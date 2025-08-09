@@ -1,0 +1,13 @@
+torch
+torchvision
+hydra-core
+wandb
+tqdm
+numpy 
+accelerate
+datasets
+diffusers
+deepspeed
+zarr
+numba
+transformers

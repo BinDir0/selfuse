@@ -1,0 +1,121 @@
+# @package _global_
+
+_target_: egovla.workspace.train_egovla_workspace.TrainEgoVLAWorkspace
+
+image_shape: [3, 384, 384]
+dataset_paths:
+ - data/egovla_demo_example
+
+shape_meta: &shape_meta
+  obs:
+    rgb:
+      shape: ${image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    wrist:
+      shape: [18]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    hand: 
+      shape: [30]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    state:
+      shape: [48]
+      type: low_dim
+      horizon: ${n_obs_steps}
+  action:
+    shape: [48]
+    horizon: ${n_action_steps}
+  retargeting:
+    num_mano_params_per_hand: 15
+    robot_hand_dof: 12
+    hidden_sizes: [64, 128, 64]
+
+dataset:
+  _target_: egovla.dataset.mano_dataset.MANOImageDataset
+  zarr_paths: ${dataset_paths}
+  horizon: ${n_action_steps}
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0
+
+n_action_steps: 30
+n_obs_steps: 6  # we currently do not support multi-step observation
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_cond: True
+
+policy:
+  _target_: egovla.policy.egovla.EgoVLA
+
+  shape_meta: ${shape_meta}
+
+  vlm:
+    _target_: egovla.model.vlm.nvila.NVILAModel
+    shape_meta: ${shape_meta}
+    model_config:
+      model_type: NVILA-Lite-2B
+      local_weights_path: null
+
+  action_head: 
+    _target_: egovla.model.action.action_head.ActionHead
+    shape_meta: ${shape_meta}
+    model_config:
+      hidden_size: 1536
+      intermediate_size: 8960
+      num_layers: 6
+      num_heads: 12
+      dropout: 0.1
+      local_weights_path: null
+
+  loss_config:
+    lambda_wrist_trans: 20.0
+    lambda_wrist_rot: 5.0
+    lambda_joint: 5.0
+  start_ckpt_path: null
+
+dataloader:
+  batch_size: 48
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 16
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1e-4
+  betas: [0.95, 0.999]
+  
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  # optimization
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  num_epochs: 25
+  gradient_accumulate_every: 1
+  # training loop control
+  # in epochs
+  rollout_every: 10
+  checkpoint_every: 1
+  val_every: 10000
+  sample_every: 10
+  gen_attn_map: True
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0

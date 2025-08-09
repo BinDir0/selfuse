@@ -1,0 +1,144 @@
+# @package _global_
+
+_target_: egovla.workspace.train_egovla_workspace.TrainEgoVLAWorkspace
+
+image_shape: [3, 384, 384]
+dataset_paths:
+ - /share_data/datasets/taco/taco.zarr
+
+shape_meta: &shape_meta
+  obs:
+    rgb:
+      shape: ${image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    wrist:
+      shape: [18]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    hand: 
+      shape: [30]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    state:
+      shape: [48]
+      type: low_dim
+      horizon: ${n_obs_steps}
+  action:
+    shape: [48]
+    horizon: ${n_action_steps}
+
+dataset:
+  _target_: egovla.dataset.mano_image_dataset.MANOImageDataset
+
+  preprocessor:
+    _target_: egovla.model.preprocessing.nvila.NVILAPreprocessor
+    shape_meta: ${shape_meta}
+    model_config:
+      model_type: Efficient-Large-Model/NVILA-Lite-2B
+      local_weights_path: /home/chenzhang/project/checkpoints/NVILA-Lite-2B
+
+  zarr_paths: ${dataset_paths}
+  horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
+  n_obs_steps: ${n_obs_steps}
+  pad_before: ${eval:'${dataset.frequency}+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.05
+  frequency: 30 # fps
+
+n_action_steps: 30
+n_obs_steps: 6  
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_cond: True
+
+policy:
+  _target_: egovla.policy.egovla.EgoVLA
+
+  shape_meta: ${shape_meta}
+
+  vlm:
+    _target_: egovla.model.vlm.nvila.NVILA
+    shape_meta: ${shape_meta}
+    model_config:
+      model_type: Efficient-Large-Model/NVILA-Lite-2B
+      local_weights_path: /home/chenzhang/project/checkpoints/NVILA-Lite-2B
+
+  action_head: 
+    _target_: egovla.model.action.action_head.ActionHead
+    shape_meta: ${shape_meta}
+    model_config:
+      hidden_size: 1536
+      intermediate_size: 8960
+      num_layers: 6
+      num_heads: 12
+      dropout: 0.1
+      local_weights_path: null
+
+  retargeting_head:
+    _target_: egovla.model.action.retargeting.RetargetingHead
+    shape_meta: ${shape_meta}
+    model_config:
+      hidden_sizes: [64, 128, 64]
+      local_weights_path: null
+    num_keypoints_per_hand: 5
+    robot_per_hand_dof: 6
+
+  loss_config:
+    lambda_wrist_trans: 20.0
+    lambda_wrist_rot: 5.0
+    lambda_joint: 5.0
+  start_ckpt_path: null
+
+datacollator:
+  _target_: egovla.dataset.vl_collator.VLDataCollator
+  pad_token_id: 151647
+
+dataloader:
+  batch_size: 48
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 16
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1e-4
+  betas: [0.95, 0.999]
+  
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  # optimization
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  num_epochs: 25
+  ckpt_save_interval: 5
+  # training loop control
+  # in epochs
+  gradient_accumulate_every: 1
+  clipping:
+    enabled: True
+    max_grad_norm: 0.5
+  rollout_every: 2
+  checkpoint_every: 1
+  val_every: 2
+  sample_every: 10
+  gen_attn_map: True
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0
