@@ -1,9 +1,8 @@
 ### Environment Setup
 
 ```bash
-conda create -n egovla python=3.10
-conda activate egovla
-pip install -r requirements.txt
+# Step 1. git clone VILA & install VILA conda env & pip install -e .
+# Step 2. git clone EgoVLA & pip install -r requirements.txt
 ```
 
 配置多机之间通信，DeepSpeed 要求训练的多机之间要能 ssh 免密通信，因此需要配置好每台机器之间的 ssh 连接。
