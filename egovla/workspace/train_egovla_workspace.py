@@ -68,7 +68,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             log_with='wandb',
             mixed_precision='bf16',  # Enable BF16 mixed precision training
             device_placement=True,
-            kwargs_handlers=[ddp_kwargs]
+            kwargs_handlers=[ddp_kwargs],
+            gradient_accumulation_steps=cfg.training.gradient_accumulate_every
         )
 
         if accelerator.is_main_process:
@@ -107,7 +108,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+        val_dataloader = DataLoader(val_dataset, collate_fn=dataset.get_collator(), **cfg.val_dataloader)
 
         self.model.set_normalizer(normalizer)
 
@@ -117,8 +118,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
             num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs) \
-                    // cfg.training.gradient_accumulate_every,
+                len(train_dataloader) * cfg.training.num_epochs),
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
             last_epoch=self.global_step-1
@@ -161,48 +161,49 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                         leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
-                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                        if train_sampling_batch is None:
-                            train_sampling_batch = batch
+                        with accelerator.accumulate(self.model):
+                            batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                            # assert no Nan in batch
+                            for key, value in batch.items():
+                                if isinstance(value, torch.Tensor):
+                                    assert not torch.isnan(value).any(), f"Batch contains NaN in {key}"
 
-                        # always use the latest batch
-                        train_sampling_batch = batch
-
-                        # compute loss
-                        raw_loss = self.model(batch)
-                        loss = raw_loss / cfg.training.gradient_accumulate_every
-                        accelerator.backward(loss)
-                        if cfg.training.clipping.enabled:
-                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 
-                                                           max_norm=cfg.training.clipping.max_grad_norm)
-
-                        # step optimizer
-                        if self.global_step % cfg.training.gradient_accumulate_every == 0:
+                            # compute loss
+                            raw_loss = self.model(batch)
+                            accelerator.backward(raw_loss)
+                            if accelerator.sync_gradients and cfg.training.clipping.enabled:
+                                total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
+                                if accelerator.is_main_process:
+                                    print(f"Total gradient norm before clipping: {total_norm.item():.6f}")
+                                
+                                total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
+                                if accelerator.is_main_process:
+                                    print(f"Total gradient norm after clipping: {total_norm.item():.6f}")
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
-                        
-                        # logging
-                        raw_loss_cpu = raw_loss.item()
-                        tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
-                        train_losses.append(raw_loss_cpu)
-                        step_log = {
-                            'train_loss': raw_loss_cpu,
-                            'global_step': self.global_step,
-                            'epoch': self.epoch,
-                            'lr': lr_scheduler.get_last_lr()[0]
-                        }
+                            
+                            # logging
+                            raw_loss_cpu = raw_loss.item()
+                            tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+                            train_losses.append(raw_loss_cpu)
+                            step_log = {
+                                'train_loss': raw_loss_cpu,
+                                'global_step': self.global_step,
+                                'epoch': self.epoch,
+                                'lr': lr_scheduler.get_last_lr()[0]
+                            }
 
-                        is_last_batch = (batch_idx == (len(train_dataloader)-1))
-                        if not is_last_batch:
-                            # log of last step is combined with validation and rollout
-                            accelerator.log(step_log, step=self.global_step)
-                            json_logger.log(step_log)
-                            self.global_step += 1
+                            is_last_batch = (batch_idx == (len(train_dataloader)-1))
+                            if not is_last_batch:
+                                # log of last step is combined with validation and rollout
+                                accelerator.log(step_log, step=self.global_step)
+                                json_logger.log(step_log)
+                                self.global_step += 1
 
-                        if (cfg.training.max_train_steps is not None) \
-                            and batch_idx >= (cfg.training.max_train_steps-1):
-                            break
+                            if (cfg.training.max_train_steps is not None) \
+                                and batch_idx >= (cfg.training.max_train_steps-1):
+                                break
 
                 # at the end of each epoch
                 # replace train_loss with epoch average
@@ -222,7 +223,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                                 disable=not accelerator.is_main_process) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss = self.model(batch, training=False)
+                                loss = self.model(batch)
                                 val_losses.append(loss)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
