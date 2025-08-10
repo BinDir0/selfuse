@@ -2,6 +2,9 @@ from typing import Dict
 import torch
 import numpy as np
 import copy
+import torch.nn.functional as F
+import torch.nn.utils.rnn as rnn_utils
+
 from egovla.utils.pytorch_util import dict_apply
 from egovla.utils.streaming_replay_buffer import StreamingReplayBuffer
 from egovla.utils.sampler import (
@@ -9,9 +12,8 @@ from egovla.utils.sampler import (
 from egovla.utils.transformation import transform_wrist_to_target_frame
 from egovla.model.common.normalizer import LinearNormalizer
 from egovla.dataset.base_dataset import BaseImageDataset
-from egovla.model.preprocessing.base_vl_preprocessor import BaseVLPreprocessor
-import torch.nn.functional as F
-
+from egovla.dataset.base_collator import BaseDataCollator
+from egovla.dataset.base_vl_preprocessor import BaseVLPreprocessor
 
 class MANOImageDataset(BaseImageDataset):
     def __init__(self,
@@ -169,6 +171,9 @@ class MANOImageDataset(BaseImageDataset):
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         return normalizer
+    
+    def get_collator(self):
+        return VLDataCollator(pad_token_id=self.preprocessor.tokenizer.pad_token_id)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
@@ -186,3 +191,33 @@ class MANOImageDataset(BaseImageDataset):
     def __len__(self):
         return sum(self.sampler_lens)
         
+
+class VLDataCollator(BaseDataCollator):
+    def __init__(self, pad_token_id: int):
+        super().__init__()
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, features):
+        """
+        DataLoader will pass a list of samples from the Dataset to this function.
+        Args:
+            features: a list, where each element is the return value of the Dataset's __getitem__ method.
+               e.g., [{'image': tensor, 'input_ids': tensor}, {'image': tensor, 'input_ids': tensor}, ...]
+        Returns:
+            A dictionary with the keys the same as the return value of the Dataset's __getitem__ method.
+        """
+        batch = {}
+        for key in features[0].keys():
+            if key != 'instruction':
+                batch[key] = torch.stack([item[key] for item in features])
+            else:
+                input_ids_batch = [item[key] for item in features]
+                batch["input_ids"] = rnn_utils.pad_sequence(
+                    input_ids_batch,
+                    batch_first=True,
+                    padding_value=self.pad_token_id
+                )
+                attention_mask_batch = (batch["input_ids"] != self.pad_token_id).long()
+                batch["attention_mask"] = attention_mask_batch
+
+        return batch

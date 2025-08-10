@@ -2,7 +2,7 @@
 
 _target_: egovla.workspace.train_egovla_workspace.TrainEgoVLAWorkspace
 
-image_shape: [3, 384, 384]
+image_shape: [384, 384, 3]
 dataset_paths:
  - /share_data/datasets/taco/taco.zarr
 
@@ -32,7 +32,7 @@ dataset:
   _target_: egovla.dataset.mano_image_dataset.MANOImageDataset
 
   preprocessor:
-    _target_: egovla.model.preprocessing.nvila.NVILAPreprocessor
+    _target_: egovla.dataset.nvila_preprocessor.NVILAPreprocessor
     shape_meta: ${shape_meta}
     model_config:
       model_type: Efficient-Large-Model/NVILA-Lite-2B
@@ -92,10 +92,6 @@ policy:
     lambda_wrist_rot: 5.0
     lambda_joint: 5.0
   start_ckpt_path: null
-
-datacollator:
-  _target_: egovla.dataset.vl_collator.VLDataCollator
-  pad_token_id: 151647
 
 dataloader:
   batch_size: 48
