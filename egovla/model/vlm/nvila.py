@@ -34,7 +34,7 @@ class NVILA(ModuleAttrMixin):
         # Load pre-trained vision-language model
         self.vlm = LlavaLlamaModel.from_pretrained(model_name_or_path)
         self.tokenizer = self.vlm.tokenizer
-        self.image_processor = self.vlm.image_processor
+        self.image_processor = self.vlm.get_vision_tower().image_processor
 
         # Define action query token IDs (last n_action_steps tokens in vocabulary)
         self.action_query_token_ids = list(

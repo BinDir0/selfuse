@@ -63,9 +63,7 @@ policy:
   vlm:
     _target_: egovla.model.vlm.nvila.NVILA
     shape_meta: ${shape_meta}
-    model_config:
-      model_type: Efficient-Large-Model/NVILA-Lite-2B
-      local_weights_path: /home/chenzhang/project/checkpoints/NVILA-Lite-2B
+    model_name_or_path: /share_data/checkpoints/NVILA-Lite-2B
 
   action_head: 
     _target_: egovla.model.action.action_head.ActionHead
