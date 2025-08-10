@@ -36,7 +36,7 @@ dataset:
     shape_meta: ${shape_meta}
     model_config:
       model_type: Efficient-Large-Model/NVILA-Lite-2B
-      local_weights_path: /home/chenzhang/project/checkpoints/NVILA-Lite-2B
+      local_weights_path: /share_data/checkpoints/NVILA-Lite-2B
 
   zarr_paths: ${dataset_paths}
   horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
@@ -86,13 +86,13 @@ policy:
     robot_per_hand_dof: 6
 
   loss_config:
-    lambda_wrist_trans: 20.0
-    lambda_wrist_rot: 5.0
-    lambda_joint: 5.0
+    wrist_trans_loss_weight: 20.0
+    wrist_rot_loss_weight: 5.0
+    hand_loss_weight: 5.0
   start_ckpt_path: null
 
 dataloader:
-  batch_size: 48
+  batch_size: 4
   num_workers: 8
   shuffle: True
   pin_memory: True

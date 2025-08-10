@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Dict, Tuple
 import inspect
 
-from egovla.model.vlm.base_vlm import BaseVLM
+from egovla.model.vlm.nvila import NVILA
 from egovla.model.action.base_action_head import BaseActionHead
 from egovla.model.action.retargeting import RetargetingHead
 from egovla.model.common.normalizer import LinearNormalizer
@@ -16,7 +16,7 @@ class EgoVLA(BasePolicy):
     def __init__(
         self,
         shape_meta : dict, 
-        vlm : BaseVLM, 
+        vlm : NVILA, 
         action_head : BaseActionHead,
         retargeting_head : RetargetingHead,
         loss_config : dict,
@@ -104,9 +104,13 @@ class EgoVLA(BasePolicy):
         action_pred = self.action_head(state, action_query)
 
         hand_loss = F.mse_loss(action_pred["hand"], action["hand"])
-        wrist_trans_loss = F.mse_loss(action_pred["wrist"][:, :, :6], action["wrist"][:, 0, :6])
-        wrist_rot_pred = rot_matrix_from_6drot(action_pred["wrist"][:, :, 6:])
-        wrist_rot_gt = rot_matrix_from_6drot(action["wrist"][:, 0, 6:])
+        wrist_trans_loss = F.mse_loss(action_pred["wrist"][:, :, :6], action["wrist"][:, :, :6])
+        wrist_rot_pred = torch.cat([rot_matrix_from_6drot(action_pred["wrist"][:, :, 6:12]), 
+                                    rot_matrix_from_6drot(action_pred["wrist"][:, :, 12:18])], 
+                                    dim=-1)
+        wrist_rot_gt = torch.cat([rot_matrix_from_6drot(action["wrist"][:, :, 6:12]), 
+                                  rot_matrix_from_6drot(action["wrist"][:, :, 12:18])], 
+                                  dim=-1)
         wrist_rot_loss = F.mse_loss(wrist_rot_pred, wrist_rot_gt)
 
         loss = self.loss_config["hand_loss_weight"] * hand_loss + \
@@ -119,10 +123,5 @@ class EgoVLA(BasePolicy):
     def compute_retargeting_loss(self, batch):
         raise NotImplementedError("Not implemented")
 
-    def forward(self, batch, type="train"):
-        if type == "train":
-            return self.compute_loss(batch)
-        elif type == "retargeting":
-            return self.compute_retargeting_loss(batch)
-        else:
-            raise ValueError(f"Invalid type: {type}")
+    def forward(self, batch):
+        return self.compute_loss(batch)

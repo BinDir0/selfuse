@@ -23,11 +23,10 @@ from egovla.utils.pytorch_util import dict_apply
 from egovla.workspace.base_workspace import BaseWorkspace
 from egovla.policy.egovla import EgoVLA
 from egovla.dataset.base_dataset import BaseImageDataset
-from egovla.env_runner.base_image_runner import BaseImageRunner
 from egovla.utils.checkpoint_util import TopKCheckpointManager
 from egovla.utils.json_logger import JsonLogger
 from egovla.model.common.lr_scheduler import get_scheduler
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
@@ -64,10 +63,12 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         # Set GPU device before initializing accelerator
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         accelerator = Accelerator(
             log_with='wandb',
             mixed_precision='bf16',  # Enable BF16 mixed precision training
-            device_placement=True
+            device_placement=True,
+            kwargs_handlers=[ddp_kwargs]
         )
 
         if accelerator.is_main_process:
@@ -123,13 +124,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             last_epoch=self.global_step-1
         )
 
-        # configure env
-        env_runner: BaseImageRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseImageRunner)
-
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, 'checkpoints'),
@@ -175,7 +169,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                         train_sampling_batch = batch
 
                         # compute loss
-                        raw_loss = self.model(batch, training=True)
+                        raw_loss = self.model(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         accelerator.backward(loss)
                         if cfg.training.clipping.enabled:
@@ -218,12 +212,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 # ========= eval for this epoch ==========
                 policy = accelerator.unwrap_model(self.model)
                 policy.eval()
-
-                # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
-                    runner_log = env_runner.run(policy)
-                    # log all
-                    step_log.update(runner_log)
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0:

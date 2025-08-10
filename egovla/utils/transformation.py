@@ -44,7 +44,7 @@ def rot_matrix_from_6drot(rot):
     if len(original_shape) > 1:
         # Remove the last dimension (6) and add [3, 3] at the end
         new_shape = list(original_shape[:-1]) + [3, 3]
-        rot_matrix = rot_matrix.reshape(new_shape)
+        rot_matrix = rot_matrix.reshape(*new_shape)
     else:
         rot_matrix = rot_matrix.squeeze(0)
 
@@ -86,7 +86,7 @@ def rot_matrix_to_6drot(rot_matrix):
     if len(original_shape) > 2:
         # Remove the last two dimensions (3, 3) and add [6] at the end
         new_shape = list(original_shape[:-2]) + [6]
-        rot_6d = rot_6d.reshape(new_shape)
+        rot_6d = rot_6d.reshape(*new_shape)
     else:
         rot_6d = rot_6d.squeeze(0)
     
@@ -105,6 +105,7 @@ def transform_to_target_frame(pose, target_extrinsic):
         pose: torch.Tensor, shape: [T, 4, 4] or [B, T, 4, 4] in target frame
     '''
     assert pose.dtype == target_extrinsic.dtype, "pose and target_extrinsic must have the same dtype"
+    # print(f"pose.shape: {pose.shape}, target_extrinsic.shape: {target_extrinsic.shape}")
     if isinstance(pose, np.ndarray):
         is_numpy = True
         pose = torch.from_numpy(pose)
@@ -148,6 +149,7 @@ def transform_wrist_to_target_frame(wrist_action, target_extrinsic):
     wrist_pose = transform_to_target_frame(wrist_pose, target_extrinsic)
 
     wrist_rot_6d = rot_matrix_to_6drot(wrist_pose[..., :3, :3])
+    # print(wrist_action[..., :3].shape, wrist_pose[..., 0:T, :3, 3].shape, wrist_pose.shape)
     wrist_action[..., :3] = wrist_pose[..., 0:T, :3, 3]
     wrist_action[..., 3:6] = wrist_pose[..., T:2*T, :3, 3]
     wrist_action[..., 6:12] = wrist_rot_6d[..., 0:T, :]

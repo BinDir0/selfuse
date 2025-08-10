@@ -118,7 +118,7 @@ class MANOImageDataset(BaseImageDataset):
     def _sample_to_data(self, sample):
         hand_state = sample['state/hand'].astype(np.float32)
         wrist_state = sample['state/wrist'].astype(np.float32)
-        instruction = sample['instruction'] # TODO: make sure how to handle the instruction
+        instruction = str(sample['instruction'][self.frequency]) # TODO: make sure how to handle the instruction
         wrist_action = sample['action/wrist'].astype(np.float32)
         hand_action = sample['action/hand'].astype(np.float32)
         # [Horizon, 16] -> [Horizon, 4, 4]
@@ -132,7 +132,7 @@ class MANOImageDataset(BaseImageDataset):
         processed_frames = processed_results['image'] # [T, H, W, 3]
         tokenized_instruction = processed_results['input_ids']
 
-        processed_wrist_state = transform_wrist_to_target_frame(wrist_state[T_slice], extrinsic[T_slice])
+        processed_wrist_state = transform_wrist_to_target_frame(wrist_state[T_slice], extrinsic[self.frequency])
 
         processed_wrist_action = wrist_action[self.frequency:]
         processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[self.frequency])

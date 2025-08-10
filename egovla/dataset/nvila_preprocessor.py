@@ -58,16 +58,15 @@ class NVILAPreprocessor(BaseVLPreprocessor):
         ]
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
         input_ids = np.array(prompt)  # [L_lang]
-        input_ids = input_ids.clamp_(0, self.vocab_size - 1)  # safety
 
         return input_ids
     
     def __call__(
         self, 
-        image: Union[torch.Tensor, np.ndarray], 
+        image: np.ndarray, 
         instruction: str, 
         **kwargs
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, np.ndarray]:
         """
         Tokenize the instruction. 
         Args:
@@ -80,6 +79,6 @@ class NVILAPreprocessor(BaseVLPreprocessor):
         """
         return {
             "input_ids": self._build_input_ids(instruction),
-            "image": image.numpy(),
+            "image": image,
         }
     

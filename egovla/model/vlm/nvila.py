@@ -69,7 +69,7 @@ class NVILA(ModuleAttrMixin):
         flattened_images = rearrange(images, 'b n h w c -> (b n) h w c')
         
         # Process images through vision pipeline
-        processed_images = self.image_processor.preprocess(flattened_images)  # [B*n_obs_steps, 3, 448, 448]
+        processed_images = self.image_processor.preprocess(flattened_images, return_tensors="pt")['pixel_values']  # [B*n_obs_steps, 3, 448, 448]
         
         # Extract vision features and apply multimodal projection
         vision_features = self.vlm.get_vision_tower()(processed_images)  # Vision encoder output
@@ -83,7 +83,7 @@ class NVILA(ModuleAttrMixin):
         text_embeds = self.vlm.llm.model.embed_tokens(input_ids)  # [B, L, D]
         
         # Prepare separator token embeddings for multimodal sequence
-        sep_token_id = self.tokenizer.convert_tokens_to_ids('\n')
+        sep_token_id = self.tokenizer.encode('\n', add_special_tokens=False)[0]
         sep_token_embedding = self.vlm.llm.model.embed_tokens(
             torch.tensor([sep_token_id], device=input_ids.device)
         )  # [1, D]
@@ -91,8 +91,8 @@ class NVILA(ModuleAttrMixin):
         # ===== Action Query Processing =====
         # Get action query token embeddings
         action_query_tokens = self.vlm.llm.model.embed_tokens(
-            torch.tensor(self.action_query_token_ids, device=input_ids.device)
-        )  # [n_action_steps, D]
+            torch.tensor(self.action_query_token_ids, device=input_ids.device).unsqueeze(0).expand(B, -1)
+        )
         
         # ===== Multimodal Sequence Construction =====
         # Split text embeddings: first 13 tokens + remaining tokens
@@ -144,10 +144,11 @@ class NVILA(ModuleAttrMixin):
             inputs_embeds=combined_embeddings,
             attention_mask=complete_attention_mask,
             return_dict=True,
+            output_hidden_states=True
         )
         
         # ===== Action Query Extraction =====
         # Extract hidden states corresponding to action query tokens (last n_action_steps positions)
-        action_query = outputs.last_hidden_state[:, -self.n_action_steps:, :]  # [B, n_action_steps, D]
+        action_query = outputs.hidden_states[-1][:, -self.n_action_steps:, :]  # [B, n_action_steps, D]
         
         return action_query
