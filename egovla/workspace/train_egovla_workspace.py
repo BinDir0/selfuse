@@ -43,9 +43,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         np.random.seed(seed)
         random.seed(seed)
 
-        # configure datacollator
-        self.datacollator = hydra.utils.instantiate(cfg.datacollator)
-
         # configure model
         self.model: EgoVLA
         self.model = hydra.utils.instantiate(cfg.policy)
@@ -95,7 +92,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         # configure dataset
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.dataset)
-        train_dataloader = DataLoader(dataset, collate_fn=self.datacollator, **cfg.dataloader)
+        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
 
         # compute normalizer on the main process and save to disk
         normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')

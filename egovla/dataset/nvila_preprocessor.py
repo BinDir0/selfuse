@@ -5,7 +5,7 @@ from typing import Dict, Union, List
 from transformers import AutoConfig, AutoModel
 from llava.model.language_model.llava_llama import LlavaLlamaModel
 
-from egovla.model.preprocessing.base_vl_preprocessor import BaseVLPreprocessor
+from egovla.dataset.base_vl_preprocessor import BaseVLPreprocessor
 
 # Preprocessor for only one image and one instruction
 # Language padding and batching are handled in the collator
