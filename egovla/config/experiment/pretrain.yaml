@@ -86,9 +86,9 @@ policy:
     robot_per_hand_dof: 6
 
   loss_config:
-    wrist_trans_loss_weight: 20.0
-    wrist_rot_loss_weight: 5.0
-    hand_loss_weight: 5.0
+    wrist_trans_loss_weight: 2.0
+    wrist_rot_loss_weight: 0.5
+    hand_loss_weight: 0.5
   start_ckpt_path: null
 
 dataloader:
