@@ -11,3 +11,4 @@ deepspeed
 zarr
 numba
 transformers
+einops
