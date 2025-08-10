@@ -51,6 +51,9 @@ class NVILAPreprocessor(BaseVLPreprocessor):
         No per-sample Python loops.
         """
         # TODO: fit chat template
+        image_prompt = ["<image>\n"] * self.shape_meta["obs"]["rgb"]["horizon"]
+        image_prompt = "".join(image_prompt)
+        instruction = image_prompt + instruction
         messages = [
             {
                 "role": "user",
