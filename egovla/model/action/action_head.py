@@ -25,13 +25,17 @@ class ActionHead(BaseActionHead):
         self.pos_embed = nn.Parameter(torch.randn(
             1, 
             2 + shape_meta["action"]["horizon"], # 2 for wrist and hand
-            feature_dim))
-        self.action_head = nn.TransformerEncoderLayer(
-            d_model=feature_dim,
-            nhead=model_config["num_heads"],
-            dim_feedforward=model_config["intermediate_size"],
-            dropout=model_config["dropout"],
-            batch_first=True,
+            feature_dim) * 0.02)
+
+        self.action_head = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=feature_dim,
+                nhead=model_config["num_heads"],
+                dim_feedforward=model_config["intermediate_size"],
+                dropout=model_config["dropout"],
+                batch_first=True,
+            ),
+            num_layers=model_config["num_layers"],
         )
 
         self.action_net = nn.Sequential(
