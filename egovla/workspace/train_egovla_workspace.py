@@ -158,7 +158,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
 
                 train_losses = list()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
-                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                        leave=False, mininterval=cfg.training.tqdm_interval_sec, disable=not accelerator.is_main_process) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
