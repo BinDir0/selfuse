@@ -34,7 +34,10 @@ def rot_matrix_from_6drot(rot):
     a = rot[..., :3]  # First 3 elements: [N, 3]
     b = rot[..., 3:]  # Last 3 elements: [N, 3]
     
-    # Compute the third vector as the cross product
+    # Schmidth orthogonalization
+    a = F.normalize(a, dim=-1)
+    b = b - torch.sum(a * b, dim=-1, keepdim=True) * a
+    b = F.normalize(b, dim=-1)
     c = torch.cross(a, b, dim=-1)
     
     # Stack to form the rotation matrix
@@ -76,11 +79,11 @@ def rot_matrix_to_6drot(rot_matrix):
     rot_matrix = rot_matrix.reshape(-1, 3, 3)
     
     # Extract the first two columns
-    a = rot_matrix[:, :, 0]  # First column: [N, 3]
-    b = rot_matrix[:, :, 1]  # Second column: [N, 3]
+    a = rot_matrix[..., :, 0]  # First column: [N, 3]
+    b = rot_matrix[..., :, 1]  # Second column: [N, 3]
     
     # Concatenate to form 6D representation
-    rot_6d = torch.cat([a, b], dim=1)  # [N, 6]
+    rot_6d = torch.cat([a, b], dim=-1)  # [N, 6]
     
     # Reshape back to original dimensions if needed
     if len(original_shape) > 2:
@@ -114,7 +117,14 @@ def transform_to_target_frame(pose, target_extrinsic):
         is_numpy = False
     target_extrinsic = target_extrinsic.unsqueeze(-3)
 
-    pose = torch.matmul(torch.linalg.inv(target_extrinsic), pose)
+    # use pseudo-inverse to avoid NaN
+    target_extrinsic_inv = torch.linalg.pinv(target_extrinsic)
+    pose = torch.matmul(target_extrinsic_inv, pose)
+    
+    # check if the result contains NaN and handle it
+    if torch.isnan(pose).any():
+        print(f"Warning: NaN detected in pose after transformation")
+        pose = torch.where(torch.isnan(pose), torch.zeros_like(pose), pose)
     
     if is_numpy:
         pose = pose.numpy()
