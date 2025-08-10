@@ -118,7 +118,7 @@ class MANOImageDataset(BaseImageDataset):
     def _sample_to_data(self, sample):
         hand_state = sample['state/hand'].astype(np.float32)
         wrist_state = sample['state/wrist'].astype(np.float32)
-        instruction = str(sample['instruction'][self.frequency]) # TODO: make sure how to handle the instruction
+        instruction = str(sample['instruction'][self.frequency]) 
         wrist_action = sample['action/wrist'].astype(np.float32)
         hand_action = sample['action/hand'].astype(np.float32)
         # [Horizon, 16] -> [Horizon, 4, 4]
