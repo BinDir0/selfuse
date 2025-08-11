@@ -62,9 +62,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
         
-        # Set GPU device before initializing accelerator
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
         accelerator = Accelerator(log_with='wandb')
 
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
@@ -109,14 +106,19 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
 
         # compute normalizer on the main process and save to disk
-        normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
         if accelerator.is_main_process:
+            # 1. main process compute/get object
             normalizer = dataset.get_normalizer()
-            pickle.dump(normalizer, open(normalizer_path, 'wb'))
+            objects_to_broadcast = [normalizer]
+        else:
+            # 2. other process prepare a placeholder
+            objects_to_broadcast = [None]
 
-        # load normalizer on all processes
-        accelerator.wait_for_everyone()
-        normalizer = pickle.load(open(normalizer_path, 'rb'))
+        # 3. broadcast object from main process (from_process=0) to all processes
+        accelerator.broadcast_object(objects_to_broadcast, from_process=0)
+
+        # 4. now all processes have a fully identical object copy
+        normalizer = objects_to_broadcast[0]
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
@@ -159,18 +161,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
         )
-        device = accelerator.device
-        
-        # Ensure model is on the correct device when using DeepSpeed
-        if hasattr(self.model, 'module'):
-            # When wrapped by DeepSpeed, ensure the underlying module is on correct device
-            actual_device = next(self.model.module.parameters()).device
-        else:
-            actual_device = next(self.model.parameters()).device
-        
-        if accelerator.is_main_process:
-            print(f"Model device: {actual_device}")
-            print(f"Accelerator device: {device}")
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2
@@ -191,16 +181,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec, disable=not accelerator.is_main_process) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
-                        # device transfer
                         with accelerator.accumulate(self.model):
-                            # Use the actual device where model parameters are located
-                            target_device = actual_device if 'actual_device' in locals() else device
-                            batch = dict_apply(batch, lambda x: x.to(target_device, non_blocking=True))
-                            # assert no Nan in batch
-                            for key, value in batch.items():
-                                if isinstance(value, torch.Tensor):
-                                    assert not torch.isnan(value).any(), f"Batch contains NaN in {key}"
-
                             # compute loss - let DeepSpeed handle BF16 without autocast
                             raw_loss = self.model(batch)
                             accelerator.backward(raw_loss)
@@ -247,8 +228,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec, 
                                 disable=not accelerator.is_main_process) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
-                                target_device = actual_device if 'actual_device' in locals() else device
-                                batch = dict_apply(batch, lambda x: x.to(target_device, non_blocking=True))
                                 # Let DeepSpeed handle BF16 without autocast
                                 loss = self.model(batch)
                                 val_losses.append(loss)
