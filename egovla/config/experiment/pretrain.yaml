@@ -43,9 +43,6 @@ n_action_steps: 30
 n_obs_steps: 6  
 n_latency_steps: 0
 dataset_obs_steps: ${n_obs_steps}
-past_action_visible: False
-keypoint_visible_rate: 1.0
-obs_as_cond: True
 
 policy:
   _target_: egovla.policy.egovla.EgoVLA
@@ -78,9 +75,9 @@ policy:
     robot_per_hand_dof: 6
 
   loss_config:
-    wrist_trans_loss_weight: 2.0
-    wrist_rot_loss_weight: 0.5
-    hand_loss_weight: 0.5
+    wrist_trans_loss_weight: 20.0
+    wrist_rot_loss_weight: 5.0
+    hand_loss_weight: 5.0
   start_ckpt_path: null
 
 dataloader:
@@ -98,8 +95,8 @@ val_dataloader:
   persistent_workers: True
 
 optimizer:
-  lr: 1.0e-5
-  weight_decay: 1e-4
+  lr: 1.0e-4
+  weight_decay: 0.0
   betas: [0.95, 0.999]
   
 training:
@@ -109,8 +106,8 @@ training:
   resume: False
   # optimization
   lr_scheduler: cosine
-  lr_warmup_steps: 2000
-  num_epochs: 25
+  lr_warmup_steps: 0
+  num_epochs: 20
   ckpt_save_interval: 5
   # training loop control
   # in epochs

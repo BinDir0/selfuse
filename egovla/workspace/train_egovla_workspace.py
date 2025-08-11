@@ -168,24 +168,13 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
                         with accelerator.accumulate(self.model):
-                            batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                            # assert no Nan in batch
-                            for key, value in batch.items():
-                                if isinstance(value, torch.Tensor):
-                                    assert not torch.isnan(value).any(), f"Batch contains NaN in {key}"
-                                    
-                            # torch.autograd.set_detect_anomaly(True)
                             # compute loss
                             raw_loss = self.model(batch)
                             accelerator.backward(raw_loss)
+                            step_log = {}
                             if accelerator.sync_gradients and cfg.training.clipping.enabled:
                                 total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
-                                if accelerator.is_main_process:
-                                    print(f"Total gradient norm before clipping: {total_norm.item():.6f}")
-                                
-                                total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
-                                if accelerator.is_main_process:
-                                    print(f"Total gradient norm after clipping: {total_norm.item():.6f}")
+                                step_log['grad_norm'] = total_norm.item()
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
@@ -194,12 +183,12 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                             raw_loss_cpu = raw_loss.item()
                             tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                             train_losses.append(raw_loss_cpu)
-                            step_log = {
+                            step_log.update({
                                 'train_loss': raw_loss_cpu,
                                 'global_step': self.global_step,
                                 'epoch': self.epoch,
-                                'lr': lr_scheduler.get_last_lr()[0]
-                            }
+                                'lr': lr_scheduler.get_last_lr()[0],
+                            })
 
                             is_last_batch = (batch_idx == (len(train_dataloader)-1))
                             if not is_last_batch:
@@ -229,7 +218,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec, 
                                 disable=not accelerator.is_main_process) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                                 loss = self.model(batch)
                                 val_losses.append(loss)
                                 if (cfg.training.max_val_steps is not None) \
