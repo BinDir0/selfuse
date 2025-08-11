@@ -65,22 +65,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         # Set GPU device before initializing accelerator
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-        accelerator = Accelerator(
-            log_with='wandb',
-            mixed_precision=None,    # Let DeepSpeed handle BF16 mixed precision
-            device_placement=True,   # Enable automatic device placement like non-DeepSpeed version
-            kwargs_handlers=[ddp_kwargs],
-            gradient_accumulation_steps=cfg.training.gradient_accumulate_every
-        )
-
-        if accelerator.is_main_process:
-            print(f"Using mixed precision: {accelerator.mixed_precision}")
-            print(f"Using device: {accelerator.device}")
-            print(f"Local rank: {local_rank}")
-            if torch.cuda.is_available():
-                print(f"CUDA Device: {torch.cuda.get_device_name(local_rank)}")
-                print(f"CUDA Capability: {torch.cuda.get_device_capability(local_rank)}")
+        accelerator = Accelerator(log_with='wandb')
 
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
         wandb_cfg.pop('project')
@@ -109,7 +94,10 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 {'params': decay_params, 'weight_decay': cfg.optimizer.weight_decay},
                 {'params': nodecay_params, 'weight_decay': 0.0}
             ]
-            self.optimizer = DummyOptim(optimizer_grouped_parameters, lr=cfg.optimizer.lr)
+            self.optimizer = DummyOptim(optimizer_grouped_parameters, 
+                                        lr=cfg.optimizer.lr, 
+                                        betas=cfg.optimizer.betas, 
+                                        fused=True)
 
         # configure dataset
         dataset: BaseImageDataset
@@ -184,18 +172,12 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             print(f"Model device: {actual_device}")
             print(f"Accelerator device: {device}")
 
-
-        # save batch for sampling
-        train_sampling_batch = None
-
         if cfg.training.debug:
             cfg.training.num_epochs = 2
             cfg.training.max_train_steps = 3
             cfg.training.max_val_steps = 3
-            cfg.training.rollout_every = 1
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
-            cfg.training.sample_every = 1
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -222,14 +204,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                             # compute loss - let DeepSpeed handle BF16 without autocast
                             raw_loss = self.model(batch)
                             accelerator.backward(raw_loss)
-                            if accelerator.sync_gradients and cfg.training.clipping.enabled:
-                                total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
-                                if accelerator.is_main_process:
-                                    print(f"Total gradient norm before clipping: {total_norm.item():.6f}")
-                                
-                                total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
-                                if accelerator.is_main_process:
-                                    print(f"Total gradient norm after clipping: {total_norm.item():.6f}")
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()

@@ -42,14 +42,7 @@ echo "  GPUs per node: $NUM_GPUS_PER_NODE"
 echo "  Total GPUs: $((NUM_NODES * NUM_GPUS_PER_NODE))"
 echo "  DeepSpeed config: $DEEPSPEED_CONFIG"
 
-# Create output directory
-OUTPUT_DIR="outputs/${CONFIG_NAME}_$(date +%Y%m%d_%H%M%S)"
-mkdir -p $OUTPUT_DIR
-
 # Launch training
 accelerate launch \
     --config_file ../egovla/config/acc_node0.yaml \
-    ../egovla/workspace/train_egovla_deepspeed_workspace.py \
-    hydra.run.dir=$OUTPUT_DIR \
-    hydra.sweep.dir=$OUTPUT_DIR \
-    hydra.job.name=${CONFIG_NAME}
+    ../train.py 
