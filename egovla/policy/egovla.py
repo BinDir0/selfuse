@@ -103,6 +103,7 @@ class EgoVLA(BasePolicy):
         action_query = self.vlm(image, input_ids, attention_mask)
         action_pred = self.action_head(state, action_query)
 
+
         hand_loss = F.mse_loss(action_pred["hand"], action["hand"])
         wrist_trans_loss = F.mse_loss(action_pred["wrist"][:, :, :6], action["wrist"][:, :, :6])
         wrist_rot_pred = torch.cat([rot_matrix_from_6drot(action_pred["wrist"][:, :, 6:12]), 

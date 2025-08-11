@@ -12,3 +12,4 @@ zarr
 numba
 transformers
 einops
+ps3-torch

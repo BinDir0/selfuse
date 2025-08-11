@@ -17,7 +17,6 @@ from egovla.dataset.base_vl_preprocessor import BaseVLPreprocessor
 
 class MANOImageDataset(BaseImageDataset):
     def __init__(self,
-            preprocessor: BaseVLPreprocessor,
             zarr_paths,
             horizon=1,
             n_obs_steps=1,
@@ -31,7 +30,7 @@ class MANOImageDataset(BaseImageDataset):
             ):
         
         super().__init__()
-        self.preprocessor = preprocessor
+        self.preprocessor = None
         self.image_size = image_size
         self.frequency = frequency
 
@@ -147,6 +146,9 @@ class MANOImageDataset(BaseImageDataset):
             'action/hand': hand_action[self.frequency:]
         }
         return data
+
+    def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
+        self.preprocessor = preprocessor
 
     def get_normalizer(self, mode='limits', **kwargs):
         # Merge all data

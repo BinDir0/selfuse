@@ -32,14 +32,20 @@ class NVILA(ModuleAttrMixin):
         self.n_obs_steps = shape_meta['obs']['rgb']['horizon']
 
         # Load pre-trained vision-language model
-        self.vlm = LlavaLlamaModel.from_pretrained(model_name_or_path)
+        self.vlm = LlavaLlamaModel.from_pretrained(
+            model_name_or_path, 
+            attn_implementation="sdpa"
+        )
         self.tokenizer = self.vlm.tokenizer
-        self.image_processor = self.vlm.get_vision_tower().image_processor
 
         # Define action query token IDs (last n_action_steps tokens in vocabulary)
         self.action_query_token_ids = list(
             range(self.tokenizer.vocab_size - self.n_action_steps, self.tokenizer.vocab_size)
         )
+        
+        sep_token_id = self.tokenizer.encode('\n', add_special_tokens=False)[0]
+        # use register_buffer to make it a part of the model, so it will automatically move with .to(device)
+        self.register_buffer('sep_token_id', torch.tensor([sep_token_id], dtype=torch.long))
 
     def forward(self, images: torch.Tensor, input_ids: torch.Tensor, attention_masks: torch.Tensor) -> torch.Tensor:
         """
@@ -51,6 +57,7 @@ class NVILA(ModuleAttrMixin):
         
         Args:
             images: Multi-frame RGB observations, shape [B, n_obs_steps, H, W, 3]
+            which is already preprocessed by the preprocessor
             input_ids: Tokenized text instructions, shape [B, L]  
             attention_masks: Attention masks for text tokens, shape [B, L]
             
@@ -63,11 +70,8 @@ class NVILA(ModuleAttrMixin):
         
         # ===== Vision Processing =====
         # Flatten multi-frame images for batch processing: (B, n_obs_steps, H, W, 3) -> (B*n_obs_steps, H, W, 3)
-        flattened_images = rearrange(images, 'b n h w c -> (b n) h w c')
-        
-        # Process images through vision pipeline
-        processed_images = self.image_processor.preprocess(flattened_images, return_tensors="pt")['pixel_values']  # [B*n_obs_steps, 3, 448, 448]
-        
+        processed_images = rearrange(images, 'b n h w c -> (b n) h w c')
+
         # Extract vision features and apply multimodal projection
         vision_features = self.vlm.get_vision_tower()(processed_images)  # Vision encoder output
         projected_vision_features = self.vlm.get_mm_projector()(vision_features)  # [B*n_obs_steps, 121, D]
@@ -80,9 +84,8 @@ class NVILA(ModuleAttrMixin):
         text_embeds = self.vlm.llm.model.embed_tokens(input_ids)  # [B, L, D]
         
         # Prepare separator token embeddings for multimodal sequence
-        sep_token_id = self.tokenizer.encode('\n', add_special_tokens=False)[0]
         sep_token_embedding = self.vlm.llm.model.embed_tokens(
-            torch.tensor([sep_token_id], device=input_ids.device)
+            self.sep_token_id.to(input_ids.device)
         )  # [1, D]
         
         # ===== Action Query Processing =====
@@ -147,5 +150,5 @@ class NVILA(ModuleAttrMixin):
         # ===== Action Query Extraction =====
         # Extract hidden states corresponding to action query tokens (last n_action_steps positions)
         action_query = outputs.hidden_states[-1][:, -self.n_action_steps:, :]  # [B, n_action_steps, D]
-        
+
         return action_query

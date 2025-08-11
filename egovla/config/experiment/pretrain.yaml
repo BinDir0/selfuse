@@ -30,14 +30,6 @@ shape_meta: &shape_meta
 
 dataset:
   _target_: egovla.dataset.mano_image_dataset.MANOImageDataset
-
-  preprocessor:
-    _target_: egovla.dataset.nvila_preprocessor.NVILAPreprocessor
-    shape_meta: ${shape_meta}
-    model_config:
-      model_type: Efficient-Large-Model/NVILA-Lite-2B
-      local_weights_path: /share_data/checkpoints/NVILA-Lite-2B
-
   zarr_paths: ${dataset_paths}
   horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
   n_obs_steps: ${n_obs_steps}
@@ -70,7 +62,7 @@ policy:
     shape_meta: ${shape_meta}
     model_config:
       hidden_size: 1536
-      intermediate_size: 8960
+      intermediate_size: ${eval:'${policy.action_head.model_config.hidden_size}*8'}
       num_layers: 6
       num_heads: 12
       dropout: 0.1
@@ -99,7 +91,7 @@ dataloader:
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 16
+  batch_size: 4
   num_workers: 8
   shuffle: False
   pin_memory: True

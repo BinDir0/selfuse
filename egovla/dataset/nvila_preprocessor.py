@@ -1,9 +1,6 @@
 import torch
 import numpy as np
-from PIL import Image
 from typing import Dict, Union, List
-from transformers import AutoConfig, AutoModel
-from llava.model.language_model.llava_llama import LlavaLlamaModel
 
 from egovla.dataset.base_vl_preprocessor import BaseVLPreprocessor
 
@@ -11,38 +8,9 @@ from egovla.dataset.base_vl_preprocessor import BaseVLPreprocessor
 # Language padding and batching are handled in the collator
 class NVILAPreprocessor(BaseVLPreprocessor):
 
-    def __init__(self, shape_meta: dict, model_config: dict):
-        self.shape_meta = shape_meta
-        self.model_config = model_config
-        self.model_path = model_config["local_weights_path"]
-        if self.model_path is None:
-            # Load config (trust remote code to trigger local class registration)
-            self.config = AutoConfig.from_pretrained(model_config["model_type"], trust_remote_code=True)
-            self.model: LlavaLlamaModel = AutoModel.from_pretrained(
-                model_config["model_type"],
-                trust_remote_code=True,
-                device_map="auto",
-            )
-        else : 
-            self.config = AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
-            self.model: LlavaLlamaModel = AutoModel.from_pretrained(
-                self.model_path,
-                trust_remote_code=True,
-                device_map="auto",
-            )
-
-        # Tokenizer and vision processor
-        self.tokenizer = getattr(self.model, "tokenizer", None)
-        if self.tokenizer is None:
-            raise ValueError(f"Tokenizer is not found on the loaded model. Please ensure {self.model_config['model_type']} provides tokenizer.")
-
-        # Safe vocabulary sizing
-        tokenizer_vocab_size = len(self.tokenizer.get_vocab()) if hasattr(self.tokenizer, 'get_vocab') else self.tokenizer.vocab_size
-        model_vocab_size = self.model.llm.config.vocab_size
-        embedding_vocab_size = self.model.llm.model.embed_tokens.num_embeddings
-        print(f"[NVILA] Vocabulary sizes - Tokenizer: {tokenizer_vocab_size}, Model config: {model_vocab_size}, Embeddings: {embedding_vocab_size}")
-
-        self.vocab_size = min(tokenizer_vocab_size, model_vocab_size, embedding_vocab_size)
+    def __init__(self, image_preprocessor, tokenizer):
+        self.image_preprocessor = image_preprocessor
+        self.tokenizer = tokenizer
 
     def _build_input_ids(self, instruction: str) -> torch.Tensor:
         """
@@ -60,7 +28,14 @@ class NVILAPreprocessor(BaseVLPreprocessor):
         input_ids = np.array(prompt)  # [L_lang]
 
         return input_ids
-    
+
+    def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Preprocess images for NVILA model.
+        """
+        image = self.image_preprocessor.preprocess(image, return_tensors="pt")['pixel_values']
+        return image.cpu().numpy()
+
     def __call__(
         self, 
         image: np.ndarray, 
@@ -70,15 +45,15 @@ class NVILAPreprocessor(BaseVLPreprocessor):
         """
         Tokenize the instruction. 
         Args:
-            image: [H, W, C]
+            image: np.ndarray [H, W, C]
             instruction: str
             **kwargs: Additional arguments
         Returns:
           - input_ids: [L_lang]
-          - image: [H, W, C]
+          - image: np.ndarray [B, 3, H, W]
         """
         return {
             "input_ids": self._build_input_ids(instruction),
-            "image": image,
+            "image": self._preprocess_image(image),
         }
     

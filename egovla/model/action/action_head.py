@@ -15,6 +15,7 @@ class ActionHead(BaseActionHead):
             nn.Linear(feature_dim, feature_dim),
             nn.ReLU(),
         )
+        
         self.hand_net = nn.Sequential(
             nn.Linear(shape_meta["obs"]["hand"]["shape"][0] * shape_meta["obs"]["hand"]["horizon"], feature_dim),
             nn.ReLU(),
@@ -27,6 +28,7 @@ class ActionHead(BaseActionHead):
             2 + shape_meta["action"]["horizon"], # 2 for wrist and hand
             feature_dim) * 0.02)
 
+        # TODO: Use TransformerEncoder with flash attention
         self.action_head = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=feature_dim,
@@ -81,7 +83,7 @@ class ActionHead(BaseActionHead):
         inputs = torch.cat([state_wrist, state_hand, action_query], dim=1)  # [B, 2+H, feature_dim]
         inputs = inputs + self.pos_embed
         outputs = self.action_head(inputs)[:, 2:, :]  # only take the output of action_query
-        
+
         action = self.action_net(outputs)
         action = {
             "wrist": action[:, :, :self.shape_meta["obs"]["wrist"]["shape"][0]],

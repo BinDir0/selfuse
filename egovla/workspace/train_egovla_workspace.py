@@ -23,6 +23,7 @@ from egovla.utils.pytorch_util import dict_apply
 from egovla.workspace.base_workspace import BaseWorkspace
 from egovla.policy.egovla import EgoVLA
 from egovla.dataset.base_dataset import BaseImageDataset
+from egovla.dataset.nvila_preprocessor import NVILAPreprocessor
 from egovla.utils.checkpoint_util import TopKCheckpointManager
 from egovla.utils.json_logger import JsonLogger
 from egovla.model.common.lr_scheduler import get_scheduler
@@ -94,6 +95,10 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         # configure dataset
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.dataset)
+        dataset.set_preprocessor(NVILAPreprocessor(
+            image_preprocessor=self.model.vlm.vlm.get_vision_tower().image_processor,
+            tokenizer=self.model.vlm.vlm.tokenizer
+        ))
         train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
 
         # compute normalizer on the main process and save to disk
@@ -111,6 +116,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         val_dataloader = DataLoader(val_dataset, collate_fn=dataset.get_collator(), **cfg.val_dataloader)
 
         self.model.set_normalizer(normalizer)
+        # self.model = torch.compile(self.model, mode="max-autotune")
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(
@@ -167,7 +173,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                             for key, value in batch.items():
                                 if isinstance(value, torch.Tensor):
                                     assert not torch.isnan(value).any(), f"Batch contains NaN in {key}"
-
+                                    
+                            # torch.autograd.set_detect_anomaly(True)
                             # compute loss
                             raw_loss = self.model(batch)
                             accelerator.backward(raw_loss)
