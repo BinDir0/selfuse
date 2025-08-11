@@ -14,7 +14,7 @@ NUM_GPUS_PER_NODE=${5:-8}
 NODE_RANK=${6:-0}
 
 # DeepSpeed configuration
-DEEPSPEED_CONFIG="deepspeed_config.json"
+DEEPSPEED_CONFIG="$(pwd)/../egovla/workspace/ds_config.json"
 
 # Environment variables for DeepSpeed
 export ACCELERATE_USE_DEEPSPEED=true
@@ -27,6 +27,10 @@ export NCCL_IB_DISABLE=0
 export NCCL_P2P_DISABLE=0
 export NCCL_BLOCKING_WAIT=1
 export NCCL_ASYNC_ERROR_HANDLING=1
+
+# Fix BF16 LayerNorm compatibility
+export TORCH_CUDNN_V8_API_ENABLED=1
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 
 echo "Starting DeepSpeed training with:"
 echo "  Config: $CONFIG_NAME"
@@ -44,15 +48,8 @@ mkdir -p $OUTPUT_DIR
 
 # Launch training
 accelerate launch \
-    --multi_gpu \
-    --num_processes $((NUM_NODES * NUM_GPUS_PER_NODE)) \
-    --num_machines $NUM_NODES \
-    --machine_rank $NODE_RANK \
-    --main_process_ip $MASTER_IP \
-    --main_process_port $MASTER_PORT \
-    --use_deepspeed \
-    --deepspeed_config_file $DEEPSPEED_CONFIG \
-    train_egovla_deepspeed_workspace.py \
+    --config_file ../egovla/config/acc_node0.yaml \
+    ../egovla/workspace/train_egovla_deepspeed_workspace.py \
     hydra.run.dir=$OUTPUT_DIR \
     hydra.sweep.dir=$OUTPUT_DIR \
     hydra.job.name=${CONFIG_NAME}
