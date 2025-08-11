@@ -113,7 +113,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, collate_fn=dataset.get_collator(), **cfg.val_dataloader)
+        val_dataloader = DataLoader(val_dataset, collate_fn=val_dataset.get_collator(), **cfg.val_dataloader)
 
         self.model.set_normalizer(normalizer)
         # self.model = torch.compile(self.model, mode="max-autotune")
@@ -140,10 +140,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
         )
-        device = self.model.device
-
-        # save batch for sampling
-        train_sampling_batch = None
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2
