@@ -19,7 +19,6 @@ import tqdm
 import numpy as np
 import pickle
 
-from egovla.utils.pytorch_util import dict_apply
 from egovla.workspace.base_workspace import BaseWorkspace
 from egovla.policy.egovla import EgoVLA
 from egovla.dataset.base_dataset import BaseImageDataset
@@ -153,11 +152,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
+            for _ in range(cfg.training.num_epochs):
                 self.model.train()
-
-                step_log = dict()
-
                 train_losses = list()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec, disable=not accelerator.is_main_process) as tepoch:
