@@ -40,9 +40,6 @@ class NVILA(ModuleAttrMixin):
         self.action_query_token_ids = list(
             range(self.tokenizer.vocab_size - self.n_action_steps, self.tokenizer.vocab_size)
         )
-        
-        # Get image token ID for multimodal sequence construction
-        self.image_token_id = self.tokenizer.convert_tokens_to_ids(DEFAULT_IMAGE_TOKEN)
 
     def forward(self, images: torch.Tensor, input_ids: torch.Tensor, attention_masks: torch.Tensor) -> torch.Tensor:
         """
