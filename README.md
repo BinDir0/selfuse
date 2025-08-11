@@ -7,6 +7,12 @@
 
 配置多机之间通信，DeepSpeed 要求训练的多机之间要能 ssh 免密通信，因此需要配置好每台机器之间的 ssh 连接。
 
+在每台服务器上安装好 pdsh 启动器，用于 DeepSpeed 多机启动：
+
+```
+sudo apt-get install pdsh
+```
+
 配置 wandb，使用国内的镜像站（可选）：
 
 ```bash

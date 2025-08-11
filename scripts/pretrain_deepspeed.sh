@@ -14,7 +14,7 @@ NUM_GPUS_PER_NODE=${5:-8}
 NODE_RANK=${6:-0}
 
 # DeepSpeed configuration
-DEEPSPEED_CONFIG="$(pwd)/../egovla/config/ds_config.json"
+DEEPSPEED_CONFIG="/home/chenzhang/project/EgoVLA/egovla/config/ds_config.json"
 
 
 # Set NCCL environment variables for better multi-node performance
@@ -36,5 +36,6 @@ echo "  DeepSpeed config: $DEEPSPEED_CONFIG"
 
 # Launch training
 accelerate launch \
-    --config_file ../egovla/config/acc_node0.yaml \
-    ../train.py 
+    --config_file /home/chenzhang/project/EgoVLA/egovla/config/acc_node0.yaml \
+    train.py \
+    experiment=pretrain

@@ -1,6 +1,6 @@
 defaults:
   - _self_ 
-  - experiment: pretrain 
+  - experiment: pretrain_deepspeed
 
 name: train_egovla_deepspeed
 exp_name: "deepspeed"
