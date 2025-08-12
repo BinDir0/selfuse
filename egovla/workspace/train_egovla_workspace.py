@@ -19,7 +19,6 @@ import tqdm
 import numpy as np
 import pickle
 
-from egovla.utils.pytorch_util import dict_apply
 from egovla.workspace.base_workspace import BaseWorkspace
 from egovla.policy.egovla import EgoVLA
 from egovla.dataset.base_dataset import BaseImageDataset
@@ -70,7 +69,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             mixed_precision='bf16',  # Enable BF16 mixed precision training
             device_placement=True,
             kwargs_handlers=[ddp_kwargs],
-            gradient_accumulation_steps=cfg.training.gradient_accumulate_every
+            gradient_accumulation_steps=cfg.training.gradient_accumulation_steps
         )
 
         if accelerator.is_main_process:
@@ -113,7 +112,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, collate_fn=dataset.get_collator(), **cfg.val_dataloader)
+        val_dataloader = DataLoader(val_dataset, collate_fn=val_dataset.get_collator(), **cfg.val_dataloader)
 
         self.model.set_normalizer(normalizer)
         # self.model = torch.compile(self.model, mode="max-autotune")
@@ -140,10 +139,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
         )
-        device = self.model.device
-
-        # save batch for sampling
-        train_sampling_batch = None
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2
@@ -157,35 +152,21 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
+            for _ in range(cfg.training.num_epochs):
                 self.model.train()
-
-                step_log = dict()
-
                 train_losses = list()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec, disable=not accelerator.is_main_process) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         # device transfer
                         with accelerator.accumulate(self.model):
-                            batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                            # assert no Nan in batch
-                            for key, value in batch.items():
-                                if isinstance(value, torch.Tensor):
-                                    assert not torch.isnan(value).any(), f"Batch contains NaN in {key}"
-                                    
-                            # torch.autograd.set_detect_anomaly(True)
                             # compute loss
                             raw_loss = self.model(batch)
                             accelerator.backward(raw_loss)
+                            step_log = {}
                             if accelerator.sync_gradients and cfg.training.clipping.enabled:
                                 total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
-                                if accelerator.is_main_process:
-                                    print(f"Total gradient norm before clipping: {total_norm.item():.6f}")
-                                
-                                total_norm = accelerator.clip_grad_norm_(self.model.parameters(), cfg.training.clipping.max_grad_norm)
-                                if accelerator.is_main_process:
-                                    print(f"Total gradient norm after clipping: {total_norm.item():.6f}")
+                                step_log['grad_norm'] = total_norm.item()
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
@@ -194,12 +175,12 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                             raw_loss_cpu = raw_loss.item()
                             tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                             train_losses.append(raw_loss_cpu)
-                            step_log = {
+                            step_log.update({
                                 'train_loss': raw_loss_cpu,
                                 'global_step': self.global_step,
                                 'epoch': self.epoch,
-                                'lr': lr_scheduler.get_last_lr()[0]
-                            }
+                                'lr': lr_scheduler.get_last_lr()[0],
+                            })
 
                             is_last_batch = (batch_idx == (len(train_dataloader)-1))
                             if not is_last_batch:
@@ -217,10 +198,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
 
-                # ========= eval for this epoch ==========
-                policy = accelerator.unwrap_model(self.model)
-                policy.eval()
-
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0:
                     with torch.no_grad():
@@ -229,7 +206,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec, 
                                 disable=not accelerator.is_main_process) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
-                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                                 loss = self.model(batch)
                                 val_losses.append(loss)
                                 if (cfg.training.max_val_steps is not None) \

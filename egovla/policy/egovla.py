@@ -47,34 +47,15 @@ class EgoVLA(BasePolicy):
 
     # TODO: add a method to get the optimizer only for the retargeting head
     # add modules_to_train to params
-    def get_optimizer(
-            self,
-            lr: float,
-            weight_decay: float,
-            betas: Tuple[float, float],
-        ) -> torch.optim.Optimizer:
-
-        # start with all of the candidate parameters (that require grad)
-        param_dict = {pn: p for pn, p in self.named_parameters()}
-        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-
+    def get_optimizer(self, lr: float) -> torch.optim.Optimizer:
+        num_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        num_params_no_grad = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+        print(f"num parameters that require grad: {num_params:,}")
+        print(f"num parameters that do not require grad: {num_params_no_grad:,}")
+        assert num_params_no_grad == 0, "There are parameters that do not require grad"
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         print(f"Fused AdamW available: {fused_available}")
-        optimizer = torch.optim.AdamW(
-            optim_groups, lr=lr, betas=betas, fused=fused_available
-        )
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr, fused=fused_available, weight_decay=0.0)
         return optimizer
 
     def compute_loss(self, batch):
