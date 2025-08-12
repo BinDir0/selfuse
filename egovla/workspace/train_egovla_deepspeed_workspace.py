@@ -159,6 +159,17 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         )
 
         # accelerator
+        '''
+        dtype_map = {
+            'fp16': torch.float16,
+            'bf16': torch.bfloat16,
+            'no': torch.float32  
+        }
+
+        mixed_precision_dtype = dtype_map.get(accelerator.state.mixed_precision)
+        print(f"current mixed precision dtype: {mixed_precision_dtype}")
+        self.model = self.model.to(mixed_precision_dtype)
+        '''
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
         )
