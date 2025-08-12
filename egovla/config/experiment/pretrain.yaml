@@ -96,8 +96,6 @@ val_dataloader:
 
 optimizer:
   lr: 1.0e-4
-  weight_decay: 0.0
-  betas: [0.95, 0.999]
   
 training:
   device: "cuda:0"
