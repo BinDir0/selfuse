@@ -27,6 +27,7 @@ from egovla.dataset.nvila_preprocessor import NVILAPreprocessor
 from egovla.utils.checkpoint_util import TopKCheckpointManager
 from egovla.utils.json_logger import JsonLogger
 from egovla.model.common.lr_scheduler import get_scheduler
+import accelerate
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import DummyOptim, DummyScheduler
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -115,7 +116,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             objects_to_broadcast = [None]
 
         # 3. broadcast object from main process (from_process=0) to all processes
-        accelerator.broadcast_object_list(objects_to_broadcast, from_process=0)
+        accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
 
         # 4. now all processes have a fully identical object copy
         normalizer = objects_to_broadcast[0]
