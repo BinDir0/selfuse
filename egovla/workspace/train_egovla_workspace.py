@@ -69,7 +69,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             mixed_precision='bf16',  # Enable BF16 mixed precision training
             device_placement=True,
             kwargs_handlers=[ddp_kwargs],
-            gradient_accumulation_steps=cfg.training.gradient_accumulate_every
+            gradient_accumulation_steps=cfg.training.gradient_accumulation_steps
         )
 
         if accelerator.is_main_process:
@@ -197,10 +197,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
-
-                # ========= eval for this epoch ==========
-                policy = accelerator.unwrap_model(self.model)
-                policy.eval()
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0:

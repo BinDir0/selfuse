@@ -109,7 +109,7 @@ training:
   ckpt_save_interval: 5
   # training loop control
   # in epochs
-  gradient_accumulate_every: 4
+  gradient_accumulation_steps: 4
   clipping:
     enabled: True
     max_grad_norm: 0.5

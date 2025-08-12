@@ -71,8 +71,8 @@ class NVILA(ModuleAttrMixin):
         D = self.vlm.llm.config.hidden_size
         
         # ===== Vision Processing =====
-        # Flatten multi-frame images for batch processing: (B, n_obs_steps, H, W, 3) -> (B*n_obs_steps, H, W, 3)
-        processed_images = rearrange(images, 'b n h w c -> (b n) h w c')
+        # Flatten multi-frame images for batch processing: (B, n_obs_steps, 3, H, W) -> (B*n_obs_steps, 3, H, W)
+        processed_images = rearrange(images, 'b n c h w -> (b n) c h w')
 
         # Extract vision features and apply multimodal projection
         vision_features = self.vision_tower(processed_images)  # Vision encoder output
