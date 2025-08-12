@@ -59,14 +59,7 @@ class RetargetingHead(nn.Module):
         # Load pretrained weights if specified
         if self.local_weights_path is not None:
             self._load_pretrained_weights()
-        
-        print("Initialized RetargetingHead:")
-        print(f"  - Input Dimension (Fingertip Positions): {input_dim}")
-        print(f"  - Output Dimension (Robot Joint Commands): {output_dim}")
-        print(f"  - Hidden Sizes: {self.hidden_sizes}")
-        print(f"  - Architecture: {input_dim} -> {' -> '.join(map(str, self.hidden_sizes))} -> {output_dim}")
-        print(f"  - num_keypoints_per_hand={self.num_keypoints_per_hand}, robot_per_hand_dof={self.robot_per_hand_dof}")
-        print(f"  - Weights path: {self.local_weights_path}")
+
 
     def _load_pretrained_weights(self):
         """
