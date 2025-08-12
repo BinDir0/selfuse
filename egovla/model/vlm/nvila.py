@@ -35,7 +35,7 @@ class NVILA(ModuleAttrMixin):
         self.vlm = LlavaLlamaModel.from_pretrained(
             model_name_or_path, 
             attn_implementation="sdpa", 
-            dtype=torch.bfloat16
+            torch_dtype=torch.bfloat16
         )
         self.tokenizer = self.vlm.tokenizer
         self.vision_tower = self.vlm.get_vision_tower()
