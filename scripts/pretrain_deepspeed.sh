@@ -38,4 +38,4 @@ echo "  DeepSpeed config: $DEEPSPEED_CONFIG"
 accelerate launch \
     --config_file /home/chenzhang/project/EgoVLA/egovla/config/acc_node0.yaml \
     train.py \
-    experiment=pretrain
+    experiment=pretrain_deepspeed

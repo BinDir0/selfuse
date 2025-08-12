@@ -115,7 +115,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             objects_to_broadcast = [None]
 
         # 3. broadcast object from main process (from_process=0) to all processes
-        accelerator.broadcast_object(objects_to_broadcast, from_process=0)
+        accelerator.broadcast_object_list(objects_to_broadcast, from_process=0)
 
         # 4. now all processes have a fully identical object copy
         normalizer = objects_to_broadcast[0]
