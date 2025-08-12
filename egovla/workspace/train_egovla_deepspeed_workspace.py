@@ -19,7 +19,6 @@ import tqdm
 import numpy as np
 import pickle
 
-from egovla.utils.progress_bar import SimpleProgressBar
 from egovla.utils.pytorch_util import dict_apply
 from egovla.workspace.base_workspace import BaseWorkspace
 from egovla.policy.egovla import EgoVLA
@@ -155,8 +154,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 step_log = dict()
 
                 train_losses = list()
-                if accelerator.is_main_process:
-                    progress_bar = SimpleProgressBar(len(train_dataloader), desc=f"Training epoch {self.epoch}")
                 for batch_idx, batch in enumerate(train_dataloader):
                     with accelerator.accumulate(self.model):
                         # compute loss - let DeepSpeed handle BF16 without autocast
@@ -169,8 +166,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                         
                         # logging
                         raw_loss_cpu = raw_loss.item()
-                        if accelerator.is_main_process:
-                            progress_bar.update(raw_loss_cpu)
                         train_losses.append(raw_loss_cpu)
                         step_log = {
                             'train_loss': raw_loss_cpu,
@@ -190,8 +185,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                             and batch_idx >= (cfg.training.max_train_steps-1):
                             break
                         
-                if accelerator.is_main_process:
-                    progress_bar.close()
                 # at the end of each epoch
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)

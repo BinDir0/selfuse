@@ -32,6 +32,7 @@ hydra:
   job:
     override_dirname: ${name}
   run:
+    # need to change to the correct path
     dir: /home/chenzhang/project/logs/EgoVLA/data/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
   sweep:
     dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}

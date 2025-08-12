@@ -13,7 +13,7 @@ export NCCL_ASYNC_ERROR_HANDLING=1
 
 # Launch training
 accelerate launch \
-    --config_file /home/chenzhang/project/EgoVLA/egovla/config/acc_node0.yaml \
-    train.py \
+    --config_file egovla/config/acc_node0.yaml \
+    train_deepspeed.py \
     experiment=pretrain_deepspeed \
     > progress.log

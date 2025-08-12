@@ -13,6 +13,11 @@
 sudo apt-get install pdsh
 ```
 
+如果要使用 Deepspeed 多机训练，需要在每台机器上使用 conda 安装完全相同的环境，包括环境名。
+最好是环境直接复制。
+
+接着，将代码（包括 EgoVLA 和 VILA）放到 share_data/ 下，保证所有机器之间均能访问。然后在每台机器的相同位置创建一个软链接指向这个位置。
+
 配置 wandb，使用国内的镜像站（可选）：
 
 ```bash
@@ -27,6 +32,8 @@ wandb login
 
 ### Pretraining
 
+#### Single Node
+
 本项目基于 Accelerate 包装的 DeepSeed 完成多机多卡训练，通过 Accelerate 设置 DeepSpeed Config：
 
 ```bash
@@ -39,7 +46,13 @@ Accelerate config
 ./scripts/pretrain.sh
 ```
 
+#### Multi Node with DeepSpeed
 
+```bash
+/scripts/pretrain_deepspeed.sh
+```
+
+logging 结果将分别保存在每台机器上，位置可以在 `egovla/config/train_egovla_deepspeed_workspace.yaml` 中调整。
 
 ### Post-Traning
 
