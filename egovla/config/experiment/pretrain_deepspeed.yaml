@@ -84,7 +84,7 @@ policy:
   start_ckpt_path: null
 
 dataloader:
-  batch_size: 4
+  batch_size: 8
   num_workers: 8
   shuffle: True
   pin_memory: True

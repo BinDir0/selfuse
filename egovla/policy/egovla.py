@@ -40,6 +40,11 @@ class EgoVLA(BasePolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
+        self.normalizer.eval()
+    
+        for param in self.normalizer.parameters():
+            param.requires_grad = False
+
     # TODO: add a method to get the optimizer only for the retargeting head
     # add modules_to_train to params
     def get_optimizer(

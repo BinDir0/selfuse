@@ -7,7 +7,7 @@ numpy
 accelerate
 datasets
 diffusers
-deepspeed
+deepspeed==0.17.1
 zarr
 numba
 transformers

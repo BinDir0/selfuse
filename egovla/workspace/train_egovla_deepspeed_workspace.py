@@ -19,6 +19,7 @@ import tqdm
 import numpy as np
 import pickle
 
+from egovla.utils.progress_bar import SimpleProgressBar
 from egovla.utils.pytorch_util import dict_apply
 from egovla.workspace.base_workspace import BaseWorkspace
 from egovla.policy.egovla import EgoVLA
@@ -29,7 +30,7 @@ from egovla.utils.json_logger import JsonLogger
 from egovla.model.common.lr_scheduler import get_scheduler
 import accelerate
 from accelerate import Accelerator, DistributedDataParallelKwargs
-from accelerate.utils import DummyOptim, DummyScheduler
+from accelerate.utils import DummyOptim, DummyScheduler, tqdm
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
@@ -64,17 +65,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         cfg = copy.deepcopy(self.cfg)
         
         accelerator = Accelerator(log_with='wandb')
-        '''
-        dtype_map = {
-            'fp16': torch.float16,
-            'bf16': torch.bfloat16,
-            'no': torch.float32  
-        }
-
-        mixed_precision_dtype = dtype_map.get(accelerator.state.mixed_precision)
-        print(f"current mixed precision dtype: {mixed_precision_dtype}")
-        self.model = self.model.to(mixed_precision_dtype)
-        '''
         
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
         wandb_cfg.pop('project')
@@ -85,28 +75,20 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             init_kwargs={"wandb": wandb_cfg}
         )
 
-        # Create optimizer - use DummyOptim if DeepSpeed is configured
-        if (
-            accelerator.state.deepspeed_plugin is None
-            or "optimizer" not in accelerator.state.deepspeed_plugin.deepspeed_config
-        ):
-            # Use model's get_optimizer method for regular training
-            self.optimizer = self.model.get_optimizer(**cfg.optimizer)
-        else:
-            # Use DummyOptim for DeepSpeed training
-            # Get optimizer parameters using the same logic as get_optimizer method
-            param_dict = {pn: p for pn, p in self.model.named_parameters()}
-            param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-            optimizer_grouped_parameters = [
-                {'params': decay_params, 'weight_decay': cfg.optimizer.weight_decay},
-                {'params': nodecay_params, 'weight_decay': 0.0}
-            ]
-            self.optimizer = DummyOptim(optimizer_grouped_parameters, 
-                                        lr=cfg.optimizer.lr, 
-                                        betas=cfg.optimizer.betas, 
-                                        fused=True)
+        # Use DummyOptim for DeepSpeed training
+        # Get optimizer parameters using the same logic as get_optimizer method
+        param_dict = {pn: p for pn, p in self.model.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optimizer_grouped_parameters = [
+            {'params': decay_params, 'weight_decay': cfg.optimizer.weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        self.optimizer = DummyOptim(optimizer_grouped_parameters, 
+                                    lr=cfg.optimizer.lr, 
+                                    betas=cfg.optimizer.betas, 
+                                    fused=True)
 
         # configure dataset
         dataset: BaseImageDataset
@@ -138,30 +120,13 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
 
         self.model.set_normalizer(normalizer)
         
-        # configure lr scheduler - use DummyScheduler if DeepSpeed is configured
-        if (
-            accelerator.state.deepspeed_plugin is None
-            or "scheduler" not in accelerator.state.deepspeed_plugin.deepspeed_config
-        ):
-            # Use regular scheduler for normal training
-            lr_scheduler = get_scheduler(
-                cfg.training.lr_scheduler,
-                optimizer=self.optimizer,
-                num_warmup_steps=cfg.training.lr_warmup_steps,
-                num_training_steps=(
-                    len(train_dataloader) * cfg.training.num_epochs),
-                # pytorch assumes stepping LRScheduler every epoch
-                # however huggingface diffusers steps it every batch
-                last_epoch=self.global_step-1
-            )
-        else:
-            # Use DummyScheduler for DeepSpeed training
-            max_train_steps = len(train_dataloader) * cfg.training.num_epochs
-            lr_scheduler = DummyScheduler(
-                self.optimizer, 
-                total_num_steps=max_train_steps, 
-                warmup_num_steps=cfg.training.lr_warmup_steps
-            )
+        # Use DummyScheduler for DeepSpeed training
+        max_train_steps = len(train_dataloader) * cfg.training.num_epochs
+        lr_scheduler = DummyScheduler(
+            self.optimizer, 
+            warmup_num_steps=cfg.training.lr_warmup_steps,
+            total_num_steps=max_train_steps, 
+        )
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
@@ -190,41 +155,43 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 step_log = dict()
 
                 train_losses = list()
-                with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
-                        leave=False, mininterval=cfg.training.tqdm_interval_sec, disable=not accelerator.is_main_process) as tepoch:
-                    for batch_idx, batch in enumerate(tepoch):
-                        with accelerator.accumulate(self.model):
-                            # compute loss - let DeepSpeed handle BF16 without autocast
-                            batch = dict_apply(batch, lambda x: x.to(torch.bfloat16) if x.dtype == torch.float32 else x)
-                            print(batch['image'].dtype)
-                            raw_loss = self.model(batch)
-                            accelerator.backward(raw_loss)
-                            self.optimizer.step()
-                            self.optimizer.zero_grad()
-                            lr_scheduler.step()
-                            
-                            # logging
-                            raw_loss_cpu = raw_loss.item()
-                            tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
-                            train_losses.append(raw_loss_cpu)
-                            step_log = {
-                                'train_loss': raw_loss_cpu,
-                                'global_step': self.global_step,
-                                'epoch': self.epoch,
-                                'lr': lr_scheduler.get_last_lr()[0]
-                            }
+                if accelerator.is_main_process:
+                    progress_bar = SimpleProgressBar(len(train_dataloader), desc=f"Training epoch {self.epoch}")
+                for batch_idx, batch in enumerate(train_dataloader):
+                    with accelerator.accumulate(self.model):
+                        # compute loss - let DeepSpeed handle BF16 without autocast
+                        batch = dict_apply(batch, lambda x: x.to(torch.bfloat16) if x.dtype == torch.float32 else x)
+                        raw_loss = self.model(batch)
+                        accelerator.backward(raw_loss)
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                        lr_scheduler.step()
+                        
+                        # logging
+                        raw_loss_cpu = raw_loss.item()
+                        if accelerator.is_main_process:
+                            progress_bar.update(raw_loss_cpu)
+                        train_losses.append(raw_loss_cpu)
+                        step_log = {
+                            'train_loss': raw_loss_cpu,
+                            'global_step': self.global_step,
+                            'epoch': self.epoch,
+                            'lr': lr_scheduler.get_last_lr()[0]
+                        }
 
-                            is_last_batch = (batch_idx == (len(train_dataloader)-1))
-                            if not is_last_batch:
-                                # log of last step is combined with validation and rollout
-                                accelerator.log(step_log, step=self.global_step)
-                                json_logger.log(step_log)
-                                self.global_step += 1
+                        is_last_batch = (batch_idx == (len(train_dataloader)-1))
+                        if not is_last_batch:
+                            # log of last step is combined with validation and rollout
+                            accelerator.log(step_log, step=self.global_step)
+                            json_logger.log(step_log)
+                            self.global_step += 1
 
-                            if (cfg.training.max_train_steps is not None) \
-                                and batch_idx >= (cfg.training.max_train_steps-1):
-                                break
-
+                        if (cfg.training.max_train_steps is not None) \
+                            and batch_idx >= (cfg.training.max_train_steps-1):
+                            break
+                        
+                if accelerator.is_main_process:
+                    progress_bar.close()
                 # at the end of each epoch
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
@@ -238,16 +205,14 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0:
                     with torch.no_grad():
                         val_losses = list()
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
-                                leave=False, mininterval=cfg.training.tqdm_interval_sec, 
-                                disable=not accelerator.is_main_process) as tepoch:
-                            for batch_idx, batch in enumerate(tepoch):
-                                # Let DeepSpeed handle BF16 without autocast
-                                loss = self.model(batch)
-                                val_losses.append(loss)
-                                if (cfg.training.max_val_steps is not None) \
-                                    and batch_idx >= (cfg.training.max_val_steps-1):
-                                    break
+                        for batch_idx, batch in enumerate(val_dataloader):
+                            # Let DeepSpeed handle BF16 without autocast
+                            batch = dict_apply(batch, lambda x: x.to(torch.bfloat16) if x.dtype == torch.float32 else x)
+                            loss = self.model(batch)
+                            val_losses.append(loss)
+                            if (cfg.training.max_val_steps is not None) \
+                                and batch_idx >= (cfg.training.max_val_steps-1):
+                                break
                         
                         if len(val_losses) > 0:
                             # Collect validation losses from all processes

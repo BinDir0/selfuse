@@ -9,14 +9,12 @@
         }
     },
     "scheduler": {
-        "type": "WarmupDecayLR",
+        "type": "WarmupCosineLR",
         "params": {
-            "warmup_min_lr": "auto",
-            "warmup_max_lr": "auto",
             "warmup_num_steps": "auto",
             "total_num_steps": "auto"
         }
-    },
+    }, 
     "zero_optimization": {
         "stage": 2,
         "allgather_partitions": true,
@@ -28,8 +26,7 @@
         "cpu_offload": false
     },
     "bf16": {
-        "enabled": true,
-        "auto_cast": false
+        "enabled": true
     },
     "gradient_accumulation_steps": 1,
     "gradient_clipping": 1.0,
