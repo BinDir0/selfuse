@@ -37,8 +37,6 @@ class NVILA(ModuleAttrMixin):
             attn_implementation="sdpa"
         )
         self.tokenizer = self.vlm.tokenizer
-        self.vision_tower = self.vlm.get_vision_tower()
-        self.mm_projector = self.vlm.get_mm_projector()
 
         # Define action query token IDs (last n_action_steps tokens in vocabulary)
         self.action_query_token_ids = list(
@@ -75,8 +73,8 @@ class NVILA(ModuleAttrMixin):
         processed_images = rearrange(images, 'b n h w c -> (b n) h w c')
 
         # Extract vision features and apply multimodal projection
-        vision_features = self.vision_tower(processed_images)  # Vision encoder output
-        projected_vision_features = self.mm_projector(vision_features)  # [B*n_obs_steps, 121, D]
+        vision_features = self.vlm.get_vision_tower()(processed_images)  # Vision encoder output
+        projected_vision_features = self.vlm.get_mm_projector()(vision_features)  # [B*n_obs_steps, 121, D]
         
         # Reshape to separate batch and frame dimensions: (B*n_obs_steps, 121, D) -> (B, n_obs_steps, 121, D)
         vision_features_per_frame = rearrange(projected_vision_features, '(b n) t d -> b n t d', b=B)
