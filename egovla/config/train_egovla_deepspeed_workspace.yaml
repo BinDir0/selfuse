@@ -32,7 +32,7 @@ hydra:
   job:
     override_dirname: ${name}
   run:
-    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    dir: /home/chenzhang/project/logs/data/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
   sweep:
     dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
     subdir: ${hydra.job.num}

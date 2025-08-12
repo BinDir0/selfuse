@@ -8,7 +8,7 @@ set -e
 # Default values
 CONFIG_NAME=${1:-"train_egovla_deepspeed_workspace"}
 MASTER_IP=${2:-"localhost"}
-MASTER_PORT=${3:-29500}
+MASTER_PORT=${3:-11451}
 NUM_NODES=${4:-1}
 NUM_GPUS_PER_NODE=${5:-8}
 NODE_RANK=${6:-0}

@@ -64,6 +64,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         cfg = copy.deepcopy(self.cfg)
         
         accelerator = Accelerator(log_with='wandb')
+        '''
         dtype_map = {
             'fp16': torch.float16,
             'bf16': torch.bfloat16,
@@ -73,7 +74,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         mixed_precision_dtype = dtype_map.get(accelerator.state.mixed_precision)
         print(f"current mixed precision dtype: {mixed_precision_dtype}")
         self.model = self.model.to(mixed_precision_dtype)
-
+        '''
+        
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
         wandb_cfg.pop('project')
         wandb_cfg['mode'] = cfg.logging.mode
@@ -193,6 +195,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                     for batch_idx, batch in enumerate(tepoch):
                         with accelerator.accumulate(self.model):
                             # compute loss - let DeepSpeed handle BF16 without autocast
+                            batch = dict_apply(batch, lambda x: x.to(torch.bfloat16) if x.dtype == torch.float32 else x)
+                            print(batch['image'].dtype)
                             raw_loss = self.model(batch)
                             accelerator.backward(raw_loss)
                             self.optimizer.step()

@@ -91,14 +91,17 @@ class EgoVLA(BasePolicy):
         image = batch["image"]
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
-        state = {
-            "wrist": self.normalizer['state/wrist'](batch["state/wrist"]),
-            "hand": self.normalizer['state/hand'](batch["state/hand"])
-        }
-        action = {
-            "wrist": self.normalizer['action/wrist'](batch["action/wrist"]),
-            "hand": self.normalizer['action/hand'](batch["action/hand"])
-        }
+        with torch.no_grad():
+            state = {
+                "wrist": self.normalizer['state/wrist'](batch["state/wrist"]),
+                "hand": self.normalizer['state/hand'](batch["state/hand"])
+            }
+            action = {
+                "wrist": self.normalizer['action/wrist'](batch["action/wrist"]),
+                "hand": self.normalizer['action/hand'](batch["action/hand"])
+            }
+            state = {k: v.detach() for k, v in state.items() }
+            action = {k: v.detach() for k, v in action.items() }
 
         action_query = self.vlm(image, input_ids, attention_mask)
         action_pred = self.action_head(state, action_query)
