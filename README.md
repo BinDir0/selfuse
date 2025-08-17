@@ -1,4 +1,25 @@
-### Environment Setup
+# EgoVLA and Our Better Solution
+
+## Environment Setup
+
+安装环境的完整流程，最好搞成一键式的，方便快捷。
+
+## Data Processing
+
+
+
+## Training
+
+
+
+
+## Inference
+
+
+## Visualization
+
+
+
 
 ```bash
 # Step 1. git clone VILA & install VILA conda env & pip install -e .
