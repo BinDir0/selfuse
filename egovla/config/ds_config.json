@@ -33,7 +33,7 @@
     "train_batch_size": "auto",
     "train_micro_batch_size_per_gpu": "auto",
     "wall_clock_breakdown": false,
-    "steps_per_print": 2000,
+    "steps_per_print": 20,
     "dump_state": false,
     "activation_checkpointing": {
         "partition_activations": false,

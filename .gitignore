@@ -15,6 +15,7 @@ bin
 logs
 wandb
 outputs
+reference
 data_local
 .vscode
 _wandb
@@ -149,3 +150,9 @@ dmypy.json
 
 
 logs/
+
+# NVIDIA Nsight Systems profile files
+*.nsys-rep
+
+# deepspeed env
+.deepspeed_env

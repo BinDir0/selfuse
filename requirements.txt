@@ -4,7 +4,7 @@ hydra-core
 wandb
 tqdm
 numpy 
-accelerate
+accelerate==1.10.0
 datasets
 diffusers
 deepspeed==0.17.1
@@ -13,3 +13,9 @@ numba
 transformers
 einops
 ps3-torch
+nvtx
+h5py
+pymodbus
+pyrealsense2
+dex_retargeting
+mujoco

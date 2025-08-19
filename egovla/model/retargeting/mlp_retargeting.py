@@ -4,7 +4,9 @@ from torch.utils.data import TensorDataset, DataLoader
 from omegaconf import DictConfig
 from typing import Optional, Dict, Any
 
-class RetargetingHead(nn.Module):
+from egovla.model.retargeting.base_retargeting import BaseRetargeting
+
+class RetargetingHead(BaseRetargeting):
     """
     Implements the retargeting MLP described in the EgoVLA paper (Appendix 3.3).
 
@@ -13,36 +15,27 @@ class RetargetingHead(nn.Module):
     """
     def __init__(self, 
                  shape_meta: Optional[Dict[str, Any]] = None,
-                 model_config: Optional[DictConfig] = None,
-                 num_keypoints_per_hand: int = 5,
-                 robot_per_hand_dof: int = 6):
+                 model_config: Optional[DictConfig] = None):
         """
         Initializes the MLP architecture.
 
         Args:
             shape_meta (Optional[Dict[str, Any]]): Shape metadata containing input/output shape information and retargeting parameters.
             model_config (Optional[DictConfig]): Model configuration containing local weights path.
-            num_keypoints_per_hand (int): Number of keypoints used per hand (e.g., 5 for fingertips).
-            robot_per_hand_dof (int): Degrees of Freedom for a single robot hand.
-                                  The paper uses Inspire hands with 12 DoFs.
         """
         super().__init__()
 
         self.shape_meta = shape_meta
         self.model_config = model_config
 
-        self.num_keypoints_per_hand = num_keypoints_per_hand
-        self.robot_per_hand_dof = robot_per_hand_dof
-        self.hidden_sizes = model_config.get('hidden_sizes', [64, 128, 64])
+        self.num_keypoints = self.model_config['num_keypoints']
+        self.robot_dof = self.shape_meta['robot_dof']
+        input_dim = self.num_keypoints * 3 
+        output_dim = self.robot_dof
 
+        self.hidden_sizes = model_config.get('hidden_sizes', [64, 128, 64])
         self.local_weights_path = model_config['local_weights_path']
 
-        # Input dimension: 2 hands * 5 fingertips/hand * 3 coords (x,y,z) = 30
-        input_dim = 2 * self.num_keypoints_per_hand * 3 
-        # Output dimension: 2 hands * 6 DoFs/hand = 12
-        output_dim = 2 * self.robot_per_hand_dof
-        
-        # Construct the four-layer MLP using hidden_sizes from config
         layers = []
         prev_dim = input_dim
         
@@ -51,7 +44,6 @@ class RetargetingHead(nn.Module):
             layers.append(nn.ReLU())
             prev_dim = hidden_size
         
-        # Add output layer
         layers.append(nn.Linear(prev_dim, output_dim))
         
         self.mlp = nn.Sequential(*layers)
@@ -59,7 +51,6 @@ class RetargetingHead(nn.Module):
         # Load pretrained weights if specified
         if self.local_weights_path is not None:
             self._load_pretrained_weights()
-
 
     def _load_pretrained_weights(self):
         """
@@ -78,16 +69,15 @@ class RetargetingHead(nn.Module):
         except Exception as e:
             print(f"Warning: Unable to load pretrained weights {self.local_weights_path}: {e}")
 
-    def forward(self, fingertip_positions: torch.Tensor) -> torch.Tensor:
-        """
-        Performs a forward pass through the MLP.
-
+    def forward(self, keypoints_pos: torch.Tensor) -> torch.Tensor:
+        '''
         Args:
-            fingertip_positions (torch.Tensor): A batch of 3D fingertip positions for both hands.
-                                                Shape: [Batch, H, Input_Dim] (e.g., [B, H, 30])
-
+            keypoints_pos: [B, E, N, 3] positions of hand keypoints in wrist frame
+            N: number of keypoints per hand
         Returns:
-            torch.Tensor: The predicted robot hand joint commands.
-                          Shape: [Batch, H, Output_Dim] (e.g., [B, H, 12])
-        """
-        return self.mlp(fingertip_positions)
+            qpos: [B, E, rdof] qpos of the hand dofs
+        '''
+        B, E, N, _ = keypoints_pos.shape
+        keypoints_pos = keypoints_pos.reshape(B * E, N * 3) # [B*E, N*3]
+        qpos = self.mlp(keypoints_pos) # [B*E, rdof]
+        return qpos.reshape(B, E, -1) # [B, E, rdof]
