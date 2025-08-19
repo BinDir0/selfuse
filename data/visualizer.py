@@ -92,15 +92,16 @@ def try_import_manolayer(candidates: list):
 
 
 def load_intrinsics(path: str) -> tuple:
-    try:
-        with open(path, 'r') as f:
-            txt = f.read()
-        nums = [float(x) for x in txt.replace(',', ' ').split() if x.strip()]
-        if len(nums) >= 4:
-            fx, fy, cx, cy = nums[0], nums[1], nums[2], nums[3]
-            return fx, fy, cx, cy
-    except Exception:
-        pass
+    # load numpy
+    intrinsics = np.load(path)
+    if intrinsics.shape == (4, 4):
+        intrinsics = intrinsics[:3, :3]
+    if intrinsics.shape == (3, 3):
+        intrinsics = intrinsics.copy()
+        return intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+    if intrinsics.shape == (4, ):
+        return intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]
+    print(f"Invalid intrinsics shape: {intrinsics.shape}")
     return None
 
 
@@ -125,10 +126,9 @@ def main():
     parser.add_argument('--mano_root', type=str, default='/home/guantianrui/manopth/mano/models', help='MANO model directory')
     parser.add_argument('--manopth_path', type=str, default='/home/guantianrui/manopth', help='Path to local manopth repo or its parent (added to sys.path)')
     parser.add_argument('--index', type=int, default=-1, help='Specific frame index to visualize (default random)')
-    parser.add_argument('--save', type=str, default='', help='If set, save visualization to this path instead of showing')
+    parser.add_argument('--save', type=str, default='', help='save visualization to this path')
     parser.add_argument('--camera_view', action='store_true', help='Project MANO meshes to image using camera intrinsics and overlay')
-    parser.add_argument('--coord_frame', type=str, default='world', choices=['world', 'camera'], help='3D rendering frame when not overlaying')
-    parser.add_argument('--intrinsic_path', type=str, default='', help='Path to intrinsics text (fx fy cx cy)')
+    parser.add_argument('--intrinsic_path', type=str, default='', help='Path to intrinsics .npy')
     parser.add_argument('--fx', type=float, default=0, help='fx if no intrinsic file provided')
     parser.add_argument('--fy', type=float, default=0, help='fy if no intrinsic file provided')
     parser.add_argument('--cx', type=float, default=0, help='cx if no intrinsic file provided')
@@ -200,7 +200,7 @@ def main():
     R_pose15 = hand30[15:30]
     # L_pose15 = np.zeros(15)
     # R_pose15 = np.zeros(15)
-    print(L_pose15, R_pose15)
+    # print(L_pose15, R_pose15)
 
     Lt3 = wrist18[0:3]
     Rt3 = wrist18[3:6]
@@ -212,23 +212,7 @@ def main():
     
     L_aa = rotmat_to_axisangle(L_R)
     R_aa = rotmat_to_axisangle(R_R)
-    # diff = L_R @ R_R.T
-    # axis, angle = rot_axis_angle(diff)  # Rdiff = R_right @ R_left.T
-    # print('angle_deg=', np.degrees(angle), 'axis=', axis)
-    # print(np.linalg.det(L_R @ R_R.T))
-    print(L_aa, R_aa)
-
-    # Diagnose relative rotation between hands in the same frame (world frame)
-    # try:
-    #     ang_deg, axis_vec = rotation_diff_axis_angle(R_R, L_R)
-    #     sims = [abs(float(np.dot(axis_vec, np.array([1, 0, 0], dtype=np.float32)))),
-    #             abs(float(np.dot(axis_vec, np.array([0, 1, 0], dtype=np.float32)))),
-    #             abs(float(np.dot(axis_vec, np.array([0, 0, 1], dtype=np.float32))))]
-    #     axis_names = ['x', 'y', 'z']
-    #     top_axis = axis_names[int(np.argmax(sims))]
-    #     print(f"[Diag] Rdiff angle(deg)≈{ang_deg:.2f}, axis≈{axis_vec.tolist()}, closest_axis={top_axis} (|dot|={max(sims):.3f})")
-    # except Exception as e:
-    #     print(f"[Diag] Failed to compute Rdiff axis/angle: {e}")
+    # print(L_aa, R_aa)
 
     mano_left = build_mano_layer(args.mano_root, side='left')
     mano_right = build_mano_layer(args.mano_root, side='right')
@@ -267,30 +251,9 @@ def main():
             M_wc = extrinsic_ds[idx].reshape(4, 4).astype(np.float32)
         R_wc = M_wc[:3, :3]
         t_wc = M_wc[:3, 3]
-        # Transform to camera coords
-        # print(L_joints_world[8] - L_joints_world[0])
-        # print(Lt3 - Rt3)
-        # print((Lt3 - Rt3) @ (L_joints_world[8] - L_joints_world[0]))
-        for verts_world, color in [(R_verts_world, 'yellow'), (R_joints_world, 'red')]:
+        for verts_world, color in [(R_verts_world, 'yellow'), (L_verts_world, 'cyan'), (R_joints_world, 'red'), (L_joints_world, 'blue')]:
             verts_cam = (R_wc @ verts_world.T).T + t_wc.reshape(1, 3)
-            # print(t_wc.reshape(1, 3))
-            # print((R_wc @ Lt3.T).T + t_wc.reshape(1, 3), (R_wc @ Rt3.T).T + t_wc.reshape(1, 3))
-            # 将两个手腕的点投影到图像上，并可视化出来
-            # uv_L = project_points((R_wc @ Lt3.T).T + t_wc.reshape(1, 3), fx, fy, cx, cy)
-            # uv_R = project_points((R_wc @ Rt3.T).T + t_wc.reshape(1, 3), fx, fy, cx, cy)
-            # ax1.scatter(uv_L[:, 0], uv_L[:, 1], s=5.0, c='blue', alpha=0.8)
-            # ax1.scatter(uv_R[:, 0], uv_R[:, 1], s=5.0, c='red', alpha=0.8)
-            # print(np.mean(verts_cam[:,2]))
-            # if color == 'blue' or color == 'red':
-            #     print(verts_cam[8] - verts_cam[0])
-            #     print((R_wc @ Lt3.T).T + t_wc.reshape(1, 3) - ((R_wc @ Rt3.T).T + t_wc.reshape(1, 3)))
-            #     print(((R_wc @ Lt3.T).T + t_wc.reshape(1, 3) - ((R_wc @ Rt3.T).T + t_wc.reshape(1, 3))) @ (verts_cam[8] - verts_cam[0]))
             uv = project_points(verts_cam, fx, fy, cx, cy)
-            # print(f"verts_cam x: {np.min(verts_cam[:, 0])}, {np.max(verts_cam[:, 0])}")
-            # print(f"verts_cam y: {np.min(verts_cam[:, 1])}, {np.max(verts_cam[:, 1])}")
-            # print(f"verts_cam z: {np.min(verts_cam[:, 2])}, {np.max(verts_cam[:, 2])}")
-            # print(f"uv x: {np.min(uv[:, 0])}, {np.max(uv[:, 0])}")
-            # print(f"uv y: {np.min(uv[:, 1])}, {np.max(uv[:, 1])}")
             mask = verts_cam[:, 2] > 1e-6
             uv = uv[mask]
             ax1.scatter(uv[:, 0], uv[:, 1], s=1.0, c=color, alpha=0.8)
