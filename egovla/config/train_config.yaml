@@ -1,0 +1,3 @@
+defaults:
+  - experiment: pretrain
+  - _self_

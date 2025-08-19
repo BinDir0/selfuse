@@ -21,9 +21,6 @@ export NCCL_IB_TIMEOUT=23
 
 rm -f .deepspeed_env
 
-# Launch training
-accelerate launch \
-    --config_file egovla/config/acc_node0.yaml \
-    train.py \
-    experiment=pretrain_deepspeed 
-    
+nsys profile -t cuda,mpi,nvtx,cudnn -o rname.%p python train.py experiment=pretrain_deepspeed 
+
+# accelerate launch --config_file egovla/config/acc_node0.yaml --no_python ./scripts/pretrain_deepspeed_nsys.sh

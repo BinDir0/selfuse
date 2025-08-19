@@ -1,10 +1,14 @@
 # @package _global_
 
+name: pretrain_deepspeed
+exp_name: "pretrain_deepspeed"
+
 _target_: egovla.workspace.train_egovla_deepspeed_workspace.TrainEgoVLAWorkspace
 
 image_shape: [384, 384, 3]
 dataset_paths:
  - /share_data/datasets/taco/taco.zarr
+ - /share_data/datasets/hoi4d/hoi4d.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -68,15 +72,6 @@ policy:
       dropout: 0.1
       local_weights_path: null
 
-  retargeting_head:
-    _target_: egovla.model.action.retargeting.RetargetingHead
-    shape_meta: ${shape_meta}
-    model_config:
-      hidden_sizes: [64, 128, 64]
-      local_weights_path: null
-    num_keypoints_per_hand: 5
-    robot_per_hand_dof: 6
-
   loss_config:
     wrist_trans_loss_weight: 2.0
     wrist_rot_loss_weight: 0.5
@@ -120,3 +115,36 @@ training:
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
+
+logging:
+  project: train_egovla_deepspeed
+  entity: LegendaryVLA
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  tags: ["${name}", "${hydra:runtime.choices.experiment}", "${exp_name}", "deepspeed"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  save_last_ckpt: False
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: /home/chenzhang/project/logs/EgoVLA/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    # need to change to the correct path
+    dir: /home/chenzhang/project/logs/EgoVLA/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  sweep:
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    subdir: ${hydra.job.num}

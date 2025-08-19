@@ -15,7 +15,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.joinpath(
         'egovla','config')), 
-    config_name="train_egovla_workspace"
+    config_name="train_config"
 )
 def main(cfg: OmegaConf):
     # resolve immediately so all the ${now:} resolvers

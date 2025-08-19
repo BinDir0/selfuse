@@ -17,6 +17,8 @@ class NVILA(ModuleAttrMixin):
         - Multimodal fusion: Combines vision, language, and action representations
     """
     
+    # TODO: add a branch to support downloading model from hugging face
+    # (https://huggingface.co/Efficient-Large-Model/NVILA-Lite-2B)
     def __init__(self, model_name_or_path: str, shape_meta: dict):
         """
         Initialize NVILA model.
@@ -58,7 +60,7 @@ class NVILA(ModuleAttrMixin):
         [text_prefix] + [img1 + sep + sep + img2 + sep + sep + ... + img6 + sep + sep] + [text_suffix] + [action_queries]
         
         Args:
-            images: Multi-frame RGB observations, shape [B, n_obs_steps, H, W, 3]
+            images: Multi-frame RGB observations, shape [B, n_obs_steps, 3, H, W]
             which is already preprocessed by the preprocessor
             input_ids: Tokenized text instructions, shape [B, L]  
             attention_masks: Attention masks for text tokens, shape [B, L]
@@ -119,7 +121,7 @@ class NVILA(ModuleAttrMixin):
         
         # Add text suffix and action query tokens
         combined_seq.extend([text_suffix, action_query_tokens])
-        
+
         # Concatenate all sequence parts
         combined_embeddings = torch.cat(combined_seq, dim=1)  # [B, L + n_obs_steps*123 + n_action_steps, D]
         

@@ -1,6 +1,4 @@
 # @package _global_
-name: pretrain
-exp_name: "pretrain"
 
 _target_: egovla.workspace.train_egovla_workspace.TrainEgoVLAWorkspace
 
@@ -46,32 +44,14 @@ n_obs_steps: 6
 n_latency_steps: 0
 dataset_obs_steps: ${n_obs_steps}
 
-policy:
-  _target_: egovla.policy.egovla.EgoVLA
-
+retargeting_head:
+  _target_: egovla.model.retargeting.retargeting_mlp.RetargetingHead
   shape_meta: ${shape_meta}
-
-  vlm:
-    _target_: egovla.model.vlm.nvila.NVILA
-    shape_meta: ${shape_meta}
-    model_name_or_path: /share_data/checkpoints/NVILA-Lite-2B
-
-  action_head: 
-    _target_: egovla.model.action.action_head.ActionHead
-    shape_meta: ${shape_meta}
-    model_config:
-      hidden_size: 1536
-      intermediate_size: ${eval:'${policy.action_head.model_config.hidden_size}*8'}
-      num_layers: 6
-      num_heads: 12
-      dropout: 0.1
-      local_weights_path: null
-
-  loss_config:
-    wrist_trans_loss_weight: 2.0
-    wrist_rot_loss_weight: 0.5
-    hand_loss_weight: 0.5
-  start_ckpt_path: null
+  model_config:
+    hidden_sizes: [64, 128, 64]
+    local_weights_path: null
+  num_keypoints_per_hand: 5
+  robot_per_hand_dof: 6
 
 dataloader:
   batch_size: 4
@@ -116,35 +96,3 @@ training:
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
-
-logging:
-  project: train_egovla
-  entity: LegendaryVLA
-  resume: False
-  mode: online
-  name: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
-  tags: ["${name}", "${hydra:runtime.choices.experiment}", "${exp_name}"]
-  id: null
-  group: null
-
-checkpoint:
-  topk:
-    monitor_key: train_loss
-    mode: min
-    k: 1
-    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
-  save_last_ckpt: False
-  save_last_snapshot: False
-
-multi_run:
-  run_dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
-  wandb_name_base: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
-
-hydra:
-  job:
-    override_dirname: ${name}
-  run:
-    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
-  sweep:
-    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
-    subdir: ${hydra.job.num}

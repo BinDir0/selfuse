@@ -145,6 +145,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
 
+        if accelerator.is_main_process:
+            print(f"Training with {len(train_dataloader)} steps per epoch")
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
@@ -184,6 +186,9 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                         if (cfg.training.max_train_steps is not None) \
                             and batch_idx >= (cfg.training.max_train_steps-1):
                             break
+
+                        if self.global_step % 100 == 0 and accelerator.is_main_process:
+                            print(f"Global step {self.global_step} completed")
                         
                 # at the end of each epoch
                 # replace train_loss with epoch average
