@@ -158,15 +158,15 @@ class MANOImageDataset(BaseImageDataset):
         wrist_states = []
         hand_states = []
         for rb in self.replay_buffers:
-            wrist_actions.append(rb['action/wrist'])
+            wrist_actions.append(rb['action/wrist'][..., :6])
             hand_actions.append(rb['action/hand'])
-            wrist_states.append(rb['state/wrist'])
+            wrist_states.append(rb['state/wrist'][..., :6])
             hand_states.append(rb['state/hand'])
             
         data = {
-            'action/wrist': np.concatenate(wrist_actions, axis=0),
+            'action/wrist_trans': np.concatenate(wrist_actions, axis=0),
             'action/hand': np.concatenate(hand_actions, axis=0),
-            'state/wrist': np.concatenate(wrist_states, axis=0),
+            'state/wrist_trans': np.concatenate(wrist_states, axis=0),
             'state/hand': np.concatenate(hand_states, axis=0)
         }
         
