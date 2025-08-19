@@ -84,7 +84,7 @@ python build_zarr.py --data_root PATH/TO/DATASET --output PATH/TO/OUTPUT_ZARR_DI
 
 有两种模式：不打开 `--camera_view` 参数时，会将插值后的图片显示在图像的左半边，并将两只手的 mesh 显示在图像的右半边，注意 mesh 可视化的视角不是相机视角；打开该参数时，会将手部 mesh 的顶点以及 21 个关节位置重叠在左半边的图像上。注意如果不传递内参信息，则手部位置可视化结果可能不太准确。
 
-外参信息可以存在 .npy 文件中（支持 $4*4$, $3*3$ 或直接以 `fx, fy, cx, cy` 形式给出），并调用 `--intrinsic_path PATH/TO/INTR_NPY`；也可以手动调用 `--fx --fy --cx --cy` 四个参数给出。
+外参信息可以存在 .npy 文件中（支持 4×4, 3×3 或直接以 `fx, fy, cx, cy` 形式给出），并调用 `--intrinsic_path PATH/TO/INTR_NPY`；也可以手动调用 `--fx --fy --cx --cy` 四个参数给出。
 
 使用示例：
 ```bash
