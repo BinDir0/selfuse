@@ -10,9 +10,7 @@ import matplotlib.patches as patches
 from typing import Tuple, List, Optional
 import argparse
 
-# Add manopth to path
-sys.path.append('../manopth')
-from manopth.manolayer import ManoLayer
+# manopth.manolayer will be imported dynamically in main()
 
 # Add transformation utilities (moved to HandVisualizer class)
 
@@ -21,15 +19,20 @@ class HandVisualizer:
     Hand motion visualizer for inference with direct tensor inputs
     """
     
-    def __init__(self, mano_root: str = '../manopth/mano/models'):
+    def __init__(self, mano_root: str = None):
         """
         Initialize the hand visualizer for inference
         
         Args:
             mano_root: Path to MANO model files
         """
+        if mano_root is None:
+            mano_root = '../manopth/mano/models'  # Default fallback
         self.mano_root = mano_root
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Import ManoLayer dynamically
+        from manopth.manolayer import ManoLayer
         
         # Initialize MANO layers for both hands
         self.mano_left = ManoLayer(
@@ -985,6 +988,8 @@ def main():
     parser.add_argument('--data_path', type=str, 
                        default='/share_data/yeyuyao/egovla/egovla_predictions_complete.pt',
                        help='Path to complete data file containing predictions, camera params, and images')
+    parser.add_argument('--mano_dir', type=str, default='/home/yeyuyao',
+                       help='Directory containing manopth repository')
     parser.add_argument('--sample_id', type=int, default=0,
                        help='Index of sample to visualize (default: 0)')
     parser.add_argument('--find_worst', action='store_true', default=False,
@@ -1004,9 +1009,15 @@ def main():
     args = parser.parse_args()
     
     try:
-        # Initialize visualizer
-        print("Initializing hand visualizer for inference...")
-        visualizer = HandVisualizer()
+        # Add manopth to path dynamically
+        manopth_path = os.path.join(args.mano_dir, 'manopth')
+        if manopth_path not in sys.path:
+            sys.path.append(manopth_path)
+        
+        # Initialize visualizer with mano model path
+        mano_root = os.path.join(args.mano_dir, 'manopth', 'mano', 'models')
+        print(f"Initializing hand visualizer for inference with MANO root: {mano_root}")
+        visualizer = HandVisualizer(mano_root=mano_root)
         
         # Determine which sample to use
         if args.find_worst:
