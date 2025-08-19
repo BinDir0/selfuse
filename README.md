@@ -124,3 +124,48 @@ Accelerate config
 
 ## Visualization
 
+`visualize.py`提供模型预测结果的可视化，将未来30帧的预测结果渲染为视频，包含手部骨架连线以及3D mesh重建。
+
+### 使用方法
+
+基本使用：
+```bash
+python visualize.py --data_path /path/to/predictions.pt --mano_dir /path/to/manopth --show_mesh --show_gt
+```
+
+完整参数示例：
+```bash
+python visualize.py \
+  --data_path /path/to/predictions.pt \
+  --mano_dir /path/to/manopth \
+  --sample_id 0 \
+  --find_worst \
+  --video_name hand_motion.mp4 \
+  --output_dir ./output \
+  --fps 30 \
+  --show_mesh \
+  --mesh_alpha 0.9 \
+  --show_gt
+```
+
+### 参数说明
+
+- `--data_path`: 包含预测结果、相机参数和背景图像的完整数据文件路径 (默认: `/share_data/yeyuyao/egovla/egovla_predictions_complete.pt`)
+- `--mano_dir`: manopth仓库的父目录路径 (默认: `/home/yeyuyao`)
+- `--sample_id`: 要可视化的样本索引 (默认: 0)
+- `--find_worst`: 自动寻找并使用所有sample中loss最大的样本
+- `--video_name`: 输出视频文件名 (默认: `inference_hand_motion.mp4`)
+- `--output_dir`: 输出目录 (默认: `./output`)
+- `--fps`: 视频帧率 (默认: 30)
+- `--show_mesh`: 显示手部3D mesh重建结果
+- `--mesh_alpha`: 网格透明度，范围0.0-1.0 (默认: 0.9)
+- `--show_gt`: 显示ground truth标注（绿色）与预测结果对比
+
+### 输出格式
+
+生成的视频文件将包含：
+- 静态背景图像（来自数据集）
+- 30帧手部运动预测序列，包括手部骨架连线和3D mesh重建结果（如果启用`--show_mesh`）
+- 可选的真值对比（如果启用`--show_gt`）
+
+
