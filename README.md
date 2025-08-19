@@ -40,7 +40,60 @@ wandb login
 
 ## Data Processing
 
+### For each dataset
 
+每个数据集名字命名的文件夹中有两个代码：
+
+- mano_trans：将 raw hand pose / 45 + 3d 的 MANO 参数和腕部平移信息一起，转化为 3D 腕部平移，rot6D 腕部旋转和前 15D mano PCA 分量。最好将 mano 信息存放到数据集根目录下的子文件夹中，方便 build_zarr。使用方式：
+
+```bash
+python mano_trans.py --data_root PATH/TO/DATASET --output_root PATH/TO/OUTPUT_DIR
+```
+
+- build_zarr：读取视频信息、相机外参、语言标注以及转换好的手部、腕部数据，将这些信息封装在一个 zarr 目录中。代码使用方式：
+
+```bash
+python build_zarr.py --data_root PATH/TO/DATASET --output PATH/TO/OUTPUT_ZARR_DIR
+```
+
+经过封装后，会生成如下格式的 zarr 目录：
+
+```
+├── data
+│   ├── action       下一帧本体感知
+│   │   ├── hand     (sum_frames, 30) float32 先左后右
+│   │   └── wrist    (sum_frames, 18) float32 左平移，右平移，左旋转，右旋转
+│   ├── extrinsic    (sum_frames, 16) float32
+│   ├── image        (sum_frames, 384, 384, 3) uint8 注意图像都被插值成 384x384
+│   ├── instruction  (sum_frames,) strin
+│   └── state        当前帧本体感知
+│       ├── hand     (sum_frames, 30) float32 同 action
+│       └── wrist    (sum_frames, 18) float32 同 action
+└── meta
+    ├── episode_ends (num_episodes,) int64 同 dexgrasp
+    └── presence     (num_episodes,) int8  左右手可见情况，1 左 2 右 3 均可见
+```
+
+### Dataset visualizer
+
+`data/visualizer.py` 可以对生成好的 zarr 格式的数据集进行可视化。该 visualizer 会将数据集某一帧的语言指令、被插值后的图片以及两只手的 pose 可视化出来。
+
+注意需要用 `--mano_root`, `--manopth_path` 两个参数传递 mano 模型和 manopth 库的路径。
+
+默认会从所有帧中随机一帧进行可视化，也可以用 `--index n` 参数来指定可视化第 n 帧。
+
+有两种模式：不打开 `--camera_view` 参数时，会将插值后的图片显示在图像的左半边，并将两只手的 mesh 显示在图像的右半边，注意 mesh 可视化的视角不是相机视角；打开该参数时，会将手部 mesh 的顶点以及 21 个关节位置重叠在左半边的图像上。注意如果不传递内参信息，则手部位置可视化结果可能不太准确。
+
+外参信息可以存在 .npy 文件中（支持 $4*4$, $3*3$ 或直接以 `fx, fy, cx, cy` 形式给出），并调用 `--intrinsic_path PATH/TO/INTR_NPY`；也可以手动调用 `--fx --fy --cx --cy` 四个参数给出。
+
+使用示例：
+```bash
+python data/visualizer.py --mano_root PATH/TO/MANO_MODEL --manopth_path PATH/TO/MANOPTH_LIB \
+  --zarr PATH/TO/DATASET \
+  --index N \
+  --intrinsic_path PATH/TO/INTR_NPY \
+  --camera_view
+```
 
 ## Training
 

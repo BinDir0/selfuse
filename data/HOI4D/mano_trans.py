@@ -5,6 +5,7 @@ import torch.nn as nn
 import numpy as np
 import os
 import glob
+import argparse
 
 # Initialize PCA mode MANO layer (for computing PCA components)
 manolayer_pca_right = ManoLayer(
@@ -114,9 +115,25 @@ def process_hoi4d_dataset(data_root, output_root, which_hand):
 
 if __name__ == '__main__':
     # Set data paths
-    data_root = "/share_data/datasets/hoi4d/Hand_pose/handpose_right_hand"  # Please replace with your dataset path
-    output_root = "/share_data/datasets/hoi4d/mano_hand_pose/right_hand"  # Please replace with your output path
+    parser = argparse.ArgumentParser(description='Convert HOI4D hand pose to 15-dimensional PCA components')
+    parser.add_argument('--data_root', type=str, default="/share_data/datasets/hoi4d/Hand_pose/",
+                       help='HOI4D dataset root directory')
+    parser.add_argument('--output_root', type=str, default="/share_data/datasets/hoi4d/mano_hand_pose/",
+                       help='Output directory')
+    parser.add_argument('--hand_side', type=str, default='right',
+                       choices=['left', 'right', 'both'],
+                       help='Hand side to process: left, right, or both')
+    
+    args = parser.parse_args()
+    
     
     # Process dataset
-    process_hoi4d_dataset(data_root, output_root, "right")
+    if args.hand_side == 'right' or args.hand_side == 'both':
+        data_root = os.path.join(args.data_root, "handpose_right_hand")
+        output_root = os.path.join(args.output_root, "right_hand")
+        process_hoi4d_dataset(data_root, output_root, "right")
+    if args.hand_side == 'left' or args.hand_side == 'both':
+        data_root = os.path.join(args.data_root, "handpose_left_hand")
+        output_root = os.path.join(args.output_root, "left_hand")
+        process_hoi4d_dataset(data_root, output_root, "left")
     print("Dataset processing completed!")
