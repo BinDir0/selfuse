@@ -102,6 +102,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
         if accelerator.is_main_process:
             # 1. main process compute/get object
             normalizer = dataset.get_normalizer()
+            normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
+            pickle.dump(normalizer, open(normalizer_path, 'wb'))
             objects_to_broadcast = [normalizer]
         else:
             # 2. other process prepare a placeholder
