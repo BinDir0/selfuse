@@ -191,4 +191,24 @@ python visualize.py \
    - 3D坐标空间中的手部mesh和骨架可视化
    - 固定尺寸800x600的3D渲染视图
 
+## Debug
+
+
+### Nsight
+
+Nsight 是 Nvidia 用于监控 GPU 使用情况的一个库，他能准确的告诉你，每个时刻 GPU 是在调用内核还是内存访问，还是与 cpu 或者其他 gpu 的通信。
+
+有两种启动方法：1. `nsys launch` 2. `nsys profile`
+
+从 Nvidia Nsight [官网](https://developer.nvidia.com/nsight-systems/get-started)，在服务器上下载：Nsight CLI，并使用 `dpkg -i Nsight...` 安装。
+
+在本地机器上下载：Nisight Host，用于可视化记录的结果。
+
+1. 对于一个单机程序，只需要在启动命令（如 `python/accelerate launch`）前先加上 `nsys launch`。然后在训练稳定后，使用 `nsys start -o profile_result_file_name`，即可启动，并且将结果保存在 `profile_result_file_name` 中。使用 `nsys stop` 停止记录，会自动生成上述文件，但程序依然在进行。（**如上方法暂时不知道如何拓展到多机，比如与 deepspeed 配合使用**）
+2. 对于多机程序，在训练之前，将如下内容写入 shell 脚本（和设置通信环境变量的一起）：`nsys profile -t cuda,mpi,nvtx,cudnn -o rname.%p python xxx.py [args] `。然后再启动 accelerate/deepspeed：`accelerate launch --config_file egovla/config/acc_node0.yaml --no_python ./scripts/pretrain_deepspeed_nsys.sh`。如上采用 nsight profile 记录，只会返回 **每张卡独自的内容**。
+
+**使用 NVTX 标记代码段：**我们希望追踪 Nsight 中记录的 GPU 运行来源于哪一段代码，只需按照如下方式用 NVTX 对代码进行修饰，最后就可以在 nsight 的 NVTX 段看到对应的标记：
+
+![](assets/NVTX.png)
+
 
