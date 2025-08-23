@@ -5,7 +5,7 @@ conda create -n egovla python=3.10
 conda activate egovla
 
 # install VILA
-git clone https://github.com/NVlabs/VILA
+git clone https://github.com/Ivan-Zhong/VILA.git
 cd VILA
 ./environment_setup.sh
 pip install -e .
