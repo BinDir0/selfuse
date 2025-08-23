@@ -124,23 +124,26 @@ Accelerate config
 
 ## Visualization
 
-`visualize.py`提供模型预测结果的可视化，将未来30帧的预测结果渲染为视频，包含手部骨架连线以及3D mesh重建。
+`visualize.py`提供模型预测结果的可视化，能够将30帧手部运动预测序列渲染为两个视频：2D投影视频（将3D手部姿态投影到背景图像上）和3D可视化视频（在3D空间中显示手部mesh和骨架结构）。
 
 ### 使用方法
 
 基本使用：
 ```bash
-python visualize.py --data_path /path/to/predictions.pt --mano_dir /path/to/manopth --show_mesh --show_gt
+python visualize.py --data_path /path/to/predictions.pt --mano_root_dir /path/to/manopth --show_mesh --show_gt
 ```
 
 完整参数示例：
 ```bash
 python visualize.py \
   --data_path /path/to/predictions.pt \
-  --mano_dir /path/to/manopth \
+  --mano_root_dir /path/to/manopth \
   --sample_id 0 \
   --find_worst \
+  --target_width 1920 \
+  --target_height 1080 \
   --video_name hand_motion.mp4 \
+  --video_3d_name hand_motion_3d.mp4 \
   --output_dir ./output \
   --fps 30 \
   --show_mesh \
@@ -150,22 +153,42 @@ python visualize.py \
 
 ### 参数说明
 
-- `--data_path`: 包含预测结果、相机参数和背景图像的完整数据文件路径 (默认: `/share_data/yeyuyao/egovla/egovla_predictions_complete.pt`)
-- `--mano_dir`: manopth仓库的父目录路径 (默认: `/home/yeyuyao`)
+#### 必选参数
+- `--data_path`: 包含预测结果、相机参数和背景图像的完整数据文件路径
+- `--mano_root_dir`: manopth仓库的根目录路径
+
+#### 可选参数
+
+##### 样本选择参数：
 - `--sample_id`: 要可视化的样本索引 (默认: 0)
 - `--find_worst`: 自动寻找并使用所有sample中loss最大的样本
-- `--video_name`: 输出视频文件名 (默认: `inference_hand_motion.mp4`)
+
+##### 输出设置参数：
 - `--output_dir`: 输出目录 (默认: `./output`)
+- `--video_name`: 2D投影视频输出文件名 (默认: `hand_motion.mp4`)
+- `--video_3d_name`: 3D mesh+骨架视频输出文件名 (默认: `hand_motion_3d.mp4`)
+- `--target_width`: 目标视频宽度像素 (默认: 1920)
+- `--target_height`: 目标视频高度像素 (默认: 1080)
 - `--fps`: 视频帧率 (默认: 30)
-- `--show_mesh`: 显示手部3D mesh重建结果
-- `--mesh_alpha`: 网格透明度，范围0.0-1.0 (默认: 0.9)
-- `--show_gt`: 显示ground truth标注（绿色）与预测结果对比
+
+
+##### 可视化效果参数：
+- `--show_mesh`: 在2D投影视频中显示手部3D mesh重建结果（3D视频中总是显示mesh）
+- `--mesh_alpha`: 2D投影视频中网格的透明度，范围0.0-1.0 (默认: 0.9)
+- `--show_gt`: 在2D投影视频中显示ground truth标注（绿色）与预测结果对比
 
 ### 输出格式
 
-生成的视频文件将包含：
-- 静态背景图像（来自数据集）
-- 30帧手部运动预测序列，包括手部骨架连线和3D mesh重建结果（如果启用`--show_mesh`）
-- 可选的真值对比（如果启用`--show_gt`）
+该工具会生成两个视频文件：
+
+1. **2D投影视频** (`hand_motion.mp4`):
+   - 静态背景图像（来自数据集，缩放到指定分辨率）
+   - 30帧手部运动预测序列投影到2D图像上
+   - 手部骨架连线和3D mesh重建结果（如果启用`--show_mesh`）
+   - 可选的真值对比（如果启用`--show_gt`，以绿色显示）
+
+2. **3D mesh+骨架视频** (`hand_motion_3d.mp4`):
+   - 3D坐标空间中的手部mesh和骨架可视化
+   - 固定尺寸800x600的3D渲染视图
 
 
