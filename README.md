@@ -116,7 +116,7 @@ Accelerate config
 在训练之前，请你根据 comments 修改 `egovla/config/acc_node0.yaml` 下有关多机信息的内容。
 
 ```bash
-/scripts/pretrain_deepspeed.sh
+./scripts/pretrain_deepspeed.sh
 ```
 
 ## Inference
