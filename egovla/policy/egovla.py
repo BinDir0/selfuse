@@ -87,8 +87,6 @@ class EgoVLA(BasePolicy):
                 "wrist": batch["action/wrist"],
                 "hand": self.normalizer['action/hand'](batch["action/hand"])
             }
-            state["wrist"][..., :6] = self.normalizer['state/wrist_trans'](state["wrist"][..., :6])
-            action["wrist"][..., :6] = self.normalizer['action/wrist_trans'](action["wrist"][..., :6])
             state = {k: v.detach() for k, v in state.items() }
             action = {k: v.detach() for k, v in action.items() }
 

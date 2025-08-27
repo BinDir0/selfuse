@@ -8,7 +8,7 @@ _target_: egovla.workspace.train_egovla_deepspeed_workspace.TrainEgoVLAWorkspace
 image_shape: [384, 384, 3]
 dataset_paths:
  - /share_data/datasets/taco/taco.zarr
- - /share_data/datasets/hoi4d/hoi4d.zarr
+ - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
 
 shape_meta: &shape_meta
   obs:
