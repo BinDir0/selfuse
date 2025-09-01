@@ -779,6 +779,7 @@ if __name__ == "__main__":
 
     # processor
     num_image_tokens = config.vision.config.num_image_tokens
+    # TODO: add size parameter to processor
     processor = VLAProcessor(tokenizer, num_image_tokens, config.max_seq_len)
 
     # process image and text

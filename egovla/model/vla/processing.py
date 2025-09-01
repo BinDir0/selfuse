@@ -1,6 +1,7 @@
-from typing import List
+from typing import Dict, List, Tuple
 
 import torch
+import torch.nn.functional as F
 
 IMAGENET_STANDARD_MEAN = torch.tensor([0.5, 0.5, 0.5])
 IMAGENET_STANDARD_STD = torch.tensor([0.5, 0.5, 0.5])
@@ -30,6 +31,14 @@ def rescale(
     return rescaled_image
 
 
+def resize(
+    image: torch.FloatTensor,
+    size: Tuple[int, int],
+) -> torch.FloatTensor:
+    height, width = size
+    resized_image = F.interpolate(image, size=(width, height), mode="bilinear")
+    return resized_image
+
 def normalize(
     image: torch.LongTensor,
     mean: torch.FloatTensor,
@@ -47,12 +56,16 @@ def normalize(
 
 def process_images(
     images: torch.LongTensor,
+    size: Dict[str, int],
     rescale_factor: float,
     image_mean: torch.FloatTensor,
     image_std: torch.FloatTensor,
 ) -> torch.FloatTensor:
     # Rescale the pixel values to be in the range [0, 1]
     images = rescale(images, scale=rescale_factor)
+
+    # Resize the images to the desired size
+    images = resize(images, size=size)
 
     # Normalize the images to have mean 0 and standard deviation 1
     images = normalize(images, mean=image_mean, std=image_std)
@@ -67,12 +80,14 @@ class VLAProcessor:
         self,
         tokenizer,
         num_image_tokens: int,
+        image_size: int,
         max_seq_len: int,
         tokenizer_padding: str = "max_length",  #  # instead of truncating to longest
     ):
         super().__init__()
 
         self.image_seq_length = num_image_tokens
+        self.image_size = image_size
         self.max_seq_len = max_seq_len
         self.tokenizer_padding = tokenizer_padding
 
@@ -99,15 +114,13 @@ class VLAProcessor:
         images: torch.LongTensor,
         truncation: bool = True,
     ) -> dict:
-        assert len(images) == len(
-            text
-        ), f"Received {len(images)} images for {len(text)} prompts."
         assert (
             images.dtype == torch.uint8
         ), f"Expected uint8 tensor for images, got {images.dtype}."
 
         pixel_values = process_images(
             images,
+            size=(self.image_size, self.image_size),
             rescale_factor=1 / 255.0,
             image_mean=IMAGENET_STANDARD_MEAN,
             image_std=IMAGENET_STANDARD_STD,
@@ -118,7 +131,7 @@ class VLAProcessor:
             add_image_tokens_to_prompt(
                 prefix_prompt=prompt,
                 bos_token=self.tokenizer.bos_token,
-                image_seq_len=self.image_seq_length,
+                image_seq_len=self.image_seq_length * len(images),
                 image_token=self.IMAGE_TOKEN,
             )
             for prompt in text

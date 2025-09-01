@@ -120,7 +120,7 @@ class PaliGemmaProcessor:
         truncation: bool = True,
     ) -> dict:
         assert (
-            len(images) == 1 and len(text) == 1
+            len(text) == 1
         ), f"Received {len(images)} images for {len(text)} prompts."
 
         pixel_values = process_images(
@@ -141,7 +141,7 @@ class PaliGemmaProcessor:
             add_image_tokens_to_prompt(
                 prefix_prompt=prompt,
                 bos_token=self.tokenizer.bos_token,
-                image_seq_len=self.image_seq_length,
+                image_seq_len=self.image_seq_length * len(images),
                 image_token=self.IMAGE_TOKEN,
             )
             for prompt in text
