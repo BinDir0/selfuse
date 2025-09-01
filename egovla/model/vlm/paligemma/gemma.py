@@ -6,7 +6,7 @@ from torch import nn
 
 from egovla.model.common.kv_cache import KVCache
 from egovla.model.common.lora import get_layer
-from modules import GemmaMLP, GemmaRMSNorm, GemmaRotaryEmbedding
+from egovla.model.common.modules import GemmaMLP, GemmaRMSNorm, GemmaRotaryEmbedding
 from siglip import PaliGemmaMultiModalProjector, SiglipVisionModel
 from egovla.model.common.utils import apply_rotary_pos_emb, repeat_kv
 

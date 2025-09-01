@@ -15,7 +15,7 @@ import torch
 from torch import nn
 
 from egovla.model.common.kv_cache import KVCache
-from modules import (
+from egovla.model.common.modules import (
     ActionEncoder,
     SinusoidalPosEmb,
 )
@@ -723,7 +723,7 @@ if __name__ == "__main__":
     from PIL import Image
     from transformers import AutoTokenizer
 
-    from model.vla.processing import VLAProcessor
+    from egovla.dataset.paligemma_processing import VLAProcessor
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--text_only", action="store_true")

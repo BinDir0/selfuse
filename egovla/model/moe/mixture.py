@@ -11,13 +11,14 @@ import torch
 import torch.nn as nn
 
 from egovla.model.common.lora import get_layer
-from egovla.model.vlm.paligemma.modules import (
+from egovla.model.common.modules import (
     GemmaMLP,
     GemmaRMSNorm,
     GemmaRotaryEmbedding,
+    AdaptiveLayerscale, 
+    AdaptiveRMSNorm,
 )
 from egovla.model.common.utils import apply_rotary_pos_emb, repeat_kv
-from modules import AdaptiveLayerscale, AdaptiveRMSNorm
 
 
 class Mixture(nn.Module):
