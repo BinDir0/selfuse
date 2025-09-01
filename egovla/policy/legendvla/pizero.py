@@ -19,8 +19,8 @@ from modules import (
     ActionEncoder,
     SinusoidalPosEmb,
 )
-from utils.decorator import NoSyncBase
-from utils.monitor import log_execution_time
+from egovla.utils.decorator import NoSyncBase
+from egovla.utils.monitor import log_execution_time
 
 log = logging.getLogger(__name__)
 

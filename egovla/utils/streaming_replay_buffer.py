@@ -1,6 +1,6 @@
 import zarr
 import numpy as np
-from egovla.utils.replay_buffer import ReplayBuffer
+from replay_buffer import ReplayBuffer
 
 class ZarrImageReference:
     """Lazy loading image data reference"""
