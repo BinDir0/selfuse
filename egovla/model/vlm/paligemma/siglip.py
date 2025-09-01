@@ -2,6 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from model.lora import get_layer
 
@@ -86,6 +87,7 @@ class SiglipAttention(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        use_fused_attn: bool = True,
     ):
         super().__init__()
         self.config = config
@@ -94,6 +96,7 @@ class SiglipAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         self.scale = self.head_dim**-0.5  # Equivalent to 1 / sqrt(self.head_dim)
         self.dropout = config.attention_dropout
+        self.use_fused_attn = use_fused_attn
 
         layer = get_layer(
             use_quantize,
@@ -129,27 +132,33 @@ class SiglipAttention(nn.Module):
         value_states = value_states.view(
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
-        # Calculate the attention using the formula Q * K^T / sqrt(d_k). attn_weights: [Batch_Size, Num_Heads, Num_Patches, Num_Patches]
-        attn_weights = (
-            torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
-        )
-
-        if attn_weights.size() != (batch_size, self.num_heads, seq_len, seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(batch_size, self.num_heads, seq_len, seq_len)}, but is"
-                f" {attn_weights.size()}"
+        if self.use_fused_attn:
+            attn_output = F.scaled_dot_product_attention(
+                query_states, key_states, value_states, dropout_p=self.dropout if self.training else 0.0
+            )
+            attn_weights = None
+        else:
+            # Calculate the attention using the formula Q * K^T / sqrt(d_k). attn_weights: [Batch_Size, Num_Heads, Num_Patches, Num_Patches]
+            attn_weights = (
+                torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
             )
 
-        # Apply the softmax row-wise. attn_weights: [Batch_Size, Num_Heads, Num_Patches, Num_Patches]
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
-        # Apply dropout only during training
-        attn_weights = nn.functional.dropout(
-            attn_weights, p=self.dropout, training=self.training
-        )
-        # Multiply the attention weights by the value states. attn_output: [Batch_Size, Num_Heads, Num_Patches, Head_Dim]
-        attn_output = torch.matmul(attn_weights, value_states)
+            if attn_weights.size() != (batch_size, self.num_heads, seq_len, seq_len):
+                raise ValueError(
+                    f"Attention weights should be of size {(batch_size, self.num_heads, seq_len, seq_len)}, but is"
+                    f" {attn_weights.size()}"
+                )
+
+            # Apply the softmax row-wise. attn_weights: [Batch_Size, Num_Heads, Num_Patches, Num_Patches]
+            attn_weights = nn.functional.softmax(
+                attn_weights, dim=-1, dtype=torch.float32
+            ).to(query_states.dtype)
+            # Apply dropout only during training
+            attn_weights = nn.functional.dropout(
+                attn_weights, p=self.dropout, training=self.training
+            )
+            # Multiply the attention weights by the value states. attn_output: [Batch_Size, Num_Heads, Num_Patches, Head_Dim]
+            attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (batch_size, self.num_heads, seq_len, self.head_dim):
             raise ValueError(
@@ -200,6 +209,7 @@ class SiglipEncoderLayer(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        use_fused_attn: bool = True,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -207,6 +217,7 @@ class SiglipEncoderLayer(nn.Module):
             config,
             use_quantize=use_quantize,
             use_lora=use_lora,
+            use_fused_attn=use_fused_attn,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -244,6 +255,7 @@ class SiglipEncoder(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        use_fused_attn: bool = True,
     ):
         super().__init__()
         self.config = config
@@ -253,6 +265,7 @@ class SiglipEncoder(nn.Module):
                     config,
                     use_quantize=use_quantize,
                     use_lora=use_lora,
+                    use_fused_attn=use_fused_attn,
                 )
                 for _ in range(config.num_hidden_layers)
             ]
@@ -276,6 +289,7 @@ class SiglipVisionTransformer(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        use_fused_attn: bool = True,
     ):
         super().__init__()
         self.config = config
@@ -286,6 +300,7 @@ class SiglipVisionTransformer(nn.Module):
             config,
             use_quantize=use_quantize,
             use_lora=use_lora,
+            use_fused_attn=use_fused_attn,
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -306,6 +321,7 @@ class SiglipVisionModel(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        use_fused_attn: bool = True,
     ):
         super().__init__()
         self.config = config
@@ -313,6 +329,7 @@ class SiglipVisionModel(nn.Module):
             config,
             use_quantize=use_quantize,
             use_lora=use_lora,
+            use_fused_attn=use_fused_attn,
         )
 
     def forward(self, pixel_values) -> Tuple:

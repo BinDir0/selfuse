@@ -102,6 +102,7 @@ class GemmaAttention(nn.Module):
         # Repeat the key and values to match the number of heads of the query
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # TODO: find faster way to do this
         # Perform the calculation as usual, Q * K^T / sqrt(head_dim). Shape: [Batch_Size, Num_Heads_Q, Seq_Len_Q, Seq_Len_KV]
         attn_weights = torch.matmul(
             query_states, key_states.transpose(2, 3)
@@ -393,7 +394,7 @@ class PaliGemmaForConditionalGeneration(nn.Module):
             # The position of the query is just the last position
             position_ids = attention_mask.cumsum(-1)[:, -1]
             if position_ids.dim() == 1:
-                position_ids = position_ids.unsqueeze(0)
+                position_ids = position_ids.unsqueeze(1)
         else:
             # Create a position_ids based on the size of the attention_mask
             # For masked tokens, use the number 1 as position.
@@ -421,7 +422,20 @@ class PaliGemmaForConditionalGeneration(nn.Module):
 
         # 2. Merge text and images --- possible improvement: can be cached
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
+        # or [Batch_Size, Num_Images, Channels, Height, Width] -> [Batch_Size, Num_Images * Num_Patches, Embed_Dim]
+        if pixel_values.dim() == 5:
+            B, N, C, H, W = pixel_values.shape
+            is_multiple_images = True
+            pixel_values = pixel_values.reshape(-1, C, H, W)
+        else : 
+            is_multiple_images = False
+
         selected_image_feature = self.vision_tower(pixel_values.type_as(inputs_embeds))
+        
+        if is_multiple_images:
+            embed_dim = selected_image_feature.shape[-1]
+            selected_image_feature = selected_image_feature.reshape(B, -1, embed_dim)
+
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Projected_Dim]
         image_features = self.multi_modal_projector(selected_image_feature)
 
