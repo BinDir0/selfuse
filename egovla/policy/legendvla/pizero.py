@@ -14,8 +14,8 @@ import hydra
 import torch
 from torch import nn
 
-from model.kv_cache import KVCache
-from model.vla.modules import (
+from egovla.model.common.kv_cache import KVCache
+from modules import (
     ActionEncoder,
     SinusoidalPosEmb,
 )

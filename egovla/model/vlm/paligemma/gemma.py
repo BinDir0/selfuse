@@ -4,11 +4,11 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from model.kv_cache import KVCache
-from model.lora import get_layer
+from egovla.model.common.kv_cache import KVCache
+from egovla.model.common.lora import get_layer
 from modules import GemmaMLP, GemmaRMSNorm, GemmaRotaryEmbedding
 from siglip import PaliGemmaMultiModalProjector, SiglipVisionModel
-from model.utils import apply_rotary_pos_emb, repeat_kv
+from egovla.model.common.utils import apply_rotary_pos_emb, repeat_kv
 
 
 class GemmaAttention(nn.Module):

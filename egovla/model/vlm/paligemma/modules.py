@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from model.lora import get_layer
+from egovla.model.common.lora import get_layer
 
 
 class GemmaRMSNorm(nn.Module):

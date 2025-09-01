@@ -17,8 +17,8 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from src.model.kv_cache import KVCache
-from src.model.vla.mixture import Mixture
+from egovla.model.common.kv_cache import KVCache
+from mixture import Mixture
 
 
 def forward_mixture_layers(

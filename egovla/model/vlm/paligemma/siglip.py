@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from model.lora import get_layer
+from egovla.model.common.lora import get_layer
 
 
 class PaliGemmaMultiModalProjector(nn.Module):
