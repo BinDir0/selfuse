@@ -23,7 +23,7 @@ rm -f .deepspeed_env
 
 # Launch training
 accelerate launch \
-    --config_file egovla/config/acc_config.yaml \
+    --config_file src/config/acc_config.yaml \
     train.py \
     experiment=pretrain_deepspeed 
     

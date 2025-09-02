@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-conda create -n egovla python=3.10
-conda activate egovla
+conda create -n legendvla python=3.10
+conda activate legendvla
 
 # install VILA
 git clone https://github.com/Ivan-Zhong/VILA.git
@@ -14,10 +14,10 @@ pip install -e .
 cd ..
 git clone https://github.com/hassony2/manopth
 cd manopth
-conda env update -n egovla -f environment.yml 
+conda env update -n legendvla -f environment.yml 
 pip install -e .
 
-# install egovla
+# install legendvla
 cd ..
 pip install -r requirements.txt
 

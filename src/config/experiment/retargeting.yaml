@@ -1,0 +1,98 @@
+# @package _global_
+
+_target_: src.workspace.train_egovla_workspace.TrainEgoVLAWorkspace
+
+image_shape: [384, 384, 3]
+dataset_paths:
+ - /share_data/datasets/taco/taco.zarr
+
+shape_meta: &shape_meta
+  obs:
+    rgb:
+      shape: ${image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    wrist:
+      shape: [18]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    hand: 
+      shape: [30]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    state:
+      shape: [48]
+      type: low_dim
+      horizon: ${n_obs_steps}
+  action:
+    shape: [48]
+    horizon: ${n_action_steps}
+
+dataset:
+  _target_: src.dataset.egovla_dataset.EgoVLADataset
+  zarr_paths: ${dataset_paths}
+  horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
+  n_obs_steps: ${n_obs_steps}
+  pad_before: ${eval:'${dataset.frequency}+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.05
+  frequency: 30 # fps
+
+n_action_steps: 30
+n_obs_steps: 6  
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+
+retargeting_head:
+  _target_: src.model.retargeting.retargeting_mlp.RetargetingHead
+  shape_meta: ${shape_meta}
+  model_config:
+    hidden_sizes: [64, 128, 64]
+    local_weights_path: null
+  num_keypoints_per_hand: 5
+  robot_per_hand_dof: 6
+
+dataloader:
+  batch_size: 4
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 4
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  lr: 1.0e-4
+  
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  # optimization
+  lr_scheduler: cosine
+  lr_warmup_steps: 0
+  num_epochs: 20
+  ckpt_save_interval: 5
+  # training loop control
+  # in epochs
+  gradient_accumulation_steps: 1
+  clipping:
+    enabled: True
+    max_grad_norm: 0.5
+  rollout_every: 2
+  checkpoint_every: 1
+  val_every: 2
+  sample_every: 10
+  gen_attn_map: True
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0

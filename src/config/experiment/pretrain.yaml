@@ -1,0 +1,150 @@
+# @package _global_
+name: pretrain
+exp_name: "pretrain"
+
+_target_: src.workspace.train_egovla_workspace.TrainEgoVLAWorkspace
+
+image_shape: [384, 384, 3]
+dataset_paths:
+ - /share_data/datasets/taco/taco.zarr
+
+shape_meta: &shape_meta
+  obs:
+    rgb:
+      shape: ${image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    wrist:
+      shape: [18]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    hand: 
+      shape: [30]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    state:
+      shape: [48]
+      type: low_dim
+      horizon: ${n_obs_steps}
+  action:
+    shape: [48]
+    horizon: ${n_action_steps}
+
+dataset:
+  _target_: src.dataset.egovla_dataset.EgoVLADataset
+  zarr_paths: ${dataset_paths}
+  horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
+  n_obs_steps: ${n_obs_steps}
+  pad_before: ${eval:'${dataset.frequency}+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.05
+  frequency: 30 # fps
+
+n_action_steps: 30
+n_obs_steps: 6  
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+
+policy:
+  _target_: src.policy.egovla.EgoVLA
+
+  shape_meta: ${shape_meta}
+
+  vlm:
+    _target_: src.model.vlm.nvila.NVILA
+    shape_meta: ${shape_meta}
+    model_name_or_path: /share_data/checkpoints/NVILA-Lite-2B
+
+  action_head: 
+    _target_: src.model.action.action_head.ActionHead
+    shape_meta: ${shape_meta}
+    model_config:
+      hidden_size: 1536
+      intermediate_size: ${eval:'${policy.action_head.model_config.hidden_size}*8'}
+      num_layers: 6
+      num_heads: 12
+      dropout: 0.1
+      local_weights_path: null
+
+  loss_config:
+    wrist_trans_loss_weight: 2.0
+    wrist_rot_loss_weight: 0.5
+    hand_loss_weight: 0.5
+  start_ckpt_path: null
+
+dataloader:
+  batch_size: 4
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 4
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  lr: 1.0e-4
+  
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  # optimization
+  lr_scheduler: cosine
+  lr_warmup_steps: 0
+  num_epochs: 20
+  ckpt_save_interval: 5
+  # training loop control
+  # in epochs
+  gradient_accumulation_steps: 1
+  clipping:
+    enabled: True
+    max_grad_norm: 0.5
+  rollout_every: 2
+  checkpoint_every: 1
+  val_every: 2
+  sample_every: 10
+  gen_attn_map: True
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: train_egovla
+  entity: LegendaryVLA
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  tags: ["${name}", "${hydra:runtime.choices.experiment}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  save_last_ckpt: False
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  sweep:
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    subdir: ${hydra.job.num}

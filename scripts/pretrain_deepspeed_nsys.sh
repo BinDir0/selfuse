@@ -23,4 +23,4 @@ rm -f .deepspeed_env
 
 nsys profile -t cuda,mpi,nvtx,cudnn -o rname.%p python train.py experiment=pretrain_deepspeed 
 
-# accelerate launch --config_file egovla/config/acc_config.yaml --no_python ./scripts/pretrain_deepspeed_nsys.sh
+# accelerate launch --config_file src/config/acc_config.yaml --no_python ./scripts/pretrain_deepspeed_nsys.sh
