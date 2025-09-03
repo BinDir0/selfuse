@@ -322,10 +322,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
                     # Need to update_bn when the model contains batch norm layers !!!
                     if cfg.checkpoint.save_last_ckpt:
-                        self.save_training(
-                            cnt_update=self.update_step,
-                            cnt_batch=self.global_step,
-                        )
+                        self.save_checkpoint()
 
                     # sanitize metric names
                     metric_dict = dict()
@@ -339,22 +336,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
                     if topk_ckpt_path is not None:
-                        self.save_training(
-                            cnt_update=self.update_step,
-                            cnt_batch=self.global_step,
-                            path=topk_ckpt_path
-                        )
+                        self.save_checkpoint()
 
                 # Save model at specific epochs without affecting best model saving
                 if self.epoch % cfg.training.ckpt_save_interval == 0 and accelerator.is_main_process:
                     save_dir = os.path.join(self.output_dir, 'epoch_checkpoints')
                     os.makedirs(save_dir, exist_ok=True)
                     # Need to update_bn when the model contains batch norm layers !!!
-                    self.save_training(
-                        cnt_update=self.update_step,
-                        cnt_batch=self.global_step,
-                        path=os.path.join(save_dir, f'epoch={self.epoch}.ckpt')
-                    )
+                    self.save_checkpoint()
 
                 # Log final step of epoch
                 accelerator.log(step_log, step=self.global_step)
@@ -420,131 +409,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         return inputs
 
-    # TODO: use save_checkpoint instead
-    def save_training(self, cnt_update: int, cnt_batch: int, path: Optional[str] = None):
-        """
-        Save training state with step-based naming convention.
-        Compatible with open-pi-zero training format.
-        """
-        # Get model averaging state if available
-        avg_state = {}
-        if hasattr(self, 'model_averaging') and self.model_averaging is not None:
-            avg_state = self.model_averaging.state_dict()
-        
-        model_type = avg_state.get("model_type", "normal")
-        n_averaged = avg_state.get("n_averaged", 1)
-        
-        # Get model weights
-        if avg_state and "state_dict" in avg_state:
-            weights = avg_state["state_dict"]
-        else:
-            # Use unwrapped model state dict
-            if hasattr(self.model, 'module'):
-                weights = self.model.module.state_dict()
-            else:
-                weights = self.model.state_dict()
-        
-        # Prepare training data
-        data = {
-            "cnt_update": cnt_update,
-            "cnt_batch": cnt_batch,
-            "model": weights,
-            "action_optimizer": self.action_optimizer.state_dict(),
-            "vlm_optimizer": self.vlm_optimizer.state_dict()
-            if self.train_vlm and hasattr(self, 'vlm_optimizer')
-            else None,
-            "action_lr_scheduler": self.action_lr_scheduler.state_dict(),
-            "vlm_lr_scheduler": self.vlm_lr_scheduler.state_dict()
-            if self.train_vlm and hasattr(self, 'vlm_lr_scheduler')
-            else None,
-            "wandb_id": wandb.run.id if hasattr(self, 'use_wandb') and self.use_wandb and wandb.run is not None else None,
-            "n_averaged": n_averaged,
-        }
-        
-        # Create checkpoint directory if it doesn't exist
-        checkpoint_dir = os.path.join(self.output_dir, "checkpoint")
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        # Save with step-based naming
-        savepath = os.path.join(checkpoint_dir, f"step{cnt_update}.pt")
-        torch.save(data, savepath)
-        checkpoint_size_in_gb = os.path.getsize(savepath) / (1024**3)
-        print(
-            f"Saved model to {savepath}, size: {checkpoint_size_in_gb:.2f} GB, type: {model_type}, averaged: {n_averaged}"
-        )
 
-    def load_checkpoint(self, path: str):
-        """
-        Load checkpoint with training state.
-        Compatible with open-pi-zero checkpoint format.
-        """
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        
-        # Load checkpoint data to CPU first
-        data = torch.load(path, weights_only=True, map_location="cpu")
-        
-        # Load training counters
-        if "cnt_update" in data:
-            self.cnt_update = data["cnt_update"]
-        if "cnt_batch" in data:
-            self.cnt_batch = data["cnt_batch"]
-        if "wandb_id" in data:
-            self.wandb_id = data["wandb_id"]
-        
-        # Handle compiled model keys (remove _orig_mod. prefix)
-        model_state_dict = data["model"]
-        model_state_dict = {
-            k.replace("_orig_mod.", ""): v for k, v in model_state_dict.items()
-        }
-        
-        # Load model state
-        self.model.load_state_dict(model_state_dict, strict=True)
-        
-        print(
-            f"Loaded model from {path} at update {getattr(self, 'cnt_update', 'unknown')} batch {getattr(self, 'cnt_batch', 'unknown')}"
-        )
-
-    def load_optimizer(self, path: str):
-        """
-        Load optimizer and scheduler states from checkpoint.
-        Compatible with open-pi-zero optimizer loading.
-        """
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        
-        # Import optimizer_to utility if available
-        try:
-            from src.utils.optim import optimizer_to
-        except ImportError:
-            # Fallback: manual device transfer
-            def optimizer_to(optimizer, device):
-                for state in optimizer.state.values():
-                    for k, v in state.items():
-                        if torch.is_tensor(v):
-                            state[k] = v.to(device)
-        
-        # Load checkpoint data to CPU first
-        data = torch.load(path, weights_only=True, map_location="cpu")
-        
-        # Load action optimizer and scheduler
-        if "action_optimizer" in data and data["action_optimizer"] is not None:
-            self.action_optimizer.load_state_dict(data["action_optimizer"])
-            optimizer_to(self.action_optimizer, self.device)
-        
-        if "action_lr_scheduler" in data and data["action_lr_scheduler"] is not None:
-            self.action_lr_scheduler.load_state_dict(data["action_lr_scheduler"])
-
-        # Load VLM optimizer and scheduler if training VLM
-        if self.train_vlm and hasattr(self, 'vlm_optimizer'):
-            if "vlm_optimizer" in data and data["vlm_optimizer"] is not None:
-                self.vlm_optimizer.load_state_dict(data["vlm_optimizer"])
-                optimizer_to(self.vlm_optimizer, self.device)
-            
-            if "vlm_lr_scheduler" in data and data["vlm_lr_scheduler"] is not None:
-                self.vlm_lr_scheduler.load_state_dict(data["vlm_lr_scheduler"])
-        
-        print(f"Loaded optimizer and scheduler states from {path}")
 
 
 @hydra.main(
