@@ -7,7 +7,7 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 
 """
 
-# TODO: add normalizer for human action
+# TODO: support multiple images
 
 import logging
 from typing import Optional, Tuple
