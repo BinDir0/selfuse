@@ -19,7 +19,7 @@ shape_meta: &shape_meta
     rgb:
       shape: ${image_shape}
       type: rgb
-      horizon: 1
+      horizon: ${n_obs_image_steps}
     state:
       wrist:
         shape: [18]
@@ -27,7 +27,7 @@ shape_meta: &shape_meta
         shape: [30]
       shape: [48]
       type: low_dim
-      horizon: ${n_obs_steps}
+      horizon: ${n_obs_state_steps}
   action:
     shape: [48]
     horizon: ${n_action_steps}
@@ -35,16 +35,17 @@ shape_meta: &shape_meta
 dataset:
   _target_: src.dataset.legendvla_dataset.LegendVLADataset
   zarr_paths: ${dataset_paths}
-  horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
-  n_obs_steps: ${n_obs_steps}
-  pad_before: ${eval:'${dataset.frequency}+${n_latency_steps}'}
+  horizon: ${eval:'${n_action_steps}+${dataset.history}'}
+  pad_before: ${eval:'${dataset.history}+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}
+  shape_meta: ${shape_meta}
   seed: 42
   val_ratio: 0.05
-  frequency: 30 # fps
+  history: 30 # frames
 
 n_action_steps: 30
-n_obs_steps: 6  
+n_obs_image_steps: 2
+n_obs_state_steps: 6
 n_latency_steps: 0
 
 dataloader:

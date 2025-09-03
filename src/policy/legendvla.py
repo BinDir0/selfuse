@@ -7,7 +7,7 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 
 """
 
-# TODO: add normalizer for human action
+# TODO: support multiple images
 
 import logging
 from typing import Optional, Tuple
@@ -634,6 +634,11 @@ class LegendVLA(nn.Module):
         proprio_position_ids = input["proprio_position_ids"]
         human_action_position_ids = input["human_action_position_ids"]
         proprios = input["proprios"]
+
+        # normalize proprio
+        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
+        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
+
         dtype, device = pixel_values.dtype, pixel_values.device
         bsz = pixel_values.size(0)
 
@@ -690,6 +695,8 @@ class LegendVLA(nn.Module):
             human_action += delta_t * human_action_vel
             t += delta_t
 
+        # normalize action
+        human_action[..., wrist_dim:] = self.normalizer['action/hand'](human_action[..., wrist_dim:])
         return human_action
 
     def infer_human_action_naive(
@@ -721,6 +728,11 @@ class LegendVLA(nn.Module):
         proprio_position_ids = input["proprio_position_ids"]
         human_action_position_ids = input["human_action_position_ids"]
         proprios = input["proprios"]
+
+        # normalize proprio
+        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
+        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
+
         dtype, device = pixel_values.dtype, pixel_values.device
         bsz = pixel_values.size(0)
 
@@ -769,6 +781,8 @@ class LegendVLA(nn.Module):
             human_action += delta_t * human_action_vel
             t += delta_t
 
+        # normalize action
+        human_action[..., wrist_dim:] = self.normalizer['action/hand'](human_action[..., wrist_dim:])
         return human_action
 
     def infer_text(
@@ -867,6 +881,12 @@ class LegendVLA(nn.Module):
                 - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
                 - human_actions (torch.FloatTensor): [B, horizon_steps, human_action_dim] Ground truth human actions
                 - t (torch.FloatTensor): [B] Time steps for flow matching (0 to 1)
+
+        Note: 
+            Proprioceptive state structure: [wrist, hand]
+            - Wrist: [translation(left, right), rotation(left, right)]
+            - Hand: [left_hand_features, right_hand_features]
+            Action structure mirrors the state
         
         Returns:
             torch.FloatTensor: [1] Flow matching loss (mean squared error)
@@ -881,11 +901,18 @@ class LegendVLA(nn.Module):
         proprios = batch["proprios"]
         human_actions = batch["human_actions"]
         t = batch["t"]
+
+        # normalize proprio
+        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
+        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
+
         """flow matching loss for action prediction, no use of kv cache"""
         # noisy action
         # [Batch_Size, Horizon_Steps, Action_Dim]
         x0 = torch.randn_like(human_actions, device=t.device, dtype=t.dtype)
         x1 = human_actions
+        # normalize action
+        x1[..., wrist_dim:] = self.normalizer['action/hand'](x1[..., wrist_dim:])
         psi_t = self.psi_t(x0, x1, t)
 
         # text tokens + image tokens

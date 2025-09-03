@@ -1,6 +1,7 @@
 import logging
 
 import torch
+import torch.nn as nn
 import accelerate
 
 log = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ class ModelAveraging:
             self.model_avg.update_parameters(unwrapped_model.to(self.swa_device))
             logging.info("SWA updated")
 
-    def get_model_module(self) -> dict:
+    def get_model_module(self) -> nn.Module:
         if self.model_avg:
             return self.model_avg.module.to(self.device)
         return self.model
