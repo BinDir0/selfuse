@@ -144,10 +144,8 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
             cfg.training.num_epochs = 2
             cfg.training.max_train_steps = 3
             cfg.training.max_val_steps = 3
-            cfg.training.rollout_every = 1
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
-            cfg.training.sample_every = 1
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')

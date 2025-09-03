@@ -1,0 +1,273 @@
+# @package _global_
+name: pretrain_legendvla
+exp_name: "pretrain_legendvla"
+_target_: src.workspace.train_legendvla_workspace.TrainLegendVLAWorkspace
+
+action_expert_adaptive_mode:  # adaLN, adaLN-Zero, or None
+quantize: False
+lora: False
+lora_r: 32
+lora_dropout: 0.0
+
+image_shape: [384, 384, 3]
+dataset_paths:
+ - /share_data/datasets/taco/taco.zarr
+ - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
+
+shape_meta: &shape_meta
+  obs:
+    rgb:
+      shape: ${image_shape}
+      type: rgb
+      horizon: 1
+    state:
+      wrist:
+        shape: [18]
+      hand: 
+        shape: [30]
+      shape: [48]
+      type: low_dim
+      horizon: ${n_obs_steps}
+  action:
+    shape: [48]
+    horizon: ${n_action_steps}
+
+dataset:
+  _target_: src.dataset.legendvla_dataset.LegendVLADataset
+  zarr_paths: ${dataset_paths}
+  horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
+  n_obs_steps: ${n_obs_steps}
+  pad_before: ${eval:'${dataset.frequency}+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.05
+  frequency: 30 # fps
+
+n_action_steps: 30
+n_obs_steps: 6  
+n_latency_steps: 0
+
+dataloader:
+  batch_size: 16
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+flow: 
+  sig_min: 0.001
+  sampling: beta
+  num_inference_steps: 10
+
+optimizer:
+  action: 
+    lr: 5e-5
+    weight_decay: 0
+  vlm:
+    lr: 5e-5
+    weight_decay: 0
+
+lr_scheduler:
+  action: 
+    first_cycle_steps: 10000000 # basically no decaying
+    min_lr: 1e-8
+    warmup_steps: 200 # a bit of warmup
+  vlm:
+    first_cycle_steps: 10000000
+    min_lr: 1e-8
+    warmup_steps: 200
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  train_vlm: True
+  load_pretrained_weights: True # load pretrained weights from VLM
+  pretrained_model_path: ${oc.env:TRANSFORMERS_CACHE}/paligemma-3b-pt-224
+  resume_checkpoint_path:
+  num_epochs: 25
+  gradient_accumulate_every: 1
+  use_bf16: True
+  use_torch_compile: True
+  clipping:
+    enabled: True
+    max_grad_norm: 1.0
+  # EMA destroys performance when used with BatchNorm
+  # replace BatchNorm with GroupNorm.
+  ema: 
+    enabled: True
+    decay: 0.99
+    start: 0
+    freq: 1
+    device: cpu
+  swa:
+    enabled: False
+    start: 100000
+    freq: 100000
+    device: cpu
+  # training loop control
+  # in epochs
+  rollout_every: 10
+  checkpoint_every: 1
+  val_every: 10000
+  sample_every: 10
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0
+
+# Being-H0 Style Proprio Encoder Configuration
+# proprio_encoder:
+#   type: "mlp" 
+#   input_dim: ${proprio_dim}  # 480 (48 original + 432 action history)
+#   output_dim: ${mixture.proprio.hidden_size}  # 1024
+#   intermediate_dim: 512  # Hidden layer size (input_dim -> intermediate_dim -> output_dim)
+#   activation: "relu"  # Activation function: "relu", "gelu", "swish"
+#   dropout: 0.0  # Dropout rate
+#   use_layer_norm: False  # Whether to use layer normalization
+
+mixture:
+  vlm:   # gemma
+    hidden_size: 2048
+    intermediate_size: 16384
+    use_final_norm: False
+    cache: True
+    use_quantize: ${quantize}
+    use_lora: ${lora}
+    adaptive_mode:  # not applicable for gemma
+    rope_theta: 10000.0  # 10000 in gemma
+  proprio:
+    hidden_size: 1024
+    intermediate_size: 4096
+    use_final_norm: True  # technically no, but sharing weights with action anyway
+    cache: True
+    use_quantize: False
+    use_lora: False
+    adaptive_mode: ${action_expert_adaptive_mode}
+    rope_theta: ${action_expert_rope_theta}
+  human_action:
+    hidden_size: 1024
+    intermediate_size: 4096
+    use_final_norm: True
+    cache: False
+    use_quantize: False
+    use_lora: False
+    adaptive_mode: ${action_expert_adaptive_mode}
+    rope_theta: ${action_expert_rope_theta}
+
+time_hidden_size: 256 # only applicable if using adaptive
+time_max_period: 100.0
+action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
+
+# Fixed
+image_token_index: 257152
+vocab_size: 257216
+pad_token_id: 0
+max_image_text_tokens: 276  # fixed 256 for image + max 20 for text
+tokenizer_padding: max_length # instead of truncating to longest
+
+policy: 
+  _target_: src.policy.legendvla.LegendVLA
+  cfg: 
+    vocab_size: ${vocab_size}
+    pad_token_id: ${pad_token_id}
+    image_token_index: ${image_token_index}
+    use_lm_head: False
+    max_image_text_tokens: ${max_image_text_tokens}
+    num_inference_steps: ${flow.num_inference_steps}
+    action_expert_adaptive_mode: ${action_expert_adaptive_mode}
+    time_hidden_size: ${time_hidden_size}
+    time_max_period: ${time_max_period}
+    flow_sig_min: ${flow.sig_min}
+    # Add pretrained_model_path for loading pre-trained VLM weights
+    pretrained_model_path: ${training.pretrained_model_path}
+  shape_meta: ${shape_meta}
+  vision_tower:
+    _target_: src.model.paligemma.siglip.SiglipVisionModel
+    config:
+      hidden_size: 1152 # siglip
+      intermediate_size: 4304
+      num_hidden_layers: 27
+      num_attention_heads: 16
+      num_channels: 3
+      image_size: 224
+      patch_size: 14
+      layer_norm_eps: 1e-6
+      attention_dropout: 0.0
+      num_image_tokens: 256
+      lora:
+        r: ${lora_r}
+        dropout: ${lora_dropout}
+    use_quantize: ${quantize}
+    use_lora: ${lora}
+
+  multi_modal_projector:
+    _target_: src.model.paligemma.siglip.PaliGemmaMultiModalProjector
+    config:
+      vision_config:
+        hidden_size: 1152
+        projection_dim: 2048
+      lora:
+        r: ${lora_r}
+        dropout: ${lora_dropout}
+    use_quantize: ${quantize}
+    use_lora: ${lora}
+
+  joint_model:
+    _target_: src.model.vla.joint_model.JointModel
+    config:
+      action_expert_adaptive_mode: ${action_expert_adaptive_mode}
+      time_hidden_size: ${time_hidden_size}
+      mixture: ${mixture}
+      lora:
+        r: ${lora_r}
+        dropout: ${lora_dropout}
+      num_hidden_layers: 18
+      num_attention_heads: 8
+      num_key_value_heads: 1
+      head_dim: 256
+      rms_norm_eps: 1e-6
+      attention_bias: False
+      attention_dropout: 0.0
+      pad_token_id: ${pad_token_id}
+
+logging:
+  project: train_legendvla
+  entity: LegendaryVLA
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  tags: ["${name}", "${hydra:runtime.choices.experiment}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.4f}.ckpt'
+  save_last_ckpt: False
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  sweep:
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    subdir: ${hydra.job.num}

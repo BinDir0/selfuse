@@ -7,7 +7,7 @@ class TopKCheckpointManager:
             monitor_key: str,
             mode='min',
             k=1,
-            format_str='epoch={epoch:03d}-train_loss={train_loss:.3f}.ckpt'
+            format_str='epoch={epoch:04d}-train_loss={train_loss:.4f}.ckpt'
         ):
         assert mode in ['max', 'min']
         assert k >= 0

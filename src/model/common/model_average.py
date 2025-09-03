@@ -1,14 +1,16 @@
 import logging
 
 import torch
+import accelerate
 
 log = logging.getLogger(__name__)
 
 
+# TODO: support Accelerate + Deepspeed
 class ModelAveraging:
     """Not supporting resume from checkpoint currently"""
 
-    def __init__(self, model, cfg, device):
+    def __init__(self, model, cfg, device, use_accelerate = True):
         self.use_ema = cfg.get("use_ema", False)
         self.use_swa = cfg.get("use_swa", False)
         assert not (self.use_ema and self.use_swa), (
@@ -18,6 +20,7 @@ class ModelAveraging:
         self.model_avg = None
         self.model = model
         self.device = device
+        self.use_accelerate = use_accelerate
 
         # EMA configuration
         if self.use_ema:
@@ -33,15 +36,19 @@ class ModelAveraging:
             self.swa_device = cfg.get("swa_device", "cpu")
 
     def maybe_initialize(self, cnt_update):
+        if self.use_accelerate:
+            unwrapped_model = accelerate.unwrap_model(self.model)
+        else:
+            unwrapped_model = self.model
         if self.use_swa and cnt_update == self.swa_start:
             self.model_avg = torch.optim.swa_utils.AveragedModel(
-                self.model, device=self.swa_device
+                unwrapped_model, device=self.swa_device
             )
             logging.info("Starting SWA...")
 
         if self.use_ema and cnt_update == self.ema_start:
             self.model_avg = torch.optim.swa_utils.AveragedModel(
-                self.model,
+                unwrapped_model,
                 multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(self.ema_decay),
                 device=self.ema_device,
             )
@@ -50,16 +57,20 @@ class ModelAveraging:
     def maybe_update(self, cnt_update):
         if self.model_avg is None:
             return
+        if self.use_accelerate:
+            unwrapped_model = accelerate.unwrap_model(self.model)
+        else:
+            unwrapped_model = self.model
         if self.use_ema and cnt_update % self.ema_freq == 0:
-            self.model_avg.update_parameters(self.model)
+            self.model_avg.update_parameters(unwrapped_model.to(self.ema_device))
             logging.info("EMA updated")
         if self.use_swa and cnt_update % self.swa_freq == 0:
-            self.model_avg.update_parameters(self.model)
+            self.model_avg.update_parameters(unwrapped_model.to(self.swa_device))
             logging.info("SWA updated")
 
     def get_model_module(self) -> dict:
         if self.model_avg:
-            return self.model_avg.module
+            return self.model_avg.module.to(self.device)
         return self.model
 
     def state_dict(self) -> dict:
