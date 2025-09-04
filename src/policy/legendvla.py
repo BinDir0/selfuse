@@ -440,7 +440,8 @@ class LegendVLA(nn.Module):
             torch.finfo(dtype).min,
             dtype=dtype,
         )  # smallest value, avoid using inf for softmax nan issues with padding
-        for idx, cnt in enumerate(image_text_token_cnts):
+        for idx in range(bsz):
+            cnt = image_text_token_cnts[idx].item()
             causal_mask[idx, :cnt, :cnt] = 0  # image/text attend to itself
             causal_mask[idx, proprio_start:, :cnt] = (
                 0  # proprio/human_action attend to image/text
@@ -576,8 +577,9 @@ class LegendVLA(nn.Module):
         # [Batch_Size, Channels, Height, Width] or [Batch_Size, Time, Channels, Height, Width] 
         # -> [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
         if pixel_values.ndim == 5:
-            B, T = pixel_values.shape[:2]
+            B, T, C, H, W = pixel_values.shape
             pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
+            # pixel_values = pixel_values.view(B * T, C, H, W)
         else:
             T = None
 
@@ -586,6 +588,7 @@ class LegendVLA(nn.Module):
 
         if T is not None:
             image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
+            # image_features = image_features.view(B, -1, image_features.shape[-1])
 
         # normalize the image features
         _, _, embed_dim = image_features.shape
@@ -602,7 +605,8 @@ class LegendVLA(nn.Module):
             input_ids != self.pad_token_id
         )
         image_mask = input_ids == self.image_token_index
-        final_embedding[text_mask] = inputs_embeds[text_mask]
+        # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
+        final_embedding[text_mask] = inputs_embeds[text_mask].to(final_embedding.dtype)
         for i in range(bsz):
             image_indices = image_mask[i].nonzero(as_tuple=True)[0]
             num_image_tokens = len(image_indices)

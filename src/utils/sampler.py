@@ -104,7 +104,7 @@ class SequenceSampler:
                 pad_before=pad_before, 
                 pad_after=pad_after,
                 episode_mask=episode_mask
-                )
+            )
         else:
             indices = np.zeros((0,4), dtype=np.int64)
 

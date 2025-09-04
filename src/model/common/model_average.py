@@ -11,9 +11,10 @@ log = logging.getLogger(__name__)
 class ModelAveraging:
     """Model averaging with EMA and SWA support. Now supports resume from checkpoint."""
 
-    def __init__(self, model, cfg, device, use_accelerate = True):
-        self.use_ema = cfg.get("use_ema", False)
-        self.use_swa = cfg.get("use_swa", False)
+    def __init__(self, model, cfg, device, accelerator = None):
+        print(f"ModelAveraging cfg: {cfg}")
+        self.use_ema = cfg.ema.enabled
+        self.use_swa = cfg.swa.enabled
         assert not (self.use_ema and self.use_swa), (
             "Cannot use both EMA and SWA at once"
         )
@@ -21,24 +22,25 @@ class ModelAveraging:
         self.model_avg = None
         self.model = model
         self.device = device
-        self.use_accelerate = use_accelerate
+        self.accelerator = accelerator
 
         # EMA configuration
         if self.use_ema:
-            self.ema_start = cfg.ema_start
-            self.ema_decay = cfg.get("ema_decay", 0.99)
-            self.ema_freq = cfg.get("ema_freq", 1)
-            self.ema_device = cfg.get("ema_device", self.device)
+            self.ema_start = cfg.ema.start
+            self.ema_decay = cfg.ema.decay
+            self.ema_freq = cfg.ema.freq
+            self.ema_device = cfg.ema.device
 
         # SWA configuration
         if self.use_swa:
-            self.swa_start = cfg.swa_start
-            self.swa_freq = cfg.swa_freq
-            self.swa_device = cfg.get("swa_device", "cpu")
+            self.swa_start = cfg.swa.start
+            self.swa_freq = cfg.swa.freq
+            self.swa_device = cfg.swa.device
 
     def maybe_initialize(self, cnt_update):
-        if self.use_accelerate:
-            unwrapped_model = accelerate.unwrap_model(self.model)
+        print(f"maybe_initialize cnt_update: {cnt_update}, start: {self.swa_start if self.use_swa else self.ema_start}")
+        if self.accelerator:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
         else:
             unwrapped_model = self.model
         if self.use_swa and cnt_update == self.swa_start:
@@ -58,8 +60,8 @@ class ModelAveraging:
     def maybe_update(self, cnt_update):
         if self.model_avg is None:
             return
-        if self.use_accelerate:
-            unwrapped_model = accelerate.unwrap_model(self.model)
+        if self.accelerator:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
         else:
             unwrapped_model = self.model
         if self.use_ema and cnt_update % self.ema_freq == 0:
@@ -70,10 +72,11 @@ class ModelAveraging:
             logging.info("SWA updated")
 
     def get_unwrapped_averaged_model(self) -> nn.Module:
+        print(self.model_avg)
         if self.model_avg:
-            return self.model_avg.module.to(self.device)
-        if self.use_accelerate:
-            return accelerate.unwrap_model(self.model)
+            return self.model_avg.module
+        if self.accelerator:
+            return self.accelerator.unwrap_model(self.model)
         else:
             return self.model
 
@@ -101,8 +104,8 @@ class ModelAveraging:
         
         if model_type in ["ema", "swa"] and "state_dict" in state_dict:
             # Get unwrapped model
-            if self.use_accelerate:
-                unwrapped_model = accelerate.unwrap_model(self.model)
+            if self.accelerator:
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
             else:
                 unwrapped_model = self.model
                 

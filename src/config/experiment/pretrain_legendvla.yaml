@@ -11,8 +11,7 @@ lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
 dataset_paths:
- - /share_data/datasets/taco/taco.zarr
- - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
+ - /share_data/datasets/test/taco.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -40,7 +39,7 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   shape_meta: ${shape_meta}
   seed: 42
-  val_ratio: 0.05
+  val_ratio: 0.5
   history: 30 # frames
 
 n_action_steps: 30
@@ -57,7 +56,7 @@ dataloader:
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 32
+  batch_size: 16 # use the same batch size with training for best performance
   num_workers: 8
   shuffle: False
   pin_memory: True
@@ -78,24 +77,16 @@ optimizer:
     lr: 5e-5
     weight_decay: 0
 
-lr_scheduler:
-  action: 
-    first_cycle_steps: 10000000 # basically no decaying
-    min_lr: 1e-8
-    warmup_steps: 200 # a bit of warmup
-  vlm:
-    first_cycle_steps: 10000000
-    min_lr: 1e-8
-    warmup_steps: 200
-
 training:
   device: "cuda:0"
   seed: 42
   debug: False
   resume: True
+  lr_scheduler: cosine
+  lr_warmup_steps: 0
   train_vlm: True
   load_pretrained_weights: True # load pretrained weights from VLM
-  pretrained_model_path: ${oc.env:TRANSFORMERS_CACHE}/paligemma-3b-pt-224
+  pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
   resume_checkpoint_path:
   num_epochs: 25
   gradient_accumulate_every: 1
@@ -106,17 +97,18 @@ training:
     max_grad_norm: 1.0
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.
-  ema: 
-    enabled: True
-    decay: 0.99
-    start: 0
-    freq: 1
-    device: cpu
-  swa:
-    enabled: False
-    start: 100000
-    freq: 100000
-    device: cpu
+  average:
+    ema: 
+      enabled: True
+      decay: 0.99
+      start: 1 # start from 1st step
+      freq: 1
+      device: cpu
+    swa:
+      enabled: False
+      start: 100000
+      freq: 100000
+      device: cpu
   # training loop control
   # in epochs
   rollout_every: 10
@@ -201,7 +193,7 @@ policy:
     pretrained_model_path: ${training.pretrained_model_path}
   shape_meta: ${shape_meta}
   vision_tower:
-    _target_: src.model.paligemma.siglip.SiglipVisionModel
+    _target_: src.model.vlm.paligemma.siglip.SiglipVisionModel
     config:
       hidden_size: 1152 # siglip
       intermediate_size: 4304
@@ -220,7 +212,7 @@ policy:
     use_lora: ${lora}
 
   multi_modal_projector:
-    _target_: src.model.paligemma.siglip.PaliGemmaMultiModalProjector
+    _target_: src.model.vlm.paligemma.siglip.PaliGemmaMultiModalProjector
     config:
       vision_config:
         hidden_size: 1152
@@ -232,7 +224,7 @@ policy:
     use_lora: ${lora}
 
   joint_model:
-    _target_: src.model.vla.joint_model.JointModel
+    _target_: src.model.moe.joint_model.JointModel
     config:
       action_expert_adaptive_mode: ${action_expert_adaptive_mode}
       time_hidden_size: ${time_hidden_size}

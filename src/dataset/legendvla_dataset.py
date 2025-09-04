@@ -9,6 +9,7 @@ import numpy as np
 import copy
 import torch.nn.functional as F
 import torch.nn.utils.rnn as rnn_utils
+from tqdm import tqdm
 
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
@@ -19,7 +20,7 @@ from src.model.common.normalizer import LinearNormalizer
 from .base_dataset import BaseImageDataset, BaseDataCollator
 from .base_vl_preprocessor import BaseVLPreprocessor
 
-class EgoVLADataset(BaseImageDataset):
+class LegendVLADataset(BaseImageDataset):
     def __init__(self,
             zarr_paths,
             horizon=1,
@@ -118,10 +119,10 @@ class EgoVLADataset(BaseImageDataset):
 
         # Process all images in batch
         # processed_frames = self._process_image_batch(sample['image'][T_slice])
-        processed_results = self.preprocessor(image=sample['image'][image_slice], instruction=instruction)
+        processed_results = self.preprocessor(images=sample['image'][image_slice], text=instruction)
         processed_frames = processed_results['pixel_values'] # [T, C, H, W]
-        tokenized_instruction = processed_results['input_ids'] # [L]
-        attention_mask = processed_results['attention_mask'] # [L]
+        tokenized_instruction = processed_results['input_ids'][0] # [L]
+        attention_mask = processed_results['attention_mask'][0] # [L]
 
         processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
 
@@ -143,23 +144,51 @@ class EgoVLADataset(BaseImageDataset):
         }
         return data
 
+    def _sample_to_normalize_data(self, sample):
+        hand_state = sample['state/hand'].astype(np.float32)
+        wrist_state = sample['state/wrist'].astype(np.float32)
+        wrist_action = sample['action/wrist'].astype(np.float32)
+        hand_action = sample['action/hand'].astype(np.float32)
+        # [Horizon, 16] -> [Horizon, 4, 4]
+        extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
+
+        state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+
+        processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
+
+        processed_wrist_action = wrist_action[self.history:]
+        processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[self.history])
+
+        # use delta of wrist translation and hand mano params as action
+        processed_wrist_action[..., :6] = processed_wrist_action[..., :6] - processed_wrist_state[-1, :6]
+        processed_hand_state = hand_state[state_slice]
+        processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]
+
+        data = {
+            'human_action': np.concatenate([processed_wrist_action, processed_hand_action], axis=-1),
+        }
+        return data
+
     def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
         self.preprocessor = preprocessor
 
+    # TODO: use multi-threading to speed up the normalizer calculation
     def get_normalizer(self, mode='limits', **kwargs):
         # Merge all data
         # TODO: Use StreamingReplayBuffer to calculate the normalizer
         hand_actions = []
         hand_states = []
-        # TODO: add delta of action 
-        for rb in self.replay_buffers:
+        for rb in tqdm(self.replay_buffers, desc="Loading hand states from replay buffers"):
             hand_states.append(rb['state/hand'])
 
-        for idx in range(len(self)): 
-            sample = self[idx]
+        for idx in tqdm(range(len(self)), desc="Processing dataset samples for normalizer"): 
+            sample = self._get_normalize_data(idx)
             wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
             hand_action = sample['human_action'][:, wrist_dim:]
-            hand_actions.append(hand_action.cpu().numpy())
+            hand_actions.append(hand_action)
+            # TODO: debug, need to change this
+            if idx > 1000: 
+                break
             
         data = {
             'action/hand': np.concatenate(hand_actions, axis=0),
@@ -168,6 +197,16 @@ class EgoVLADataset(BaseImageDataset):
         
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+
+        # def print_dict(d):
+        #     for k, v in d.items():
+        #         print(f"{k}: {v}")
+        
+        # print(f"state/hand: ")
+        # print_dict(normalizer.params_dict['state/hand']['input_stats'])
+        # print(f"action/hand: ")
+        # print_dict(normalizer.params_dict['action/hand']['input_stats'])
+
         return normalizer
     
     def get_collator(self):
@@ -185,6 +224,16 @@ class EgoVLADataset(BaseImageDataset):
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
+
+    def _get_normalize_data(self, idx: int) -> Dict[str, np.ndarray]:
+        curr_idx = idx
+        for i, length in enumerate(self.sampler_lens):
+            if curr_idx < length:
+                sample = self.samplers[i].sample_sequence(curr_idx)
+                break
+            curr_idx -= length
+        data = self._sample_to_normalize_data(sample)
+        return data
 
     def __len__(self):
         return sum(self.sampler_lens)
@@ -211,7 +260,6 @@ class LegendVLADataCollator(BaseDataCollator):
                 batch[key] = torch.stack([item[key] for item in data_list])
             else:
                 input_ids_batch = [item[key] for item in data_list]
-                # TODO: change to max length padding
                 batch["input_ids"] = rnn_utils.pad_sequence(
                     input_ids_batch,
                     batch_first=True,

@@ -1,4 +1,3 @@
-# TODO: need to modify this to support the new dataset
 from typing import Dict, List, Tuple
 
 import torch
@@ -72,9 +71,7 @@ def resize(
         if img_hwc.dtype == np.uint8:
             pil_image = Image.fromarray(img_hwc)
         elif img_hwc.dtype in [np.float32, np.float64]:
-            np.clip(img_hwc, 0, 1, out=img_hwc)
-            np.multiply(img_hwc, 255, out=temp_hwc)
-            pil_image = Image.fromarray(temp_hwc)
+            pil_image = Image.fromarray((img_hwc * 255).astype(np.uint8))
         
         resized_pil = pil_image.resize((width, height), Image.Resampling.BILINEAR)
         
