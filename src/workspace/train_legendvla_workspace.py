@@ -192,11 +192,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             last_epoch=self.global_step-1
         )
 
-        # Compile model if requested
-        if cfg.training.use_torch_compile:
-            # self.model = torch.compile(self.model, mode="max-autotune")
-            self.model = torch.compile(self.model, mode="default")
-
         # Configure checkpoint manager (if available)
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, 'checkpoints'),
@@ -227,6 +222,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             cfg.training.max_val_steps = 3
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
+
+        # Compile model if requested
+        if cfg.training.use_torch_compile:
+            # self.model = torch.compile(self.model, mode="max-autotune")
+            self.model = torch.compile(self.model, mode="default")
 
         self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device, accelerator)
 
