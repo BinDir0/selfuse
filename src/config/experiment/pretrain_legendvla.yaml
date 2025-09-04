@@ -65,6 +65,8 @@ val_dataloader:
 flow: 
   sig_min: 0.001
   sampling: beta
+  alpha: 1.5
+  beta: 1
   num_inference_steps: 10
 
 optimizer:
@@ -89,7 +91,7 @@ training:
   device: "cuda:0"
   seed: 42
   debug: False
-  resume: False
+  resume: True
   train_vlm: True
   load_pretrained_weights: True # load pretrained weights from VLM
   pretrained_model_path: ${oc.env:TRANSFORMERS_CACHE}/paligemma-3b-pt-224
@@ -118,8 +120,8 @@ training:
   # in epochs
   rollout_every: 10
   checkpoint_every: 1
-  val_every: 10000
-  sample_every: 10
+  val_every: 1
+  sample_every: 1
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
