@@ -7,14 +7,13 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 
 """
 
-# TODO: support multiple images
-
 import logging
 from typing import Optional, Tuple
 
 import hydra
 import torch
 from torch import nn
+from einops import rearrange
 
 from src.model.common.normalizer import LinearNormalizer
 from src.model.common.kv_cache import KVCache
@@ -562,7 +561,7 @@ class LegendVLA(nn.Module):
         
         Args:
             input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-            pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
+            pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values (normalized)
         
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
@@ -574,9 +573,19 @@ class LegendVLA(nn.Module):
         inputs_embeds = self.embed_tokens(input_ids)
 
         # image features from siglip and projector
-        # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
+        # [Batch_Size, Channels, Height, Width] or [Batch_Size, Time, Channels, Height, Width] 
+        # -> [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
+        if pixel_values.ndim == 5:
+            B, T = pixel_values.shape[:2]
+            pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
+        else:
+            T = None
+
         selected_image_feature = self.vision_tower(pixel_values)
         image_features = self.multi_modal_projector(selected_image_feature)
+
+        if T is not None:
+            image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
 
         # normalize the image features
         _, _, embed_dim = image_features.shape
@@ -612,7 +621,7 @@ class LegendVLA(nn.Module):
         Args:
             input (dict): Input dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
                 - image_text_proprio_mask (torch.FloatTensor): [B, 1, seq_len, seq_len] 
                   Attention mask for image/text/proprio tokens (broadcasts to all heads)
                 - human_action_mask (torch.FloatTensor): [B, 1, action_len, total_len] 
@@ -709,7 +718,7 @@ class LegendVLA(nn.Module):
         Args:
             input (dict): Input dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
                 - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] 
                   Full causal attention mask for all tokens (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
@@ -795,7 +804,7 @@ class LegendVLA(nn.Module):
         Args:
             input (dict): Input dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
                 - attention_mask (torch.Tensor): [B, seq_len] Attention mask for text tokens
                 - kv_cache (Optional[KVCache]): Optional KV cache for autoregressive generation
         
@@ -862,6 +871,7 @@ class LegendVLA(nn.Module):
         t = t[:, None, None]  # (B, 1, 1)
         return (1 - (1 - self.flow_sig_min) * t) * x + t * x1
 
+    # TODO: add indicator for only one hand or two hands
     def forward(
         self,
         batch: dict,
@@ -872,7 +882,7 @@ class LegendVLA(nn.Module):
         Args:
             batch (dict): Training batch dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.ByteTensor): [B, 3, H, W] Image pixel values (uint8)
+                - pixel_values (torch.ByteTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (uint8)
                 - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] 
                   Full causal attention mask for all tokens (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
@@ -979,169 +989,3 @@ class LegendVLAInference(LegendVLA):
         """
         return super().infer_human_action(input)
 
-
-if __name__ == "__main__":
-    import argparse
-    import time
-
-    import numpy as np
-    from omegaconf import OmegaConf
-    from PIL import Image
-    from transformers import AutoTokenizer
-
-    from src.dataset.paligemma_processing import PaliGemmaVLAProcessor
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--text_only", action="store_true")
-    parser.add_argument("--load_pretrained_weights", action="store_true")
-    parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--loss_only", action="store_true")
-    parser.add_argument("--use_bf16", action="store_true")
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-    assert not (args.text_only and args.loss_only)
-
-    torch.manual_seed(args.seed)
-
-    config = OmegaConf.load("src/config/experiment/pretrain_legendvla.yaml")
-    if args.text_only:
-        # Set use_lm_head in policy.cfg
-        config.policy.cfg.use_lm_head = True
-        # Set use_final_norm in joint_model config
-        config.policy.joint_model.config.mixture.vlm.use_final_norm = True
-    
-    device = "cpu" if args.cpu else "cuda"
-    
-    # Create model using policy configuration
-    model = hydra.utils.instantiate(config.policy)
-    
-    model.tie_action_proprio_weights()
-    if args.load_pretrained_weights:
-        model.load_pretrained_weights()
-    
-    dtype = torch.bfloat16 if args.use_bf16 else torch.float32
-    model.to(device)
-    model.to(dtype)
-    model.eval()
-    print(f"Using {device} and {dtype}...")
-
-    # dummy image --- replace the first image with a real one
-    bsz = 1 if args.text_only else 2
-    dummy_images = torch.randint(
-        0, 256, (bsz, 3, 224, 224), dtype=torch.uint8
-    )  # not used if text_only
-    real_image_path = "assets/maniskill_pp.png"
-    real_image = Image.open(real_image_path).convert("RGB")
-    real_image_t = torch.as_tensor(
-        np.array(real_image.resize((224, 224))).transpose(2, 0, 1)
-    )
-    dummy_images[0] = real_image_t
-
-    # text and proprio
-    dummy_texts = [
-        "this image shows ",
-        "this is a nice portrait of London because ",
-    ][:bsz]
-    # Use shape_meta from the model instead of config
-    dummy_proprio = torch.rand(bsz, model.num_proprio_tokens, model.proprio_dim)
-
-    # tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.policy.cfg.pretrained_model_path, padding_side="right"
-    )
-    assert tokenizer.padding_side == "right"
-
-    # processor
-    # Use fixed values for testing since these are not in the model config
-    num_image_tokens = 256  # Fixed for PaliGemma
-    max_seq_len = 512  # Fixed for testing
-    processor = PaliGemmaVLAProcessor(tokenizer, num_image_tokens, max_seq_len)
-
-    # process image and text
-    model_inputs = processor(text=dummy_texts, images=dummy_images)
-    input_ids = model_inputs["input_ids"]
-    attention_mask = model_inputs["attention_mask"]
-    pixel_values = model_inputs["pixel_values"].to(dtype)
-
-    # inference
-    start_time = time.time()
-    if args.text_only:  # no sampling
-        kv_cache = model.build_text_cache()
-        num_tokens_to_generate = 20
-        print(f"Generating text of maximum {num_tokens_to_generate} tokens...")
-
-        stop_token = processor.tokenizer.eos_token_id
-        generated_tokens = []
-        for _ in range(num_tokens_to_generate):
-            with torch.inference_mode():
-                outputs = model.infer_text({
-                    "input_ids": input_ids.to(device),
-                    "pixel_values": pixel_values.to(device),
-                    "attention_mask": attention_mask.to(device),
-                    "kv_cache": kv_cache,
-                })
-            next_token_logits = outputs["logits"][:, -1, :]
-            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-            assert next_token.size() == (1, 1)
-            next_token = next_token.squeeze(0)  # remove batch dimension
-            generated_tokens.append(next_token)
-            # stop if the stop token has been generated
-            if next_token.item() == stop_token:
-                break
-            # only input the new token the next time since using cache
-            input_ids = next_token.unsqueeze(-1)
-            attention_mask = torch.cat(
-                [attention_mask, torch.ones((1, 1), dtype=attention_mask.dtype)], dim=-1
-            )
-        generated_tokens = torch.cat(generated_tokens, dim=-1)
-        decoded = processor.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        print("\n\n=========================")
-        print("Image path:", real_image_path)
-        print("Prompt:", dummy_texts[0])
-        print("Generated text:", decoded)
-    elif args.loss_only:
-        dummy_actions = torch.randn(bsz, model.horizon_steps, model.human_action_dim)
-        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
-            model.build_causal_mask_and_position_ids(attention_mask, dtype=dtype)
-        )
-        image_text_proprio_mask, action_mask = model.split_full_mask_into_submasks(
-            causal_mask
-        )
-        t = torch.rand(bsz)
-        with torch.inference_mode():
-            loss = model({
-                "input_ids": input_ids.to(device),
-                "pixel_values": pixel_values.to(dtype).to(device),
-                "causal_mask": causal_mask.to(device),
-                "vlm_position_ids": vlm_position_ids.to(device),
-                "proprio_position_ids": proprio_position_ids.to(device),
-                "human_action_position_ids": action_position_ids.to(device),
-                "proprios": dummy_proprio.to(dtype).to(device),
-                "human_actions": dummy_actions.to(dtype).to(device),
-                "t": t.to(dtype).to(device),
-            })
-        print("\n\n=========================")
-        print("Loss:", loss)
-    else:  # dummy action generation
-        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
-            model.build_causal_mask_and_position_ids(attention_mask, dtype=dtype)
-        )
-        image_text_proprio_mask, action_mask = model.split_full_mask_into_submasks(
-            causal_mask
-        )
-        with torch.inference_mode():
-            actions = model.infer_human_action({
-                "input_ids": input_ids.to(device),
-                "pixel_values": pixel_values.to(dtype).to(device),
-                "image_text_proprio_mask": image_text_proprio_mask.to(device),
-                "human_action_mask": action_mask.to(device),
-                "vlm_position_ids": vlm_position_ids.to(device),
-                "proprio_position_ids": proprio_position_ids.to(device),
-                "human_action_position_ids": action_position_ids.to(device),
-                "proprios": dummy_proprio.to(dtype).to(device),
-            })
-        print("\n\n=========================")
-        print("Final action dimensions:", actions.shape)
-        print("Final action values:", actions)
-    print("Time taken:", time.time() - start_time)
-    print("============================\n\n")

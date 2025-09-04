@@ -119,8 +119,9 @@ class EgoVLADataset(BaseImageDataset):
         # Process all images in batch
         # processed_frames = self._process_image_batch(sample['image'][T_slice])
         processed_results = self.preprocessor(image=sample['image'][image_slice], instruction=instruction)
-        processed_frames = processed_results['image'] # [T, H, W, 3]
-        tokenized_instruction = processed_results['input_ids']
+        processed_frames = processed_results['pixel_values'] # [T, C, H, W]
+        tokenized_instruction = processed_results['input_ids'] # [L]
+        attention_mask = processed_results['attention_mask'] # [L]
 
         processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
 
@@ -133,8 +134,9 @@ class EgoVLADataset(BaseImageDataset):
         processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]
 
         data = {
-            'instruction': tokenized_instruction,
-            'image': processed_frames, 
+            'input_id': tokenized_instruction,
+            'attention_mask': attention_mask,
+            'pixel_value': processed_frames, 
             # we assume the history of the data is 30 Hz, the image should cover the past 1 second
             'proprio': np.concatenate([processed_wrist_state, processed_hand_state], axis=-1),
             'human_action': np.concatenate([processed_wrist_action, processed_hand_action], axis=-1),
@@ -169,7 +171,7 @@ class EgoVLADataset(BaseImageDataset):
         return normalizer
     
     def get_collator(self):
-        return LegendVLADataCollator(pad_token_id=self.preprocessor.tokenizer.pad_token_id)
+        return LegendVLADataCollator()
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
@@ -189,7 +191,7 @@ class EgoVLADataset(BaseImageDataset):
         
 
 class LegendVLADataCollator(BaseDataCollator):
-    def __init__(self, pad_token_id: int):
+    def __init__(self, pad_token_id: int = None):
         super().__init__()
         self.pad_token_id = pad_token_id
 

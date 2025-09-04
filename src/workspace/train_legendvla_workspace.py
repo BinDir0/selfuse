@@ -1,4 +1,3 @@
-# TODO: change logging mode
 if __name__ == "__main__":
     import sys
     import os
@@ -145,6 +144,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.tokenizer,
             num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
             max_seq_len=cfg.policy.cfg.max_image_text_tokens,
+            image_size=cfg.policy.vision_tower.config.image_size,
             tokenizer_padding=cfg.tokenizer_padding,
         )
         dataset.set_preprocessor(self.processor)
@@ -448,20 +448,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def preprocess_batch(self, batch, sample_fm_time: bool = True):
         """Preprocess batch for training"""
         # Extract data from batch
-        images = batch["observation"]["image_primary"]
-        proprios = batch["observation"]["proprio"]
-        actions = batch["action"].squeeze(1)  # remove the time dimension
-        texts = [
-            text.decode("utf-8") for text in batch["task"]["language_instruction"]
-        ]
-        
-        # Reshape images
-        images = einops.rearrange(
-            images, "B T H W C -> B (T C) H W"
-        )  # remove cond_steps dimension
-        
-        # Process with VLA processor
-        model_inputs = self.processor(text=texts, images=images)
+        images = batch["pixel_value"]
+        proprios = batch["proprio"]
+        human_actions = batch["human_action"]
+        input_ids = batch["input_id"]
 
         # Get unwrapped model for mask building
         model = self.model
@@ -471,28 +461,26 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Build causal mask and position ids
         causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
             model.build_causal_mask_and_position_ids(
-                model_inputs["attention_mask"], torch.bfloat16
+                batch["attention_mask"], torch.bfloat16
             )
         )
 
         inputs = {
-            "input_ids": model_inputs["input_ids"],
-            "pixel_values": model_inputs["pixel_values"],
+            "input_ids": input_ids,
+            "pixel_values": images,
             "causal_mask": causal_mask,
             "vlm_position_ids": vlm_position_ids,
             "proprio_position_ids": proprio_position_ids,
             "human_action_position_ids": action_position_ids,
             "proprios": proprios,
-            "human_actions": actions,
+            "human_actions": human_actions,
         }
         
         # Sample flow matching timesteps
         if sample_fm_time:
-            inputs["t"] = self.sample_fm_time(len(texts))
+            inputs["t"] = self.sample_fm_time(len(input_ids))
 
         return inputs
-
-
 
 
 @hydra.main(

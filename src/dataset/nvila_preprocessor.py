@@ -45,7 +45,7 @@ class NVILAPreprocessor(BaseVLPreprocessor):
         """
         Tokenize the instruction. 
         Args:
-            image: np.ndarray [H, W, C]
+            image: np.ndarray [B, H, W, C]
             instruction: str
             **kwargs: Additional arguments
         Returns:

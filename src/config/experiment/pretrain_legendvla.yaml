@@ -9,7 +9,7 @@ lora: False
 lora_r: 32
 lora_dropout: 0.0
 
-image_shape: [384, 384, 3]
+image_shape: [224, 224, 3]
 dataset_paths:
  - /share_data/datasets/taco/taco.zarr
  - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
@@ -47,6 +47,7 @@ n_action_steps: 30
 n_obs_image_steps: 2
 n_obs_state_steps: 6
 n_latency_steps: 0
+# Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
 dataloader:
   batch_size: 16
@@ -177,7 +178,10 @@ action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
 image_token_index: 257152
 vocab_size: 257216
 pad_token_id: 0
-max_image_text_tokens: 276  # fixed 256 for image + max 20 for text
+patch_size: 14
+image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
+text_seq_len: 32
+max_image_text_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}'} 
 tokenizer_padding: max_length # instead of truncating to longest
 
 policy: 
