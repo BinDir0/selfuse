@@ -123,6 +123,8 @@ training:
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
+  # evaluation settings
+  eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
   # misc
   tqdm_interval_sec: 1.0
 
