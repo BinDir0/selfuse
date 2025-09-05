@@ -1,6 +1,6 @@
 # @package _global_
-name: pretrain_legendvla
-exp_name: "pretrain_legendvla"
+name: legendvla
+exp_name: "pretrain"
 _target_: src.workspace.train_legendvla_workspace.TrainLegendVLAWorkspace
 
 action_expert_adaptive_mode:  # adaLN, adaLN-Zero, or None
@@ -11,7 +11,8 @@ lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
 dataset_paths:
- - /share_data/datasets/test/taco.zarr
+ - /share_data/datasets/taco/taco.zarr
+ - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -49,14 +50,14 @@ n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
 dataloader:
-  batch_size: 16
+  batch_size: 12
   num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 16 # use the same batch size with training for best performance
+  batch_size: 12 # use the same batch size with training for best performance
   num_workers: 8
   shuffle: False
   pin_memory: True
@@ -103,16 +104,17 @@ training:
       decay: 0.99
       start: 1 # start from 1st step
       freq: 1
-      device: cpu
+      device: # not supported for specific device
     swa:
       enabled: False
       start: 100000
       freq: 100000
-      device: cpu
+      device: # not supported for specific device
   # training loop control
   # in epochs
   rollout_every: 10
   checkpoint_every: 1
+  ckpt_save_interval: 10
   val_every: 1
   sample_every: 1
   # steps per epoch

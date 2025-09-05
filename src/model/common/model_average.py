@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 class ModelAveraging:
     """Model averaging with EMA and SWA support. Now supports resume from checkpoint."""
 
-    def __init__(self, model, cfg, device, accelerator = None):
+    def __init__(self, model, cfg, device):
         print(f"ModelAveraging cfg: {cfg}")
         self.use_ema = cfg.ema.enabled
         self.use_swa = cfg.swa.enabled
@@ -22,36 +22,30 @@ class ModelAveraging:
         self.model_avg = None
         self.model = model
         self.device = device
-        self.accelerator = accelerator
 
         # EMA configuration
         if self.use_ema:
             self.ema_start = cfg.ema.start
             self.ema_decay = cfg.ema.decay
             self.ema_freq = cfg.ema.freq
-            self.ema_device = cfg.ema.device
+            self.ema_device = cfg.ema.get("device", device)
 
         # SWA configuration
         if self.use_swa:
             self.swa_start = cfg.swa.start
             self.swa_freq = cfg.swa.freq
-            self.swa_device = cfg.swa.device
+            self.swa_device = cfg.swa.get("device", device)
 
     def maybe_initialize(self, cnt_update):
-        print(f"maybe_initialize cnt_update: {cnt_update}, start: {self.swa_start if self.use_swa else self.ema_start}")
-        if self.accelerator:
-            unwrapped_model = self.accelerator.unwrap_model(self.model)
-        else:
-            unwrapped_model = self.model
         if self.use_swa and cnt_update == self.swa_start:
             self.model_avg = torch.optim.swa_utils.AveragedModel(
-                unwrapped_model, device=self.swa_device
+                self.model, device=self.swa_device
             )
             logging.info("Starting SWA...")
 
         if self.use_ema and cnt_update == self.ema_start:
             self.model_avg = torch.optim.swa_utils.AveragedModel(
-                unwrapped_model,
+                self.model,
                 multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(self.ema_decay),
                 device=self.ema_device,
             )
@@ -60,25 +54,15 @@ class ModelAveraging:
     def maybe_update(self, cnt_update):
         if self.model_avg is None:
             return
-        if self.accelerator:
-            unwrapped_model = self.accelerator.unwrap_model(self.model)
-        else:
-            unwrapped_model = self.model
         if self.use_ema and cnt_update % self.ema_freq == 0:
-            self.model_avg.update_parameters(unwrapped_model.to(self.ema_device))
-            logging.info("EMA updated")
+            self.model_avg.update_parameters(self.model.to(self.ema_device))
         if self.use_swa and cnt_update % self.swa_freq == 0:
-            self.model_avg.update_parameters(unwrapped_model.to(self.swa_device))
-            logging.info("SWA updated")
+            self.model_avg.update_parameters(self.model.to(self.swa_device))
 
     def get_unwrapped_averaged_model(self) -> nn.Module:
-        print(self.model_avg)
         if self.model_avg:
             return self.model_avg.module
-        if self.accelerator:
-            return self.accelerator.unwrap_model(self.model)
-        else:
-            return self.model
+        return self.model
 
     def state_dict(self) -> dict:
         if self.model_avg:
@@ -103,23 +87,17 @@ class ModelAveraging:
         n_averaged = state_dict.get("n_averaged", 1)
         
         if model_type in ["ema", "swa"] and "state_dict" in state_dict:
-            # Get unwrapped model
-            if self.accelerator:
-                unwrapped_model = self.accelerator.unwrap_model(self.model)
-            else:
-                unwrapped_model = self.model
-                
             # Create appropriate averaged model based on type
             if model_type == "ema" and self.use_ema:
                 self.model_avg = torch.optim.swa_utils.AveragedModel(
-                    unwrapped_model,
+                    self.model,
                     multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(self.ema_decay),
                     device=self.ema_device,
                 )
                 logging.info(f"Loaded EMA model with {n_averaged} averaged updates")
             elif model_type == "swa" and self.use_swa:
                 self.model_avg = torch.optim.swa_utils.AveragedModel(
-                    unwrapped_model, device=self.swa_device
+                    self.model, device=self.swa_device
                 )
                 logging.info(f"Loaded SWA model with {n_averaged} averaged updates")
             else:

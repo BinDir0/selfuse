@@ -24,6 +24,8 @@ from PIL import Image
 import bitsandbytes as bnb
 import einops
 from transformers import AutoTokenizer
+from accelerate.utils import TorchDynamoPlugin
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
@@ -35,7 +37,7 @@ from src.model.common.lr_scheduler import get_scheduler
 from src.model.common.model_average import ModelAveraging
 from src.utils.metric import get_action_accuracy
 from src.utils.optim import CosineAnnealingWarmupRestarts, get_num_params_in_billions
-from accelerate import Accelerator, DistributedDataParallelKwargs
+
 
 import wandb
 
@@ -79,7 +81,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             mixed_precision='bf16' if cfg.training.use_bf16 else 'no',
             device_placement=True,
             kwargs_handlers=[ddp_kwargs],
-            gradient_accumulation_steps=cfg.training.gradient_accumulate_every
+            gradient_accumulation_steps=cfg.training.gradient_accumulate_every,
         )
 
         if accelerator.is_main_process:
@@ -198,6 +200,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             **cfg.checkpoint.topk
         )
 
+        # Compile model if requested
+        if cfg.training.use_torch_compile:
+            # self.model = torch.compile(self.model, mode="max-autotune")
+            self.model = torch.compile(self.model, mode="default")
+
         # Prepare everything with Accelerate
         if self.train_vlm:
             train_dataloader, val_dataloader, self.model, self.action_optimizer, self.vlm_optimizer, self.action_lr_scheduler, self.vlm_lr_scheduler = accelerator.prepare(
@@ -223,12 +230,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
 
-        # Compile model if requested
-        if cfg.training.use_torch_compile:
-            # self.model = torch.compile(self.model, mode="max-autotune")
-            self.model = torch.compile(self.model, mode="default")
-
-        self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device, accelerator)
+        self.model_averaging = ModelAveraging(accelerator.unwrap_model(self.model), cfg.training.average, accelerator.device)
 
         # Training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -335,12 +337,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
                     with torch.no_grad():
                         # Get evaluation model (use averaged model if available)
-                        unwrapped_avg_model = self.model_averaging.get_unwrapped_averaged_model()
+                        policy = self.model_averaging.get_unwrapped_averaged_model()
                         # Set model to evaluation mode for validation
-                        unwrapped_avg_model.eval()
-                        policy = accelerator.prepare(unwrapped_avg_model)
-                        if hasattr(policy, 'module'):
-                            policy = policy.module
+                        policy.eval()
                         
                         # Initialize evaluation metrics
                         eval_thresholds = cfg.training.eval_thresholds
@@ -353,12 +352,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             for batch_idx, batch in enumerate(tepoch):
                                 # Preprocess batch
                                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
+                                inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
                                 # Compute action accuracy if actions are available
                                 if 'human_actions' in inputs:
                                     gt_actions = inputs['human_actions']
                                     # Get action predictions
                                     with torch.inference_mode():
-                                        pred_actions = policy.infer_human_action({k: v for k, v in inputs.items() if k != 'human_actions'})
+                                        with torch.autocast(device_type=accelerator.device.type, dtype=self.dtype):
+                                            pred_actions = policy.infer_human_action(inputs)
                                     
                                     # Compute accuracy metrics
                                     batch_accuracy = get_action_accuracy(gt_actions, pred_actions, eval_thresholds)
@@ -372,6 +373,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     break
                         
                         # Process action accuracy metrics
+                        print(f"rank: {local_rank}, eval_accuracy: {len(eval_accuracy)}")
                         if len(eval_accuracy) > 0:
                             # Average over batches
                             eval_accuracy = torch.stack(eval_accuracy)
@@ -382,7 +384,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             eval_l1_loss = accelerator.gather(eval_l1_loss)
                             
                             if accelerator.is_main_process:
-                                eval_accuracy = torch.sum(eval_accuracy.unsqueeze(1), dim=0)
+                                eval_accuracy = torch.sum(eval_accuracy, dim=0)
                                 eval_l1_loss = torch.sum(eval_l1_loss)
                                 
                                 # Log accuracy metrics
@@ -487,7 +489,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 model.split_full_mask_into_submasks(causal_mask)
             )
             inputs["image_text_proprio_mask"] = image_text_proprio_mask
-            inputs["action_mask"] = action_mask
+            inputs["human_action_mask"] = action_mask
         else:
             inputs["causal_mask"] = causal_mask
 
