@@ -84,19 +84,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         torch.cuda.set_device(local_rank)
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 
-        # Configure torch.compile via Accelerate's dynamo_backend argument
-        dynamo_backend = None
-        if cfg.training.use_torch_compile:
-            # Use inductor as default backend when torch.compile is enabled
-            dynamo_backend = "inductor"
-
         accelerator = Accelerator(
             log_with='wandb',
             mixed_precision='bf16' if cfg.training.use_bf16 else 'no',
             device_placement=True,
             kwargs_handlers=[ddp_kwargs],
             gradient_accumulation_steps=cfg.training.gradient_accumulate_every,
-            dynamo_backend=dynamo_backend
+            # dynamo_plugin=dynamo_plugin
         )
 
         if accelerator.is_main_process:
