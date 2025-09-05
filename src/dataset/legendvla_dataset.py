@@ -7,9 +7,8 @@ from typing import Dict
 import torch
 import numpy as np
 import copy
-import torch.nn.functional as F
-import torch.nn.utils.rnn as rnn_utils
 from tqdm import tqdm
+from torch.utils.data import DataLoader
 
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
@@ -30,14 +29,18 @@ class LegendVLADataset(BaseImageDataset):
             seed=42,
             val_ratio=0.0,
             history=30,
+            normalizer_dataloader_cfg=dict(),
             max_train_episodes=None,
             image_size=(384, 384)
             ):
         
         super().__init__()
+        self.zarr_paths = zarr_paths
         self.preprocessor = None
         self.image_size = image_size
         self.history = history
+        self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
+        self.max_train_episodes = max_train_episodes
 
         # Initialize storage lists
         self.replay_buffers = []
@@ -144,68 +147,37 @@ class LegendVLADataset(BaseImageDataset):
         }
         return data
 
-    def _sample_to_normalize_data(self, sample):
-        hand_state = sample['state/hand'].astype(np.float32)
-        wrist_state = sample['state/wrist'].astype(np.float32)
-        wrist_action = sample['action/wrist'].astype(np.float32)
-        hand_action = sample['action/hand'].astype(np.float32)
-        # [Horizon, 16] -> [Horizon, 4, 4]
-        extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
-
-        state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
-
-        processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
-
-        processed_wrist_action = wrist_action[self.history:]
-        processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[self.history])
-
-        # use delta of wrist translation and hand mano params as action
-        processed_wrist_action[..., :6] = processed_wrist_action[..., :6] - processed_wrist_state[-1, :6]
-        processed_hand_state = hand_state[state_slice]
-        processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]
-
-        data = {
-            'human_action': np.concatenate([processed_wrist_action, processed_hand_action], axis=-1),
-        }
-        return data
-
     def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
         self.preprocessor = preprocessor
 
-    # TODO: use multi-threading to speed up the normalizer calculation
     def get_normalizer(self, mode='limits', **kwargs):
         # Merge all data
-        # TODO: Use StreamingReplayBuffer to calculate the normalizer
-        hand_actions = []
-        hand_states = []
-        for rb in tqdm(self.replay_buffers, desc="Loading hand states from replay buffers"):
-            hand_states.append(rb['state/hand'])
+        normalizer_dataset = LegendVLANormalizerDataset(
+            zarr_paths=self.zarr_paths,
+            horizon=self.horizon,
+            pad_before=self.pad_before,
+            pad_after=self.pad_after,
+            shape_meta=self.shape_meta,
+            history=self.history,
+            max_train_episodes=self.max_train_episodes
+        )
+        dataloader = DataLoader(normalizer_dataset, collate_fn=normalizer_dataset.get_collator(), **self.normalizer_dataloader_cfg)
+        assert len(dataloader) > 0, "No data to calculate normalizer"
+        for idx, batch in tqdm(enumerate(dataloader), desc="Calculating normalizer"):
+            if idx == 0 : 
+                normalizer = LinearNormalizer()
+                normalizer.start_streaming_fit(keys=batch.keys())
+            input_data = {k: v.reshape(-1, v.shape[-1]) for k, v in batch.items()}
+            normalizer.update_streaming_fit(input_data)
+        normalizer.finish_streaming_fit()
 
-        for idx in tqdm(range(len(self)), desc="Processing dataset samples for normalizer"): 
-            sample = self._get_normalize_data(idx)
-            wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
-            hand_action = sample['human_action'][:, wrist_dim:]
-            hand_actions.append(hand_action)
-            # TODO: debug, need to change this
-            if idx > 1000: 
-                break
-            
-        data = {
-            'action/hand': np.concatenate(hand_actions, axis=0),
-            'state/hand': np.concatenate(hand_states, axis=0)
-        }
+        def print_dict(d):
+            for k, v in d.items():
+                print(f"{k}: {v}")
         
-        normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
-
-        # def print_dict(d):
-        #     for k, v in d.items():
-        #         print(f"{k}: {v}")
-        
-        # print(f"state/hand: ")
-        # print_dict(normalizer.params_dict['state/hand']['input_stats'])
-        # print(f"action/hand: ")
-        # print_dict(normalizer.params_dict['action/hand']['input_stats'])
+        for key in normalizer.params_dict.keys():
+            print(f"{key}: ")
+            print_dict(normalizer.params_dict[key]['input_stats'])
 
         return normalizer
     
@@ -225,14 +197,98 @@ class LegendVLADataset(BaseImageDataset):
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
 
-    def _get_normalize_data(self, idx: int) -> Dict[str, np.ndarray]:
+    def __len__(self):
+        return sum(self.sampler_lens)
+        
+
+class LegendVLANormalizerDataset(BaseImageDataset):
+    def __init__(self,
+            zarr_paths,
+            horizon=1,
+            pad_before=0,
+            pad_after=0,
+            shape_meta=None,
+            history=30,
+            max_train_episodes=None,
+            image_size=(384, 384)
+            ):
+        
+        super().__init__()
+        self.history = history
+
+        # Initialize storage lists
+        self.replay_buffers = []
+        self.samplers = []
+        self.sampler_lens = []
+        
+        # Process each zarr file
+        for zarr_path in zarr_paths:
+            # Create replay buffer
+            replay_buffer = StreamingReplayBuffer.copy_from_path(
+                zarr_path, keys=['state', 'action'])
+            self.replay_buffers.append(replay_buffer)
+
+            # Create train mask
+            val_mask = get_val_mask(
+                n_episodes=replay_buffer.n_episodes,
+                val_ratio=0,
+            )
+            train_mask = ~val_mask
+            train_mask = downsample_mask(
+                mask=train_mask,
+                max_n=max_train_episodes
+            )
+            
+            # Create sampler
+            sampler = SequenceSampler(
+                replay_buffer=replay_buffer,
+                sequence_length=horizon,
+                pad_before=pad_before,
+                pad_after=pad_after,
+                episode_mask=train_mask,
+                key_first_k=dict())
+            self.samplers.append(sampler)
+            
+            # Record sampler length
+            self.sampler_lens.append(len(sampler))
+
+        self.horizon = horizon
+        self.pad_before = pad_before
+        self.pad_after = pad_after
+        self.shape_meta = shape_meta
+        self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
+
+
+    def _sample_to_data(self, sample):
+        hand_state = sample['state/hand'].astype(np.float32)
+        hand_action = sample['action/hand'].astype(np.float32)
+
+        state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+
+        # use delta of wrist translation and hand mano params as action
+        processed_hand_state = hand_state[state_slice]
+        processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]
+
+        data = {
+            # we assume the history of the data is 30 Hz, the image should cover the past 1 second
+            'state/hand': processed_hand_state,
+            'action/hand': processed_hand_action,
+        }
+        return data
+
+    def get_collator(self):
+        return LegendVLANormalizerDataCollator()
+
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
+        # Find corresponding sampler
         curr_idx = idx
         for i, length in enumerate(self.sampler_lens):
             if curr_idx < length:
                 sample = self.samplers[i].sample_sequence(curr_idx)
                 break
             curr_idx -= length
-        data = self._sample_to_normalize_data(sample)
+            
+        data = self._sample_to_data(sample)
         return data
 
     def __len__(self):
@@ -270,5 +326,25 @@ class LegendVLADataCollator(BaseDataCollator):
             '''
             # We assume the length of tokenized instruction is the same for all samples
             batch[key] = torch.stack([item[key] for item in data_list])
+
+        return batch
+
+
+class LegendVLANormalizerDataCollator(BaseDataCollator):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, data_list):
+        """
+        DataLoader will pass a list of samples from the Dataset to this function.
+        Args:
+            data_list: a list, where each element is the return value of the Dataset's __getitem__ method.
+               e.g., [{'state/hand': np.ndarray, 'action/hand': np.ndarray}, {'state/hand': np.ndarray, 'action/hand': np.ndarray}, ...]
+        Returns:
+            A dictionary with the keys the same as the return value of the Dataset's __getitem__ method.
+        """
+        batch = {}
+        for key in data_list[0].keys():
+            batch[key] = np.stack([item[key] for item in data_list], axis=0)
 
         return batch

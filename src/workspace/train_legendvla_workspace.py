@@ -72,6 +72,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
         
+        # # Configure TorchDynamoPlugin
+        # dynamo_plugin = TorchDynamoPlugin(
+        #     backend="inductor",  # Options: "inductor", "aot_eager", "aot_nvfuser", etc.
+        #     mode="default",      # Options: "default", "reduce-overhead", "max-autotune"
+        #     fullgraph=True,
+        #     dynamic=False
+        # )
+
         # Set GPU device before initializing accelerator
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
@@ -82,6 +90,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             device_placement=True,
             kwargs_handlers=[ddp_kwargs],
             gradient_accumulation_steps=cfg.training.gradient_accumulate_every,
+            # dynamo_plugin=dynamo_plugin
         )
 
         if accelerator.is_main_process:
@@ -200,10 +209,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             **cfg.checkpoint.topk
         )
 
-        # Compile model if requested
-        if cfg.training.use_torch_compile:
-            # self.model = torch.compile(self.model, mode="max-autotune")
-            self.model = torch.compile(self.model, mode="default")
+        # # Compile model if requested
+        # if cfg.training.use_torch_compile:
+        #     # self.model = torch.compile(self.model, mode="max-autotune")
+        #     self.model = torch.compile(self.model, mode="default")
 
         # Prepare everything with Accelerate
         if self.train_vlm:

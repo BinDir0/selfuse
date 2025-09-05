@@ -40,8 +40,14 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   shape_meta: ${shape_meta}
   seed: 42
-  val_ratio: 0.5
+  val_ratio: 0.05
   history: 30 # frames
+  normalizer_dataloader_cfg:
+    batch_size: 4096
+    num_workers: 16
+    shuffle: False
+    pin_memory: True
+    persistent_workers: True
 
 n_action_steps: 30
 n_obs_image_steps: 2
@@ -51,14 +57,14 @@ n_latency_steps: 0
 
 dataloader:
   batch_size: 12
-  num_workers: 8
+  num_workers: 16
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
   batch_size: 12 # use the same batch size with training for best performance
-  num_workers: 8
+  num_workers: 16
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -72,10 +78,10 @@ flow:
 
 optimizer:
   action: 
-    lr: 5e-5
+    lr: 1e-5
     weight_decay: 0
   vlm:
-    lr: 5e-5
+    lr: 1e-5
     weight_decay: 0
 
 training:
