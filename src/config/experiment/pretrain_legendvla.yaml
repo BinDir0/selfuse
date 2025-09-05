@@ -40,7 +40,7 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   shape_meta: ${shape_meta}
   seed: 42
-  val_ratio: 0.5
+  val_ratio: 0.05
   history: 30 # frames
 
 n_action_steps: 30
