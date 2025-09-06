@@ -709,7 +709,7 @@ class LegendVLA(nn.Module):
             t += delta_t
 
         # normalize action
-        human_action[..., wrist_dim:] = self.normalizer['action/hand'](human_action[..., wrist_dim:])
+        human_action[..., wrist_dim:] = self.normalizer['action/hand'].unnormalize(human_action[..., wrist_dim:])
         return human_action
 
     def infer_human_action_naive(
@@ -795,7 +795,7 @@ class LegendVLA(nn.Module):
             t += delta_t
 
         # normalize action
-        human_action[..., wrist_dim:] = self.normalizer['action/hand'](human_action[..., wrist_dim:])
+        human_action[..., wrist_dim:] = self.normalizer['action/hand'].unnormalize(human_action[..., wrist_dim:])
         return human_action
 
     def infer_text(

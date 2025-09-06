@@ -1,5 +1,5 @@
-torch==2.5.1
-torchvision==0.20.1
+torch==2.8.0
+torchvision==0.23.1
 pydantic==2.11.7
 hydra-core
 wandb
@@ -20,3 +20,4 @@ pymodbus
 pyrealsense2
 dex_retargeting
 mujoco
+bitsandbytes==0.47.0

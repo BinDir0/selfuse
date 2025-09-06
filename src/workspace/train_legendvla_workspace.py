@@ -25,6 +25,7 @@ import bitsandbytes as bnb
 import einops
 from transformers import AutoTokenizer
 from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate.utils import TorchDynamoPlugin
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
@@ -72,12 +73,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         cfg = copy.deepcopy(self.cfg)
         
         # # Configure TorchDynamoPlugin
-        # dynamo_plugin = TorchDynamoPlugin(
-        #     backend="inductor",  # Options: "inductor", "aot_eager", "aot_nvfuser", etc.
-        #     mode="default",      # Options: "default", "reduce-overhead", "max-autotune"
-        #     fullgraph=True,
-        #     dynamic=False
-        # )
+        dynamo_plugin = TorchDynamoPlugin(
+            backend="inductor",  # Options: "inductor", "aot_eager", "aot_nvfuser", etc.
+            mode="default",      # Options: "default", "reduce-overhead", "max-autotune"
+            fullgraph=False,
+            dynamic=False
+        )
 
         # Set GPU device before initializing accelerator
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -90,7 +91,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             device_placement=True,
             kwargs_handlers=[ddp_kwargs],
             gradient_accumulation_steps=cfg.training.gradient_accumulate_every,
-            # dynamo_plugin=dynamo_plugin
+            dynamo_plugin=dynamo_plugin
         )
 
         if accelerator.is_main_process:
@@ -382,7 +383,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     break
                         
                         # Process action accuracy metrics
-                        print(f"rank: {local_rank}, eval_accuracy: {len(eval_accuracy)}")
                         if len(eval_accuracy) > 0:
                             # Average over batches
                             eval_accuracy = torch.stack(eval_accuracy)
@@ -402,7 +402,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
                                 
                                 # Create log message
-                                log_msg = f"Eval | L1 Loss: {eval_l1_loss.item():.3f} | "
+                                log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
                                 log_msg += " | ".join([
                                     f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
                                     for i, threshold in enumerate(eval_thresholds)

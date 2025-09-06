@@ -9,6 +9,7 @@ def get_action_accuracy(
     thresholds: List[float] = [0.1, 0.2],
 ) -> torch.FloatTensor:
     device = gt.device
+    assert gt.shape == pred.shape, "GT and pred must have the same shape"
     diff = torch.abs(gt - pred).reshape(-1, gt.shape[-1])
 
     # get the percentage of diff lower than threshold for all action dimensions

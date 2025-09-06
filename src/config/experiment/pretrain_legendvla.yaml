@@ -13,6 +13,7 @@ image_shape: [224, 224, 3]
 dataset_paths:
  - /share_data/datasets/taco/taco.zarr
  - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
+#  - /share_data/datasets/test/taco.zarr
 
 shape_meta: &shape_meta
   obs:
