@@ -393,8 +393,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             eval_l1_loss = accelerator.gather(eval_l1_loss)
                             
                             if accelerator.is_main_process:
-                                eval_accuracy = torch.sum(eval_accuracy, dim=0)
-                                eval_l1_loss = torch.sum(eval_l1_loss)
+                                eval_accuracy = torch.mean(eval_accuracy, dim=0)
+                                eval_l1_loss = torch.mean(eval_l1_loss)
                                 
                                 # Log accuracy metrics
                                 step_log['eval_l1_loss'] = eval_l1_loss.item()
