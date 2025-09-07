@@ -12,7 +12,6 @@ class ModelAveraging:
     """Model averaging with EMA and SWA support. Now supports resume from checkpoint."""
 
     def __init__(self, model, cfg, device):
-        print(f"ModelAveraging cfg: {cfg}")
         self.use_ema = cfg.ema.enabled
         self.use_swa = cfg.swa.enabled
         assert not (self.use_ema and self.use_swa), (

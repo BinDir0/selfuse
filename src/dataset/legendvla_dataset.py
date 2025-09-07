@@ -3,12 +3,16 @@ Propise dataset for LegendVLA
 Every action is the delta of the next predicted absolute state and the state at the beginning of the action chunk.
 '''
 
+### TODO: add gaussian blur & jitter to the image
+
 from typing import Dict
 import torch
 import numpy as np
 import copy
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+from torchvision import transforms
+from PIL import Image
 
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
@@ -31,8 +35,9 @@ class LegendVLADataset(BaseImageDataset):
             history=30,
             normalizer_dataloader_cfg=dict(),
             max_train_episodes=None,
-            image_size=(384, 384)
-            ):
+            image_size=(384, 384), 
+            train_mode=True,
+        ):
         
         super().__init__()
         self.zarr_paths = zarr_paths
@@ -47,6 +52,17 @@ class LegendVLADataset(BaseImageDataset):
         self.train_masks = []
         self.samplers = []
         self.sampler_lens = []
+
+        self.train_mode = train_mode
+        self.aug_transform = None
+        if self.train_mode:
+            self.aug_transform = transforms.Compose([
+                # ColorJitter: random change brightness, contrast, saturation, and hue
+                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+                # GaussianBlur: apply gaussian blur
+                # kernel_size must be odd
+                transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 2.0))
+            ])
         
         # Process each zarr file
         for zarr_path in zarr_paths:
@@ -92,7 +108,8 @@ class LegendVLADataset(BaseImageDataset):
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
-        
+        val_set.train_mode = False
+
         for i, replay_buffer in enumerate(self.replay_buffers):
             # Create validation set sampler
             sampler = SequenceSampler(
@@ -120,9 +137,23 @@ class LegendVLADataset(BaseImageDataset):
         image_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_image_steps - 1))]
         state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
 
+        images_to_process = sample['image'][image_slice]
+        if self.train_mode and self.aug_transform is not None:
+            augmented_images = []
+            for img_np in images_to_process:
+                # 1. convert NumPy array (H, W, C) to PIL Image
+                img_pil = Image.fromarray(img_np)
+                # 2. apply the defined augmentation
+                augmented_pil = self.aug_transform(img_pil)
+                # 3. convert the augmented PIL Image back to NumPy array
+                augmented_np = np.array(augmented_pil)
+                augmented_images.append(augmented_np)
+            # 4. stack the augmented images into a NumPy array
+            images_to_process = np.stack(augmented_images)
+
         # Process all images in batch
         # processed_frames = self._process_image_batch(sample['image'][T_slice])
-        processed_results = self.preprocessor(images=sample['image'][image_slice], text=instruction)
+        processed_results = self.preprocessor(images=images_to_process, text=instruction)
         processed_frames = processed_results['pixel_values'] # [T, C, H, W]
         tokenized_instruction = processed_results['input_ids'][0] # [L]
         attention_mask = processed_results['attention_mask'][0] # [L]

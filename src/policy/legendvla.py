@@ -431,6 +431,7 @@ class LegendVLA(nn.Module):
         human_action      x        x                  x         x           x 
         """
         bsz = attention_mask.size(0)
+        device = attention_mask.device
         proprio_start = self.max_image_text_tokens
         proprio_end = proprio_start + self.num_proprio_tokens
         human_action_start = proprio_end
@@ -439,6 +440,7 @@ class LegendVLA(nn.Module):
             (bsz, self.total_num_tokens, self.total_num_tokens),
             torch.finfo(dtype).min,
             dtype=dtype,
+            device=device,
         )  # smallest value, avoid using inf for softmax nan issues with padding
         for idx in range(bsz):
             cnt = image_text_token_cnts[idx].item()
@@ -458,15 +460,16 @@ class LegendVLA(nn.Module):
         causal_mask = causal_mask.unsqueeze(1)
 
         # position ids for each blocks --- start at 1
-        vlm_position_ids = torch.arange(1, self.max_image_text_tokens + 1).repeat(
+        vlm_position_ids = torch.arange(1, self.max_image_text_tokens + 1, device=device).repeat(
             bsz, 1
         )
-        proprio_position_ids = torch.arange(1, self.num_proprio_tokens + 1).repeat(
+        proprio_position_ids = torch.arange(1, self.num_proprio_tokens + 1, device=device).repeat(
             bsz, 1
         )
         human_action_position_ids = torch.arange(
             self.num_proprio_tokens + 1,
             self.num_proprio_tokens + self.num_human_action_tokens + 1,
+            device=device,
         ).repeat(bsz, 1)
         return causal_mask, vlm_position_ids, proprio_position_ids, human_action_position_ids
 

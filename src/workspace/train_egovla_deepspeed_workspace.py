@@ -29,7 +29,7 @@ from src.utils.json_logger import JsonLogger
 from src.model.common.lr_scheduler import get_scheduler
 import accelerate
 from accelerate import Accelerator, DistributedDataParallelKwargs
-from accelerate.utils import DummyOptim, DummyScheduler, tqdm
+from accelerate.utils import DummyOptim, DummyScheduler
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 # %%
@@ -197,10 +197,6 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
 
-                # ========= eval for this epoch ==========
-                policy = accelerator.unwrap_model(self.model)
-                policy.eval()
-
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0:
                     with torch.no_grad():
@@ -227,7 +223,7 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
                     # unwrap the model to save ckpt
-                    model_ddp = self.model
+                    model_ds = self.model
                     self.model = accelerator.unwrap_model(self.model)
 
                     # checkpointing
@@ -251,16 +247,16 @@ class TrainEgoVLAWorkspace(BaseWorkspace):
                         self.save_checkpoint(path=topk_ckpt_path)
 
                     # recover the DDP model
-                    self.model = model_ddp
+                    self.model = model_ds
 
                 # Save model at specific epochs without affecting best model saving
                 if self.epoch % cfg.training.ckpt_save_interval == 0 and accelerator.is_main_process:
-                    model_ddp = self.model
+                    model_ds = self.model
                     self.model = accelerator.unwrap_model(self.model)
                     save_dir = os.path.join(self.output_dir, 'epoch_checkpoints')
                     os.makedirs(save_dir, exist_ok=True)
                     self.save_checkpoint(path=os.path.join(save_dir, f'epoch={self.epoch}.ckpt'))
-                    self.model = model_ddp
+                    self.model = model_ds
 
                 # ========= eval end for this epoch ==========
                 # end of epoch
