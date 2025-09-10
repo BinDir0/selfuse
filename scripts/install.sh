@@ -23,3 +23,6 @@ pip install -r requirements.txt
 
 # install pdsh for deepspeed
 sudo apt-get install pdsh
+
+# install nccl for deepspeed
+sudo apt-get install libnccl2 libnccl-dev
