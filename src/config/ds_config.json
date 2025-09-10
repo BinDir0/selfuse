@@ -1,4 +1,7 @@
 {
+    "compile": {
+        "deepcompile": true
+    },
     "optimizer": {
         "type": "AdamW",
         "params": {

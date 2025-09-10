@@ -897,6 +897,7 @@ class LegendVLA(nn.Module):
                 - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
                 - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
                 - human_actions (torch.FloatTensor): [B, horizon_steps, human_action_dim] Ground truth human actions
+                - human_actions_valid_mask (torch.BoolTensor): [B, horizon_steps, human_action_dim] Valid mask for human actions
                 - t (torch.FloatTensor): [B] Time steps for flow matching (0 to 1)
 
         Note: 
@@ -917,6 +918,7 @@ class LegendVLA(nn.Module):
         human_action_position_ids = batch["human_action_position_ids"]
         proprios = batch["proprios"]
         human_actions = batch["human_actions"]
+        human_actions_valid_mask = batch["human_actions_valid_mask"]
         t = batch["t"]
 
         # normalize proprio
@@ -967,7 +969,10 @@ class LegendVLA(nn.Module):
 
         # compare to true velocity
         d_psi = x1 - (1 - self.flow_sig_min) * x0
-        return torch.mean((v_psi - d_psi) ** 2)
+
+        loss = (v_psi - d_psi) ** 2
+        masked_loss = torch.where(human_actions_valid_mask, loss, torch.zeros_like(loss))
+        return torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
 
     def compute_vlm_loss(self, batch: dict) -> torch.FloatTensor:
         """

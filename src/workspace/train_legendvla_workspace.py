@@ -147,7 +147,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Configure dataset and dataloader
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.dataset)
-        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.policy.cfg.pretrained_model_path, padding_side="right"
@@ -225,6 +224,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 train_dataloader, val_dataloader, self.model, self.action_optimizer, self.action_lr_scheduler
             )
 
+        # wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
+        # if accelerator.is_main_process:
+        #     wandb_tracker.watch(accelerator.unwrap_model(self.model), log="all", log_freq=10)
+
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
         if self.flow_sampling == "beta":
@@ -259,7 +262,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             # Forward pass
                             raw_loss = self.model(inputs)
                             accelerator.backward(raw_loss)
-                            
+
                             step_log = {}
                             # Gradient clipping
                             if accelerator.sync_gradients and cfg.training.clipping.enabled:
@@ -275,7 +278,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             if self.train_vlm:
                                 self.vlm_optimizer.step()
                                 self.vlm_lr_scheduler.step()
-                            
+
+                            '''
+                            if self.global_step % 10 == 0:
+                                target_param = accelerator.unwrap_model(self.model).get_parameter('human_action_decoder.weight')
+                                local_grad_norm = torch.linalg.norm(target_param.grad)
+                                local_param_norm = torch.linalg.norm(target_param)
+                                global_grad_norm = accelerator.gather(local_grad_norm)
+                                global_param_norm = accelerator.gather(local_param_norm)
+                                if accelerator.is_main_process:
+                                    print(f"dtype: global grad norm: {global_grad_norm.dtype}, global param norm: {global_param_norm.dtype}")
+                                    print(f"global grad norm: {global_grad_norm.float().cpu().detach().numpy()}, global param norm: {global_param_norm.float().cpu().detach().numpy()}")
+                                    print(f"average grad norm: {global_grad_norm.mean().item()}, average param norm: {global_param_norm.mean().item()}")
+                            '''
+
                             # Zero gradients
                             self.action_optimizer.zero_grad(set_to_none=True)
                             if self.train_vlm:
@@ -366,17 +382,25 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 # Compute action accuracy if actions are available
                                 if 'human_actions' in inputs:
                                     gt_actions = inputs['human_actions']
+                                    human_actions_valid_mask = inputs['human_actions_valid_mask']
                                     # Get action predictions
                                     with torch.inference_mode():
                                         with torch.autocast(device_type=accelerator.device.type, dtype=self.dtype):
                                             pred_actions = policy.infer_human_action(inputs)
                                     
+                                    gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
+                                    pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
+                                    
                                     # Compute accuracy metrics
-                                    batch_accuracy = get_action_accuracy(gt_actions, pred_actions, eval_thresholds)
+                                    batch_accuracy = get_action_accuracy(
+                                        gt_actions,
+                                        pred_actions,
+                                        eval_thresholds,
+                                    )
                                     eval_accuracy.append(batch_accuracy)
                                     
                                     # Compute L1 loss
-                                    batch_l1_loss = torch.nn.functional.l1_loss(pred_actions, gt_actions)
+                                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / torch.sum(human_actions_valid_mask)
                                     eval_l1_loss.append(batch_l1_loss)
                                 
                                 if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
@@ -469,6 +493,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         images = batch["pixel_value"]
         proprios = batch["proprio"]
         human_actions = batch["human_action"]
+        # TODO: for temporary debug
+        human_actions_valid_mask = ~torch.zeros_like(human_actions, dtype=torch.bool, device=human_actions.device)
+        human_actions_valid_mask[human_actions == 0.0] = False
+
         input_ids = batch["input_id"]
 
         # Get unwrapped model for mask building
@@ -477,6 +505,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             model = self.model.module
         
         # Build causal mask and position ids
+        # We need to move the new created tensors to the same device as the input prepared by the accelerate
         causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
             model.build_causal_mask_and_position_ids(
                 batch["attention_mask"], self.dtype
@@ -491,6 +520,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "human_action_position_ids": action_position_ids,
             "proprios": proprios.to(self.dtype),
             "human_actions": human_actions.to(self.dtype),
+            "human_actions_valid_mask": human_actions_valid_mask,
         }
         
         if split_mask:
@@ -504,7 +534,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # Sample flow matching timesteps
         if sample_fm_time:
-            inputs["t"] = self.sample_fm_time(len(input_ids)).to(self.dtype)
+            # We need to move the new created tensors to the same device as the input prepared by the accelerate
+            inputs["t"] = self.sample_fm_time(len(input_ids)).to(self.dtype).to(input_ids.device)
 
         return inputs
 

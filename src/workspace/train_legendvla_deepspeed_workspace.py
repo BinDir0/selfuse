@@ -99,15 +99,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         model = self.model  # Get unwrapped model for parameter access
         
         # Action optimizer
-        action_optimizer_grouped_parameters = self.get_grouped_parameters(
+        all_trainable_parameters = self.get_grouped_parameters(
             model.human_action_expert_parameters, 
             cfg.optimizer.action, 
-        )
-        self.action_optimizer = DummyOptim(
-            action_optimizer_grouped_parameters, 
-            lr=cfg.optimizer.action.lr, 
-            betas=cfg.optimizer.action.betas, 
-            fused=True
         )
         
         # VLM optimizer (if training VLM)
@@ -116,21 +110,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 vlm_trained_parameters = model.lora_trainable_vlm_parameters
             else:
                 vlm_trained_parameters = model.trainable_vlm_parameters
-            vlm_optimizer_grouped_parameters = self.get_grouped_parameters(
+            vlm_trainable_parameters = self.get_grouped_parameters(
                 vlm_trained_parameters, 
                 cfg.optimizer.vlm, 
             )
-            self.vlm_optimizer = DummyOptim(
-                vlm_optimizer_grouped_parameters, 
-                lr=cfg.optimizer.vlm.lr, 
-                betas=cfg.optimizer.vlm.betas, 
-                fused=True
-            )
+            all_trainable_parameters.extend(vlm_trainable_parameters)
+
+        self.optimizer = DummyOptim(
+            all_trainable_parameters, 
+            fused=True
+        )
 
         # Configure dataset and dataloader
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.dataset)
-        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.policy.cfg.pretrained_model_path, padding_side="right"
@@ -171,18 +164,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # Configure learning rate schedulers
         max_train_steps = len(train_dataloader) * cfg.training.num_epochs
-        self.action_lr_scheduler = DummyScheduler(
-            optimizer=self.action_optimizer,
+        self.lr_scheduler = DummyScheduler(
+            optimizer=self.optimizer,
             warmup_num_steps=cfg.training.lr_warmup_steps,
             total_num_steps=max_train_steps,
         )
-        
-        if self.train_vlm:
-            self.vlm_lr_scheduler = DummyScheduler(
-                optimizer=self.vlm_optimizer,
-                warmup_num_steps=cfg.training.lr_warmup_steps,
-                total_num_steps=max_train_steps,
-            )
 
         # Configure checkpoint manager (if available)
         topk_manager = TopKCheckpointManager(
@@ -191,14 +177,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         )
 
         # Prepare everything with Accelerate
-        if self.train_vlm:
-            train_dataloader, val_dataloader, self.model, self.action_optimizer, self.vlm_optimizer, self.action_lr_scheduler, self.vlm_lr_scheduler = accelerator.prepare(
-                train_dataloader, val_dataloader, self.model, self.action_optimizer, self.vlm_optimizer, self.action_lr_scheduler, self.vlm_lr_scheduler
-            )
-        else:
-            train_dataloader, val_dataloader, self.model, self.action_optimizer, self.action_lr_scheduler = accelerator.prepare(
-                train_dataloader, val_dataloader, self.model, self.action_optimizer, self.action_lr_scheduler
-            )
+        train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
+            train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler
+        )
+
+        # wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
+        # if accelerator.is_main_process:
+        #     wandb_tracker.watch(accelerator.unwrap_model(self.model), log="all", log_freq=10)
 
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
@@ -218,10 +203,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.model_averaging = ModelAveraging(accelerator.unwrap_model(self.model), cfg.training.average, accelerator.device)
 
         # Training loop
+        if accelerator.is_main_process:
+            print(f"Training with {len(train_dataloader)} steps per epoch")
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger:
             for _ in range(cfg.training.num_epochs):
                 self.model.train()
+                step_log = dict()
                 train_losses = list()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec, 
@@ -230,12 +218,18 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         with accelerator.accumulate(self.model):
                             # Preprocess batch
                             inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
-                            
+
+                            '''
+                            print(f"global rank : {accelerator.process_index}\n \
+                            human actions: {inputs['human_actions'].shape, inputs['human_actions'][0].float().cpu().numpy().min(axis=0)}\n \
+                            human actions valid mask: {inputs['human_actions_valid_mask'].shape, inputs['human_actions_valid_mask'][0, 0].cpu().numpy()}")
+                            # break
+                            '''
+
                             # Forward pass
                             raw_loss = self.model(inputs)
                             accelerator.backward(raw_loss)
-                            
-                            step_log = {}
+
                             # Gradient clipping
                             if accelerator.sync_gradients and cfg.training.clipping.enabled:
                                 total_norm = accelerator.clip_grad_norm_(
@@ -243,18 +237,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     float('inf')
                                 )
                                 step_log['grad_norm'] = total_norm
-                            
+
                             # Optimizer step
-                            self.action_optimizer.step()
-                            self.action_lr_scheduler.step()
-                            if self.train_vlm:
-                                self.vlm_optimizer.step()
-                                self.vlm_lr_scheduler.step()
-                            
+                            self.optimizer.step()
+                            self.lr_scheduler.step()
+
                             # Zero gradients
-                            self.action_optimizer.zero_grad(set_to_none=True)
-                            if self.train_vlm:
-                                self.vlm_optimizer.zero_grad(set_to_none=True)
+                            self.optimizer.zero_grad(set_to_none=True)
                             
                             self.global_step += 1
 
@@ -274,10 +263,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 'global_step': self.global_step,
                                 'update_step': self.update_step,
                                 'epoch': self.epoch,
-                                'action_lr': self.action_lr_scheduler.get_last_lr()[0],
+                                'lr': self.lr_scheduler.get_last_lr()[0],
                             })
-                            if self.train_vlm:
-                                step_log['vlm_lr'] = self.vlm_lr_scheduler.get_last_lr()[0]
 
                             is_last_batch = (batch_idx == (len(train_dataloader)-1))
                             if not is_last_batch and accelerator.sync_gradients:
@@ -344,17 +331,25 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 # Compute action accuracy if actions are available
                                 if 'human_actions' in inputs:
                                     gt_actions = inputs['human_actions']
+                                    human_actions_valid_mask = inputs['human_actions_valid_mask']
                                     # Get action predictions
                                     with torch.inference_mode():
                                         with torch.autocast(device_type=accelerator.device.type, dtype=self.dtype):
                                             pred_actions = policy.infer_human_action(inputs)
                                     
+                                    gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
+                                    pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
+                                    
                                     # Compute accuracy metrics
-                                    batch_accuracy = get_action_accuracy(gt_actions, pred_actions, eval_thresholds)
+                                    batch_accuracy = get_action_accuracy(
+                                        gt_actions,
+                                        pred_actions,
+                                        eval_thresholds,
+                                    )
                                     eval_accuracy.append(batch_accuracy)
                                     
                                     # Compute L1 loss
-                                    batch_l1_loss = torch.nn.functional.l1_loss(pred_actions, gt_actions)
+                                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / torch.sum(human_actions_valid_mask)
                                     eval_l1_loss.append(batch_l1_loss)
                                 
                                 if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
@@ -449,6 +444,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         images = batch["pixel_value"]
         proprios = batch["proprio"]
         human_actions = batch["human_action"]
+        # TODO: for temporary debug
+        human_actions_valid_mask = ~torch.zeros_like(human_actions, dtype=torch.bool, device=human_actions.device)
+        human_actions_valid_mask[human_actions == 0.0] = False
+
         input_ids = batch["input_id"]
 
         # Get unwrapped model for mask building
@@ -472,6 +471,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "human_action_position_ids": action_position_ids,
             "proprios": proprios.to(self.dtype),
             "human_actions": human_actions.to(self.dtype),
+            "human_actions_valid_mask": human_actions_valid_mask,
         }
         
         if split_mask:
@@ -491,12 +491,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         return inputs
 
     def get_grouped_parameters(self, param_list, cfg):
+        '''
+        Args:
+            param_list: list of parameters from some part of the model
+            cfg: config
+        Returns:
+            optimizer_grouped_parameters: list of parameter groups
+        '''
         param_list = [p for p in param_list if p.requires_grad]
         decay_params = [p for p in param_list if p.dim() >= 2]
         nodecay_params = [p for p in param_list if p.dim() < 2]
         optimizer_grouped_parameters = [
-            {'params': decay_params, 'weight_decay': cfg.weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
+            {'params': decay_params, 'weight_decay': cfg.weight_decay, 'lr': cfg.lr, 'betas': cfg.betas},
+            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': cfg.lr, 'betas': cfg.betas}
         ]
         return optimizer_grouped_parameters
 
