@@ -969,7 +969,98 @@ class LegendVLA(nn.Module):
         d_psi = x1 - (1 - self.flow_sig_min) * x0
         return torch.mean((v_psi - d_psi) ** 2)
 
-
+    def compute_vlm_loss(self, batch: dict) -> torch.FloatTensor:
+        """
+        Compute VLM-only loss for vision-language understanding training.
+        
+        This method focuses on training the vision-language components without
+        involving action prediction or flow matching.
+        
+        Args:
+            inputs (dict): Input dictionary containing:
+                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
+                - attention_mask (torch.FloatTensor, optional): [B, seq_len] Attention mask
+                - position_ids (torch.LongTensor, optional): [B, seq_len] Position IDs
+        
+        Returns:
+            torch.FloatTensor: VLM loss for vision-language understanding
+        """
+        # Extract inputs
+        input_ids = batch["input_ids"]
+        pixel_values = batch["pixel_values"]
+        causal_mask = batch["causal_mask"]
+        vlm_position_ids = batch["vlm_position_ids"]
+        proprio_position_ids = batch["proprio_position_ids"]
+        human_action_position_ids = batch["human_action_position_ids"]
+        proprios = batch["proprios"]
+        human_actions = batch["human_actions"]
+        labels = batch["labels"]
+        
+        dtype, device = pixel_values.dtype, pixel_values.device
+        bsz, seq_len = input_ids.shape
+        
+        # Create default attention mask if not provided
+        if attention_mask is None:
+            attention_mask = (input_ids != self.pad_token_id).float()
+        
+        # Create default position IDs if not provided
+        if position_ids is None:
+            position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
+        
+        # Forward pass through vision and text embedding
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        
+        # Create causal attention mask for VLM
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=dtype))
+        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+        causal_mask = causal_mask.expand(bsz, 1, seq_len, seq_len)
+        
+        # Apply attention mask
+        if attention_mask is not None:
+            # Convert attention mask to match causal mask format
+            expanded_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
+            expanded_attention_mask = expanded_attention_mask.expand(bsz, 1, seq_len, seq_len)
+            causal_mask = causal_mask * expanded_attention_mask
+        
+        # Forward pass through VLM mixture
+        hidden_states = self.joint_model(
+            attention_mask=causal_mask,
+            position_ids_all={"vlm": position_ids},
+            embeds_all={"vlm": inputs_embeds},
+            kv_caches=None,
+            return_caches=False,
+        )
+        
+        # Language modeling loss (next token prediction)
+        if self.use_lm_head:
+            # Use language model head for token prediction
+            logits = self.lm_head(hidden_states)
+        else:
+            # Use embedding weights for token prediction (weight tying)
+            logits = torch.matmul(hidden_states, self.embed_tokens.weight.T)
+        
+        # Shift logits and labels for next token prediction
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = input_ids[..., 1:].contiguous()
+        
+        # Only compute loss on text tokens (not image tokens or padding)
+        text_mask = (shift_labels != self.image_token_index) & (shift_labels != self.pad_token_id)
+        
+        # Compute cross-entropy loss
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+        flat_labels = shift_labels.view(-1)
+        flat_loss = loss_fct(flat_logits, flat_labels)
+        
+        # Apply text mask and compute mean loss
+        flat_text_mask = text_mask.view(-1)
+        if flat_text_mask.sum() > 0:
+            vlm_loss = (flat_loss * flat_text_mask.float()).sum() / flat_text_mask.sum()
+        else:
+            vlm_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        
+        return vlm_loss
 class LegendVLAInference(LegendVLA):
     def forward(
         self,
