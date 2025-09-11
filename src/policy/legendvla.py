@@ -119,6 +119,18 @@ class LegendVLA(nn.Module):
             self.lm_head.weight = self.embed_tokens.weight  # tie weights
 
         self.normalizer = LinearNormalizer()
+        
+        # Optional MANO motion adapter for action discretization
+        self.mano_adapter = None
+        if cfg.get("use_mano_adapter", False):
+            try:
+                from src.model.motion.mano_adapter import ManoMotionAdapter
+                self.mano_adapter = ManoMotionAdapter(cfg)
+                log.info("Initialized MANO adapter for action discretization")
+            except ImportError as e:
+                log.warning(f"Failed to import ManoMotionAdapter: {e}")
+            except Exception as e:
+                log.warning(f"Failed to initialize MANO adapter: {e}")
 
     @property
     def human_action_expert_parameters(self):
@@ -974,22 +986,32 @@ class LegendVLA(nn.Module):
         masked_loss = torch.where(human_actions_valid_mask, loss, torch.zeros_like(loss))
         return torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
 
-    def compute_vlm_loss(self, batch: dict) -> torch.FloatTensor:
+    def compute_vla_loss(self, batch: dict) -> dict:
         """
-        Compute VLM-only loss for vision-language understanding training.
+        Compute combined VLA loss with two components: cross-entropy loss (VLM) and flow matching loss (whole VLA).
         
-        This method focuses on training the vision-language components without
-        involving action prediction or flow matching.
+        This method computes both vision-language understanding loss and action prediction loss
+        for comprehensive VLA training.
         
         Args:
-            inputs (dict): Input dictionary containing:
+            batch (dict): Input dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
-                - attention_mask (torch.FloatTensor, optional): [B, seq_len] Attention mask
-                - position_ids (torch.LongTensor, optional): [B, seq_len] Position IDs
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
+                - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] Full causal attention mask
+                - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
+                - proprio_position_ids (torch.LongTensor): [B, num_proprio] Position IDs for proprio tokens
+                - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
+                - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
+                - human_actions (torch.FloatTensor): [B, horizon_steps, human_action_dim] Ground truth human actions
+                - human_actions_valid_mask (torch.BoolTensor): [B, horizon_steps, human_action_dim] Valid mask for human actions
+                - t (torch.FloatTensor): [B] Time steps for flow matching (0 to 1)
+                - labels (torch.LongTensor, optional): [B, seq_len] Labels for language modeling loss
         
         Returns:
-            torch.FloatTensor: VLM loss for vision-language understanding
+            dict: Dictionary containing:
+                - total_loss (torch.FloatTensor): Combined loss
+                - vlm_loss (torch.FloatTensor): Cross-entropy loss for VLM
+                - flow_loss (torch.FloatTensor): Flow matching loss for action prediction
         """
         # Extract inputs
         input_ids = batch["input_ids"]
@@ -1000,72 +1022,179 @@ class LegendVLA(nn.Module):
         human_action_position_ids = batch["human_action_position_ids"]
         proprios = batch["proprios"]
         human_actions = batch["human_actions"]
-        labels = batch["labels"]
+        human_actions_valid_mask = batch["human_actions_valid_mask"]
+        t = batch["t"]
+        labels = batch.get("labels", None)
         
         dtype, device = pixel_values.dtype, pixel_values.device
         bsz, seq_len = input_ids.shape
         
-        # Create default attention mask if not provided
-        if attention_mask is None:
-            attention_mask = (input_ids != self.pad_token_id).float()
-        
-        # Create default position IDs if not provided
-        if position_ids is None:
-            position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
+        # normalize proprio
+        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
+        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
         
         # Forward pass through vision and text embedding
         inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
         
-        # Create causal attention mask for VLM
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=device, dtype=dtype))
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
-        causal_mask = causal_mask.expand(bsz, 1, seq_len, seq_len)
+        # Encode proprio
+        proprio_embeds = self.proprio_encoder(proprios)
         
-        # Apply attention mask
-        if attention_mask is not None:
-            # Convert attention mask to match causal mask format
-            expanded_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
-            expanded_attention_mask = expanded_attention_mask.expand(bsz, 1, seq_len, seq_len)
-            causal_mask = causal_mask * expanded_attention_mask
+        # ========== Part 1: VLM loss (Cross-entropy + Action cross-entropy) ==========
+        vlm_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        action_ce_loss = torch.tensor(0.0, device=device, dtype=dtype)
         
-        # Forward pass through VLM mixture
-        hidden_states = self.joint_model(
-            attention_mask=causal_mask,
-            position_ids_all={"vlm": position_ids},
+        # Create VLM-only causal mask (only for image/text tokens)
+        vlm_seq_len = self.max_image_text_tokens
+        vlm_causal_mask = causal_mask[:, :, :vlm_seq_len, :vlm_seq_len]
+        
+        # Forward pass through VLM mixture only
+        vlm_hidden_states = self.joint_model(
+            attention_mask=vlm_causal_mask,
+            position_ids_all={"vlm": vlm_position_ids},
             embeds_all={"vlm": inputs_embeds},
-            kv_caches=None,
+            kv_caches={},
             return_caches=False,
-        )
+        )["vlm"]
         
-        # Language modeling loss (next token prediction)
-        if self.use_lm_head:
-            # Use language model head for token prediction
-            logits = self.lm_head(hidden_states)
-        else:
-            # Use embedding weights for token prediction (weight tying)
-            logits = torch.matmul(hidden_states, self.embed_tokens.weight.T)
+        # 1.1: Language modeling loss (next token prediction)
+        if self.use_lm_head and labels is not None:
+            # Language modeling loss (next token prediction)
+            logits = self.lm_head(vlm_hidden_states)
+            
+            # Shift logits and labels for next token prediction
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            # Only compute loss on text tokens (not image tokens or padding)
+            text_mask = (shift_labels != self.image_token_index) & (shift_labels != self.pad_token_id)
+            
+            # Compute cross-entropy loss
+            loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.view(-1)
+            flat_loss = loss_fct(flat_logits, flat_labels)
+            
+            # Apply text mask and compute mean loss
+            flat_text_mask = text_mask.view(-1)
+            if flat_text_mask.sum() > 0:
+                vlm_loss = (flat_loss * flat_text_mask.float()).sum() / flat_text_mask.sum()
         
-        # Shift logits and labels for next token prediction
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = input_ids[..., 1:].contiguous()
+        # 1.2: Action discretization cross-entropy loss (VLM only)
+        action_ce_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        if (human_actions is not None and 
+            hasattr(self, 'mano_adapter') and 
+            self.mano_adapter is not None):
+            
+            # Split human_actions into parts for MANO encoding
+            # Assuming human_actions structure: [wrist, hand] where hand contains left/right hand features
+            wrist_actions = human_actions[..., :wrist_dim]  # [B, horizon_steps, wrist_dim]
+            hand_actions = human_actions[..., wrist_dim:]   # [B, horizon_steps, hand_dim]
+            # Encode continuous actions to discrete tokens as labels
+            # Note: You may need to reshape/split actions based on your MANO model structure
+            # Include both wrist and hand actions for complete action encoding
+            mano_list = [wrist_actions, hand_actions]  # This may need to be adjusted based on MANO model structure
+            discrete_action_tokens = self.mano_adapter.encode_motion(mano_list, normalize=True)  # [B, num_tokens]
+            
+            # Get action vocab size from mano adapter
+            if hasattr(self.mano_adapter, 'codebook_size_list') and self.mano_adapter.codebook_size_list:
+                action_vocab_size = sum(self.mano_adapter.codebook_size_list)
+                
+                # Project VLM hidden states to action token vocabulary
+                # We need an action head for this - create it dynamically if not exists
+                if not hasattr(self, '_action_head') or self._action_head is None:
+                    self._action_head = nn.Linear(
+                        self.image_text_hidden_size,
+                        action_vocab_size,
+                        bias=False,
+                    ).to(vlm_hidden_states.device)
+                
+                # Get action logits from VLM hidden states
+                action_logits = self._action_head(vlm_hidden_states)  # [B, max_image_text_tokens, action_vocab_size]
+                
+                # Match dimensions between logits and discrete tokens
+                if action_logits.size(1) != discrete_action_tokens.size(1):
+                    min_len = min(action_logits.size(1), discrete_action_tokens.size(1))
+                    action_logits = action_logits[:, :min_len, :]
+                    discrete_action_tokens = discrete_action_tokens[:, :min_len]
+                
+                # Reshape for cross-entropy loss computation
+                flat_logits = action_logits.view(-1, action_logits.size(-1))  # [B*seq_len, vocab_size]
+                flat_targets = discrete_action_tokens.view(-1)  # [B*seq_len]
+                
+                # Create valid mask
+                if human_actions_valid_mask.size(1) == action_logits.size(1):
+                    flat_valid_mask = human_actions_valid_mask.any(dim=-1).view(-1)  # [B*seq_len]
+                else:
+                    # Create a simple valid mask for all tokens
+                    flat_valid_mask = torch.ones(flat_targets.size(0), dtype=torch.bool, device=device)
+                
+                # Compute cross-entropy loss only on valid tokens
+                if flat_valid_mask.sum() > 0:
+                    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+                    flat_loss = loss_fct(flat_logits, flat_targets)
+                    action_ce_loss = (flat_loss * flat_valid_mask.float()).sum() / flat_valid_mask.sum()
+            else:
+                log.warning("MANO adapter codebook size not available for action cross-entropy loss")
+                    
+                
+        # Combine VLM losses
+        combined_vlm_loss = vlm_loss + action_ce_loss
         
-        # Only compute loss on text tokens (not image tokens or padding)
-        text_mask = (shift_labels != self.image_token_index) & (shift_labels != self.pad_token_id)
+        # ========== Part 2: Flow matching loss (whole VLA) ==========
+        flow_loss = torch.tensor(0.0, device=device, dtype=dtype)
         
-        # Compute cross-entropy loss
-        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-        flat_labels = shift_labels.view(-1)
-        flat_loss = loss_fct(flat_logits, flat_labels)
+        # Only compute flow matching loss if dataset has human actions
+        if human_actions is not None and human_actions_valid_mask is not None and t is not None:
+            # Generate noisy action for flow matching
+            x0 = torch.randn_like(human_actions, device=device, dtype=dtype)
+            x1 = human_actions.clone()
+            # Normalize action
+            x1[..., wrist_dim:] = self.normalizer['action/hand'](x1[..., wrist_dim:])
+            psi_t = self.psi_t(x0, x1, t)
+            
+            # Encode action and time
+            time_cond = self.time_embedding(t)
+            if self.action_expert_adaptive_mode:
+                human_action_embeds = self.human_action_encoder(psi_t)
+            else:
+                human_action_embeds = self.human_action_encoder(psi_t, time_cond)
+            
+            # Forward pass through full joint model (VLM + proprio + action)
+            human_action_output = self.joint_model(
+                attention_mask=causal_mask,
+                position_ids_all={
+                    "vlm": vlm_position_ids,
+                    "proprio": proprio_position_ids,
+                    "human_action": human_action_position_ids,
+                },
+                embeds_all={
+                    "vlm": inputs_embeds,
+                    "proprio": proprio_embeds,
+                    "human_action": human_action_embeds,
+                },
+                time_cond=time_cond,
+                kv_caches={},  # no caching during training
+            )["human_action"]
+            
+            # Decode action velocity
+            v_psi = self.human_action_decoder(human_action_output)
+            
+            # Compute flow matching loss
+            d_psi = x1 - (1 - self.flow_sig_min) * x0
+            loss = (v_psi - d_psi) ** 2
+            masked_loss = torch.where(human_actions_valid_mask, loss, torch.zeros_like(loss))
+            flow_loss = torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
         
-        # Apply text mask and compute mean loss
-        flat_text_mask = text_mask.view(-1)
-        if flat_text_mask.sum() > 0:
-            vlm_loss = (flat_loss * flat_text_mask.float()).sum() / flat_text_mask.sum()
-        else:
-            vlm_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        # ========== Combine losses ==========
+        total_loss = combined_vlm_loss + flow_loss
         
-        return vlm_loss
+        return {
+            "total_loss": total_loss,
+            "vlm_loss": combined_vlm_loss,
+            "flow_loss": flow_loss,
+            "vlm_ce_loss": vlm_loss,
+            "action_ce_loss": action_ce_loss,
+        }
 class LegendVLAInference(LegendVLA):
     def forward(
         self,
