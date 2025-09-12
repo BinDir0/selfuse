@@ -133,6 +133,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.tokenizer,
             num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
             max_seq_len=cfg.policy.cfg.max_image_text_tokens,
+            ignore_index=cfg.ignore_index,
             image_size=cfg.policy.vision_tower.config.image_size,
             tokenizer_padding=cfg.tokenizer_padding,
         )

@@ -258,6 +258,7 @@ def forward_mixture_attn(
 
     # Perform the calculation as usual, Q * K^T / sqrt(head_dim)
     # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
+    # TODO: We need to change the code below when we use Knowledge Insulation training recipe
     attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
         mixtures[active_mixture_names[0]].head_dim
     )
@@ -309,6 +310,7 @@ class JointModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.knowledge_insulation = config.knowledge_insulation
         self.num_hidden_layers = config.num_hidden_layers
         self.num_mixture = len(config.mixture)
         self.cache_names = [

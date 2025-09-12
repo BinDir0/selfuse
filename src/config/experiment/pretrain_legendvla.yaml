@@ -10,10 +10,12 @@ lora_r: 32
 lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
-dataset_paths:
+vla_dataset_paths:
  - /share_data/datasets/taco/taco.zarr
  - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
 #  - /share_data/datasets/test/taco.zarr
+vlm_dataset_paths:
+
 
 shape_meta: &shape_meta
   obs:
@@ -34,8 +36,9 @@ shape_meta: &shape_meta
     horizon: ${n_action_steps}
 
 dataset:
-  _target_: src.dataset.legendvla_dataset.LegendVLADataset
-  zarr_paths: ${dataset_paths}
+  _target_: src.dataset.legendvla_dataset.LegendUnifiedDataset
+  zarr_paths: ${vla_dataset_paths}
+  zarr_paths: ${vlm_dataset_paths}
   horizon: ${eval:'${n_action_steps}+${dataset.history}'}
   pad_before: ${eval:'${dataset.history}+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}
@@ -176,20 +179,23 @@ time_max_period: 100.0
 action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
 
 # Fixed
+ignore_index: -100
 image_token_index: 257152
 vocab_size: 257216
 pad_token_id: 0
 patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
 text_seq_len: 32
-max_image_text_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}'} 
-tokenizer_padding: max_length # instead of truncating to longest
+answer_seq_len: 160 # TODO: check 
+max_image_text_answer_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
+tokenizer_padding: max_length # instead of truncating to longest, for best efficiency
 
 policy: 
   _target_: src.policy.legendvla.LegendVLA
   cfg: 
     vocab_size: ${vocab_size}
     pad_token_id: ${pad_token_id}
+    ignore_index: ${ignore_index}
     image_token_index: ${image_token_index}
     use_lm_head: False
     max_image_text_tokens: ${max_image_text_tokens}
@@ -235,6 +241,7 @@ policy:
   joint_model:
     _target_: src.model.moe.joint_model.JointModel
     config:
+      knowledge_insulation: False
       action_expert_adaptive_mode: ${action_expert_adaptive_mode}
       time_hidden_size: ${time_hidden_size}
       mixture: ${mixture}

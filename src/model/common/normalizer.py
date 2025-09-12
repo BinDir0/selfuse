@@ -190,6 +190,16 @@ class LinearNormalizer(DictOfTensorMixin):
         
         self.streaming_stats = {}
         delattr(self, 'streaming_config')
+
+    def ignore_dim(self, key: str, dim: slice):
+        """
+        ignore some dimensions when normalizing, e.g. the wrist rotation
+        """
+        if key not in self.params_dict:
+            raise RuntimeError(f"Not initialized with key: {key}")
+        params = self.params_dict[key]
+        params['scale'][dim] = 1.0
+        params['offset'][dim] = 0.0
     
     def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> Union[Dict, torch.Tensor]:
         return self.normalize(x)

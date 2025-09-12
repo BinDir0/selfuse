@@ -37,6 +37,7 @@ from src.model.common.lr_scheduler import get_scheduler
 from src.model.common.model_average import ModelAveraging
 from src.utils.metric import get_action_accuracy
 from src.utils.optim import CosineAnnealingWarmupRestarts, get_num_params_in_billions
+from src.utils.pytorch_util import dict_apply
 
 
 import wandb
@@ -156,6 +157,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.tokenizer,
             num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
             max_seq_len=cfg.policy.cfg.max_image_text_tokens,
+            ignore_index=cfg.ignore_index,
             image_size=cfg.policy.vision_tower.config.image_size,
             tokenizer_padding=cfg.tokenizer_padding,
         )
@@ -260,8 +262,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
                             
                             # Forward pass
-                            raw_loss = self.model(inputs)
-                            accelerator.backward(raw_loss)
+                            raw_loss = self.model("train", inputs)
+                            accelerator.backward(raw_loss["total_loss"])
 
                             step_log = {}
                             # Gradient clipping
@@ -279,19 +281,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 self.vlm_optimizer.step()
                                 self.vlm_lr_scheduler.step()
 
-                            '''
-                            if self.global_step % 10 == 0:
-                                target_param = accelerator.unwrap_model(self.model).get_parameter('human_action_decoder.weight')
-                                local_grad_norm = torch.linalg.norm(target_param.grad)
-                                local_param_norm = torch.linalg.norm(target_param)
-                                global_grad_norm = accelerator.gather(local_grad_norm)
-                                global_param_norm = accelerator.gather(local_param_norm)
-                                if accelerator.is_main_process:
-                                    print(f"dtype: global grad norm: {global_grad_norm.dtype}, global param norm: {global_param_norm.dtype}")
-                                    print(f"global grad norm: {global_grad_norm.float().cpu().detach().numpy()}, global param norm: {global_param_norm.float().cpu().detach().numpy()}")
-                                    print(f"average grad norm: {global_grad_norm.mean().item()}, average param norm: {global_param_norm.mean().item()}")
-                            '''
-
                             # Zero gradients
                             self.action_optimizer.zero_grad(set_to_none=True)
                             if self.train_vlm:
@@ -307,16 +296,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 self.model_averaging.maybe_update(self.update_step)
 
                             # Logging
-                            raw_loss_cpu = raw_loss.item()
-                            tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+                            raw_loss_cpu = dict_apply(raw_loss, lambda x: x.item())
+                            tepoch.set_postfix(refresh=False, **raw_loss_cpu)
                             train_losses.append(raw_loss_cpu)
                             step_log.update({
-                                'train_loss': raw_loss_cpu,
                                 'global_step': self.global_step,
                                 'update_step': self.update_step,
                                 'epoch': self.epoch,
                                 'action_lr': self.action_lr_scheduler.get_last_lr()[0],
                             })
+                            for key, loss in raw_loss_cpu.items():
+                                step_log[key] = loss
                             if self.train_vlm:
                                 step_log['vlm_lr'] = self.vlm_lr_scheduler.get_last_lr()[0]
 
@@ -329,13 +319,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 break
 
                 # End of epoch processing
-                train_loss = np.mean(train_losses)
-                step_log['train_loss'] = train_loss
+                train_loss = dict_apply(train_losses, lambda x: np.mean(x))
+                for key, loss in train_loss.items():
+                    step_log[key] = loss
 
                 # Validation
                 if (self.epoch % cfg.training.val_every) == 0 and val_dataloader is not None:
                     with torch.no_grad():
-                        val_losses = list()
+                        val_losses = dict()
                         
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec, 
@@ -344,29 +335,30 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
                                 
                                 # Compute validation loss
-                                loss = self.model(inputs)
-                                val_losses.append(loss)
+                                loss = self.model("train", inputs)
+                                for key, loss in loss.items():
+                                    if key not in val_losses:
+                                        val_losses[key] = list()
+                                    val_losses[key].append(loss)
                                 
                                 if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
                         
                         # Process validation loss
                         if len(val_losses) > 0:
-                            val_losses = torch.stack(val_losses)
-                            val_losses = accelerator.gather(val_losses)
+                            for key in val_losses.keys():
+                                val_losses[key] = torch.stack(val_losses[key])
+                                val_losses[key] = accelerator.gather(val_losses[key])
                             
                             if accelerator.is_main_process:
-                                val_loss = torch.mean(val_losses).item()
-                                step_log['val_loss'] = val_loss
+                                for key in val_losses.keys():
+                                    val_losses[key] = torch.mean(val_losses[key]).item()
+                                    step_log[key] = val_losses[key]
 
                 # Sampling
                 if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
                     with torch.no_grad():
-                        # Get evaluation model (use averaged model if available)
-                        policy = self.model_averaging.get_unwrapped_averaged_model()
-                        # Set model to evaluation mode for validation
-                        policy.eval()
-                        
+                        self.model.eval()
                         # Initialize evaluation metrics
                         eval_thresholds = cfg.training.eval_thresholds
                         eval_accuracy = []
@@ -378,15 +370,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             for batch_idx, batch in enumerate(tepoch):
                                 # Preprocess batch
                                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
-                                inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
                                 # Compute action accuracy if actions are available
                                 if 'human_actions' in inputs:
                                     gt_actions = inputs['human_actions']
                                     human_actions_valid_mask = inputs['human_actions_valid_mask']
                                     # Get action predictions
-                                    with torch.inference_mode():
-                                        with torch.autocast(device_type=accelerator.device.type, dtype=self.dtype):
-                                            pred_actions = policy.infer_human_action(inputs)
+                                    pred_actions = self.model.forward("infer_human_action", inputs)
                                     
                                     gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
                                     pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
@@ -491,11 +480,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         """Preprocess batch for training"""
         # Extract data from batch
         images = batch["pixel_value"]
-        proprios = batch["proprio"]
         human_actions = batch["human_action"]
-        # TODO: for temporary debug
-        human_actions_valid_mask = ~torch.zeros_like(human_actions, dtype=torch.bool, device=human_actions.device)
-        human_actions_valid_mask[human_actions == 0.0] = False
+        human_actions_valid_mask = batch["human_actions_valid_mask"]
 
         input_ids = batch["input_id"]
 
@@ -506,7 +492,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         
         # Build causal mask and position ids
         # We need to move the new created tensors to the same device as the input prepared by the accelerate
-        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
+        # get causal mask by the first unignored index of labels 
+        causal_mask, vlm_position_ids, action_position_ids = (
             model.build_causal_mask_and_position_ids(
                 batch["attention_mask"], self.dtype
             )
@@ -516,18 +503,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "input_ids": input_ids,
             "pixel_values": images.to(self.dtype),
             "vlm_position_ids": vlm_position_ids,
-            "proprio_position_ids": proprio_position_ids,
             "human_action_position_ids": action_position_ids,
-            "proprios": proprios.to(self.dtype),
             "human_actions": human_actions.to(self.dtype),
             "human_actions_valid_mask": human_actions_valid_mask,
         }
         
         if split_mask:
-            image_text_proprio_mask, action_mask = (
+            image_text_mask, action_mask = (
                 model.split_full_mask_into_submasks(causal_mask)
             )
-            inputs["image_text_proprio_mask"] = image_text_proprio_mask
+            inputs["image_text_mask"] = image_text_mask
             inputs["human_action_mask"] = action_mask
         else:
             inputs["causal_mask"] = causal_mask

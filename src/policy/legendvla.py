@@ -47,24 +47,20 @@ class LegendVLA(nn.Module):
         self.use_lm_head = cfg.get("use_lm_head", False)
 
         self.max_image_text_tokens = cfg.max_image_text_tokens
-        self.num_proprio_tokens = shape_meta["obs"]["state"]["horizon"]
         self.num_human_action_tokens = shape_meta["action"]["horizon"]
         self.total_num_tokens = (
             self.max_image_text_tokens
-            + self.num_proprio_tokens
             + self.num_human_action_tokens
         )
 
         # Get hidden sizes from joint_model config
         self.image_text_hidden_size = joint_model.config.mixture.vlm.hidden_size
-        self.proprio_hidden_size = joint_model.config.mixture.proprio.hidden_size
         self.human_action_hidden_size = joint_model.config.mixture.human_action.hidden_size
 
         # Action parameterization
         self.num_inference_steps = cfg.num_inference_steps
         self.horizon_steps = shape_meta["action"]["horizon"]
         self.human_action_dim = shape_meta["action"]["shape"][0]
-        self.proprio_dim = shape_meta["obs"]["state"]["shape"][0]
         self.flow_sig_min = cfg.get("flow_sig_min", 0.001)
 
         # text input only
@@ -101,10 +97,6 @@ class LegendVLA(nn.Module):
             self.time_embedding = SinusoidalPosEmb(
                 self.human_action_hidden_size, cfg.time_max_period
             )
-        self.proprio_encoder = nn.Linear(
-            self.proprio_dim,
-            self.proprio_hidden_size,
-        )
         # Action decoder
         self.human_action_decoder = nn.Linear(
             self.human_action_hidden_size,
@@ -121,39 +113,25 @@ class LegendVLA(nn.Module):
             self.lm_head.weight = self.embed_tokens.weight  # tie weights
 
         self.normalizer = LinearNormalizer()
-        
-        # Optional MANO motion adapter for action discretization
-        self.mano_adapter = None
-        if cfg.get("use_mano_adapter", False):
-            try:
-                from src.model.motion.mano_adapter import ManoMotionAdapter
-                self.mano_adapter = ManoMotionAdapter(cfg)
-                log.info("Initialized MANO adapter for action discretization")
-            except ImportError as e:
-                log.warning(f"Failed to import ManoMotionAdapter: {e}")
-            except Exception as e:
-                log.warning(f"Failed to initialize MANO adapter: {e}")
+        self.CELoss = nn.CrossEntropyLoss(ignore_index=cfg.ignore_index)
 
     @property
     def human_action_expert_parameters(self):
         """
-        Get all trainable parameters for the action and proprio experts.
+        Get all trainable parameters for the human action experts.
         
         Returns:
             List[torch.nn.Parameter]: Parameters from:
                 - Human action encoder
                 - Human action decoder  
-                - Proprio encoder
-                - Human action mixture (shared with proprio)
+                - Human action mixture
         
-        Note: Human action and proprio share weights through tie_action_proprio_weights()
         """
         return (
             list(self.human_action_encoder.parameters())
             + list(self.human_action_decoder.parameters())
-            + list(self.proprio_encoder.parameters())
             + list(self.joint_model.mixtures["human_action"].parameters())
-        )  # note: human_action and proprio share weights
+        )
 
     @property
     def trainable_vlm_parameters(self):
@@ -191,6 +169,8 @@ class LegendVLA(nn.Module):
             if "lora_" in name:
                 params.append(param)
         params.extend(self.trainable_lora_gemma_parameters)
+
+        params.extend(list(self.embed_tokens.parameters()))
         return params
 
     @property
@@ -198,16 +178,14 @@ class LegendVLA(nn.Module):
         """
         Get all trainable parameters for the Gemma language model.
         
-        Excludes parameters that are not needed for training based on
-        _check_gemma_unused_parameter_by_name().
-        
         Returns:
             List[torch.nn.Parameter]: Trainable Gemma parameters
         """
         gemma_parameters = []
         for name, param in self.joint_model.mixtures["vlm"].named_parameters():
-            if not self._check_gemma_unused_parameter_by_name(name):
-                gemma_parameters.append(param)
+            gemma_parameters.append(param)
+        
+        gemma_parameters.extend(list(self.embed_tokens.parameters()))
         return gemma_parameters
 
     @property
@@ -222,9 +200,10 @@ class LegendVLA(nn.Module):
         """
         gemma_parameters = []
         for name, param in self.joint_model.mixtures["vlm"].named_parameters():
-            if not self._check_gemma_unused_parameter_by_name(name):
-                if "lora_" in name:
-                    gemma_parameters.append(param)
+            if "lora_" in name:
+                gemma_parameters.append(param)
+
+        gemma_parameters.extend(list(self.embed_tokens.parameters()))
         return gemma_parameters
 
     @log_execution_time(log)
@@ -308,33 +287,6 @@ class LegendVLA(nn.Module):
         self.joint_model.load_state_dict(joint_model_state_dict, strict=False)
         log.info("Loaded pre-trained weights for lm part of the joint model")
 
-    # TODO: may need to change this when we use Knowledge Insulation training recipe
-    def _check_gemma_unused_parameter_by_name(self, name: str) -> bool:
-        """
-        Check if a Gemma parameter should be excluded from training.
-        
-        Excludes parameters from the last layer that are not needed for training:
-        - Post-attention normalization
-        - MLP layers
-        - Output projection (o_proj)
-        - Value projection (v_proj)
-        
-        Args:
-            name (str): Parameter name to check
-        
-        Returns:
-            bool: True if parameter should be excluded, False otherwise
-        """
-        last_hidden_layer_index = self.joint_model.num_hidden_layers - 1
-        if (
-            f"{last_hidden_layer_index}.post" in name
-            or f"{last_hidden_layer_index}.mlp" in name
-            or f"{last_hidden_layer_index}.self_attn.o_proj" in name
-            or f"{last_hidden_layer_index}.self_attn.v_proj" in name
-        ):  # final norm is not initialized
-            return True
-        return False
-
     def freeze_non_lora_weights_in_vlm(self):
         """
         Freeze non-LoRA weights in VLM components while keeping LoRA weights trainable.
@@ -355,23 +307,8 @@ class LegendVLA(nn.Module):
         log.info("Froze non-lora weights in projector")
 
         for name, param in self.joint_model.mixtures["vlm"].named_parameters():
-            if not self._check_gemma_unused_parameter_by_name(name):
-                param.requires_grad = True if "lora_" in name else False
+            param.requires_grad = True if "lora_" in name else False
         log.info("Froze non-lora weights in lm part of the joint model")
-
-    def freeze_unused_weights(self):
-        """
-        Freeze weights that are not used during training.
-        
-        Freezes:
-        - Text embedding weights
-        - Last layer post-attention, MLP, and output projection weights in VLM
-        - Any LoRA weights in the unused parts
-        """
-        self.embed_tokens.weight.requires_grad = False
-        for name, param in self.joint_model.mixtures["vlm"].named_parameters():
-            if self._check_gemma_unused_parameter_by_name(name):
-                param.requires_grad = False
 
     def freeze_all_weights(self):
         """
@@ -382,15 +319,6 @@ class LegendVLA(nn.Module):
         """
         for _, param in self.named_parameters():
             param.requires_grad = False
-
-    def tie_action_proprio_weights(self):
-        """
-        Tie the proprio and human action mixture weights.
-        
-        This method shares the same mixture module between proprio and human action,
-        allowing them to share learned representations and reduce model size.
-        """
-        self.joint_model.mixtures["proprio"] = self.joint_model.mixtures["human_action"]
 
     def build_text_cache(self):
         """
@@ -411,6 +339,7 @@ class LegendVLA(nn.Module):
 
     # ---------- Input preparation ---------- #
 
+    # TODO: need to change this when we use Knowledge Insulation training recipe
     def build_causal_mask_and_position_ids(
         self, attention_mask: torch.Tensor, dtype: torch.dtype
     ) -> Tuple[torch.FloatTensor, torch.LongTensor, torch.LongTensor, torch.LongTensor]:
@@ -419,8 +348,8 @@ class LegendVLA(nn.Module):
         
         Creates block-diagonal attention patterns:
         - Image/text tokens can attend to themselves
-        - Proprio tokens can attend to image/text and themselves  
-        - Action tokens can attend to image/text, proprio, and themselves (causal)
+        - Answer only tokens can attend to image/text and the answer tokens before them
+        - Action tokens can attend to image/text, and themselves (causal)
         
         Args:
             attention_mask (torch.Tensor): [B, seq_len] Attention mask indicating valid tokens
@@ -487,6 +416,7 @@ class LegendVLA(nn.Module):
         ).repeat(bsz, 1)
         return causal_mask, vlm_position_ids, proprio_position_ids, human_action_position_ids
 
+    # TODO: need to change this when we use Knowledge Insulation training recipe
     def split_full_mask_into_submasks(
         self, causal_mask: torch.FloatTensor
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
@@ -499,18 +429,18 @@ class LegendVLA(nn.Module):
         
         Returns:
             Tuple containing:
-                - image_text_proprio_mask (torch.FloatTensor): [B, 1, seq_len+proprio_len, seq_len+proprio_len]
-                  Attention mask for image/text/proprio tokens (broadcasts to all heads)
+                - image_text_mask (torch.FloatTensor): [B, 1, seq_len, seq_len]
+                  Attention mask for image/text tokens (broadcasts to all heads)
                 - human_action_mask (torch.FloatTensor): [B, 1, action_len, total_len]
                   Attention mask for human action tokens (broadcasts to all heads)
         """
-        image_text_proprio_mask = causal_mask[
+        image_text_mask = causal_mask[
             ...,
-            : self.max_image_text_tokens + self.num_proprio_tokens,
-            : self.max_image_text_tokens + self.num_proprio_tokens,
+            : self.max_image_text_tokens,
+            : self.max_image_text_tokens,
         ]
         human_action_mask = causal_mask[..., -self.num_human_action_tokens :, :]
-        return image_text_proprio_mask, human_action_mask
+        return image_text_mask, human_action_mask
 
     # TODO: need to change this when we use Knowledge Insulation training recipe
     def build_causal_mask_and_position_ids_for_text(
@@ -632,6 +562,7 @@ class LegendVLA(nn.Module):
             ]
         return final_embedding
 
+    @torch.inference_mode()
     def infer_human_action(
         self,
         input: dict,
@@ -648,9 +579,7 @@ class LegendVLA(nn.Module):
                 - human_action_mask (torch.FloatTensor): [B, 1, action_len, total_len] 
                   Attention mask for human action tokens (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - proprio_position_ids (torch.LongTensor): [B, num_proprio] Position IDs for proprio tokens
                 - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
-                - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
         
         Returns:
             torch.FloatTensor: [B, horizon_steps, human_action_dim] Generated human action sequence
@@ -661,13 +590,7 @@ class LegendVLA(nn.Module):
         image_text_proprio_mask = input["image_text_proprio_mask"]
         human_action_mask = input["human_action_mask"]
         vlm_position_ids = input["vlm_position_ids"]
-        proprio_position_ids = input["proprio_position_ids"]
         human_action_position_ids = input["human_action_position_ids"]
-        proprios = input["proprios"]
-
-        # normalize proprio
-        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
-        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
 
         dtype, device = pixel_values.dtype, pixel_values.device
         bsz = pixel_values.size(0)
@@ -677,19 +600,15 @@ class LegendVLA(nn.Module):
         # merge the text tokens and the image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
 
-        # proprio
-        proprio_embeds = self.proprio_encoder(proprios)
         
         # forward pass thru the vlm, proprio, cache the kv
         _, kv_caches = self.joint_model(
             attention_mask=image_text_proprio_mask,
             position_ids_all={
                 "vlm": vlm_position_ids,
-                "proprio": proprio_position_ids,
             },
             embeds_all={
                 "vlm": inputs_embeds,
-                "proprio": proprio_embeds,
             },
             kv_caches=kv_caches,
             return_caches=True,
@@ -718,7 +637,7 @@ class LegendVLA(nn.Module):
                 embeds_all={"human_action": human_action_embeds},
                 time_cond=time_cond,
                 kv_caches=kv_caches,
-                cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm and proprio
+                cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
             )["human_action"]
             # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
             human_action_vel = self.human_action_decoder(human_action_embeds)
@@ -726,9 +645,10 @@ class LegendVLA(nn.Module):
             t += delta_t
 
         # normalize action
-        human_action[..., wrist_dim:] = self.normalizer['action/hand'].unnormalize(human_action[..., wrist_dim:])
+        human_action = self.normalizer['human_action'].unnormalize(human_action)
         return human_action
 
+    @torch.inference_mode()
     def infer_human_action_naive(
         self,
         input: dict,
@@ -743,9 +663,7 @@ class LegendVLA(nn.Module):
                 - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] 
                   Full causal attention mask for all tokens (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - proprio_position_ids (torch.LongTensor): [B, num_proprio] Position IDs for proprio tokens
                 - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
-                - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
         
         Returns:
             torch.FloatTensor: [B, horizon_steps, human_action_dim] Generated human action sequence
@@ -755,13 +673,7 @@ class LegendVLA(nn.Module):
         pixel_values = input["pixel_values"]
         causal_mask = input["causal_mask"]
         vlm_position_ids = input["vlm_position_ids"]
-        proprio_position_ids = input["proprio_position_ids"]
         human_action_position_ids = input["human_action_position_ids"]
-        proprios = input["proprios"]
-
-        # normalize proprio
-        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
-        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
 
         dtype, device = pixel_values.dtype, pixel_values.device
         bsz = pixel_values.size(0)
@@ -770,9 +682,6 @@ class LegendVLA(nn.Module):
 
         # merge the text tokens and the image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
-
-        # encode proprio
-        proprio_embeds = self.proprio_encoder(proprios)
 
         # sample pure action noise
         human_action = torch.randn(
@@ -794,12 +703,10 @@ class LegendVLA(nn.Module):
                 attention_mask=causal_mask,
                 position_ids_all={
                     "vlm": vlm_position_ids,
-                    "proprio": proprio_position_ids,
                     "human_action": human_action_position_ids,
                 },
                 embeds_all={
                     "vlm": inputs_embeds.clone(),  # clone needed due to modified in-place
-                    "proprio": proprio_embeds.clone(),
                     "human_action": human_action_embeds,
                 },
                 time_cond=time_cond,
@@ -812,15 +719,16 @@ class LegendVLA(nn.Module):
             t += delta_t
 
         # normalize action
-        human_action[..., wrist_dim:] = self.normalizer['action/hand'].unnormalize(human_action[..., wrist_dim:])
+        human_action = self.normalizer['human_action'].unnormalize(human_action)
         return human_action
 
-    def infer_text(
+    @torch.inference_mode()
+    def infer_discrete_human_action(
         self,
         input: dict,
     ) -> Tuple:
         """
-        Text generation inference function using VLM.
+        Discrete human action generation inference function using Autoregressive VLA.
         
         Args:
             input (dict): Input dictionary containing:
@@ -892,8 +800,7 @@ class LegendVLA(nn.Module):
         t = t[:, None, None]  # (B, 1, 1)
         return (1 - (1 - self.flow_sig_min) * t) * x + t * x1
 
-    # TODO: change to multi mode for difference training strategy / inference strategy
-    def forward(
+    def compute_flow_loss(
         self,
         batch: dict,
     ) -> torch.FloatTensor:
@@ -907,17 +814,12 @@ class LegendVLA(nn.Module):
                 - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] 
                   Full causal attention mask for all tokens (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - proprio_position_ids (torch.LongTensor): [B, num_proprio] Position IDs for proprio tokens
                 - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
-                - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
                 - human_actions (torch.FloatTensor): [B, horizon_steps, human_action_dim] Ground truth human actions
                 - human_actions_valid_mask (torch.BoolTensor): [B, horizon_steps, human_action_dim] Valid mask for human actions
                 - t (torch.FloatTensor): [B] Time steps for flow matching (0 to 1)
 
         Note: 
-            Proprioceptive state structure: [wrist, hand]
-            - Wrist: [translation(left, right), rotation(left, right)]
-            - Hand: [left_hand_features, right_hand_features]
             Action structure mirrors the state
         
         Returns:
@@ -928,32 +830,21 @@ class LegendVLA(nn.Module):
         pixel_values = batch["pixel_values"]
         causal_mask = batch["causal_mask"]
         vlm_position_ids = batch["vlm_position_ids"]
-        proprio_position_ids = batch["proprio_position_ids"]
         human_action_position_ids = batch["human_action_position_ids"]
-        proprios = batch["proprios"]
         human_actions = batch["human_actions"]
         human_actions_valid_mask = batch["human_actions_valid_mask"]
         t = batch["t"]
-
-        # normalize proprio
-        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
-        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
 
         """flow matching loss for action prediction, no use of kv cache"""
         # noisy action
         # [Batch_Size, Horizon_Steps, Action_Dim]
         x0 = torch.randn_like(human_actions, device=t.device, dtype=t.dtype)
         x1 = human_actions
-        # normalize action
-        x1[..., wrist_dim:] = self.normalizer['action/hand'](x1[..., wrist_dim:])
         psi_t = self.psi_t(x0, x1, t)
 
         # text tokens + image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
 
-        # proprio
-        proprio_embeds = self.proprio_encoder(proprios)
-        
         # inference with noisy action
         # [Batch_Size, Embed_Dim]
         time_cond = self.time_embedding(t)
@@ -966,12 +857,10 @@ class LegendVLA(nn.Module):
             attention_mask=causal_mask,
             position_ids_all={
                 "vlm": vlm_position_ids,
-                "proprio": proprio_position_ids,
                 "human_action": human_action_position_ids,
             },
             embeds_all={
                 "vlm": inputs_embeds,
-                "proprio": proprio_embeds,
                 "human_action": human_action_embeds,
             },
             time_cond=time_cond,
@@ -988,7 +877,7 @@ class LegendVLA(nn.Module):
         masked_loss = torch.where(human_actions_valid_mask, loss, torch.zeros_like(loss))
         return torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
 
-    def compute_vla_loss(self, batch: dict) -> dict:
+    def compute_loss(self, batch: dict) -> dict:
         """
         Compute combined VLA loss with two components: cross-entropy loss (VLM) and flow matching loss (whole VLA).
         
@@ -998,206 +887,104 @@ class LegendVLA(nn.Module):
         Args:
             batch (dict): Input dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
+                - labels (torch.LongTensor, optional): [B, seq_len] Labels for language modeling loss
                 - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
                 - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] Full causal attention mask
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - proprio_position_ids (torch.LongTensor): [B, num_proprio] Position IDs for proprio tokens
                 - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
-                - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
                 - human_actions (torch.FloatTensor): [B, horizon_steps, human_action_dim] Ground truth human actions
                 - human_actions_valid_mask (torch.BoolTensor): [B, horizon_steps, human_action_dim] Valid mask for human actions
                 - t (torch.FloatTensor): [B] Time steps for flow matching (0 to 1)
-                - labels (torch.LongTensor, optional): [B, seq_len] Labels for language modeling loss
         
         Returns:
             dict: Dictionary containing:
                 - total_loss (torch.FloatTensor): Combined loss
-                - vlm_loss (torch.FloatTensor): Cross-entropy loss for VLM
+                - ce_loss (torch.FloatTensor): Cross-entropy loss for Autoregressive VLA
                 - flow_loss (torch.FloatTensor): Flow matching loss for action prediction
         """
-        # Extract inputs
+        # Extract inputs from batch dict
         input_ids = batch["input_ids"]
+        labels = batch["labels"]
         pixel_values = batch["pixel_values"]
         causal_mask = batch["causal_mask"]
         vlm_position_ids = batch["vlm_position_ids"]
-        proprio_position_ids = batch["proprio_position_ids"]
         human_action_position_ids = batch["human_action_position_ids"]
-        proprios = batch["proprios"]
         human_actions = batch["human_actions"]
         human_actions_valid_mask = batch["human_actions_valid_mask"]
         t = batch["t"]
-        labels = batch.get("labels", None)
-        
-        dtype, device = pixel_values.dtype, pixel_values.device
-        bsz, seq_len = input_ids.shape
-        
-        # normalize proprio
-        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0]
-        proprios[..., wrist_dim:] = self.normalizer['state/hand'](proprios[..., wrist_dim:])
-        
-        # Forward pass through vision and text embedding
+
+        """flow matching loss for action prediction, no use of kv cache"""
+        # noisy action
+        # [Batch_Size, Horizon_Steps, Action_Dim]
+        x0 = torch.randn_like(human_actions, device=t.device, dtype=t.dtype)
+        x1 = human_actions
+        psi_t = self.psi_t(x0, x1, t)
+
+        # text tokens + image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
         
-        # Encode proprio
-        proprio_embeds = self.proprio_encoder(proprios)
-        
-        # ========== Part 1: VLM loss (Cross-entropy + Action cross-entropy) ==========
-        vlm_loss = torch.tensor(0.0, device=device, dtype=dtype)
-        action_ce_loss = torch.tensor(0.0, device=device, dtype=dtype)
-        
-        # Create VLM-only causal mask (only for image/text tokens)
-        vlm_seq_len = self.max_image_text_tokens
-        vlm_causal_mask = causal_mask[:, :, :vlm_seq_len, :vlm_seq_len]
-        
-        # Forward pass through VLM mixture only
-        vlm_hidden_states = self.joint_model(
-            attention_mask=vlm_causal_mask,
-            position_ids_all={"vlm": vlm_position_ids},
-            embeds_all={"vlm": inputs_embeds},
-            kv_caches={},
-            return_caches=False,
-        )["vlm"]
-        
-        # 1.1: Language modeling loss (next token prediction)
-        if self.use_lm_head and labels is not None:
-            # Language modeling loss (next token prediction)
-            logits = self.lm_head(vlm_hidden_states)
-            
-            # Shift logits and labels for next token prediction
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            
-            # Only compute loss on text tokens (not image tokens or padding)
-            text_mask = (shift_labels != self.image_token_index) & (shift_labels != self.pad_token_id)
-            
-            # Compute cross-entropy loss
-            loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-            flat_labels = shift_labels.view(-1)
-            flat_loss = loss_fct(flat_logits, flat_labels)
-            
-            # Apply text mask and compute mean loss
-            flat_text_mask = text_mask.view(-1)
-            if flat_text_mask.sum() > 0:
-                vlm_loss = (flat_loss * flat_text_mask.float()).sum() / flat_text_mask.sum()
-        
-        # 1.2: Action discretization cross-entropy loss (VLM only)
-        action_ce_loss = torch.tensor(0.0, device=device, dtype=dtype)
-        if (human_actions is not None and 
-            hasattr(self, 'mano_adapter') and 
-            self.mano_adapter is not None):
-            
-            # Split human_actions into parts for MANO encoding
-            # Assuming human_actions structure: [wrist, hand] where hand contains left/right hand features
-            wrist_actions = human_actions[..., :wrist_dim]  # [B, horizon_steps, wrist_dim]
-            hand_actions = human_actions[..., wrist_dim:]   # [B, horizon_steps, hand_dim]
-            # Encode continuous actions to discrete tokens as labels
-            # Note: You may need to reshape/split actions based on your MANO model structure
-            # Include both wrist and hand actions for complete action encoding
-            mano_list = [wrist_actions, hand_actions]  # This may need to be adjusted based on MANO model structure
-            discrete_action_tokens = self.mano_adapter.encode_motion(mano_list, normalize=True)  # [B, num_tokens]
-            
-            # Get action vocab size from mano adapter
-            if hasattr(self.mano_adapter, 'codebook_size_list') and self.mano_adapter.codebook_size_list:
-                action_vocab_size = sum(self.mano_adapter.codebook_size_list)
-                
-                # Project VLM hidden states to action token vocabulary
-                # We need an action head for this - create it dynamically if not exists
-                if not hasattr(self, '_action_head') or self._action_head is None:
-                    self._action_head = nn.Linear(
-                        self.image_text_hidden_size,
-                        action_vocab_size,
-                        bias=False,
-                    ).to(vlm_hidden_states.device)
-                
-                # Get action logits from VLM hidden states
-                action_logits = self._action_head(vlm_hidden_states)  # [B, max_image_text_tokens, action_vocab_size]
-                
-                # Match dimensions between logits and discrete tokens
-                if action_logits.size(1) != discrete_action_tokens.size(1):
-                    min_len = min(action_logits.size(1), discrete_action_tokens.size(1))
-                    action_logits = action_logits[:, :min_len, :]
-                    discrete_action_tokens = discrete_action_tokens[:, :min_len]
-                
-                # Reshape for cross-entropy loss computation
-                flat_logits = action_logits.view(-1, action_logits.size(-1))  # [B*seq_len, vocab_size]
-                flat_targets = discrete_action_tokens.view(-1)  # [B*seq_len]
-                
-                # Create valid mask
-                if human_actions_valid_mask.size(1) == action_logits.size(1):
-                    flat_valid_mask = human_actions_valid_mask.any(dim=-1).view(-1)  # [B*seq_len]
-                else:
-                    # Create a simple valid mask for all tokens
-                    flat_valid_mask = torch.ones(flat_targets.size(0), dtype=torch.bool, device=device)
-                
-                # Compute cross-entropy loss only on valid tokens
-                if flat_valid_mask.sum() > 0:
-                    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-                    flat_loss = loss_fct(flat_logits, flat_targets)
-                    action_ce_loss = (flat_loss * flat_valid_mask.float()).sum() / flat_valid_mask.sum()
-            else:
-                log.warning("MANO adapter codebook size not available for action cross-entropy loss")
-                    
-                
-        # Combine VLM losses
-        combined_vlm_loss = vlm_loss + action_ce_loss
-        
-        # ========== Part 2: Flow matching loss (whole VLA) ==========
-        flow_loss = torch.tensor(0.0, device=device, dtype=dtype)
-        
-        # Only compute flow matching loss if dataset has human actions
-        if human_actions is not None and human_actions_valid_mask is not None and t is not None:
-            # Generate noisy action for flow matching
-            x0 = torch.randn_like(human_actions, device=device, dtype=dtype)
-            x1 = human_actions.clone()
-            # Normalize action
-            x1[..., wrist_dim:] = self.normalizer['action/hand'](x1[..., wrist_dim:])
-            psi_t = self.psi_t(x0, x1, t)
-            
-            # Encode action and time
-            time_cond = self.time_embedding(t)
-            if self.action_expert_adaptive_mode:
-                human_action_embeds = self.human_action_encoder(psi_t)
-            else:
-                human_action_embeds = self.human_action_encoder(psi_t, time_cond)
-            
-            # Forward pass through full joint model (VLM + proprio + action)
-            human_action_output = self.joint_model(
-                attention_mask=causal_mask,
-                position_ids_all={
-                    "vlm": vlm_position_ids,
-                    "proprio": proprio_position_ids,
-                    "human_action": human_action_position_ids,
-                },
-                embeds_all={
-                    "vlm": inputs_embeds,
-                    "proprio": proprio_embeds,
-                    "human_action": human_action_embeds,
-                },
-                time_cond=time_cond,
-                kv_caches={},  # no caching during training
-            )["human_action"]
-            
-            # Decode action velocity
-            v_psi = self.human_action_decoder(human_action_output)
-            
-            # Compute flow matching loss
-            d_psi = x1 - (1 - self.flow_sig_min) * x0
-            loss = (v_psi - d_psi) ** 2
-            masked_loss = torch.where(human_actions_valid_mask, loss, torch.zeros_like(loss))
-            flow_loss = torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
-        
-        # ========== Combine losses ==========
-        total_loss = combined_vlm_loss + flow_loss
-        
+        # inference with noisy action
+        # [Batch_Size, Embed_Dim]
+        time_cond = self.time_embedding(t)
+        # [Batch_Size, Horizon_Steps, Embed_Dim]
+        if self.action_expert_adaptive_mode:
+            human_action_embeds = self.human_action_encoder(psi_t)
+        else:
+            human_action_embeds = self.human_action_encoder(psi_t, time_cond)
+        output_logits = self.joint_model(
+            attention_mask=causal_mask,
+            position_ids_all={
+                "vlm": vlm_position_ids,
+                "human_action": human_action_position_ids,
+            },
+            embeds_all={
+                "vlm": inputs_embeds,
+                "human_action": human_action_embeds,
+            },
+            time_cond=time_cond,
+            kv_caches={},  # no caching during training
+        )
+        logits = output_logits["vlm"]
+        human_action_embeds = output_logits["human_action"]
+
+        logits = logits[:, :-1, :].contiguous()
+        labels = labels[:, 1:].contiguous()
+        logits = logits.view(-1, logits.shape[-1])
+        labels = labels.view(-1)
+        ce_loss = self.CELoss(logits, labels)
+
+        # [Batch_Size, Horizon_Steps, Action_Dim]
+        v_psi = self.human_action_decoder(human_action_embeds)
+
+        # compare to true velocity
+        d_psi = x1 - (1 - self.flow_sig_min) * x0
+
+        flow_loss = (v_psi - d_psi) ** 2
+        masked_loss = torch.where(human_actions_valid_mask, flow_loss, torch.zeros_like(flow_loss))
+        flow_loss = torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
+
+        total_loss = ce_loss + flow_loss
         return {
             "total_loss": total_loss,
-            "vlm_loss": combined_vlm_loss,
+            "ce_loss": ce_loss,
             "flow_loss": flow_loss,
-            "vlm_ce_loss": vlm_loss,
-            "action_ce_loss": action_ce_loss,
         }
+
+    def forward(self, mode: str, batch: dict) -> dict:
+        if mode == "train":
+            return self.compute_loss(batch)
+        elif mode == "train_flow":
+            return self.compute_flow_loss(batch)
+        elif mode == "infer_human_action":
+            return self.infer_human_action(batch)
+        elif mode == "infer_human_action_naive":
+            return self.infer_human_action_naive(batch)
+        elif mode == "infer_discrete_human_action":
+            return self.infer_discrete_human_action(batch)
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
         
+
 class LegendVLAInference(LegendVLA):
     def forward(
         self,

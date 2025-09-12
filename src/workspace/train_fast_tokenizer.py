@@ -45,7 +45,7 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
         average_token_length_list = []
         with tqdm(self.dataloader, desc="Validating tokenizer", mininterval=self.cfg.training.tqdm_interval_sec) as tepoch:
             for batch in tepoch:
-                action_data = batch['action']
+                action_data = batch['human_action']
                 batch_tokens = valid_tokenizer(action_data)
                 decoded_actions = valid_tokenizer.decode(batch_tokens)
 

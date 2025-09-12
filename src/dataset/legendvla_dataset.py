@@ -44,6 +44,7 @@ class LegendVLADataset(BaseImageDataset):
         self.history = history
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.max_train_episodes = max_train_episodes
+        self.normalizer = None
 
         # Initialize storage lists
         self.replay_buffers = []
@@ -66,7 +67,7 @@ class LegendVLADataset(BaseImageDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, keys=['image', 'state', 'instruction', 'action', 'extrinsic'])
+                zarr_path, keys=['image', 'state', 'instruction', 'action', 'extrinsic', 'presence'])
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask
@@ -98,6 +99,7 @@ class LegendVLADataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
+        self.hand_ndim = shape_meta['obs']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
@@ -123,17 +125,39 @@ class LegendVLADataset(BaseImageDataset):
             
         return val_set
     
-    def _sample_to_data(self, sample):
+    def _sample_to_vla_data(self, sample):
         hand_state = sample['state/hand'].astype(np.float32)
         wrist_state = sample['state/wrist'].astype(np.float32)
-        instruction = str(sample['instruction'][self.history]) 
         wrist_action = sample['action/wrist'].astype(np.float32)
         hand_action = sample['action/hand'].astype(np.float32)
+        instruction = str(sample['instruction'][self.history]) 
         # [Horizon, 16] -> [Horizon, 4, 4]
         extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
+        presence = sample['presence'].astype(np.float32)[self.history]
 
         image_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_image_steps - 1))]
         state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+
+        # use first self.hand_ndim components of hand state and action
+        all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims
+        hand_state = np.concatenate([hand_state[:, :self.hand_ndim], hand_state[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
+        hand_action = np.concatenate([hand_action[:, :self.hand_ndim], hand_action[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
+
+        processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
+
+        processed_wrist_action = wrist_action[self.history:]
+        processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[self.history])
+
+        # use delta of wrist translation and hand mano params as action
+        processed_wrist_action[..., :6] = processed_wrist_action[..., :6] - processed_wrist_state[-1, :6]
+        processed_hand_state = hand_state[state_slice]
+        processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]
+
+        assert self.normalizer is not None, "Normalizer is not set"
+        state = np.concatenate([processed_wrist_state, processed_hand_state], axis=-1)
+        state = self.normalizer['state'](state)
+        action = np.concatenate([processed_wrist_action, processed_hand_action], axis=-1)
+        action = self.normalizer['human_action'](action)
 
         images_to_process = sample['image'][image_slice]
         if self.train_mode and self.aug_transform is not None:
@@ -150,29 +174,30 @@ class LegendVLADataset(BaseImageDataset):
             images_to_process = np.stack(augmented_images)
 
         # Process all images in batch
-        # processed_frames = self._process_image_batch(sample['image'][T_slice])
-        processed_results = self.preprocessor(images=images_to_process, text=instruction)
+        processed_results = self.preprocessor(mode="vla", images=images_to_process, text=instruction, state=state, action=action)
         processed_frames = processed_results['pixel_values'] # [T, C, H, W]
-        tokenized_instruction = processed_results['input_ids'][0] # [L]
-        attention_mask = processed_results['attention_mask'][0] # [L]
+        tokenized_instruction = processed_results['input_ids'] # [L]
+        tokenized_labels = processed_results['labels'] # [L]
+        attention_mask = processed_results['attention_mask'] # [L]
 
-        processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
-
-        processed_wrist_action = wrist_action[self.history:]
-        processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[self.history])
-
-        # use delta of wrist translation and hand mano params as action
-        processed_wrist_action[..., :6] = processed_wrist_action[..., :6] - processed_wrist_state[-1, :6]
-        processed_hand_state = hand_state[state_slice]
-        processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]
+        human_actions_valid_mask = ~torch.zeros_like(action, dtype=torch.bool)
+        if presence & 1 : 
+            human_actions_valid_mask[..., :3] = True
+            human_actions_valid_mask[..., 6:12] = True
+            human_actions_valid_mask[..., 18:18+self.hand_ndim] = True
+        if (presence >> 1) & 1 : 
+            human_actions_valid_mask[..., 3:6] = True
+            human_actions_valid_mask[..., 12:18] = True
+            human_actions_valid_mask[..., 18+self.hand_ndim:18+self.hand_ndim*2] = True
 
         data = {
             'input_id': tokenized_instruction,
+            'label': tokenized_labels,
             'attention_mask': attention_mask,
             'pixel_value': processed_frames, 
             # we assume the history of the data is 30 Hz, the image should cover the past 1 second
-            'proprio': np.concatenate([processed_wrist_state, processed_hand_state], axis=-1),
-            'human_action': np.concatenate([processed_wrist_action, processed_hand_action], axis=-1),
+            'human_actions': action,
+            'human_actions_valid_mask': human_actions_valid_mask,
         }
         return data
 
@@ -192,6 +217,7 @@ class LegendVLADataset(BaseImageDataset):
         )
         dataloader = DataLoader(normalizer_dataset, collate_fn=normalizer_dataset.get_collator(), **self.normalizer_dataloader_cfg)
         assert len(dataloader) > 0, "No data to calculate normalizer"
+        # We may need to normalize the wrist translation
         for idx, batch in tqdm(enumerate(dataloader), desc="Calculating normalizer"):
             if idx == 0 : 
                 normalizer = LinearNormalizer()
@@ -199,6 +225,9 @@ class LegendVLADataset(BaseImageDataset):
             input_data = {k: v.reshape(-1, v.shape[-1]) for k, v in batch.items()}
             normalizer.update_streaming_fit(input_data)
         normalizer.finish_streaming_fit()
+        # ignore the wrist rotation
+        normalizer.ignore_dim(key='state', dim=slice(6, 18))
+        normalizer.ignore_dim(key='human_action', dim=slice(6, 18))
 
         def print_dict(d):
             for k, v in d.items():
@@ -207,7 +236,10 @@ class LegendVLADataset(BaseImageDataset):
         for key in normalizer.params_dict.keys():
             print(f"{key}: ")
             print_dict(normalizer.params_dict[key]['input_stats'])
+            print_dict(normalizer.params_dict[key]['scale'])
+            print_dict(normalizer.params_dict[key]['offset'])
 
+        self.normalizer = normalizer
         return normalizer
 
     def get_collator(self):
@@ -229,6 +261,56 @@ class LegendVLADataset(BaseImageDataset):
     def __len__(self):
         return sum(self.sampler_lens)
         
+
+class LegendVLMDataset(BaseImageDataset):
+    def __init__(self,
+        zarr_paths,
+        shape_meta=None,
+    ):
+        super().__init__()
+        raise NotImplementedError()
+    
+    def get_collator(self):
+        raise NotImplementedError()
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        raise NotImplementedError()
+
+    def __len__(self):
+        raise NotImplementedError()
+
+
+class LegendUnifiedDataset(BaseImageDataset):
+    def __init__(self,
+        vla_dataset,
+        vlm_dataset,
+    ):
+        super().__init__()
+        self.vla_dataset = vla_dataset
+        self.vlm_dataset = vlm_dataset
+
+        vla_sample = vla_dataset[0]
+        self.shape_meta = dict()
+        for key in vla_sample.keys():
+            self.shape_meta[key] = vla_sample[key].shape
+
+    def get_collator(self):
+        return LegendUnifiedDataCollator()
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        if idx < len(self.vla_dataset):
+            return self.vla_dataset[idx]
+        else:
+            sample = self.vlm_dataset[idx - len(self.vla_dataset)]
+            for key in self.shape_meta.keys():
+                if key not in sample:
+                    sample[key] = torch.zeros(self.shape_meta[key])
+                    sample[f"{key}_valid_mask"] = torch.zeros(self.shape_meta[key], dtype=torch.bool)
+            return sample
+
+    def __len__(self):
+        return len(self.vla_dataset) + len(self.vlm_dataset)
+
 
 class LegendVLANormalizerDataset(BaseImageDataset):
     def __init__(self,
@@ -284,23 +366,39 @@ class LegendVLANormalizerDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
+        self.hand_ndim = shape_meta['obs']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
-
     def _sample_to_data(self, sample):
+        # We only normalize the wrist translation & hand mano params
         hand_state = sample['state/hand'].astype(np.float32)
+        wrist_state = sample['state/wrist'].astype(np.float32)
+        wrist_action = sample['action/wrist'].astype(np.float32)
         hand_action = sample['action/hand'].astype(np.float32)
+        # [Horizon, 16] -> [Horizon, 4, 4]
+        extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
+
+        # use first self.hand_ndim components of hand state and action
+        all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims
+        hand_state = np.concatenate([hand_state[:, :self.hand_ndim], hand_state[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
+        hand_action = np.concatenate([hand_action[:, :self.hand_ndim], hand_action[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
 
         state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
 
+        processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
+
+        processed_wrist_action = wrist_action[self.history:]
+        processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[self.history])
+
         # use delta of wrist translation and hand mano params as action
+        processed_wrist_action[..., :6] = processed_wrist_action[..., :6] - processed_wrist_state[-1, :6]
         processed_hand_state = hand_state[state_slice]
         processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]
 
         data = {
             # we assume the history of the data is 30 Hz, the image should cover the past 1 second
-            'state/hand': processed_hand_state,
-            'action/hand': processed_hand_action,
+            'state': np.concatenate([processed_wrist_state, processed_hand_state], axis=-1),
+            'human_action': np.concatenate([processed_wrist_action, processed_hand_action], axis=-1),
         }
         return data
 
@@ -321,7 +419,7 @@ class LegendVLANormalizerDataset(BaseImageDataset):
 
     def __len__(self):
         return sum(self.sampler_lens)
-        
+
 
 class LegendVLAActionDataset(BaseImageDataset):
     def __init__(self,
@@ -377,12 +475,23 @@ class LegendVLAActionDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
+        self.hand_ndim = shape_meta['obs']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
 
     def _sample_to_data(self, sample):
-        state = np.concatenate([sample['state/wrist'], sample['state/hand']], axis=-1)
-        action = np.concatenate([sample['action/wrist'], sample['action/hand']], axis=-1)
+        hand_state = sample['state/hand'].astype(np.float32)
+        wrist_state = sample['state/wrist'].astype(np.float32)
+        wrist_action = sample['action/wrist'].astype(np.float32)
+        hand_action = sample['action/hand'].astype(np.float32)
+        
+        # use first self.hand_ndim components of hand state and action
+        all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims
+        hand_state = np.concatenate([hand_state[:, :self.hand_ndim], hand_state[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
+        hand_action = np.concatenate([hand_action[:, :self.hand_ndim], hand_action[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
+
+        state = np.concatenate([wrist_state, hand_state], axis=-1)
+        action = np.concatenate([wrist_action, hand_action], axis=-1)
 
         state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
 
@@ -392,7 +501,7 @@ class LegendVLAActionDataset(BaseImageDataset):
 
         data = {
             # we assume the history of the data is 30 Hz, the image should cover the past 1 second
-            'action': processed_action,
+            'human_action': processed_action,
         }
         return data
 
@@ -448,6 +557,14 @@ class LegendVLADataCollator(BaseDataCollator):
             batch[key] = torch.stack([item[key] for item in data_list])
 
         return batch
+
+
+class LegendUnifiedDataCollator(LegendVLADataCollator):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, data_list):
+        return super().__call__(data_list)
 
 
 class BaseDataCollator4numpy(BaseDataCollator):

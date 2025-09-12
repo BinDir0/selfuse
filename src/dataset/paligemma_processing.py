@@ -14,8 +14,10 @@ IMAGENET_STANDARD_STD = np.array([0.5, 0.5, 0.5])
 def add_image_tokens_to_prompt(
     prefix_prompt,
     bos_token,
+    eos_token,
     image_seq_len,
     image_token,
+    suffix_target, 
 ):
     # Quoting from the blog (https://huggingface.co/blog/paligemma#detailed-inference-process):
     #   The input text is tokenized normally.
@@ -24,7 +26,7 @@ def add_image_tokens_to_prompt(
     #   The tokenized text is also prefixed with a fixed number of <image> tokens.
     # NOTE: from the paper it looks like the `\n` should be tokenized separately, but in the HF implementation this is not done.
     #       ref to HF implementation: https://github.com/huggingface/transformers/blob/7f79a97399bb52aad8460e1da2f36577d5dccfed/src/transformers/models/paligemma/processing_paligemma.py#L55-L73
-    return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n"
+    return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{suffix_target}{eos_token}"
 
 
 def rescale(
@@ -151,7 +153,7 @@ def process_images(
     return images
 
 
-class PaliGemmaVLAProcessor:
+class PaliGemmaProcessor:
     IMAGE_TOKEN = "<image>"
 
     def __init__(
@@ -159,6 +161,7 @@ class PaliGemmaVLAProcessor:
         tokenizer,
         num_image_tokens: int,
         max_seq_len: int,
+        ignore_index: int = -100,
         image_size: int = 224,
         tokenizer_padding: str = "max_length",  #  # instead of truncating to longest
     ):
@@ -170,7 +173,9 @@ class PaliGemmaVLAProcessor:
         self.tokenizer_padding = tokenizer_padding
 
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
-        tokens_to_add = {"additional_special_tokens": [self.IMAGE_TOKEN]}
+        tokens_to_add = {"additional_special_tokens": [
+            self.IMAGE_TOKEN, 
+        ]}
         tokenizer.add_special_tokens(tokens_to_add)
         EXTRA_TOKENS = [
             f"<loc{i:04d}>" for i in range(1024)
@@ -185,6 +190,122 @@ class PaliGemmaVLAProcessor:
         tokenizer.add_eos_token = False
 
         self.tokenizer = tokenizer
+        self.sep_token_id = tokenizer('\n', max_length=1, padding="max_length", truncation=True)['input_ids'][0]
+
+    def __call__(
+        self,
+        text: str,
+        images: np.ndarray,
+        target: str, 
+        truncation: bool = True,
+    ) -> dict:
+        '''
+        Args: 
+            text: str
+            images: np.ndarray [T, C, H, W] or [T, H, W, C]
+            target: str
+            truncation: bool
+
+        Returns:
+            dict:
+                - pixel_values: torch.FloatTensor [T, C, H, W]
+                - input_ids: torch.LongTensor [L]
+                - attention_mask: torch.LongTensor [L]
+        '''
+        if images.dtype == np.uint8:
+            scale_factor = 1 / 255.0
+        else:
+            scale_factor = 1.0
+
+        pixel_values = process_images(
+            images,
+            size=(self.image_size, self.image_size),
+            rescale_factor=scale_factor,
+            image_mean=IMAGENET_STANDARD_MEAN,
+            image_std=IMAGENET_STANDARD_STD,
+        )
+
+        # Prepend a `self.image_seq_length` number of image tokens to the prompt
+        input_string = add_image_tokens_to_prompt(
+            prefix_prompt=text,
+            bos_token=self.tokenizer.bos_token,
+            eos_token=self.tokenizer.eos_token,
+            image_seq_len=self.image_seq_length * images.shape[0],
+            image_token=self.IMAGE_TOKEN,
+            suffix_target=target,
+        )
+
+        # Returns the input_ids and attention_mask as PyTorch tensors
+        inputs = self.tokenizer(
+            input_string,
+            max_length=self.max_seq_len,
+            padding=self.tokenizer_padding,
+            truncation=truncation,
+        )
+        inputs = dict_apply(inputs, lambda x: np.array(x))
+
+        labels = inputs['input_ids'].clone()
+        labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
+        condition = (labels == self.sep_token_id)
+        assert np.any(condition), "The separator token is not found in the input_ids"
+        sep_idx = np.argmax(condition)
+        labels[:sep_idx+1] = self.ignore_index
+        inputs['labels'] = labels
+        output = {"pixel_values": pixel_values, **inputs}
+        return output
+
+
+class PaliGemmaVLAProcessor:
+    IMAGE_TOKEN = "<image>"
+    STATE_TOKEN = "<state>"
+    STATE_BEGIN_TOKEN = "<state_begin>"
+    STATE_END_TOKEN = "<state_end>"
+    HUMAN_ACTION_BEGIN_TOKEN = "<human_action_begin>"
+    HUMAN_ACTION_TOKEN = "<human_action>"
+    HUMAN_ACTION_END_TOKEN = "<human_action_end>"
+
+    def __init__(
+        self,
+        tokenizer,
+        fast_tokenizer,
+        num_image_tokens: int,
+        max_seq_len: int,
+        ignore_index: int = -100,
+        image_size: int = 224,
+        tokenizer_padding: str = "max_length",  #  # instead of truncating to longest
+    ):
+        super().__init__()
+
+        self.image_seq_length = num_image_tokens
+        self.image_size = image_size
+        self.max_seq_len = max_seq_len
+        self.tokenizer_padding = tokenizer_padding
+
+        # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
+        tokens_to_add = {"additional_special_tokens": [
+            self.IMAGE_TOKEN, 
+            self.STATE_TOKEN, 
+            self.STATE_BEGIN_TOKEN, 
+            self.STATE_END_TOKEN, 
+            self.HUMAN_ACTION_BEGIN_TOKEN, 
+            self.HUMAN_ACTION_TOKEN, 
+            self.HUMAN_ACTION_END_TOKEN,
+        ]}
+        tokenizer.add_special_tokens(tokens_to_add)
+        EXTRA_TOKENS = [
+            f"<loc{i:04d}>" for i in range(1024)
+        ]  # These tokens are used for object detection (bounding boxes)
+        EXTRA_TOKENS += [
+            f"<seg{i:03d}>" for i in range(128)
+        ]  # These tokens are used for object segmentation
+        tokenizer.add_tokens(EXTRA_TOKENS)
+        self.image_token_id = tokenizer.convert_tokens_to_ids(self.IMAGE_TOKEN)
+        # We will add the BOS and EOS tokens ourselves
+        tokenizer.add_bos_token = False
+        tokenizer.add_eos_token = False
+
+        self.tokenizer = tokenizer
+        self.fast_tokenizer = fast_tokenizer
 
     def __call__(
         self,
