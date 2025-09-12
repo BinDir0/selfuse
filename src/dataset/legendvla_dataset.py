@@ -35,14 +35,12 @@ class LegendVLADataset(BaseImageDataset):
             history=30,
             normalizer_dataloader_cfg=dict(),
             max_train_episodes=None,
-            image_size=(384, 384), 
             train_mode=True,
         ):
         
         super().__init__()
         self.zarr_paths = zarr_paths
         self.preprocessor = None
-        self.image_size = image_size
         self.history = history
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.max_train_episodes = max_train_episodes
@@ -211,7 +209,7 @@ class LegendVLADataset(BaseImageDataset):
             print_dict(normalizer.params_dict[key]['input_stats'])
 
         return normalizer
-    
+
     def get_collator(self):
         return LegendVLADataCollator()
 
@@ -241,7 +239,6 @@ class LegendVLANormalizerDataset(BaseImageDataset):
             shape_meta=None,
             history=30,
             max_train_episodes=None,
-            image_size=(384, 384)
             ):
         
         super().__init__()
@@ -308,7 +305,7 @@ class LegendVLANormalizerDataset(BaseImageDataset):
         return data
 
     def get_collator(self):
-        return LegendVLANormalizerDataCollator()
+        return BaseDataCollator4numpy()
 
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
         # Find corresponding sampler
@@ -325,6 +322,98 @@ class LegendVLANormalizerDataset(BaseImageDataset):
     def __len__(self):
         return sum(self.sampler_lens)
         
+
+class LegendVLAActionDataset(BaseImageDataset):
+    def __init__(self,
+            zarr_paths,
+            horizon=1,
+            pad_before=0,
+            pad_after=0,
+            shape_meta=None,
+            history=30,
+            max_train_episodes=None,
+            ):
+        
+        super().__init__()
+        self.history = history
+
+        # Initialize storage lists
+        self.replay_buffers = []
+        self.samplers = []
+        self.sampler_lens = []
+        
+        # Process each zarr file
+        for zarr_path in zarr_paths:
+            # Create replay buffer
+            replay_buffer = StreamingReplayBuffer.copy_from_path(
+                zarr_path, keys=['state', 'action'])
+            self.replay_buffers.append(replay_buffer)
+
+            # Create train mask
+            val_mask = get_val_mask(
+                n_episodes=replay_buffer.n_episodes,
+                val_ratio=0,
+            )
+            train_mask = ~val_mask
+            train_mask = downsample_mask(
+                mask=train_mask,
+                max_n=max_train_episodes
+            )
+            
+            # Create sampler
+            sampler = SequenceSampler(
+                replay_buffer=replay_buffer,
+                sequence_length=horizon,
+                pad_before=pad_before,
+                pad_after=pad_after,
+                episode_mask=train_mask,
+                key_first_k=dict())
+            self.samplers.append(sampler)
+            
+            # Record sampler length
+            self.sampler_lens.append(len(sampler))
+
+        self.horizon = horizon
+        self.pad_before = pad_before
+        self.pad_after = pad_after
+        self.shape_meta = shape_meta
+        self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
+
+
+    def _sample_to_data(self, sample):
+        state = np.concatenate([sample['state/wrist'], sample['state/hand']], axis=-1)
+        action = np.concatenate([sample['action/wrist'], sample['action/hand']], axis=-1)
+
+        state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+
+        # use delta of wrist translation and hand mano params as action
+        processed_state = state[state_slice]
+        processed_action = action[self.history:, :] - processed_state[-1, :]
+
+        data = {
+            # we assume the history of the data is 30 Hz, the image should cover the past 1 second
+            'action': processed_action,
+        }
+        return data
+
+    def get_collator(self):
+        return BaseDataCollator4numpy()
+
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
+        # Find corresponding sampler
+        curr_idx = idx
+        for i, length in enumerate(self.sampler_lens):
+            if curr_idx < length:
+                sample = self.samplers[i].sample_sequence(curr_idx)
+                break
+            curr_idx -= length
+            
+        data = self._sample_to_data(sample)
+        return data
+
+    def __len__(self):
+        return sum(self.sampler_lens)
+                
 
 class LegendVLADataCollator(BaseDataCollator):
     def __init__(self, pad_token_id: int = None):
@@ -361,7 +450,7 @@ class LegendVLADataCollator(BaseDataCollator):
         return batch
 
 
-class LegendVLANormalizerDataCollator(BaseDataCollator):
+class BaseDataCollator4numpy(BaseDataCollator):
     def __init__(self):
         super().__init__()
 

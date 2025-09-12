@@ -7,6 +7,8 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 
 """
 
+# TODO: We can use 3D ROPE for image tokens
+
 import logging
 from typing import Optional, Tuple
 
@@ -890,7 +892,7 @@ class LegendVLA(nn.Module):
         t = t[:, None, None]  # (B, 1, 1)
         return (1 - (1 - self.flow_sig_min) * t) * x + t * x1
 
-    # TODO: add indicator for only one hand or two hands
+    # TODO: change to multi mode for difference training strategy / inference strategy
     def forward(
         self,
         batch: dict,
@@ -1195,6 +1197,7 @@ class LegendVLA(nn.Module):
             "vlm_ce_loss": vlm_loss,
             "action_ce_loss": action_ce_loss,
         }
+        
 class LegendVLAInference(LegendVLA):
     def forward(
         self,
