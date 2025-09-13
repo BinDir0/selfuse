@@ -23,7 +23,7 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
         assert len(self.dataloader) > 0, "No data to calculate tokenizer"
         action_data = []
         for batch in tqdm(self.dataloader, desc="Loading tokenizer", mininterval=self.cfg.training.tqdm_interval_sec):
-            action_data.append(batch['action'])
+            action_data.append(batch['human_actions'])
         action_data = np.concatenate(action_data, axis=0)
         self.tokenizer = UniversalActionProcessor.fit(
             action_data,
@@ -45,7 +45,7 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
         average_token_length_list = []
         with tqdm(self.dataloader, desc="Validating tokenizer", mininterval=self.cfg.training.tqdm_interval_sec) as tepoch:
             for batch in tepoch:
-                action_data = batch['human_action']
+                action_data = batch['human_actions']
                 batch_tokens = valid_tokenizer(action_data)
                 decoded_actions = valid_tokenizer.decode(batch_tokens)
 

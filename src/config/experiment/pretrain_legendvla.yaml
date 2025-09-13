@@ -11,9 +11,9 @@ lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
 vla_dataset_paths:
- - /share_data/datasets/taco/taco.zarr
- - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
-#  - /share_data/datasets/test/taco.zarr
+ - /share_data/datasets/taco/10episodes.zarr
+#  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+#  - /share_data/datasets/OakInk-v2/oakink2.zarr
 vlm_dataset_paths:
 
 
@@ -37,38 +37,45 @@ shape_meta: &shape_meta
 
 dataset:
   _target_: src.dataset.legendvla_dataset.LegendUnifiedDataset
-  zarr_paths: ${vla_dataset_paths}
-  zarr_paths: ${vlm_dataset_paths}
-  horizon: ${eval:'${n_action_steps}+${dataset.history}'}
-  pad_before: ${eval:'${dataset.history}+${n_latency_steps}'}
-  pad_after: ${eval:'${n_action_steps}-1'}
-  shape_meta: ${shape_meta}
-  seed: 42
-  val_ratio: 0.05
-  history: 30 # frames
-  normalizer_dataloader_cfg:
-    batch_size: 4096
-    num_workers: 16
-    shuffle: False
-    pin_memory: True
-    persistent_workers: True
+  vla_dataset: 
+    _target_: src.dataset.legendvla_dataset.LegendVLADataset
+    zarr_paths: ${vla_dataset_paths}
+    horizon: ${eval:'${n_action_steps}+${history}'}
+    pad_before: ${eval:'${history}+${n_latency_steps}'}
+    pad_after: ${eval:'${n_action_steps}-1'}
+    shape_meta: ${shape_meta}
+    seed: 42
+    val_ratio: 0.05
+    history: ${history} # frames
+    normalizer_dataloader_cfg:
+      batch_size: 4096
+      num_workers: 32
+      shuffle: False
+      pin_memory: True
+      persistent_workers: True
+  vlm_dataset: 
 
+history: 30
 n_action_steps: 30
-n_obs_image_steps: 2
-n_obs_state_steps: 6
+n_obs_image_steps: 1
+n_obs_state_steps: 1
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
+processor: 
+  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-hoi4d-scale20-2048
+  state_vocab_size: 256
+
 dataloader:
-  batch_size: 12
-  num_workers: 16
+  batch_size: 4
+  num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 12 # use the same batch size with training for best performance
-  num_workers: 16
+  batch_size: 4 # use the same batch size with training for best performance
+  num_workers: 8
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -102,7 +109,7 @@ training:
   num_epochs: 25
   gradient_accumulate_every: 1
   use_bf16: True
-  use_torch_compile: True
+  use_torch_compile: False
   clipping:
     enabled: True
     max_grad_norm: 1.0
@@ -146,6 +153,7 @@ training:
 #   use_layer_norm: False  # Whether to use layer normalization
 
 mixture:
+  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then human_action
   vlm:   # gemma
     hidden_size: 2048
     intermediate_size: 16384
@@ -155,15 +163,6 @@ mixture:
     use_lora: ${lora}
     adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0  # 10000 in gemma
-  proprio:
-    hidden_size: 1024
-    intermediate_size: 4096
-    use_final_norm: True  # technically no, but sharing weights with action anyway
-    cache: True
-    use_quantize: False
-    use_lora: False
-    adaptive_mode: ${action_expert_adaptive_mode}
-    rope_theta: ${action_expert_rope_theta}
   human_action:
     hidden_size: 1024
     intermediate_size: 4096
@@ -185,9 +184,10 @@ vocab_size: 257216
 pad_token_id: 0
 patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
-text_seq_len: 32
-answer_seq_len: 160 # TODO: check 
-max_image_text_answer_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
+state_seq_len: ${eval:'${n_obs_state_steps}*${shape_meta.obs.state.shape[0]}*(2+2)'} # 2 for lg(vocab_size)
+text_seq_len: ${eval:'${state_seq_len}+32'}
+answer_seq_len: 256 # TODO: check 
+max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
 tokenizer_padding: max_length # instead of truncating to longest, for best efficiency
 
 policy: 
@@ -197,8 +197,8 @@ policy:
     pad_token_id: ${pad_token_id}
     ignore_index: ${ignore_index}
     image_token_index: ${image_token_index}
-    use_lm_head: False
-    max_image_text_tokens: ${max_image_text_tokens}
+    use_lm_head: True
+    max_vlm_tokens: ${max_vlm_tokens}
     num_inference_steps: ${flow.num_inference_steps}
     action_expert_adaptive_mode: ${action_expert_adaptive_mode}
     time_hidden_size: ${time_hidden_size}
@@ -206,6 +206,9 @@ policy:
     flow_sig_min: ${flow.sig_min}
     # Add pretrained_model_path for loading pre-trained VLM weights
     pretrained_model_path: ${training.pretrained_model_path}
+    loss_weights: 
+      ce_loss_weight: 1.0
+      flow_loss_weight: 1.0
   shape_meta: ${shape_meta}
   vision_tower:
     _target_: src.model.vlm.paligemma.siglip.SiglipVisionModel

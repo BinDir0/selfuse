@@ -13,6 +13,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from PIL import Image
+import random
 
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
@@ -67,7 +68,7 @@ class LegendVLADataset(BaseImageDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, keys=['image', 'state', 'instruction', 'action', 'extrinsic', 'presence'])
+                zarr_path, keys=['image', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'presence'])
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask
@@ -99,7 +100,7 @@ class LegendVLADataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
-        self.hand_ndim = shape_meta['obs']['hand']['shape'][-1] // 2 # per hand pca ncomponents
+        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
@@ -125,18 +126,28 @@ class LegendVLADataset(BaseImageDataset):
             
         return val_set
     
-    def _sample_to_vla_data(self, sample):
+    def _sample_to_data(self, sample):
         hand_state = sample['state/hand'].astype(np.float32)
         wrist_state = sample['state/wrist'].astype(np.float32)
         wrist_action = sample['action/wrist'].astype(np.float32)
         hand_action = sample['action/hand'].astype(np.float32)
         instruction = str(sample['instruction'][self.history]) 
+        instruction_num = sample['instruction_num'][self.history]
         # [Horizon, 16] -> [Horizon, 4, 4]
         extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
-        presence = sample['presence'].astype(np.float32)[self.history]
+        presence = sample['presence'][self.history]
 
-        image_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_image_steps - 1))]
-        state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+        # sample a random instruction from the candidate instructions
+        instruction = instruction[random.randint(0, instruction_num)]
+
+        if self.n_obs_image_steps > 1:
+            image_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_image_steps - 1))]
+        else:
+            image_slice = [self.history]
+        if self.n_obs_state_steps > 1:
+            state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+        else:
+            state_slice = [self.history]
 
         # use first self.hand_ndim components of hand state and action
         all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims
@@ -155,9 +166,9 @@ class LegendVLADataset(BaseImageDataset):
 
         assert self.normalizer is not None, "Normalizer is not set"
         state = np.concatenate([processed_wrist_state, processed_hand_state], axis=-1)
-        state = self.normalizer['state'](state)
+        state = self.normalizer['states'](state)
         action = np.concatenate([processed_wrist_action, processed_hand_action], axis=-1)
-        action = self.normalizer['human_action'](action)
+        action = self.normalizer['human_actions'](action)
 
         images_to_process = sample['image'][image_slice]
         if self.train_mode and self.aug_transform is not None:
@@ -174,13 +185,14 @@ class LegendVLADataset(BaseImageDataset):
             images_to_process = np.stack(augmented_images)
 
         # Process all images in batch
-        processed_results = self.preprocessor(mode="vla", images=images_to_process, text=instruction, state=state, action=action)
+        processed_results = self.preprocessor(images=images_to_process, text=instruction, states=state, human_actions=action)
         processed_frames = processed_results['pixel_values'] # [T, C, H, W]
         tokenized_instruction = processed_results['input_ids'] # [L]
         tokenized_labels = processed_results['labels'] # [L]
+        answer_start_idx = processed_results['answer_start_idx'] # []
         attention_mask = processed_results['attention_mask'] # [L]
 
-        human_actions_valid_mask = ~torch.zeros_like(action, dtype=torch.bool)
+        human_actions_valid_mask = np.zeros_like(action, dtype=bool)
         if presence & 1 : 
             human_actions_valid_mask[..., :3] = True
             human_actions_valid_mask[..., 6:12] = True
@@ -191,10 +203,11 @@ class LegendVLADataset(BaseImageDataset):
             human_actions_valid_mask[..., 18+self.hand_ndim:18+self.hand_ndim*2] = True
 
         data = {
-            'input_id': tokenized_instruction,
-            'label': tokenized_labels,
+            'input_ids': tokenized_instruction,
+            'labels': tokenized_labels,
+            'answer_start_idx': answer_start_idx,
             'attention_mask': attention_mask,
-            'pixel_value': processed_frames, 
+            'pixel_values': processed_frames, 
             # we assume the history of the data is 30 Hz, the image should cover the past 1 second
             'human_actions': action,
             'human_actions_valid_mask': human_actions_valid_mask,
@@ -203,6 +216,9 @@ class LegendVLADataset(BaseImageDataset):
 
     def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
         self.preprocessor = preprocessor
+
+    def set_normalizer(self, normalizer: LinearNormalizer):
+        self.normalizer = normalizer
 
     def get_normalizer(self, mode='limits', **kwargs):
         # Merge all data
@@ -226,8 +242,8 @@ class LegendVLADataset(BaseImageDataset):
             normalizer.update_streaming_fit(input_data)
         normalizer.finish_streaming_fit()
         # ignore the wrist rotation
-        normalizer.ignore_dim(key='state', dim=slice(6, 18))
-        normalizer.ignore_dim(key='human_action', dim=slice(6, 18))
+        normalizer.ignore_dim(key='states', dim=slice(6, 18))
+        normalizer.ignore_dim(key='human_actions', dim=slice(6, 18))
 
         def print_dict(d):
             for k, v in d.items():
@@ -236,10 +252,9 @@ class LegendVLADataset(BaseImageDataset):
         for key in normalizer.params_dict.keys():
             print(f"{key}: ")
             print_dict(normalizer.params_dict[key]['input_stats'])
-            print_dict(normalizer.params_dict[key]['scale'])
-            print_dict(normalizer.params_dict[key]['offset'])
+            print(f"scale: {normalizer.params_dict[key]['scale']}")
+            print(f"offset: {normalizer.params_dict[key]['offset']}")
 
-        self.normalizer = normalizer
         return normalizer
 
     def get_collator(self):
@@ -282,34 +297,43 @@ class LegendVLMDataset(BaseImageDataset):
 
 class LegendUnifiedDataset(BaseImageDataset):
     def __init__(self,
-        vla_dataset,
-        vlm_dataset,
+        vla_dataset: LegendVLADataset,
+        vlm_dataset: LegendVLMDataset = None,
     ):
         super().__init__()
         self.vla_dataset = vla_dataset
         self.vlm_dataset = vlm_dataset
-
-        vla_sample = vla_dataset[0]
-        self.shape_meta = dict()
-        for key in vla_sample.keys():
-            self.shape_meta[key] = vla_sample[key].shape
+        self.shape_meta = None
 
     def get_collator(self):
         return LegendUnifiedDataCollator()
 
+    def get_validation_dataset(self):
+        return LegendUnifiedDataset(
+            vla_dataset=self.vla_dataset.get_validation_dataset(),
+            vlm_dataset=self.vlm_dataset.get_validation_dataset() if self.vlm_dataset is not None else None
+        )
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        if self.shape_meta is None:
+            self.shape_meta = dict()
+            vla_sample = self.vla_dataset[0]
+            for key in vla_sample.keys():
+                self.shape_meta[key] = vla_sample[key].shape
         if idx < len(self.vla_dataset):
             return self.vla_dataset[idx]
-        else:
+        elif self.vlm_dataset is not None:
             sample = self.vlm_dataset[idx - len(self.vla_dataset)]
             for key in self.shape_meta.keys():
                 if key not in sample:
                     sample[key] = torch.zeros(self.shape_meta[key])
                     sample[f"{key}_valid_mask"] = torch.zeros(self.shape_meta[key], dtype=torch.bool)
             return sample
+        else:
+            raise ValueError("No dataset to get item from")
 
     def __len__(self):
-        return len(self.vla_dataset) + len(self.vlm_dataset)
+        return len(self.vla_dataset) + len(self.vlm_dataset) if self.vlm_dataset is not None else len(self.vla_dataset)
 
 
 class LegendVLANormalizerDataset(BaseImageDataset):
@@ -335,7 +359,7 @@ class LegendVLANormalizerDataset(BaseImageDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, keys=['state', 'action'])
+                zarr_path, keys=['state', 'action', 'extrinsic'])
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask
@@ -366,7 +390,7 @@ class LegendVLANormalizerDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
-        self.hand_ndim = shape_meta['obs']['hand']['shape'][-1] // 2 # per hand pca ncomponents
+        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
     def _sample_to_data(self, sample):
@@ -383,7 +407,10 @@ class LegendVLANormalizerDataset(BaseImageDataset):
         hand_state = np.concatenate([hand_state[:, :self.hand_ndim], hand_state[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
         hand_action = np.concatenate([hand_action[:, :self.hand_ndim], hand_action[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]], axis=-1)
 
-        state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+        if self.n_obs_state_steps > 1:
+            state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+        else:
+            state_slice = [self.history]
 
         processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
 
@@ -397,8 +424,8 @@ class LegendVLANormalizerDataset(BaseImageDataset):
 
         data = {
             # we assume the history of the data is 30 Hz, the image should cover the past 1 second
-            'state': np.concatenate([processed_wrist_state, processed_hand_state], axis=-1),
-            'human_action': np.concatenate([processed_wrist_action, processed_hand_action], axis=-1),
+            'states': np.concatenate([processed_wrist_state, processed_hand_state], axis=-1),
+            'human_actions': np.concatenate([processed_wrist_action, processed_hand_action], axis=-1),
         }
         return data
 
@@ -475,7 +502,7 @@ class LegendVLAActionDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
-        self.hand_ndim = shape_meta['obs']['hand']['shape'][-1] // 2 # per hand pca ncomponents
+        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
 
@@ -493,7 +520,10 @@ class LegendVLAActionDataset(BaseImageDataset):
         state = np.concatenate([wrist_state, hand_state], axis=-1)
         action = np.concatenate([wrist_action, hand_action], axis=-1)
 
-        state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+        if self.n_obs_state_steps > 1:
+            state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+        else:
+            state_slice = [self.history]
 
         # use delta of wrist translation and hand mano params as action
         processed_state = state[state_slice]
@@ -501,7 +531,7 @@ class LegendVLAActionDataset(BaseImageDataset):
 
         data = {
             # we assume the history of the data is 30 Hz, the image should cover the past 1 second
-            'human_action': processed_action,
+            'human_actions': processed_action,
         }
         return data
 

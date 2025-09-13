@@ -495,11 +495,11 @@ def _fit_from_stats(stats_dict: Dict,
 
 def _normalize(x, params, forward=True):
     assert 'scale' in params
-    if isinstance(x, np.ndarray):
-        x = torch.from_numpy(x)
     scale = params['scale']
     offset = params['offset']
-    x = x.to(device=scale.device, dtype=scale.dtype)
+    if isinstance(x, np.ndarray):
+        scale = scale.cpu().numpy()
+        offset = offset.cpu().numpy()
     src_shape = x.shape
     x = x.reshape(-1, scale.shape[0])
     if forward:

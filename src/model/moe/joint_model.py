@@ -4,9 +4,9 @@ Wrapper around the mixtures (without encoder / decoder)
 Agnostic to the mixture setup
 
 KV caches --- There are a few different modes depending on the setting:
-    - text generation, only vlm active, use vlm cache --- append active (mode="append")
-    - action naive inference, all active, use vlm and proprio cache --- no new tokens for the active mixture (mode="no_append")
-    - action inference, no cache during vlm and proprio forward, then use vlm and proprio cache --- append, non-active (mode="append_non_active")
+    - text/discrete action generation, only vlm active, use vlm cache --- append active (mode="append")
+    - action naive inference, all active, use vlm cache --- no new tokens for the active mixture (mode="no_append")
+    - action inference, no cache during vlm forward, then use vlm cache --- append, non-active (mode="append_non_active")
     - action flow matching training, all active, no cache (mode does not matter)
 """
 
@@ -27,10 +27,11 @@ def forward_mixture_layers(
     position_ids_all: dict[torch.LongTensor],
     embeds_all: dict[torch.FloatTensor],
     layer_idx: int,
-    post_attn_skip_names: Tuple[str, ...] = ("vlm", "proprio"),
+    post_attn_skip_names: Tuple[str, ...] = ("vlm"),
     kv_caches: dict[KVCache] = {},
     cache_mode: str = "append_non_active",
     time_cond: Optional[torch.FloatTensor] = None,
+    knowledge_insulation: bool = False,
 ) -> dict[torch.FloatTensor]:
     """the usual norm + attn + res + norm + mlp + res"""
     active_mixture_names = list(embeds_all.keys())
@@ -58,6 +59,7 @@ def forward_mixture_layers(
         post_attn_skip_names=post_attn_skip_names,
         kv_caches=kv_caches,
         cache_mode=cache_mode,
+        knowledge_insulation=knowledge_insulation,
     )
     hidden_states_pre_res = hidden_states_post_attn
 
@@ -133,11 +135,12 @@ def forward_mixture_attn(
     position_ids_all: dict[torch.LongTensor],
     hidden_states_all: dict[torch.FloatTensor],
     layer_idx: int,
-    post_attn_skip_names: Tuple[str, ...] = ("vlm", "proprio"),
+    post_attn_skip_names: Tuple[str, ...] = ("vlm"),
     kv_caches: dict[KVCache] = {},
     cache_mode: str = "append_non_active",
     attn_softclamp: float = 50.0,  # default in gemma
     attention_dropout: float = 0.0,
+    knowledge_insulation: bool = False,
 ) -> dict[torch.FloatTensor]:
     """Assume all mixtures have the same head dim"""
     assert cache_mode in [
@@ -250,37 +253,16 @@ def forward_mixture_attn(
         key_states_all[name] = key_states
         value_states_all[name] = value_states
 
-    # Concatenate all the blocks along sequence
-    # [Batch_Size, Num_Heads_Q / Num_Heads_KV, Full_Seq_Len, Head_Dim]
-    query_states = torch.cat(tuple(query_states_all.values()), dim=-2)
-    key_states = torch.cat(tuple(key_states_all.values()), dim=-2)
-    value_states = torch.cat(tuple(value_states_all.values()), dim=2)
-
-    # Perform the calculation as usual, Q * K^T / sqrt(head_dim)
-    # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
-    # TODO: We need to change the code below when we use Knowledge Insulation training recipe
-    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
-        mixtures[active_mixture_names[0]].head_dim
+    attn_output = forward_mixture_scaled_dot_product_attention(
+        query_states_all,
+        key_states_all,
+        value_states_all,
+        attention_mask,
+        attn_softclamp,
+        attention_dropout,
+        knowledge_insulation,
+        mixtures[active_mixture_names[0]].training,
     )
-
-    # Soft capping
-    attn_weights = attn_weights / attn_softclamp
-    attn_weights = torch.tanh(attn_weights)
-    attn_weights = attn_weights * attn_softclamp
-
-    # Apply the softmax / dropout
-    attn_weights = attn_weights + attention_mask
-    # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-        query_states.dtype
-    )
-    attn_weights = nn.functional.dropout(
-        attn_weights,
-        p=attention_dropout,
-        training=mixtures[active_mixture_names[0]].training,
-    )
-    # Multiply by the values. [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len] x [Batch_Size, Num_Heads_KV, Full_Seq_Len, Head_Dim] -> [Batch_Size, Num_Heads_Q, Full_Seq_Len, Head_Dim]
-    attn_output = torch.matmul(attn_weights, value_states)
 
     # Make sure the sequence length is the second dimension. # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Head_Dim] -> [Batch_Size, Full_Seq_Len, Num_Heads_Q, Head_Dim]
     attn_output = attn_output.transpose(1, 2).contiguous()
@@ -303,6 +285,107 @@ def forward_mixture_attn(
                 "forward_o_proj", layer_idx, attn_outputs[name]
             )
     return attn_outputs_final
+
+
+def forward_mixture_scaled_dot_product_attention(
+    query_states_all: dict[torch.FloatTensor],
+    key_states_all: dict[torch.FloatTensor],
+    value_states_all: dict[torch.FloatTensor],
+    attention_mask: torch.Tensor,
+    attn_softclamp: float = 50.0,
+    attention_dropout: float = 0.0,
+    knowledge_insulation: bool = False,
+    training: bool = False,
+) -> torch.FloatTensor:
+    if not knowledge_insulation:
+        # Concatenate all the blocks along sequence
+        # [Batch_Size, Num_Heads_Q / Num_Heads_KV, Full_Seq_Len, Head_Dim]
+        query_states = torch.cat(tuple(query_states_all.values()), dim=-2)
+        key_states = torch.cat(tuple(key_states_all.values()), dim=-2)
+        value_states = torch.cat(tuple(value_states_all.values()), dim=2)
+
+        # Perform the calculation as usual, Q * K^T / sqrt(head_dim)
+        # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
+            query_states.shape[-1]
+        )
+
+        # Soft capping
+        attn_weights = attn_weights / attn_softclamp
+        attn_weights = torch.tanh(attn_weights)
+        attn_weights = attn_weights * attn_softclamp
+
+        # Apply the softmax / dropout
+        attn_weights = attn_weights + attention_mask
+        # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+            query_states.dtype
+        )
+        attn_weights = nn.functional.dropout(
+            attn_weights,
+            p=attention_dropout,
+            training=training,
+        )
+        # Multiply by the values. [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len] x [Batch_Size, Num_Heads_KV, Full_Seq_Len, Head_Dim] -> [Batch_Size, Num_Heads_Q, Full_Seq_Len, Head_Dim]
+        attn_output = torch.matmul(attn_weights, value_states)
+    elif 'vlm' in query_states_all and len(query_states_all["vlm"]) > 1: # we have more than one vlm mixture
+        # Concatenate the blocks into two groups: vlm and other mixtures
+        # [Batch_Size, Num_Heads_Q / Num_Heads_KV, VLM_Seq_Len, Head_Dim]
+        query_states_vlm = torch.cat(tuple(query_states_all["vlm"]), dim=-2)
+        key_states_vlm = torch.cat(tuple(key_states_all["vlm"]), dim=-2)
+        value_states_vlm = torch.cat(tuple(value_states_all["vlm"]), dim=2)
+
+        query_states_others = {key: value for key, value in query_states_all.items() if key != "vlm"}
+        key_states_others = {key: value for key, value in key_states_all.items() if key != "vlm"}
+        value_states_others = {key: value for key, value in value_states_all.items() if key != "vlm"}
+        # [Batch_Size, Num_Heads_Q / Num_Heads_KV, Other_Seq_Len, Head_Dim]
+        query_states_others = torch.cat(tuple(query_states_others.values()), dim=-2)
+        key_states_others = torch.cat(tuple(key_states_others.values()), dim=-2)
+        value_states_others = torch.cat(tuple(value_states_others.values()), dim=2)
+
+        # Perform the calculation as usual, Q * K^T / sqrt(head_dim)
+        # [Batch_Size, Num_Heads_Q, VLM_Seq_Len, VLM_Seq_Len]
+        attn_weights_vlm = torch.matmul(query_states_vlm, key_states_vlm.transpose(2, 3))
+        # [Batch_Size, Num_Heads_Q, Other_Seq_Len, Other_Seq_Len]
+        attn_weights_others = torch.matmul(query_states_others, key_states_others.transpose(2, 3))
+        # [Batch_Size, Num_Heads_Q, Other_Seq_Len, VLM_Seq_Len]
+        # Detach the key states of vlm to avoid backprop through the vlm
+        attn_weights_others_vlm = torch.matmul(query_states_others, key_states_vlm.detach().transpose(2, 3))
+        bsz, num_heads_q, vlm_seq_len = query_states_vlm.shape[:3]
+        other_seq_len = query_states_others.shape[2]
+        full_seq_len = vlm_seq_len + other_seq_len
+        # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
+        attn_weights = torch.zeros((bsz, num_heads_q, full_seq_len, full_seq_len), dtype=query_states_vlm.dtype, device=query_states_vlm.device)
+        attn_weights[:, :, :vlm_seq_len, :vlm_seq_len] = attn_weights_vlm
+        attn_weights[:, :, vlm_seq_len:, :vlm_seq_len] = attn_weights_others_vlm
+        attn_weights[:, :, vlm_seq_len:, vlm_seq_len:] = attn_weights_others
+
+        # Soft capping
+        attn_weights = attn_weights / attn_softclamp
+        attn_weights = torch.tanh(attn_weights)
+        attn_weights = attn_weights * attn_softclamp
+
+        # Apply the softmax / dropout
+        attn_weights = attn_weights + attention_mask
+        # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+            query_states_vlm.dtype
+        )
+        attn_weights = nn.functional.dropout(
+            attn_weights,
+            p=attention_dropout,
+            training=training,
+        )
+        # Multiply by the values. [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len] x [Batch_Size, Num_Heads_KV, Full_Seq_Len, Head_Dim] -> [Batch_Size, Num_Heads_Q, Full_Seq_Len, Head_Dim]
+        attn_output_vlm = torch.matmul(attn_weights[:, :, :vlm_seq_len, :vlm_seq_len], value_states_vlm)
+        # Detach the value states of vlm to avoid backprop through the vlm
+        value_states_all = torch.cat((value_states_vlm.detach(), value_states_others), dim=2)
+        attn_output_others = torch.matmul(attn_weights[:, :, vlm_seq_len:, :], value_states_all)
+        attn_output = torch.cat((attn_output_vlm, attn_output_others), dim=-2)
+    else: 
+        raise ValueError("Knowledge Insulation is not supported for single vlm mixture")
+
+    return attn_output
 
 
 # should have named this `MoE`
@@ -333,7 +416,7 @@ class JointModel(nn.Module):
         position_ids_all: dict[torch.LongTensor],
         embeds_all: dict[torch.FloatTensor],
         time_cond: Optional[torch.FloatTensor] = None,
-        final_layer_post_attn_skip_names: Tuple[str, ...] = ("vlm", "proprio"),
+        final_layer_post_attn_skip_names: Tuple[str, ...] = ("vlm"),
         kv_caches: dict[KVCache] = {},
         cache_mode: str = "append_non_active",
         return_caches: bool = False,
@@ -341,7 +424,7 @@ class JointModel(nn.Module):
         """
         Assume attention_mask is in the right block attention form
 
-        embeds_all and position_ids_all need to be in the correct order, e.g., {"vlm": ..., "proprio": ..., "action": ...}
+        embeds_all and position_ids_all need to be in the correct order, e.g., {"vlm": ..., "action": ...}
         """
         active_mixture_names = list(embeds_all.keys())
 
@@ -371,6 +454,7 @@ class JointModel(nn.Module):
                 post_attn_skip_names=final_layer_post_attn_skip_names
                 if is_final_layer
                 else [],
+                knowledge_insulation=self.knowledge_insulation,
             )
 
         # [Batch_Size, Seq_Len, Hidden_Size]
@@ -383,92 +467,3 @@ class JointModel(nn.Module):
         if return_caches:
             return hidden_states_all, kv_caches
         return hidden_states_all
-
-
-if __name__ == "__main__":
-    from omegaconf import OmegaConf
-
-    cfg = OmegaConf.load("config/train/bridge.yaml")
-    model = JointModel(cfg.joint.config)
-
-    # dummy inputs
-    dummy_num_image_tokens = 7
-    q_lens = [
-        dummy_num_image_tokens,
-        cfg.cond_steps,
-        cfg.horizon_steps,
-    ]  # not considering text (padding)
-    total_len = sum(q_lens)
-    inputs_embeds = torch.randn(
-        1,
-        dummy_num_image_tokens,
-        cfg.mixture.vlm.hidden_size,
-    )  # no history
-    proprio_embeds = torch.randn(
-        1,
-        cfg.cond_steps,
-        cfg.mixture.proprio.hidden_size,
-    )
-    action_embeds = torch.randn(
-        1,
-        cfg.horizon_steps,
-        cfg.mixture.action.hidden_size,
-    )
-    time_cond = None
-    if cfg.action_expert_adaptive_mode:
-        time_cond = torch.randn(1, cfg.time_hidden_size)
-
-    kv_caches = model.build_mixture_caches()
-    position_ids_all = {
-        "vlm": torch.arange(dummy_num_image_tokens)[None],
-        "proprio": torch.arange(cfg.cond_steps)[None],
-        "action": torch.arange(cfg.horizon_steps)[None],
-    }  # add batch dim
-
-    # block attention
-    proprio_start = dummy_num_image_tokens
-    proprio_end = dummy_num_image_tokens + 1
-    action_start = proprio_end
-    causal_mask = torch.full(
-        (1, total_len, total_len),
-        torch.finfo(torch.float32).min,
-        dtype=torch.float32,
-    )  # smallest value, avoid using inf for softmax nan issues with padding
-    causal_mask[:, :dummy_num_image_tokens, :dummy_num_image_tokens] = (
-        0  # image/text attend to itself
-    )
-    causal_mask[:, proprio_start:proprio_end, :dummy_num_image_tokens] = (
-        0  # proprio attend to image/text
-    )
-    causal_mask[:, action_start:, :dummy_num_image_tokens] = (
-        0  # action attend to image/text
-    )
-    causal_mask[:, proprio_start:proprio_end, proprio_start:proprio_end] = (
-        0  # proprio attend to itself
-    )
-    causal_mask[:, action_start:, proprio_start:] = (
-        0  # action attend to itself and proprio
-    )
-
-    # Add the head dimension
-    # [Batch_Size, Q_Len, KV_Len] -> [Batch_Size, Num_Heads_Q, Q_Len, KV_Len]
-    causal_mask = causal_mask.unsqueeze(1)
-
-    # dummy denoising - naive action inference
-    print("Initial action embeds", action_embeds)
-    num_step = 3
-    for _step in range(num_step):
-        print("running dummy denoising step", _step)
-        action_embeds = model(
-            attention_mask=causal_mask,
-            position_ids_all=position_ids_all,
-            embeds_all={
-                "vlm": inputs_embeds,
-                "proprio": proprio_embeds,
-                "action": action_embeds,
-            },
-            kv_caches=kv_caches,
-            time_cond=time_cond,
-            cache_mode="no_append",
-        )["action"]
-        print("Updated action embeds", action_embeds)

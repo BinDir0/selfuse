@@ -75,7 +75,7 @@ class Mixture(nn.Module):
             args = [x] if self.adaptive_mode is None else [x, cond]
             return self.norm(*args)
         else:
-            return None
+            return x
 
 
 class MixtureDecoderLayer(nn.Module):

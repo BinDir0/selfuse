@@ -40,21 +40,21 @@ class LegendVLA(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg
-        self.shape_meta = shape_meta
+        self.shape_meta = shape_meta    
         self.vocab_size = cfg.vocab_size
         self.pad_token_id = cfg.pad_token_id
         self.image_token_index = cfg.image_token_index
         self.use_lm_head = cfg.get("use_lm_head", False)
 
-        self.max_image_text_tokens = cfg.max_image_text_tokens
+        self.max_vlm_tokens = cfg.max_vlm_tokens
         self.num_human_action_tokens = shape_meta["action"]["horizon"]
         self.total_num_tokens = (
-            self.max_image_text_tokens
+            self.max_vlm_tokens
             + self.num_human_action_tokens
         )
 
         # Get hidden sizes from joint_model config
-        self.image_text_hidden_size = joint_model.config.mixture.vlm.hidden_size
+        self.vlm_hidden_size = joint_model.config.mixture.vlm.hidden_size
         self.human_action_hidden_size = joint_model.config.mixture.human_action.hidden_size
 
         # Action parameterization
@@ -66,7 +66,7 @@ class LegendVLA(nn.Module):
         # text input only
         self.embed_tokens = nn.Embedding(
             cfg.vocab_size,
-            self.image_text_hidden_size,
+            self.vlm_hidden_size,
             self.pad_token_id,
         )  # 0.527B parameters
 
@@ -106,7 +106,7 @@ class LegendVLA(nn.Module):
         # optional text output
         if self.use_lm_head:
             self.lm_head = nn.Linear(
-                self.image_text_hidden_size,
+                self.vlm_hidden_size,
                 self.vocab_size,
                 bias=False,
             )
@@ -114,6 +114,7 @@ class LegendVLA(nn.Module):
 
         self.normalizer = LinearNormalizer()
         self.CELoss = nn.CrossEntropyLoss(ignore_index=cfg.ignore_index)
+        self.loss_weights = cfg.loss_weights
 
     @property
     def human_action_expert_parameters(self):
@@ -339,10 +340,9 @@ class LegendVLA(nn.Module):
 
     # ---------- Input preparation ---------- #
 
-    # TODO: need to change this when we use Knowledge Insulation training recipe
     def build_causal_mask_and_position_ids(
-        self, attention_mask: torch.Tensor, dtype: torch.dtype
-    ) -> Tuple[torch.FloatTensor, torch.LongTensor, torch.LongTensor, torch.LongTensor]:
+        self, attention_mask: torch.Tensor, answer_start_idx: torch.Tensor, dtype: torch.dtype
+    ) -> Tuple[torch.FloatTensor, torch.LongTensor, torch.LongTensor]:
         """
         Build causal attention masks and position IDs for different token types.
         
@@ -353,6 +353,7 @@ class LegendVLA(nn.Module):
         
         Args:
             attention_mask (torch.Tensor): [B, seq_len] Attention mask indicating valid tokens
+            answer_start_idx (torch.Tensor): [B] Index of the first answer token
             dtype (torch.dtype): Data type for the causal mask
         
         Returns:
@@ -360,25 +361,24 @@ class LegendVLA(nn.Module):
                 - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] 
                   Causal attention mask with block structure (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - proprio_position_ids (torch.LongTensor): [B, num_proprio] Position IDs for proprio tokens
                 - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
                 
         block attention --- padding for unused text tokens
 
-                       img/text img/text (padding) proprio human_action human_action
+                       img/text img/text answer answer answer (padding) human_action human_action
         img/text          x        x
         img/text          x        x
+        answer            x        x       x           
+        answer            x        x       x      x   
+        answer            x        x       x      x      x
         (padding)
-        proprio           x        x                  x
-        human_action      x        x                  x         x           x
-        human_action      x        x                  x         x           x 
+        human_action      x        x                                         x            x
+        human_action      x        x                                         x            x
         """
         bsz = attention_mask.size(0)
         device = attention_mask.device
-        proprio_start = self.max_image_text_tokens
-        proprio_end = proprio_start + self.num_proprio_tokens
-        human_action_start = proprio_end
-        image_text_token_cnts = torch.sum(attention_mask, dim=1)
+        human_action_start = self.max_vlm_tokens
+        vlm_token_cnts = torch.sum(attention_mask, dim=1)
         causal_mask = torch.full(
             (bsz, self.total_num_tokens, self.total_num_tokens),
             torch.finfo(dtype).min,
@@ -386,16 +386,19 @@ class LegendVLA(nn.Module):
             device=device,
         )  # smallest value, avoid using inf for softmax nan issues with padding
         for idx in range(bsz):
-            cnt = image_text_token_cnts[idx].item()
-            causal_mask[idx, :cnt, :cnt] = 0  # image/text attend to itself
-            causal_mask[idx, proprio_start:, :cnt] = (
-                0  # proprio/human_action attend to image/text
+            cnt = vlm_token_cnts[idx].item()
+            start = answer_start_idx[idx].item()
+            answer_len = cnt - start
+            causal_mask[idx, :start, :start] = 0  # image/text attend to itself
+            mask = torch.tril(torch.ones((answer_len, answer_len), dtype=torch.bool, device=device))
+            causal_mask[idx, start:start+answer_len, start:start+answer_len] = torch.where(
+                mask, 0, torch.finfo(dtype).min
+            ) # answer tokens attend to answer tokens before them
+            causal_mask[idx, human_action_start:, :start] = (
+                0  # human_action attend to image/text
             )
-        causal_mask[:, proprio_start:proprio_end, proprio_start:proprio_end] = (
-            0  # proprio attend to itself
-        )
-        causal_mask[:, human_action_start:, proprio_start:] = (
-            0  # human_action attend to proprio, and itself (causal)
+        causal_mask[:, human_action_start:, human_action_start:] = (
+            0  # human_action attend to itself
         )
 
         # add the head dimension for broadcasting to all attention heads
@@ -403,20 +406,16 @@ class LegendVLA(nn.Module):
         causal_mask = causal_mask.unsqueeze(1)
 
         # position ids for each blocks --- start at 1
-        vlm_position_ids = torch.arange(1, self.max_image_text_tokens + 1, device=device).repeat(
-            bsz, 1
-        )
-        proprio_position_ids = torch.arange(1, self.num_proprio_tokens + 1, device=device).repeat(
+        vlm_position_ids = torch.arange(1, self.max_vlm_tokens + 1, device=device).repeat(
             bsz, 1
         )
         human_action_position_ids = torch.arange(
-            self.num_proprio_tokens + 1,
-            self.num_proprio_tokens + self.num_human_action_tokens + 1,
+            1,
+            self.num_human_action_tokens + 1,
             device=device,
         ).repeat(bsz, 1)
-        return causal_mask, vlm_position_ids, proprio_position_ids, human_action_position_ids
+        return causal_mask, vlm_position_ids, human_action_position_ids
 
-    # TODO: need to change this when we use Knowledge Insulation training recipe
     def split_full_mask_into_submasks(
         self, causal_mask: torch.FloatTensor
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
@@ -429,20 +428,19 @@ class LegendVLA(nn.Module):
         
         Returns:
             Tuple containing:
-                - image_text_mask (torch.FloatTensor): [B, 1, seq_len, seq_len]
+                - vlm_mask (torch.FloatTensor): [B, 1, seq_len, seq_len]
                   Attention mask for image/text tokens (broadcasts to all heads)
                 - human_action_mask (torch.FloatTensor): [B, 1, action_len, total_len]
                   Attention mask for human action tokens (broadcasts to all heads)
         """
-        image_text_mask = causal_mask[
+        vlm_mask = causal_mask[
             ...,
-            : self.max_image_text_tokens,
-            : self.max_image_text_tokens,
+            : self.max_vlm_tokens,
+            : self.max_vlm_tokens,
         ]
         human_action_mask = causal_mask[..., -self.num_human_action_tokens :, :]
-        return image_text_mask, human_action_mask
+        return vlm_mask, human_action_mask
 
-    # TODO: need to change this when we use Knowledge Insulation training recipe
     def build_causal_mask_and_position_ids_for_text(
         self,
         q_len: int,
@@ -498,7 +496,6 @@ class LegendVLA(nn.Module):
         return causal_mask, position_ids
 
     # ---------- Inference ----------#
-
     def _forward_siglip_and_text_embedding(
         self,
         input_ids: torch.LongTensor,
@@ -540,7 +537,7 @@ class LegendVLA(nn.Module):
         # normalize the image features
         _, _, embed_dim = image_features.shape
         bsz, seq_len = input_ids.shape
-        scaled_image_features = image_features / (self.image_text_hidden_size**0.5)
+        scaled_image_features = image_features / (self.vlm_hidden_size**0.5)
 
         # put embedding together - image, text, padding
         final_embedding = torch.full(
@@ -574,7 +571,7 @@ class LegendVLA(nn.Module):
             input (dict): Input dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
                 - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
-                - image_text_proprio_mask (torch.FloatTensor): [B, 1, seq_len, seq_len] 
+                - vlm_mask (torch.FloatTensor): [B, 1, seq_len, seq_len] 
                   Attention mask for image/text/proprio tokens (broadcasts to all heads)
                 - human_action_mask (torch.FloatTensor): [B, 1, action_len, total_len] 
                   Attention mask for human action tokens (broadcasts to all heads)
@@ -587,7 +584,7 @@ class LegendVLA(nn.Module):
         # Extract inputs from dict
         input_ids = input["input_ids"]
         pixel_values = input["pixel_values"]
-        image_text_proprio_mask = input["image_text_proprio_mask"]
+        vlm_mask = input["vlm_mask"]
         human_action_mask = input["human_action_mask"]
         vlm_position_ids = input["vlm_position_ids"]
         human_action_position_ids = input["human_action_position_ids"]
@@ -599,11 +596,10 @@ class LegendVLA(nn.Module):
 
         # merge the text tokens and the image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
-
         
-        # forward pass thru the vlm, proprio, cache the kv
+        # forward pass thru the vlm, cache the kv
         _, kv_caches = self.joint_model(
-            attention_mask=image_text_proprio_mask,
+            attention_mask=vlm_mask,
             position_ids_all={
                 "vlm": vlm_position_ids,
             },
@@ -619,7 +615,7 @@ class LegendVLA(nn.Module):
             (bsz, self.horizon_steps, self.human_action_dim), device=device, dtype=dtype
         )
 
-        # forward euler integration --- using kv caches of vlm and proprio
+        # forward euler integration --- using kv caches of vlm
         delta_t = 1.0 / self.num_inference_steps
         t = torch.zeros(bsz, device=device, dtype=dtype)
         for _ in range(self.num_inference_steps):
@@ -931,7 +927,7 @@ class LegendVLA(nn.Module):
             human_action_embeds = self.human_action_encoder(psi_t)
         else:
             human_action_embeds = self.human_action_encoder(psi_t, time_cond)
-        output_logits = self.joint_model(
+        output = self.joint_model(
             attention_mask=causal_mask,
             position_ids_all={
                 "vlm": vlm_position_ids,
@@ -943,14 +939,19 @@ class LegendVLA(nn.Module):
             },
             time_cond=time_cond,
             kv_caches={},  # no caching during training
+            final_layer_post_attn_skip_names=[],  # do not skip vlm last layer
         )
-        logits = output_logits["vlm"]
-        human_action_embeds = output_logits["human_action"]
+        hidden_states = output["vlm"]
+        human_action_embeds = output["human_action"]
 
-        logits = logits[:, :-1, :].contiguous()
-        labels = labels[:, 1:].contiguous()
-        logits = logits.view(-1, logits.shape[-1])
-        labels = labels.view(-1)
+        logits = self.lm_head(hidden_states)
+        logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
+        labels = labels[:, 1:].contiguous().view(-1)
+        condition = (labels < 0) & (labels > -100)
+        if torch.any(condition):
+            print(f"labels: {labels[condition]}")
+        assert not torch.any(condition)
+
         ce_loss = self.CELoss(logits, labels)
 
         # [Batch_Size, Horizon_Steps, Action_Dim]
@@ -963,7 +964,7 @@ class LegendVLA(nn.Module):
         masked_loss = torch.where(human_actions_valid_mask, flow_loss, torch.zeros_like(flow_loss))
         flow_loss = torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
 
-        total_loss = ce_loss + flow_loss
+        total_loss = self.loss_weights.ce_loss_weight * ce_loss + self.loss_weights.flow_loss_weight * flow_loss
         return {
             "total_loss": total_loss,
             "ce_loss": ce_loss,
@@ -997,14 +998,12 @@ class LegendVLAInference(LegendVLA):
             input (dict): Input dictionary containing:
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
                 - pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
-                - image_text_proprio_mask (torch.FloatTensor): [B, 1, seq_len, seq_len] 
-                  Attention mask for image/text/proprio tokens (broadcasts to all heads)
+                - vlm_mask (torch.FloatTensor): [B, 1, seq_len, seq_len] 
+                  Attention mask for image/text/answer tokens (broadcasts to all heads)
                 - human_action_mask (torch.FloatTensor): [B, 1, action_len, total_len] 
                   Attention mask for human action tokens (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - proprio_position_ids (torch.LongTensor): [B, num_proprio] Position IDs for proprio tokens
                 - human_action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
-                - proprios (torch.FloatTensor): [B, num_proprio, proprio_dim] Proprioceptive state features
         
         Returns:
             torch.FloatTensor: [B, horizon_steps, human_action_dim] Generated human action sequence

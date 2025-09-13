@@ -29,12 +29,13 @@ from accelerate.utils import TorchDynamoPlugin
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
-from src.dataset.base_dataset import BaseImageDataset
-from src.dataset.paligemma_processing import PaliGemmaVLAProcessor
-from src.utils.checkpoint_util import TopKCheckpointManager
-from src.utils.json_logger import JsonLogger
+from src.model.action.fast_tokenizer import UniversalActionProcessor
 from src.model.common.lr_scheduler import get_scheduler
 from src.model.common.model_average import ModelAveraging
+from src.dataset.base_dataset import BaseImageDataset
+from src.dataset.paligemma_processing import PaliGemmaVLAProcessor, PaliGemmaProcessor
+from src.utils.checkpoint_util import TopKCheckpointManager
+from src.utils.json_logger import JsonLogger
 from src.utils.metric import get_action_accuracy
 from src.utils.optim import CosineAnnealingWarmupRestarts, get_num_params_in_billions
 from src.utils.pytorch_util import dict_apply
@@ -74,12 +75,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         cfg = copy.deepcopy(self.cfg)
         
         # # Configure TorchDynamoPlugin
-        dynamo_plugin = TorchDynamoPlugin(
-            backend="inductor",  # Options: "inductor", "aot_eager", "aot_nvfuser", etc.
-            mode="default",      # Options: "default", "reduce-overhead", "max-autotune"
-            fullgraph=False,
-            dynamic=False
-        )
+        if cfg.training.use_torch_compile:
+            dynamo_plugin = TorchDynamoPlugin(
+                backend="inductor",  # Options: "inductor", "aot_eager", "aot_nvfuser", etc.
+                mode="default",      # Options: "default", "reduce-overhead", "max-autotune"
+                fullgraph=False,
+                dynamic=False
+            )
 
         # Set GPU device before initializing accelerator
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -92,7 +94,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             device_placement=True,
             kwargs_handlers=[ddp_kwargs],
             gradient_accumulation_steps=cfg.training.gradient_accumulate_every,
-            dynamo_plugin=dynamo_plugin
+            dynamo_plugin=dynamo_plugin if cfg.training.use_torch_compile else None
         )
 
         if accelerator.is_main_process:
@@ -117,8 +119,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.load_checkpoint(cfg.training.resume_checkpoint_path)
         elif cfg.training.load_pretrained_weights:
             self.model.load_pretrained_weights()
-        self.model.tie_action_proprio_weights()
-        self.model.freeze_unused_weights()
         if cfg.lora:
             self.model.freeze_non_lora_weights_in_vlm()
         
@@ -152,23 +152,37 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.policy.cfg.pretrained_model_path, padding_side="right"
         )
+        self.fast_tokenizer = UniversalActionProcessor.from_pretrained(
+            cfg.processor.fast_tokenizer_path
+        )
         
-        self.processor = PaliGemmaVLAProcessor(
+        self.vla_processor = PaliGemmaVLAProcessor(
+            self.tokenizer,
+            self.fast_tokenizer,
+            num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
+            max_seq_len=cfg.policy.cfg.max_vlm_tokens,
+            ignore_index=cfg.ignore_index,
+            image_size=cfg.policy.vision_tower.config.image_size,
+            state_vocab_size=cfg.processor.state_vocab_size,
+            tokenizer_padding=cfg.tokenizer_padding,
+        )
+        self.vlm_processor = PaliGemmaProcessor(
             self.tokenizer,
             num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
-            max_seq_len=cfg.policy.cfg.max_image_text_tokens,
+            max_seq_len=cfg.policy.cfg.max_vlm_tokens,
             ignore_index=cfg.ignore_index,
             image_size=cfg.policy.vision_tower.config.image_size,
             tokenizer_padding=cfg.tokenizer_padding,
         )
-        dataset.set_preprocessor(self.processor)
-        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
+        dataset.vla_dataset.set_preprocessor(self.vla_processor)
+        if dataset.vlm_dataset is not None:
+            dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
         
         print("Computing normalizer...")
         # compute normalizer on the main process and save to disk
         normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
         if accelerator.is_main_process:
-            normalizer = dataset.get_normalizer()
+            normalizer = dataset.vla_dataset.get_normalizer()
             pickle.dump(normalizer, open(normalizer_path, 'wb'))
 
         print("Loading normalizer...")
@@ -176,6 +190,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         accelerator.wait_for_everyone()
         normalizer = pickle.load(open(normalizer_path, 'rb'))
         self.model.set_normalizer(normalizer)
+        dataset.vla_dataset.set_normalizer(normalizer)
+
+        # configure training dataset
+        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
@@ -252,7 +270,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         with JsonLogger(log_path) as json_logger:
             for _ in range(cfg.training.num_epochs):
                 self.model.train()
-                train_losses = list()
+                train_losses = dict()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec, 
                         disable=not accelerator.is_main_process) as tepoch:
@@ -298,15 +316,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             # Logging
                             raw_loss_cpu = dict_apply(raw_loss, lambda x: x.item())
                             tepoch.set_postfix(refresh=False, **raw_loss_cpu)
-                            train_losses.append(raw_loss_cpu)
+                            for key, value in raw_loss_cpu.items():
+                                if key not in train_losses:
+                                    train_losses[key] = list()
+                                train_losses[key].append(value)
                             step_log.update({
                                 'global_step': self.global_step,
                                 'update_step': self.update_step,
                                 'epoch': self.epoch,
                                 'action_lr': self.action_lr_scheduler.get_last_lr()[0],
                             })
-                            for key, loss in raw_loss_cpu.items():
-                                step_log[key] = loss
+                            step_log.update(raw_loss_cpu)
                             if self.train_vlm:
                                 step_log['vlm_lr'] = self.vlm_lr_scheduler.get_last_lr()[0]
 
@@ -320,8 +340,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                 # End of epoch processing
                 train_loss = dict_apply(train_losses, lambda x: np.mean(x))
-                for key, loss in train_loss.items():
-                    step_log[key] = loss
+                step_log.update(train_loss)
 
                 # Validation
                 if (self.epoch % cfg.training.val_every) == 0 and val_dataloader is not None:
@@ -479,11 +498,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def preprocess_batch(self, batch, split_mask: bool = False, sample_fm_time: bool = True):
         """Preprocess batch for training"""
         # Extract data from batch
-        images = batch["pixel_value"]
-        human_actions = batch["human_action"]
+        pixel_values = batch["pixel_values"]
+        human_actions = batch["human_actions"]
         human_actions_valid_mask = batch["human_actions_valid_mask"]
 
-        input_ids = batch["input_id"]
+        input_ids = batch["input_ids"]
 
         # Get unwrapped model for mask building
         model = self.model
@@ -493,27 +512,28 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Build causal mask and position ids
         # We need to move the new created tensors to the same device as the input prepared by the accelerate
         # get causal mask by the first unignored index of labels 
-        causal_mask, vlm_position_ids, action_position_ids = (
-            model.build_causal_mask_and_position_ids(
-                batch["attention_mask"], self.dtype
+        causal_mask, vlm_position_ids, human_action_position_ids = (
+            model.build_causal_mask_and_position_ids(   
+                batch["attention_mask"], batch["answer_start_idx"], self.dtype
             )
         )
 
         inputs = {
             "input_ids": input_ids,
-            "pixel_values": images.to(self.dtype),
+            "labels": batch["labels"],
+            "pixel_values": pixel_values.to(self.dtype),
             "vlm_position_ids": vlm_position_ids,
-            "human_action_position_ids": action_position_ids,
+            "human_action_position_ids": human_action_position_ids,
             "human_actions": human_actions.to(self.dtype),
             "human_actions_valid_mask": human_actions_valid_mask,
         }
         
         if split_mask:
-            image_text_mask, action_mask = (
+            vlm_mask, human_action_mask = (
                 model.split_full_mask_into_submasks(causal_mask)
             )
-            inputs["image_text_mask"] = image_text_mask
-            inputs["human_action_mask"] = action_mask
+            inputs["vlm_mask"] = vlm_mask
+            inputs["human_action_mask"] = human_action_mask
         else:
             inputs["causal_mask"] = causal_mask
 

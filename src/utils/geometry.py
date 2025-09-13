@@ -593,6 +593,7 @@ def transform_to_target_frame(pose, target_extrinsic):
         pose = pose.numpy()
     return pose
 
+# TODO: check whether the target_extrinsic is cam2world or world2cam
 def transform_wrist_to_target_frame(wrist_action, target_extrinsic):
     '''
     Transform the wrist action to the target frame.

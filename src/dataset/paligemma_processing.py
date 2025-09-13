@@ -29,6 +29,27 @@ def add_image_tokens_to_prompt(
     return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{suffix_target}{eos_token}"
 
 
+def add_image_action_tokens_to_prompt(
+    prefix_prompt,
+    bos_token,
+    eos_token,
+    image_seq_len,
+    image_token,
+    action_begin_token,
+    action_end_token,
+    action_token,
+    action_seq_len,
+):
+    # Quoting from the blog (https://huggingface.co/blog/paligemma#detailed-inference-process):
+    #   The input text is tokenized normally.
+    #   A <bos> token is added at the beginning, and an additional newline token (\n) is appended.
+    #   This newline token is an essential part of the input prompt the model was trained with, so adding it explicitly ensures it's always there.
+    #   The tokenized text is also prefixed with a fixed number of <image> tokens.
+    # NOTE: from the paper it looks like the `\n` should be tokenized separately, but in the HF implementation this is not done.
+    #       ref to HF implementation: https://github.com/huggingface/transformers/blob/7f79a97399bb52aad8460e1da2f36577d5dccfed/src/transformers/models/paligemma/processing_paligemma.py#L55-L73
+    return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{action_begin_token}{action_token * action_seq_len}{action_end_token}{eos_token}"
+
+
 def rescale(
     image: np.ndarray,
     scale: float,
@@ -170,6 +191,7 @@ class PaliGemmaProcessor:
         self.image_seq_length = num_image_tokens
         self.image_size = image_size
         self.max_seq_len = max_seq_len
+        self.ignore_index = ignore_index
         self.tokenizer_padding = tokenizer_padding
 
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
@@ -210,6 +232,7 @@ class PaliGemmaProcessor:
             dict:
                 - pixel_values: torch.FloatTensor [T, C, H, W]
                 - input_ids: torch.LongTensor [L]
+                - labels: torch.LongTensor [L]
                 - attention_mask: torch.LongTensor [L]
         '''
         if images.dtype == np.uint8:
@@ -244,20 +267,21 @@ class PaliGemmaProcessor:
         )
         inputs = dict_apply(inputs, lambda x: np.array(x))
 
-        labels = inputs['input_ids'].clone()
+        labels = inputs['input_ids'].copy()
         labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
         condition = (labels == self.sep_token_id)
         assert np.any(condition), "The separator token is not found in the input_ids"
         sep_idx = np.argmax(condition)
         labels[:sep_idx+1] = self.ignore_index
         inputs['labels'] = labels
+        inputs['answer_start_idx'] = np.array(sep_idx+1)
+        
         output = {"pixel_values": pixel_values, **inputs}
         return output
 
 
 class PaliGemmaVLAProcessor:
     IMAGE_TOKEN = "<image>"
-    STATE_TOKEN = "<state>"
     STATE_BEGIN_TOKEN = "<state_begin>"
     STATE_END_TOKEN = "<state_end>"
     HUMAN_ACTION_BEGIN_TOKEN = "<human_action_begin>"
@@ -272,6 +296,7 @@ class PaliGemmaVLAProcessor:
         max_seq_len: int,
         ignore_index: int = -100,
         image_size: int = 224,
+        state_vocab_size: int = 256,
         tokenizer_padding: str = "max_length",  #  # instead of truncating to longest
     ):
         super().__init__()
@@ -279,12 +304,13 @@ class PaliGemmaVLAProcessor:
         self.image_seq_length = num_image_tokens
         self.image_size = image_size
         self.max_seq_len = max_seq_len
+        self.ignore_index = ignore_index
+        self.state_vocab_size = state_vocab_size
         self.tokenizer_padding = tokenizer_padding
 
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
         tokens_to_add = {"additional_special_tokens": [
             self.IMAGE_TOKEN, 
-            self.STATE_TOKEN, 
             self.STATE_BEGIN_TOKEN, 
             self.STATE_END_TOKEN, 
             self.HUMAN_ACTION_BEGIN_TOKEN, 
@@ -300,6 +326,7 @@ class PaliGemmaVLAProcessor:
         ]  # These tokens are used for object segmentation
         tokenizer.add_tokens(EXTRA_TOKENS)
         self.image_token_id = tokenizer.convert_tokens_to_ids(self.IMAGE_TOKEN)
+        self.human_action_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_TOKEN)
         # We will add the BOS and EOS tokens ourselves
         tokenizer.add_bos_token = False
         tokenizer.add_eos_token = False
@@ -307,22 +334,46 @@ class PaliGemmaVLAProcessor:
         self.tokenizer = tokenizer
         self.fast_tokenizer = fast_tokenizer
 
+        self.fast_token_id2gemma_token_id = dict()
+        vocab_size = self.tokenizer.vocab_size
+        special_tokens = self.tokenizer.all_special_ids
+        token_id_replace = []
+        replace_size = 0
+        for i in range(vocab_size - 1, -1, -1):
+            if i in special_tokens:
+                continue
+            token_id_replace.append(i)
+            replace_size += 1
+            if replace_size >= self.fast_tokenizer.vocab_size:
+                break
+        token_id_replace = token_id_replace[::-1]
+        for i in range(replace_size):
+            self.fast_token_id2gemma_token_id[i] = token_id_replace[i]
+        self.gemma_token_id2fast_token_id = {
+            v: k for k, v in self.fast_token_id2gemma_token_id.items()
+        }
+
     def __call__(
         self,
         text: str,
         images: np.ndarray,
+        states: np.ndarray,
+        human_actions: np.ndarray,
         truncation: bool = True,
     ) -> dict:
         '''
         Args: 
             text: str
-            images: np.ndarray [T, C, H, W] or [T, H, W, C]
+            images: np.ndarray [T_image, C, H, W] or [T_image, H, W, C]
+            state: np.ndarray [T_state, state_dim]
+            human_action: np.ndarray [Horizon, human_action_dim]
             truncation: bool
 
         Returns:
             dict:
-                - pixel_values: torch.FloatTensor [T, C, H, W]
+                - pixel_values: torch.FloatTensor [T_image, C, H, W]
                 - input_ids: torch.LongTensor [L]
+                - labels: torch.LongTensor [L]
                 - attention_mask: torch.LongTensor [L]
         '''
         if images.dtype == np.uint8:
@@ -338,22 +389,48 @@ class PaliGemmaVLAProcessor:
             image_std=IMAGENET_STANDARD_STD,
         )
 
+        # We assume the state is in [-1, 1]
+        states = (states + 1) / 2
+        states = (np.clip(states * self.state_vocab_size, 0, self.state_vocab_size - 1)).astype(np.uint32)
+        states = states.flatten()
+        states = " ".join([str(v) for v in states])
+
+        discrete_human_actions = self.fast_tokenizer(human_actions)[0]
+
+        text = f"What should the robot do to {text} with the state {self.STATE_BEGIN_TOKEN}{states}{self.STATE_END_TOKEN}?"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
-        input_string = add_image_tokens_to_prompt(
+        input_string = add_image_action_tokens_to_prompt(
             prefix_prompt=text,
             bos_token=self.tokenizer.bos_token,
+            eos_token=self.tokenizer.eos_token,
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
+            action_begin_token=self.HUMAN_ACTION_BEGIN_TOKEN,
+            action_end_token=self.HUMAN_ACTION_END_TOKEN,
+            action_token=self.HUMAN_ACTION_TOKEN,
+            action_seq_len=len(discrete_human_actions),
         )
 
         # Returns the input_ids and attention_mask as PyTorch tensors
         inputs = self.tokenizer(
             input_string,
-            return_tensors="pt",
             max_length=self.max_seq_len,
             padding=self.tokenizer_padding,
             truncation=truncation,
         )
-        inputs = dict_apply(inputs, lambda x: x.cpu().numpy())
+        inputs = dict_apply(inputs, lambda x: np.array(x))
+        
+        discrete_human_actions = np.array([self.fast_token_id2gemma_token_id[id] for id in discrete_human_actions])
+        input_ids = inputs['input_ids']
+        condition = (input_ids == self.human_action_token_id)
+        input_ids[condition] = discrete_human_actions
+        inputs['input_ids'] = input_ids
+        labels = input_ids.copy()
+        answer_start_idx = np.argmax(condition)
+        labels[:answer_start_idx] = self.ignore_index
+        labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
+        inputs['labels'] = labels
+        inputs['answer_start_idx'] = np.array(answer_start_idx)
+
         output = {"pixel_values": pixel_values, **inputs}
         return output
