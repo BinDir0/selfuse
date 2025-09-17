@@ -282,6 +282,7 @@ class LegendVLMDataset(BaseImageDataset):
             dataset_paths,
             split='train',
             cache_dir=None,
+            weights=[0.5, 0.5, 0.5],
             seed=42,
             val_ratio=0.0,
             train_mode=True,
@@ -290,6 +291,7 @@ class LegendVLMDataset(BaseImageDataset):
         super().__init__()
         self.dataset_paths = dataset_paths
         self.split = split
+        self.weights = weights
         self.cache_dir = cache_dir
         self.datasets = None
         self.preprocessor = None
@@ -335,10 +337,16 @@ class LegendVLMDataset(BaseImageDataset):
         return val_copy
     
     def _sample_to_data(self, sample):
-        image = sample['images']
+        image = sample['images'][0]
         text = sample['texts']
+        weights = self.weights
+        formatting_ratings = sample['formatting_ratings']
+        visual_dependency_ratings = sample['visual_dependency_ratings']
+        relevance_ratings = sample['relevance_ratings']
+
         if len(text) > 1:
-            text = text[random.randint(0, len(text) - 1)]
+            scores = np.array(formatting_ratings) * weights[0] + np.array(visual_dependency_ratings) * weights[1] + np.array(relevance_ratings) * weights[2]
+            text = text[np.argmax(scores)]
         else:
             text = text[0]
         question = text['user']
