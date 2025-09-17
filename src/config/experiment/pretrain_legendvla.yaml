@@ -15,7 +15,13 @@ vla_dataset_paths:
 #  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
 #  - /share_data/datasets/OakInk-v2/oakink2.zarr
 vlm_dataset_paths:
-
+ - /share_data/datasets/VLM/FineVision/image_textualization(filtered)
+ - /share_data/datasets/VLM/FineVision/sharegpt4v(llava)
+ - /share_data/datasets/VLM/FineVision/sharegpt4v(sam)
+ - /share_data/datasets/VLM/FineVision/textcaps
+ - /share_data/datasets/VLM/FineVision/alfworldgpt
+ - /share_data/datasets/VLM/FineVision/cambrian(filtered)_processed
+ - /share_data/datasets/VLM/FineVision/cocoqa
 
 shape_meta: &shape_meta
   obs:
@@ -53,7 +59,14 @@ dataset:
       shuffle: False
       pin_memory: True
       persistent_workers: True
-  vlm_dataset: 
+  vlm_dataset:
+    _target_: src.dataset.legendvla_dataset.LegendVLADataset # TODO: change to LegendVLMDataset
+    dataset_paths: ${vlm_dataset_paths}
+    split: train
+    cache_dir: /share_data/datasets/VLM/FineVision/.hf_datasets_cache
+    seed: 42
+    val_ratio: 0.05
+
 
 history: 30
 n_action_steps: 30
