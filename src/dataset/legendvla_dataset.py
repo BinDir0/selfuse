@@ -4,7 +4,7 @@ Every action is the delta of the next predicted absolute state and the state at 
 '''
 
 ### TODO: add gaussian blur & jitter to the image
-
+import os
 from typing import Dict
 import torch
 import numpy as np
@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from PIL import Image
 import random
-
+from datasets import load_dataset
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
 from src.utils.sampler import (
@@ -280,20 +280,118 @@ class LegendVLADataset(BaseImageDataset):
 
 class LegendVLMDataset(BaseImageDataset):
     def __init__(self,
-        zarr_paths,
-        shape_meta=None,
-    ):
+            dataset_paths,
+            split='train',
+            cache_dir=None,
+            weights=[0.5, 0.5, 0.5],
+            seed=42,
+            val_ratio=0.0,
+            train_mode=True,
+        ):
+        
         super().__init__()
-        raise NotImplementedError()
+        self.dataset_paths = dataset_paths
+        self.split = split
+        self.weights = weights
+        self.cache_dir = cache_dir
+        self.datasets = None
+        self.preprocessor = None
+        self.train_mode = train_mode
+        self.aug_transform = None
+        if self.train_mode:
+            self.aug_transform = transforms.Compose([
+                # ColorJitter: random change brightness, contrast, saturation, and hue
+                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+                # GaussianBlur: apply gaussian blur
+                # kernel_size must be odd
+                transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 2.0))
+            ])
+        if isinstance(dataset_paths, str):
+            data_files = f"{dataset_paths}/*.parquet"
+        else:
+            data_files = [f"{p}/*.parquet" for p in dataset_paths]
+
+        self.datasets = load_dataset(
+            "parquet",
+            data_files=data_files,
+            split=self.split,
+            cache_dir=self.cache_dir,
+        )
+        if val_ratio > 0:
+            datasets_splits = self.datasets.train_test_split(test_size=val_ratio, seed=seed)
+            self.train_datasets = datasets_splits['train']
+            self.val_datasets = datasets_splits['test']
+        else:
+            self.train_datasets = self.datasets
+            self.val_datasets = None
+
+    def get_validation_dataset(self):
+        if self.val_datasets is None:
+            return None
+        val_copy = LegendVLMDataset.__new__(LegendVLMDataset)
+        # shallow-copy config
+        for k, v in self.__dict__.items():
+            setattr(val_copy, k, v)
+        val_copy.train_mode = False
+        val_copy.aug_transform = None
+        val_copy.train_datasets = self.val_datasets
+        return val_copy
     
+    def _sample_to_data(self, sample):
+        image = sample['images'][0]
+        text = sample['texts']
+        weights = self.weights
+        formatting_ratings = sample['formatting_ratings']
+        visual_dependency_ratings = sample['visual_dependency_ratings']
+        relevance_ratings = sample['relevance_ratings']
+
+        if len(text) > 1:
+            scores = np.array(formatting_ratings) * weights[0] + np.array(visual_dependency_ratings) * weights[1] + np.array(relevance_ratings) * weights[2]
+            text = text[np.argmax(scores)]
+        else:
+            text = text[0]
+        question = text['user']
+        answer = text['assistant']
+
+        images_to_process = np.array(image)
+        if self.train_mode and self.aug_transform is not None:
+            # 1. convert NumPy array (H, W, C) to PIL Image
+            img_pil = Image.fromarray(images_to_process)
+            # 2. apply the defined augmentation
+            augmented_pil = self.aug_transform(img_pil)
+            # 3. convert the augmented PIL Image back to NumPy array
+            images_to_process = np.array(augmented_pil)
+        images_to_process = images_to_process[None, :, :, :]
+        # Process all images in batch
+        processed_results = self.preprocessor(images=images_to_process, text=question, target=answer)
+        processed_image = processed_results['pixel_values'] # [T, C, H, W]
+        tokenized_question = processed_results['input_ids'] 
+        tokenized_answer = processed_results['labels'] 
+        attention_mask = processed_results['attention_mask'] 
+
+        data = {
+            'input_ids': tokenized_question,
+            'labels': tokenized_answer,
+            'attention_mask': attention_mask,
+            'pixel_values': processed_image, 
+        }
+        return data
+
     def get_collator(self):
-        raise NotImplementedError()
+        return LegendVLADataCollator()
+
+    def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
+        self.preprocessor = preprocessor
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        raise NotImplementedError()
+        # Find corresponding sampler
+        sample = self.train_datasets[idx]
+        data = self._sample_to_data(sample)
+        torch_data = dict_apply(data, torch.from_numpy)
+        return torch_data
 
     def __len__(self):
-        raise NotImplementedError()
+        return len(self.train_datasets)
 
 
 class LegendUnifiedDataset(BaseImageDataset):
