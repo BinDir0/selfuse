@@ -566,7 +566,8 @@ def transform_to_target_frame(pose, target_extrinsic):
     Transform the pose to the target frame.
     Args:
         pose: torch.Tensor or np.ndarray, shape: [T, 4, 4] or [B, T, 4, 4] in world frame
-        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4] in world frame
+        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
+        we assume the target_extrinsic is world2cam, and we want to transform the pose in the world frame to the camera frame
     Returns:
         pose: torch.Tensor, shape: [T, 4, 4] or [B, T, 4, 4] in target frame
     '''
@@ -580,9 +581,13 @@ def transform_to_target_frame(pose, target_extrinsic):
         is_numpy = False
     target_extrinsic = target_extrinsic.unsqueeze(-3)
 
+    '''
     # use pseudo-inverse to avoid NaN
+    # for cam2world, we need to use the inverse of the target_extrinsic
     target_extrinsic_inv = torch.linalg.pinv(target_extrinsic)
-    pose = torch.matmul(target_extrinsic_inv, pose)
+    '''
+
+    pose = torch.matmul(target_extrinsic, pose)
     
     # check if the result contains NaN and handle it
     if torch.isnan(pose).any():
@@ -600,6 +605,7 @@ def transform_wrist_to_target_frame(wrist_action, target_extrinsic):
     Args:
         wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
         target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
+        we assume the target_extrinsic is world2cam, and we want to transform the wrist action in the world frame to the camera frame
     Returns:
         wrist_action: torch.Tensor, shape: [T, 18] or [B, T, 18]
     '''

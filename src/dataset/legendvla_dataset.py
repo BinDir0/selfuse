@@ -160,6 +160,7 @@ class LegendVLADataset(BaseImageDataset):
         processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[self.history])
 
         # use delta of wrist translation and hand mano params as action
+        # TODO: use relative rotation 
         processed_wrist_action[..., :6] = processed_wrist_action[..., :6] - processed_wrist_state[-1, :6]
         processed_hand_state = hand_state[state_slice]
         processed_hand_action = hand_action[self.history:, :] - processed_hand_state[-1, :]

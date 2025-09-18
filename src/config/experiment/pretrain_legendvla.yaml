@@ -11,9 +11,9 @@ lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
 vla_dataset_paths:
- - /share_data/datasets/taco/10episodes.zarr
-#  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
-#  - /share_data/datasets/OakInk-v2/oakink2.zarr
+#  - /share_data/datasets/taco/10episodes.zarr
+ - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+ - /share_data/datasets/OakInk-v2/oakink2.zarr
 vlm_dataset_paths:
 
 
@@ -68,14 +68,14 @@ processor:
 
 dataloader:
   batch_size: 4
-  num_workers: 8
+  num_workers: 24
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
   batch_size: 4 # use the same batch size with training for best performance
-  num_workers: 8
+  num_workers: 24
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -101,11 +101,11 @@ training:
   debug: False
   resume: True
   lr_scheduler: cosine
-  lr_warmup_steps: 0
+  lr_warmup_steps: 2000
   train_vlm: True
   load_pretrained_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path:
+  resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.09.15/16.18_legendvla_pretrain_legendvla/checkpoints/epoch=0002-total_loss=2.8695.ckpt
   num_epochs: 25
   gradient_accumulate_every: 1
   use_bf16: True
@@ -131,7 +131,7 @@ training:
   # in epochs
   rollout_every: 10
   checkpoint_every: 1
-  ckpt_save_interval: 10
+  ckpt_save_interval: 5
   val_every: 1
   sample_every: 1
   # steps per epoch
@@ -186,7 +186,7 @@ patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
 state_seq_len: ${eval:'${n_obs_state_steps}*${shape_meta.obs.state.shape[0]}*(2+2)'} # 2 for lg(vocab_size)
 text_seq_len: ${eval:'${state_seq_len}+32'}
-answer_seq_len: 256 # TODO: check 
+answer_seq_len: 360 # TODO: check 
 max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
 tokenizer_padding: max_length # instead of truncating to longest, for best efficiency
 
@@ -272,10 +272,10 @@ logging:
 
 checkpoint:
   topk:
-    monitor_key: train_loss
+    monitor_key: total_loss
     mode: min
     k: 1
-    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.4f}.ckpt'
+    format_str: 'epoch={epoch:04d}-total_loss={total_loss:.4f}.ckpt'
   save_last_ckpt: False
   save_last_snapshot: False
 

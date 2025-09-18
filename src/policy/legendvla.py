@@ -641,7 +641,7 @@ class LegendVLA(nn.Module):
             t += delta_t
 
         # normalize action
-        human_action = self.normalizer['human_action'].unnormalize(human_action)
+        human_action = self.normalizer['human_actions'].unnormalize(human_action)
         return human_action
 
     @torch.inference_mode()
@@ -715,7 +715,7 @@ class LegendVLA(nn.Module):
             t += delta_t
 
         # normalize action
-        human_action = self.normalizer['human_action'].unnormalize(human_action)
+        human_action = self.normalizer['human_actions'].unnormalize(human_action)
         return human_action
 
     @torch.inference_mode()
@@ -947,10 +947,6 @@ class LegendVLA(nn.Module):
         logits = self.lm_head(hidden_states)
         logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
         labels = labels[:, 1:].contiguous().view(-1)
-        condition = (labels < 0) & (labels > -100)
-        if torch.any(condition):
-            print(f"labels: {labels[condition]}")
-        assert not torch.any(condition)
 
         ce_loss = self.CELoss(logits, labels)
 

@@ -1,5 +1,6 @@
 from transformers import AutoTokenizer
 import numpy as np
+from datasets import load_from_disk
 
 from src.dataset.paligemma_processing import PaliGemmaProcessor, PaliGemmaVLAProcessor
 from src.model.action.fast_tokenizer import UniversalActionProcessor
@@ -86,6 +87,10 @@ def test_PaliGemmaVLA_processor():
     output = processor(text, images, state, human_action)
     np.set_printoptions(threshold=np.inf)
     print(output)
+
+def test_COCO_Caption2017():
+    dataset = load_from_disk("/share_data/datasets/VLM/COCO-Caption2017")
+    print(dataset)
 
 # test_PaliGemma_processor()
 

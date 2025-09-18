@@ -330,13 +330,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             if self.train_vlm:
                                 step_log['vlm_lr'] = self.vlm_lr_scheduler.get_last_lr()[0]
 
-                            is_last_batch = (batch_idx == (len(train_dataloader)-1))
-                            if not is_last_batch and accelerator.sync_gradients:
-                                accelerator.log(step_log, step=self.update_step)
-                                json_logger.log(step_log)
+                        is_last_batch = (batch_idx == (len(train_dataloader)-1))
+                        if not is_last_batch and accelerator.sync_gradients:
+                            accelerator.log(step_log, step=self.update_step)
+                            json_logger.log(step_log)
 
-                            if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
-                                break
+                        if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
+                            break
 
                 # End of epoch processing
                 train_loss = dict_apply(train_losses, lambda x: np.mean(x))
@@ -372,7 +372,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             if accelerator.is_main_process:
                                 for key in val_losses.keys():
                                     val_losses[key] = torch.mean(val_losses[key]).item()
-                                    step_log[key] = val_losses[key]
+                                    step_log[f'val_{key}'] = val_losses[key]
 
                 # Sampling
                 if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
@@ -383,7 +383,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         eval_accuracy = []
                         eval_l1_loss = []
                         
-                        with tqdm.tqdm(val_dataloader, desc=f"Sampling epoch {self.epoch}", 
+                        # TODO: modify here when we are not debugging
+                        with tqdm.tqdm(train_dataloader, desc=f"Sampling epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec, 
                                 disable=not accelerator.is_main_process) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
@@ -456,7 +457,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     for key, value in step_log.items():
                         new_key = key.replace('/', '_')
                         metric_dict[new_key] = value
-                    
+
                     # We can't copy the last checkpoint here
                     # since save_checkpoint uses threads.
                     # therefore at this point the file might have been empty!
