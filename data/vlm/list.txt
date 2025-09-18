@@ -1,0 +1,125 @@
+FineVision: 
+    - cambrian(filtered)_processed
+    - cocoqa
+    - vqav2
+    - 
+ActivityNet-CAP
+ActivityNet-QA
+GQA
+MSRVTT-CAP
+MSRVTT-QA
+MSVD-QA
+NLVR2
+RefCOCO_seg
+VATEX-CAP
+
+[
+    "coco_colors",
+    "densefusion_1m",
+    "face_emotion",
+    "google_landmarks",
+    "image_textualization(filtered)",
+    "laion_gpt4v",
+    "localized_narratives",
+    "sharegpt4o",
+    "sharegpt4v(coco)",
+    "sharegpt4v(knowledge)",
+    "sharegpt4v(llava)",
+    "sharegpt4v(sam)",
+    "textcaps",
+    "alfworldgpt",
+    "allava_laion",
+    "allava_vflan",
+    "cambrian(filtered)_processed",
+    "chinesememe",
+    "cocoqa",
+    "CoSyn_400k_graphic",
+    "datik",
+    "datikz",
+    "drivelm",
+    "hateful_memes",
+    "iconqa",
+    "iconqa(mathv360k)",
+    "idk",
+    "indoor_qa",
+    "LLaVA_Instruct_150K",
+    "llavar_gpt4_20k",
+    "lnqa",
+    "lrv_normal(filtered)",
+    "lvis_instruct4v",
+    "mimic_cgd",
+    "mmevol",
+    "mmra",
+    "nlvr2",
+    "sketchyvqa",
+    "spark",
+    "spatialsense",
+    "spot_the_diff",
+    "vision_flan(filtered)",
+    "visual7w",
+    "vizwiz(mathv360k)",
+    "vqav2",
+    "vsr",
+    "websight",
+    "wildvision",
+    "yesbut",
+    "aguvis-stage-1",
+    "groundui",
+    "objects365_qa", # too heavy
+    "oodvqa",
+    "tallyqa"
+]
+
+coco_colors
+densefusion_1m
+face_emotion
+google_landmarks
+image_textualization(filtered)
+laion_gpt4v
+localized_narratives
+sharegpt4o
+sharegpt4v(coco)
+sharegpt4v(knowledge)
+sharegpt4v(llava)
+sharegpt4v(sam)
+textcaps
+alfworldgpt
+allava_laion
+allava_vflan
+cambrian(filtered)_processed
+chinesememe
+cocoqa
+CoSyn_400k_graphic
+datik
+datikz
+drivelm
+hateful_memes
+iconqa
+iconqa(mathv360k)
+idk
+indoor_qa
+LLaVA_Instruct_150K
+llavar_gpt4_20k
+lnqa
+lrv_normal(filtered)
+lvis_instruct4v
+mimic_cgd
+mmevol
+mmra
+nlvr2
+sketchyvqa
+spark
+spatialsense
+spot_the_diff
+vision_flan(filtered)
+visual7w
+vizwiz(mathv360k)
+vqav2
+vsr
+websight
+wildvision
+yesbut
+aguvis-stage-1
+groundui
+oodvqa
+tallyqa
