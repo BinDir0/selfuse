@@ -15,12 +15,12 @@ vla_dataset_paths:
  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
  - /share_data/datasets/OakInk-v2/oakink2.zarr
 vlm_dataset_paths:
- - /share_data/datasets/VLM/FineVision/image_textualization(filtered)
- - /share_data/datasets/VLM/FineVision/sharegpt4v(llava)
- - /share_data/datasets/VLM/FineVision/sharegpt4v(sam)
- - /share_data/datasets/VLM/FineVision/textcaps
- - /share_data/datasets/VLM/FineVision/alfworldgpt
- - /share_data/datasets/VLM/FineVision/cambrian(filtered)_processed
+#  - /share_data/datasets/VLM/FineVision/image_textualization(filtered)
+#  - /share_data/datasets/VLM/FineVision/sharegpt4v(llava)
+#  - /share_data/datasets/VLM/FineVision/sharegpt4v(sam)
+#  - /share_data/datasets/VLM/FineVision/textcaps
+#  - /share_data/datasets/VLM/FineVision/alfworldgpt
+#  - /share_data/datasets/VLM/FineVision/cambrian(filtered)_processed
  - /share_data/datasets/VLM/FineVision/cocoqa
 
 shape_meta: &shape_meta
@@ -60,10 +60,10 @@ dataset:
       pin_memory: True
       persistent_workers: True
   vlm_dataset:
-    _target_: src.dataset.legendvla_dataset.LegendVLADataset # TODO: change to LegendVLMDataset
+    _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}
     split: train
-    cache_dir: /share_data/datasets/VLM/FineVision/.hf_datasets_cache
+    cache_dir: /share_data/datasets/VLM/FineVision/.cache
     seed: 42
     weights: [0.5, 0.5, 0.5]
     val_ratio: 0.05
@@ -77,8 +77,7 @@ n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
 processor: 
-  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-hoi4d-scale20-2048
-  state_vocab_size: 256
+  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
 
 dataloader:
   batch_size: 4
@@ -103,27 +102,30 @@ flow:
 
 optimizer:
   action: 
-    lr: 1e-5
-    weight_decay: 0
+    lr: 4e-5
+    weight_decay: 1e-4
+    fused: True
   vlm:
-    lr: 1e-5
-    weight_decay: 0
+    lr: 4e-5
+    weight_decay: 1e-4
+    fused: True
 
 training:
   device: "cuda:0"
   seed: 42
   debug: False
+  profile: False
   resume: True
   lr_scheduler: cosine
   lr_warmup_steps: 2000
   train_vlm: True
   load_pretrained_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.09.15/16.18_legendvla_pretrain_legendvla/checkpoints/epoch=0002-total_loss=2.8695.ckpt
+  resume_checkpoint_path: # /home/chenzhang/project/EgoVLA/outputs/2025.09.15/16.18_legendvla_pretrain_legendvla/checkpoints/epoch=0002-total_loss=2.8695.ckpt
   num_epochs: 25
-  gradient_accumulate_every: 1
+  gradient_accumulate_every: 4
   use_bf16: True
-  use_torch_compile: False
+  use_torch_compile: True
   clipping:
     enabled: True
     max_grad_norm: 1.0
@@ -198,9 +200,9 @@ vocab_size: 257216
 pad_token_id: 0
 patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
-state_seq_len: ${eval:'${n_obs_state_steps}*${shape_meta.obs.state.shape[0]}*(2+2)'} # 2 for lg(vocab_size)
-text_seq_len: ${eval:'${state_seq_len}+32'}
-answer_seq_len: 360 # TODO: check 
+state_seq_len: 160 # 
+text_seq_len: ${eval:'${state_seq_len}+64'}
+answer_seq_len: 160 # TODO: check 
 max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
 tokenizer_padding: max_length # instead of truncating to longest, for best efficiency
 

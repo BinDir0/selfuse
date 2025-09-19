@@ -21,3 +21,5 @@ pyrealsense2
 dex_retargeting
 mujoco
 bitsandbytes==0.47.0
+datasets==4.1.0
+pyarrow==21.0.0

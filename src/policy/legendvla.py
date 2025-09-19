@@ -871,7 +871,10 @@ class LegendVLA(nn.Module):
 
         loss = (v_psi - d_psi) ** 2
         masked_loss = torch.where(human_actions_valid_mask, loss, torch.zeros_like(loss))
-        return torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
+        human_actions_valid_num = torch.sum(human_actions_valid_mask)
+        if human_actions_valid_num == 0:
+            human_actions_valid_num = 1
+        return torch.sum(masked_loss) / human_actions_valid_num
 
     def compute_loss(self, batch: dict) -> dict:
         """
@@ -958,7 +961,11 @@ class LegendVLA(nn.Module):
 
         flow_loss = (v_psi - d_psi) ** 2
         masked_loss = torch.where(human_actions_valid_mask, flow_loss, torch.zeros_like(flow_loss))
-        flow_loss = torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
+        human_actions_valid_num = torch.sum(human_actions_valid_mask)
+        if human_actions_valid_num == 0:
+            flow_loss = torch.tensor(0.0, device=t.device, dtype=t.dtype)
+        else:
+            flow_loss = torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
 
         total_loss = self.loss_weights.ce_loss_weight * ce_loss + self.loss_weights.flow_loss_weight * flow_loss
         return {

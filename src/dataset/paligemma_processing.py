@@ -1,4 +1,5 @@
 from typing import Dict, List, Tuple
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -283,6 +284,7 @@ class PaliGemmaProcessor:
 class PaliGemmaVLAProcessor:
     IMAGE_TOKEN = "<image>"
     STATE_BEGIN_TOKEN = "<state_begin>"
+    STATE_TOKEN = "<state>"
     STATE_END_TOKEN = "<state_end>"
     HUMAN_ACTION_BEGIN_TOKEN = "<human_action_begin>"
     HUMAN_ACTION_TOKEN = "<human_action>"
@@ -296,7 +298,6 @@ class PaliGemmaVLAProcessor:
         max_seq_len: int,
         ignore_index: int = -100,
         image_size: int = 224,
-        state_vocab_size: int = 256,
         tokenizer_padding: str = "max_length",  #  # instead of truncating to longest
     ):
         super().__init__()
@@ -305,13 +306,13 @@ class PaliGemmaVLAProcessor:
         self.image_size = image_size
         self.max_seq_len = max_seq_len
         self.ignore_index = ignore_index
-        self.state_vocab_size = state_vocab_size
         self.tokenizer_padding = tokenizer_padding
 
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
         tokens_to_add = {"additional_special_tokens": [
             self.IMAGE_TOKEN, 
             self.STATE_BEGIN_TOKEN, 
+            self.STATE_TOKEN,
             self.STATE_END_TOKEN, 
             self.HUMAN_ACTION_BEGIN_TOKEN, 
             self.HUMAN_ACTION_TOKEN, 
@@ -326,7 +327,9 @@ class PaliGemmaVLAProcessor:
         ]  # These tokens are used for object segmentation
         tokenizer.add_tokens(EXTRA_TOKENS)
         self.image_token_id = tokenizer.convert_tokens_to_ids(self.IMAGE_TOKEN)
+        self.state_token_id = tokenizer.convert_tokens_to_ids(self.STATE_TOKEN)
         self.human_action_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_TOKEN)
+        self.human_action_begin_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_BEGIN_TOKEN)
         # We will add the BOS and EOS tokens ourselves
         tokenizer.add_bos_token = False
         tokenizer.add_eos_token = False
@@ -334,7 +337,10 @@ class PaliGemmaVLAProcessor:
         self.tokenizer = tokenizer
         self.fast_tokenizer = fast_tokenizer
 
-        self.fast_token_id2gemma_token_id = dict()
+        self.fast_token_id2gemma_token_id = {
+            k: {} for k in self.fast_tokenizer.keys()
+        }
+        sum_fast_vocab_size = sum([self.fast_tokenizer[k].vocab_size for k in self.fast_tokenizer.keys()])
         vocab_size = self.tokenizer.vocab_size
         special_tokens = self.tokenizer.all_special_ids
         token_id_replace = []
@@ -344,14 +350,20 @@ class PaliGemmaVLAProcessor:
                 continue
             token_id_replace.append(i)
             replace_size += 1
-            if replace_size >= self.fast_tokenizer.vocab_size:
+            if replace_size >= sum_fast_vocab_size:
                 break
+        assert replace_size == sum_fast_vocab_size, "The replace size is not equal to the sum of the fast tokenizer vocab size"
+
         token_id_replace = token_id_replace[::-1]
-        for i in range(replace_size):
-            self.fast_token_id2gemma_token_id[i] = token_id_replace[i]
-        self.gemma_token_id2fast_token_id = {
-            v: k for k, v in self.fast_token_id2gemma_token_id.items()
-        }
+        replace_id = 0
+        for k in self.fast_tokenizer.keys():
+            tk = self.fast_tokenizer[k]
+            for i in range(tk.vocab_size):
+                self.fast_token_id2gemma_token_id[k][i] = token_id_replace[replace_id]
+                replace_id += 1
+        self.gemma_token_id2fast_token_id = {}
+        for key, id_map in self.fast_token_id2gemma_token_id.items():
+            self.gemma_token_id2fast_token_id[key] = {v: k for k, v in id_map.items()}
 
     def __call__(
         self,
@@ -389,15 +401,14 @@ class PaliGemmaVLAProcessor:
             image_std=IMAGENET_STANDARD_STD,
         )
 
-        # We assume the state is in [-1, 1]
-        states = (states + 1) / 2
-        states = (np.clip(states * self.state_vocab_size, 0, self.state_vocab_size - 1)).astype(np.uint32)
-        states = states.flatten()
-        states = " ".join([str(v) for v in states])
+        # We assume the states and human actions are in [-1, 1]
+        discrete_states = self.fast_tokenizer['states'](states)[0]
+        discrete_human_actions = self.fast_tokenizer['human_actions'](human_actions)[0]
 
-        discrete_human_actions = self.fast_tokenizer(human_actions)[0]
-
-        text = f"What should the robot do to {text} with the state {self.STATE_BEGIN_TOKEN}{states}{self.STATE_END_TOKEN}?"
+        if '.' in text:
+            text = text.replace('.', '')
+        text = text.lower()
+        text = f"What should the robot do to {text} with the state {self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
         input_string = add_image_action_tokens_to_prompt(
             prefix_prompt=text,
@@ -420,13 +431,15 @@ class PaliGemmaVLAProcessor:
         )
         inputs = dict_apply(inputs, lambda x: np.array(x))
         
-        discrete_human_actions = np.array([self.fast_token_id2gemma_token_id[id] for id in discrete_human_actions])
+        discrete_states = np.array([self.fast_token_id2gemma_token_id['states'][id] for id in discrete_states])
+        discrete_human_actions = np.array([self.fast_token_id2gemma_token_id['human_actions'][id] for id in discrete_human_actions])
         input_ids = inputs['input_ids']
-        condition = (input_ids == self.human_action_token_id)
-        input_ids[condition] = discrete_human_actions
+        input_ids = set_token_id(input_ids, self.state_token_id, discrete_states)
+        input_ids = set_token_id(input_ids, self.human_action_token_id, discrete_human_actions)
         inputs['input_ids'] = input_ids
+
         labels = input_ids.copy()
-        answer_start_idx = np.argmax(condition)
+        answer_start_idx = np.argmax(labels == self.human_action_begin_token_id) + 1
         labels[:answer_start_idx] = self.ignore_index
         labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
         inputs['labels'] = labels
@@ -434,3 +447,13 @@ class PaliGemmaVLAProcessor:
 
         output = {"pixel_values": pixel_values, **inputs}
         return output
+
+
+def set_token_id(input_ids, token_id, discrete_tokens):
+    condition = (input_ids == token_id)
+    available_tokens = np.sum(condition)
+    if available_tokens != len(discrete_tokens):
+        warnings.warn(f"The number of tokens to set is not equal to the number of discrete tokens. {np.sum(condition)} != {len(discrete_tokens)}")
+    
+    input_ids[condition] = discrete_tokens[:available_tokens]
+    return input_ids

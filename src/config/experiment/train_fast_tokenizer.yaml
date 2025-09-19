@@ -5,8 +5,8 @@ _target_: src.workspace.train_fast_tokenizer.TrainFastTokenizerWorkspace
 
 image_shape: [224, 224, 3]
 dataset_paths:
- - /share_data/datasets/taco/taco.zarr
- - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
+ - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+ - /share_data/datasets/OakInk-v2/oakink2.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -27,14 +27,21 @@ shape_meta: &shape_meta
     horizon: ${n_action_steps}
 
 dataset:
-  _target_: src.dataset.legendvla_dataset.LegendVLAActionDataset
+  _target_: src.dataset.legendvla_dataset.LegendVLALowLevelDataset
   zarr_paths: ${dataset_paths}
-  horizon: ${eval:'${n_action_steps}+${dataset.history}'}
-  pad_before: ${eval:'${dataset.history}+${n_latency_steps}'}
+  horizon: ${eval:'${n_action_steps}+${history}'}
+  pad_before: ${eval:'${history}+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}
   shape_meta: ${shape_meta}
-  history: 30 # frames
+  history: ${history} # frames
+  normalizer_dataloader_cfg:
+    batch_size: 4096
+    num_workers: 32
+    shuffle: False
+    pin_memory: True
+    persistent_workers: True
 
+history: 30
 n_action_steps: 30
 n_obs_image_steps: 2
 n_obs_state_steps: 6
@@ -43,18 +50,22 @@ n_latency_steps: 0
 
 dataloader:
   batch_size: 4096
-  num_workers: 16
+  num_workers: 32
   shuffle: False
   pin_memory: True
   persistent_workers: True
 
 tokenizer: 
-  scale: 20
-  vocab_size: 2048
+  states: 
+    scale: 40
+    vocab_size: 2048
+  human_actions: 
+    scale: 10
+    vocab_size: 1024
 
 training:
   tqdm_interval_sec: 1.0
-  save_path: 
+  save_path: # /home/chenzhang/project/EgoVLA/outputs/2025.09.19/17.56_fast_tokenizer_train_fast_tokenizer/tokenizer
 
 multi_run:
   run_dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}

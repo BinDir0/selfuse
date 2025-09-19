@@ -7,7 +7,6 @@ import accelerate
 log = logging.getLogger(__name__)
 
 
-# TODO: support Accelerate + Deepspeed
 class ModelAveraging:
     """Model averaging with EMA and SWA support. Now supports resume from checkpoint."""
 
