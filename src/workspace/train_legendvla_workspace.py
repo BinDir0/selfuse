@@ -83,7 +83,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 fullgraph=False,
                 dynamic=False
             )
-
+        
         # Set GPU device before initializing accelerator
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
@@ -150,7 +150,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Configure optimizers
         self.train_vlm = cfg.training.train_vlm
         model = self.model  # Get unwrapped model for parameter access
-        
+
         # Action optimizer
         self.action_optimizer = bnb.optim.AdamW8bit(
             model.human_action_expert_parameters,
@@ -253,7 +253,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         )
 
         self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device)
-
+        
         # Setup model
         if cfg.training.resume_checkpoint_path:
             self.load_checkpoint(cfg.training.resume_checkpoint_path)
@@ -268,11 +268,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             **cfg.checkpoint.topk
         )
 
-        # # Compile model if requested
-        # if cfg.training.use_torch_compile:
-        #     # self.model = torch.compile(self.model, mode="max-autotune")
-        #     self.model = torch.compile(self.model, mode="default")
-
         # Prepare everything with Accelerate
         if self.train_vlm:
             train_dataloader, val_dataloader, self.model, self.action_optimizer, self.vlm_optimizer, self.action_lr_scheduler, self.vlm_lr_scheduler = accelerator.prepare(
@@ -282,10 +277,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             train_dataloader, val_dataloader, self.model, self.action_optimizer, self.action_lr_scheduler = accelerator.prepare(
                 train_dataloader, val_dataloader, self.model, self.action_optimizer, self.action_lr_scheduler
             )
-
-        # wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
-        # if accelerator.is_main_process:
-        #     wandb_tracker.watch(accelerator.unwrap_model(self.model), log="all", log_freq=10)
 
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
@@ -302,6 +293,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             cfg.training.max_val_steps = 3
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
+            wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
+            if accelerator.is_main_process:
+                wandb_tracker.watch(accelerator.unwrap_model(self.model), log="all", log_freq=10)
+
         if cfg.training.profile and accelerator.is_main_process:
             profile_context = accelerator.profile()
 
@@ -321,7 +316,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
                                 
                                 # Forward pass
-                                raw_loss = self.model("train", inputs)
+                                with accelerator.autocast():
+                                    raw_loss = self.model("train", inputs)
                                 accelerator.backward(raw_loss["total_loss"])
 
                                 step_log = {}
@@ -389,6 +385,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     # Validation
                     if (self.epoch % cfg.training.val_every) == 0 and val_dataloader is not None:
                         with torch.no_grad():
+                            policy = self.model_averaging.get_unwrapped_averaged_model()
+                            policy = accelerator.prepare(policy)
+                            policy.eval()
                             val_losses = dict()
                             
                             with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
@@ -398,12 +397,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
                                     
                                     # Compute validation loss
-                                    loss = self.model("train", inputs)
+                                    with accelerator.autocast():
+                                        loss = policy("train", inputs)
                                     for key, loss in loss.items():
                                         if key not in val_losses:
                                             val_losses[key] = list()
                                         val_losses[key].append(loss)
-                                    
+                                        
                                     if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
                                         break
                             
@@ -417,6 +417,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     for key in val_losses.keys():
                                         val_losses[key] = torch.mean(val_losses[key]).item()
                                         step_log[f'val_{key}'] = val_losses[key]
+                            
+                            self.model.train()
 
                     # Sampling
                     if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
@@ -440,7 +442,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                         gt_actions = inputs['human_actions']
                                         human_actions_valid_mask = inputs['human_actions_valid_mask']
                                         # Get action predictions
-                                        pred_actions = policy.forward("infer_human_action", inputs)
+                                        with accelerator.autocast():
+                                            pred_actions = policy("infer_human_action", inputs)
                                         
                                         gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
                                         pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.ones_like(pred_actions) * -100)
@@ -590,7 +593,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Sample flow matching timesteps
         if sample_fm_time:
             # We need to move the new created tensors to the same device as the input prepared by the accelerate
-            inputs["t"] = self.sample_fm_time(len(input_ids)).to(self.dtype).to(input_ids.device)
+            inputs["t"] = self.sample_fm_time(len(input_ids)).to(input_ids.device).to(self.dtype)
 
         return inputs
 

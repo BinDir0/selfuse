@@ -115,6 +115,8 @@ Accelerate config
 
 在训练之前，请你根据 comments 修改 `egovla/config/acc_node0.yaml` 下有关多机信息的内容。
 
+同时，如果你希望指定 VLM Dataset cache 的共享路径，需要注意 Hugging Face Dataset Load 时会创建锁，你需要保证不同机器都有访问和修改这个锁的权限，也即需要保证不同机器的 UID 和 GID 相同。
+
 ```bash
 ./scripts/pretrain_deepspeed.sh
 ```

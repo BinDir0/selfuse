@@ -31,11 +31,13 @@ from accelerate.utils import DummyOptim, DummyScheduler
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.dataset.base_dataset import BaseImageDataset
-from src.dataset.paligemma_processing import PaliGemmaVLAProcessor
+from src.dataset.paligemma_processing import PaliGemmaVLAProcessor, PaliGemmaProcessor
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.json_logger import JsonLogger
+from src.utils.pytorch_util import dict_apply
 from src.model.common.lr_scheduler import get_scheduler
 from src.model.common.model_average import ModelAveraging
+from src.model.action.fast_tokenizer import UniversalActionProcessor
 from src.utils.metric import get_action_accuracy
 from src.utils.optim import CosineAnnealingWarmupRestarts, get_num_params_in_billions
 
@@ -89,13 +91,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.load_checkpoint(cfg.training.resume_checkpoint_path)
         elif cfg.training.load_pretrained_weights:
             self.model.load_pretrained_weights()
-        self.model.tie_action_proprio_weights()
-        self.model.freeze_unused_weights()
         if cfg.lora:
             self.model.freeze_non_lora_weights_in_vlm()
         
         # Configure optimizers
-        self.train_vlm = cfg.training.train_vlm
         model = self.model  # Get unwrapped model for parameter access
         
         # Action optimizer
@@ -105,7 +104,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         )
         
         # VLM optimizer (if training VLM)
-        if self.train_vlm:
+        if cfg.training.train_vlm:
             if cfg.lora:
                 vlm_trained_parameters = model.lora_trainable_vlm_parameters
             else:
@@ -118,7 +117,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         self.optimizer = DummyOptim(
             all_trainable_parameters, 
-            fused=True
         )
 
         # Configure dataset and dataloader
@@ -128,23 +126,41 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.policy.cfg.pretrained_model_path, padding_side="right"
         )
+        self.fast_tokenizer = {
+            "states": UniversalActionProcessor.from_pretrained(
+                os.path.join(cfg.processor.fast_tokenizer_path, "states")
+            ),
+            "human_actions": UniversalActionProcessor.from_pretrained(
+                os.path.join(cfg.processor.fast_tokenizer_path, "human_actions")
+            )
+        }
         
-        self.processor = PaliGemmaVLAProcessor(
+        self.vla_processor = PaliGemmaVLAProcessor(
             self.tokenizer,
+            self.fast_tokenizer,
             num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
-            max_seq_len=cfg.policy.cfg.max_image_text_tokens,
+            max_seq_len=cfg.policy.cfg.max_vlm_tokens,
             ignore_index=cfg.ignore_index,
             image_size=cfg.policy.vision_tower.config.image_size,
             tokenizer_padding=cfg.tokenizer_padding,
         )
-        dataset.set_preprocessor(self.processor)
-        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
+        self.vlm_processor = PaliGemmaProcessor(
+            self.tokenizer,
+            num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
+            max_seq_len=cfg.policy.cfg.max_vlm_tokens,
+            ignore_index=cfg.ignore_index,
+            image_size=cfg.policy.vision_tower.config.image_size,
+            tokenizer_padding=cfg.tokenizer_padding,
+        )
+        dataset.vla_dataset.set_preprocessor(self.vla_processor)
+        if dataset.vlm_dataset is not None:
+            dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
         
         print("Computing normalizer...")
         # compute normalizer on the main process and save to disk
         if accelerator.is_main_process:
             # 1. main process compute/get object
-            normalizer = dataset.get_normalizer()
+            normalizer = dataset.vla_dataset.get_normalizer()
             normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
             pickle.dump(normalizer, open(normalizer_path, 'wb'))
             objects_to_broadcast = [normalizer]
@@ -158,6 +174,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # 4. now all processes have a fully identical object copy
         normalizer = objects_to_broadcast[0]
         self.model.set_normalizer(normalizer)
+        dataset.vla_dataset.set_normalizer(normalizer)
+
+        # configure training dataset
+        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
@@ -171,6 +191,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             total_num_steps=max_train_steps,
         )
 
+        self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device)
+
         # Configure checkpoint manager (if available)
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, 'checkpoints'),
@@ -181,10 +203,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler
         )
-
-        # wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
-        # if accelerator.is_main_process:
-        #     wandb_tracker.watch(accelerator.unwrap_model(self.model), log="all", log_freq=10)
 
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
@@ -201,8 +219,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
 
-        self.model_averaging = ModelAveraging(accelerator.unwrap_model(self.model), cfg.training.average, accelerator.device)
-
         # Training loop
         if accelerator.is_main_process:
             print(f"Training with {len(train_dataloader)} steps per epoch")
@@ -211,7 +227,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             for _ in range(cfg.training.num_epochs):
                 self.model.train()
                 step_log = dict()
-                train_losses = list()
+                train_losses = dict()
                 with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                         leave=False, mininterval=cfg.training.tqdm_interval_sec, 
                         disable=not accelerator.is_main_process) as tepoch:
@@ -220,16 +236,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             # Preprocess batch
                             inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
 
-                            '''
-                            print(f"global rank : {accelerator.process_index}\n \
-                            human actions: {inputs['human_actions'].shape, inputs['human_actions'][0].float().cpu().numpy().min(axis=0)}\n \
-                            human actions valid mask: {inputs['human_actions_valid_mask'].shape, inputs['human_actions_valid_mask'][0, 0].cpu().numpy()}")
-                            # break
-                            '''
-
                             # Forward pass
-                            raw_loss = self.model(inputs)
-                            accelerator.backward(raw_loss)
+                            with accelerator.autocast():
+                                raw_loss = self.model("train", inputs)
+                            accelerator.backward(raw_loss["total_loss"])
 
                             # Gradient clipping
                             if accelerator.sync_gradients and cfg.training.clipping.enabled:
@@ -256,16 +266,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 self.model_averaging.maybe_update(self.update_step)
 
                             # Logging
-                            raw_loss_cpu = raw_loss.item()
-                            tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
-                            train_losses.append(raw_loss_cpu)
+                            raw_loss_cpu = dict_apply(raw_loss, lambda x: x.item())
+                            tepoch.set_postfix(refresh=False, **raw_loss_cpu)
+                            for key, value in raw_loss_cpu.items():
+                                if key not in train_losses:
+                                    train_losses[key] = []
+                                train_losses[key].append(value)
                             step_log.update({
-                                'train_loss': raw_loss_cpu,
                                 'global_step': self.global_step,
                                 'update_step': self.update_step,
                                 'epoch': self.epoch,
                                 'lr': self.lr_scheduler.get_last_lr()[0],
                             })
+                            step_log.update(raw_loss_cpu)
 
                             is_last_batch = (batch_idx == (len(train_dataloader)-1))
                             if not is_last_batch and accelerator.sync_gradients:
@@ -279,42 +292,53 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 print(f"Global step {self.global_step} completed")
 
                 # End of epoch processing
-                train_loss = np.mean(train_losses)
-                step_log['train_loss'] = train_loss
+                train_loss = dict_apply(train_losses, lambda x: np.mean(x))
+                step_log.update(train_loss)
 
                 # Validation
                 if (self.epoch % cfg.training.val_every) == 0 and val_dataloader is not None:
                     with torch.no_grad():
-                        val_losses = list()
+                        policy = self.model_averaging.get_unwrapped_averaged_model()
+                        policy = accelerator.prepare(policy)
+                        policy.eval()
+                        val_losses = dict()
                         
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec, 
                                 disable=not accelerator.is_main_process) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
-                                
+
                                 # Compute validation loss
-                                loss = self.model(inputs)
-                                val_losses.append(loss)
+                                with accelerator.autocast():
+                                    loss = policy("train", inputs)
+                                for key, loss in loss.items():
+                                    if key not in val_losses:
+                                        val_losses[key] = list()
+                                    val_losses[key].append(loss)
                                 
                                 if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
                         
                         # Process validation loss
                         if len(val_losses) > 0:
-                            val_losses = torch.stack(val_losses)
-                            val_losses = accelerator.gather(val_losses)
+                            for key in val_losses.keys():
+                                val_losses[key] = torch.stack(val_losses[key])
+                                val_losses[key] = accelerator.gather(val_losses[key])
                             
                             if accelerator.is_main_process:
-                                val_loss = torch.mean(val_losses).item()
-                                step_log['val_loss'] = val_loss
+                                for key in val_losses.keys():
+                                    val_losses[key] = torch.mean(val_losses[key]).item()
+                                    step_log[f'val_{key}'] = val_losses[key]
+
+                        self.model.train()
 
                 # Sampling
                 if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
                     with torch.no_grad():
                         # Get evaluation model (use averaged model if available)
                         policy = self.model_averaging.get_unwrapped_averaged_model()
-                        # Set model to evaluation mode for validation
+                        policy = accelerator.prepare(policy)
                         policy.eval()
                         
                         # Initialize evaluation metrics
@@ -328,15 +352,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             for batch_idx, batch in enumerate(tepoch):
                                 # Preprocess batch
                                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
-                                inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
                                 # Compute action accuracy if actions are available
                                 if 'human_actions' in inputs:
                                     gt_actions = inputs['human_actions']
                                     human_actions_valid_mask = inputs['human_actions_valid_mask']
                                     # Get action predictions
-                                    with torch.inference_mode():
-                                        with torch.autocast(device_type=accelerator.device.type, dtype=self.dtype):
-                                            pred_actions = policy.infer_human_action(inputs)
+                                    with accelerator.autocast():
+                                        pred_actions = policy("infer_human_action", inputs)
                                     
                                     gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
                                     pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
@@ -350,7 +372,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     eval_accuracy.append(batch_accuracy)
                                     
                                     # Compute L1 loss
-                                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / torch.sum(human_actions_valid_mask)
+                                    human_actions_valid_num = torch.sum(human_actions_valid_mask)
+                                    if human_actions_valid_num == 0:
+                                        batch_l1_loss = torch.tensor(0.0, device=gt_actions.device, dtype=gt_actions.dtype)
+                                    else:
+                                        batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
                                     eval_l1_loss.append(batch_l1_loss)
                                 
                                 if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
@@ -442,14 +468,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def preprocess_batch(self, batch, split_mask: bool = False, sample_fm_time: bool = True):
         """Preprocess batch for training"""
         # Extract data from batch
-        images = batch["pixel_value"]
-        proprios = batch["proprio"]
-        human_actions = batch["human_action"]
-        # TODO: for temporary debug
-        human_actions_valid_mask = ~torch.zeros_like(human_actions, dtype=torch.bool, device=human_actions.device)
-        human_actions_valid_mask[human_actions == 0.0] = False
+        pixel_values = batch["pixel_values"]
+        human_actions = batch["human_actions"]
+        human_actions_valid_mask = batch["human_actions_valid_mask"]
 
-        input_ids = batch["input_id"]
+        input_ids = batch["input_ids"]
 
         # Get unwrapped model for mask building
         model = self.model
@@ -458,36 +481,36 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         
         # Build causal mask and position ids
         # We need to move the new created tensors to the same device as the input prepared by the accelerate
-        causal_mask, vlm_position_ids, proprio_position_ids, action_position_ids = (
-            model.build_causal_mask_and_position_ids(
-                batch["attention_mask"], self.dtype
+        # get causal mask by the first unignored index of labels 
+        causal_mask, vlm_position_ids, human_action_position_ids = (
+            model.build_causal_mask_and_position_ids(   
+                batch["attention_mask"], batch["answer_start_idx"], self.dtype
             )
         )
 
         inputs = {
             "input_ids": input_ids,
-            "pixel_values": images.to(self.dtype),
+            "labels": batch["labels"],
+            "pixel_values": pixel_values.to(self.dtype),
             "vlm_position_ids": vlm_position_ids,
-            "proprio_position_ids": proprio_position_ids,
-            "human_action_position_ids": action_position_ids,
-            "proprios": proprios.to(self.dtype),
+            "human_action_position_ids": human_action_position_ids,
             "human_actions": human_actions.to(self.dtype),
             "human_actions_valid_mask": human_actions_valid_mask,
         }
         
         if split_mask:
-            image_text_proprio_mask, action_mask = (
+            vlm_mask, human_action_mask = (
                 model.split_full_mask_into_submasks(causal_mask)
             )
-            inputs["image_text_proprio_mask"] = image_text_proprio_mask
-            inputs["human_action_mask"] = action_mask
+            inputs["vlm_mask"] = vlm_mask
+            inputs["human_action_mask"] = human_action_mask
         else:
             inputs["causal_mask"] = causal_mask
 
         # Sample flow matching timesteps
         if sample_fm_time:
             # We need to move the new created tensors to the same device as the input prepared by the accelerate
-            inputs["t"] = self.sample_fm_time(len(input_ids)).to(self.dtype).to(input_ids.device)
+            inputs["t"] = self.sample_fm_time(len(input_ids)).to(input_ids.device).to(self.dtype)
 
         return inputs
 

@@ -11,9 +11,9 @@ lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
 vla_dataset_paths:
-#  - /share_data/datasets/taco/10episodes.zarr
- - /share_data/datasets/taco/taco_45pca_newpresence.zarr
- - /share_data/datasets/OakInk-v2/oakink2.zarr
+ - /share_data/datasets/taco/10episodes.zarr
+#  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+#  - /share_data/datasets/OakInk-v2/oakink2.zarr
 vlm_dataset_paths:
 #  - /share_data/datasets/VLM/FineVision/image_textualization(filtered)
 #  - /share_data/datasets/VLM/FineVision/sharegpt4v(llava)
@@ -136,7 +136,7 @@ training:
       enabled: True
       decay: 0.99
       start: 1 # start from 1st step
-      freq: 1
+      freq: 4
       device: # not supported for specific device
     swa:
       enabled: False
@@ -157,16 +157,6 @@ training:
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
   # misc
   tqdm_interval_sec: 1.0
-
-# Being-H0 Style Proprio Encoder Configuration
-# proprio_encoder:
-#   type: "mlp" 
-#   input_dim: ${proprio_dim}  # 480 (48 original + 432 action history)
-#   output_dim: ${mixture.proprio.hidden_size}  # 1024
-#   intermediate_dim: 512  # Hidden layer size (input_dim -> intermediate_dim -> output_dim)
-#   activation: "relu"  # Activation function: "relu", "gelu", "swish"
-#   dropout: 0.0  # Dropout rate
-#   use_layer_norm: False  # Whether to use layer normalization
 
 mixture:
   # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then human_action

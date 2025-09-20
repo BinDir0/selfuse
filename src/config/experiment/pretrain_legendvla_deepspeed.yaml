@@ -10,10 +10,18 @@ lora_r: 32
 lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
-dataset_paths:
- - /share_data/datasets/taco/taco.zarr
- - /share_data/datasets/hoi4d/hoi4d_cleaned.zarr
-#  - /share_data/datasets/test/taco.zarr
+vla_dataset_paths:
+ - /share_data/datasets/taco/10episodes.zarr
+#  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+#  - /share_data/datasets/OakInk-v2/oakink2.zarr
+vlm_dataset_paths:
+#  - /share_data/datasets/VLM/FineVision/image_textualization(filtered)
+#  - /share_data/datasets/VLM/FineVision/sharegpt4v(llava)
+#  - /share_data/datasets/VLM/FineVision/sharegpt4v(sam)
+#  - /share_data/datasets/VLM/FineVision/textcaps
+#  - /share_data/datasets/VLM/FineVision/alfworldgpt
+#  - /share_data/datasets/VLM/FineVision/cambrian(filtered)_processed
+ - /share_data/datasets/VLM/FineVision/cocoqa
 
 shape_meta: &shape_meta
   obs:
@@ -34,38 +42,52 @@ shape_meta: &shape_meta
     horizon: ${n_action_steps}
 
 dataset:
-  _target_: src.dataset.legendvla_dataset.LegendVLADataset
-  zarr_paths: ${dataset_paths}
-  horizon: ${eval:'${n_action_steps}+${dataset.history}'}
-  pad_before: ${eval:'${dataset.history}+${n_latency_steps}'}
-  pad_after: ${eval:'${n_action_steps}-1'}
-  shape_meta: ${shape_meta}
-  seed: 42
-  val_ratio: 0.05
-  history: 30 # frames
-  normalizer_dataloader_cfg:
-    batch_size: 4096
-    num_workers: 16
-    shuffle: False
-    pin_memory: True
-    persistent_workers: True
+  _target_: src.dataset.legendvla_dataset.LegendUnifiedDataset
+  vla_dataset: 
+    _target_: src.dataset.legendvla_dataset.LegendVLADataset
+    zarr_paths: ${vla_dataset_paths}
+    horizon: ${eval:'${n_action_steps}+${history}'}
+    pad_before: ${eval:'${history}+${n_latency_steps}'}
+    pad_after: ${eval:'${n_action_steps}-1'}
+    shape_meta: ${shape_meta}
+    seed: 42
+    val_ratio: 0.05
+    history: ${history} # frames
+    normalizer_dataloader_cfg:
+      batch_size: 4096
+      num_workers: 32
+      shuffle: False
+      pin_memory: True
+      persistent_workers: True
+  vlm_dataset:
+    _target_: src.dataset.legendvla_dataset.LegendVLMDataset
+    dataset_paths: ${vlm_dataset_paths}
+    split: train
+    cache_dir: # /share_data/datasets/VLM/FineVision/.cache
+    seed: 42
+    weights: [0.5, 0.5, 0.5]
+    val_ratio: 0.05
 
+history: 30
 n_action_steps: 30
-n_obs_image_steps: 2
-n_obs_state_steps: 6
+n_obs_image_steps: 1
+n_obs_state_steps: 1
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
+processor: 
+  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
+
 dataloader:
-  batch_size: 20
-  num_workers: 16
+  batch_size: 4
+  num_workers: 24
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 20 # use the same batch size with training for best performance
-  num_workers: 16
+  batch_size: 4 # use the same batch size with training for best performance
+  num_workers: 24
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -79,11 +101,11 @@ flow:
 
 optimizer:
   action: 
-    lr: 2e-5
+    lr: 4e-5
     betas: [0.9, 0.999]
     weight_decay: 1e-4
   vlm:
-    lr: 2e-5 # We can try smaller learning rate than action for VLM
+    lr: 4e-5 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.999]
     weight_decay: 1e-4
 
@@ -99,9 +121,7 @@ training:
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
   resume_checkpoint_path:
   num_epochs: 25
-  gradient_accumulate_every: 1
   use_bf16: True
-  use_torch_compile: True
   clipping:
     enabled: True
     max_grad_norm: 1.0
@@ -134,17 +154,8 @@ training:
   # misc
   tqdm_interval_sec: 1.0
 
-# Being-H0 Style Proprio Encoder Configuration
-# proprio_encoder:
-#   type: "mlp" 
-#   input_dim: ${proprio_dim}  # 480 (48 original + 432 action history)
-#   output_dim: ${mixture.proprio.hidden_size}  # 1024
-#   intermediate_dim: 512  # Hidden layer size (input_dim -> intermediate_dim -> output_dim)
-#   activation: "relu"  # Activation function: "relu", "gelu", "swish"
-#   dropout: 0.0  # Dropout rate
-#   use_layer_norm: False  # Whether to use layer normalization
-
 mixture:
+  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then human_action
   vlm:   # gemma
     hidden_size: 2048
     intermediate_size: 16384
@@ -154,15 +165,6 @@ mixture:
     use_lora: ${lora}
     adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0  # 10000 in gemma
-  proprio:
-    hidden_size: 1024
-    intermediate_size: 4096
-    use_final_norm: True  # technically no, but sharing weights with action anyway
-    cache: True
-    use_quantize: False
-    use_lora: False
-    adaptive_mode: ${action_expert_adaptive_mode}
-    rope_theta: ${action_expert_rope_theta}
   human_action:
     hidden_size: 1024
     intermediate_size: 4096
@@ -178,23 +180,27 @@ time_max_period: 100.0
 action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
 
 # Fixed
+ignore_index: -100
 image_token_index: 257152
 vocab_size: 257216
 pad_token_id: 0
 patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
-text_seq_len: 32
-max_image_text_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}'} 
-tokenizer_padding: max_length # instead of truncating to longest
+state_seq_len: 160 # 
+text_seq_len: ${eval:'${state_seq_len}+64'}
+answer_seq_len: 160 # TODO: check 
+max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
+tokenizer_padding: max_length # instead of truncating to longest, for best efficiency
 
 policy: 
   _target_: src.policy.legendvla.LegendVLA
   cfg: 
     vocab_size: ${vocab_size}
     pad_token_id: ${pad_token_id}
+    ignore_index: ${ignore_index}
     image_token_index: ${image_token_index}
-    use_lm_head: False
-    max_image_text_tokens: ${max_image_text_tokens}
+    use_lm_head: True
+    max_vlm_tokens: ${max_vlm_tokens}
     num_inference_steps: ${flow.num_inference_steps}
     action_expert_adaptive_mode: ${action_expert_adaptive_mode}
     time_hidden_size: ${time_hidden_size}
@@ -202,6 +208,9 @@ policy:
     flow_sig_min: ${flow.sig_min}
     # Add pretrained_model_path for loading pre-trained VLM weights
     pretrained_model_path: ${training.pretrained_model_path}
+    loss_weights: 
+      ce_loss_weight: 1.0
+      flow_loss_weight: 1.0
   shape_meta: ${shape_meta}
   vision_tower:
     _target_: src.model.vlm.paligemma.siglip.SiglipVisionModel
@@ -237,6 +246,7 @@ policy:
   joint_model:
     _target_: src.model.moe.joint_model.JointModel
     config:
+      knowledge_insulation: False
       action_expert_adaptive_mode: ${action_expert_adaptive_mode}
       time_hidden_size: ${time_hidden_size}
       mixture: ${mixture}
@@ -264,10 +274,10 @@ logging:
 
 checkpoint:
   topk:
-    monitor_key: train_loss
+    monitor_key: total_loss
     mode: min
     k: 1
-    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.4f}.ckpt'
+    format_str: 'epoch={epoch:04d}-total_loss={total_loss:.4f}.ckpt'
   save_last_ckpt: False
   save_last_snapshot: False
 

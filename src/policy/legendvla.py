@@ -522,8 +522,8 @@ class LegendVLA(nn.Module):
         # -> [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
         if pixel_values.ndim == 5:
             B, T, C, H, W = pixel_values.shape
-            pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
-            # pixel_values = pixel_values.view(B * T, C, H, W)
+            # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
+            pixel_values = pixel_values.view(B * T, C, H, W)
         else:
             T = None
 
@@ -531,8 +531,8 @@ class LegendVLA(nn.Module):
         image_features = self.multi_modal_projector(selected_image_feature)
 
         if T is not None:
-            image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
-            # image_features = image_features.view(B, -1, image_features.shape[-1])
+            # image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
+            image_features = image_features.view(B, -1, image_features.shape[-1])
 
         # normalize the image features
         _, _, embed_dim = image_features.shape
