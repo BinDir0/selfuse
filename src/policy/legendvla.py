@@ -870,7 +870,8 @@ class LegendVLA(nn.Module):
         d_psi = x1 - (1 - self.flow_sig_min) * x0
 
         loss = (v_psi - d_psi) ** 2
-        masked_loss = torch.where(human_actions_valid_mask, loss, torch.zeros_like(loss))
+        # Use element-wise multiplication to make sure the gradient can always be propagated to the action expert 
+        masked_loss = human_actions_valid_mask * loss
         human_actions_valid_num = torch.sum(human_actions_valid_mask)
         if human_actions_valid_num == 0:
             human_actions_valid_num = 1
@@ -960,12 +961,12 @@ class LegendVLA(nn.Module):
         d_psi = x1 - (1 - self.flow_sig_min) * x0
 
         flow_loss = (v_psi - d_psi) ** 2
-        masked_loss = torch.where(human_actions_valid_mask, flow_loss, torch.zeros_like(flow_loss))
+        # Use element-wise multiplication to make sure the gradient can always be propagated to the action expert 
+        masked_loss = human_actions_valid_mask * flow_loss
         human_actions_valid_num = torch.sum(human_actions_valid_mask)
         if human_actions_valid_num == 0:
-            flow_loss = torch.tensor(0.0, device=t.device, dtype=t.dtype)
-        else:
-            flow_loss = torch.sum(masked_loss) / torch.sum(human_actions_valid_mask)
+            human_actions_valid_num = 1
+        flow_loss = torch.sum(masked_loss) / human_actions_valid_num
 
         total_loss = self.loss_weights.ce_loss_weight * ce_loss + self.loss_weights.flow_loss_weight * flow_loss
         return {

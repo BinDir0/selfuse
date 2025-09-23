@@ -18,15 +18,5 @@ export NCCL_NET_GDR_LEVEL=2
 export NCCL_IB_QPS_PER_CONNECTION=4
 export NCCL_IB_TC=160
 export NCCL_IB_TIMEOUT=23
-export NCCL_PXN_DISABLE=0
-export NCCL_MIN_CTAS=4
 
-
-rm -f .deepspeed_env
-
-# Launch training
-accelerate launch \
-    --config_file src/config/acc_config.yaml \
-    train.py \
-    experiment=pretrain_legendvla_deepspeed 
-
+mpirun -np 16 --hostfile /home/chenzhang/project/EgoVLA/src/config/hostfile /home/chenzhang/project/nccl-tests/build/all_reduce_perf_mpi -b 8 -e 1G -f 2 -g 1

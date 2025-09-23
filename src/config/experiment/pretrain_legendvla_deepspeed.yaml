@@ -79,14 +79,14 @@ processor:
   fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
 
 dataloader:
-  batch_size: 4
+  batch_size: 12
   num_workers: 24
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 4 # use the same batch size with training for best performance
+  batch_size: 12 # use the same batch size with training for best performance
   num_workers: 24
   shuffle: False
   pin_memory: True
@@ -101,16 +101,15 @@ flow:
 
 optimizer:
   action: 
-    lr: 4e-5
+    lr: 5e-5
     betas: [0.9, 0.999]
     weight_decay: 1e-4
   vlm:
-    lr: 4e-5 # We can try smaller learning rate than action for VLM
+    lr: 5e-5 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.999]
     weight_decay: 1e-4
 
 training:
-  device: "cuda:0"
   seed: 42
   debug: False
   resume: True
@@ -188,7 +187,9 @@ patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
 state_seq_len: 160 # 
 text_seq_len: ${eval:'${state_seq_len}+64'}
-answer_seq_len: 160 # TODO: check 
+answer_seq_len: 160 
+# Make sure at least one tokens for VLM answer in the training, 
+# otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
 max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
 tokenizer_padding: max_length # instead of truncating to longest, for best efficiency
 

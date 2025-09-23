@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from contextlib import nullcontext
 from typing import Optional
 import pathlib
+from contextlib import contextmanager
 from torch.utils.data import DataLoader
 import copy
 import random
@@ -384,10 +385,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     # Validation
                     if (self.epoch % cfg.training.val_every) == 0 and val_dataloader is not None:
-                        with torch.no_grad():
-                            policy = self.model_averaging.get_unwrapped_averaged_model()
-                            policy = accelerator.prepare(policy)
-                            policy.eval()
+                        with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
                             val_losses = dict()
                             
                             with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
@@ -398,7 +396,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     
                                     # Compute validation loss
                                     with accelerator.autocast():
-                                        loss = policy("train", inputs)
+                                        loss = self.model("train", inputs)
                                     for key, loss in loss.items():
                                         if key not in val_losses:
                                             val_losses[key] = list()
@@ -422,10 +420,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     # Sampling
                     if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
-                        with torch.no_grad():
-                            policy = self.model_averaging.get_unwrapped_averaged_model()
-                            policy = accelerator.prepare(policy)
-                            policy.eval()
+                        with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
                             # Initialize evaluation metrics
                             eval_thresholds = cfg.training.eval_thresholds
                             eval_accuracy = []
@@ -443,7 +438,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                         human_actions_valid_mask = inputs['human_actions_valid_mask']
                                         # Get action predictions
                                         with accelerator.autocast():
-                                            pred_actions = policy("infer_human_action", inputs)
+                                            pred_actions = self.model("infer_human_action", inputs)
                                         
                                         gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
                                         pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.ones_like(pred_actions) * -100)
@@ -596,6 +591,28 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             inputs["t"] = self.sample_fm_time(len(input_ids)).to(input_ids.device).to(self.dtype)
 
         return inputs
+
+
+@contextmanager
+def eval_with_averaged_model(accelerator, model, averaged_model):
+    """
+    A context manager to temporarily load averaged weights into the main model during evaluation.
+    """
+    unwrapped_model = accelerator.unwrap_model(model)
+    
+    # Use .clone() to avoid affecting the original dictionary
+    # Move to CPU to avoid GPU memory issues
+    original_state_dict = {k: v.clone().to('cpu') for k, v in unwrapped_model.state_dict().items()}
+    
+    averaged_state_dict = averaged_model.averaged_model_state_dict() 
+    unwrapped_model.load_state_dict(averaged_state_dict)
+    model.eval()
+    
+    try:
+        yield
+    finally:
+        unwrapped_model.load_state_dict(original_state_dict)
+        model.train()
 
 
 @hydra.main(

@@ -70,6 +70,11 @@ class ModelAveraging:
                 "model_type": "ema" if self.use_ema else "swa",
             }
         return {}
+
+    def averaged_model_state_dict(self) -> dict:
+        if self.model_avg:
+            return self.model_avg.module.state_dict()
+        return self.model.state_dict()
     
     def load_state_dict(self, state_dict: dict):
         """
