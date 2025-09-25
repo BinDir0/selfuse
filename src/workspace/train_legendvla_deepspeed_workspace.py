@@ -13,7 +13,7 @@ import torch
 from omegaconf import OmegaConf
 from typing import Optional
 import pathlib
-from contextlib import contextmanager
+from contextlib import nullcontext, contextmanager
 from torch.utils.data import DataLoader
 import copy
 import random
@@ -27,7 +27,7 @@ import einops
 from transformers import AutoTokenizer
 import accelerate
 from accelerate import Accelerator
-from accelerate.utils import DummyOptim, DummyScheduler
+from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
@@ -75,7 +75,40 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        accelerator = Accelerator(log_with='wandb')
+        def trace_handler(p):
+            # sort by GPU time, find GPU bottleneck
+            output_gpu = p.key_averages().table(sort_by="self_cuda_time_total", row_limit=20)
+            print("--- GPU Bottlenecks ---")
+            print(output_gpu)
+
+            # sort by CPU time, find CPU bottleneck
+            output_cpu = p.key_averages().table(sort_by="self_cpu_time_total", row_limit=20)
+            print("\n--- CPU Bottlenecks ---")
+            print(output_cpu)
+
+            '''
+            # sort by GPU memory usage, find GPU memory bottleneck
+            output_gpu_mem = p.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10)
+            print("\n--- GPU Memory Consumption ---")
+            print(output_gpu_mem)
+            '''
+            
+            p.export_chrome_trace(f"{self.output_dir}/trace/trace_step_{p.step_num}.json")
+
+        if cfg.training.profile: 
+            profile_kwargs = ProfileKwargs(
+                activities=['cpu', 'cuda'],
+                schedule_option={"wait": 1, "warmup": 2, "active": 10, "repeat": 3, "skip_first": 50},
+                on_trace_ready=trace_handler, 
+                # profile_memory=True,  # enable memory analysis
+                # with_stack=True
+            )
+            os.makedirs(f"{self.output_dir}/trace", exist_ok=True)
+
+        accelerator = Accelerator(
+            log_with='wandb', 
+            kwargs_handlers=[profile_kwargs] if cfg.training.profile else None
+        )
 
         # Initialize wandb tracking
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
@@ -219,11 +252,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
 
+        profile_context = nullcontext()
+        if cfg.training.profile and accelerator.is_main_process:
+            profile_context = accelerator.profile()
+
         # Training loop
         if accelerator.is_main_process:
             print(f"Training with {len(train_dataloader)} steps per epoch")
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        with JsonLogger(log_path) as json_logger:
+        with JsonLogger(log_path) as json_logger, profile_context as prof:
             for _ in range(cfg.training.num_epochs):
                 self.model.train()
                 step_log = dict()
@@ -289,6 +326,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         if self.global_step % 100 == 0 and accelerator.is_main_process:
                             print(f"Global step {self.global_step} completed")
 
+                        if cfg.training.profile and accelerator.is_main_process:
+                            prof.step()
+
                 # End of epoch processing
                 train_loss = dict_apply(train_losses, lambda x: np.mean(x))
                 step_log.update(train_loss)
@@ -320,10 +360,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 val_losses[key] = torch.stack(val_losses[key])
                                 val_losses[key] = accelerator.gather(val_losses[key])
                             
-                            if accelerator.is_main_process:
-                                for key in val_losses.keys():
-                                    val_losses[key] = torch.mean(val_losses[key]).item()
-                                    step_log[f'val_{key}'] = val_losses[key]
+                            for key in val_losses.keys():
+                                val_losses[key] = torch.mean(val_losses[key]).item()
+                                step_log[f'val_{key}'] = val_losses[key]
 
                 # Sampling
                 if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
@@ -378,21 +417,21 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             eval_accuracy = accelerator.gather(eval_accuracy)
                             eval_l1_loss = accelerator.gather(eval_l1_loss)
                             
+                            eval_accuracy = torch.mean(eval_accuracy, dim=0)
+                            eval_l1_loss = torch.mean(eval_l1_loss)
+                            
+                            # Log accuracy metrics
+                            step_log['eval_l1_loss'] = eval_l1_loss.item()
+                            for i, threshold in enumerate(eval_thresholds):
+                                step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
+                            
+                            # Create log message
+                            log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
+                            log_msg += " | ".join([
+                                f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
+                                for i, threshold in enumerate(eval_thresholds)
+                            ])
                             if accelerator.is_main_process:
-                                eval_accuracy = torch.mean(eval_accuracy, dim=0)
-                                eval_l1_loss = torch.mean(eval_l1_loss)
-                                
-                                # Log accuracy metrics
-                                step_log['eval_l1_loss'] = eval_l1_loss.item()
-                                for i, threshold in enumerate(eval_thresholds):
-                                    step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
-                                
-                                # Create log message
-                                log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
-                                log_msg += " | ".join([
-                                    f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
-                                    for i, threshold in enumerate(eval_thresholds)
-                                ])
                                 print(log_msg)
 
                 # Checkpoint saving

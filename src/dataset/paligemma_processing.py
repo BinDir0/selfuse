@@ -250,6 +250,8 @@ class PaliGemmaProcessor:
         )
 
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
+        text = text.replace('\n', '')
+        target = target.replace('\n', '')
         input_string = add_image_tokens_to_prompt(
             prefix_prompt=text,
             bos_token=self.tokenizer.bos_token,
@@ -405,8 +407,7 @@ class PaliGemmaVLAProcessor:
         discrete_states = self.fast_tokenizer['states'](states)[0]
         discrete_human_actions = self.fast_tokenizer['human_actions'](human_actions)[0]
 
-        if '.' in text:
-            text = text.replace('.', '')
+        text = text.replace('.', '')
         text = text.lower()
         text = f"What should the robot do to {text} with the state {self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt

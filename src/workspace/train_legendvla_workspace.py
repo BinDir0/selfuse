@@ -411,10 +411,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     val_losses[key] = torch.stack(val_losses[key])
                                     val_losses[key] = accelerator.gather(val_losses[key])
                                 
-                                if accelerator.is_main_process:
-                                    for key in val_losses.keys():
-                                        val_losses[key] = torch.mean(val_losses[key]).item()
-                                        step_log[f'val_{key}'] = val_losses[key]
+                                for key in val_losses.keys():
+                                    val_losses[key] = torch.mean(val_losses[key]).item()
+                                    step_log[f'val_{key}'] = val_losses[key]
                             
                             self.model.train()
 
@@ -472,21 +471,21 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 eval_accuracy = accelerator.gather(eval_accuracy)
                                 eval_l1_loss = accelerator.gather(eval_l1_loss)
                                 
+                                eval_accuracy = torch.mean(eval_accuracy, dim=0)
+                                eval_l1_loss = torch.mean(eval_l1_loss)
+                                
+                                # Log accuracy metrics
+                                step_log['eval_l1_loss'] = eval_l1_loss.item()
+                                for i, threshold in enumerate(eval_thresholds):
+                                    step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
+                                
+                                # Create log message
+                                log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
+                                log_msg += " | ".join([
+                                    f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
+                                    for i, threshold in enumerate(eval_thresholds)
+                                ])
                                 if accelerator.is_main_process:
-                                    eval_accuracy = torch.mean(eval_accuracy, dim=0)
-                                    eval_l1_loss = torch.mean(eval_l1_loss)
-                                    
-                                    # Log accuracy metrics
-                                    step_log['eval_l1_loss'] = eval_l1_loss.item()
-                                    for i, threshold in enumerate(eval_thresholds):
-                                        step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
-                                    
-                                    # Create log message
-                                    log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
-                                    log_msg += " | ".join([
-                                        f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
-                                        for i, threshold in enumerate(eval_thresholds)
-                                    ])
                                     print(log_msg)
 
                             self.model.train()

@@ -20,7 +20,7 @@ from omegaconf import OmegaConf
 from src.model.common.kv_cache import KVCache
 from .mixture import Mixture
 
-
+# In our settings, attention is not the bottleneck, but the MLP is
 def forward_mixture_scaled_dot_product_attention(
     query_states_all: dict[torch.FloatTensor],
     key_states_all: dict[torch.FloatTensor],
@@ -34,7 +34,7 @@ def forward_mixture_scaled_dot_product_attention(
     # [Batch_Size, Num_Heads_Q / Num_Heads_KV, Full_Seq_Len, Head_Dim]
     query_states = torch.cat(tuple(query_states_all.values()), dim=-2)
     key_states = torch.cat(tuple(key_states_all.values()), dim=-2)
-    value_states = torch.cat(tuple(value_states_all.values()), dim=2)
+    value_states = torch.cat(tuple(value_states_all.values()), dim=-2)
 
     # Perform the calculation as usual, Q * K^T / sqrt(head_dim)
     # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len]
@@ -75,9 +75,9 @@ def forward_insulation_scaled_dot_product_attention(
 ) -> torch.FloatTensor:
     # Concatenate the blocks into two groups: vlm and other mixtures
     # [Batch_Size, Num_Heads_Q / Num_Heads_KV, VLM_Seq_Len, Head_Dim]
-    query_states_vlm = torch.cat(tuple(query_states_all["vlm"]), dim=-2)
-    key_states_vlm = torch.cat(tuple(key_states_all["vlm"]), dim=-2)
-    value_states_vlm = torch.cat(tuple(value_states_all["vlm"]), dim=2)
+    query_states_vlm = query_states_all["vlm"]
+    key_states_vlm = key_states_all["vlm"]
+    value_states_vlm = value_states_all["vlm"]
 
     query_states_others = {key: value for key, value in query_states_all.items() if key != "vlm"}
     key_states_others = {key: value for key, value in key_states_all.items() if key != "vlm"}
@@ -85,7 +85,7 @@ def forward_insulation_scaled_dot_product_attention(
     # [Batch_Size, Num_Heads_Q / Num_Heads_KV, Other_Seq_Len, Head_Dim]
     query_states_others = torch.cat(tuple(query_states_others.values()), dim=-2)
     key_states_others = torch.cat(tuple(key_states_others.values()), dim=-2)
-    value_states_others = torch.cat(tuple(value_states_others.values()), dim=2)
+    value_states_others = torch.cat(tuple(value_states_others.values()), dim=-2)
 
     # Perform the calculation as usual, Q * K^T / sqrt(head_dim)
     # [Batch_Size, Num_Heads_Q, VLM_Seq_Len, VLM_Seq_Len]

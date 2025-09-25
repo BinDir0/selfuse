@@ -1,6 +1,6 @@
 {
     "compile": {
-        "deepcompile": true
+        "deepcompile": false
     },
     "optimizer": {
         "type": "AdamW",

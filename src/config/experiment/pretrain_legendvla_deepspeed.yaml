@@ -11,9 +11,10 @@ lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
 vla_dataset_paths:
- - /share_data/datasets/taco/10episodes.zarr
-#  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
-#  - /share_data/datasets/OakInk-v2/oakink2.zarr
+#  - /share_data/datasets/taco/10episodes.zarr
+ - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+ - /share_data/datasets/OakInk-v2/oakink2.zarr
+ - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
 vlm_dataset_paths:
 #  - /share_data/datasets/VLM/FineVision/image_textualization(filtered)
 #  - /share_data/datasets/VLM/FineVision/sharegpt4v(llava)
@@ -21,6 +22,7 @@ vlm_dataset_paths:
 #  - /share_data/datasets/VLM/FineVision/textcaps
 #  - /share_data/datasets/VLM/FineVision/alfworldgpt
 #  - /share_data/datasets/VLM/FineVision/cambrian(filtered)_processed
+ - /share_data/datasets/VLM/FineVision/LLaVA_Instruct_150K
  - /share_data/datasets/VLM/FineVision/cocoqa
 
 shape_meta: &shape_meta
@@ -63,7 +65,7 @@ dataset:
     _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}
     split: train
-    cache_dir: # /share_data/datasets/VLM/FineVision/.cache
+    cache_dir: /share_data/datasets/VLM/FineVision/.cache
     seed: 42
     weights: [0.5, 0.5, 0.5]
     val_ratio: 0.05
@@ -79,14 +81,14 @@ processor:
   fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
 
 dataloader:
-  batch_size: 12
+  batch_size: 8
   num_workers: 24
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 12 # use the same batch size with training for best performance
+  batch_size: 8 # use the same batch size with training for best performance
   num_workers: 24
   shuffle: False
   pin_memory: True
@@ -101,17 +103,18 @@ flow:
 
 optimizer:
   action: 
-    lr: 5e-5
+    lr: 2e-5
     betas: [0.9, 0.999]
     weight_decay: 1e-4
   vlm:
-    lr: 5e-5 # We can try smaller learning rate than action for VLM
+    lr: 1e-5 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.999]
     weight_decay: 1e-4
 
 training:
   seed: 42
   debug: False
+  profile: False
   resume: True
   lr_scheduler: cosine
   lr_warmup_steps: 2000
@@ -185,9 +188,9 @@ vocab_size: 257216
 pad_token_id: 0
 patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
-state_seq_len: 160 # 
+state_seq_len: 256 # 
 text_seq_len: ${eval:'${state_seq_len}+64'}
-answer_seq_len: 160 
+answer_seq_len: 512 
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
 max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
@@ -211,7 +214,7 @@ policy:
     pretrained_model_path: ${training.pretrained_model_path}
     loss_weights: 
       ce_loss_weight: 1.0
-      flow_loss_weight: 1.0
+      flow_loss_weight: 10.0
   shape_meta: ${shape_meta}
   vision_tower:
     _target_: src.model.vlm.paligemma.siglip.SiglipVisionModel
@@ -247,7 +250,7 @@ policy:
   joint_model:
     _target_: src.model.moe.joint_model.JointModel
     config:
-      knowledge_insulation: False
+      knowledge_insulation: True
       action_expert_adaptive_mode: ${action_expert_adaptive_mode}
       time_hidden_size: ${time_hidden_size}
       mixture: ${mixture}

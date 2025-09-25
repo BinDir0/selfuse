@@ -156,3 +156,6 @@ logs/
 
 # deepspeed env
 .deepspeed_env
+
+# test files
+_test
