@@ -152,9 +152,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             all_trainable_parameters, 
         )
 
+        print("--> Configure dataset and dataloader...................")
         # Configure dataset and dataloader
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.dataset)
+        print("--> dataset instantiated")
+        accelerator.wait_for_everyone()
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.policy.cfg.pretrained_model_path, padding_side="right"
@@ -190,22 +193,25 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
         
         print("Computing normalizer...")
-        # compute normalizer on the main process and save to disk
-        if accelerator.is_main_process:
-            # 1. main process compute/get object
-            normalizer = dataset.vla_dataset.get_normalizer()
-            normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
-            pickle.dump(normalizer, open(normalizer_path, 'wb'))
-            objects_to_broadcast = [normalizer]
+        if cfg.training.normalizer_path is not None:
+            normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
         else:
-            # 2. other process prepare a placeholder
-            objects_to_broadcast = [None]
+            # compute normalizer on the main process and save to disk
+            if accelerator.is_main_process:
+                # 1. main process compute/get object
+                normalizer = dataset.vla_dataset.get_normalizer()
+                normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
+                pickle.dump(normalizer, open(normalizer_path, 'wb'))
+                objects_to_broadcast = [normalizer]
+            else:
+                # 2. other process prepare a placeholder
+                objects_to_broadcast = [None]
 
-        # 3. broadcast object from main process (from_process=0) to all processes
-        objects_to_broadcast = accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
+            # 3. broadcast object from main process (from_process=0) to all processes
+            objects_to_broadcast = accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
+            normalizer = objects_to_broadcast[0]
 
         # 4. now all processes have a fully identical object copy
-        normalizer = objects_to_broadcast[0]
         self.model.set_normalizer(normalizer)
         dataset.vla_dataset.set_normalizer(normalizer)
 
@@ -236,7 +242,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler
         )
-
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
         if self.flow_sampling == "beta":
@@ -315,6 +320,24 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         })
                         step_log.update(raw_loss_cpu)
 
+                        # Validation
+                        if (self.update_step % cfg.training.val_every) == 0 and \
+                            val_dataloader is not None and accelerator.sync_gradients:
+                            self.validation(accelerator, val_dataloader, step_log)
+
+                        if (self.update_step % cfg.training.sample_every) == 0 and \
+                            val_dataloader is not None and accelerator.sync_gradients:
+                            self.sample(accelerator, val_dataloader, step_log)
+
+                        # Checkpoint saving
+                        if (self.update_step % cfg.training.checkpoint_every) == 0 and \
+                            accelerator.is_main_process and accelerator.sync_gradients:
+                            self.save_topk_ckpt(accelerator, topk_manager, step_log)
+
+                        if self.update_step % cfg.training.ckpt_save_interval == 0 and \
+                            accelerator.is_main_process and accelerator.sync_gradients:
+                            self.save_interval_ckpt(accelerator)
+
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch and accelerator.sync_gradients:
                             accelerator.log(step_log, step=self.update_step)
@@ -333,150 +356,147 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 train_loss = dict_apply(train_losses, lambda x: np.mean(x))
                 step_log.update(train_loss)
 
-                # Validation
-                if (self.epoch % cfg.training.val_every) == 0 and val_dataloader is not None:
-                    if accelerator.is_main_process:
-                        print(f"Validation epoch {self.epoch} started")
-                    with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
-                        val_losses = dict()
-                        
-                        for batch_idx, batch in enumerate(val_dataloader):
-                            inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
-
-                            # Compute validation loss
-                            with accelerator.autocast():
-                                loss = self.model("train", inputs)
-                            for key, loss in loss.items():
-                                if key not in val_losses:
-                                    val_losses[key] = list()
-                                val_losses[key].append(loss)
-                            
-                            if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
-                                break
-                        
-                        # Process validation loss
-                        if len(val_losses) > 0:
-                            for key in val_losses.keys():
-                                val_losses[key] = torch.stack(val_losses[key])
-                                val_losses[key] = accelerator.gather(val_losses[key])
-                            
-                            for key in val_losses.keys():
-                                val_losses[key] = torch.mean(val_losses[key]).item()
-                                step_log[f'val_{key}'] = val_losses[key]
-
-                # Sampling
-                if (self.epoch % cfg.training.sample_every) == 0 and val_dataloader is not None:
-                    if accelerator.is_main_process:
-                        print(f"Sampling epoch {self.epoch} started")
-                    with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
-                        # Initialize evaluation metrics
-                        eval_thresholds = cfg.training.eval_thresholds
-                        eval_accuracy = []
-                        eval_l1_loss = []
-                        
-                        for batch_idx, batch in enumerate(val_dataloader):
-                            # Preprocess batch
-                            inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
-                            # Compute action accuracy if actions are available
-                            if 'human_actions' in inputs:
-                                gt_actions = inputs['human_actions']
-                                human_actions_valid_mask = inputs['human_actions_valid_mask']
-                                # Get action predictions
-                                with accelerator.autocast():
-                                    pred_actions = self.model("infer_human_action", inputs)
-                                
-                                gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
-                                pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.ones_like(pred_actions) * -100)
-                                
-                                # Compute accuracy metrics
-                                batch_accuracy = get_action_accuracy(
-                                    gt_actions,
-                                    pred_actions,
-                                    eval_thresholds,
-                                )
-                                eval_accuracy.append(batch_accuracy)
-                                
-                                # Compute L1 loss
-                                human_actions_valid_num = torch.sum(human_actions_valid_mask)
-                                if human_actions_valid_num == 0:
-                                    batch_l1_loss = torch.tensor(0.0, device=gt_actions.device, dtype=gt_actions.dtype)
-                                else:
-                                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
-                                eval_l1_loss.append(batch_l1_loss)
-                            
-                            if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
-                                break
-                        
-                        # Process action accuracy metrics
-                        if len(eval_accuracy) > 0:
-                            # Average over batches
-                            eval_accuracy = torch.stack(eval_accuracy)
-                            eval_l1_loss = torch.stack(eval_l1_loss)
-                            
-                            # Gather metrics across all processes
-                            eval_accuracy = accelerator.gather(eval_accuracy)
-                            eval_l1_loss = accelerator.gather(eval_l1_loss)
-                            
-                            eval_accuracy = torch.mean(eval_accuracy, dim=0)
-                            eval_l1_loss = torch.mean(eval_l1_loss)
-                            
-                            # Log accuracy metrics
-                            step_log['eval_l1_loss'] = eval_l1_loss.item()
-                            for i, threshold in enumerate(eval_thresholds):
-                                step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
-                            
-                            # Create log message
-                            log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
-                            log_msg += " | ".join([
-                                f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
-                                for i, threshold in enumerate(eval_thresholds)
-                            ])
-                            if accelerator.is_main_process:
-                                print(log_msg)
-
-                # Checkpoint saving
-                if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
-                    model_ds = self.model
-                    self.model = accelerator.unwrap_model(self.model)
-                    # Need to update_bn when the model contains batch norm layers !!!
-                    if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
-                    if cfg.checkpoint.save_last_snapshot:
-                        self.save_snapshot()
-
-                    # sanitize metric names
-                    metric_dict = dict()
-                    for key, value in step_log.items():
-                        new_key = key.replace('/', '_')
-                        metric_dict[new_key] = value
-                    
-                    # We can't copy the last checkpoint here
-                    # since save_checkpoint uses threads.
-                    # therefore at this point the file might have been empty!
-                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
-
-                    if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path)
-
-                    # recover the DDP model
-                    self.model = model_ds
-
-                # Save model at specific epochs without affecting best model saving
-                if self.epoch % cfg.training.ckpt_save_interval == 0 and accelerator.is_main_process:
-                    model_ds = self.model
-                    self.model = accelerator.unwrap_model(self.model)
-                    save_dir = os.path.join(self.output_dir, 'epoch_checkpoints')
-                    os.makedirs(save_dir, exist_ok=True)
-                    # Need to update_bn when the model contains batch norm layers !!!
-                    self.save_checkpoint(path=os.path.join(save_dir, f'epoch_{self.epoch}.ckpt'))
-                    self.model = model_ds
-
                 # Log final step of epoch
                 accelerator.log(step_log, step=self.update_step)
                 json_logger.log(step_log)
                 self.epoch += 1
 
         accelerator.end_training()
+
+    def validation(self, accelerator, dataloader, step_log): 
+        if accelerator.is_main_process:
+            print(f"Validation step {self.update_step} started")
+        with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
+            val_losses = dict()
+            
+            for batch_idx, batch in enumerate(dataloader):
+                inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
+
+                # Compute validation loss
+                with accelerator.autocast():
+                    loss = self.model("train", inputs)
+                for key, loss in loss.items():
+                    if key not in val_losses:
+                        val_losses[key] = list()
+                    val_losses[key].append(loss)
+                
+                if self.cfg.training.max_val_steps and batch_idx >= (self.cfg.training.max_val_steps-1):
+                    break
+            
+            # Process validation loss
+            if len(val_losses) > 0:
+                for key in val_losses.keys():
+                    val_losses[key] = torch.stack(val_losses[key])
+                    val_losses[key] = accelerator.gather(val_losses[key])
+                
+                for key in val_losses.keys():
+                    val_losses[key] = torch.mean(val_losses[key]).item()
+                    step_log[f'val_{key}'] = val_losses[key]
+
+    def sample(self, accelerator, dataloader, step_log):
+        if accelerator.is_main_process:
+            print(f"Sampling step {self.update_step} started")
+        with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
+            # Initialize evaluation metrics
+            eval_thresholds = self.cfg.training.eval_thresholds
+            eval_accuracy = []
+            eval_l1_loss = []
+            
+            for batch_idx, batch in enumerate(dataloader):
+                # Preprocess batch
+                inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
+                # Compute action accuracy if actions are available
+                if 'human_actions' in inputs:
+                    gt_actions = inputs['human_actions']
+                    human_actions_valid_mask = inputs['human_actions_valid_mask']
+                    # Get action predictions
+                    with accelerator.autocast():
+                        pred_actions = self.model("infer_human_action", inputs)
+                    
+                    # ignore invalid actions
+                    gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
+                    pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
+                    
+                    # Compute accuracy metrics
+                    batch_accuracy = get_action_accuracy(
+                        gt_actions,
+                        pred_actions,
+                        eval_thresholds,
+                    )
+                    eval_accuracy.append(batch_accuracy)
+                    
+                    # Compute L1 loss
+                    human_actions_valid_num = torch.sum(human_actions_valid_mask)
+                    if human_actions_valid_num == 0:
+                        batch_l1_loss = torch.tensor(0.0, device=gt_actions.device, dtype=gt_actions.dtype)
+                    else:
+                        batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
+                    eval_l1_loss.append(batch_l1_loss)
+                
+                if self.cfg.training.max_val_steps and batch_idx >= (self.cfg.training.max_val_steps-1):
+                    break
+            
+            # Process action accuracy metrics
+            if len(eval_accuracy) > 0:
+                # Average over batches
+                eval_accuracy = torch.stack(eval_accuracy)
+                eval_l1_loss = torch.stack(eval_l1_loss)
+                
+                # Gather metrics across all processes
+                eval_accuracy = accelerator.gather(eval_accuracy)
+                eval_l1_loss = accelerator.gather(eval_l1_loss)
+                
+                eval_accuracy = torch.mean(eval_accuracy, dim=0)
+                eval_l1_loss = torch.mean(eval_l1_loss)
+                
+                # Log accuracy metrics
+                step_log['eval_l1_loss'] = eval_l1_loss.item()
+                for i, threshold in enumerate(eval_thresholds):
+                    step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
+                
+                # Create log message
+                log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
+                log_msg += " | ".join([
+                    f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
+                    for i, threshold in enumerate(eval_thresholds)
+                ])
+                if accelerator.is_main_process:
+                    print(log_msg)
+
+    def save_topk_ckpt(self, accelerator, topk_manager, step_log): 
+        model_ds = self.model
+        self.model = accelerator.unwrap_model(self.model)
+        # Need to update_bn when the model contains batch norm layers !!!
+        if self.cfg.checkpoint.save_last_ckpt:
+            self.save_checkpoint()
+        if self.cfg.checkpoint.save_last_snapshot:
+            self.save_snapshot()
+
+        # sanitize metric names
+        metric_dict = dict()
+        for key, value in step_log.items():
+            new_key = key.replace('/', '_')
+            metric_dict[new_key] = value
+        
+        # We can't copy the last checkpoint here
+        # since save_checkpoint uses threads.
+        # therefore at this point the file might have been empty!
+        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+
+        if topk_ckpt_path is not None:
+            self.save_checkpoint(path=topk_ckpt_path)
+
+        # recover the DDP model
+        self.model = model_ds
+
+    def save_interval_ckpt(self, accelerator): 
+        model_ds = self.model
+        self.model = accelerator.unwrap_model(self.model)
+        save_dir = os.path.join(self.output_dir, 'epoch_checkpoints')
+        os.makedirs(save_dir, exist_ok=True)
+        # Need to update_bn when the model contains batch norm layers !!!
+        self.save_checkpoint(path=os.path.join(save_dir, f'epoch_{self.epoch}.ckpt'))
+        self.model = model_ds
 
     def sample_fm_time(self, bsz: int) -> torch.FloatTensor:
         if self.flow_sampling == "uniform":  # uniform between 0 and 1
@@ -564,6 +584,7 @@ def eval_with_averaged_model(accelerator, model, averaged_model):
     
     # Use .clone() to avoid affecting the original dictionary
     # Move to CPU to avoid GPU memory issues
+    device = next(iter(unwrapped_model.parameters())).device
     original_state_dict = {k: v.clone().to('cpu') for k, v in unwrapped_model.state_dict().items()}
     
     averaged_state_dict = averaged_model.averaged_model_state_dict() 
@@ -574,6 +595,7 @@ def eval_with_averaged_model(accelerator, model, averaged_model):
         yield
     finally:
         unwrapped_model.load_state_dict(original_state_dict)
+        unwrapped_model.to(device)
         model.train()
 
 

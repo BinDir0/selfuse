@@ -2,7 +2,7 @@ import zarr
 import numpy as np
 from .replay_buffer import ReplayBuffer
 
-class ZarrImageReference:
+class ZarrReference:
     """Lazy loading image data reference"""
     def __init__(self, zarr_array):
         self.zarr_array = zarr_array
@@ -27,7 +27,7 @@ class StreamingReplayBuffer(ReplayBuffer):
         self.zarr_path = None
         
     @classmethod
-    def copy_from_path(cls, path, keys=None):
+    def copy_from_path(cls, path, keys=None, lazy_load=True):
         """Create StreamingReplayBuffer from zarr file"""
         buffer = cls()
         buffer.zarr_path = path
@@ -55,17 +55,17 @@ class StreamingReplayBuffer(ReplayBuffer):
             keys = list(src_data.keys())
             
         for key in keys:
-            arr = src_data[key]
-            # Use references for image data, load other data completely
-            if key in ['image']:
-                buffer._data[key] = ZarrImageReference(arr)
-            else:
-                buffer._data = buffer._data | cls._load_zarr_recursive(arr, prefix_key=key)
+            data = src_data[key]
+            # Use references for image, because image is too large to load into memory
+            # Use references for all other data according to the lazy_load flag
+            buffer._data = buffer._data | cls._load_zarr_recursive(
+                data, prefix_key=key, lazy_load=lazy_load if key != 'image' else True
+            )
                 
         return buffer
     
     @staticmethod
-    def _load_zarr_recursive(node, prefix_key=""):
+    def _load_zarr_recursive(node, prefix_key="", lazy_load=True):
         """
         Recursively load Zarr nodes.
         - If the node is a Group, create a dictionary and recursively.
@@ -75,14 +75,15 @@ class StreamingReplayBuffer(ReplayBuffer):
         if isinstance(node, zarr.hierarchy.Group):
             data_dict = dict()
             for sub_key, sub_node in node.items():
-                data_dict = data_dict | __class__._load_zarr_recursive(sub_node, prefix_key=f"{prefix_key}/{sub_key}")
+                data_dict = data_dict | __class__._load_zarr_recursive(
+                    sub_node, prefix_key=f"{prefix_key}/{sub_key}", lazy_load=lazy_load
+                )
             return data_dict
-        # Basic case: if the current node is an array
-        elif isinstance(node, zarr.core.Array):
-            return {prefix_key: node[:]}
         
-        # If the node is other types, return directly
-        return node
+        if lazy_load:
+            return {prefix_key: ZarrReference(node)}
+        else:
+            return {prefix_key: node[:]}
 
     @property
     def data(self):

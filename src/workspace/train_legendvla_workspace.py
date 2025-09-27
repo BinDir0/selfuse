@@ -440,7 +440,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                             pred_actions = self.model("infer_human_action", inputs)
                                         
                                         gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
-                                        pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.ones_like(pred_actions) * -100)
+                                        pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
                                         
                                         # Compute accuracy metrics
                                         batch_accuracy = get_action_accuracy(

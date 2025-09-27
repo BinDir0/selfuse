@@ -1,5 +1,6 @@
 from typing import Dict, List, Tuple
 import warnings
+import re
 
 import torch
 import torch.nn.functional as F
@@ -177,6 +178,8 @@ def process_images(
 
 class PaliGemmaProcessor:
     IMAGE_TOKEN = "<image>"
+    LOCALIZATION_TOKEN_NUM = 1024
+    SEGMENTATION_TOKEN_NUM = 128
 
     def __init__(
         self,
@@ -215,6 +218,33 @@ class PaliGemmaProcessor:
         self.tokenizer = tokenizer
         self.sep_token_id = tokenizer('\n', max_length=1, padding="max_length", truncation=True)['input_ids'][0]
 
+    def float2localization_tokens(self, text: str):
+        pattern = r"\d+\.\d+"
+
+        def replacer(match: re.Match) -> str:
+            # match.group(1) is the captured floating point string, e.g. "0.123"
+            float_str = match.group(0)
+            
+            # Convert the string to a floating point number
+            float_val = float(float_str)
+            
+            # Clip the floating point number to [0, 1] range, then scale and discretize to an integer
+            token_id = int(np.clip(float_val, 0, 1) * self.LOCALIZATION_TOKEN_NUM)
+            
+            # Build and return the formatted token string
+            return f"<loc{token_id:04d}>"
+
+        # Use re.sub to globally find and replace
+        return re.sub(pattern, replacer, text)
+
+    def localization_tokens2float(self, text: str):
+        pattern = r"<loc\d{4}>"
+        def replacer(match: re.Match) -> str:
+            loc_token = match.group(0)
+            loc_token_id = int(loc_token.split('<loc')[-1].split('>')[0])
+            return f"{loc_token_id / self.LOCALIZATION_TOKEN_NUM:.4f}"
+        return re.sub(pattern, replacer, text)
+
     def __call__(
         self,
         text: str,
@@ -252,6 +282,11 @@ class PaliGemmaProcessor:
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
         text = text.replace('\n', '')
         target = target.replace('\n', '')
+        text = text.replace('<image>', '')
+        target = target.replace('<image>', '')
+        # We assume the floating point numbers in the text and target are localization tokens
+        text = self.float2localization_tokens(text)
+        target = self.float2localization_tokens(target)
         input_string = add_image_tokens_to_prompt(
             prefix_prompt=text,
             bos_token=self.tokenizer.bos_token,
@@ -273,14 +308,23 @@ class PaliGemmaProcessor:
         labels = inputs['input_ids'].copy()
         labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
         condition = (labels == self.sep_token_id)
-        assert np.any(condition), "The separator token is not found in the input_ids"
-        sep_idx = np.argmax(condition)
+        if not np.any(condition):
+            warnings.warn("The separator token is not found in the input_ids")
+            # print(f"text length: {len(text.split(' '))}, target length: {len(target.split(' '))}")
+            # print(f"text: {text}, target: {target}")
+            sep_idx = len(labels) - 1
+        else : 
+            sep_idx = np.argmax(condition)
         labels[:sep_idx+1] = self.ignore_index
         inputs['labels'] = labels
         inputs['answer_start_idx'] = np.array(sep_idx+1)
         
         output = {"pixel_values": pixel_values, **inputs}
         return output
+
+    def decode(self, output_ids):
+        output_str = self.tokenizer.decode(output_ids)
+        return self.localization_tokens2float(output_str)
 
 
 class PaliGemmaVLAProcessor:
@@ -332,6 +376,7 @@ class PaliGemmaVLAProcessor:
         self.state_token_id = tokenizer.convert_tokens_to_ids(self.STATE_TOKEN)
         self.human_action_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_TOKEN)
         self.human_action_begin_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_BEGIN_TOKEN)
+        self.human_action_end_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_END_TOKEN)
         # We will add the BOS and EOS tokens ourselves
         tokenizer.add_bos_token = False
         tokenizer.add_eos_token = False
@@ -440,7 +485,11 @@ class PaliGemmaVLAProcessor:
         inputs['input_ids'] = input_ids
 
         labels = input_ids.copy()
-        answer_start_idx = np.argmax(labels == self.human_action_begin_token_id) + 1
+        if not np.any(labels == self.human_action_begin_token_id):
+            warnings.warn("The human action begin token is not found in the input_ids")
+            answer_start_idx = len(labels)
+        else : 
+            answer_start_idx = np.argmax(labels == self.human_action_begin_token_id) + 1
         labels[:answer_start_idx] = self.ignore_index
         labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
         inputs['labels'] = labels
@@ -448,6 +497,25 @@ class PaliGemmaVLAProcessor:
 
         output = {"pixel_values": pixel_values, **inputs}
         return output
+
+    def decode(self, output_ids):
+        if self.human_action_begin_token_id not in output_ids:
+            warnings.warn("The human action begin token is not found in the output_ids")
+            return {}
+        if self.human_action_end_token_id not in output_ids:
+            warnings.warn("The human action end token is not found in the output_ids")
+            return {}
+        start_idx = np.argmax(output_ids == self.human_action_begin_token_id) + 1
+        end_idx = np.argmax(output_ids == self.human_action_end_token_id)
+        human_action_tokens = output_ids[start_idx:end_idx].copy()
+        for idx, token in enumerate(human_action_tokens):
+            if token not in self.gemma_token_id2fast_token_id['human_actions']:
+                warnings.warn(f"The token {token} is not found in the human actions")
+                return {}
+            human_action_tokens[idx] = self.gemma_token_id2fast_token_id['human_actions'][token]
+        
+        human_actions = self.fast_tokenizer['human_actions'].decode([human_action_tokens])
+        return {'human_actions': human_actions}
 
 
 def set_token_id(input_ids, token_id, discrete_tokens):
@@ -458,3 +526,4 @@ def set_token_id(input_ids, token_id, discrete_tokens):
     
     input_ids[condition] = discrete_tokens[:available_tokens]
     return input_ids
+

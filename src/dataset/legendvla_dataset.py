@@ -68,7 +68,10 @@ class LegendVLADataset(BaseImageDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, keys=['image', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'presence'])
+                zarr_path, 
+                keys=['image', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'presence'], 
+                lazy_load=True
+            )
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask
@@ -261,18 +264,19 @@ class LegendVLMDataset(BaseImageDataset):
         val_copy.train_datasets = self.val_datasets
         return val_copy
     
-    def _sample_to_data(self, sample):
+    def _sample_to_data(self, sample, idx):
         images = sample['images'] # List[PIL.JpegImagePlugin.JpegImageFile]
         text = sample['texts'] 
         weights = self.weights
-        formatting_ratings = np.array(sample['formatting_ratings'])
-        visual_dependency_ratings = np.array(sample['visual_dependency_ratings'])
-        relevance_ratings = np.array(sample['relevance_ratings'])
+        # There are some None values in the ratings, we replace them with 0
+        formatting_ratings = np.array([rating if rating is not None else 0 for rating in sample['formatting_ratings']])
+        visual_dependency_ratings = np.array([rating if rating is not None else 0 for rating in sample['visual_dependency_ratings']])
+        relevance_ratings = np.array([rating if rating is not None else 0 for rating in sample['relevance_ratings']])
 
         if len(text) > 1:
             scores = formatting_ratings * weights[0] + \
-                     visual_dependency_ratings * weights[1] + \
-                     relevance_ratings * weights[2]
+                    visual_dependency_ratings * weights[1] + \
+                    relevance_ratings * weights[2]
             text = text[np.argmax(scores)]
         else:
             text = text[0]
@@ -313,7 +317,7 @@ class LegendVLMDataset(BaseImageDataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
         sample = self.train_datasets[idx]
-        data = self._sample_to_data(sample)
+        data = self._sample_to_data(sample, idx)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
 
@@ -387,7 +391,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, keys=['state', 'action', 'extrinsic', 'presence'])
+                zarr_path, keys=['state', 'action', 'extrinsic', 'presence'], lazy_load=False)
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask

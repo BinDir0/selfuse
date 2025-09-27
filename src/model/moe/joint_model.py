@@ -436,6 +436,10 @@ class JointModel(nn.Module):
         embeds_all and position_ids_all need to be in the correct order, e.g., {"vlm": ..., "action": ...}
         """
         active_mixture_names = list(embeds_all.keys())
+        if len(active_mixture_names) == 1 or not self.training or not self.knowledge_insulation:
+            self.sdpa = forward_mixture_scaled_dot_product_attention
+        else:
+            self.sdpa = forward_insulation_scaled_dot_product_attention
 
         # normalization
         # [Batch_Size, Seq_Len, Hidden_Size]

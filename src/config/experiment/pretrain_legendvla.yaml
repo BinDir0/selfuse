@@ -11,9 +11,11 @@ lora_dropout: 0.0
 
 image_shape: [224, 224, 3]
 vla_dataset_paths:
- - /share_data/datasets/taco/10episodes.zarr
-#  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
-#  - /share_data/datasets/OakInk-v2/oakink2.zarr
+#  - /share_data/datasets/taco/10episodes.zarr
+ - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+ - /share_data/datasets/OakInk-v2/oakink2.zarr
+ - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
+ - /share_data/datasets/EgoDex/egodex_train_copy.zarr
 vlm_dataset_paths:
 #  - /share_data/datasets/VLM/FineVision/image_textualization(filtered)
 #  - /share_data/datasets/VLM/FineVision/sharegpt4v(llava)
@@ -21,6 +23,7 @@ vlm_dataset_paths:
 #  - /share_data/datasets/VLM/FineVision/textcaps
 #  - /share_data/datasets/VLM/FineVision/alfworldgpt
 #  - /share_data/datasets/VLM/FineVision/cambrian(filtered)_processed
+ - /share_data/datasets/VLM/FineVision/LLaVA_Instruct_150K
  - /share_data/datasets/VLM/FineVision/cocoqa
 
 shape_meta: &shape_meta
@@ -55,7 +58,7 @@ dataset:
     history: ${history} # frames
     normalizer_dataloader_cfg:
       batch_size: 4096
-      num_workers: 32
+      num_workers: 64
       shuffle: False
       pin_memory: True
       persistent_workers: True

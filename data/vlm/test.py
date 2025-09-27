@@ -1,82 +1,78 @@
-from datasets import load_dataset, get_dataset_config_names
-import time
+import os
+from tqdm import tqdm
+from datasets import load_dataset
+from transformers import AutoTokenizer
 
-hub_dataset_name = "HuggingFaceM4/FineVision"
-subset_names = [
-    "image_textualization(filtered)",
-    "sharegpt4v(llava)",
-    "sharegpt4v(sam)",
-    "textcaps",
-    "alfworldgpt",
-    "cambrian(filtered)_processed",
-    "cocoqa",
+
+ORIGINAL_DATA_PATHS = [
+    # "/share_data/datasets/VLM/FineVision/objects365_qa",  # localization & grounding
+    # "/share_data/datasets/VLM/FineVision/spatialsense",  # spatialsense
+    # "/share_data/datasets/VLM/FineVision/alfworldgpt",  # high level subtask action
+    # "/share_data/datasets/VLM/FineVision/indoor_qa", 
+    # "/share_data/datasets/VLM/FineVision/LLaVA_Instruct_150K", 
+    # "/share_data/datasets/VLM/FineVision/cocoqa", 
+
+    # "/share_data/datasets/VLM/FineVision/cambrian(filtered)_processed",
+    # "/share_data/datasets/VLM/FineVision/lnqa",
+    # "/share_data/datasets/VLM/FineVision/lrv_normal(filtered)",
+    "/share_data/datasets/VLM/FineVision/lvis_instruct4v",
+    "/share_data/datasets/VLM/FineVision/vqav2",
+
+    # "/share_data/datasets/VLM/FineVision/sharegpt4v(llava)", 
+    # "/share_data/datasets/VLM/FineVision/sharegpt4v(sam)", 
+    # "/share_data/datasets/VLM/FineVision/textcaps", 
+    # "/share_data/datasets/VLM/FineVision/image_textualization(filtered)", 
 ]
-local_data_dir = "/share_data/datasets/VLM/FineVision"
-cache_dir = "/share_data/datasets/VLM/FineVision/.cache"
 
-# --- 2. In first run, generate cache from local original files ---
+SPLIT = "train" 
+CACHE_DIR = "/share_data/datasets/VLM/FineVision/.cache"
 
-print("--- First run ---")
-print(f"Using '{hub_dataset_name}' official script...")
-print(f"From local original data directory: {local_data_dir}")
-print(f"Generate Arrow cache to: {cache_dir}")
+if __name__ == "__main__":
+    for data_path in ORIGINAL_DATA_PATHS:
+        print(f"Loading original dataset from {data_path}...")
+        original_dataset = load_dataset(
+            "parquet",
+            data_files=f"{data_path}/*.parquet",
+            split=SPLIT,
+            cache_dir=CACHE_DIR,
+        )
+        filtered_dataset = load_dataset(
+            "parquet",
+            data_files=f"{data_path}_filtered/*.parquet",
+            split=SPLIT,
+            cache_dir=CACHE_DIR,
+        )
+        for i in tqdm(range(len(original_dataset))):
+            data = original_dataset[i]
+            formatting_ratings = data['formatting_ratings']
+            visual_dependency_ratings = data['visual_dependency_ratings']
+            relevance_ratings = data['relevance_ratings']
+            for rating in formatting_ratings:
+                if rating is None:
+                    print(f"Formatting rating {rating} is None for sample {i}!!!!!!!!!!!!!")
+                    print(formatting_ratings)
+            for rating in visual_dependency_ratings:
+                if rating is None:
+                    print(f"Visual dependency rating {rating} is None for sample {i}!!!!!!!!!!!!!")
+                    print(visual_dependency_ratings)
+            for rating in relevance_ratings:
+                if rating is None:
+                    print(f"Relevance rating {rating} is None for sample {i}!!!!!!!!!!!!!")
+                    print(relevance_ratings)
+        
 
-# We only load the first 1000 samples of the training set as a subset
-# The library will automatically calculate which Parquet files to read to satisfy this requirement
-time_start = time.time()
-subset_datasets_path = [f"{local_data_dir}/{name}/*.parquet" for name in subset_names]
-print(subset_datasets_path)
-
-subset_dataset = load_dataset(
-    "parquet",
-    data_files=subset_datasets_path,   # <--- Core parameter: pointing to the local original data
-    split="train",      # <--- Specify the subset you want to load
-    cache_dir=cache_dir # <--- Specify the location of the cache
-)
-print(f"Subset dataset information:")
-print(subset_dataset)
-
-print("\nFirst run completed!")
-time_end = time.time()
-print(f"Time taken: {time_end - time_start} seconds")
-
-# --- 3. Subsequent loading: experience fast loading ---
-
-print("\n\n--- Simulate second run of the script, for subsequent loading ---")
-
-# Again call the exact same command
-# This time, it will find that the cache already exists, and load directly at lightning speed
-time_start = time.time()
-subset_dataset = load_dataset(
-    "parquet",
-    data_files=subset_datasets_path,   # <--- Core parameter: pointing to the local original data
-    split="train",      # <--- Specify the subset you want to load
-    cache_dir=cache_dir # <--- Specify the location of the cache
-)
-print(f"Subset dataset information:")
-print(subset_dataset)
-
-print("\nSubsequent loading completed!")
-time_end = time.time()
-print(f"Time taken: {time_end - time_start} seconds")
-
-# You will find that the output speed of the second run is extremely fast
-
-print("Calculating max length...")
-start_time = time.time()
-max_length = 0
-for idx in range(len(subset_dataset)):
-    for text in subset_dataset[idx]['texts']:
-        max_length = max(max_length, len(text['user']) + len(text['assistant']))
-print(f"Max length: {max_length}")
-end_time = time.time()
-print(f"Time taken: {end_time - start_time} seconds")
-
-print("Calculating max image num...")
-start_time = time.time()
-max_image_num = 0
-for idx in range(len(subset_dataset)):
-    max_image_num = max(max_image_num, len(subset_dataset[idx]['images']))
-print(f"Max image num: {max_image_num}")
-end_time = time.time()
-print(f"Time taken: {end_time - start_time} seconds")
+        for i in tqdm(range(len(filtered_dataset))):
+            data = filtered_dataset[i]
+            formatting_ratings = data['formatting_ratings']
+            visual_dependency_ratings = data['visual_dependency_ratings']
+            relevance_ratings = data['relevance_ratings']
+            for rating in formatting_ratings:
+                if rating is None:
+                    print(f"Formatting rating {rating} is None for sample {i} in filtered dataset!!!!!!!!!!!!!")
+            for rating in visual_dependency_ratings:
+                if rating is None:
+                    print(f"Visual dependency rating {rating} is None for sample {i} in filtered dataset!!!!!!!!!!!!!")
+            for rating in relevance_ratings:
+                if rating is None:
+                    print(f"Relevance rating {rating} is None for sample {i} in filtered dataset!!!!!!!!!!!!!")
+    
