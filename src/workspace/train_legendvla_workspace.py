@@ -1,3 +1,5 @@
+# TODO: update resume checkpoint logic
+
 if __name__ == "__main__":
     import sys
     import os
@@ -219,7 +221,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # load normalizer on all processes
         accelerator.wait_for_everyone()
         normalizer = pickle.load(open(normalizer_path, 'rb'))
-        self.model.set_normalizer(normalizer)
         dataset.vla_dataset.set_normalizer(normalizer)
 
         # configure training dataset
@@ -438,9 +439,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                         # Get action predictions
                                         with accelerator.autocast():
                                             pred_actions = self.model("infer_human_action", inputs)
-                                        
-                                        gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
-                                        pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
+                                            
+                                        B, _, _ = gt_actions.shape
+                                        eval_sample = torch.any(human_actions_valid_mask.reshape(B, -1), dim=1)
+                                        if not torch.any(eval_sample):
+                                            continue
+                                        human_actions_valid_mask = human_actions_valid_mask[eval_sample]
+                                        gt_actions = gt_actions[eval_sample]
+                                        pred_actions = pred_actions[eval_sample]
+                                        gt_actions = gt_actions * human_actions_valid_mask
+                                        pred_actions = pred_actions * human_actions_valid_mask
                                         
                                         # Compute accuracy metrics
                                         batch_accuracy = get_action_accuracy(
@@ -450,12 +458,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                         )
                                         eval_accuracy.append(batch_accuracy)
                                         
-                                        # Compute L1 loss
+                                        # Compute L1 loss, num should not be 0 here since we have checked eval_sample
                                         human_actions_valid_num = torch.sum(human_actions_valid_mask)
-                                        if human_actions_valid_num == 0:
-                                            batch_l1_loss = torch.tensor(0.0, device=gt_actions.device, dtype=gt_actions.dtype)
-                                        else:
-                                            batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
+                                        batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
                                         eval_l1_loss.append(batch_l1_loss)
                                     
                                     if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):

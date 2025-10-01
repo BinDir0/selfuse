@@ -76,7 +76,7 @@ class ModelAveraging:
             return self.model_avg.module.state_dict()
         return self.model.state_dict()
     
-    def load_state_dict(self, state_dict: dict):
+    def load_state_dict(self, state_dict: dict, **kwargs):
         """
         Load state dict for model averaging.
         This enables compatibility with save_checkpoint method.
@@ -109,7 +109,7 @@ class ModelAveraging:
                 return
                 
             # Load the averaged model weights
-            self.model_avg.module.load_state_dict(state_dict["state_dict"])
+            self.model_avg.module.load_state_dict(state_dict["state_dict"], **kwargs)
             
             # Restore n_averaged counter if available
             if hasattr(self.model_avg, 'n_averaged'):

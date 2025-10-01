@@ -111,7 +111,7 @@ flow:
 
 optimizer:
   action: 
-    lr: 2e-5
+    lr: 5e-5
     betas: [0.9, 0.999]
     weight_decay: 1e-4
   vlm:
@@ -129,7 +129,7 @@ training:
   train_vlm: True
   load_pretrained_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path:
+  resume_checkpoint_path: 
   normalizer_path: /share_data/normalizer/hoi4d-oakink-taco/normalizer.pkl
   num_epochs: 25
   use_bf16: True
@@ -142,7 +142,7 @@ training:
     ema: 
       enabled: True
       decay: 0.99
-      start: 1 # start from 1st step
+      start: 2000 # start from 1st step
       freq: 1
       device: # not supported for specific device
     swa:
@@ -153,8 +153,8 @@ training:
   # training loop control
   # in epochs
   ckpt_save_interval: 10000
-  val_every: 5000
-  sample_every: 5000
+  val_every: 2500
+  sample_every: 2500
   # make sure it is divisible by val_every and sample_every
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 
@@ -291,13 +291,13 @@ checkpoint:
     monitor_key: eval_l1_loss
     mode: min
     k: 3
-    format_str: 'epoch={epoch:04d}-eval_l1_loss={eval_l1_loss:.4f}.ckpt'
+    format_str: 'update_step={update_step:04d}-eval_l1_loss={eval_l1_loss:.4f}.ckpt'
   save_last_ckpt: False
   save_last_snapshot: False
 
 multi_run:
   # need to change to the correct path for multi-node training
-  run_dir: /home/chenzhang/project/logs/EgoVLA/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  run_dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
   wandb_name_base: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
 
 hydra:
@@ -305,7 +305,7 @@ hydra:
     override_dirname: ${name}
   run:
     # need to change to the correct path for multi-node training
-    dir: /home/chenzhang/project/logs/EgoVLA/outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
   sweep:
     dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
     subdir: ${hydra.job.num}

@@ -17,7 +17,6 @@ import torch
 from torch import nn
 from einops import rearrange
 
-from src.model.common.normalizer import LinearNormalizer
 from src.model.common.kv_cache import KVCache
 from src.model.common.modules import (
     ActionEncoder,
@@ -112,7 +111,6 @@ class LegendVLA(nn.Module):
             )
             self.lm_head.weight = self.embed_tokens.weight  # tie weights
 
-        self.normalizer = LinearNormalizer()
         self.CELoss = nn.CrossEntropyLoss(ignore_index=cfg.ignore_index)
         self.loss_weights = cfg.loss_weights
 
@@ -329,14 +327,6 @@ class LegendVLA(nn.Module):
             KVCache: Empty key-value cache for storing attention states during text generation
         """
         return KVCache()
-
-    def set_normalizer(self, normalizer: LinearNormalizer):
-        self.normalizer.load_state_dict(normalizer.state_dict())
-
-        self.normalizer.eval()
-    
-        for param in self.normalizer.parameters():
-            param.requires_grad = False
 
     # ---------- Input preparation ---------- #
 
@@ -640,8 +630,6 @@ class LegendVLA(nn.Module):
             human_action += delta_t * human_action_vel
             t += delta_t
 
-        # normalize action
-        human_action = self.normalizer['human_actions'].unnormalize(human_action)
         return human_action
 
     @torch.inference_mode()
@@ -714,8 +702,6 @@ class LegendVLA(nn.Module):
             human_action += delta_t * human_action_vel
             t += delta_t
 
-        # normalize action
-        human_action = self.normalizer['human_actions'].unnormalize(human_action)
         return human_action
 
     @torch.inference_mode()

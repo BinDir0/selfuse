@@ -17,13 +17,9 @@ from contextlib import nullcontext, contextmanager
 from torch.utils.data import DataLoader
 import copy
 import random
-import tqdm
 import numpy as np
+from torch import nn
 import pickle
-from collections import deque
-from PIL import Image
-import bitsandbytes as bnb
-import einops
 from transformers import AutoTokenizer
 import accelerate
 from accelerate import Accelerator
@@ -41,14 +37,30 @@ from src.model.action.fast_tokenizer import UniversalActionProcessor
 from src.utils.metric import get_action_accuracy
 from src.utils.optim import CosineAnnealingWarmupRestarts, get_num_params_in_billions
 
-
-import wandb
-
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+class TrainingState:
+    """A simple class to encapsulate all scalar training states that need to be saved."""
+    def __init__(self, epoch: int = 0, update_step: int = 0, global_step: int = 0):
+        self.epoch = epoch
+        self.update_step = update_step
+        self.global_step = global_step
+
+    def state_dict(self):
+        return {
+            "epoch": self.epoch,
+            "update_step": self.update_step,
+            "global_step": self.global_step,
+        }
+
+    def load_state_dict(self, state_dict):
+        self.epoch = state_dict["epoch"]
+        self.update_step = state_dict["update_step"]
+        self.global_step = state_dict["global_step"]
 
 
 class TrainLegendVLAWorkspace(BaseWorkspace):
-    include_keys = ['global_step', 'update_step', 'epoch']
+    include_keys = ['training_state', 'model_averaging']
 
     def __init__(self, cfg: OmegaConf):
         super().__init__(cfg)
@@ -68,9 +80,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.exclude_keys = ['optimizer']
 
         self.dtype = torch.bfloat16 if cfg.training.use_bf16 else torch.float32
-        self.global_step = 0
-        self.update_step = 0
+        self.training_state = TrainingState()
         self.epoch = 0
+        self.update_step = 0
+        self.global_step = 0
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -119,17 +132,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             init_kwargs={"wandb": wandb_cfg}
         )
 
-        # Setup model
-        if cfg.training.resume_checkpoint_path:
-            self.load_checkpoint(cfg.training.resume_checkpoint_path)
-        elif cfg.training.load_pretrained_weights:
-            self.model.load_pretrained_weights()
-        if cfg.lora:
-            self.model.freeze_non_lora_weights_in_vlm()
-        
         # Configure optimizers
         model = self.model  # Get unwrapped model for parameter access
-        
+
+        # Load pretrained weights and freeze non-lora weights in VLM before deepspeed optimizer setup
+        # cause deepspeed will back up the parameters, manually load pretrained weights can't affect these parameters
+        if cfg.training.load_pretrained_weights:
+            model.load_pretrained_weights()
+        if cfg.lora:
+            model.freeze_non_lora_weights_in_vlm()
+
+        self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device)
+        for key in self.include_keys:
+            accelerator.register_for_checkpointing(self.__dict__[key])
+
         # Action optimizer
         all_trainable_parameters = self.get_grouped_parameters(
             model.human_action_expert_parameters, 
@@ -151,7 +167,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.optimizer = DummyOptim(
             all_trainable_parameters, 
         )
-
+        
         print("--> Configure dataset and dataloader...................")
         # Configure dataset and dataloader
         dataset: BaseImageDataset
@@ -212,7 +228,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             normalizer = objects_to_broadcast[0]
 
         # 4. now all processes have a fully identical object copy
-        self.model.set_normalizer(normalizer)
         dataset.vla_dataset.set_normalizer(normalizer)
 
         # configure training dataset
@@ -230,8 +245,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             total_num_steps=max_train_steps,
         )
 
-        self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device)
-
         # Configure checkpoint manager (if available)
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, 'checkpoints'),
@@ -242,6 +255,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler
         )
+
+        # resume training from checkpoint after accelerator prepare
+        if cfg.training.resume_checkpoint_path:
+            accelerator.load_state(cfg.training.resume_checkpoint_path)
+            train_dataloader = accelerator.skip_first_batches(train_dataloader, self.global_step % len(train_dataloader))
+            self.update_step = self.training_state.update_step
+            self.global_step = self.training_state.global_step
+            self.epoch = self.training_state.epoch
+
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
         if self.flow_sampling == "beta":
@@ -330,12 +352,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             self.sample(accelerator, val_dataloader, step_log)
 
                         # Checkpoint saving
-                        if (self.update_step % cfg.training.checkpoint_every) == 0 and \
-                            accelerator.is_main_process and accelerator.sync_gradients:
+                        if (self.update_step % cfg.training.checkpoint_every) == 0 and accelerator.sync_gradients:
                             self.save_topk_ckpt(accelerator, topk_manager, step_log)
 
-                        if self.update_step % cfg.training.ckpt_save_interval == 0 and \
-                            accelerator.is_main_process and accelerator.sync_gradients:
+                        if self.update_step % cfg.training.ckpt_save_interval == 0 and accelerator.sync_gradients:
                             self.save_interval_ckpt(accelerator)
 
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
@@ -387,7 +407,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             if len(val_losses) > 0:
                 for key in val_losses.keys():
                     val_losses[key] = torch.stack(val_losses[key])
-                    val_losses[key] = accelerator.gather(val_losses[key])
+                    val_losses[key] = accelerator.gather_for_metrics(val_losses[key], )
                 
                 for key in val_losses.keys():
                     val_losses[key] = torch.mean(val_losses[key]).item()
@@ -414,8 +434,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         pred_actions = self.model("infer_human_action", inputs)
                     
                     # ignore invalid actions
-                    gt_actions = torch.where(human_actions_valid_mask, gt_actions, torch.zeros_like(gt_actions))
-                    pred_actions = torch.where(human_actions_valid_mask, pred_actions, torch.zeros_like(pred_actions))
+                    B, _, _ = gt_actions.shape
+                    eval_sample = torch.any(human_actions_valid_mask.reshape(B, -1), dim=1)
+                    if not torch.any(eval_sample):
+                        continue
+                    human_actions_valid_mask = human_actions_valid_mask[eval_sample]
+                    gt_actions = gt_actions[eval_sample]
+                    pred_actions = pred_actions[eval_sample]
+                    gt_actions = gt_actions * human_actions_valid_mask
+                    pred_actions = pred_actions * human_actions_valid_mask
                     
                     # Compute accuracy metrics
                     batch_accuracy = get_action_accuracy(
@@ -425,16 +452,21 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     )
                     eval_accuracy.append(batch_accuracy)
                     
-                    # Compute L1 loss
+                    # Compute L1 loss, num should not be 0 here since we have checked eval_sample
                     human_actions_valid_num = torch.sum(human_actions_valid_mask)
-                    if human_actions_valid_num == 0:
-                        batch_l1_loss = torch.tensor(0.0, device=gt_actions.device, dtype=gt_actions.dtype)
-                    else:
-                        batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
+                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
                     eval_l1_loss.append(batch_l1_loss)
                 
                 if self.cfg.training.max_val_steps and batch_idx >= (self.cfg.training.max_val_steps-1):
                     break
+            
+            # fill eval_accuracy and eval_l1_loss to the same length as dataloader
+            eval_len, data_len = len(eval_accuracy), len(dataloader)
+            while eval_len < data_len: 
+                idx = random.randint(0, eval_len-1)
+                eval_accuracy.append(eval_accuracy[idx])
+                eval_l1_loss.append(eval_l1_loss[idx])
+                eval_len += 1
             
             # Process action accuracy metrics
             if len(eval_accuracy) > 0:
@@ -443,8 +475,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 eval_l1_loss = torch.stack(eval_l1_loss)
                 
                 # Gather metrics across all processes
-                eval_accuracy = accelerator.gather(eval_accuracy)
-                eval_l1_loss = accelerator.gather(eval_l1_loss)
+                eval_accuracy = accelerator.gather_for_metrics(eval_accuracy)
+                eval_l1_loss = accelerator.gather_for_metrics(eval_l1_loss)
                 
                 eval_accuracy = torch.mean(eval_accuracy, dim=0)
                 eval_l1_loss = torch.mean(eval_l1_loss)
@@ -463,14 +495,21 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 if accelerator.is_main_process:
                     print(log_msg)
 
+    def save_checkpoint_accelerator(self, accelerator, path=None, tag='latest'):
+        if path is None:
+            path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
+        else:
+            path = pathlib.Path(path)
+        path.parent.mkdir(parents=False, exist_ok=True)
+        self.training_state.update_step = self.update_step
+        self.training_state.global_step = self.global_step
+        self.training_state.epoch = self.epoch
+        accelerator.save_state(path)
+
     def save_topk_ckpt(self, accelerator, topk_manager, step_log): 
-        model_ds = self.model
-        self.model = accelerator.unwrap_model(self.model)
         # Need to update_bn when the model contains batch norm layers !!!
         if self.cfg.checkpoint.save_last_ckpt:
-            self.save_checkpoint()
-        if self.cfg.checkpoint.save_last_snapshot:
-            self.save_snapshot()
+            self.save_checkpoint_accelerator(accelerator)
 
         # sanitize metric names
         metric_dict = dict()
@@ -484,19 +523,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
         if topk_ckpt_path is not None:
-            self.save_checkpoint(path=topk_ckpt_path)
-
-        # recover the DDP model
-        self.model = model_ds
+            self.save_checkpoint_accelerator(accelerator, path=topk_ckpt_path)
 
     def save_interval_ckpt(self, accelerator): 
-        model_ds = self.model
-        self.model = accelerator.unwrap_model(self.model)
-        save_dir = os.path.join(self.output_dir, 'epoch_checkpoints')
+        save_dir = os.path.join(self.output_dir, 'step_checkpoints')
         os.makedirs(save_dir, exist_ok=True)
         # Need to update_bn when the model contains batch norm layers !!!
-        self.save_checkpoint(path=os.path.join(save_dir, f'epoch_{self.epoch}.ckpt'))
-        self.model = model_ds
+        self.save_checkpoint_accelerator(accelerator, path=os.path.join(save_dir, f'step_{self.update_step}.ckpt'))
 
     def sample_fm_time(self, bsz: int) -> torch.FloatTensor:
         if self.flow_sampling == "uniform":  # uniform between 0 and 1
