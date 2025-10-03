@@ -61,7 +61,7 @@ dataset:
     pad_after: ${eval:'${n_action_steps}-1'}
     shape_meta: ${shape_meta}
     seed: 42
-    val_ratio: 0.001
+    val_ratio: 0.005
     history: ${history} # frames
     normalizer_dataloader_cfg:
       batch_size: 4096
@@ -76,7 +76,7 @@ dataset:
     cache_dir: /share_data/datasets/VLM/FineVision/.cache
     seed: 42
     weights: [0.5, 0.5, 0.5]
-    val_ratio: 0.001
+    val_ratio: 0.01
 
 history: 30
 n_action_steps: 30
@@ -111,11 +111,11 @@ flow:
 
 optimizer:
   action: 
-    lr: 5e-5
+    lr: 2e-5
     betas: [0.9, 0.999]
     weight_decay: 1e-4
   vlm:
-    lr: 1e-5 # We can try smaller learning rate than action for VLM
+    lr: 5e-6 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.999]
     weight_decay: 1e-4
 
@@ -140,7 +140,7 @@ training:
   # replace BatchNorm with GroupNorm.
   average:
     ema: 
-      enabled: True
+      enabled: False
       decay: 0.99
       start: 2000 # start from 1st step
       freq: 1
@@ -153,8 +153,8 @@ training:
   # training loop control
   # in epochs
   ckpt_save_interval: 10000
-  val_every: 2500
-  sample_every: 2500
+  val_every: 1000
+  sample_every: 1000
   # make sure it is divisible by val_every and sample_every
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 
@@ -273,7 +273,7 @@ policy:
       head_dim: 256
       rms_norm_eps: 1e-6
       attention_bias: False
-      attention_dropout: 0.0
+      attention_dropout: 0.1
       pad_token_id: ${pad_token_id}
 
 logging:
@@ -291,7 +291,7 @@ checkpoint:
     monitor_key: eval_l1_loss
     mode: min
     k: 3
-    format_str: 'update_step={update_step:04d}-eval_l1_loss={eval_l1_loss:.4f}.ckpt'
+    format_str: update_step={update_step:04d}-eval_l1_loss={eval_l1_loss:.4f}
   save_last_ckpt: False
   save_last_snapshot: False
 

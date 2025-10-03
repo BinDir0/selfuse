@@ -407,7 +407,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             if len(val_losses) > 0:
                 for key in val_losses.keys():
                     val_losses[key] = torch.stack(val_losses[key])
-                    val_losses[key] = accelerator.gather_for_metrics(val_losses[key], )
+                    val_losses[key] = accelerator.gather_for_metrics(val_losses[key])
                 
                 for key in val_losses.keys():
                     val_losses[key] = torch.mean(val_losses[key]).item()
@@ -497,7 +497,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
     def save_checkpoint_accelerator(self, accelerator, path=None, tag='latest'):
         if path is None:
-            path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
+            path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}')
         else:
             path = pathlib.Path(path)
         path.parent.mkdir(parents=False, exist_ok=True)
@@ -613,22 +613,24 @@ def eval_with_averaged_model(accelerator, model, averaged_model):
     """
     A context manager to temporarily load averaged weights into the main model during evaluation.
     """
-    unwrapped_model = accelerator.unwrap_model(model)
-    
-    # Use .clone() to avoid affecting the original dictionary
-    # Move to CPU to avoid GPU memory issues
-    device = next(iter(unwrapped_model.parameters())).device
-    original_state_dict = {k: v.clone().to('cpu') for k, v in unwrapped_model.state_dict().items()}
-    
-    averaged_state_dict = averaged_model.averaged_model_state_dict() 
-    unwrapped_model.load_state_dict(averaged_state_dict)
+    if averaged_model.model_avg is not None:
+        unwrapped_model = accelerator.unwrap_model(model)
+        
+        # Use .clone() to avoid affecting the original dictionary
+        # Move to CPU to avoid GPU memory issues
+        device = next(iter(unwrapped_model.parameters())).device
+        original_state_dict = {k: v.clone().to('cpu') for k, v in unwrapped_model.state_dict().items()}
+        
+        averaged_state_dict = averaged_model.averaged_model_state_dict() 
+        unwrapped_model.load_state_dict(averaged_state_dict)
     model.eval()
     
     try:
         yield
     finally:
-        unwrapped_model.load_state_dict(original_state_dict)
-        unwrapped_model.to(device)
+        if averaged_model.model_avg is not None:
+            unwrapped_model.load_state_dict(original_state_dict)
+            unwrapped_model.to(device)
         model.train()
 
 

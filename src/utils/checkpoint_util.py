@@ -1,5 +1,6 @@
 from typing import Optional, Dict
 import os
+import shutil
 
 class TopKCheckpointManager:
     def __init__(self,
@@ -55,5 +56,8 @@ class TopKCheckpointManager:
                 os.mkdir(self.save_dir)
 
             if os.path.exists(delete_path):
-                os.remove(delete_path)
+                if os.path.isfile(delete_path): 
+                    os.remove(delete_path)
+                else: 
+                    shutil.rmtree(delete_path)
             return ckpt_path
