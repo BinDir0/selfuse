@@ -386,6 +386,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def validation(self, accelerator, dataloader, step_log): 
         if accelerator.is_main_process:
             print(f"Validation step {self.update_step} started")
+        accelerator.wait_for_everyone()
         with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
             val_losses = dict()
             
@@ -416,6 +417,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def sample(self, accelerator, dataloader, step_log):
         if accelerator.is_main_process:
             print(f"Sampling step {self.update_step} started")
+        accelerator.wait_for_everyone()
         with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
             # Initialize evaluation metrics
             eval_thresholds = self.cfg.training.eval_thresholds
@@ -520,7 +522,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # We can't copy the last checkpoint here
         # since save_checkpoint uses threads.
         # therefore at this point the file might have been empty!
-        topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+        topk_ckpt_path = topk_manager.get_ckpt_path(accelerator, metric_dict)
 
         if topk_ckpt_path is not None:
             self.save_checkpoint_accelerator(accelerator, path=topk_ckpt_path)
@@ -529,7 +531,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         save_dir = os.path.join(self.output_dir, 'step_checkpoints')
         os.makedirs(save_dir, exist_ok=True)
         # Need to update_bn when the model contains batch norm layers !!!
-        self.save_checkpoint_accelerator(accelerator, path=os.path.join(save_dir, f'step_{self.update_step}.ckpt'))
+        self.save_checkpoint_accelerator(accelerator, path=os.path.join(save_dir, f'update_step_{self.update_step}'))
 
     def sample_fm_time(self, bsz: int) -> torch.FloatTensor:
         if self.flow_sampling == "uniform":  # uniform between 0 and 1
@@ -623,7 +625,7 @@ def eval_with_averaged_model(accelerator, model, averaged_model):
         
         averaged_state_dict = averaged_model.averaged_model_state_dict() 
         unwrapped_model.load_state_dict(averaged_state_dict)
-    model.eval()
+    # model.eval()
     
     try:
         yield

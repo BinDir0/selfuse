@@ -20,7 +20,7 @@ class TopKCheckpointManager:
         self.format_str = format_str
         self.path_value_map = dict()
     
-    def get_ckpt_path(self, data: Dict[str, float]) -> Optional[str]:
+    def get_ckpt_path(self, accelerator, data: Dict[str, float]) -> Optional[str]:
         if self.k == 0:
             return None
 
@@ -52,12 +52,14 @@ class TopKCheckpointManager:
             del self.path_value_map[delete_path]
             self.path_value_map[ckpt_path] = value
 
-            if not os.path.exists(self.save_dir):
-                os.mkdir(self.save_dir)
+            # only main process mkdir and delete the checkpoint
+            if accelerator.is_main_process:
+                if not os.path.exists(self.save_dir):
+                    os.mkdir(self.save_dir)
 
-            if os.path.exists(delete_path):
-                if os.path.isfile(delete_path): 
-                    os.remove(delete_path)
-                else: 
-                    shutil.rmtree(delete_path)
+                if os.path.exists(delete_path):
+                    if os.path.isfile(delete_path): 
+                        os.remove(delete_path)
+                    else: 
+                        shutil.rmtree(delete_path)
             return ckpt_path
