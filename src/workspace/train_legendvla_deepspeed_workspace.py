@@ -84,6 +84,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.epoch = 0
         self.update_step = 0
         self.global_step = 0
+        if cfg.training.objective is None: 
+            self.objective = "train"
+        else: 
+            self.objective = "train_" + cfg.training.objective
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -147,10 +151,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             accelerator.register_for_checkpointing(self.__dict__[key])
 
         # Action optimizer
-        all_trainable_parameters = self.get_grouped_parameters(
-            model.human_action_expert_parameters, 
-            cfg.optimizer.action, 
-        )
+        all_trainable_parameters = []
+        if self.objective != "train_ar":
+            all_trainable_parameters = self.get_grouped_parameters(
+                model.human_action_expert_parameters, 
+                cfg.optimizer.action, 
+            )
         
         # VLM optimizer (if training VLM)
         if cfg.training.train_vlm:
@@ -297,11 +303,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 for batch_idx, batch in enumerate(train_dataloader):
                     with accelerator.accumulate(self.model):
                         # Preprocess batch
-                        inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
+                        inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective != "train_ar")
 
                         # Forward pass
                         with accelerator.autocast():
-                            raw_loss = self.model("train", inputs)
+                            raw_loss = self.model(self.objective, inputs)
                         accelerator.backward(raw_loss["total_loss"])
 
                         # Gradient clipping
@@ -348,7 +354,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             self.validation(accelerator, val_dataloader, step_log)
 
                         if (self.update_step % cfg.training.sample_every) == 0 and \
-                            val_dataloader is not None and accelerator.sync_gradients:
+                            val_dataloader is not None and self.objective != "train_ar" and accelerator.sync_gradients:
                             self.sample(accelerator, val_dataloader, step_log)
 
                         # Checkpoint saving
@@ -395,7 +401,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                 # Compute validation loss
                 with accelerator.autocast():
-                    loss = self.model("train", inputs)
+                    loss = self.model(self.objective, inputs)
                 for key, loss in loss.items():
                     if key not in val_losses:
                         val_losses[key] = list()
@@ -545,13 +551,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
     def preprocess_batch(self, batch, split_mask: bool = False, sample_fm_time: bool = True):
         """Preprocess batch for training"""
-        # Extract data from batch
-        pixel_values = batch["pixel_values"]
-        human_actions = batch["human_actions"]
-        human_actions_valid_mask = batch["human_actions_valid_mask"]
-
         input_ids = batch["input_ids"]
-
         # Get unwrapped model for mask building
         model = self.model
         if hasattr(self.model, 'module'):
@@ -559,7 +559,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         
         # Build causal mask and position ids
         # We need to move the new created tensors to the same device as the input prepared by the accelerate
-        # get causal mask by the first unignored index of labels 
         causal_mask, vlm_position_ids, human_action_position_ids = (
             model.build_causal_mask_and_position_ids(   
                 batch["attention_mask"], batch["answer_start_idx"], self.dtype
@@ -568,20 +567,24 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         inputs = {
             "input_ids": input_ids,
-            "labels": batch["labels"],
-            "pixel_values": pixel_values.to(self.dtype),
+            "pixel_values": batch["pixel_values"].to(self.dtype),
             "vlm_position_ids": vlm_position_ids,
-            "human_action_position_ids": human_action_position_ids,
-            "human_actions": human_actions.to(self.dtype),
-            "human_actions_valid_mask": human_actions_valid_mask,
         }
+        if self.objective != "train_ar":
+            inputs["human_action_position_ids"] = human_action_position_ids
+            inputs["human_actions"] = batch["human_actions"].to(self.dtype)
+            inputs["human_actions_valid_mask"] = batch["human_actions_valid_mask"]
+        if self.objective != "train_flow":
+            inputs["labels"] = batch["labels"]
         
         if split_mask:
+            max_vlm_tokens = input_ids.shape[-1]
             vlm_mask, human_action_mask = (
-                model.split_full_mask_into_submasks(causal_mask)
+                model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
             )
             inputs["vlm_mask"] = vlm_mask
-            inputs["human_action_mask"] = human_action_mask
+            if self.objective != "train_ar":
+                inputs["human_action_mask"] = human_action_mask
         else:
             inputs["causal_mask"] = causal_mask
 

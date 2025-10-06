@@ -47,7 +47,7 @@ class LegendVLA(nn.Module):
 
         self.max_vlm_tokens = cfg.max_vlm_tokens
         self.num_human_action_tokens = shape_meta["action"]["horizon"]
-        self.total_num_tokens = (
+        self.max_num_tokens = (
             self.max_vlm_tokens
             + self.num_human_action_tokens
         )
@@ -367,10 +367,12 @@ class LegendVLA(nn.Module):
         """
         bsz = attention_mask.size(0)
         device = attention_mask.device
-        human_action_start = self.max_vlm_tokens
+        max_vlm_tokens = attention_mask.shape[-1]
+        total_num_tokens = max_vlm_tokens + self.num_human_action_tokens
+        human_action_start = max_vlm_tokens
         vlm_token_cnts = torch.sum(attention_mask, dim=1)
         causal_mask = torch.full(
-            (bsz, self.total_num_tokens, self.total_num_tokens),
+            (bsz, total_num_tokens, total_num_tokens),
             torch.finfo(dtype).min,
             dtype=dtype,
             device=device,
@@ -396,7 +398,7 @@ class LegendVLA(nn.Module):
         causal_mask = causal_mask.unsqueeze(1)
 
         # position ids for each blocks --- start at 1
-        vlm_position_ids = torch.arange(1, self.max_vlm_tokens + 1, device=device).repeat(
+        vlm_position_ids = torch.arange(1, max_vlm_tokens + 1, device=device).repeat(
             bsz, 1
         )
         human_action_position_ids = torch.arange(
@@ -407,7 +409,7 @@ class LegendVLA(nn.Module):
         return causal_mask, vlm_position_ids, human_action_position_ids
 
     def split_full_mask_into_submasks(
-        self, causal_mask: torch.FloatTensor
+        self, causal_mask: torch.FloatTensor, max_vlm_tokens: int
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
         """
         Split the full causal mask into separate masks for different model components.
@@ -423,11 +425,7 @@ class LegendVLA(nn.Module):
                 - human_action_mask (torch.FloatTensor): [B, 1, action_len, total_len]
                   Attention mask for human action tokens (broadcasts to all heads)
         """
-        vlm_mask = causal_mask[
-            ...,
-            : self.max_vlm_tokens,
-            : self.max_vlm_tokens,
-        ]
+        vlm_mask = causal_mask[..., : max_vlm_tokens, : max_vlm_tokens] 
         human_action_mask = causal_mask[..., -self.num_human_action_tokens :, :]
         return vlm_mask, human_action_mask
 
@@ -782,6 +780,61 @@ class LegendVLA(nn.Module):
         t = t[:, None, None]  # (B, 1, 1)
         return (1 - (1 - self.flow_sig_min) * t) * x + t * x1
 
+    def compute_ar_loss(
+        self,
+        batch: dict,
+    ) -> torch.FloatTensor:
+        """
+        Compute autoregressive loss for action prediction and vision language understanding.
+        
+        This method computes action prediction loss and vision language understanding loss
+        
+        Args:
+            batch (dict): Input dictionary containing:
+                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
+                - labels (torch.LongTensor, optional): [B, seq_len] Labels for language modeling loss
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
+                - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] Full causal attention mask
+                - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
+        
+        Returns:
+            dict: Dictionary containing:
+                - ce_loss (torch.FloatTensor): Cross-entropy loss for Autoregressive VLA
+        """
+        # Extract inputs from batch dict
+        input_ids = batch["input_ids"]
+        labels = batch["labels"]
+        pixel_values = batch["pixel_values"]
+        causal_mask = batch["causal_mask"]
+        vlm_position_ids = batch["vlm_position_ids"]
+
+        # text tokens + image tokens
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        
+        output = self.joint_model(
+            attention_mask=causal_mask,
+            position_ids_all={
+                "vlm": vlm_position_ids,
+            },
+            embeds_all={
+                "vlm": inputs_embeds,
+            },
+            kv_caches={},  # no caching during training
+            final_layer_post_attn_skip_names=[],  # do not skip vlm last layer
+        )
+        hidden_states = output["vlm"]
+
+        logits = self.lm_head(hidden_states)
+        logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
+        labels = labels[:, 1:].contiguous().view(-1)
+
+        ce_loss = self.CELoss(logits, labels)
+
+        return {
+            "ce_loss": ce_loss,
+        }
+
+
     def compute_flow_loss(
         self,
         batch: dict,
@@ -805,7 +858,8 @@ class LegendVLA(nn.Module):
             Action structure mirrors the state
         
         Returns:
-            torch.FloatTensor: [1] Flow matching loss (mean squared error)
+            dict: Dictionary containing:
+                - flow_loss (torch.FloatTensor): Flow matching loss (mean squared error)
         """
         # Extract inputs from batch dict
         input_ids = batch["input_ids"]
@@ -861,7 +915,11 @@ class LegendVLA(nn.Module):
         human_actions_valid_num = torch.sum(human_actions_valid_mask)
         if human_actions_valid_num == 0:
             human_actions_valid_num = 1
-        return torch.sum(masked_loss) / human_actions_valid_num
+        flow_loss = torch.sum(masked_loss) / human_actions_valid_num
+        return {
+            "flow_loss": flow_loss,
+        }
+
 
     def compute_loss(self, batch: dict) -> dict:
         """
@@ -964,6 +1022,8 @@ class LegendVLA(nn.Module):
     def forward(self, mode: str, batch: dict) -> dict:
         if mode == "train":
             return self.compute_loss(batch)
+        elif mode == "train_ar": 
+            return self.compute_ar_loss(batch)
         elif mode == "train_flow":
             return self.compute_flow_loss(batch)
         elif mode == "infer_human_action":

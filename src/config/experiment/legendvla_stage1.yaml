@@ -1,0 +1,317 @@
+# @package _global_
+name: legendvla
+exp_name: stage1
+_target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
+objective: ar # ar, flow, or None(None means both)
+
+action_expert_adaptive_mode:  # adaLN, adaLN-Zero, or None
+quantize: False
+lora: False
+lora_r: 32
+lora_dropout: 0.0
+
+image_shape: [224, 224, 3]
+vla_dataset_paths:
+#  - /share_data/datasets/taco/10episodes.zarr
+ - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+ - /share_data/datasets/OakInk-v2/oakink2.zarr
+ - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
+ - /share_data/datasets/EgoDex/egodex_train_copy.zarr
+vlm_dataset_paths:
+ - "/share_data/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
+ - "/share_data/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
+ - "/share_data/datasets/VLM/FineVision/alfworldgpt_filtered"  # high level subtask action
+ - "/share_data/datasets/VLM/FineVision/indoor_qa_filtered" 
+ - "/share_data/datasets/VLM/FineVision/LLaVA_Instruct_150K_filtered" 
+ - "/share_data/datasets/VLM/FineVision/cocoqa_filtered" 
+ - "/share_data/datasets/VLM/FineVision/cambrian(filtered)_processed_filtered"
+ - "/share_data/datasets/VLM/FineVision/lnqa_filtered"
+ - "/share_data/datasets/VLM/FineVision/lrv_normal(filtered)_filtered"
+ - "/share_data/datasets/VLM/FineVision/lvis_instruct4v_filtered"
+ - "/share_data/datasets/VLM/FineVision/vqav2_filtered"
+ - "/share_data/datasets/VLM/FineVision/sharegpt4v(llava)_filtered" 
+ - "/share_data/datasets/VLM/FineVision/sharegpt4v(sam)_filtered" 
+ - "/share_data/datasets/VLM/FineVision/textcaps_filtered" 
+ - "/share_data/datasets/VLM/FineVision/image_textualization(filtered)_filtered" 
+
+shape_meta: &shape_meta
+  obs:
+    rgb:
+      shape: ${image_shape}
+      type: rgb
+      horizon: ${n_obs_image_steps}
+    state:
+      wrist:
+        shape: [18]
+      hand: 
+        shape: [30]
+      shape: [48]
+      type: low_dim
+      horizon: ${n_obs_state_steps}
+  action:
+    shape: [48]
+    horizon: ${n_action_steps}
+
+dataset:
+  _target_: src.dataset.legendvla_dataset.LegendUnifiedDataset
+  vla_dataset: 
+    _target_: src.dataset.legendvla_dataset.LegendVLADataset
+    zarr_paths: ${vla_dataset_paths}
+    horizon: ${eval:'${n_action_steps}+${history}'}
+    pad_before: ${eval:'${history}+${n_latency_steps}'}
+    pad_after: ${eval:'${n_action_steps}-1'}
+    shape_meta: ${shape_meta}
+    seed: 42
+    val_ratio: 0.005
+    history: ${history} # frames
+    objective: ${objective}
+    normalizer_dataloader_cfg:
+      batch_size: 4096
+      num_workers: 96
+      shuffle: False
+      pin_memory: True
+      persistent_workers: True
+  vlm_dataset:
+    _target_: src.dataset.legendvla_dataset.LegendVLMDataset
+    dataset_paths: ${vlm_dataset_paths}
+    split: train
+    cache_dir: /share_data/datasets/VLM/FineVision/.cache
+    seed: 42
+    weights: [0.5, 0.5, 0.5]
+    val_ratio: 0.01
+  token_len_buckets: ${token_len_buckets}
+
+history: 30
+n_action_steps: 30
+n_obs_image_steps: 1
+n_obs_state_steps: 1
+n_latency_steps: 0
+# Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
+
+processor: 
+  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
+
+dataloader:
+  batch_size: 12
+  num_workers: 16
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 12 # use the same batch size with training for best performance
+  num_workers: 16
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+flow: 
+  sig_min: 0.001
+  sampling: beta
+  alpha: 1.5
+  beta: 1
+  num_inference_steps: 10
+
+optimizer:
+  action: 
+    lr: 4e-5
+    betas: [0.9, 0.999]
+    weight_decay: 1e-4
+  vlm:
+    lr: 5e-6 # We can try smaller learning rate than action for VLM
+    betas: [0.9, 0.999]
+    weight_decay: 1e-4
+
+training:
+  seed: 42
+  objective: ${objective}
+  debug: False
+  profile: False
+  resume: True
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  train_vlm: True
+  load_pretrained_weights: True # load pretrained weights from VLM
+  pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
+  resume_checkpoint_path: 
+  normalizer_path: /share_data/normalizer/hoi4d-oakink-taco/normalizer.pkl
+  num_epochs: 25
+  use_bf16: True
+  clipping:
+    enabled: True
+    max_grad_norm: 1.0
+  # EMA destroys performance when used with BatchNorm
+  # replace BatchNorm with GroupNorm.
+  average:
+    ema: 
+      enabled: False
+      decay: 0.99
+      start: 2000 # start from 1st step
+      freq: 1
+      device: # not supported for specific device
+    swa:
+      enabled: False
+      start: 100000
+      freq: 100000
+      device: # not supported for specific device
+  # training loop control
+  # in epochs
+  ckpt_save_interval: 10000
+  val_every: 1000
+  sample_every: 1000
+  # make sure it is divisible by val_every and sample_every
+  # cause we use eval_l1 loss to save topk checkpoint
+  checkpoint_every: 5000 
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # evaluation settings
+  eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
+  # misc
+  tqdm_interval_sec: 1.0
+
+mixture:
+  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then human_action
+  vlm:   # gemma
+    hidden_size: 2048
+    intermediate_size: 16384
+    use_final_norm: False
+    cache: True
+    use_quantize: ${quantize}
+    use_lora: ${lora}
+    adaptive_mode:  # not applicable for gemma
+    rope_theta: 10000.0  # 10000 in gemma
+  human_action:
+    hidden_size: 1024
+    intermediate_size: 4096
+    use_final_norm: True
+    cache: False
+    use_quantize: False
+    use_lora: False
+    adaptive_mode: ${action_expert_adaptive_mode}
+    rope_theta: ${action_expert_rope_theta}
+
+time_hidden_size: 256 # only applicable if using adaptive
+time_max_period: 100.0
+action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
+
+# Fixed
+ignore_index: -100
+image_token_index: 257152
+vocab_size: 257216
+pad_token_id: 0
+patch_size: 14
+image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
+state_seq_len: 192 # 
+text_seq_len: ${eval:'${state_seq_len}+64'}
+answer_seq_len: 256 
+# Make sure at least one tokens for VLM answer in the training, 
+# otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
+max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
+tokenizer_padding: longest # longest or max_length
+# when we use longest, we set several discrete buckets of token_len for the VLM tokens
+token_len_buckets: [512, 576, 640, 704, ${max_vlm_tokens}]
+
+policy: 
+  _target_: src.policy.legendvla.LegendVLA
+  cfg: 
+    vocab_size: ${vocab_size}
+    pad_token_id: ${pad_token_id}
+    ignore_index: ${ignore_index}
+    image_token_index: ${image_token_index}
+    use_lm_head: True
+    max_vlm_tokens: ${max_vlm_tokens}
+    num_inference_steps: ${flow.num_inference_steps}
+    action_expert_adaptive_mode: ${action_expert_adaptive_mode}
+    time_hidden_size: ${time_hidden_size}
+    time_max_period: ${time_max_period}
+    flow_sig_min: ${flow.sig_min}
+    # Add pretrained_model_path for loading pre-trained VLM weights
+    pretrained_model_path: ${training.pretrained_model_path}
+    loss_weights: 
+      ce_loss_weight: 1.0
+      flow_loss_weight: 10.0
+  shape_meta: ${shape_meta}
+  vision_tower:
+    _target_: src.model.vlm.paligemma.siglip.SiglipVisionModel
+    config:
+      hidden_size: 1152 # siglip
+      intermediate_size: 4304
+      num_hidden_layers: 27
+      num_attention_heads: 16
+      num_channels: 3
+      image_size: 224
+      patch_size: 14
+      layer_norm_eps: 1e-6
+      attention_dropout: 0.0
+      num_image_tokens: 256
+      lora:
+        r: ${lora_r}
+        dropout: ${lora_dropout}
+    use_quantize: ${quantize}
+    use_lora: ${lora}
+
+  multi_modal_projector:
+    _target_: src.model.vlm.paligemma.siglip.PaliGemmaMultiModalProjector
+    config:
+      vision_config:
+        hidden_size: 1152
+        projection_dim: 2048
+      lora:
+        r: ${lora_r}
+        dropout: ${lora_dropout}
+    use_quantize: ${quantize}
+    use_lora: ${lora}
+
+  joint_model:
+    _target_: src.model.moe.joint_model.JointModel
+    config:
+      knowledge_insulation: True
+      action_expert_adaptive_mode: ${action_expert_adaptive_mode}
+      time_hidden_size: ${time_hidden_size}
+      mixture: ${mixture}
+      lora:
+        r: ${lora_r}
+        dropout: ${lora_dropout}
+      num_hidden_layers: 18
+      num_attention_heads: 8
+      num_key_value_heads: 1
+      head_dim: 256
+      rms_norm_eps: 1e-6
+      attention_bias: False
+      attention_dropout: 0.1
+      pad_token_id: ${pad_token_id}
+
+logging:
+  project: train_legendvla_deepspeed
+  entity: LegendaryVLA
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  tags: ["${name}", "${hydra:runtime.choices.experiment}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: valid_ce_loss
+    mode: min
+    k: 3
+    format_str: update_step={update_step:04d}-valid_ce_loss={valid_ce_loss:.4f}
+  save_last_ckpt: False
+  save_last_snapshot: False
+
+multi_run:
+  # need to change to the correct path for multi-node training
+  run_dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    # need to change to the correct path for multi-node training
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  sweep:
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    subdir: ${hydra.job.num}
