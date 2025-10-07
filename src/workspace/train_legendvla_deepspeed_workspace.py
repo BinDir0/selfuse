@@ -85,9 +85,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.update_step = 0
         self.global_step = 0
         if cfg.training.objective is None: 
-            self.objective = "train"
+            self.objective_func = "train"
         else: 
-            self.objective = "train_" + cfg.training.objective
+            self.objective_func = "train_" + cfg.training.objective
+        print(f"Training with objective function: {self.objective_func}")
+        print(f"Token len buckets: {cfg.token_len_buckets}")
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -152,7 +154,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # Action optimizer
         all_trainable_parameters = []
-        if self.objective != "train_ar":
+        if self.objective_func != "train_ar":
             all_trainable_parameters = self.get_grouped_parameters(
                 model.human_action_expert_parameters, 
                 cfg.optimizer.action, 
@@ -303,11 +305,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 for batch_idx, batch in enumerate(train_dataloader):
                     with accelerator.accumulate(self.model):
                         # Preprocess batch
-                        inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective != "train_ar")
+                        inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
 
                         # Forward pass
                         with accelerator.autocast():
-                            raw_loss = self.model(self.objective, inputs)
+                            raw_loss = self.model(self.objective_func, inputs)
                         accelerator.backward(raw_loss["total_loss"])
 
                         # Gradient clipping
@@ -354,7 +356,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             self.validation(accelerator, val_dataloader, step_log)
 
                         if (self.update_step % cfg.training.sample_every) == 0 and \
-                            val_dataloader is not None and self.objective != "train_ar" and accelerator.sync_gradients:
+                            val_dataloader is not None and self.objective_func != "train_ar" and accelerator.sync_gradients:
                             self.sample(accelerator, val_dataloader, step_log)
 
                         # Checkpoint saving
@@ -401,7 +403,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                 # Compute validation loss
                 with accelerator.autocast():
-                    loss = self.model(self.objective, inputs)
+                    loss = self.model(self.objective_func, inputs)
                 for key, loss in loss.items():
                     if key not in val_losses:
                         val_losses[key] = list()
@@ -570,11 +572,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "pixel_values": batch["pixel_values"].to(self.dtype),
             "vlm_position_ids": vlm_position_ids,
         }
-        if self.objective != "train_ar":
+        if self.objective_func != "train_ar":
             inputs["human_action_position_ids"] = human_action_position_ids
             inputs["human_actions"] = batch["human_actions"].to(self.dtype)
             inputs["human_actions_valid_mask"] = batch["human_actions_valid_mask"]
-        if self.objective != "train_flow":
+        if self.objective_func != "train_flow":
             inputs["labels"] = batch["labels"]
         
         if split_mask:
@@ -583,7 +585,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
             )
             inputs["vlm_mask"] = vlm_mask
-            if self.objective != "train_ar":
+            if self.objective_func != "train_ar":
                 inputs["human_action_mask"] = human_action_mask
         else:
             inputs["causal_mask"] = causal_mask
@@ -628,7 +630,7 @@ def eval_with_averaged_model(accelerator, model, averaged_model):
         
         averaged_state_dict = averaged_model.averaged_model_state_dict() 
         unwrapped_model.load_state_dict(averaged_state_dict)
-    # model.eval()
+    model.eval()
     
     try:
         yield

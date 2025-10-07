@@ -2,6 +2,7 @@
 name: legendvla
 exp_name: "pretrain_deepspeed"
 _target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
+objective:  # ar, flow, or None(None means both)
 
 action_expert_adaptive_mode:  # adaLN, adaLN-Zero, or None
 quantize: False
@@ -63,6 +64,7 @@ dataset:
     seed: 42
     val_ratio: 0.005
     history: ${history} # frames
+    objective: ${objective}
     normalizer_dataloader_cfg:
       batch_size: 4096
       num_workers: 96
@@ -77,6 +79,7 @@ dataset:
     seed: 42
     weights: [0.5, 0.5, 0.5]
     val_ratio: 0.01
+  token_len_buckets: ${token_len_buckets}
 
 history: 30
 n_action_steps: 30
@@ -121,6 +124,7 @@ optimizer:
 
 training:
   seed: 42
+  objective: ${objective}
   debug: False
   profile: False
   resume: True
@@ -204,7 +208,9 @@ answer_seq_len: 256
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
 max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
-tokenizer_padding: max_length # instead of truncating to longest, for best efficiency
+tokenizer_padding: longest # longest or max_length
+# when we use longest, we set several discrete buckets of token_len for the VLM tokens
+token_len_buckets: [512, 576, 640, 704, '${max_vlm_tokens}']
 
 policy: 
   _target_: src.policy.legendvla.LegendVLA
