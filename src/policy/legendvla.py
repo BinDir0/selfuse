@@ -7,8 +7,6 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 
 """
 
-# TODO: We can use 3D ROPE for image tokens
-
 import logging
 from typing import Optional, Tuple
 
@@ -206,7 +204,7 @@ class LegendVLA(nn.Module):
         return gemma_parameters
 
     @log_execution_time(log)
-    def load_pretrained_weights(self):
+    def load_pretrained_vlm_weights(self):
         """
         Load pre-trained weights from PaliGemma checkpoint.
         
@@ -308,6 +306,29 @@ class LegendVLA(nn.Module):
         for name, param in self.joint_model.mixtures["vlm"].named_parameters():
             param.requires_grad = True if "lora_" in name else False
         log.info("Froze non-lora weights in lm part of the joint model")
+
+    def freeze_non_lora_weights_in_ae(self):
+        """
+        Freeze non-LoRA weights in VLM components while keeping LoRA weights trainable.
+        
+        This method freezes:
+        - Human action encoder weights (except LoRA)
+        - Human action decoder weights (except LoRA)  
+        - Human action mixture weights (except LoRA)
+        
+        Only LoRA parameters remain trainable for efficient fine-tuning.
+        """
+        for name, param in self.human_action_encoder.named_parameters():
+            param.requires_grad = True if "lora_" in name else False
+        log.info("Froze non-lora weights in human action encoder")
+
+        for name, param in self.human_action_decoder.named_parameters():
+            param.requires_grad = True if "lora_" in name else False
+        log.info("Froze non-lora weights in human action decoder")
+
+        for name, param in self.joint_model.mixtures["human_action"].named_parameters():
+            param.requires_grad = True if "lora_" in name else False
+        log.info("Froze non-lora weights in human action mixture")
 
     def freeze_all_weights(self):
         """

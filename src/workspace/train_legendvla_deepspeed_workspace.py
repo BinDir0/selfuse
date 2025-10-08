@@ -142,9 +142,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         model = self.model  # Get unwrapped model for parameter access
 
         # Load pretrained weights and freeze non-lora weights in VLM before deepspeed optimizer setup
-        # cause deepspeed will back up the parameters, manually load pretrained weights can't affect these parameters
-        if cfg.training.load_pretrained_weights:
-            model.load_pretrained_weights()
+        # cause deepspeed will back up the parameters, manually load pretrained weights after setup can't affect these parameters
+        if cfg.training.load_pretrained_vlm_weights:
+            model.load_pretrained_vlm_weights()
         if cfg.lora:
             model.freeze_non_lora_weights_in_vlm()
 
@@ -159,6 +159,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 model.human_action_expert_parameters, 
                 cfg.optimizer.action, 
             )
+        else: 
+            model.freeze_non_lora_weights_in_ae()
         
         # VLM optimizer (if training VLM)
         if cfg.training.train_vlm:
@@ -171,6 +173,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 cfg.optimizer.vlm, 
             )
             all_trainable_parameters.extend(vlm_trainable_parameters)
+        else: 
+            model.freeze_non_lora_weights_in_vlm()
 
         self.optimizer = DummyOptim(
             all_trainable_parameters, 

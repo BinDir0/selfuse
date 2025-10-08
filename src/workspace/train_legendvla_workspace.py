@@ -259,8 +259,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Setup model
         if cfg.training.resume_checkpoint_path:
             self.load_checkpoint(cfg.training.resume_checkpoint_path)
-        elif cfg.training.load_pretrained_weights:
-            self.model.load_pretrained_weights()
+        elif cfg.training.load_pretrained_vlm_weights:
+            self.model.load_pretrained_vlm_weights()
         if cfg.lora:
             self.model.freeze_non_lora_weights_in_vlm()
 
