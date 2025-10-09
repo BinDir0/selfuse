@@ -219,7 +219,7 @@ class LegendVLADataset(BaseImageDataset):
 
     def __len__(self):
         return sum(self.sampler_lens)
-        
+
 
 class LegendVLMDataset(BaseImageDataset):
     def __init__(self,
@@ -496,7 +496,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
     def __len__(self):
         return sum(self.sampler_lens)
-                
+
 
 class LegendVLDataCollator(BaseDataCollator):
     def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, token_len_buckets: list = None):
