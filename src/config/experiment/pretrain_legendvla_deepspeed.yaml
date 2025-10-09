@@ -78,7 +78,7 @@ dataset:
     cache_dir: /share_data/datasets/VLM/FineVision/.cache
     seed: 42
     weights: [0.5, 0.5, 0.5]
-    val_ratio: 0.01
+    val_ratio: 0.005
   token_len_buckets: ${token_len_buckets}
 
 history: 30
@@ -133,9 +133,9 @@ training:
   train_vlm: True
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.08/22.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=8000-eval_l1_loss=0.0508
+  resume_checkpoint_path: 
   normalizer_path: /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
-  num_epochs: 25
+  num_epochs: 5
   use_bf16: True
   clipping:
     enabled: True
@@ -157,14 +157,13 @@ training:
   # training loop control
   # in epochs
   ckpt_save_interval: 10000
-  val_every: 1000
-  sample_every: 1000
-  # make sure it is divisible by val_every and sample_every
+  eval_every: 100
+  # make sure it is divisible by eval_every
   # cause we use eval_l1 loss to save topk checkpoint
-  checkpoint_every: 1000 
+  checkpoint_every: 2500 
   # steps per epoch
   max_train_steps: null
-  max_val_steps: null
+  max_eval_steps: null
   # evaluation settings
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
   # misc

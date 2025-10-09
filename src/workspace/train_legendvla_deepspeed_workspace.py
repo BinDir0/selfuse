@@ -32,6 +32,7 @@ from src.dataset.paligemma_processing import PaliGemmaVLAProcessor, PaliGemmaPro
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.json_logger import JsonLogger
 from src.utils.pytorch_util import dict_apply
+from src.utils.plotting import plot_l1_loss_as_bar
 from src.model.common.model_average import ModelAveraging
 from src.model.action.fast_tokenizer import UniversalActionProcessor
 from src.utils.metric import get_action_accuracy
@@ -367,14 +368,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         })
                         step_log.update(raw_loss_cpu)
 
-                        # Validation
-                        if (self.update_step % cfg.training.val_every) == 0 and \
+                        # Evaluation
+                        if (self.update_step % cfg.training.eval_every) == 0 and \
                             val_dataloader is not None and accelerator.sync_gradients:
-                            self.validation(accelerator, val_dataloader, step_log)
-
-                        if (self.update_step % cfg.training.sample_every) == 0 and \
-                            val_dataloader is not None and self.objective_func != "train_ar" and accelerator.sync_gradients:
-                            self.sample(accelerator, val_dataloader, step_log)
+                            self.evaluation(accelerator, val_dataloader, step_log)
 
                         # Checkpoint saving
                         if (self.update_step % cfg.training.checkpoint_every) == 0 and accelerator.sync_gradients:
@@ -408,52 +405,33 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         accelerator.end_training()
 
-    def validation(self, accelerator, dataloader, step_log): 
+    # Combine validation and sampling, so we can process data only once. 
+    def evaluation(self, accelerator, dataloader, step_log): 
         if accelerator.is_main_process:
-            print(f"Validation step {self.update_step} started")
+            print(f"Evaluation step {self.update_step} started")
         accelerator.wait_for_everyone()
         with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
             val_losses = dict()
-            
-            for batch_idx, batch in enumerate(dataloader):
-                inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=True)
-
-                # Compute validation loss
-                with accelerator.autocast():
-                    loss = self.model(self.objective_func, inputs)
-                for key, loss in loss.items():
-                    if key not in val_losses:
-                        val_losses[key] = list()
-                    val_losses[key].append(loss)
-                
-                if self.cfg.training.max_val_steps and batch_idx >= (self.cfg.training.max_val_steps-1):
-                    break
-            
-            # Process validation loss
-            if len(val_losses) > 0:
-                for key in val_losses.keys():
-                    val_losses[key] = torch.stack(val_losses[key])
-                    val_losses[key] = accelerator.gather_for_metrics(val_losses[key])
-                
-                for key in val_losses.keys():
-                    val_losses[key] = torch.mean(val_losses[key]).item()
-                    step_log[f'val_{key}'] = val_losses[key]
-
-    def sample(self, accelerator, dataloader, step_log):
-        if accelerator.is_main_process:
-            print(f"Sampling step {self.update_step} started")
-        accelerator.wait_for_everyone()
-        with torch.no_grad(), eval_with_averaged_model(accelerator, self.model, self.model_averaging):
-            # Initialize evaluation metrics
             eval_thresholds = self.cfg.training.eval_thresholds
             eval_accuracy = []
             eval_l1_loss = []
             
             for batch_idx, batch in enumerate(dataloader):
-                # Preprocess batch
-                inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
+                inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
+                inputs_clone = inputs.clone()
+
+                # Compute validation loss
+                with accelerator.autocast():
+                    loss = self.model(self.objective_func, inputs)
+                for key in inputs.keys():
+                    assert inputs[key] == inputs_clone[key], f"inputs[{key}] != inputs_clone[{key}]"
+                for key, loss in loss.items():
+                    if key not in val_losses:
+                        val_losses[key] = list()
+                    val_losses[key].append(loss)
+
                 # Compute action accuracy if actions are available
-                if 'actions' in inputs:
+                if 'actions' in inputs and self.objective_func != "train_ar":
                     gt_actions = inputs['actions']
                     actions_valid_mask = inputs['actions_valid_mask']
                     # Get action predictions
@@ -484,9 +462,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / actions_valid_num
                     eval_l1_loss.append(batch_l1_loss)
                 
-                if self.cfg.training.max_val_steps and batch_idx >= (self.cfg.training.max_val_steps-1):
+                if self.cfg.training.max_eval_steps and batch_idx >= (self.cfg.training.max_eval_steps-1):
                     break
             
+            # Process validation loss
+            if len(val_losses) > 0:
+                for key in val_losses.keys():
+                    val_losses[key] = torch.stack(val_losses[key])
+                    val_losses[key] = accelerator.gather_for_metrics(val_losses[key])
+                
+                for key in val_losses.keys():
+                    val_losses[key] = torch.mean(val_losses[key]).item()
+                    step_log[f'val_{key}'] = val_losses[key]
+
             # fill eval_accuracy and eval_l1_loss to the same length as dataloader
             eval_len, data_len = len(eval_accuracy), len(dataloader)
             while eval_len < data_len: 
@@ -506,7 +494,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 eval_l1_loss = accelerator.gather_for_metrics(eval_l1_loss)
                 
                 eval_accuracy = torch.mean(eval_accuracy, dim=0)
+                eval_l1_loss = eval_l1_loss.reshape(-1, eval_l1_loss.shape[-1])
+                eval_l1_loss_per_dim = torch.mean(eval_l1_loss, dim=0).cpu().numpy()
                 eval_l1_loss = torch.mean(eval_l1_loss)
+                
+                # plot l1 loss per dimension
+                if accelerator.is_main_process:
+                    plot_path = os.path.join(self.output_dir, 'figures')
+                    plot_l1_loss_as_bar(eval_l1_loss_per_dim, self.update_step, plot_path)
                 
                 # Log accuracy metrics
                 step_log['eval_l1_loss'] = eval_l1_loss.item()
@@ -604,8 +599,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             inputs["vlm_mask"] = vlm_mask
             if self.objective_func != "train_ar":
                 inputs["action_mask"] = action_mask
-        else:
-            inputs["causal_mask"] = causal_mask
+        inputs["causal_mask"] = causal_mask
 
         # Sample flow matching timesteps
         if sample_fm_time:

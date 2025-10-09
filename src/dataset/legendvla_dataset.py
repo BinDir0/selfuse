@@ -358,6 +358,10 @@ class LegendUnifiedDataset(BaseImageDataset):
         self.vlm_dataset = vlm_dataset
         self.shape_meta = None
         self.token_len_buckets = token_len_buckets
+        
+        print(f"LegendUnifiedDataset initialized with {len(self.vla_dataset)} VLA samples")
+        if self.vlm_dataset is not None:
+            print(f"LegendUnifiedDataset initialized with {len(self.vlm_dataset)} VLM samples")
 
     def get_collator(self):
         return LegendUnifiedDataCollator(token_len_buckets=self.token_len_buckets)

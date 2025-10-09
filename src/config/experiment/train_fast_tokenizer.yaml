@@ -59,20 +59,20 @@ dataloader:
 
 tokenizer: 
   states: 
-    scale: 40
+    scale: 20
     vocab_size: 2048
     num_workers: 192
   actions: 
     scale: 10
-    vocab_size: 2048
+    vocab_size: 1024
     num_workers: 192
 
 training:
   tqdm_interval_sec: 1.0
   max_corpus_size: 2000
-  max_val_steps: 500
-  normalizer_path: # /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
-  valid_tokenizer_path: # /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
+  max_val_steps: 1000
+  normalizer_path: /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
+  valid_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
   save_path: # /home/chenzhang/project/EgoVLA/outputs/2025.09.19/17.56_fast_tokenizer_train_fast_tokenizer/tokenizer
 
 multi_run:

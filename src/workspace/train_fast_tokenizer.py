@@ -11,6 +11,7 @@ import os
 import pickle
 
 from src.workspace.base_workspace import BaseWorkspace
+from src.utils.plotting import plot_histogram
 from src.model.action.fast_tokenizer import UniversalActionProcessor
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -102,7 +103,7 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
             print(f"Key: {key}")
             print(f"Average L1 loss: {np.mean(loss_list[key])}")
             print(f"Average token length: {np.mean(average_token_length_list[key])}")
-            print_histogram(token_length_list[key], key, self.output_dir)
+            plot_histogram(token_length_list[key], key, self.output_dir)
         
     def save_fast_tokenizer(self, path = None):
         if path is None:
@@ -112,55 +113,4 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
             source_file_path = inspect.getfile(self.tokenizer[key].__class__)
             target_file_path = pathlib.Path(path).joinpath(key, source_file_path.split("/")[-1])
             shutil.copy(source_file_path, target_file_path)
-
-
-def print_histogram(data, key, output_dir):
-    """
-    Plot histogram of token lengths with statistical annotations and save to file.
-    
-    Args:
-        data: List of token lengths
-        key: Key name for the tokenizer
-        output_dir: Output directory to save the plot
-    """
-    # Calculate statistics
-    mean_val = np.mean(data)
-    std_val = np.std(data)
-    p95 = np.percentile(data, 95)
-    p99 = np.percentile(data, 99)
-    
-    # Create histogram
-    plt.figure(figsize=(12, 8))
-    n, bins, patches = plt.hist(data, bins=300, alpha=0.7, color='skyblue', edgecolor='black')
-    
-    # Add vertical lines for statistics
-    plt.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_val:.2f}')
-    plt.axvline(mean_val + std_val, color='orange', linestyle=':', linewidth=2, label=f'Mean + Std: {mean_val + std_val:.2f}')
-    plt.axvline(mean_val - std_val, color='orange', linestyle=':', linewidth=2, label=f'Mean - Std: {mean_val - std_val:.2f}')
-    plt.axvline(p95, color='green', linestyle='--', linewidth=2, label=f'95th percentile: {p95:.2f}')
-    plt.axvline(p99, color='purple', linestyle='--', linewidth=2, label=f'99th percentile: {p99:.2f}')
-    
-    # Add labels and title
-    plt.xlabel('Token Length')
-    plt.ylabel('Frequency')
-    plt.title(f'Token Length Distribution for {key}\n'
-              f'Mean: {mean_val:.2f}, Std: {std_val:.2f}, 95th: {p95:.2f}, 99th: {p99:.2f}')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Save the plot
-    output_path = pathlib.Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path / f'{key}_token_length_histogram.png', dpi=300, bbox_inches='tight')
-    plt.savefig(output_path / f'{key}_token_length_histogram.pdf', bbox_inches='tight')
-    
-    # Print statistics
-    print(f"Token length statistics for {key}:")
-    print(f"  Mean: {mean_val:.2f}")
-    print(f"  Standard deviation: {std_val:.2f}")
-    print(f"  95th percentile: {p95:.2f}")
-    print(f"  99th percentile: {p99:.2f}")
-    print(f"  Min: {np.min(data):.2f}")
-    print(f"  Max: {np.max(data):.2f}")
-    print(f"  Total samples: {len(data)}")
 

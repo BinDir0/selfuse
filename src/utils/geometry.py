@@ -515,7 +515,7 @@ def rot_matrix_from_6drot(rot):
         rot_matrix = rot_matrix.squeeze(0)
 
     if is_numpy:
-        rot_matrix = rot_matrix.numpy()
+        rot_matrix = rot_matrix.cpu().numpy()
     
     return rot_matrix
 
@@ -557,7 +557,7 @@ def rot_matrix_to_6drot(rot_matrix):
         rot_6d = rot_6d.squeeze(0)
     
     if is_numpy:
-        rot_6d = rot_6d.numpy()
+        rot_6d = rot_6d.cpu().numpy()
     
     return rot_6d
 
@@ -595,7 +595,7 @@ def homo_matrix_from_trans_6drot(trans, rot_6d):
     homo_matrix[..., :3, 3] = trans
     homo_matrix[..., 3, 3] = 1
     if is_numpy:
-        homo_matrix = homo_matrix.numpy()
+        homo_matrix = homo_matrix.cpu().numpy()
     return homo_matrix
 
 def transform_to_target_frame(pose, target_extrinsic):

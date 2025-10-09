@@ -451,7 +451,7 @@ class JointModel(nn.Module):
                 dtype=embeds_all[name].dtype,
                 device=embeds_all[name].device,
             )
-            embeds_all[name] *= normalizer
+            embeds_all[name] = embeds_all[name] * normalizer
 
         # layers
         for layer_idx in range(self.num_hidden_layers):
