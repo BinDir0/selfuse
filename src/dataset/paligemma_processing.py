@@ -41,6 +41,7 @@ def add_image_action_tokens_to_prompt(
     action_end_token,
     action_token,
     action_seq_len,
+    need_action = True, # if True, the action tokens will be added, otherwise only the image tokens will be added
 ):
     # Quoting from the blog (https://huggingface.co/blog/paligemma#detailed-inference-process):
     #   The input text is tokenized normally.
@@ -49,7 +50,10 @@ def add_image_action_tokens_to_prompt(
     #   The tokenized text is also prefixed with a fixed number of <image> tokens.
     # NOTE: from the paper it looks like the `\n` should be tokenized separately, but in the HF implementation this is not done.
     #       ref to HF implementation: https://github.com/huggingface/transformers/blob/7f79a97399bb52aad8460e1da2f36577d5dccfed/src/transformers/models/paligemma/processing_paligemma.py#L55-L73
-    return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{action_begin_token}{action_token * action_seq_len}{action_end_token}{eos_token}"
+    if need_action:
+        return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{action_begin_token}{action_token * action_seq_len}{action_end_token}{eos_token}"
+    else:
+        return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{eos_token}"
 
 
 def rescale(
@@ -188,7 +192,7 @@ class PaliGemmaProcessor:
         max_seq_len: int,
         ignore_index: int = -100,
         image_size: int = 224,
-        tokenizer_padding: str = "max_length",  #  # instead of truncating to longest
+        tokenizer_padding: str = "longest",  # longest or max_length
     ):
         super().__init__()
 
@@ -344,7 +348,7 @@ class PaliGemmaVLAProcessor:
         max_seq_len: int,
         ignore_index: int = -100,
         image_size: int = 224,
-        tokenizer_padding: str = "max_length",  #  # instead of truncating to longest
+        tokenizer_padding: str = "longest", # longest or max_length
     ):
         super().__init__()
 
@@ -418,6 +422,7 @@ class PaliGemmaVLAProcessor:
         images: np.ndarray,
         states: np.ndarray,
         human_actions: np.ndarray,
+        objective: str = None,
         truncation: bool = True,
     ) -> dict:
         '''
@@ -426,6 +431,7 @@ class PaliGemmaVLAProcessor:
             images: np.ndarray [T_image, C, H, W] or [T_image, H, W, C]
             state: np.ndarray [T_state, state_dim]
             human_action: np.ndarray [Horizon, human_action_dim]
+            objective: str, 'ar' or 'flow' or None, None means both
             truncation: bool
 
         Returns:
@@ -450,7 +456,8 @@ class PaliGemmaVLAProcessor:
 
         # We assume the states and human actions are in [-1, 1]
         discrete_states = self.fast_tokenizer['states'](states)[0]
-        discrete_human_actions = self.fast_tokenizer['human_actions'](human_actions)[0]
+        if objective != "train_flow":
+            discrete_human_actions = self.fast_tokenizer['human_actions'](human_actions)[0]
 
         text = text.replace('.', '')
         text = text.lower()
@@ -465,7 +472,8 @@ class PaliGemmaVLAProcessor:
             action_begin_token=self.HUMAN_ACTION_BEGIN_TOKEN,
             action_end_token=self.HUMAN_ACTION_END_TOKEN,
             action_token=self.HUMAN_ACTION_TOKEN,
-            action_seq_len=len(discrete_human_actions),
+            action_seq_len=len(discrete_human_actions) if objective != "train_flow" else 0,
+            need_action=objective != "train_flow",
         )
 
         # Returns the input_ids and attention_mask as PyTorch tensors
@@ -477,23 +485,29 @@ class PaliGemmaVLAProcessor:
         )
         inputs = dict_apply(inputs, lambda x: np.array(x))
         
+        input_ids = inputs['input_ids'] # [L]
+        assert input_ids.ndim == 1, f"The input_ids should be 1D array, got {input_ids.ndim}D array."
         discrete_states = np.array([self.fast_token_id2gemma_token_id['states'][id] for id in discrete_states])
-        discrete_human_actions = np.array([self.fast_token_id2gemma_token_id['human_actions'][id] for id in discrete_human_actions])
-        input_ids = inputs['input_ids']
         input_ids = set_token_id(input_ids, self.state_token_id, discrete_states)
-        input_ids = set_token_id(input_ids, self.human_action_token_id, discrete_human_actions)
+        if objective != "train_flow":
+            discrete_human_actions = np.array([self.fast_token_id2gemma_token_id['human_actions'][id] for id in discrete_human_actions])
+            input_ids = set_token_id(input_ids, self.human_action_token_id, discrete_human_actions)
         inputs['input_ids'] = input_ids
 
-        labels = input_ids.copy()
-        if not np.any(labels == self.human_action_begin_token_id):
-            warnings.warn("The human action begin token is not found in the input_ids")
-            answer_start_idx = len(labels)
-        else : 
-            answer_start_idx = np.argmax(labels == self.human_action_begin_token_id) + 1
-        labels[:answer_start_idx] = self.ignore_index
-        labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
-        inputs['labels'] = labels
-        inputs['answer_start_idx'] = np.array(answer_start_idx)
+        if objective != "train_flow":
+            labels = input_ids.copy()
+            if not np.any(labels == self.human_action_begin_token_id):
+                warnings.warn("The human action begin token is not found in the input_ids")
+                answer_start_idx = len(labels)
+            else : 
+                answer_start_idx = np.argmax(labels == self.human_action_begin_token_id) + 1
+            labels[:answer_start_idx] = self.ignore_index
+            labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
+            inputs['labels'] = labels
+            inputs['answer_start_idx'] = np.array(answer_start_idx)
+        else: 
+            attention_mask = inputs['attention_mask']
+            inputs['answer_start_idx'] = np.array(np.sum(attention_mask))
 
         output = {"pixel_values": pixel_values, **inputs}
         return output

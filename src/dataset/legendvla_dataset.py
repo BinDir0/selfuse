@@ -13,6 +13,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from PIL import Image
+import torch.nn.utils.rnn as rnn_utils
 import random
 from datasets import load_dataset
 from src.utils.pytorch_util import dict_apply
@@ -35,9 +36,11 @@ class LegendVLADataset(BaseImageDataset):
             seed=42,
             val_ratio=0.0,
             history=30,
+            objective=None,
             normalizer_dataloader_cfg=dict(),
             max_train_episodes=None,
             train_mode=True,
+            token_len_buckets=None, 
             return_raw_sample=False,
         ):
         
@@ -45,6 +48,7 @@ class LegendVLADataset(BaseImageDataset):
         self.zarr_paths = zarr_paths
         self.preprocessor = None
         self.history = history
+        self.objective = objective
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
@@ -109,6 +113,7 @@ class LegendVLADataset(BaseImageDataset):
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
+        self.token_len_buckets = token_len_buckets
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -220,22 +225,25 @@ class LegendVLADataset(BaseImageDataset):
         instruction = instruction[idx]
 
         # Process all images in batch
-        processed_results = self.preprocessor(images=image, text=instruction, states=state, human_actions=action)
+        processed_results = self.preprocessor(images=image, text=instruction, states=state, human_actions=action, objective=self.objective)
 
         data = {
             'input_ids': processed_results['input_ids'],
-            'labels': processed_results['labels'],
             'answer_start_idx': processed_results['answer_start_idx'],
             'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
-            # we assume the history of the data is 30 Hz, the image should cover the past 1 second
-            'human_actions': action,
-            'human_actions_valid_mask': action_valid_mask,
         }
+        if self.objective != "train_ar":
+            data['human_actions'] = action
+            data['human_actions_valid_mask'] = action_valid_mask
+        if self.objective != "train_flow":
+            data['labels'] = processed_results['labels']
         return data
 
     def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
         self.preprocessor = preprocessor
+        if self.token_len_buckets is None:
+            self.token_len_buckets = [preprocessor.max_seq_len]
 
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer = normalizer
@@ -261,7 +269,12 @@ class LegendVLADataset(BaseImageDataset):
         return normalizer
 
     def get_collator(self):
-        return LegendVLDataCollator()
+        assert self.preprocessor is not None, "Preprocessor is not set"
+        return LegendVLDataCollator(
+            pad_token_id=self.preprocessor.tokenizer.pad_token_id,
+            ignore_index=self.preprocessor.ignore_index,
+            token_len_buckets=self.token_len_buckets,
+        )
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
@@ -295,6 +308,7 @@ class LegendVLMDataset(BaseImageDataset):
             seed=42,
             val_ratio=0.0,
             train_mode=True,
+            token_len_buckets=None,
         ):
         
         super().__init__()
@@ -305,6 +319,7 @@ class LegendVLMDataset(BaseImageDataset):
         self.datasets = None
         self.preprocessor = None
         self.train_mode = train_mode
+        self.token_len_buckets = token_len_buckets
         self.aug_transform = None
         if self.train_mode:
             self.aug_transform = transforms.Compose([
@@ -387,10 +402,17 @@ class LegendVLMDataset(BaseImageDataset):
         return data
 
     def get_collator(self):
-        return LegendVLDataCollator()
+        assert self.preprocessor is not None, "Preprocessor is not set"
+        return LegendVLDataCollator(
+            pad_token_id=self.preprocessor.tokenizer.pad_token_id,
+            ignore_index=self.preprocessor.ignore_index,
+            token_len_buckets=self.token_len_buckets,
+        )
 
     def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
         self.preprocessor = preprocessor
+        if self.token_len_buckets is None:
+            self.token_len_buckets = [preprocessor.max_seq_len]
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
@@ -407,14 +429,16 @@ class LegendUnifiedDataset(BaseImageDataset):
     def __init__(self,
         vla_dataset: LegendVLADataset,
         vlm_dataset: LegendVLMDataset = None,
+        token_len_buckets: list = None,
     ):
         super().__init__()
         self.vla_dataset = vla_dataset
         self.vlm_dataset = vlm_dataset
         self.shape_meta = None
+        self.token_len_buckets = token_len_buckets
 
     def get_collator(self):
-        return LegendUnifiedDataCollator()
+        return LegendUnifiedDataCollator(token_len_buckets=self.token_len_buckets)
 
     def set_return_raw_sample(self, return_raw_sample: bool):
         """Set whether to return raw sample data for VLA dataset (for testing/debugging purposes)"""
@@ -423,7 +447,8 @@ class LegendUnifiedDataset(BaseImageDataset):
     def get_validation_dataset(self):
         return LegendUnifiedDataset(
             vla_dataset=self.vla_dataset.get_validation_dataset(),
-            vlm_dataset=self.vlm_dataset.get_validation_dataset() if self.vlm_dataset is not None else None
+            vlm_dataset=self.vlm_dataset.get_validation_dataset() if self.vlm_dataset is not None else None, 
+            token_len_buckets=self.token_len_buckets
         )
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -556,9 +581,11 @@ class LegendVLALowLevelDataset(BaseImageDataset):
                 
 
 class LegendVLDataCollator(BaseDataCollator):
-    def __init__(self, pad_token_id: int = None):
+    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, token_len_buckets: list = None):
         super().__init__()
         self.pad_token_id = pad_token_id
+        self.ignore_index = ignore_index
+        self.token_len_buckets = token_len_buckets
 
     def __call__(self, data_list):
         """
@@ -570,29 +597,36 @@ class LegendVLDataCollator(BaseDataCollator):
             A dictionary with the keys the same as the return value of the Dataset's __getitem__ method.
         """
         batch = {}
+        input_ids_batch = [item['input_ids'] for item in data_list]
+        labels_batch = [item['labels'] for item in data_list]
+        max_token_len = max([item.shape[-1] for item in input_ids_batch])
+        bucket = None
+        for len in self.token_len_buckets:
+            if max_token_len <= len:
+                bucket = len
+                break
+        assert bucket is not None, "No bucket found for the max token length"
+        batch["input_ids"] = rnn_utils.pad_sequence(
+            input_ids_batch,
+            batch_first=True,
+            padding_value=self.pad_token_id
+        )
+        batch["labels"] = rnn_utils.pad_sequence(
+            labels_batch,
+            batch_first=True,
+            padding_value=self.ignore_index
+        )
+        batch["attention_mask"] = (batch["input_ids"] != self.pad_token_id).long()
         for key in data_list[0].keys():
-            '''
-            if key != 'instruction':
+            if key != 'input_ids' and key != 'attention_mask' and key != 'labels':
                 batch[key] = torch.stack([item[key] for item in data_list])
-            else:
-                input_ids_batch = [item[key] for item in data_list]
-                batch["input_ids"] = rnn_utils.pad_sequence(
-                    input_ids_batch,
-                    batch_first=True,
-                    padding_value=self.pad_token_id
-                )
-                attention_mask_batch = (batch["input_ids"] != self.pad_token_id).long()
-                batch["attention_mask"] = attention_mask_batch
-            '''
-            # We assume the length of tokenized instruction is the same for all samples
-            batch[key] = torch.stack([item[key] for item in data_list])
 
         return batch
 
 
 class LegendUnifiedDataCollator(LegendVLDataCollator):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, token_len_buckets: list = None):
+        super().__init__(pad_token_id=pad_token_id, ignore_index=ignore_index, token_len_buckets=token_len_buckets)
 
     def __call__(self, data_list):
         return super().__call__(data_list)

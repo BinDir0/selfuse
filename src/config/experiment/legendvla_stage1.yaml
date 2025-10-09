@@ -1,8 +1,8 @@
 # @package _global_
 name: legendvla
-exp_name: "pretrain_deepspeed"
+exp_name: stage1
 _target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
-objective:  # ar, flow, or None(None means both)
+objective: ar # ar, flow, or None(None means both)
 
 action_expert_adaptive_mode:  # adaLN, adaLN-Zero, or None
 quantize: False
@@ -210,7 +210,7 @@ answer_seq_len: 256
 max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} 
 tokenizer_padding: longest # longest or max_length
 # when we use longest, we set several discrete buckets of token_len for the VLM tokens
-token_len_buckets: [512, 576, 640, 704, '${max_vlm_tokens}']
+token_len_buckets: [512, 576, 640, 704, ${max_vlm_tokens}]
 
 policy: 
   _target_: src.policy.legendvla.LegendVLA
@@ -294,10 +294,10 @@ logging:
 
 checkpoint:
   topk:
-    monitor_key: eval_l1_loss
+    monitor_key: valid_ce_loss
     mode: min
     k: 3
-    format_str: update_step={update_step:04d}-eval_l1_loss={eval_l1_loss:.4f}
+    format_str: update_step={update_step:04d}-valid_ce_loss={valid_ce_loss:.4f}
   save_last_ckpt: False
   save_last_snapshot: False
 
