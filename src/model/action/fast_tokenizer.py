@@ -2,6 +2,10 @@
 
 import logging
 from typing import ClassVar
+from multiprocessing import Pool, cpu_count
+from functools import partial
+from tqdm import tqdm
+import os
 
 import numpy as np
 from scipy.fft import dct
@@ -10,6 +14,18 @@ from tokenizers import ByteLevelBPETokenizer
 from tokenizers.trainers import BpeTrainer
 from transformers import PreTrainedTokenizerFast
 from transformers.processing_utils import ProcessorMixin
+
+
+def _process_dct_chunk(action_chunk: np.array) -> np.array:
+    """Helper function to process DCT for a single action chunk."""
+    return dct(action_chunk, axis=0, norm="ortho").flatten()
+
+
+def _process_single_dct_to_string(tokens, scale, min_token):
+    """Helper function to process a single dct_token array"""
+    rounded_tokens = np.around(tokens * scale) - min_token
+    rounded_tokens = rounded_tokens.astype(int)
+    return "".join(map(chr, rounded_tokens))
 
 
 class UniversalActionProcessor(ProcessorMixin):
@@ -22,6 +38,7 @@ class UniversalActionProcessor(ProcessorMixin):
         scale: float = 10,
         vocab_size: int = 1024,
         min_token: int = 0,
+        max_token: int = 1024,
         *,
         action_dim: int | None = None,
         time_horizon: int | None = None,
@@ -29,7 +46,8 @@ class UniversalActionProcessor(ProcessorMixin):
         self.scale = scale
         self.vocab_size = vocab_size
         self.min_token = min_token
-
+        self.max_token = max_token
+        
         # Action horizon and dimension needed during decoding. These can be specified
         # in three ways (in order of priority):
         # 1. passed in as kwargs to decode()
@@ -55,7 +73,8 @@ class UniversalActionProcessor(ProcessorMixin):
         dct_coeff = np.around(dct_coeff * self.scale)
         tokens = []
         for elem in dct_coeff:
-            token_str = "".join(map(chr, np.maximum(elem.flatten() - self.min_token, 0).astype(int)))
+            elem_clipped = np.clip(elem.flatten(), self.min_token, self.max_token)
+            token_str = "".join(map(chr, (elem_clipped - self.min_token).astype(int)))
             tokens.append(self.bpe_tokenizer(token_str)["input_ids"])
         return tokens
 
@@ -106,13 +125,46 @@ class UniversalActionProcessor(ProcessorMixin):
         *,
         time_horizon: int | None = None,
         action_dim: int | None = None,
+        num_workers: int | None = None,
     ) -> "UniversalActionProcessor":
-        # Run DCT over all inputs
-        dct_tokens = [dct(a, axis=0, norm="ortho").flatten() for a in action_data]
+        """
+        Fit the UniversalActionProcessor with parallel DCT computation.
+        
+        Args:
+            action_data: List of action arrays to process
+            scale: Scaling factor for quantization
+            vocab_size: Size of the vocabulary
+            time_horizon: Number of time steps (inferred from data if None)
+            action_dim: Action dimension (inferred from data if None)
+            num_workers: Number of parallel workers (defaults to CPU count if None)
+        """
         if time_horizon is None:
             time_horizon = action_data[0].shape[0]
         if action_dim is None:
             action_dim = action_data[0].shape[1]
+        
+        # Determine number of workers
+        if num_workers is None:
+            num_workers = max(1, cpu_count() - 10) # leave 10 cores for other tasks
+        num_workers = min(num_workers, len(action_data))  # Don't use more workers than data chunks
+        
+        print(f"Processing {len(action_data)} action chunks using {num_workers} workers...")
+        
+        # Run DCT over all inputs in parallel
+        if num_workers > 1 and len(action_data) > 1:
+            with Pool(processes=num_workers) as pool:
+                # Use imap for progress tracking
+                dct_tokens = list(tqdm(
+                    pool.imap(_process_dct_chunk, action_data),
+                    total=len(action_data),
+                    desc="Computing DCT",
+                    unit="sequence"
+                ))
+        else:
+            # Fallback to sequential processing for small datasets or single worker
+            dct_tokens = []
+            for i, action_chunk in enumerate(tqdm(action_data, desc="Computing DCT", unit="sequence")):
+                dct_tokens.append(_process_dct_chunk(action_chunk))
 
         # Quantize and find min token
         max_token = int(np.around(np.concatenate(dct_tokens) * scale).max())
@@ -154,6 +206,7 @@ class UniversalActionProcessor(ProcessorMixin):
 
         # Train the inner tokenizer (don't use ByteLevelBPETokenizer.train_from_iterator()
         # because it doesn't support custom alphabets)
+        os.environ["TOKENIZERS_PARALLELISM"] = "true" # set this to enable parallelism
         bpe._tokenizer.train_from_iterator(_token_iter(), trainer=trainer)
 
         return cls(
@@ -161,6 +214,7 @@ class UniversalActionProcessor(ProcessorMixin):
             scale=scale,
             vocab_size=vocab_size,
             min_token=min_token,
+            max_token=max_token,
             time_horizon=time_horizon,
             action_dim=action_dim,
         )
