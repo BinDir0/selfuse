@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
+from src.utils.geometry import transform_wrist_to_target_frame
 # manopth.manolayer will be imported dynamically in HandVisualizer.__init__()
 
 # Transformation utilities are implemented as methods within HandVisualizer class
@@ -766,8 +766,10 @@ class HandVisualizer:
         
         # Convert plot to image array
         fig.canvas.draw()
-        buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+        # Convert ARGB to RGB by removing alpha channel and reordering
+        buf = buf[:, :, 1:4]  # Remove alpha channel and keep RGB
         plt.close(fig)
         
         return buf
@@ -1111,6 +1113,38 @@ def find_sample_with_highest_loss(path: str) -> int:
         import traceback
         traceback.print_exc()
         return 0
+
+def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
+    """
+    Process the sample to be ready for mano_vis
+    """
+    wrist_sequence = action_pred[:, :18]  # Expected shape: [30, 18]    
+    mano_sequence = action_pred[:, 18:]  # Expected shape: [30, 30]
+
+    # Extract ground truth data
+    gt_wrist_sequence = raw_sample['action'][:, :18] # [30, 18]
+    gt_mano_sequence = torch.from_numpy(raw_sample['action'][:, 18:])  # [30, 30]]
+
+    # transform the gt wrist sequence to the target frame
+    gt_wrist_sequence = transform_wrist_to_target_frame(gt_wrist_sequence, raw_sample['extrinsic'][0])
+    gt_wrist_sequence = torch.from_numpy(gt_wrist_sequence)
+    # Extract presence data (single integer for all frames)
+    presence = raw_sample['presence'][0]
+    intrinsic_matrix = torch.from_numpy(raw_sample['intrinsic'][0])
+     # Expected shape: [4]
+
+    # Extract extrinsic parameters
+    extrinsic_matrix = raw_sample['extrinsic'][0]  # Expected shape: [4x4]
+
+    
+    # Replicate for all frames (30 frames)
+    num_frames = mano_sequence.shape[0]
+    # Use numpy repeat: first expand dims, then repeat along first axis
+    extrinsic_matrices = np.repeat(extrinsic_matrix[np.newaxis, :, :], num_frames, axis=0)  # [30, 4, 4]
+    extrinsic_matrices = torch.from_numpy(extrinsic_matrices)
+    background_image = raw_sample['image'].squeeze(0)  # Expected shape: [384, 384, 3]
+    
+    return mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, background_image, presence
 
 def load_complete_data(path: str, sample_id: int = 0) -> tuple:
     """

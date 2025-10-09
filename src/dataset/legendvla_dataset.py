@@ -4,6 +4,7 @@ Every action is the delta of the next predicted absolute state and the state at 
 '''
 
 import os
+from tkinter import W
 from typing import Dict, Optional
 import torch
 import numpy as np
@@ -37,6 +38,7 @@ class LegendVLADataset(BaseImageDataset):
             normalizer_dataloader_cfg=dict(),
             max_train_episodes=None,
             train_mode=True,
+            return_raw_sample=False,
         ):
         
         super().__init__()
@@ -46,6 +48,7 @@ class LegendVLADataset(BaseImageDataset):
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
+        self.return_raw_sample = return_raw_sample
 
         # Initialize storage lists
         self.replay_buffers = []
@@ -69,7 +72,7 @@ class LegendVLADataset(BaseImageDataset):
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
                 zarr_path, 
-                keys=['image', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'presence'], 
+                keys=['image', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'intrinsic', 'presence'], 
                 lazy_load=True
             )
             self.replay_buffers.append(replay_buffer)
@@ -114,6 +117,7 @@ class LegendVLADataset(BaseImageDataset):
         val_set.sampler_lens = []
         val_set.train_mode = False
         val_set.aug_transform = None
+        # Preserve the return_raw_sample setting
 
         for i, replay_buffer in enumerate(self.replay_buffers):
             # Create validation set sampler
@@ -129,7 +133,71 @@ class LegendVLADataset(BaseImageDataset):
             val_set.sampler_lens.append(len(sampler))
             
         return val_set
-    
+
+    def sample_for_inference(self, sample):
+        wrist_state = sample['state/wrist'].astype(np.float32)
+        hand_state = sample['state/hand'].astype(np.float32)
+        wrist_action = sample['action/wrist'].astype(np.float32)
+        hand_action = sample['action/hand'].astype(np.float32)        
+        presence = sample['presence']   
+        extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
+        if self.n_obs_state_steps > 1:
+            state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
+        else:
+            state_slice = [self.history]
+        # use first self.hand_ndim components of hand state and action
+        all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims, i.e. 45 in MANO hand params
+        # processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
+        # processed_wrist_action = transform_wrist_to_target_frame(wrist_action[self.history:], extrinsic[self.history])
+
+        hand_state = np.concatenate([
+            hand_state[state_slice, :self.hand_ndim], 
+            hand_state[state_slice, all_hand_ndim:all_hand_ndim + self.hand_ndim]
+        ], axis=-1)
+        hand_action = np.concatenate([
+            hand_action[self.history:, :self.hand_ndim], 
+            hand_action[self.history:, all_hand_ndim:all_hand_ndim + self.hand_ndim]
+        ], axis=-1)
+
+
+        # use delta of wrist translation and hand mano params as action
+        state_presence = presence[state_slice]
+        action_presence = presence[self.history:]
+        processed_state = np.concatenate([wrist_state[state_slice], hand_state], axis=-1)
+        processed_action = np.concatenate([wrist_action[self.history:], hand_action], axis=-1)
+        processed_state, processed_action, action_valid_mask = get_presence_value(
+            state_presence, action_presence, processed_action, processed_state, self.hand_ndim
+        )
+
+        image = process_image(sample['image'], self.history, self.n_obs_image_steps, self.aug_transform)
+
+        instruction = sample['instruction'][self.history]
+        instruction_num = sample['instruction_num'][self.history]
+        # sample a random instruction from the candidate instructions
+        idx = np.random.randint(0, instruction_num)
+        instruction = instruction[idx]
+        # Follow the same slicing pattern as process_state_action
+        # For state-related data, take the last time step (history)
+        # For action-related data, take from history onwards (history:)
+        extrinsic = sample['extrinsic'][self.history:].astype(np.float32).reshape(-1, 4, 4)
+        intrinsic = sample['intrinsic'][self.history:].astype(np.float32)
+        action_shape = sample['action/shape'][self.history:].astype(np.float32)
+        state_shape = sample['state/shape'][self.history:].astype(np.float32)
+        presence = sample['presence'][self.history:]
+
+        data = {
+            'state': processed_state,
+            'action': processed_action,
+            'action_valid_mask': action_valid_mask,
+            'image': image,
+            'extrinsic': extrinsic,
+            'intrinsic': intrinsic,
+            'action_shape': action_shape,
+            'state_shape': state_shape,
+            'presence': presence,
+        }
+        return data
+
     def _sample_to_data(self, sample):
         state, action, action_valid_mask = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
@@ -172,6 +240,10 @@ class LegendVLADataset(BaseImageDataset):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer = normalizer
 
+    def set_return_raw_sample(self, return_raw_sample: bool):
+        """Set whether to return raw sample data (for testing/debugging purposes)"""
+        self.return_raw_sample = return_raw_sample
+
     def get_normalizer(self):
         # Merge all data
         normalizer_dataset = LegendVLALowLevelDataset(
@@ -199,6 +271,12 @@ class LegendVLADataset(BaseImageDataset):
                 sample = self.samplers[i].sample_sequence(curr_idx)
                 break
             curr_idx -= length
+        
+        # Return raw sample if requested (for testing/debugging purposes)
+        if self.return_raw_sample:
+            # Convert numpy arrays to torch tensors for consistency
+            data = self.sample_for_inference(sample)
+            return data
             
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
@@ -337,6 +415,10 @@ class LegendUnifiedDataset(BaseImageDataset):
 
     def get_collator(self):
         return LegendUnifiedDataCollator()
+
+    def set_return_raw_sample(self, return_raw_sample: bool):
+        """Set whether to return raw sample data for VLA dataset (for testing/debugging purposes)"""
+        self.vla_dataset.set_return_raw_sample(return_raw_sample)
 
     def get_validation_dataset(self):
         return LegendUnifiedDataset(
