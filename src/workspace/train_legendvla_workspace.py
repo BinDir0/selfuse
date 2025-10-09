@@ -156,7 +156,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # Action optimizer
         self.action_optimizer = bnb.optim.AdamW8bit(
-            model.human_action_expert_parameters,
+            model.action_expert_parameters,
             lr=cfg.optimizer.action.lr,
             weight_decay=cfg.optimizer.action.weight_decay,
         )
@@ -184,8 +184,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "states": UniversalActionProcessor.from_pretrained(
                 os.path.join(cfg.processor.fast_tokenizer_path, "states")
             ),
-            "human_actions": UniversalActionProcessor.from_pretrained(
-                os.path.join(cfg.processor.fast_tokenizer_path, "human_actions")
+            "actions": UniversalActionProcessor.from_pretrained(
+                os.path.join(cfg.processor.fast_tokenizer_path, "actions")
             )
         }
         
@@ -433,22 +433,22 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     # Preprocess batch
                                     inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
                                     # Compute action accuracy if actions are available
-                                    if 'human_actions' in inputs:
-                                        gt_actions = inputs['human_actions']
-                                        human_actions_valid_mask = inputs['human_actions_valid_mask']
+                                    if 'actions' in inputs:
+                                        gt_actions = inputs['actions']
+                                        actions_valid_mask = inputs['actions_valid_mask']
                                         # Get action predictions
                                         with accelerator.autocast():
-                                            pred_actions = self.model("infer_human_action", inputs)
+                                            pred_actions = self.model("infer_action", inputs)
                                             
                                         B, _, _ = gt_actions.shape
-                                        eval_sample = torch.any(human_actions_valid_mask.reshape(B, -1), dim=1)
+                                        eval_sample = torch.any(actions_valid_mask.reshape(B, -1), dim=1)
                                         if not torch.any(eval_sample):
                                             continue
-                                        human_actions_valid_mask = human_actions_valid_mask[eval_sample]
+                                        actions_valid_mask = actions_valid_mask[eval_sample]
                                         gt_actions = gt_actions[eval_sample]
                                         pred_actions = pred_actions[eval_sample]
-                                        gt_actions = gt_actions * human_actions_valid_mask
-                                        pred_actions = pred_actions * human_actions_valid_mask
+                                        gt_actions = gt_actions * actions_valid_mask
+                                        pred_actions = pred_actions * actions_valid_mask
                                         
                                         # Compute accuracy metrics
                                         batch_accuracy = get_action_accuracy(
@@ -459,8 +459,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                         eval_accuracy.append(batch_accuracy)
                                         
                                         # Compute L1 loss, num should not be 0 here since we have checked eval_sample
-                                        human_actions_valid_num = torch.sum(human_actions_valid_mask)
-                                        batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
+                                        actions_valid_num = torch.sum(actions_valid_mask)
+                                        batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / actions_valid_num
                                         eval_l1_loss.append(batch_l1_loss)
                                     
                                     if cfg.training.max_val_steps and batch_idx >= (cfg.training.max_val_steps-1):
@@ -551,8 +551,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         """Preprocess batch for training"""
         # Extract data from batch
         pixel_values = batch["pixel_values"]
-        human_actions = batch["human_actions"]
-        human_actions_valid_mask = batch["human_actions_valid_mask"]
+        actions = batch["actions"]
+        actions_valid_mask = batch["actions_valid_mask"]
 
         input_ids = batch["input_ids"]
 
@@ -564,7 +564,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Build causal mask and position ids
         # We need to move the new created tensors to the same device as the input prepared by the accelerate
         # get causal mask by the first unignored index of labels 
-        causal_mask, vlm_position_ids, human_action_position_ids = (
+        causal_mask, vlm_position_ids, action_position_ids = (
             model.build_causal_mask_and_position_ids(   
                 batch["attention_mask"], batch["answer_start_idx"], self.dtype
             )
@@ -575,17 +575,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "labels": batch["labels"],
             "pixel_values": pixel_values.to(self.dtype),
             "vlm_position_ids": vlm_position_ids,
-            "human_action_position_ids": human_action_position_ids,
-            "human_actions": human_actions.to(self.dtype),
-            "human_actions_valid_mask": human_actions_valid_mask,
+            "action_position_ids": action_position_ids,
+            "actions": actions.to(self.dtype),
+            "actions_valid_mask": actions_valid_mask,
         }
         
         if split_mask:
-            vlm_mask, human_action_mask = (
+            vlm_mask, action_mask = (
                 model.split_full_mask_into_submasks(causal_mask)
             )
             inputs["vlm_mask"] = vlm_mask
-            inputs["human_action_mask"] = human_action_mask
+            inputs["action_mask"] = action_mask
         else:
             inputs["causal_mask"] = causal_mask
 

@@ -162,7 +162,7 @@ training:
   tqdm_interval_sec: 1.0
 
 mixture:
-  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then human_action
+  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action
   vlm:   # gemma
     hidden_size: 2048
     intermediate_size: 16384
@@ -172,7 +172,7 @@ mixture:
     use_lora: ${lora}
     adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0  # 10000 in gemma
-  human_action:
+  action:
     hidden_size: 1024
     intermediate_size: 4096
     use_final_norm: True
