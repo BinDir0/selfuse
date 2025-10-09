@@ -19,7 +19,7 @@ from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
 from src.utils.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
-from src.utils.geometry import transform_wrist_to_target_frame, rot_matrix_from_6drot, rot_matrix_to_6drot
+from src.utils.geometry import transform_wrist_to_target_frame, homo_matrix_from_trans_6drot, homo_matrix_to_trans_6drot
 from src.model.common.normalizer import LinearNormalizer
 from .base_dataset import BaseImageDataset, BaseDataCollator
 from .base_vl_preprocessor import BaseVLPreprocessor
@@ -157,7 +157,7 @@ class LegendVLADataset(BaseImageDataset):
         instruction = instruction[idx]
 
         # Process all images in batch
-        processed_results = self.preprocessor(images=image, text=instruction, states=state, human_actions=action, objective=self.objective)
+        processed_results = self.preprocessor(images=image, text=instruction, states=state, actions=action, objective=self.objective)
 
         data = {
             'input_ids': processed_results['input_ids'],
@@ -166,8 +166,8 @@ class LegendVLADataset(BaseImageDataset):
             'pixel_values': processed_results['pixel_values'], 
         }
         if self.objective != "train_ar":
-            data['human_actions'] = action
-            data['human_actions_valid_mask'] = action_valid_mask
+            data['actions'] = action
+            data['actions_valid_mask'] = action_valid_mask
         if self.objective != "train_flow":
             data['labels'] = processed_results['labels']
         return data
@@ -468,7 +468,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
         data = {
             'states': state,
-            'human_actions': action,
+            'actions': action,
         }
         return data
 
@@ -602,20 +602,14 @@ def get_relative_action(state, action):
     Returns:
         action: np.ndarray, shape: [H, wrist_dim + hand_dim]
     '''
-    action[..., :6] = action[..., :6] - state[:6]
-    wrist_action_rot_mat = [
-        rot_matrix_from_6drot(action[..., 6:12]),
-        rot_matrix_from_6drot(action[..., 12:18])
-    ]
-    wrist_state_rot_mat = [
-        rot_matrix_from_6drot(state[6:12]),
-        rot_matrix_from_6drot(state[12:18])
-    ]
     for idx in range(2): 
-        wrist_action_rot_mat[idx] = wrist_action_rot_mat[idx] @ np.linalg.pinv(wrist_state_rot_mat[idx])
-
-    action[..., 6:12] = rot_matrix_to_6drot(wrist_action_rot_mat[0])
-    action[..., 12:18] = rot_matrix_to_6drot(wrist_action_rot_mat[1])
+        wrist_action_homo_mat = homo_matrix_from_trans_6drot(action[..., idx*3 : idx*3+3], action[..., 6+idx*6 : 6+idx*6+6])
+        wrist_state_homo_mat = homo_matrix_from_trans_6drot(state[idx*3 : idx*3+3], state[6+idx*6 : 6+idx*6+6])
+        wrist_action_homo_mat = np.linalg.pinv(wrist_state_homo_mat) @ wrist_action_homo_mat
+        trans, rot_6d = homo_matrix_to_trans_6drot(wrist_action_homo_mat)
+        action[..., idx*3 : idx*3+3] = trans
+        action[..., 6+idx*6 : 6+idx*6+6] = rot_6d
+    
     action[..., 18:] = action[..., 18:] - state[18:]
     return action
 
@@ -680,7 +674,7 @@ def process_state_action(
 
     if normalizer is not None:
         state = normalizer['states'](processed_state)
-        action = normalizer['human_actions'](processed_action)
+        action = normalizer['actions'](processed_action)
     else:
         state = processed_state
         action = processed_action
@@ -731,7 +725,7 @@ def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
     normalizer.finish_streaming_fit()
     # ignore the wrist rotation
     normalizer.ignore_dim(key='states', dim=slice(6, 18))
-    normalizer.ignore_dim(key='human_actions', dim=slice(6, 18))
+    normalizer.ignore_dim(key='actions', dim=slice(6, 18))
 
     def print_dict(d):
         for k, v in d.items():
