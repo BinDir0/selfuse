@@ -561,6 +561,43 @@ def rot_matrix_to_6drot(rot_matrix):
     
     return rot_6d
 
+def homo_matrix_to_trans_6drot(homo_matrix):
+    '''
+    Args:
+        homo_matrix: torch.Tensor or np.ndarray, shape: [..., 4, 4]
+    Returns:
+        trans: torch.Tensor or np.ndarray, shape: [..., 3]
+        rot_6d: torch.Tensor or np.ndarray, shape: [..., 6]
+    '''
+    rot_matrix = homo_matrix[..., :3, :3]
+    trans = homo_matrix[..., :3, 3]
+    rot_6d = rot_matrix_to_6drot(rot_matrix)
+    return trans, rot_6d
+
+def homo_matrix_from_trans_6drot(trans, rot_6d):
+    '''
+    Args:
+        trans: torch.Tensor or np.ndarray, shape: [..., 3]
+        rot_6d: torch.Tensor or np.ndarray, shape: [..., 6]
+    Returns:
+        homo_matrix: torch.Tensor or np.ndarray, shape: [..., 4, 4]
+    '''
+    assert trans.shape[:-1] == rot_6d.shape[:-1], "trans and rot_6d must have the same shape, except the last dimension"
+    if isinstance(trans, np.ndarray):
+        is_numpy = True
+        trans = torch.from_numpy(trans)
+        rot_6d = torch.from_numpy(rot_6d)
+    else:
+        is_numpy = False
+    rot_matrix = rot_matrix_from_6drot(rot_6d)
+    homo_matrix = torch.zeros(trans.shape[:-1] + (4, 4), device=trans.device, dtype=trans.dtype)
+    homo_matrix[..., :3, :3] = rot_matrix
+    homo_matrix[..., :3, 3] = trans
+    homo_matrix[..., 3, 3] = 1
+    if is_numpy:
+        homo_matrix = homo_matrix.numpy()
+    return homo_matrix
+
 def transform_to_target_frame(pose, target_extrinsic):
     '''
     Transform the pose to the target frame.
