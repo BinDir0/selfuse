@@ -48,6 +48,7 @@ from src.model.action.fast_tokenizer import UniversalActionProcessor
 from src.utils.mano_vis import mano_forward, vis_hand_plot
 from src.utils.mano_utils import rot6d_to_rotmat, sample_to_manovis
 from visualize import HandVisualizer, sample_for_vis
+from src.dataset.legendvla_dataset import get_absolute_action, transform_wrist_to_target_frame
 import cv2
 from src.utils.mano_utils import invert_extrinsics
 
@@ -74,10 +75,10 @@ def preprocess_batch_for_inference(batch, model, device, dtype=torch.float32, sa
             attention_mask, answer_start_idx, dtype
         )
     )
-
+    max_vlm_tokens = input_ids.shape[-1]
     # Split mask for inference
     vlm_mask, human_action_mask = (
-        unwrapped_model.split_full_mask_into_submasks(causal_mask)
+        unwrapped_model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
     )
 
     inputs = {
@@ -303,7 +304,7 @@ if __name__ == "__main__":
         action_pred_dict = {"human_actions": action_pred_cpu}
         action_pred_unnormalized = normalizer.unnormalize(action_pred_dict)
 
-        print("action_pred_unnormalized:", action_pred_unnormalized["human_actions"])
+
         image = np.array(raw_sample['image'].squeeze(0))         # [H, W, 3]
         extrinsic_w2c = torch.from_numpy(raw_sample['extrinsic']) # [N, 4, 4]
         extrinsic_c2w = invert_extrinsics(extrinsic_w2c)
@@ -314,10 +315,16 @@ if __name__ == "__main__":
                     [0, 0, 1]
                 ])
 
+        state_in_camera = np.zeros_like(raw_sample['state'])
+        state_in_camera[:18] = transform_wrist_to_target_frame(raw_sample['state'][:18], np.array(extrinsic_w2c[0]))
+        state_in_camera[18:] = raw_sample['state'][18:]
+        print(state_in_camera.squeeze(0).shape, action_pred_unnormalized["human_actions"].squeeze(0).shape)
+        action_pred = get_absolute_action(state_in_camera.squeeze(0), action_pred_unnormalized["human_actions"].squeeze(0))
+
         mano_shape = raw_sample['action_shape'] # [N, 20]
         action_wrist = raw_sample['action'][:,:18]
         action_hand = raw_sample['action'][:,18:]
-        mano_data = sample_to_manovis(action_pred_unnormalized["human_actions"].squeeze(0), action_wrist, action_hand, mano_shape, extrinsic_c2w)
+        mano_data = sample_to_manovis(action_pred, action_wrist, action_hand, mano_shape, extrinsic_c2w)
         output_dir = f"/data/fanlian/outputs/test_legendvla_workspace/{i}"
         
         # Convert single frame [H, W, 3] to sequence format [N, H, W, 3] for vis_hand_plot
@@ -327,141 +334,141 @@ if __name__ == "__main__":
                 
         vis_hand_plot(mano_data['predicted']['rot'], mano_data['predicted']['trans'], mano_data['predicted']['theta'], mano_data['beta'], mano_data['sides'], image_sequence, intrinsic, extrinsic_c2w, output_dir, fps=30)
 
-    #     mano_root = cfg.testing.mano_root_dir
-    #     print(f"Initializing hand visualizer with MANO root: {mano_root}")
-    #     visualizer = HandVisualizer(mano_root=mano_root)
+        mano_root = cfg.testing.mano_root_dir
+        print(f"Initializing hand visualizer with MANO root: {mano_root}")
+        visualizer = HandVisualizer(mano_root=mano_root)
 
-    #     mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, background_image, presence = sample_for_vis(
-    #         action_pred_unnormalized["human_actions"].squeeze(0), raw_sample)
+        mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, background_image, presence = sample_for_vis(
+            action_pred, raw_sample)
 
-    #     if mano_sequence is None:
-    #         raise ValueError(f"Failed to load complete data from file")
+        if mano_sequence is None:
+            raise ValueError(f"Failed to load complete data from file")
         
-    #     # Process background image
-    #     # Convert from tensor to numpy array if necessary
-    #     if isinstance(background_image, torch.Tensor):
-    #         background_img = background_image.cpu().numpy()
-    #     else:
-    #         background_img = background_image
+        # Process background image
+        # Convert from tensor to numpy array if necessary
+        if isinstance(background_image, torch.Tensor):
+            background_img = background_image.cpu().numpy()
+        else:
+            background_img = background_image
         
-    #     # Ensure image is in uint8 format
-    #     if background_img.dtype != np.uint8:
-    #         if background_img.max() <= 1.0:
-    #             background_img = (background_img * 255).astype(np.uint8)
-    #         else:
-    #             background_img = background_img.astype(np.uint8)
+        # Ensure image is in uint8 format
+        if background_img.dtype != np.uint8:
+            if background_img.max() <= 1.0:
+                background_img = (background_img * 255).astype(np.uint8)
+            else:
+                background_img = background_img.astype(np.uint8)
         
-    #     # Convert from RGB to BGR for OpenCV compatibility (assuming input is RGB)
-    #     background_img = cv2.cvtColor(background_img, cv2.COLOR_RGB2BGR)
+        # Convert from RGB to BGR for OpenCV compatibility (assuming input is RGB)
+        background_img = cv2.cvtColor(background_img, cv2.COLOR_RGB2BGR)
         
-    #     # Resize image from 384x384 to target resolution
-    #     original_size = background_img.shape[:2]  # (height, width)
-    #     target_size = (cfg.testing.target_width, cfg.testing.target_height)  # (width, height) for cv2.resize
+        # Resize image from 384x384 to target resolution
+        original_size = background_img.shape[:2]  # (height, width)
+        target_size = (cfg.testing.target_width, cfg.testing.target_height)  # (width, height) for cv2.resize
         
-    #     print(f"Original background image size: {original_size[1]}x{original_size[0]}")
-    #     background_img = cv2.resize(background_img, target_size, interpolation=cv2.INTER_CUBIC)
-    #     print(f"Resized background image to: {background_img.shape[1]}x{background_img.shape[0]}")
+        print(f"Original background image size: {original_size[1]}x{original_size[0]}")
+        background_img = cv2.resize(background_img, target_size, interpolation=cv2.INTER_CUBIC)
+        print(f"Resized background image to: {background_img.shape[1]}x{background_img.shape[0]}")
         
-    #     # Move to device and convert to float32 to avoid dtype issues
-    #     mano_sequence = mano_sequence.to(visualizer.device).float()
-    #     wrist_sequence = wrist_sequence.to(visualizer.device).float()
-    #     if cfg.testing.show_gt:
-    #         gt_mano_sequence = gt_mano_sequence.to(visualizer.device).float()
-    #         gt_wrist_sequence = gt_wrist_sequence.to(visualizer.device).float()
+        # Move to device and convert to float32 to avoid dtype issues
+        mano_sequence = mano_sequence.to(visualizer.device).float()
+        wrist_sequence = wrist_sequence.to(visualizer.device).float()
+        if cfg.testing.show_gt:
+            gt_mano_sequence = gt_mano_sequence.to(visualizer.device).float()
+            gt_wrist_sequence = gt_wrist_sequence.to(visualizer.device).float()
         
         
-    #     num_frames = mano_sequence.shape[0]
-    #     print(f"Detected {num_frames} frames in the prediction sequences")
+        num_frames = mano_sequence.shape[0]
+        print(f"Detected {num_frames} frames in the prediction sequences")
         
-    #     # Extract camera intrinsics
-    #     # Convert numpy array to torch tensor if necessary for .item() method
+        # Extract camera intrinsics
+        # Convert numpy array to torch tensor if necessary for .item() method
         
-    #     # Original camera intrinsics for 384x384 image
-    #     fx_original = intrinsic_matrix[0]
-    #     fy_original = intrinsic_matrix[1]
-    #     cx_original = intrinsic_matrix[2]
-    #     cy_original = intrinsic_matrix[3]
+        # Original camera intrinsics for 384x384 image
+        fx_original = intrinsic_matrix[0]
+        fy_original = intrinsic_matrix[1]
+        cx_original = intrinsic_matrix[2]
+        cy_original = intrinsic_matrix[3]
 
 
-    #     # Calculate scaling factors for resizing from 384x384 to target resolution
-    #     # Different scaling factors for width and height due to aspect ratio change
-    #     scale_factor_x = cfg.testing.target_width / 384.0  # Scale factor for width
-    #     scale_factor_y = cfg.testing.target_height / 384.0  # Scale factor for height
+        # Calculate scaling factors for resizing from 384x384 to target resolution
+        # Different scaling factors for width and height due to aspect ratio change
+        scale_factor_x = cfg.testing.target_width / 384.0  # Scale factor for width
+        scale_factor_y = cfg.testing.target_height / 384.0  # Scale factor for height
         
-    #     # Scale camera intrinsics accordingly
-    #     fx = fx_original * scale_factor_x  # Scale focal length in x direction
-    #     fy = fy_original * scale_factor_y  # Scale focal length in y direction
-    #     cx = cx_original * scale_factor_x  # Scale principal point x coordinate
-    #     cy = cy_original * scale_factor_y  # Scale principal point y coordinate
+        # Scale camera intrinsics accordingly
+        fx = fx_original * scale_factor_x  # Scale focal length in x direction
+        fy = fy_original * scale_factor_y  # Scale focal length in y direction
+        cx = cx_original * scale_factor_x  # Scale principal point x coordinate
+        cy = cy_original * scale_factor_y  # Scale principal point y coordinate
         
-    #     print(f"Original camera intrinsics (384x384):")
-    #     print(f"  fx={fx_original:.3f}, fy={fy_original:.3f}")
-    #     print(f"  cx={cx_original:.3f}, cy={cy_original:.3f}")
-    #     print(f"Scaled camera intrinsics ({cfg.testing.target_width}x{cfg.testing.target_height}, scale factors: x={scale_factor_x:.3f}, y={scale_factor_y:.3f}):")
-    #     print(f"  fx={fx:.3f}, fy={fy:.3f}")
-    #     print(f"  cx={cx:.3f}, cy={cy:.3f}")
+        print(f"Original camera intrinsics (384x384):")
+        print(f"  fx={fx_original:.3f}, fy={fy_original:.3f}")
+        print(f"  cx={cx_original:.3f}, cy={cy_original:.3f}")
+        print(f"Scaled camera intrinsics ({cfg.testing.target_width}x{cfg.testing.target_height}, scale factors: x={scale_factor_x:.3f}, y={scale_factor_y:.3f}):")
+        print(f"  fx={fx:.3f}, fy={fy:.3f}")
+        print(f"  cx={cx:.3f}, cy={cy:.3f}")
         
-    #     # Process extrinsic matrices
-    #     extrinsic_sequence = None
-    #     if extrinsic_matrices is not None:
-    #         # Convert numpy array to torch tensor if necessary
-    #         if isinstance(extrinsic_matrices, np.ndarray):
-    #             extrinsic_matrices = torch.from_numpy(extrinsic_matrices).float()
+        # Process extrinsic matrices
+        extrinsic_sequence = None
+        if extrinsic_matrices is not None:
+            # Convert numpy array to torch tensor if necessary
+            if isinstance(extrinsic_matrices, np.ndarray):
+                extrinsic_matrices = torch.from_numpy(extrinsic_matrices).float()
             
-    #         # Validate extrinsic sequence shape matches frame count
-    #         if extrinsic_matrices.shape[0] != num_frames:
-    #             print(f"Warning: Extrinsic sequence frames ({extrinsic_matrices.shape[0]}) does not match prediction frames ({num_frames})")
-    #             print(f"Using identity transformation instead")
-    #         else:
-    #             extrinsic_sequence = extrinsic_matrices.to(visualizer.device).float()
-    #             print(f"Loaded camera extrinsics with {extrinsic_sequence.shape[0]} frames")
-    #     else:
-    #         print("No extrinsic data available, using identity transformation")
+            # Validate extrinsic sequence shape matches frame count
+            if extrinsic_matrices.shape[0] != num_frames:
+                print(f"Warning: Extrinsic sequence frames ({extrinsic_matrices.shape[0]}) does not match prediction frames ({num_frames})")
+                print(f"Using identity transformation instead")
+            else:
+                extrinsic_sequence = extrinsic_matrices.to(visualizer.device).float()
+                print(f"Loaded camera extrinsics with {extrinsic_sequence.shape[0]} frames")
+        else:
+            print("No extrinsic data available, using identity transformation")
         
-    #     # Display presence information
-    #     presence_desc = {1: "left hand only", 2: "right hand only", 3: "both hands"}
-    #     print(f"  - Hand visibility: {presence_desc.get(presence, 'unknown')} (presence={presence})")
+        # Display presence information
+        presence_desc = {1: "left hand only", 2: "right hand only", 3: "both hands"}
+        print(f"  - Hand visibility: {presence_desc.get(presence, 'unknown')} (presence={presence})")
         
-    #     # Create output directory if it doesn't exist
-    #     os.makedirs(cfg.testing.output_dir, exist_ok=True)
+        # Create output directory if it doesn't exist
+        os.makedirs(cfg.testing.output_dir, exist_ok=True)
         
-    #     # Construct full output paths with sample index to avoid overwriting
-    #     # Extract base name and extension from video names
-    #     video_2d_base = os.path.splitext(cfg.testing.video_name)[0]
-    #     video_3d_base = os.path.splitext(cfg.testing.video_3d_name)[0]
+        # Construct full output paths with sample index to avoid overwriting
+        # Extract base name and extension from video names
+        video_2d_base = os.path.splitext(cfg.testing.video_name)[0]
+        video_3d_base = os.path.splitext(cfg.testing.video_3d_name)[0]
         
-    #     # Add sample index to make each video unique
-    #     output_path_2d = os.path.join(cfg.testing.output_dir, f"{video_2d_base}_sample_{i+1:03d}.mp4")
-    #     output_path_3d = os.path.join(cfg.testing.output_dir, f"{video_3d_base}_sample_{i+1:03d}.mp4")
+        # Add sample index to make each video unique
+        output_path_2d = os.path.join(cfg.testing.output_dir, f"{video_2d_base}_sample_{i+1:03d}.mp4")
+        output_path_3d = os.path.join(cfg.testing.output_dir, f"{video_3d_base}_sample_{i+1:03d}.mp4")
         
-    #     # Prepare ground truth data if show_gt is enabled
-    #     gt_mano_seq = gt_mano_sequence if cfg.testing.show_gt else None
-    #     gt_wrist_seq = gt_wrist_sequence if cfg.testing.show_gt else None
+        # Prepare ground truth data if show_gt is enabled
+        gt_mano_seq = gt_mano_sequence if cfg.testing.show_gt else None
+        gt_wrist_seq = gt_wrist_sequence if cfg.testing.show_gt else None
         
-    #     # Generate 2D projection video (original functionality)
-    #     print(f"Generating 2D projection video...")
-    #     visualizer.generate_2d_projection_video(background_img, mano_sequence, wrist_sequence, 
-    #                                 output_path_2d, cfg.testing.fps, fx=fx, fy=fy, cx=cx, cy=cy,
-    #                                 extrinsic_sequence=None,
-    #                                 show_mesh=cfg.testing.show_mesh, mesh_alpha=cfg.testing.mesh_alpha,
-    #                                 gt_mano_sequence=gt_mano_seq, gt_wrist_sequence=gt_wrist_seq,
-    #                                 presence=presence)
+        # Generate 2D projection video (original functionality)
+        print(f"Generating 2D projection video...")
+        visualizer.generate_2d_projection_video(background_img, mano_sequence, wrist_sequence, 
+                                    output_path_2d, cfg.testing.fps, fx=fx, fy=fy, cx=cx, cy=cy,
+                                    extrinsic_sequence=None,
+                                    show_mesh=cfg.testing.show_mesh, mesh_alpha=cfg.testing.mesh_alpha,
+                                    gt_mano_sequence=gt_mano_seq, gt_wrist_sequence=gt_wrist_seq,
+                                    presence=presence)
         
-    #     # Generate 3D mesh and skeleton video in 3D coordinate space
-    #     # print(f"Generating 3D mesh + skeleton video...")
-    #     # visualizer.generate_3d_mesh_skeleton_video(mano_sequence, wrist_sequence,
-    #     #                                           output_path_3d, cfg.testing.fps, 
-    #     #                                           extrinsic_sequence=None,
-    #     #                                           gt_mano_sequence=gt_mano_seq, gt_wrist_sequence=gt_wrist_seq,
-    #     #                                           presence=presence)
+        # Generate 3D mesh and skeleton video in 3D coordinate space
+        # print(f"Generating 3D mesh + skeleton video...")
+        # visualizer.generate_3d_mesh_skeleton_video(mano_sequence, wrist_sequence,
+        #                                           output_path_3d, cfg.testing.fps, 
+        #                                           extrinsic_sequence=None,
+        #                                           gt_mano_sequence=gt_mano_seq, gt_wrist_sequence=gt_wrist_seq,
+        #                                           presence=presence)
         
-    #     print(f"Sample {i+1}/{len(sample_indices)} (index {sample_idx}) completed:")
-    #     print(f"  2D projection video: {output_path_2d}")
-    #     # print(f"  3D mesh + skeleton video: {output_path_3d}")
+        print(f"Sample {i+1}/{len(sample_indices)} (index {sample_idx}) completed:")
+        print(f"  2D projection video: {output_path_2d}")
+        # print(f"  3D mesh + skeleton video: {output_path_3d}")
     
-    # # Print summary of all generated videos
-    # print(f"\n=== Summary ===")
-    # print(f"Successfully processed {len(sample_indices)} samples")
-    # print(f"All videos saved to: {cfg.testing.output_dir}")
-    # print(f"Generated {len(sample_indices)} 2D projection videos and {len(sample_indices)} 3D mesh videos")
+    # Print summary of all generated videos
+    print(f"\n=== Summary ===")
+    print(f"Successfully processed {len(sample_indices)} samples")
+    print(f"All videos saved to: {cfg.testing.output_dir}")
+    print(f"Generated {len(sample_indices)} 2D projection videos and {len(sample_indices)} 3D mesh videos")
 

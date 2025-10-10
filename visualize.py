@@ -1118,6 +1118,9 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
     """
     Process the sample to be ready for mano_vis
     """
+    if isinstance(action_pred, np.ndarray):
+        action_pred = torch.from_numpy(action_pred)
+        
     wrist_sequence = action_pred[:, :18]  # Expected shape: [30, 18]    
     mano_sequence = action_pred[:, 18:]  # Expected shape: [30, 30]
 

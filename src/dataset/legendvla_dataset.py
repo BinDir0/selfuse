@@ -701,6 +701,52 @@ def get_relative_action(state, action):
     action[..., 18:] = action[..., 18:] - state[18:]
     return action
 
+def get_absolute_action(state, relative_action):
+    '''
+    Convert relative action back to absolute action.
+    This is the inverse operation of get_relative_action.
+    
+    Args:
+        state: np.ndarray, shape: [wrist_dim + hand_dim] - current state
+        relative_action: np.ndarray, shape: [H, wrist_dim + hand_dim] - relative action
+    Returns:
+        absolute_action: np.ndarray, shape: [H, wrist_dim + hand_dim] - absolute action
+    '''
+    if isinstance(state, torch.Tensor):
+        state = state.cpu().numpy()
+    if isinstance(relative_action, torch.Tensor):
+        relative_action = relative_action.cpu().numpy()
+    # Create zero matrix with same shape to avoid modifying input
+    absolute_action = np.zeros_like(np.array(relative_action))
+    
+    # Convert relative translation back to absolute: absolute = relative + state
+    absolute_action[..., :6] = relative_action[..., :6] + state[:6]
+    
+    # Convert relative rotation back to absolute
+    # Get relative rotation matrices
+    relative_rot_mat = [
+        rot_matrix_from_6drot(relative_action[..., 6:12]),
+        rot_matrix_from_6drot(relative_action[..., 12:18])
+    ]
+    # Get state rotation matrices
+    state_rot_mat = [
+        rot_matrix_from_6drot(state[6:12]),
+        rot_matrix_from_6drot(state[12:18])
+    ]
+    
+    # Compute absolute rotation: absolute_rot = relative_rot @ state_rot
+    for idx in range(2):
+        absolute_rot_mat = relative_rot_mat[idx] @ state_rot_mat[idx]
+    
+    absolute_action[..., 6:12] = rot_matrix_to_6drot(absolute_rot_mat[0])
+
+    absolute_action[..., 12:18] = rot_matrix_to_6drot(absolute_rot_mat[1])
+    
+    # Convert relative hand parameters back to absolute: absolute = relative + state
+    absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]
+    
+    return absolute_action
+
 
 def process_state_action(
     wrist_state, 

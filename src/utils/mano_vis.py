@@ -1894,7 +1894,7 @@ def vis_hand_plot(rot, trans, theta, beta, sides, image_paths, intrinsic_matrix,
         # print(rot[side].device, trans[side].device, camera_extrinsics.device)
         rot_c[side], trans_c[side] = world_to_camera(camera_extrinsics, rot=rot[side], trans=trans[side])
     hand_data = mano_forward(rot_c, trans_c, theta, beta, sides, relative = True)
-
+    
     if not isinstance(image_paths, np.ndarray):
         raw_frames = []
         for path in image_paths:

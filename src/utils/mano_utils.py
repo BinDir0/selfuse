@@ -1255,13 +1255,16 @@ def sample_to_manovis(action_pred: torch.Tensor, action_wrist: torch.Tensor, act
     """
     
     # Convert inputs to torch tensors if they are numpy arrays
+    if isinstance(action_pred, np.ndarray):
+        action_pred = torch.from_numpy(action_pred).float()
     if isinstance(action_wrist, np.ndarray):
         action_wrist = torch.from_numpy(action_wrist).float()
     if isinstance(action_hand, np.ndarray):
         action_hand = torch.from_numpy(action_hand).float()
     if isinstance(mano_shape, np.ndarray):
         mano_shape = torch.from_numpy(mano_shape).float()
-    
+    if isinstance(extrinsic_c2w, np.ndarray):
+        extrinsic_c2w = torch.from_numpy(extrinsic_c2w).float()
 
     
     # Parse wrist actions [N, 18]: left_trans(3) + right_trans(3) + left_rot(6) + right_rot(6)
