@@ -144,7 +144,7 @@ class LegendVLADataset(BaseImageDataset):
         hand_state = sample['state/hand'].astype(np.float32)
         wrist_action = sample['action/wrist'].astype(np.float32)
         hand_action = sample['action/hand'].astype(np.float32)        
-        presence = sample['presence']   
+        presence = sample['presence']
         extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
         if self.n_obs_state_steps > 1:
             state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
@@ -279,9 +279,11 @@ class LegendVLADataset(BaseImageDataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
         curr_idx = idx
+        dataset_idx = 0
         for i, length in enumerate(self.sampler_lens):
             if curr_idx < length:
                 sample = self.samplers[i].sample_sequence(curr_idx)
+                dataset_idx = i
                 break
             curr_idx -= length
         
@@ -289,7 +291,11 @@ class LegendVLADataset(BaseImageDataset):
         if self.return_raw_sample:
             # Convert numpy arrays to torch tensors for consistency
             data = self.sample_for_inference(sample)
-            return data
+            torch_data = dict_apply(data, torch.from_numpy)
+            # Add dataset source information
+            torch_data['dataset_source'] = self.zarr_paths[dataset_idx]
+            torch_data['dataset_idx'] = dataset_idx
+            return torch_data
             
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
@@ -456,7 +462,9 @@ class LegendUnifiedDataset(BaseImageDataset):
             self.shape_meta = dict()
             vla_sample = self.vla_dataset[0]
             for key in vla_sample.keys():
-                self.shape_meta[key] = vla_sample[key].shape
+                # Only store shape for tensor-like objects, skip strings and other non-tensor types
+                if hasattr(vla_sample[key], 'shape'):
+                    self.shape_meta[key] = vla_sample[key].shape
         if idx < len(self.vla_dataset):
             return self.vla_dataset[idx]
         elif self.vlm_dataset is not None:
@@ -707,17 +715,13 @@ def get_absolute_action(state, relative_action):
     This is the inverse operation of get_relative_action.
     
     Args:
-        state: np.ndarray, shape: [wrist_dim + hand_dim] - current state
-        relative_action: np.ndarray, shape: [H, wrist_dim + hand_dim] - relative action
+        state: torch.Tensor, shape: [wrist_dim + hand_dim] - current state
+        relative_action: torch.Tensor, shape: [H, wrist_dim + hand_dim] - relative action
     Returns:
-        absolute_action: np.ndarray, shape: [H, wrist_dim + hand_dim] - absolute action
+        absolute_action: torch.Tensor, shape: [H, wrist_dim + hand_dim] - absolute action
     '''
-    if isinstance(state, torch.Tensor):
-        state = state.cpu().numpy()
-    if isinstance(relative_action, torch.Tensor):
-        relative_action = relative_action.cpu().numpy()
     # Create zero matrix with same shape to avoid modifying input
-    absolute_action = np.zeros_like(np.array(relative_action))
+    absolute_action = torch.zeros_like(relative_action)
     
     # Convert relative translation back to absolute: absolute = relative + state
     absolute_action[..., :6] = relative_action[..., :6] + state[:6]
@@ -736,11 +740,11 @@ def get_absolute_action(state, relative_action):
     
     # Compute absolute rotation: absolute_rot = relative_rot @ state_rot
     for idx in range(2):
-        absolute_rot_mat = relative_rot_mat[idx] @ state_rot_mat[idx]
+        relative_rot_mat[idx] = relative_rot_mat[idx] @ state_rot_mat[idx]
     
-    absolute_action[..., 6:12] = rot_matrix_to_6drot(absolute_rot_mat[0])
+    absolute_action[..., 6:12] = rot_matrix_to_6drot(relative_rot_mat[0])
 
-    absolute_action[..., 12:18] = rot_matrix_to_6drot(absolute_rot_mat[1])
+    absolute_action[..., 12:18] = rot_matrix_to_6drot(relative_rot_mat[1])
     
     # Convert relative hand parameters back to absolute: absolute = relative + state
     absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]

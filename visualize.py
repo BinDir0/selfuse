@@ -480,6 +480,12 @@ class HandVisualizer:
         
         if len(camera_extrinsic.shape) == 2:
             camera_extrinsic = camera_extrinsic.unsqueeze(0)
+        
+        # Ensure both tensors are on the same device
+        if camera_extrinsic.device != wrist_action.device:
+            camera_extrinsic = camera_extrinsic.to(wrist_action.device)
+        if camera_extrinsic.dtype != wrist_action.dtype:
+            camera_extrinsic = camera_extrinsic.to(wrist_action.dtype)
 
         B = wrist_action.shape[0]
 
@@ -564,6 +570,13 @@ class HandVisualizer:
             Tuple of (left_joints_world, right_joints_world, left_verts_world, right_verts_world)
             Each element can be None if the corresponding hand is not visible or vertices not requested
         """
+        # Ensure all tensors are on the same device
+        if extrinsic_matrix is not None:
+            if extrinsic_matrix.device != wrist_params.device:
+                extrinsic_matrix = extrinsic_matrix.to(wrist_params.device)
+            if extrinsic_matrix.dtype != wrist_params.dtype:
+                extrinsic_matrix = extrinsic_matrix.to(wrist_params.dtype)
+        
         # Transform wrist parameters from camera frame to world frame if extrinsic matrix is available
         if extrinsic_matrix is not None:
             wrist_params_world = self.transform_wrist_from_camera_to_world(wrist_params, extrinsic_matrix)
@@ -1117,6 +1130,18 @@ def find_sample_with_highest_loss(path: str) -> int:
 def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
     """
     Process the sample to be ready for mano_vis
+    Args:
+        action_pred: Action prediction [30, 30]
+        raw_sample: Raw sample dict
+        
+    Returns:
+        mano_sequence: MANO sequence [30, 30]
+        wrist_sequence: Wrist sequence [30, 18]
+        gt_mano_sequence: Ground truth MANO sequence [30, 30]
+        gt_wrist_sequence: Ground truth wrist sequence [30, 18]
+        intrinsic_matrix: Intrinsic matrix [4]
+        extrinsic_matrices: Extrinsic matrices [30, 4, 4]
+        presence: Presence [1]
     """
     if isinstance(action_pred, np.ndarray):
         action_pred = torch.from_numpy(action_pred)
@@ -1126,14 +1151,13 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
 
     # Extract ground truth data
     gt_wrist_sequence = raw_sample['action'][:, :18] # [30, 18]
-    gt_mano_sequence = torch.from_numpy(raw_sample['action'][:, 18:])  # [30, 30]]
+    gt_mano_sequence =  raw_sample['action'][:, 18:]  # [30, 30]]
 
     # transform the gt wrist sequence to the target frame
     gt_wrist_sequence = transform_wrist_to_target_frame(gt_wrist_sequence, raw_sample['extrinsic'][0])
-    gt_wrist_sequence = torch.from_numpy(gt_wrist_sequence)
     # Extract presence data (single integer for all frames)
     presence = raw_sample['presence'][0]
-    intrinsic_matrix = torch.from_numpy(raw_sample['intrinsic'][0])
+    intrinsic_matrix = raw_sample['intrinsic'][0]
      # Expected shape: [4]
 
     # Extract extrinsic parameters
@@ -1143,11 +1167,9 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
     # Replicate for all frames (30 frames)
     num_frames = mano_sequence.shape[0]
     # Use numpy repeat: first expand dims, then repeat along first axis
-    extrinsic_matrices = np.repeat(extrinsic_matrix[np.newaxis, :, :], num_frames, axis=0)  # [30, 4, 4]
-    extrinsic_matrices = torch.from_numpy(extrinsic_matrices)
-    background_image = raw_sample['image'].squeeze(0)  # Expected shape: [384, 384, 3]
+    extrinsic_matrices = extrinsic_matrix.unsqueeze(0).repeat(num_frames, 1, 1)  # [30, 4, 4]
     
-    return mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, background_image, presence
+    return mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, presence
 
 def load_complete_data(path: str, sample_id: int = 0) -> tuple:
     """

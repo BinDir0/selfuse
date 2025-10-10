@@ -825,6 +825,217 @@ def hand_2d_render(hands_data, camera_intrinsic, output_path, raw_frames=None,
     imageio.mimsave(output_path, frames, fps=fps, codec='libx264')
     print("PyRender video saved successfully!")
 
+def hand_2d_render_comparison(pred_hands_data, gt_hands_data, camera_intrinsic, output_path, 
+                             raw_frames=None, fps=30, render_res=(640, 480), 
+                             pred_colors=None, gt_colors=None, background_color=(0.0, 0.0, 0.0), 
+                             blend_alpha=0.9, valid_region=None):
+    """
+    Render both prediction and ground truth hands using PyRender with high-quality mesh rendering
+    
+    Args:
+        pred_hands_data: dict {'left': {'verts': (N,V,3), 'joints': (N,J,3), 'faces': (F,3)}, ...}
+        gt_hands_data: dict {'left': {'verts': (N,V,3), 'joints': (N,J,3), 'faces': (F,3)}, ...}
+        camera_intrinsic: (3, 3) camera intrinsic matrix
+        output_path: str, output video path
+        raw_frames: optional, (N, H, W, 3) background frames
+        fps: int, frame rate
+        render_res: tuple, (width, height) for rendering resolution
+        pred_colors: dict, colors for prediction hands {'left': (r,g,b), 'right': (r,g,b)}
+        gt_colors: dict, colors for ground truth hands {'left': (r,g,b), 'right': (r,g,b)}
+        background_color: tuple, (r,g,b) background color
+        blend_alpha: float, blending alpha with background frames
+        valid_region: tuple, (y1, y2, x1, x2) valid region for cropping
+    """
+    
+    # Default colors for predictions - 红色系
+    if pred_colors is None:
+        pred_colors = {
+            'left': (1.0, 0.2, 0.2),   # 红色
+            'right': (1.0, 0.4, 0.4)   # 浅红色
+        }
+    
+    # Default colors for ground truth - 绿色系
+    if gt_colors is None:
+        gt_colors = {
+            'left': (0.2, 1.0, 0.2),   # 绿色
+            'right': (0.4, 1.0, 0.4)   # 浅绿色
+        }
+    
+    # Get maximum frames from both datasets
+    pred_max_frames = max(hand_data['verts'].shape[0] for hand_data in pred_hands_data.values()) if pred_hands_data else 0
+    gt_max_frames = max(hand_data['verts'].shape[0] for hand_data in gt_hands_data.values()) if gt_hands_data else 0
+    max_frames = max(pred_max_frames, gt_max_frames)
+    
+    if raw_frames is not None:
+        if len(raw_frames.shape) == 3:
+            # If raw_frames is a single frame, expand it to match the number of frames
+            raw_frames = np.stack([raw_frames] * max_frames, axis=0)
+        width, height = raw_frames.shape[-2], raw_frames.shape[-3]
+    else:    
+        # Get rendering parameters
+        width, height = render_res
+    
+    fx, fy = camera_intrinsic[0, 0], camera_intrinsic[1, 1]
+    cx, cy = camera_intrinsic[0, 2], camera_intrinsic[1, 2]
+    
+    # Get total frames
+    print(f"Creating comparison video with {max_frames} frames...")
+    print(f"  Prediction frames: {pred_max_frames}")
+    print(f"  Ground truth frames: {gt_max_frames}")
+    
+    frames = []
+    
+    for frame_idx in trange(max_frames, desc="Comparison rendering"):
+        # Initialize renderer for this frame
+        renderer = pyrender.OffscreenRenderer(
+            viewport_width=width, 
+            viewport_height=height,
+            point_size=1.0
+        )
+        
+        # Create scene
+        scene = pyrender.Scene(
+            bg_color=[*background_color, 1.0],
+            ambient_light=(0.3, 0.3, 0.3)
+        )
+        
+        # Add prediction meshes
+        if pred_hands_data:
+            for side, hand_data in pred_hands_data.items():
+                if frame_idx >= hand_data['verts'].shape[0]:
+                    continue
+                    
+                # Get vertices and faces for current frame
+                vertices = hand_data['verts'][frame_idx].numpy()  # (V, 3)
+                faces = hand_data['faces'].numpy()  # (F, 3)
+                
+                # Create trimesh with prediction colors
+                mesh_color = pred_colors.get(side, (1.0, 0.2, 0.2))
+                vertex_colors = np.array([(*mesh_color, 0.8)] * vertices.shape[0])  # Slightly transparent
+                
+                tri_mesh = trimesh.Trimesh(
+                    vertices=vertices,
+                    faces=faces,
+                    vertex_colors=vertex_colors
+                )
+                
+                # Apply coordinate system transformation (PyRender uses different convention)
+                transform = np.eye(4)
+                transform[1, 1] = -1  # Flip Y
+                transform[2, 2] = -1  # Flip Z
+                tri_mesh.apply_transform(transform)
+                
+                # Create PyRender mesh with material
+                material = pyrender.MetallicRoughnessMaterial(
+                    metallicFactor=0.1,
+                    roughnessFactor=0.8,
+                    alphaMode='BLEND',  # Use BLEND for transparency
+                    baseColorFactor=(*mesh_color, 0.8)
+                )
+                
+                py_mesh = pyrender.Mesh.from_trimesh(tri_mesh, material=material)
+                scene.add(py_mesh, name=f'pred_hand_{side}')
+        
+        # Add ground truth meshes
+        if gt_hands_data:
+            for side, hand_data in gt_hands_data.items():
+                if frame_idx >= hand_data['verts'].shape[0]:
+                    continue
+                    
+                # Get vertices and faces for current frame
+                vertices = hand_data['verts'][frame_idx].numpy()  # (V, 3)
+                faces = hand_data['faces'].numpy()  # (F, 3)
+                
+                # Create trimesh with ground truth colors
+                mesh_color = gt_colors.get(side, (0.2, 1.0, 0.2))
+                vertex_colors = np.array([(*mesh_color, 0.8)] * vertices.shape[0])  # Slightly transparent
+                
+                tri_mesh = trimesh.Trimesh(
+                    vertices=vertices,
+                    faces=faces,
+                    vertex_colors=vertex_colors
+                )
+                
+                # Apply coordinate system transformation (PyRender uses different convention)
+                transform = np.eye(4)
+                transform[1, 1] = -1  # Flip Y
+                transform[2, 2] = -1  # Flip Z
+                tri_mesh.apply_transform(transform)
+                
+                # Create PyRender mesh with material
+                material = pyrender.MetallicRoughnessMaterial(
+                    metallicFactor=0.1,
+                    roughnessFactor=0.8,
+                    alphaMode='BLEND',  # Use BLEND for transparency
+                    baseColorFactor=(*mesh_color, 0.8)
+                )
+                
+                py_mesh = pyrender.Mesh.from_trimesh(tri_mesh, material=material)
+                scene.add(py_mesh, name=f'gt_hand_{side}')
+        
+        # Set up camera
+        camera = pyrender.IntrinsicsCamera(
+            fx=fx, fy=fy, cx=cx, cy=cy, znear=0.1, zfar=10.0
+        )
+        
+        camera_pose = np.eye(4)
+        scene.add(camera, pose=camera_pose)
+        
+        # Add lighting
+        light_nodes = create_raymond_lights()
+        for node in light_nodes:
+            scene.add_node(node)
+        
+        # Additional point light at camera position
+        point_light = pyrender.PointLight(color=np.ones(3), intensity=2.0)
+        light_pose = np.eye(4)
+        light_pose[2, 3] = 1.0  # Move light slightly forward
+        scene.add(point_light, pose=light_pose)
+        
+        # Render
+        try:
+            color, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+            color = color.astype(np.float32) / 255.0
+        except Exception as e:
+            print(f"Rendering error at frame {frame_idx}: {e}")
+            # Create blank frame on error
+            color = np.zeros((height, width, 4), dtype=np.float32)
+            color[:, :, 3] = 1.0  # Full alpha
+        
+        renderer.delete()
+        
+        # Process the rendered frame
+        if raw_frames is not None and frame_idx < len(raw_frames):
+            # Blend with background frame
+            background = raw_frames[frame_idx].astype(np.float32) / 255.0
+            
+            # Resize background if needed
+            if background.shape[:2] != (height, width):
+                background = cv2.resize(
+                    background, (width, height), 
+                    interpolation=cv2.INTER_LINEAR
+                )
+            
+            mask = depth > 0
+            hand_color = color[mask]
+            background[mask] = (hand_color[:, :3] * hand_color[:, 3:4] * blend_alpha + 
+                              background[mask] * (1 - hand_color[:, 3:4] * blend_alpha))
+            final_frame = (background * 255).astype(np.uint8)
+        else:
+            final_frame = (color[:, :, :3] * 255).astype(np.uint8)
+        
+        # Apply valid region mask if provided
+        if valid_region is not None:
+            valid_frame = final_frame[valid_region[0]+2:valid_region[1]-3, valid_region[2]+2:valid_region[3]-3]
+        else:
+            valid_frame = final_frame
+        frames.append(valid_frame)
+
+    # Save video with more compatible settings
+    print(f"Saving comparison video to {output_path}...")
+    imageio.mimsave(output_path, frames, fps=fps, codec='libx264')
+    print("Comparison video saved successfully!")
+
 def hand_2d_render_old(hands_data, camera_intrinsic, output_path, raw_frames=None, 
                    fps=30, render_res=(640, 480), mesh_colors=None, 
                    background_color=(0.0, 0.0, 0.0), blend_alpha=0.8):
@@ -1907,11 +2118,40 @@ def vis_hand_plot(rot, trans, theta, beta, sides, image_paths, intrinsic_matrix,
     # print(intrinsic_matrix)
 
     # print(raw_frames)
-    hand_2d_render(hand_data, torch.Tensor(intrinsic_matrix), 
+    hand_2d_render(hand_data, torch.Tensor(intrinsic_matrix),
                     output_path=f"{output_dir}_render.mp4", raw_frames=raw_frames, 
                     fps=fps, blend_alpha=0.5)
 
     # hand_render(hand_data, output_path=f"{output_dir}.mp4", fps=fps)
+
+def vis_hand_plot_comparison(rot_pred, trans_pred, theta_pred, rot_gt, trans_gt, theta_gt, beta, sides, image_paths, intrinsic_matrix, camera_extrinsics, output_dir, fps=30):
+    print("vis_hand_plot")
+
+    rot_c_pred, trans_c_pred = {}, {}
+    rot_c_gt, trans_c_gt = {}, {}
+    for side in sides:
+        # print(rot[side].device, trans[side].device, camera_extrinsics.device)
+        rot_c_pred[side], trans_c_pred[side] = world_to_camera(camera_extrinsics, rot=rot_pred[side], trans=trans_pred[side])
+        rot_c_gt[side], trans_c_gt[side] = world_to_camera(camera_extrinsics, rot=rot_gt[side], trans=trans_gt[side])
+
+    hand_data_pred = mano_forward(rot_c_pred, trans_c_pred, theta_pred, beta, sides, relative = True)
+    hand_data_gt = mano_forward(rot_c_gt, trans_c_gt, theta_gt, beta, sides, relative = True)
+    
+    if not isinstance(image_paths, np.ndarray):
+        raw_frames = []
+        for path in image_paths:
+            with Image.open(path) as img:
+                raw_frames.append(np.array(img))
+        raw_frames = np.array(raw_frames)
+    else:
+        raw_frames = image_paths
+    # print(raw_frames.shape)
+    # print(intrinsic_matrix)
+
+    # print(raw_frames)
+    hand_2d_render_comparison(hand_data_pred, hand_data_gt, torch.Tensor(intrinsic_matrix),
+                    output_path=f"{output_dir}_render.mp4", raw_frames=raw_frames, 
+                    fps=fps, blend_alpha=0.5)
 
 def vis_hand_plot_v2(hand_data, image_paths, intrinsic_matrix, output_dir, fps=30):
     print("vis_hand_plot_v2")
