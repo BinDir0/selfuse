@@ -8,6 +8,7 @@ import hydra
 import shutil
 import inspect
 import os
+import pickle
 
 from src.workspace.base_workspace import BaseWorkspace
 from src.model.action.fast_tokenizer import UniversalActionProcessor
@@ -20,7 +21,14 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
 
         self.tokenizer_cfg = cfg.tokenizer
         self.dataset = hydra.utils.instantiate(cfg.dataset)
-        self.dataset.get_normalizer()
+        if cfg.training.normalizer_path is not None:
+            normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
+            self.dataset.set_normalizer(normalizer)
+        else:
+            normalizer = self.dataset.get_normalizer()
+        normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
+        pickle.dump(normalizer, open(normalizer_path, 'wb'))
+        
         self.dataloader = DataLoader(self.dataset, collate_fn=self.dataset.get_collator(), **cfg.dataloader)
 
         if self.cfg.training.save_path is not None:
@@ -30,29 +38,38 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
             
     def run(self):
         assert len(self.dataloader) > 0, "No data to calculate tokenizer"
-        action_data = {
-            key: [] for key in self.tokenizer_cfg.keys()
-        }
-        # We need set normalizer for the dataset
-        for batch in tqdm(self.dataloader, desc="Loading tokenizer", mininterval=self.cfg.training.tqdm_interval_sec):
-            for key in self.tokenizer_cfg.keys():
-                assert key in batch.keys(), f"Key {key} not found in batch"
-                action_data[key].append(batch[key])
-        action_data = {k: np.concatenate(v, axis=0) for k, v in action_data.items()}
-        self.tokenizer = {
-            key: UniversalActionProcessor.fit(
-                action_data[key],
-                scale=self.tokenizer_cfg[key].scale,
-                vocab_size=self.tokenizer_cfg[key].vocab_size,
-            ) for key in self.tokenizer_cfg.keys()
-        }
-        self.save_fast_tokenizer(path=self.save_path)
+        if self.cfg.training.valid_tokenizer_path is None: 
+            action_data = {
+                key: [] for key in self.tokenizer_cfg.keys()
+            }
+            # We need set normalizer for the dataset
+            size = 0
+            for batch in tqdm(self.dataloader, desc="Loading tokenizer", mininterval=self.cfg.training.tqdm_interval_sec):
+                for key in self.tokenizer_cfg.keys():
+                    assert key in batch.keys(), f"Key {key} not found in batch"
+                    action_data[key].append(batch[key])
+                size += 1
+                if self.cfg.training.max_corpus_size and size >= self.cfg.training.max_corpus_size:
+                    break
+            action_data = {k: np.concatenate(v, axis=0) for k, v in action_data.items()}
+            self.tokenizer = {
+                key: UniversalActionProcessor.fit(
+                    action_data[key],
+                    scale=self.tokenizer_cfg[key].scale,
+                    vocab_size=self.tokenizer_cfg[key].vocab_size,
+                    num_workers=self.tokenizer_cfg[key].num_workers,
+                ) for key in self.tokenizer_cfg.keys()
+            }
+            self.save_fast_tokenizer(path=self.save_path)
 
         self.validate()
 
     def validate(self):
+        valid_tokenizer_path = self.cfg.training.valid_tokenizer_path
+        if valid_tokenizer_path is None:
+            valid_tokenizer_path = self.save_path
         valid_tokenizer = {
-            key: UniversalActionProcessor.from_pretrained(os.path.join(self.save_path, key))
+            key: UniversalActionProcessor.from_pretrained(os.path.join(valid_tokenizer_path, key))
             for key in self.tokenizer_cfg.keys()
         }
         loss_list = {
@@ -65,7 +82,7 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
             key: [] for key in self.tokenizer_cfg.keys()
         }
         with tqdm(self.dataloader, desc="Validating tokenizer", mininterval=self.cfg.training.tqdm_interval_sec) as tepoch:
-            for batch in tepoch:
+            for idx, batch in enumerate(tepoch):
                 for key in valid_tokenizer.keys():
                     data = batch[key]
                     batch_tokens = valid_tokenizer[key](data)
@@ -78,6 +95,8 @@ class TrainFastTokenizerWorkspace(BaseWorkspace):
                     tepoch.set_postfix(key=key, loss=loss, average_token_length=average_token_length)
                     loss_list[key].append(loss)
                     average_token_length_list[key].append(average_token_length)
+                if self.cfg.training.max_val_steps and idx >= self.cfg.training.max_val_steps:
+                    break
         
         for key in valid_tokenizer.keys():
             print(f"Key: {key}")

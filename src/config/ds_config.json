@@ -1,7 +1,10 @@
 {
     "compile": {
         "deepcompile": false
-    },
+    }, 
+    "checkpoint": {
+        "load_universal": true
+    }, 
     "optimizer": {
         "type": "AdamW",
         "params": {

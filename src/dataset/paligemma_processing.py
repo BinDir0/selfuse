@@ -336,9 +336,9 @@ class PaliGemmaVLAProcessor:
     STATE_BEGIN_TOKEN = "<state_begin>"
     STATE_TOKEN = "<state>"
     STATE_END_TOKEN = "<state_end>"
-    HUMAN_ACTION_BEGIN_TOKEN = "<human_action_begin>"
-    HUMAN_ACTION_TOKEN = "<human_action>"
-    HUMAN_ACTION_END_TOKEN = "<human_action_end>"
+    ACTION_BEGIN_TOKEN = "<action_begin>"
+    ACTION_TOKEN = "<action>"
+    ACTION_END_TOKEN = "<action_end>"
 
     def __init__(
         self,
@@ -364,9 +364,9 @@ class PaliGemmaVLAProcessor:
             self.STATE_BEGIN_TOKEN, 
             self.STATE_TOKEN,
             self.STATE_END_TOKEN, 
-            self.HUMAN_ACTION_BEGIN_TOKEN, 
-            self.HUMAN_ACTION_TOKEN, 
-            self.HUMAN_ACTION_END_TOKEN,
+            self.ACTION_BEGIN_TOKEN, 
+            self.ACTION_TOKEN, 
+            self.ACTION_END_TOKEN,
         ]}
         tokenizer.add_special_tokens(tokens_to_add)
         EXTRA_TOKENS = [
@@ -378,9 +378,9 @@ class PaliGemmaVLAProcessor:
         tokenizer.add_tokens(EXTRA_TOKENS)
         self.image_token_id = tokenizer.convert_tokens_to_ids(self.IMAGE_TOKEN)
         self.state_token_id = tokenizer.convert_tokens_to_ids(self.STATE_TOKEN)
-        self.human_action_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_TOKEN)
-        self.human_action_begin_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_BEGIN_TOKEN)
-        self.human_action_end_token_id = tokenizer.convert_tokens_to_ids(self.HUMAN_ACTION_END_TOKEN)
+        self.action_token_id = tokenizer.convert_tokens_to_ids(self.ACTION_TOKEN)
+        self.action_begin_token_id = tokenizer.convert_tokens_to_ids(self.ACTION_BEGIN_TOKEN)
+        self.action_end_token_id = tokenizer.convert_tokens_to_ids(self.ACTION_END_TOKEN)
         # We will add the BOS and EOS tokens ourselves
         tokenizer.add_bos_token = False
         tokenizer.add_eos_token = False
@@ -421,7 +421,7 @@ class PaliGemmaVLAProcessor:
         text: str,
         images: np.ndarray,
         states: np.ndarray,
-        human_actions: np.ndarray,
+        actions: np.ndarray,
         objective: str = None,
         truncation: bool = True,
     ) -> dict:
@@ -430,7 +430,7 @@ class PaliGemmaVLAProcessor:
             text: str
             images: np.ndarray [T_image, C, H, W] or [T_image, H, W, C]
             state: np.ndarray [T_state, state_dim]
-            human_action: np.ndarray [Horizon, human_action_dim]
+            action: np.ndarray [Horizon, action_dim]
             objective: str, 'ar' or 'flow' or None, None means both
             truncation: bool
 
@@ -454,10 +454,10 @@ class PaliGemmaVLAProcessor:
             image_std=IMAGENET_STANDARD_STD,
         )
 
-        # We assume the states and human actions are in [-1, 1]
+        # We assume the states and actions are in [-1, 1]
         discrete_states = self.fast_tokenizer['states'](states)[0]
         if objective != "train_flow":
-            discrete_human_actions = self.fast_tokenizer['human_actions'](human_actions)[0]
+            discrete_actions = self.fast_tokenizer['actions'](actions)[0]
 
         text = text.replace('.', '')
         text = text.lower()
@@ -469,10 +469,10 @@ class PaliGemmaVLAProcessor:
             eos_token=self.tokenizer.eos_token,
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
-            action_begin_token=self.HUMAN_ACTION_BEGIN_TOKEN,
-            action_end_token=self.HUMAN_ACTION_END_TOKEN,
-            action_token=self.HUMAN_ACTION_TOKEN,
-            action_seq_len=len(discrete_human_actions) if objective != "train_flow" else 0,
+            action_begin_token=self.ACTION_BEGIN_TOKEN,
+            action_end_token=self.ACTION_END_TOKEN,
+            action_token=self.ACTION_TOKEN,
+            action_seq_len=len(discrete_actions) if objective != "train_flow" else 0,
             need_action=objective != "train_flow",
         )
 
@@ -490,17 +490,17 @@ class PaliGemmaVLAProcessor:
         discrete_states = np.array([self.fast_token_id2gemma_token_id['states'][id] for id in discrete_states])
         input_ids = set_token_id(input_ids, self.state_token_id, discrete_states)
         if objective != "train_flow":
-            discrete_human_actions = np.array([self.fast_token_id2gemma_token_id['human_actions'][id] for id in discrete_human_actions])
-            input_ids = set_token_id(input_ids, self.human_action_token_id, discrete_human_actions)
+            discrete_actions = np.array([self.fast_token_id2gemma_token_id['actions'][id] for id in discrete_actions])
+            input_ids = set_token_id(input_ids, self.action_token_id, discrete_actions)
         inputs['input_ids'] = input_ids
 
         if objective != "train_flow":
             labels = input_ids.copy()
-            if not np.any(labels == self.human_action_begin_token_id):
-                warnings.warn("The human action begin token is not found in the input_ids")
+            if not np.any(labels == self.action_begin_token_id):
+                warnings.warn("The action begin token is not found in the input_ids")
                 answer_start_idx = len(labels)
             else : 
-                answer_start_idx = np.argmax(labels == self.human_action_begin_token_id) + 1
+                answer_start_idx = np.argmax(labels == self.action_begin_token_id) + 1
             labels[:answer_start_idx] = self.ignore_index
             labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
             inputs['labels'] = labels
@@ -513,23 +513,23 @@ class PaliGemmaVLAProcessor:
         return output
 
     def decode(self, output_ids):
-        if self.human_action_begin_token_id not in output_ids:
-            warnings.warn("The human action begin token is not found in the output_ids")
+        if self.action_begin_token_id not in output_ids:
+            warnings.warn("The action begin token is not found in the output_ids")
             return {}
-        if self.human_action_end_token_id not in output_ids:
-            warnings.warn("The human action end token is not found in the output_ids")
+        if self.action_end_token_id not in output_ids:
+            warnings.warn("The action end token is not found in the output_ids")
             return {}
-        start_idx = np.argmax(output_ids == self.human_action_begin_token_id) + 1
-        end_idx = np.argmax(output_ids == self.human_action_end_token_id)
-        human_action_tokens = output_ids[start_idx:end_idx].copy()
-        for idx, token in enumerate(human_action_tokens):
-            if token not in self.gemma_token_id2fast_token_id['human_actions']:
-                warnings.warn(f"The token {token} is not found in the human actions")
+        start_idx = np.argmax(output_ids == self.action_begin_token_id) + 1
+        end_idx = np.argmax(output_ids == self.action_end_token_id)
+        action_tokens = output_ids[start_idx:end_idx].copy()
+        for idx, token in enumerate(action_tokens):
+            if token not in self.gemma_token_id2fast_token_id['actions']:
+                warnings.warn(f"The token {token} is not found in the actions")
                 return {}
-            human_action_tokens[idx] = self.gemma_token_id2fast_token_id['human_actions'][token]
+            action_tokens[idx] = self.gemma_token_id2fast_token_id['actions'][token]
         
-        human_actions = self.fast_tokenizer['human_actions'].decode([human_action_tokens])
-        return {'human_actions': human_actions}
+        actions = self.fast_tokenizer['actions'].decode([action_tokens])
+        return {'actions': actions}
 
 
 def set_token_id(input_ids, token_id, discrete_tokens):

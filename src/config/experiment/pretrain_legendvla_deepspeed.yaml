@@ -16,7 +16,7 @@ vla_dataset_paths:
  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
  - /share_data/datasets/OakInk-v2/oakink2.zarr
  - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/datasets/EgoDex/egodex_train_copy.zarr
+ - /share_data/datasets/EgoDex/egodex_train.zarr
 vlm_dataset_paths:
  - "/share_data/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
@@ -89,7 +89,7 @@ n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
 processor: 
-  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024
+  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024 # may need to change
 
 dataloader:
   batch_size: 12
@@ -131,10 +131,10 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 2000
   train_vlm: True
-  load_pretrained_weights: True # load pretrained weights from VLM
+  load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path: 
-  normalizer_path: /share_data/normalizer/hoi4d-oakink-taco/normalizer.pkl
+  resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.08/22.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=8000-eval_l1_loss=0.0508
+  normalizer_path: /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
   num_epochs: 25
   use_bf16: True
   clipping:
@@ -161,7 +161,7 @@ training:
   sample_every: 1000
   # make sure it is divisible by val_every and sample_every
   # cause we use eval_l1 loss to save topk checkpoint
-  checkpoint_every: 5000 
+  checkpoint_every: 1000 
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
@@ -171,7 +171,7 @@ training:
   tqdm_interval_sec: 1.0
 
 mixture:
-  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then human_action
+  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action
   vlm:   # gemma
     hidden_size: 2048
     intermediate_size: 16384
@@ -181,7 +181,7 @@ mixture:
     use_lora: ${lora}
     adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0  # 10000 in gemma
-  human_action:
+  action:
     hidden_size: 1024
     intermediate_size: 4096
     use_final_norm: True

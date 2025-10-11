@@ -138,13 +138,26 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             init_kwargs={"wandb": wandb_cfg}
         )
 
+        # Broadcast output directory to all processes
+        # so that all processes can save checkpoint to the same directory
+        if accelerator.is_main_process:
+            output_dir = self.output_dir
+            objects_to_broadcast = [output_dir]
+        else:
+            objects_to_broadcast = [None]
+
+        objects_to_broadcast = accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
+        output_dir = objects_to_broadcast[0]
+        self._output_dir = output_dir
+        accelerator.wait_for_everyone()
+
         # Configure optimizers
         model = self.model  # Get unwrapped model for parameter access
 
         # Load pretrained weights and freeze non-lora weights in VLM before deepspeed optimizer setup
-        # cause deepspeed will back up the parameters, manually load pretrained weights can't affect these parameters
-        if cfg.training.load_pretrained_weights:
-            model.load_pretrained_weights()
+        # cause deepspeed will back up the parameters, manually load pretrained weights after setup can't affect these parameters
+        if cfg.training.load_pretrained_vlm_weights:
+            model.load_pretrained_vlm_weights()
         if cfg.lora:
             model.freeze_non_lora_weights_in_vlm()
 
@@ -156,9 +169,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         all_trainable_parameters = []
         if self.objective_func != "train_ar":
             all_trainable_parameters = self.get_grouped_parameters(
-                model.human_action_expert_parameters, 
+                model.action_expert_parameters, 
                 cfg.optimizer.action, 
             )
+        else: 
+            model.freeze_non_lora_weights_in_ae()
         
         # VLM optimizer (if training VLM)
         if cfg.training.train_vlm:
@@ -171,6 +186,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 cfg.optimizer.vlm, 
             )
             all_trainable_parameters.extend(vlm_trainable_parameters)
+        else: 
+            model.freeze_non_lora_weights_in_vlm()
 
         self.optimizer = DummyOptim(
             all_trainable_parameters, 
@@ -190,8 +207,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "states": UniversalActionProcessor.from_pretrained(
                 os.path.join(cfg.processor.fast_tokenizer_path, "states")
             ),
-            "human_actions": UniversalActionProcessor.from_pretrained(
-                os.path.join(cfg.processor.fast_tokenizer_path, "human_actions")
+            "actions": UniversalActionProcessor.from_pretrained(
+                os.path.join(cfg.processor.fast_tokenizer_path, "actions")
             )
         }
         
@@ -436,23 +453,23 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 # Preprocess batch
                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=False)
                 # Compute action accuracy if actions are available
-                if 'human_actions' in inputs:
-                    gt_actions = inputs['human_actions']
-                    human_actions_valid_mask = inputs['human_actions_valid_mask']
+                if 'actions' in inputs:
+                    gt_actions = inputs['actions']
+                    actions_valid_mask = inputs['actions_valid_mask']
                     # Get action predictions
                     with accelerator.autocast():
-                        pred_actions = self.model("infer_human_action", inputs)
+                        pred_actions = self.model("infer_action", inputs)
                     
                     # ignore invalid actions
                     B, _, _ = gt_actions.shape
-                    eval_sample = torch.any(human_actions_valid_mask.reshape(B, -1), dim=1)
+                    eval_sample = torch.any(actions_valid_mask.reshape(B, -1), dim=1)
                     if not torch.any(eval_sample):
                         continue
-                    human_actions_valid_mask = human_actions_valid_mask[eval_sample]
+                    actions_valid_mask = actions_valid_mask[eval_sample]
                     gt_actions = gt_actions[eval_sample]
                     pred_actions = pred_actions[eval_sample]
-                    gt_actions = gt_actions * human_actions_valid_mask
-                    pred_actions = pred_actions * human_actions_valid_mask
+                    gt_actions = gt_actions * actions_valid_mask
+                    pred_actions = pred_actions * actions_valid_mask
                     
                     # Compute accuracy metrics
                     batch_accuracy = get_action_accuracy(
@@ -463,8 +480,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     eval_accuracy.append(batch_accuracy)
                     
                     # Compute L1 loss, num should not be 0 here since we have checked eval_sample
-                    human_actions_valid_num = torch.sum(human_actions_valid_mask)
-                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / human_actions_valid_num
+                    actions_valid_num = torch.sum(actions_valid_mask)
+                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / actions_valid_num
                     eval_l1_loss.append(batch_l1_loss)
                 
                 if self.cfg.training.max_val_steps and batch_idx >= (self.cfg.training.max_val_steps-1):
@@ -561,7 +578,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         
         # Build causal mask and position ids
         # We need to move the new created tensors to the same device as the input prepared by the accelerate
-        causal_mask, vlm_position_ids, human_action_position_ids = (
+        causal_mask, vlm_position_ids, action_position_ids = (
             model.build_causal_mask_and_position_ids(   
                 batch["attention_mask"], batch["answer_start_idx"], self.dtype
             )
@@ -573,20 +590,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "vlm_position_ids": vlm_position_ids,
         }
         if self.objective_func != "train_ar":
-            inputs["human_action_position_ids"] = human_action_position_ids
-            inputs["human_actions"] = batch["human_actions"].to(self.dtype)
-            inputs["human_actions_valid_mask"] = batch["human_actions_valid_mask"]
+            inputs["action_position_ids"] = action_position_ids
+            inputs["actions"] = batch["actions"].to(self.dtype)
+            inputs["actions_valid_mask"] = batch["actions_valid_mask"]
         if self.objective_func != "train_flow":
             inputs["labels"] = batch["labels"]
         
         if split_mask:
             max_vlm_tokens = input_ids.shape[-1]
-            vlm_mask, human_action_mask = (
+            vlm_mask, action_mask = (
                 model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
             )
             inputs["vlm_mask"] = vlm_mask
             if self.objective_func != "train_ar":
-                inputs["human_action_mask"] = human_action_mask
+                inputs["action_mask"] = action_mask
         else:
             inputs["causal_mask"] = causal_mask
 

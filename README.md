@@ -2,7 +2,13 @@
 
 ## Environment Setup
 
-在需要多机并行的每台机器上，下载仓库并安装 conda 环境（或者放置到一个共享文件夹，可以共同访问）：
+如果需要多机训练，确保你的多台服务器满足以下要求：
+
+- 有共享盘，你所有的代码、数据、环境最好全部放在这个共享盘当中，并且通过软链接到同一个位置。
+- 请确保你在不同服务器上的 UID 和 GID 一致，不然可能会导致权限问题。
+- 配置多机之间通信，DeepSpeed 要求训练的多机之间要能 ssh 免密通信，因此需要配置好每台机器之间的 ssh 连接（包括本机与本机）。
+
+在需要多机并行的每台机器上，下载仓库并安装 conda 环境，放置到一个共享文件夹：
 
 ```bash
 git clone https://github.com/Psi-Robot/EgoVLA
@@ -10,7 +16,7 @@ cd EgoVLA
 ./scripts/install.sh
 ```
 
-前往 MANO [官网](https://mano.is.tue.mpg.de/)，下载模型 `mano_v*_*.zip`，然后解压按照如下方式放置：
+前往 MANO [官网](https://mano.is.tue.mpg.de/)，下载模型 `mano_v*_*.zip`，解压后按照如下方式放置：
 
 ```bash
 manopth/
@@ -23,8 +29,6 @@ manopth/
     __init__.py
     ...
 ```
-
-配置多机之间通信，DeepSpeed 要求训练的多机之间要能 ssh 免密通信，因此需要配置好每台机器之间的 ssh 连接。
 
 配置 wandb，使用国内的镜像站（可选）：
 
@@ -111,15 +115,48 @@ Accelerate config
 
 ### Multi Node with DeepSpeed
 
-注意，在使用共享数据盘时，可能出现多机竞争读写的问题，因此你需要把 `egovla/config/experiment/pretrain_deepspeed.yaml` 下的 `multi_run/run_dir` 和 `hydra/run/dir` 修改成一个在每台机器上分别保存的路径。
-
 在训练之前，请你根据 comments 修改 `egovla/config/acc_node0.yaml` 下有关多机信息的内容。
-
-同时，如果你希望指定 VLM Dataset cache 的共享路径，需要注意 Hugging Face Dataset Load 时会创建锁，你需要保证不同机器都有访问和修改这个锁的权限，也即需要保证不同机器的 UID 和 GID 相同。
 
 ```bash
 ./scripts/pretrain_deepspeed.sh
 ```
+
+如果希望从 checkpoint 中恢复训练，有以下两种选择：
+
+1. 保证训练环境和恢复的 checkpoint 原本的训练环境一致（GPU 数量和分布一致），然后在 `src/config/ds_config` 当中设置如下字段：
+
+```
+"checkpoint": {
+    "load_universal": false
+}, 
+```
+
+接着，在 `src/config/xxxx.yaml` 当中修改 `training/resume_checkpoint_path` 字段为你指定的 checkpoint。
+
+2. 如果训练环境和恢复的 checkpoint（使用 Deepspeed ZeRO 训练）原本的训练环境不一致，需要在使用 Deepspeed 提供的 universal checkpoint。
+
+首先在 `src/config/ds_config` 当中设置如下字段：
+
+```
+"checkpoint": {
+    "load_universal": true
+}, 
+```
+
+接着，使用 Deepspeed 提供的 `ds_to_universal.py` 将 ZeRO 训练保存的 checkpoint 转换为 universal checkpoint：
+
+```
+python ds_to_universal.py \
+  --input_folder your_input_folder \
+  --output_folder your_output_folder \
+  --inject_missing_state
+```
+
+接着，在 `src/config/xxxx.yaml` 当中修改 `training/resume_checkpoint_path` 字段为你指定的转换后的 checkpoint。
+
+请注意，本项目通过 Accelerate 实现，因此在保存 checkpoint 时，除了 Deepspeed 保存的 `pytorch_model` 文件夹以外，还保存了一些其他的信息。
+在上面的转换中，你需要把 `pytorch_model` 文件夹作为输入，直接替换同样的位置作为输出。
+然后 config file 当中填的 path 为 `pytorch_model` 文件夹的父文件夹（Accelerate 保存的文件夹）。
 
 ## Inference
 
@@ -213,4 +250,6 @@ Nsight 是 Nvidia 用于监控 GPU 使用情况的一个库，他能准确的告
 
 ![](assets/NVTX.png)
 
+
+## Project Structure
 

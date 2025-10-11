@@ -131,7 +131,7 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 2000
   train_vlm: True
-  load_pretrained_weights: True # load pretrained weights from VLM
+  load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
   resume_checkpoint_path: 
   normalizer_path: /share_data/normalizer/hoi4d-oakink-taco/normalizer.pkl
@@ -171,7 +171,7 @@ training:
   tqdm_interval_sec: 1.0
 
 mixture:
-  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then human_action
+  # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action
   vlm:   # gemma
     hidden_size: 2048
     intermediate_size: 16384
@@ -181,7 +181,7 @@ mixture:
     use_lora: ${lora}
     adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0  # 10000 in gemma
-  human_action:
+  action:
     hidden_size: 1024
     intermediate_size: 4096
     use_final_norm: True
