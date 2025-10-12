@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
+from src.utils.geometry import transform_wrist_to_target_frame
 # manopth.manolayer will be imported dynamically in HandVisualizer.__init__()
 
 # Transformation utilities are implemented as methods within HandVisualizer class
@@ -480,6 +480,12 @@ class HandVisualizer:
         
         if len(camera_extrinsic.shape) == 2:
             camera_extrinsic = camera_extrinsic.unsqueeze(0)
+        
+        # Ensure both tensors are on the same device
+        if camera_extrinsic.device != wrist_action.device:
+            camera_extrinsic = camera_extrinsic.to(wrist_action.device)
+        if camera_extrinsic.dtype != wrist_action.dtype:
+            camera_extrinsic = camera_extrinsic.to(wrist_action.dtype)
 
         B = wrist_action.shape[0]
 
@@ -564,6 +570,13 @@ class HandVisualizer:
             Tuple of (left_joints_world, right_joints_world, left_verts_world, right_verts_world)
             Each element can be None if the corresponding hand is not visible or vertices not requested
         """
+        # Ensure all tensors are on the same device
+        if extrinsic_matrix is not None:
+            if extrinsic_matrix.device != wrist_params.device:
+                extrinsic_matrix = extrinsic_matrix.to(wrist_params.device)
+            if extrinsic_matrix.dtype != wrist_params.dtype:
+                extrinsic_matrix = extrinsic_matrix.to(wrist_params.dtype)
+        
         # Transform wrist parameters from camera frame to world frame if extrinsic matrix is available
         if extrinsic_matrix is not None:
             wrist_params_world = self.transform_wrist_from_camera_to_world(wrist_params, extrinsic_matrix)
@@ -766,8 +779,10 @@ class HandVisualizer:
         
         # Convert plot to image array
         fig.canvas.draw()
-        buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+        # Convert ARGB to RGB by removing alpha channel and reordering
+        buf = buf[:, :, 1:4]  # Remove alpha channel and keep RGB
         plt.close(fig)
         
         return buf
@@ -1111,6 +1126,50 @@ def find_sample_with_highest_loss(path: str) -> int:
         import traceback
         traceback.print_exc()
         return 0
+
+def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
+    """
+    Process the sample to be ready for mano_vis
+    Args:
+        action_pred: Action prediction [30, 30]
+        raw_sample: Raw sample dict
+        
+    Returns:
+        mano_sequence: MANO sequence [30, 30]
+        wrist_sequence: Wrist sequence [30, 18]
+        gt_mano_sequence: Ground truth MANO sequence [30, 30]
+        gt_wrist_sequence: Ground truth wrist sequence [30, 18]
+        intrinsic_matrix: Intrinsic matrix [4]
+        extrinsic_matrices: Extrinsic matrices [30, 4, 4]
+        presence: Presence [1]
+    """
+    if isinstance(action_pred, np.ndarray):
+        action_pred = torch.from_numpy(action_pred)
+        
+    wrist_sequence = action_pred[:, :18]  # Expected shape: [30, 18]    
+    mano_sequence = action_pred[:, 18:]  # Expected shape: [30, 30]
+
+    # Extract ground truth data
+    gt_wrist_sequence = raw_sample['action'][:, :18] # [30, 18]
+    gt_mano_sequence =  raw_sample['action'][:, 18:]  # [30, 30]]
+
+    # transform the gt wrist sequence to the target frame
+    gt_wrist_sequence = transform_wrist_to_target_frame(gt_wrist_sequence, raw_sample['extrinsic'][0])
+    # Extract presence data (single integer for all frames)
+    presence = raw_sample['presence'][0]
+    intrinsic_matrix = raw_sample['intrinsic'][0]
+     # Expected shape: [4]
+
+    # Extract extrinsic parameters
+    extrinsic_matrix = raw_sample['extrinsic'][0]  # Expected shape: [4x4]
+
+    
+    # Replicate for all frames (30 frames)
+    num_frames = mano_sequence.shape[0]
+    # Use numpy repeat: first expand dims, then repeat along first axis
+    extrinsic_matrices = extrinsic_matrix.unsqueeze(0).repeat(num_frames, 1, 1)  # [30, 4, 4]
+    
+    return mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, presence
 
 def load_complete_data(path: str, sample_id: int = 0) -> tuple:
     """

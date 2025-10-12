@@ -23,3 +23,7 @@ mujoco
 bitsandbytes==0.47.0
 datasets==4.1.0
 pyarrow==21.0.0
+manotorch
+decord
+imageio
+opencv-python
