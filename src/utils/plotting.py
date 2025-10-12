@@ -12,13 +12,16 @@ def plot_l1_loss_as_bar(data, step, output_dir):
         step: int, Step number
         output_dir: Output directory to save the plot
     """
+    print(f"Plotting L1 loss as bar for step {step}, data shape: {data.shape}")
     mean_l1_loss = np.mean(data.reshape(-1, data.shape[-1]), axis=0)
     plt.figure(figsize=(12, 8))
     plt.bar(range(mean_l1_loss.shape[0]), mean_l1_loss)
     plt.xlabel('Dimension')
     plt.ylabel('Average L1 Loss')
     plt.title('Average L1 Loss for Each Dimension')
-    plt.savefig(output_dir / f'l1_loss_as_bar_{step}.png', dpi=300, bbox_inches='tight')
+    save_dir = pathlib.Path(output_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_dir / f'l1_loss_as_bar_{step}.png', dpi=300, bbox_inches='tight')
     plt.close()
     
 

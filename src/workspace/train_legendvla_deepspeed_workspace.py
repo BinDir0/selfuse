@@ -285,10 +285,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # resume training from checkpoint after accelerator prepare
         if cfg.training.resume_checkpoint_path:
             accelerator.load_state(cfg.training.resume_checkpoint_path)
-            train_dataloader = accelerator.skip_first_batches(train_dataloader, self.global_step % len(train_dataloader))
             self.update_step = self.training_state.update_step
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
+            print(f"Skipping {self.global_step % len(train_dataloader)} batches, total batches: {len(train_dataloader)}")
+            skipped_dataloader = accelerator.skip_first_batches(train_dataloader, self.global_step % len(train_dataloader))
 
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
@@ -314,13 +315,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             print(f"Training with {len(train_dataloader)} steps per epoch")
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger, profile_context as prof:
-            for _ in range(cfg.training.num_epochs):
+            for epoch_idx in range(cfg.training.num_epochs):
                 self.model.train()
                 step_log = dict()
                 train_losses = dict()
                 if accelerator.is_main_process:
                     print(f"Training epoch {self.epoch} started")
-                for batch_idx, batch in enumerate(train_dataloader):
+                if epoch_idx == 0 and cfg.training.resume_checkpoint_path: 
+                    dataloader = skipped_dataloader
+                else:
+                    dataloader = train_dataloader
+                for batch_idx, batch in enumerate(dataloader):
                     with accelerator.accumulate(self.model):
                         # Preprocess batch
                         inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
@@ -380,7 +385,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         if self.update_step % cfg.training.ckpt_save_interval == 0 and accelerator.sync_gradients:
                             self.save_interval_ckpt(accelerator)
 
-                        is_last_batch = (batch_idx == (len(train_dataloader)-1))
+                        is_last_batch = (batch_idx == (len(dataloader)-1))
                         if not is_last_batch and accelerator.sync_gradients:
                             accelerator.log(step_log, step=self.update_step)
                             json_logger.log(step_log)
@@ -415,16 +420,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             eval_thresholds = self.cfg.training.eval_thresholds
             eval_accuracy = []
             eval_l1_loss = []
+            eval_l1_loss_per_dim = []
             
             for batch_idx, batch in enumerate(dataloader):
                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
-                inputs_clone = inputs.clone()
 
                 # Compute validation loss
                 with accelerator.autocast():
                     loss = self.model(self.objective_func, inputs)
-                for key in inputs.keys():
-                    assert inputs[key] == inputs_clone[key], f"inputs[{key}] != inputs_clone[{key}]"
                 for key, loss in loss.items():
                     if key not in val_losses:
                         val_losses[key] = list()
@@ -439,7 +442,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         pred_actions = self.model("infer_action", inputs)
                     
                     # ignore invalid actions
-                    B, _, _ = gt_actions.shape
+                    B, H, D = gt_actions.shape
                     eval_sample = torch.any(actions_valid_mask.reshape(B, -1), dim=1)
                     if not torch.any(eval_sample):
                         continue
@@ -459,8 +462,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     
                     # Compute L1 loss, num should not be 0 here since we have checked eval_sample
                     actions_valid_num = torch.sum(actions_valid_mask)
+                    actions_valid_num_per_dim = torch.sum(actions_valid_mask.reshape(-1, D), dim=0)
                     batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / actions_valid_num
+                    batch_l1_loss_per_dim = torch.sum(torch.abs(pred_actions - gt_actions).reshape(-1, D), dim=0) / actions_valid_num_per_dim
                     eval_l1_loss.append(batch_l1_loss)
+                    eval_l1_loss_per_dim.append(batch_l1_loss_per_dim)
                 
                 if self.cfg.training.max_eval_steps and batch_idx >= (self.cfg.training.max_eval_steps-1):
                     break
@@ -476,11 +482,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     step_log[f'val_{key}'] = val_losses[key]
 
             # fill eval_accuracy and eval_l1_loss to the same length as dataloader
+            # Note: we assume at least one action dimension is available for evaluation
             eval_len, data_len = len(eval_accuracy), len(dataloader)
             while eval_len < data_len: 
                 idx = random.randint(0, eval_len-1)
                 eval_accuracy.append(eval_accuracy[idx])
                 eval_l1_loss.append(eval_l1_loss[idx])
+                eval_l1_loss_per_dim.append(eval_l1_loss_per_dim[idx])
                 eval_len += 1
             
             # Process action accuracy metrics
@@ -488,15 +496,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 # Average over batches
                 eval_accuracy = torch.stack(eval_accuracy)
                 eval_l1_loss = torch.stack(eval_l1_loss)
+                eval_l1_loss_per_dim = torch.stack(eval_l1_loss_per_dim)
                 
                 # Gather metrics across all processes
                 eval_accuracy = accelerator.gather_for_metrics(eval_accuracy)
                 eval_l1_loss = accelerator.gather_for_metrics(eval_l1_loss)
+                eval_l1_loss_per_dim = accelerator.gather_for_metrics(eval_l1_loss_per_dim)
                 
                 eval_accuracy = torch.mean(eval_accuracy, dim=0)
-                eval_l1_loss = eval_l1_loss.reshape(-1, eval_l1_loss.shape[-1])
-                eval_l1_loss_per_dim = torch.mean(eval_l1_loss, dim=0).cpu().numpy()
                 eval_l1_loss = torch.mean(eval_l1_loss)
+                eval_l1_loss_per_dim = torch.mean(eval_l1_loss_per_dim, dim=0).float().cpu().numpy()
                 
                 # plot l1 loss per dimension
                 if accelerator.is_main_process:

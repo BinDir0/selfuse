@@ -3,7 +3,7 @@
         "deepcompile": false
     }, 
     "checkpoint": {
-        "load_universal": true
+        "load_universal": false
     }, 
     "optimizer": {
         "type": "AdamW",
