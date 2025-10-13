@@ -12,13 +12,16 @@ lora_dropout: 0.0
 # Data configuration
 image_shape: [224, 224, 3]
 vla_dataset_paths:
- - /data/fanlian/datasets/taco_test_seen.zarr
- - /data/fanlian/datasets/taco_test_unseen_task.zarr
- - /data/fanlian/datasets/oakink2_test_seen.zarr
- - /data/fanlian/datasets/oakink2_test_unseen_task.zarr
- - /data/fanlian/datasets/hoi4d_test_seen.zarr
- - /data/fanlian/datasets/hoi4d_test_unseen_object.zarr
- - /data/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
+#  - /data/fanlian/datasets/taco_test_seen.zarr
+#  - /data/fanlian/datasets/taco_test_unseen_task.zarr
+#  - /data/fanlian/datasets/oakink2_test_seen.zarr
+#  - /data/fanlian/datasets/oakink2_test_unseen_task.zarr
+#  - /data/fanlian/datasets/hoi4d_test_seen.zarr
+#  - /data/fanlian/datasets/hoi4d_test_unseen_object.zarr
+#  - /data/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
+ - /data/fanlian/datasets/egodex_test_seen.zarr
+ - /data/fanlian/datasets/egodex_test_unseen_task.zarr
+
 
 # Shape metadata
 shape_meta: &shape_meta
@@ -69,7 +72,7 @@ n_latency_steps: 0
 
 # Processor configuration
 processor: 
-  fast_tokenizer_path: /data/fanlian/tokenizers
+  fast_tokenizer_path: /data/fanlian/tokenizers/state20-2048action10-1024
 
 # Flow matching configuration
 flow: 
@@ -109,7 +112,7 @@ mixture:
     use_lora: ${lora}
     adaptive_mode:
     rope_theta: 10000.0
-  human_action:
+  action:
     hidden_size: 1024
     intermediate_size: 4096
     use_final_norm: True

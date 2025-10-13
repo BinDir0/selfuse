@@ -718,34 +718,42 @@ def get_absolute_action(state, relative_action):
     Returns:
         absolute_action: torch.Tensor, shape: [H, wrist_dim + hand_dim] - absolute action
     '''
-    # Create zero matrix with same shape to avoid modifying input
-    absolute_action = torch.zeros_like(relative_action)
-    
-    # Convert relative translation back to absolute: absolute = relative + state
-    absolute_action[..., :6] = relative_action[..., :6] + state[:6]
-    
-    # Convert relative rotation back to absolute
-    # Get relative rotation matrices
-    relative_rot_mat = [
-        rot_matrix_from_6drot(relative_action[..., 6:12]),
-        rot_matrix_from_6drot(relative_action[..., 12:18])
-    ]
-    # Get state rotation matrices
-    state_rot_mat = [
-        rot_matrix_from_6drot(state[6:12]),
-        rot_matrix_from_6drot(state[12:18])
-    ]
-    
-    # Compute absolute rotation: absolute_rot = relative_rot @ state_rot
-    for idx in range(2):
-        relative_rot_mat[idx] = relative_rot_mat[idx] @ state_rot_mat[idx]
-    
-    absolute_action[..., 6:12] = rot_matrix_to_6drot(relative_rot_mat[0])
 
-    absolute_action[..., 12:18] = rot_matrix_to_6drot(relative_rot_mat[1])
+    
+    # Convert to numpy for processing, then back to torch
+    state_np = state.cpu().numpy() if isinstance(state, torch.Tensor) else state
+    relative_action_np = relative_action.cpu().numpy() if isinstance(relative_action, torch.Tensor) else relative_action
+    
+    # Create zero matrix with same shape to avoid modifying input
+    absolute_action = np.zeros_like(relative_action_np)
+    
+    # Process each wrist (left and right)
+    for idx in range(2):
+        # Get homogeneous matrices for relative action and state
+        relative_wrist_homo_mat = homo_matrix_from_trans_6drot(
+            relative_action_np[..., idx*3 : idx*3+3], 
+            relative_action_np[..., 6+idx*6 : 6+idx*6+6]
+        )
+        state_wrist_homo_mat = homo_matrix_from_trans_6drot(
+            state_np[idx*3 : idx*3+3], 
+            state_np[6+idx*6 : 6+idx*6+6]
+        )
+        
+        # Compute absolute action: absolute = state @ relative
+        # Since relative = inv(state) @ absolute, we have absolute = state @ relative
+        absolute_wrist_homo_mat = state_wrist_homo_mat @ relative_wrist_homo_mat
+        
+        # Extract translation and rotation from homogeneous matrix
+        trans, rot_6d = homo_matrix_to_trans_6drot(absolute_wrist_homo_mat)
+        absolute_action[..., idx*3 : idx*3+3] = trans
+        absolute_action[..., 6+idx*6 : 6+idx*6+6] = rot_6d
     
     # Convert relative hand parameters back to absolute: absolute = relative + state
-    absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]
+    absolute_action[..., 18:] = relative_action_np[..., 18:] + state_np[18:]
+    
+    # Convert back to torch tensor if input was torch tensor
+    if isinstance(relative_action, torch.Tensor):
+        absolute_action = torch.from_numpy(absolute_action)
     
     return absolute_action
 
