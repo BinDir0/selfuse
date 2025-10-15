@@ -28,6 +28,10 @@ import os
 import hydra
 import torch
 from omegaconf import OmegaConf
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+from mpl_toolkits.mplot3d import Axes3D
 import zarr
 import pathlib
 from torch.utils.data import DataLoader
@@ -52,12 +56,197 @@ from src.dataset.legendvla_dataset import get_absolute_action, transform_wrist_t
 import cv2
 from src.utils.mano_utils import invert_extrinsics
 
+def plot_action_comparison(pred_action, gt_action, output_path, sample_idx=0):
+    """
+    Plot 2D comparison between predicted action and ground truth action with improved visualization
+    
+    Args:
+        pred_action: torch.Tensor or np.ndarray, shape: [H, action_dim] - predicted action
+        gt_action: torch.Tensor or np.ndarray, shape: [H, action_dim] - ground truth action
+        output_path: str - path to save the plot
+        sample_idx: int - sample index for title
+    """
+    # Convert to numpy if needed
+    if isinstance(pred_action, torch.Tensor):
+        pred_action = pred_action.cpu().numpy()
+    if isinstance(gt_action, torch.Tensor):
+        gt_action = gt_action.cpu().numpy()
+    
+    horizon, action_dim = pred_action.shape
+    time_steps = np.arange(horizon)
+    
+    # Use a clean, professional style
+    plt.style.use('seaborn-v0_8-darkgrid')
+    
+    # Create figure with better layout - 2x2 grid
+    fig = plt.figure(figsize=(18, 12))
+    gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.25)
+    
+    # Color schemes
+    gt_color = '#2E86AB'  # Blue for GT
+    pred_color = '#A23B72'  # Purple/Magenta for Prediction
+    
+    # === 1. Wrist Translation - Split into Left and Right ===
+    # Left hand translation
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.set_title('Left Wrist Translation', fontsize=13, fontweight='bold', pad=10)
+    coords = ['X', 'Y', 'Z']
+    colors_coord = ['#E63946', '#F77F00', '#06A77D']  # Red, Orange, Green
+    for i in range(3):
+        ax1.plot(time_steps, gt_action[:, i], '--', color=colors_coord[i], 
+                alpha=0.6, linewidth=2.5, label=f'GT {coords[i]}')
+        ax1.plot(time_steps, pred_action[:, i], '-', color=colors_coord[i], 
+                alpha=0.95, linewidth=2, label=f'Pred {coords[i]}')
+    ax1.set_xlabel('Time Step', fontsize=11)
+    ax1.set_ylabel('Translation (m)', fontsize=11)
+    ax1.legend(loc='best', ncol=2, fontsize=9, framealpha=0.9)
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    
+    # Right hand translation
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.set_title('Right Wrist Translation', fontsize=13, fontweight='bold', pad=10)
+    for i in range(3, 6):
+        coord_idx = i - 3
+        ax2.plot(time_steps, gt_action[:, i], '--', color=colors_coord[coord_idx], 
+                alpha=0.6, linewidth=2.5, label=f'GT {coords[coord_idx]}')
+        ax2.plot(time_steps, pred_action[:, i], '-', color=colors_coord[coord_idx], 
+                alpha=0.95, linewidth=2, label=f'Pred {coords[coord_idx]}')
+    ax2.set_xlabel('Time Step', fontsize=11)
+    ax2.set_ylabel('Translation (m)', fontsize=11)
+    ax2.legend(loc='best', ncol=2, fontsize=9, framealpha=0.9)
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    
+    # === 2. Wrist Rotation - Show rotation error using geodesic distance ===
+    ax3 = fig.add_subplot(gs[1, :])
+    ax3.set_title('Wrist Rotation Error (Geodesic Distance in Degrees)', 
+                 fontsize=13, fontweight='bold', pad=10)
+    
+    # Convert 6D rotation to rotation matrices
+    gt_left_rot_6d = torch.from_numpy(gt_action[:, 6:12]).float()
+    pred_left_rot_6d = torch.from_numpy(pred_action[:, 6:12]).float()
+    gt_right_rot_6d = torch.from_numpy(gt_action[:, 12:18]).float()
+    pred_right_rot_6d = torch.from_numpy(pred_action[:, 12:18]).float()
+    
+    gt_left_rot_mat = rot6d_to_rotmat(gt_left_rot_6d).numpy()  # [H, 3, 3]
+    pred_left_rot_mat = rot6d_to_rotmat(pred_left_rot_6d).numpy()
+    gt_right_rot_mat = rot6d_to_rotmat(gt_right_rot_6d).numpy()
+    pred_right_rot_mat = rot6d_to_rotmat(pred_right_rot_6d).numpy()
+    
+    # Compute geodesic distance (rotation error in degrees)
+    def rotation_error_degrees(R_pred, R_gt):
+        """
+        Compute geodesic distance between rotation matrices in degrees.
+        Formula: theta = arccos((trace(R_pred^T @ R_gt) - 1) / 2)
+        """
+        # Compute relative rotation: R_rel = R_pred^T @ R_gt
+        # This gives the rotation needed to go from pred to gt
+        R_rel = np.matmul(R_pred.transpose(0, 2, 1), R_gt)
+        
+        # The angle of rotation is: theta = arccos((trace(R_rel) - 1) / 2)
+        trace = np.trace(R_rel, axis1=1, axis2=2)
+        
+        # Clamp to avoid numerical issues with arccos (valid range: [-1, 1])
+        # trace should be in range [−1, 3] for valid rotation matrices
+        cos_theta = (trace - 1.0) / 2.0
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+        
+        theta_rad = np.arccos(cos_theta)
+        theta_deg = np.degrees(theta_rad)
+        
+        return theta_deg
+    
+    left_rot_error = rotation_error_degrees(pred_left_rot_mat, gt_left_rot_mat)
+    right_rot_error = rotation_error_degrees(pred_right_rot_mat, gt_right_rot_mat)
+    
+    # Debug: print statistics
+    print(f"Left rotation error - Mean: {np.mean(left_rot_error):.2f}°, "
+          f"Median: {np.median(left_rot_error):.2f}°, "
+          f"Max: {np.max(left_rot_error):.2f}°")
+    print(f"Right rotation error - Mean: {np.mean(right_rot_error):.2f}°, "
+          f"Median: {np.median(right_rot_error):.2f}°, "
+          f"Max: {np.max(right_rot_error):.2f}°")
+    
+    # Plot rotation errors
+    ax3.plot(time_steps, left_rot_error, '-', color='#0077B6', 
+            linewidth=2.5, alpha=0.9, 
+            label=f'Left Hand (Mean: {np.mean(left_rot_error):.1f}°)')
+    ax3.plot(time_steps, right_rot_error, '-', color='#D62828', 
+            linewidth=2.5, alpha=0.9, 
+            label=f'Right Hand (Mean: {np.mean(right_rot_error):.1f}°)')
+    
+    ax3.set_xlabel('Time Step', fontsize=11)
+    ax3.set_ylabel('Rotation Error (degrees)', fontsize=11)
+    ax3.legend(loc='best', fontsize=10, framealpha=0.9)
+    ax3.grid(True, alpha=0.3, linestyle='--')
+    ax3.set_ylim(bottom=0)  # Error is always non-negative
+    
+    # === 3. Hand Parameters - Show mean and std envelope ===
+    ax4 = fig.add_subplot(gs[2, 0])
+    ax4.set_title('Hand Parameters (Left Hand - Dims 18-32)', fontsize=13, fontweight='bold', pad=10)
+    
+    # Compute mean and std across all hand parameter dimensions
+    gt_left_mean = np.mean(gt_action[:, 18:33], axis=1)
+    gt_left_std = np.std(gt_action[:, 18:33], axis=1)
+    pred_left_mean = np.mean(pred_action[:, 18:33], axis=1)
+    pred_left_std = np.std(pred_action[:, 18:33], axis=1)
+    
+    ax4.plot(time_steps, gt_left_mean, '--', color=gt_color, 
+            alpha=0.8, linewidth=2.5, label='GT Mean')
+    ax4.fill_between(time_steps, gt_left_mean - gt_left_std, gt_left_mean + gt_left_std, 
+                     color=gt_color, alpha=0.2, label='GT Std')
+    ax4.plot(time_steps, pred_left_mean, '-', color=pred_color, 
+            alpha=0.95, linewidth=2, label='Pred Mean')
+    ax4.fill_between(time_steps, pred_left_mean - pred_left_std, pred_left_mean + pred_left_std, 
+                     color=pred_color, alpha=0.2, label='Pred Std')
+    
+    ax4.set_xlabel('Time Step', fontsize=11)
+    ax4.set_ylabel('Parameter Value', fontsize=11)
+    ax4.legend(loc='best', fontsize=9, framealpha=0.9)
+    ax4.grid(True, alpha=0.3, linestyle='--')
+    
+    # Right hand parameters
+    ax5 = fig.add_subplot(gs[2, 1])
+    ax5.set_title('Hand Parameters (Right Hand - Dims 33-47)', fontsize=13, fontweight='bold', pad=10)
+    
+    gt_right_mean = np.mean(gt_action[:, 33:48], axis=1)
+    gt_right_std = np.std(gt_action[:, 33:48], axis=1)
+    pred_right_mean = np.mean(pred_action[:, 33:48], axis=1)
+    pred_right_std = np.std(pred_action[:, 33:48], axis=1)
+    
+    ax5.plot(time_steps, gt_right_mean, '--', color=gt_color, 
+            alpha=0.8, linewidth=2.5, label='GT Mean')
+    ax5.fill_between(time_steps, gt_right_mean - gt_right_std, gt_right_mean + gt_right_std, 
+                     color=gt_color, alpha=0.2, label='GT Std')
+    ax5.plot(time_steps, pred_right_mean, '-', color=pred_color, 
+            alpha=0.95, linewidth=2, label='Pred Mean')
+    ax5.fill_between(time_steps, pred_right_mean - pred_right_std, pred_right_mean + pred_right_std, 
+                     color=pred_color, alpha=0.2, label='Pred Std')
+    
+    ax5.set_xlabel('Time Step', fontsize=11)
+    ax5.set_ylabel('Parameter Value', fontsize=11)
+    ax5.legend(loc='best', fontsize=9, framealpha=0.9)
+    ax5.grid(True, alpha=0.3, linestyle='--')
+    
+    # Add main title
+    fig.suptitle(f'Action Prediction vs Ground Truth - Sample {sample_idx}', 
+                fontsize=16, fontweight='bold', y=0.995)
+    
+    # Save with high quality
+    plt.savefig(output_path, dpi=200, bbox_inches='tight', facecolor='white')
+    plt.close()
+    
+    # Reset style
+    plt.style.use('default')
+    
+    print(f"Action comparison plot saved to {output_path}")
+
+
 def preprocess_batch_for_inference(batch, model, device, dtype=torch.float32, sample_fm_time=False):
     """Preprocess batch for inference, similar to training script"""
     # Extract data from batch and move to device
     pixel_values = batch["pixel_values"].to(device)
-    human_actions = batch["human_actions"].to(device)
-    human_actions_valid_mask = batch["human_actions_valid_mask"].to(device)
+    actions = batch["actions"].to(device)
+    actions_valid_mask = batch["actions_valid_mask"].to(device)
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
     answer_start_idx = batch["answer_start_idx"].to(device)
@@ -70,14 +259,14 @@ def preprocess_batch_for_inference(batch, model, device, dtype=torch.float32, sa
         unwrapped_model = model
     
     # Build causal mask and position ids
-    causal_mask, vlm_position_ids, human_action_position_ids = (
+    causal_mask, vlm_position_ids, action_position_ids = (
         unwrapped_model.build_causal_mask_and_position_ids(   
             attention_mask, answer_start_idx, dtype
         )
     )
     max_vlm_tokens = input_ids.shape[-1]
     # Split mask for inference
-    vlm_mask, human_action_mask = (
+    vlm_mask, action_mask = (
         unwrapped_model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
     )
 
@@ -86,12 +275,12 @@ def preprocess_batch_for_inference(batch, model, device, dtype=torch.float32, sa
         "labels": labels,
         "pixel_values": pixel_values.to(dtype),
         "vlm_position_ids": vlm_position_ids,
-        "human_action_position_ids": human_action_position_ids,
+        "action_position_ids": action_position_ids,
         "vlm_mask": vlm_mask,
-        "human_action_mask": human_action_mask,
+        "action_mask": action_mask,
         "causal_mask": causal_mask,
-        "human_actions": human_actions.to(dtype),
-        "human_actions_valid_mask": human_actions_valid_mask,
+        "actions": actions.to(dtype),
+        "actions_valid_mask": actions_valid_mask,
     }
     
 
@@ -151,8 +340,8 @@ if __name__ == "__main__":
         "states": UniversalActionProcessor.from_pretrained(
             os.path.join(cfg.processor.fast_tokenizer_path, "states")
         ),
-        "human_actions": UniversalActionProcessor.from_pretrained(
-            os.path.join(cfg.processor.fast_tokenizer_path, "human_actions")
+        "actions": UniversalActionProcessor.from_pretrained(
+            os.path.join(cfg.processor.fast_tokenizer_path, "actions")
         )
     }
     
@@ -180,13 +369,22 @@ if __name__ == "__main__":
     print("Loading normalizer...")
     # Load normalizer from checkpoint
 
-    if cfg.testing.normalizer_path is not None:
-        normalizer = pickle.load(open(cfg.testing.normalizer_path, 'rb'))
-        print(f"Normalizer loaded from {cfg.testing.normalizer_path}")
+    # Check for normalizer file
+    normalizer_path = cfg.testing.normalizer_path 
+    if os.path.exists(normalizer_path):
+        normalizer = pickle.load(open(normalizer_path, 'rb'))
+        print(f"Normalizer loaded from {normalizer_path}")
     else:
-        print("Computing normalizer...")
+        print(f"Normalizer file not found at {normalizer_path}")
+        print("Computing normalizer from dataset...")
         normalizer = dataset.vla_dataset.get_normalizer()
-        print("Normalizer computed from dataset")
+        print("Normalizer computed successfully")
+        
+        # Save the normalizer for future use
+        os.makedirs(os.path.dirname(normalizer_path), exist_ok=True)
+        with open(normalizer_path, 'wb') as f:
+            pickle.dump(normalizer, f)
+        print(f"Normalizer saved to {normalizer_path}")
 
     dataset.vla_dataset.set_normalizer(normalizer)
 
@@ -319,11 +517,11 @@ if __name__ == "__main__":
         # Run prediction
         with torch.no_grad():
             # torch.FloatTensor: [B, horizon_steps, human_action_dim] Generated human action sequence [1, 30, 48] for each sample
-            action_pred_normalized = model("infer_human_action", inputs)
+            action_pred_normalized = model("infer_action", inputs)
             loss = model("train_flow", inputs)
         print("loss:", loss)
         action_pred_cpu = action_pred_normalized.cpu()
-        action_pred_dict = {"human_actions": action_pred_cpu}
+        action_pred_dict = {"actions": action_pred_cpu}
         action_pred_unnormalized = normalizer.unnormalize(action_pred_dict)
 
 
@@ -377,11 +575,23 @@ if __name__ == "__main__":
                     ])        
 
 
-        state_in_camera = torch.zeros_like(raw_sample['state'])
-        state_in_camera[:18] = transform_wrist_to_target_frame(raw_sample['state'][:18], extrinsic_w2c[0])
-        state_in_camera[18:] = raw_sample['state'][18:]
-        print(state_in_camera.squeeze(0).shape, action_pred_unnormalized["human_actions"].squeeze(0).shape)
-        action_pred = get_absolute_action(state_in_camera.squeeze(0), action_pred_unnormalized["human_actions"].squeeze(0))
+        state_in_camera = raw_sample['state'].clone()
+        state_in_camera[:,:18] = transform_wrist_to_target_frame(state_in_camera[:,:18], extrinsic_w2c[0])
+
+        action_in_camera = raw_sample['action'].clone()
+        action_in_camera[:,:18] = transform_wrist_to_target_frame(action_in_camera[:,:18], extrinsic_w2c[0])
+        
+        print(state_in_camera.squeeze(0).shape, action_pred_unnormalized["actions"].squeeze(0).shape)
+        action_pred = get_absolute_action(state_in_camera.squeeze(0), action_pred_unnormalized["actions"].squeeze(0))
+
+        # Plot action comparison (2D curves)
+        plot_output_path = os.path.join(cfg.testing.output_dir, f"action_comparison_sample_{i+1:03d}.png")
+        plot_action_comparison(
+            pred_action=action_pred,
+            gt_action=action_in_camera,
+            output_path=plot_output_path,
+            sample_idx=i+1
+        )
 
         if cfg.testing.visualize_type == 'mesh':
             mano_shape = raw_sample['action_shape'] # [N, 20]
