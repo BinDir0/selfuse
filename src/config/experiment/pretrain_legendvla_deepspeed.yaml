@@ -16,7 +16,7 @@ vla_dataset_paths:
  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
  - /share_data/datasets/OakInk-v2/oakink2.zarr
  - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/datasets/EgoDex/egodex_train.zarr
+ - /share_data/datasets/EgoDex/egodex_train_copy.zarr
 vlm_dataset_paths:
  - "/share_data/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
@@ -133,9 +133,9 @@ training:
   train_vlm: True
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.11/13.29_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=30000-eval_l1_loss=0.0405
+  resume_checkpoint_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.11/13.29_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=30000-eval_l1_loss=0.0405
   normalizer_path: /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
-  num_epochs: 5
+  num_epochs: 10
   use_bf16: True
   clipping:
     enabled: True

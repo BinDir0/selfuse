@@ -494,6 +494,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         pad_after=0,
         shape_meta=None,
         history=30,
+        dims=None, 
         max_train_episodes=None,
         normalizer_dataloader_cfg=None,
     ):
@@ -543,6 +544,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.shape_meta = shape_meta
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
+        self.dims = dims
         self.normalizer = None
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
 
@@ -559,6 +561,10 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             history = self.history, 
             n_obs_state_steps = self.n_obs_state_steps
         )
+        if self.dims is not None:
+            dim_slice = slice(self.dims[0], self.dims[1])
+            state = state[:, dim_slice]
+            action = action[:, dim_slice]
 
         data = {
             'states': state,
@@ -718,34 +724,17 @@ def get_absolute_action(state, relative_action):
     Returns:
         absolute_action: torch.Tensor, shape: [H, wrist_dim + hand_dim] - absolute action
     '''
-    # Create zero matrix with same shape to avoid modifying input
-    absolute_action = torch.zeros_like(relative_action)
+    # For hand parameters, absolute action = relative action + state
+    absolute_action = state + relative_action
     
-    # Convert relative translation back to absolute: absolute = relative + state
-    absolute_action[..., :6] = relative_action[..., :6] + state[:6]
-    
-    # Convert relative rotation back to absolute
-    # Get relative rotation matrices
-    relative_rot_mat = [
-        rot_matrix_from_6drot(relative_action[..., 6:12]),
-        rot_matrix_from_6drot(relative_action[..., 12:18])
-    ]
-    # Get state rotation matrices
-    state_rot_mat = [
-        rot_matrix_from_6drot(state[6:12]),
-        rot_matrix_from_6drot(state[12:18])
-    ]
-    
-    # Compute absolute rotation: absolute_rot = relative_rot @ state_rot
-    for idx in range(2):
-        relative_rot_mat[idx] = relative_rot_mat[idx] @ state_rot_mat[idx]
-    
-    absolute_action[..., 6:12] = rot_matrix_to_6drot(relative_rot_mat[0])
-
-    absolute_action[..., 12:18] = rot_matrix_to_6drot(relative_rot_mat[1])
-    
-    # Convert relative hand parameters back to absolute: absolute = relative + state
-    absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]
+    # For wrist parameters, absolute action = state @ relative action
+    for idx in range(2): 
+        wrist_relative_action_homo_mat = homo_matrix_from_trans_6drot(relative_action[..., idx*3 : idx*3+3], relative_action[..., 6+idx*6 : 6+idx*6+6])
+        wrist_state_homo_mat = homo_matrix_from_trans_6drot(state[idx*3 : idx*3+3], state[6+idx*6 : 6+idx*6+6])
+        wrist_action_homo_mat = wrist_state_homo_mat @ wrist_relative_action_homo_mat
+        trans, rot_6d = homo_matrix_to_trans_6drot(wrist_action_homo_mat)
+        absolute_action[..., idx*3 : idx*3+3] = trans
+        absolute_action[..., 6+idx*6 : 6+idx*6+6] = rot_6d
     
     return absolute_action
 

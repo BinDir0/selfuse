@@ -74,7 +74,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # configure model
         self.model: LegendVLA
-        self.model = hydra.utils.instantiate(cfg.policy)  # Accelerate will handle DDP
+        self.model = hydra.utils.instantiate(cfg.policy) 
         
         # do not save optimizer if resume=False
         if not cfg.training.resume:
@@ -315,7 +315,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             print(f"Training with {len(train_dataloader)} steps per epoch")
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         with JsonLogger(log_path) as json_logger, profile_context as prof:
-            for epoch_idx in range(cfg.training.num_epochs):
+            for epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
                 step_log = dict()
                 train_losses = dict()
