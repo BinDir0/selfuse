@@ -27,3 +27,4 @@ manotorch
 decord
 imageio
 opencv-python
+vector_quantize_pytorch

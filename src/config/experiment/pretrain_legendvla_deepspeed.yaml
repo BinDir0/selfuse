@@ -133,7 +133,7 @@ training:
   train_vlm: True
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.11/13.29_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=30000-eval_l1_loss=0.0405
+  resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
   normalizer_path: /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
   num_epochs: 10
   use_bf16: True
