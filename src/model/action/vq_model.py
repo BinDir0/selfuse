@@ -423,8 +423,6 @@ def train_vq_model(
     batch_size: int = 128,
     learning_rate: float = 1e-4,
     commitment_weight: float = 0.02,
-    velocity_weight: float = 0.01,
-    part: str = 'wrist',
 ):
     """
     Train VQ-VAE model on action data.
@@ -467,7 +465,6 @@ def train_vq_model(
     for epoch in range(num_epochs):
         total_recon_loss = 0.0
         total_commit_loss = 0.0
-        total_velocity_loss = 0.0
         total_loss = 0.0
         for batch_idx, (actions,) in enumerate(dataloader):
             actions = actions.to(device)
@@ -482,12 +479,8 @@ def train_vq_model(
             # Losses need to modify here if wanna train left and right hand separately.
 
             recon_loss = F.mse_loss(reconstructed, actions)
-            if part == 'wrist':
-                velocity_loss = F.mse_loss(reconstructed, actions)
-                total_loss = recon_loss + commitment_weight * commitment_loss + velocity_weight * velocity_loss
-            else:
-                velocity_loss = torch.tensor(0.0, device=device)
-                total_loss = recon_loss + commitment_weight * commitment_loss
+
+            total_loss = recon_loss + commitment_weight * commitment_loss
             
             # Backward
             optimizer.zero_grad()
@@ -496,19 +489,16 @@ def train_vq_model(
             
             total_recon_loss += recon_loss.item()
             total_commit_loss += commitment_loss.item()
-            total_velocity_loss += velocity_loss.item()
             total_loss += total_loss.item()
         
         avg_recon_loss = total_recon_loss / len(dataloader)
         avg_commit_loss = total_commit_loss / len(dataloader)
-        avg_velocity_loss = total_velocity_loss / len(dataloader)
         avg_total_loss = total_loss / len(dataloader)
         
         if (epoch + 1) % 10 == 0:
             logger.info(f"Epoch {epoch+1}/{num_epochs}: "
                        f"Recon Loss = {avg_recon_loss:.6f}, "
                        f"Commit Loss = {avg_commit_loss:.6f}, "
-                       f"Velocity Loss = {avg_velocity_loss:.6f}, "
                        f"Total Loss = {avg_total_loss:.6f}")
     
     model.eval()

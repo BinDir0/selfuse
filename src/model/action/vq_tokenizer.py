@@ -311,7 +311,6 @@ if __name__ == "__main__":
         },
         num_epochs=100,
         batch_size=128,
-        part="wrist",
     )
     
     # 2b. Train tokenizer with GRVQ (like Being-H0)
@@ -326,7 +325,6 @@ if __name__ == "__main__":
         },
         num_epochs=100,
         batch_size=128,
-        part="wrist",
     )
     
     # 3. Save tokenizer
