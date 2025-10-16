@@ -146,10 +146,9 @@ class LegendVLADataset(BaseImageDataset):
         hand_action = sample['action/hand'].astype(np.float32)        
         presence = sample['presence']
         extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
-        if self.n_obs_state_steps > 1:
-            state_slice = [i for i in range(0, self.history + 1, self.history // (self.n_obs_state_steps - 1))]
-        else:
-            state_slice = [self.history]
+        step = self.history // self.n_obs_state_steps
+        state_slice = [self.history - i * step for i in range(0, self.n_obs_state_steps)]
+        state_slice = state_slice[::-1]
         # use first self.hand_ndim components of hand state and action
         all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims, i.e. 45 in MANO hand params
         # processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
@@ -163,7 +162,6 @@ class LegendVLADataset(BaseImageDataset):
             hand_action[self.history:, :self.hand_ndim], 
             hand_action[self.history:, all_hand_ndim:all_hand_ndim + self.hand_ndim]
         ], axis=-1)
-
 
         # use delta of wrist translation and hand mano params as action
         state_presence = presence[state_slice]
@@ -261,7 +259,8 @@ class LegendVLADataset(BaseImageDataset):
             pad_after=self.pad_after,
             shape_meta=self.shape_meta,
             history=self.history,
-            max_train_episodes=self.max_train_episodes
+            max_train_episodes=self.max_train_episodes, 
+            return_numpy=True
         )
         normalizer = get_normalizer(self.normalizer_dataloader_cfg, normalizer_dataset)
         self.normalizer = normalizer
@@ -494,8 +493,11 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         pad_after=0,
         shape_meta=None,
         history=30,
+        seed=42,
+        val_ratio=0.0,
         dims=None, 
         max_train_episodes=None,
+        return_numpy=True, # whether to return numpy arrays
         normalizer_dataloader_cfg=None,
     ):
         
@@ -504,6 +506,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
         # Initialize storage lists
         self.replay_buffers = []
+        self.train_masks = []
         self.samplers = []
         self.sampler_lens = []
         
@@ -517,13 +520,15 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             # Create train mask
             val_mask = get_val_mask(
                 n_episodes=replay_buffer.n_episodes,
-                val_ratio=0,
+                val_ratio=val_ratio,
+                seed=seed
             )
             train_mask = ~val_mask
             train_mask = downsample_mask(
                 mask=train_mask,
                 max_n=max_train_episodes
             )
+            self.train_masks.append(train_mask)
             
             # Create sampler
             sampler = SequenceSampler(
@@ -545,8 +550,30 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
         self.dims = dims
+        self.return_numpy = return_numpy
         self.normalizer = None
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
+
+    def get_validation_dataset(self):
+        val_set = copy.copy(self)
+        val_set.samplers = []
+        val_set.train_masks = []
+        val_set.sampler_lens = []
+
+        for i, replay_buffer in enumerate(self.replay_buffers):
+            # Create validation set sampler
+            sampler = SequenceSampler(
+                replay_buffer=replay_buffer,
+                sequence_length=self.horizon,
+                pad_before=self.pad_before,
+                pad_after=self.pad_after,
+                episode_mask=~self.train_masks[i],
+                key_first_k=dict())
+            val_set.samplers.append(sampler)
+            val_set.train_masks.append(~self.train_masks[i])
+            val_set.sampler_lens.append(len(sampler))
+            
+        return val_set
 
     def _sample_to_data(self, sample):
         state, action, _ = process_state_action(
@@ -580,7 +607,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.normalizer = normalizer
 
     def get_collator(self):
-        return BaseDataCollator4numpy()
+        return BaseDataCollator()
 
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
         # Find corresponding sampler
@@ -592,6 +619,8 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             curr_idx -= length
             
         data = self._sample_to_data(sample)
+        if not self.return_numpy:
+            data = dict_apply(data, torch.from_numpy) 
         return data
 
     def __len__(self):
@@ -641,7 +670,6 @@ class LegendVLDataCollator(BaseDataCollator):
 
         return batch
 
-
 class LegendUnifiedDataCollator(LegendVLDataCollator):
     def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, token_len_buckets: list = None):
         super().__init__(pad_token_id=pad_token_id, ignore_index=ignore_index, token_len_buckets=token_len_buckets)
@@ -649,8 +677,7 @@ class LegendUnifiedDataCollator(LegendVLDataCollator):
     def __call__(self, data_list):
         return super().__call__(data_list)
 
-
-class BaseDataCollator4numpy(BaseDataCollator):
+class BaseDataCollator(BaseDataCollator):
     def __init__(self):
         super().__init__()
 
@@ -665,8 +692,12 @@ class BaseDataCollator4numpy(BaseDataCollator):
         """
         batch = {}
         for key in data_list[0].keys():
-            batch[key] = np.stack([item[key] for item in data_list], axis=0)
-
+            if isinstance(data_list[0][key], torch.Tensor): # tensor
+                batch[key] = torch.stack([item[key] for item in data_list], axis=0)
+            elif isinstance(data_list[0][key], np.ndarray): # numpy
+                batch[key] = np.stack([item[key] for item in data_list], axis=0)
+            else: # other types
+                raise ValueError(f"Unsupported type: {type(data_list[0][key])} for key: {key}")
         return batch
 
 
@@ -692,7 +723,6 @@ def get_presence_value(state_presence, action_presence, action, state, hand_ndim
     action[~action_presence_right, 18+hand_ndim:18+hand_ndim*2] = state[~state_presence_right, 18+hand_ndim:18+hand_ndim*2] = 0
     
     return state, action, action_valid_mask
-
 
 def get_relative_action(state, action):
     '''
@@ -738,7 +768,6 @@ def get_absolute_action(state, relative_action):
     
     return absolute_action
 
-
 def process_state_action(
     wrist_state, 
     hand_state, 
@@ -764,14 +793,13 @@ def process_state_action(
         n_obs_state_steps: int
         normalizer: Optional[LinearNormalizer]
     Returns:
-        state: np.ndarray, shape: [T, wrist_dim + all_hand_dim]
-        action: np.ndarray, shape: [H, wrist_dim + all_hand_dim]
-        action_valid_mask: np.ndarray, shape: [H, wrist_dim + all_hand_dim]
+        state: np.ndarray, shape: [T, wrist_dim + hand_dim]
+        action: np.ndarray, shape: [H, wrist_dim + hand_dim]
+        action_valid_mask: np.ndarray, shape: [H, wrist_dim + hand_dim]
     '''
-    if n_obs_state_steps > 1:
-        state_slice = [i for i in range(0, history + 1, history // (n_obs_state_steps - 1))]
-    else:
-        state_slice = [history]
+    step = history // n_obs_state_steps
+    state_slice = [history - i * step for i in range(0, n_obs_state_steps)]
+    state_slice = state_slice[::-1]
     # use first self.hand_ndim components of hand state and action
     all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims, i.e. 45 in MANO hand params
     hand_state = np.concatenate([
@@ -805,7 +833,6 @@ def process_state_action(
         action = processed_action
 
     return state, action, action_valid_mask
-
 
 def process_image(image, history, n_obs_image_steps, aug_transform = None):
     '''

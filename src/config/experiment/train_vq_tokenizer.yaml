@@ -1,14 +1,14 @@
 # @package _global_
 name: vq_tokenizer
 exp_name: "vq_tokenizer"
-_target_: src.workspace.train_grvq_tokenizer.TrainVQTokenizerWorkspace
+_target_: src.workspace.train_vq_tokenizer.TrainVQTokenizerWorkspace
 
 image_shape: [224, 224, 3]
 dataset_paths:
  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
  - /share_data/datasets/OakInk-v2/oakink2.zarr
- - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/datasets/EgoDex/egodex_train.zarr
+#  - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
+#  - /share_data/datasets/EgoDex/egodex_train.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -36,6 +36,9 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   shape_meta: ${shape_meta}
   history: ${history} # frames
+  seed: 42
+  val_ratio: 0.005
+  return_numpy: False # whether to return numpy arrays
   normalizer_dataloader_cfg:
     batch_size: 4096
     num_workers: 192
@@ -46,23 +49,31 @@ dataset:
 history: 30
 n_action_steps: 30
 n_obs_image_steps: 2
-n_obs_state_steps: 6
+n_obs_state_steps: 30
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
 dataloader:
-  batch_size: 4096
+  batch_size: 2048
   num_workers: 24
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
+val_dataloader:
+  batch_size: 2048
+  num_workers: 24
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
 # Define base tokenizer arguments
 base_tokenizer_args: &base_tokenizer_args
-  codebook_dim: 256
-  nb_code: 1024
-  mu: 0.99
-  model:
+  use_part: wrist
+  motion_dim: ${eval:'${shape_meta.obs.state.shape[0]}//2'}
+  wrist_dim: ${eval:'${shape_meta.obs.state.wrist.shape[0]}//2'} # per wrist
+  hand_dim: ${eval:'${shape_meta.obs.state.hand.shape[0]}//2'} # per hand
+  model_config:
     down_t: 2
     stride_t: 2
     width: 256
@@ -72,13 +83,14 @@ base_tokenizer_args: &base_tokenizer_args
     activate: relu
     norm: null
     num_conv_layers: 3
-  quantizer:
+  quantizer_config:
     quantizer_name: group_residualvq
-    quantbeta: 1
+    nb_code: 1024
+    codebook_dim: 256
     num_quantizers: 8
     num_groups: 1
     shared_codebook: True
-  loss:
+  loss_config:
     recons_loss: l2
     commit_weight: 0.02
 
@@ -90,33 +102,33 @@ base_optimizer: &base_optimizer
 
 tokenizer: 
   states: 
-    use_part: True
     wrist: 
-      __target__: src.model.action.vq_tokenizer.PartialMotionVQModel
-      shape_meta: ${shape_meta}
-      args:
+      _target_: src.model.action.vq_model.MotionVQModel
+      config:
+        _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: wrist
     hand: 
-      __target__: src.model.action.vq_tokenizer.PartialMotionVQModel
-      shape_meta: ${shape_meta}
-      args:
+      _target_: src.model.action.vq_model.MotionVQModel
+      config:
+        _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: hand
+    use_part: True
   actions: 
-    use_part: True
     wrist: 
-      __target__: src.model.action.vq_tokenizer.PartialMotionVQModel
-      shape_meta: ${shape_meta}
-      args:
+      _target_: src.model.action.vq_model.MotionVQModel
+      config:
+        _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: wrist
     hand: 
-      __target__: src.model.action.vq_tokenizer.PartialMotionVQModel
-      shape_meta: ${shape_meta}
-      args:
+      _target_: src.model.action.vq_model.MotionVQModel
+      config:
+        _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: hand
+    use_part: True
 
 optimizer:
   states: 
@@ -132,12 +144,27 @@ optimizer:
 
 
 training:
+  device: cuda:4
+  num_epochs: 10
   tqdm_interval_sec: 1.0
-  max_corpus_size: 2000
+  max_train_steps: 
   max_val_steps: 100
-  normalizer_path: # /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
+  val_per_epoch: 1
+  ckpt_save_interval: 1
+  normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.16/19.47_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   valid_tokenizer_path: # /share_data/tokenizers/GRVQ/taco-oakink/state20-2048action10-1024
+  # if valid_tokenizer_path is not None, will validate the tokenizer
   save_path: 
+
+logging:
+  project: train_vq_tokenizer
+  entity: LegendaryVLA
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  tags: ["${name}", "${hydra:runtime.choices.experiment}", "${exp_name}"]
+  id: null
+  group: null
 
 multi_run:
   run_dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
@@ -151,3 +178,4 @@ hydra:
   sweep:
     dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
     subdir: ${hydra.job.num}
+

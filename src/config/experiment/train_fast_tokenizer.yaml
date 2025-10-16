@@ -46,7 +46,7 @@ dataset:
 history: 30
 n_action_steps: 30
 n_obs_image_steps: 2
-n_obs_state_steps: 6
+n_obs_state_steps: 30
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 

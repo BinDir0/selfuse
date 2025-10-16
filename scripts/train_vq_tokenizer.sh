@@ -1,0 +1,1 @@
+python train.py experiment=train_vq_tokenizer
