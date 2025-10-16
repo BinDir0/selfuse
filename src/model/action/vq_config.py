@@ -37,6 +37,21 @@ class ModelArchConfig(PretrainedConfig):
         self.activate = activate
         self.norm = norm
         self.num_conv_layers = num_conv_layers
+    
+    def to_dict(self):
+        """Override to only save relevant parameters."""
+        return {
+            'model_type': self.model_type,
+            'down_t': self.down_t,
+            'stride_t': self.stride_t,
+            'width': self.width,
+            'depth': self.depth,
+            'dilation_growth_rate': self.dilation_growth_rate,
+            'output_emb_width': self.output_emb_width,
+            'activate': self.activate,
+            'norm': self.norm,
+            'num_conv_layers': self.num_conv_layers,
+        }
 
 
 class QuantizerConfig(PretrainedConfig):
@@ -61,6 +76,18 @@ class QuantizerConfig(PretrainedConfig):
         self.num_quantizers = num_quantizers
         self.num_groups = num_groups
         self.shared_codebook = shared_codebook
+    
+    def to_dict(self):
+        """Override to only save relevant parameters."""
+        return {
+            'model_type': self.model_type,
+            'quantizer_name': self.quantizer_name,
+            'nb_code': self.nb_code,
+            'codebook_dim': self.codebook_dim,
+            'num_quantizers': self.num_quantizers,
+            'num_groups': self.num_groups,
+            'shared_codebook': self.shared_codebook,
+        }
 
 
 class LossConfig(PretrainedConfig):
@@ -77,6 +104,14 @@ class LossConfig(PretrainedConfig):
         super().__init__(**kwargs)
         self.recons_loss = recons_loss
         self.commit_weight = commit_weight
+    
+    def to_dict(self):
+        """Override to only save relevant parameters."""
+        return {
+            'model_type': self.model_type,
+            'recons_loss': self.recons_loss,
+            'commit_weight': self.commit_weight,
+        }
 
 
 class MotionVQModelConfig(PretrainedConfig):
@@ -106,9 +141,6 @@ class MotionVQModelConfig(PretrainedConfig):
             motion_dim: Full motion dimension
             wrist_dim: Wrist motion dimension
             hand_dim: Hand motion dimension
-            codebook_dim: Codebook embedding dimension
-            nb_code: Codebook size (vocabulary size)
-            mu: EMA decay for codebook updates
             model_config: Nested model architecture config (dict or ModelArchConfig)
             quantizer_config: Nested quantizer config (dict or QuantizerConfig)
             loss_config: Nested loss config (dict or LossConfig)
@@ -136,3 +168,63 @@ class MotionVQModelConfig(PretrainedConfig):
             self.loss_config = LossConfig()
         else: 
             self.loss_config = LossConfig(**loss_config)
+    
+    def to_dict(self):
+        """
+        Override to properly serialize nested PretrainedConfig objects.
+        Only save relevant parameters, not the inherited defaults.
+        """
+        import transformers
+        
+        output = {
+            'model_type': self.model_type,
+            'use_part': self.use_part,
+            'motion_dim': self.motion_dim,
+            'wrist_dim': self.wrist_dim,
+            'hand_dim': self.hand_dim,
+            'transformers_version': transformers.__version__,
+        }
+        
+        # Convert nested configs to dicts (they have their own to_dict())
+        if hasattr(self, 'model_config') and self.model_config is not None:
+            output['model_config'] = self.model_config.to_dict()
+        
+        if hasattr(self, 'quantizer_config') and self.quantizer_config is not None:
+            output['quantizer_config'] = self.quantizer_config.to_dict()
+        
+        if hasattr(self, 'loss_config') and self.loss_config is not None:
+            output['loss_config'] = self.loss_config.to_dict()
+        
+        return output
+    
+    def to_json_string(self, use_diff: bool = True) -> str:
+        """
+        Override to prevent filtering of nested configs.
+        
+        HuggingFace's default implementation compares with default config
+        and filters out "unchanged" values, which breaks nested configs.
+        """
+        import json
+        config_dict = self.to_dict()
+        return json.dumps(config_dict, indent=2, sort_keys=True) + "\n"
+    
+    @classmethod
+    def from_dict(cls, config_dict, **kwargs):
+        """
+        Override to properly deserialize nested PretrainedConfig objects.
+        """
+        # Make a copy to avoid modifying the original
+        config_dict = dict(config_dict)
+        
+        # Extract nested configs before calling super()
+        model_config_dict = config_dict.pop('model_config', None)
+        quantizer_config_dict = config_dict.pop('quantizer_config', None)
+        loss_config_dict = config_dict.pop('loss_config', None)
+        
+        # Create the main config - pass the nested dicts to __init__
+        config_dict['model_config'] = model_config_dict
+        config_dict['quantizer_config'] = quantizer_config_dict
+        config_dict['loss_config'] = loss_config_dict
+        
+        # Call parent's from_dict, which will call __init__ with our config_dict
+        return super().from_dict(config_dict, **kwargs)

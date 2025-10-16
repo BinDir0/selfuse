@@ -72,7 +72,7 @@ class TrainVQTokenizerWorkspace(BaseWorkspace):
                     self.tokenizer[key] = {
                         part: MotionVQModel.from_pretrained(
                             os.path.join(self.cfg.training.valid_tokenizer_path, key, part)
-                        ) for part in tokenizer_cfg.items() if part != "use_part"
+                        ) for part in tokenizer_cfg.keys() if part != "use_part"
                     }
                 else:
                     self.tokenizer[key] = MotionVQModel.from_pretrained(
@@ -155,6 +155,7 @@ class TrainVQTokenizerWorkspace(BaseWorkspace):
         Validate all tokenizers and log averaged metrics to wandb.
         """
         device = torch.device(self.cfg.training.device)
+        dict_apply(self.tokenizer, lambda x: x.to(device))
         dict_apply(self.tokenizer, lambda x: x.eval())
         
         # Accumulate losses for all batches
