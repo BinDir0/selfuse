@@ -9,105 +9,25 @@ from transformers import PretrainedConfig
 from typing import Optional, Dict, Any
 
 
-class VQModelConfig(PretrainedConfig):
-    """
-    Configuration class for VQ-VAE models.
+class ModelArchConfig(PretrainedConfig):
+    """Model architecture configuration (nested under 'model' in YAML)"""
     
-    This configuration stores all hyperparameters needed to instantiate a VQ model.
-    Using this configuration class enables:
-    - Automatic config saving/loading with save_pretrained()/from_pretrained()
-    - Proper integration with HuggingFace Hub
-    - Version control and reproducibility
-    
-    Example:
-        >>> config = VQModelConfig(
-        ...     use_part="wrist",
-        ...     codebook_dim=256,
-        ...     nb_code=1024
-        ... )
-        >>> model = PartialMotionVQModel(config=config)
-        >>> model.save_pretrained("/path/to/save")  # Saves both model and config
-    """
-    
-    model_type = "vq_model"
+    model_type = "vq_model_arch"
     
     def __init__(
         self,
-        # Motion dimensions
-        use_part: Optional[str] = None,  # "wrist", "hand", or None for full
-        motion_dim: int = 48,
-        wrist_dim: int = 18,
-        hand_dim: int = 30,
-        
-        # Codebook config
-        codebook_dim: int = 256,
-        nb_code: int = 1024,
-        mu: float = 0.99,
-        
-        # Model architecture
         down_t: int = 2,
         stride_t: int = 2,
         width: int = 256,
         depth: int = 3,
         dilation_growth_rate: int = 3,
         output_emb_width: int = 256,
-        activate: str = "relu",
-        norm: Optional[str] = None,
+        activate: str = "relu", # "relu", "gelu", "silu"
+        norm: Optional[str] = None, # "LN", "GN", "BN"
         num_conv_layers: int = 3,
-        
-        # Quantizer config
-        quantizer_name: str = "group_residualvq",
-        quantbeta: float = 1.0,
-        num_quantizers: int = 8,
-        num_groups: int = 1,
-        shared_codebook: bool = True,
-        
-        # Loss config
-        recons_loss: str = "l2",
-        commit_weight: float = 0.02,
-        
         **kwargs
     ):
-        """
-        Args:
-            use_part: Which part to use ("wrist", "hand", None for full state)
-            motion_dim: Full motion dimension
-            wrist_dim: Wrist motion dimension
-            hand_dim: Hand motion dimension
-            codebook_dim: Codebook embedding dimension
-            nb_code: Codebook size (vocabulary size)
-            mu: EMA decay for codebook updates
-            down_t: Temporal downsampling rate
-            stride_t: Temporal stride
-            width: Network width
-            depth: Network depth
-            dilation_growth_rate: Dilation growth rate for temporal convs
-            output_emb_width: Output embedding width
-            activate: Activation function name
-            norm: Normalization type (None, "batch", "layer")
-            num_conv_layers: Number of conv layers in encoder/decoder
-            quantizer_name: Quantizer type ("residualvq", "group_residualvq", "fsq")
-            quantbeta: Quantization beta parameter
-            num_quantizers: Number of quantizers for RVQ/GRVQ
-            num_groups: Number of groups for GRVQ
-            shared_codebook: Whether to share codebook across quantizers
-            recons_loss: Reconstruction loss type ("l1", "l2")
-            commit_weight: Commitment loss weight
-        """
         super().__init__(**kwargs)
-        
-        # Motion dimensions
-        self.use_part = use_part
-        self.motion_dim = motion_dim
-        self.wrist_dim = wrist_dim
-        self.hand_dim = hand_dim
-        
-        # Codebook
-        self.codebook_dim = codebook_dim
-        self.nb_code = nb_code
-        self.mu = mu
-        
-        # Model architecture
         self.down_t = down_t
         self.stride_t = stride_t
         self.width = width
@@ -117,106 +37,194 @@ class VQModelConfig(PretrainedConfig):
         self.activate = activate
         self.norm = norm
         self.num_conv_layers = num_conv_layers
-        
-        # Quantizer
-        self.quantizer_name = quantizer_name
-        self.quantbeta = quantbeta
-        self.num_quantizers = num_quantizers
-        self.num_groups = num_groups
-        self.shared_codebook = shared_codebook
-        
-        # Loss
-        self.recons_loss = recons_loss
-        self.commit_weight = commit_weight
     
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Serializes this configuration to a Python dictionary.
-        
-        Returns:
-            Dictionary of all attributes that define this configuration instance.
-        """
-        output = super().to_dict()
-        return output
-    
-    @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any], **kwargs) -> "VQModelConfig":
-        """
-        Constructs a configuration from a Python dictionary.
-        
-        Args:
-            config_dict: Dictionary with configuration attributes.
-            
-        Returns:
-            VQModelConfig instance.
-        """
-        return cls(**config_dict)
+    def to_dict(self):
+        """Override to only save relevant parameters."""
+        return {
+            'model_type': self.model_type,
+            'down_t': self.down_t,
+            'stride_t': self.stride_t,
+            'width': self.width,
+            'depth': self.depth,
+            'dilation_growth_rate': self.dilation_growth_rate,
+            'output_emb_width': self.output_emb_width,
+            'activate': self.activate,
+            'norm': self.norm,
+            'num_conv_layers': self.num_conv_layers,
+        }
 
 
-class PartialMotionVQModelConfig(VQModelConfig):
-    """
-    Configuration specific to PartialMotionVQModel.
+class QuantizerConfig(PretrainedConfig):
+    """Quantizer configuration (nested under 'quantizer' in YAML)"""
     
-    Extends VQModelConfig with shape_meta information.
-    """
-    
-    model_type = "partial_motion_vq_model"
+    model_type = "vq_quantizer"
     
     def __init__(
         self,
-        shape_meta: Optional[Dict] = None,
+        quantizer_name: str = "group_residualvq", # "residualvq", "group_residualvq", "fsq"
+        nb_code: int = 1024, # codebook size (vocabulary size)
+        codebook_dim: int = 256, # codebook embedding dimension
+        num_quantizers: int = 8, # number of quantizers for Res_VQ
+        num_groups: int = 1, # number of groups for Group_Res_VQ
+        shared_codebook: bool = True, # whether to share codebook for Res_VQ
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.quantizer_name = quantizer_name
+        self.nb_code = nb_code
+        self.codebook_dim = codebook_dim
+        self.num_quantizers = num_quantizers
+        self.num_groups = num_groups
+        self.shared_codebook = shared_codebook
+    
+    def to_dict(self):
+        """Override to only save relevant parameters."""
+        return {
+            'model_type': self.model_type,
+            'quantizer_name': self.quantizer_name,
+            'nb_code': self.nb_code,
+            'codebook_dim': self.codebook_dim,
+            'num_quantizers': self.num_quantizers,
+            'num_groups': self.num_groups,
+            'shared_codebook': self.shared_codebook,
+        }
+
+
+class LossConfig(PretrainedConfig):
+    """Loss configuration (nested under 'loss' in YAML)"""
+    
+    model_type = "vq_loss"
+    
+    def __init__(
+        self,
+        recons_loss: str = "l2", # "l1", "l2", "l1_smooth"
+        commit_weight: float = 0.02,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.recons_loss = recons_loss
+        self.commit_weight = commit_weight
+    
+    def to_dict(self):
+        """Override to only save relevant parameters."""
+        return {
+            'model_type': self.model_type,
+            'recons_loss': self.recons_loss,
+            'commit_weight': self.commit_weight,
+        }
+
+
+class MotionVQModelConfig(PretrainedConfig):
+    """
+    Configuration class for Motion VQ-VAE models with nested structure.
+    """
+    
+    model_type = "vq_model"
+    
+    def __init__(
+        self,
+        # Motion dimensions
+        use_part: Optional[str] = None, # "wrist", "hand", None for full state
+        motion_dim: int = 24, # full motion dimension
+        wrist_dim: int = 9, # wrist motion dimension
+        hand_dim: int = 15, # hand motion dimension
+        
+        model_config: Optional[Dict[str, Any]] = None,
+        quantizer_config: Optional[Dict[str, Any]] = None,
+        loss_config: Optional[Dict[str, Any]] = None,
+        
         **kwargs
     ):
         """
         Args:
-            shape_meta: Dictionary containing shape information for obs/action
-            **kwargs: Arguments passed to VQModelConfig
+            use_part: Which part to use ("wrist", "hand", None for full state)
+            motion_dim: Full motion dimension
+            wrist_dim: Wrist motion dimension
+            hand_dim: Hand motion dimension
+            model_config: Nested model architecture config (dict or ModelArchConfig)
+            quantizer_config: Nested quantizer config (dict or QuantizerConfig)
+            loss_config: Nested loss config (dict or LossConfig)
         """
         super().__init__(**kwargs)
-        self.shape_meta = shape_meta or {}
         
-        # Extract dimensions from shape_meta if provided
-        if shape_meta:
-            if "obs" in shape_meta and "state" in shape_meta["obs"]:
-                state_meta = shape_meta["obs"]["state"]
-                if "wrist" in state_meta:
-                    self.wrist_dim = state_meta["wrist"]["shape"][0]
-                if "hand" in state_meta:
-                    self.hand_dim = state_meta["hand"]["shape"][0]
-                if "shape" in state_meta:
-                    self.motion_dim = state_meta["shape"][0]
-
-
-# Factory function to create config from OmegaConf
-def create_vq_config_from_hydra(cfg, use_part: Optional[str] = None) -> VQModelConfig:
-    """
-    Create a VQModelConfig from Hydra/OmegaConf configuration.
-    
-    Args:
-        cfg: Hydra configuration object
-        use_part: Override use_part if needed
+        # Motion dimensions
+        self.use_part = use_part
+        self.motion_dim = motion_dim
+        self.wrist_dim = wrist_dim
+        self.hand_dim = hand_dim
         
-    Returns:
-        VQModelConfig instance
-    """
-    from omegaconf import OmegaConf
+        # Nested configs - handle dict, Config object, or None
+        if model_config is None:
+            self.model_config = ModelArchConfig()
+        else: 
+            self.model_config = ModelArchConfig(**model_config)
+        
+        if quantizer_config is None:
+            self.quantizer_config = QuantizerConfig()
+        else: 
+            self.quantizer_config = QuantizerConfig(**quantizer_config)
+        
+        if loss_config is None:
+            self.loss_config = LossConfig()
+        else: 
+            self.loss_config = LossConfig(**loss_config)
     
-    # Convert to dict
-    if hasattr(cfg, 'model'):
-        model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
-    else:
-        model_cfg = OmegaConf.to_container(cfg, resolve=True)
+    def to_dict(self):
+        """
+        Override to properly serialize nested PretrainedConfig objects.
+        Only save relevant parameters, not the inherited defaults.
+        """
+        import transformers
+        
+        output = {
+            'model_type': self.model_type,
+            'use_part': self.use_part,
+            'motion_dim': self.motion_dim,
+            'wrist_dim': self.wrist_dim,
+            'hand_dim': self.hand_dim,
+            'transformers_version': transformers.__version__,
+        }
+        
+        # Convert nested configs to dicts (they have their own to_dict())
+        if hasattr(self, 'model_config') and self.model_config is not None:
+            output['model_config'] = self.model_config.to_dict()
+        
+        if hasattr(self, 'quantizer_config') and self.quantizer_config is not None:
+            output['quantizer_config'] = self.quantizer_config.to_dict()
+        
+        if hasattr(self, 'loss_config') and self.loss_config is not None:
+            output['loss_config'] = self.loss_config.to_dict()
+        
+        return output
     
-    # Flatten nested structure
-    config_dict = {
-        "use_part": use_part or cfg.get("use_part"),
-        "codebook_dim": cfg.get("codebook_dim", 256),
-        "nb_code": cfg.get("nb_code", 1024),
-        "mu": cfg.get("mu", 0.99),
-        **model_cfg.get("model", {}),
-        **model_cfg.get("quantizer", {}),
-        **model_cfg.get("loss", {}),
-    }
+    def to_json_string(self, use_diff: bool = True) -> str:
+        """
+        Override to prevent filtering of nested configs.
+        
+        HuggingFace's default implementation compares with default config
+        and filters out "unchanged" values, which breaks nested configs.
+        """
+        import json
+        config_dict = self.to_dict()
+        return json.dumps(config_dict, indent=2, sort_keys=True) + "\n"
     
-    return VQModelConfig(**config_dict)
-
+    @classmethod
+    def from_dict(cls, config_dict, **kwargs):
+        """
+        Override to properly deserialize nested PretrainedConfig objects.
+        """
+        # Make a copy to avoid modifying the original
+        config_dict = dict(config_dict)
+        
+        # Extract nested configs before calling super()
+        model_config_dict = config_dict.pop('model_config', None)
+        quantizer_config_dict = config_dict.pop('quantizer_config', None)
+        loss_config_dict = config_dict.pop('loss_config', None)
+        
+        # Create the main config - pass the nested dicts to __init__
+        config_dict['model_config'] = model_config_dict
+        config_dict['quantizer_config'] = quantizer_config_dict
+        config_dict['loss_config'] = loss_config_dict
+        
+        # Call parent's from_dict, which will call __init__ with our config_dict
+        return super().from_dict(config_dict, **kwargs)

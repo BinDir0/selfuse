@@ -113,7 +113,7 @@ class Encoder(nn.Module):
         super().__init__()
         
         
-        filter_t, pad_t = stride_t * 2, stride_t // 2
+        filter_t, pad_t = stride_t * 2 + 1, stride_t
 
         blocks = []
         blocks.append(nn.Conv1d(input_emb_width, width, 3, 1, 1))
@@ -125,7 +125,7 @@ class Encoder(nn.Module):
         for i in range(down_t):
             input_dim = width
             block = nn.Sequential(
-                nn.Conv1d(input_dim, width, filter_t, stride_t, pad_t),
+                nn.Conv1d(input_dim, width, filter_t, stride_t, pad_t), # B, C, T -> B, C, ceil(T/stride_t)
                 Resnet1D(width, depth, dilation_growth_rate, activation=activation, norm=norm),
             )
             blocks.append(block)

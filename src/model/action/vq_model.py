@@ -9,56 +9,58 @@ from transformers import PreTrainedModel, PretrainedConfig
 from vector_quantize_pytorch import GroupedResidualVQ, ResidualVQ, FSQ
 
 from .encdec import Encoder, Decoder
+from .vq_config import MotionVQModelConfig
 
 
 class BaseVQModel(nn.Module):
     """
     VQ-VAE model for action tokenization.
     
-    Similar to ManoVQModel but adapted for general action sequences.
-    Supports both RVQ and GRVQ (Grouped Residual VQ).
+    Supports both RVQ, GRVQ and FSQ.
     """
     
     def __init__(
         self,
-        args, # config dict
+        config: MotionVQModelConfig,
         motion_dim: Optional[int] = None
     ):
         super().__init__()
         """Initialize encoder/decoder and quantizer based on config."""
-        self.code_dim = args.code_dim
-        self.motion_dim = motion_dim if motion_dim is not None else args.motion_dim
-        self.quantizer_name = args.quantizer_name
-        
+        self.code_dim = config.quantizer_config.codebook_dim
+        self.motion_dim = motion_dim if motion_dim is not None else config.motion_dim
+        self.quantizer_name = config.quantizer_config.quantizer_name
+
+        model_config = config.model_config
         self.encoder = Encoder(
             input_emb_width=self.motion_dim,
-            output_emb_width=args.output_emb_width,
-            down_t=args.down_t,
-            stride_t=args.stride_t,
-            width=args.width,
-            depth=args.depth,
-            dilation_growth_rate=args.dilation_growth_rate,
-            activation=args.activate,
-            norm=args.norm,
-            num_conv_layers=args.num_conv_layers
+            output_emb_width=model_config.output_emb_width,
+            down_t=model_config.down_t,
+            stride_t=model_config.stride_t,
+            width=model_config.width,
+            depth=model_config.depth,
+            dilation_growth_rate=model_config.dilation_growth_rate,
+            activation=model_config.activate,
+            norm=model_config.norm,
+            num_conv_layers=model_config.num_conv_layers
         )
         self.decoder = Decoder(
             input_emb_width=self.motion_dim,
-            output_emb_width=args.output_emb_width,
-            down_t=args.down_t,  # Assuming symmetric
-            stride_t=args.stride_t,
-            width=args.width,
-            depth=args.depth,
-            dilation_growth_rate=args.dilation_growth_rate,
-            activation=args.activate,
-            norm=args.norm,
-            num_conv_layers=args.num_conv_layers
+            output_emb_width=model_config.output_emb_width,
+            down_t=model_config.down_t,  # Assuming symmetric
+            stride_t=model_config.stride_t,
+            width=model_config.width,
+            depth=model_config.depth,
+            dilation_growth_rate=model_config.dilation_growth_rate,
+            activation=model_config.activate,
+            norm=model_config.norm,
+            num_conv_layers=model_config.num_conv_layers
         )
 
-        self.quantizer = self._create_quantizer(args)
+        self.quantizer = self._create_quantizer(config.quantizer_config)
     
-    def _create_quantizer(self, args):
+    def _create_quantizer(self, quantizer_config):
         """Factory method for quantizer creation."""
+        print(quantizer_config)
         levels_dict = {
             256: [8, 6, 5], 512: [8, 8, 8],
             1024: [8, 5, 5, 5], 2048: [8, 8, 6, 5],
@@ -67,24 +69,24 @@ class BaseVQModel(nn.Module):
         }
         quantizers = {
             "residualvq": lambda: ResidualVQ(
-                codebook_size=args.nb_code,
-                dim=args.code_dim,
-                num_quantizers=args.num_quantizers,
-                shared_codebook=args.shared_codebook
+                codebook_size=quantizer_config.nb_code,
+                dim=quantizer_config.codebook_dim,
+                num_quantizers=quantizer_config.num_quantizers,
+                shared_codebook=quantizer_config.shared_codebook
             ),
-            "group_residualvq": lambda: GroupedResidualVQ(codebook_size=args.nb_code, dim=args.code_dim, 
-                                               num_quantizers=args.num_quantizers, 
-                                               groups=args.num_quant_groups,
-                                               shared_codebook=args.shared_codebook),
-            "fsq": lambda: FSQ(levels=levels_dict[args.nb_code], dim=args.code_dim)
+            "group_residualvq": lambda: GroupedResidualVQ(codebook_size=quantizer_config.nb_code, dim=quantizer_config.codebook_dim, 
+                                               num_quantizers=quantizer_config.num_quantizers, 
+                                               groups=quantizer_config.num_groups,
+                                               shared_codebook=quantizer_config.shared_codebook),
+            "fsq": lambda: FSQ(levels=levels_dict[quantizer_config.nb_code], dim=quantizer_config.codebook_dim)
         }
-        return quantizers[args.quantizer_name]()
+        return quantizers[quantizer_config.quantizer_name]()
 
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
-        return x.permute(0, 2, 1).float() # (bs, T, Jx3) -> (bs, Jx3, T)
+        return x.permute(0, 2, 1).float() # (bs, T, D) -> (bs, D, T)
     
     def postprocess(self, x: torch.Tensor) -> torch.Tensor: 
-        return x.permute(0, 2, 1) # (bs, Jx3, T) ->  (bs, T, Jx3)
+        return x.permute(0, 2, 1) # (bs, D, T) ->  (bs, T, D)
     
     def encode(self, x: torch.Tensor):
         N, T, _ = x.shape
@@ -106,10 +108,13 @@ class BaseVQModel(nn.Module):
         return x_out
     
     def forward(self, x: torch.Tensor) -> tuple:
+        B, T, D = x.shape
         x_in = self.preprocess(x)
         x_enc = self.encoder(x_in)
         x_quant, commit_loss, perplexity = self.quantizer(x_enc)
-        x_out = self.postprocess(self.decoder(x_quant))
+        x_out = self.postprocess(self.decoder(x_quant))[:, :T, :]
+        # The output horizon of decoder may be larger than the input's, 
+        # so we need to truncate the output to the input's horizon.
         return x_out, commit_loss, perplexity
 
 
@@ -124,10 +129,11 @@ class ResidualVQModel(BaseVQModel):
         return indices
     
     def forward(self, x: torch.Tensor) -> tuple:
+        B, T, D = x.shape
         x_in = self.preprocess(x)
         x_enc = self.encoder(x_in).permute(0, 2, 1)
         x_quant, indices, commit_loss = self.quantizer(x_enc)
-        x_out = self.postprocess(self.decoder(x_quant.permute(0, 2, 1)))
+        x_out = self.postprocess(self.decoder(x_quant.permute(0, 2, 1)))[:, :T, :]
         return x_out, commit_loss.mean(), torch.tensor(-1, device=x.device)
 
 
@@ -149,10 +155,11 @@ class GroupResidualVQModel(BaseVQModel):
         return x_out
     
     def forward(self, x: torch.Tensor) -> tuple:
+        B, T, D = x.shape
         x_in = self.preprocess(x)
         x_enc = self.encoder(x_in).permute(0, 2, 1)
         x_quant, indices, commit_loss = self.quantizer(x_enc) # indices: 2, B, T/4, layer
-        x_out = self.postprocess(self.decoder(x_quant.permute(0, 2, 1)))
+        x_out = self.postprocess(self.decoder(x_quant.permute(0, 2, 1)))[:, :T, :]
         return x_out, commit_loss.mean(), torch.tensor(-1, device=x.device)
 
 
@@ -165,16 +172,18 @@ class FSQModel(BaseVQModel):
         return code_idx.view(x.size(0), -1)
 
     def forward(self, x: torch.Tensor) -> tuple:
+        B, T, D = x.shape
         x_enc = self.encoder(self.preprocess(x)) # 256, 512, 16
         x_quant, _, loss, perplexity, activate, indices = self.quantizer(x_enc)
         
-        x_decoder = self.decoder(x_quant)
+        x_decoder = self.decoder(x_quant)[:, :T, :]
         x_out = self.postprocess(x_decoder)
 
         return x_out, loss, perplexity
 
 
-class MotionReconstructionLoss(nn.Module):
+# ==================== Loss Functions ====================
+class ReconstructionLoss(nn.Module):
     """Handles motion reconstruction loss."""
     LOSS_MAP = {
         'l1': nn.L1Loss,
@@ -190,28 +199,37 @@ class MotionReconstructionLoss(nn.Module):
         return self.loss_fn(pred, target)
 
 
+# ==================== Motion VQ Model ====================
 class MotionVQModel(PreTrainedModel):
-    """Main human motion VQ-VAE model."""
-    config_class = PretrainedConfig  # Can customize config class
-    
-    def __init__(self, args):
-        config = PretrainedConfig()
+    config_class = MotionVQModelConfig
+
+    def __init__(self, config: MotionVQModelConfig):
         super().__init__(config)
-  
-        self.model = self._create_vq_model(args)
-        self.motion_dim = args.motion_dim
-        self.loss_fn = MotionReconstructionLoss(args.recons_loss)
+        self.use_part = config.use_part
+        self.motion_dim = config.motion_dim
+        self.wrist_dim = config.wrist_dim
+        self.hand_dim = config.hand_dim
+        self.commit_weight = config.loss_config.commit_weight
 
-        self.commit_weight = args.commit_weight
+        if self.use_part is not None:
+            if self.use_part == "wrist":
+                self.model = self._create_vq_model(config, motion_dim=self.wrist_dim)
+            elif self.use_part == "hand":
+                self.model = self._create_vq_model(config, motion_dim=self.hand_dim)
+            else:  # both
+                raise NotImplementedError(f"Unsupported use_part: {self.use_part}")
+        else:
+            self.model = self._create_vq_model(config)
+        self.loss_fn = ReconstructionLoss(config.loss_config.recons_loss)
 
-    def _create_vq_model(self, args):
+    def _create_vq_model(self, config: MotionVQModelConfig, motion_dim: Optional[int] = None):
         """Factory method for VQ model creation."""
         model_map = {
             "residualvq": ResidualVQModel,
             "group_residualvq": GroupResidualVQModel,
             "fsq": FSQModel
         }
-        return model_map.get(args.quantizer_name, BaseVQModel)(args)
+        return model_map.get(config.quantizer_config.quantizer_name, BaseVQModel)(config, motion_dim)
     
     def encode(self, x):
         return self.model.encode(x)
@@ -222,66 +240,6 @@ class MotionVQModel(PreTrainedModel):
     def forward(self, motion: torch.Tensor, **kwargs):
         pred_motion, commit_loss, perplexity = self.model(motion.float())
         recon_loss = self.loss_fn(pred_motion, motion)
-        total_loss = recon_loss + self.commit_weight * commit_loss
-        
-        return {
-            'loss': total_loss,
-            'loss_recons': recon_loss,
-            'perplexity': perplexity,
-            'loss_commit': commit_loss,
-            'pred_motion': pred_motion,
-        }
-
-
-class PartialMotionVQModel(PreTrainedModel):
-    config_class = PretrainedConfig
-
-    def __init__(self, shape_meta, args):
-        config = PretrainedConfig()
-        super().__init__(config)
-        self.use_part = args.use_part
-        self.wrist_dim = shape_meta["obs"]["state"]["wrist"]["shape"][0]
-        self.hand_dim = shape_meta["obs"]["state"]["hand"]["shape"][0]
-
-        if args.use_part is not None:
-            if args.use_part == "wrist":
-                self.model = self._create_vq_model(args, dim_motion=self.wrist_dim)
-            elif args.use_part == "hand":
-                self.model = self._create_vq_model(args, dim_motion=self.hand_dim)
-            else:  # both
-                raise NotImplementedError(f"Unsupported use_part: {args.use_part}")
-        else:
-            self.model = self._create_vq_model(args)
-
-        self.loss_fn = MotionReconstructionLoss(args.recons_loss)
-
-        self.commit_weight = args.commit_weight
-
-    def _create_vq_model(self, args, dim_motion=None):
-        """Factory method for VQ model creation."""
-        model_map = {
-            "residualvq": ResidualVQModel,
-            "group_residualvq": GroupResidualVQModel,
-            "fsq": FSQModel
-        }
-        return model_map.get(args.quantizer_name, BaseVQModel)(args, dim_motion)
-    
-    def encode(self, x):
-        return self.model.encode(x)
-
-    def forward_decoder(self, x):
-        return self.model.forward_decoder(x)
-
-    def forward(self, motion: torch.Tensor, wrist_motion: torch.Tensor, hand_motion: torch.Tensor, **kwargs):
-        if self.use_part is None:
-            x_motion = motion
-        elif self.use_part == "wrist":
-            x_motion = wrist_motion
-        elif self.use_part == "hand":
-            x_motion = hand_motion
-        
-        pred_motion, commit_loss, perplexity = self.model(x_motion.float())
-        recon_loss = self.loss_fn(pred_motion, x_motion)
         total_loss = recon_loss + self.commit_weight * commit_loss
         
         return {
