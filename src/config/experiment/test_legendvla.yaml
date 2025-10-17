@@ -12,15 +12,15 @@ lora_dropout: 0.0
 # Data configuration
 image_shape: [224, 224, 3]
 vla_dataset_paths:
-#  - /data/fanlian/datasets/taco_test_seen.zarr
-#  - /data/fanlian/datasets/taco_test_unseen_task.zarr
-#  - /data/fanlian/datasets/oakink2_test_seen.zarr
-#  - /data/fanlian/datasets/oakink2_test_unseen_task.zarr
-#  - /data/fanlian/datasets/hoi4d_test_seen.zarr
-#  - /data/fanlian/datasets/hoi4d_test_unseen_object.zarr
-#  - /data/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
- - /data/fanlian/datasets/egodex_test_seen.zarr
- - /data/fanlian/datasets/egodex_test_unseen_task.zarr
+ - /data/fanlian/datasets/taco_test_seen.zarr
+ - /data/fanlian/datasets/taco_test_unseen_task.zarr
+ - /data/fanlian/datasets/oakink2_test_seen.zarr
+ - /data/fanlian/datasets/oakink2_test_unseen_task.zarr
+ - /data/fanlian/datasets/hoi4d_test_seen.zarr
+ - /data/fanlian/datasets/hoi4d_test_unseen_object.zarr
+ - /data/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
+#  - /data/fanlian/datasets/egodex_test_seen.zarr
+#  - /data/fanlian/datasets/egodex_test_unseen_task.zarr
 
 
 # Shape metadata
@@ -210,4 +210,4 @@ testing:
   show_gt: True
   target_width: 1920
   target_height: 1080
-  visualize_type: 'mesh' # mesh or skeleton
+  visualize_type: 'skeleton' # mesh or skeleton

@@ -676,3 +676,93 @@ def transform_wrist_to_target_frame(wrist_action, target_extrinsic):
         wrist_action = wrist_action.numpy()
     
     return wrist_action
+
+def transform_wrist_to_target_frame_per_frame(wrist_action, target_extrinsic):
+    '''
+    Transform the wrist action to the target frame with per-frame extrinsics.
+    Args:
+        wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
+        target_extrinsic: torch.Tensor or np.ndarray, shape: [N, 4, 4] or [B, N, 4, 4]
+        where N should equal T. We assume the target_extrinsic is world2cam, and we want to 
+        transform the wrist action in the world frame to the camera frame for each frame.
+    Returns:
+        wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
+    '''
+    assert wrist_action.dtype == target_extrinsic.dtype, "wrist_action and target_extrinsic must have the same dtype"
+    
+    # Check if input is numpy array
+    if isinstance(wrist_action, np.ndarray):
+        is_numpy = True
+        wrist_action = torch.from_numpy(wrist_action)
+        target_extrinsic = torch.from_numpy(target_extrinsic)
+    else:
+        is_numpy = False
+    
+    # Determine if batched or not
+    if wrist_action.ndim == 2:
+        # Add batch dimension for processing
+        wrist_action = wrist_action.unsqueeze(0)  # [1, T, 18]
+        target_extrinsic = target_extrinsic.unsqueeze(0)  # [1, N, 4, 4]
+        remove_batch = True
+    else:
+        remove_batch = False
+    
+    B, T = wrist_action.shape[0], wrist_action.shape[1]
+    
+    # Extract left and right wrist positions: [B, T, 3] each
+    left_wrist_pos = wrist_action[..., :3]  # [B, T, 3]
+    right_wrist_pos = wrist_action[..., 3:6]  # [B, T, 3]
+    
+    # Extract left and right wrist rotations (6D representation): [B, T, 6] each
+    left_wrist_rot_6d = wrist_action[..., 6:12]  # [B, T, 6]
+    right_wrist_rot_6d = wrist_action[..., 12:18]  # [B, T, 6]
+    
+    # Convert 6D rotation to rotation matrices: [B, T, 3, 3] each
+    left_wrist_rot_mat = rot_matrix_from_6drot(left_wrist_rot_6d)  # [B, T, 3, 3]
+    right_wrist_rot_mat = rot_matrix_from_6drot(right_wrist_rot_6d)  # [B, T, 3, 3]
+    
+    # Create homogeneous transformation matrices for left and right wrists
+    left_wrist_pose = torch.zeros((B, T, 4, 4), dtype=wrist_action.dtype, device=wrist_action.device)
+    left_wrist_pose[..., :3, :3] = left_wrist_rot_mat
+    left_wrist_pose[..., :3, 3] = left_wrist_pos
+    left_wrist_pose[..., 3, 3] = 1
+    
+    right_wrist_pose = torch.zeros((B, T, 4, 4), dtype=wrist_action.dtype, device=wrist_action.device)
+    right_wrist_pose[..., :3, :3] = right_wrist_rot_mat
+    right_wrist_pose[..., :3, 3] = right_wrist_pos
+    right_wrist_pose[..., 3, 3] = 1
+    
+    # Transform each frame with its corresponding extrinsic
+    # target_extrinsic: [B, T, 4, 4], left_wrist_pose: [B, T, 4, 4]
+    # We need to do matrix multiplication for each frame: target_extrinsic[b, t] @ left_wrist_pose[b, t]
+    left_wrist_pose_transformed = torch.matmul(target_extrinsic, left_wrist_pose)  # [B, T, 4, 4]
+    right_wrist_pose_transformed = torch.matmul(target_extrinsic, right_wrist_pose)  # [B, T, 4, 4]
+    
+    
+    # Extract transformed positions and rotations
+    left_wrist_pos_transformed = left_wrist_pose_transformed[..., :3, 3]  # [B, T, 3]
+    right_wrist_pos_transformed = right_wrist_pose_transformed[..., :3, 3]  # [B, T, 3]
+    
+    left_wrist_rot_mat_transformed = left_wrist_pose_transformed[..., :3, :3]  # [B, T, 3, 3]
+    right_wrist_rot_mat_transformed = right_wrist_pose_transformed[..., :3, :3]  # [B, T, 3, 3]
+    
+    # Convert rotation matrices back to 6D representation
+    left_wrist_rot_6d_transformed = rot_matrix_to_6drot(left_wrist_rot_mat_transformed)  # [B, T, 6]
+    right_wrist_rot_6d_transformed = rot_matrix_to_6drot(right_wrist_rot_mat_transformed)  # [B, T, 6]
+    
+    # Reconstruct wrist_action
+    wrist_action_transformed = torch.zeros_like(wrist_action)
+    wrist_action_transformed[..., :3] = left_wrist_pos_transformed
+    wrist_action_transformed[..., 3:6] = right_wrist_pos_transformed
+    wrist_action_transformed[..., 6:12] = left_wrist_rot_6d_transformed
+    wrist_action_transformed[..., 12:18] = right_wrist_rot_6d_transformed
+    
+    # Remove batch dimension if it was added
+    if remove_batch:
+        wrist_action_transformed = wrist_action_transformed.squeeze(0)  # [T, 18]
+    
+    # Convert back to numpy if input was numpy
+    if is_numpy:
+        wrist_action_transformed = wrist_action_transformed.numpy()
+    
+    return wrist_action_transformed

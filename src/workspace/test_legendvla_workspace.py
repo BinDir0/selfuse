@@ -406,34 +406,54 @@ if __name__ == "__main__":
     
     num_samples = cfg.testing.num_samples
     print(f"\nSampling {num_samples} random samples from dataset...")
-    sample_indices = random.sample(range(dataset_size), num_samples)
     
-    # Sample random indices, ensuring enough future frames
+    # Enable raw sample mode first to ensure samplers load enough frames
+    dataset.set_return_raw_sample(True)
+    
+    # Filter out samples that don't have enough frames for visualization
+    # We need history + horizon frames total
+    min_required_frames = dataset.vla_dataset.history + dataset.vla_dataset.horizon
+    valid_indices = []
+    
+    for idx in range(dataset_size):
+        # Get the sample's indices from the dataset
+        vla_dataset = dataset.vla_dataset
+        # Find which sampler this index belongs to
+        cumulative_len = 0
+        for sampler_idx, sampler_len in enumerate(vla_dataset.sampler_lens):
+            if idx < cumulative_len + sampler_len:
+                # This index belongs to this sampler
+                local_idx = idx - cumulative_len
+                sampler = vla_dataset.samplers[sampler_idx]
+                replay_buffer = sampler.replay_buffer
+                
+                # Get the buffer indices for this sample
+                buffer_start_idx, buffer_end_idx, _, _ = sampler.indices[local_idx]
+                
+                # Find which episode this sample belongs to
+                episode_ends = replay_buffer.episode_ends
+                episode_idx = np.searchsorted(episode_ends, buffer_end_idx)
+                episode_end = episode_ends[episode_idx]
+                
+                # Check if we can load enough frames from buffer_start_idx
+                # We need at least min_required_frames from buffer_start_idx
+                available_frames = episode_end - buffer_start_idx
+                if available_frames >= min_required_frames:
+                    valid_indices.append(idx)
+                break
+            cumulative_len += sampler_len
+    
+    print(f"Found {len(valid_indices)} valid samples (with at least {min_required_frames} frames available)")
+    print(f"Filtered out {dataset_size - len(valid_indices)} samples without enough frames")
+    
+    # Sample from valid indices only
+    sample_indices = random.sample(valid_indices, min(num_samples, len(valid_indices)))
+    
+    # Disable raw sample mode temporarily
+    dataset.set_return_raw_sample(False)
+    
     # Process all samples
     all_sample_data = []
-    
-    # Create augmentation transforms
-    # use_augmentation = cfg.testing.use_augmentation
-    # use_color_jitter = cfg.testing.use_color_jitter
-    # use_gaussian_noise = cfg.testing.use_gaussian_noise
-    # gaussian_noise_sigma = cfg.testing.gaussian_noise_sigma
-
-    # if use_augmentation:
-    #     if use_color_jitter:
-    #         color_jitter = v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1)
-    #         print(f"ColorJitter augmentation enabled: brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1")
-        
-    #     if use_gaussian_noise:
-    #         gaussian_noise = v2.GaussianNoise(sigma=gaussian_noise_sigma)
-    #         print(f"GaussianNoise augmentation enabled: sigma={gaussian_noise_sigma}")
-        
-    #     enabled_augs = []
-    #     if use_color_jitter: enabled_augs.append("ColorJitter")
-    #     if use_gaussian_noise: enabled_augs.append("GaussianNoise")
-    #     print(f"Enabled augmentations: {', '.join(enabled_augs)}")
-    # else:
-    #     print(f"All augmentations disabled")
-
     
     print(f"\nProcessing {len(sample_indices)} samples...")
     
@@ -471,49 +491,6 @@ if __name__ == "__main__":
         # Preprocess batch like in training script
         inputs = preprocess_batch_for_inference(batch, model, device, sample_fm_time=True)
 
-        #     print(f"  Batch image shape: {batch['image'].shape}")
-        #     enabled_augs = []
-        #     if use_color_jitter: enabled_augs.append("ColorJitter")
-        #     if use_gaussian_noise: enabled_augs.append("GaussianNoise")
-        #     print(f"  Applying {', '.join(enabled_augs)} to all {batch_seq_len} frames in sequence")
-            
-        #     # Apply augmentation to each frame in the sequence
-        #     augmented_frames = []
-        #     for t in range(batch_seq_len):
-        #         # Get the original frame
-        #         original_frame = batch['image'][0, t]  # (C, H, W) with values [0, 1]
-        #         augmented_frame = original_frame.clone()
-                
-        #         # Apply ColorJitter augmentation if enabled
-        #         if use_color_jitter:
-        #             # Convert from (C, H, W) to (H, W, C) for PIL processing
-        #             frame_hwc = original_frame.permute(1, 2, 0).numpy()  # (H, W, C)
-        #             frame_uint8 = (frame_hwc * 255).astype(np.uint8)
-                    
-        #             # Apply ColorJitter
-        #             frame_pil = Image.fromarray(frame_uint8)
-        #             augmented_pil = color_jitter(frame_pil)
-        #             augmented_array = np.array(augmented_pil)
-                    
-        #             # Convert back to tensor format (C, H, W)
-        #             augmented_frame = torch.from_numpy(augmented_array).float() / 255.0
-        #             augmented_frame = augmented_frame.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
-                
-        #         # Apply GaussianNoise if enabled (v2 transforms work on tensors directly)
-        #         if use_gaussian_noise:
-        #             augmented_frame = gaussian_noise(augmented_frame)
-                
-        #         augmented_frames.append(augmented_frame)
-            
-        #     # Stack all augmented frames and replace in batch
-        #     augmented_sequence = torch.stack(augmented_frames)  # (T, C, H, W)
-        #     batch['image'][0] = augmented_sequence
-            
-        #     print(f"  Successfully applied {', '.join(enabled_augs)} to all {batch_seq_len} frames in sequence")
-        
-        # Save the batch data that was used for model prediction
-        # This ensures perfect correspondence between prediction and ground truth
-        
         # Run prediction
         with torch.no_grad():
             # torch.FloatTensor: [B, horizon_steps, human_action_dim] Generated human action sequence [1, 30, 48] for each sample
@@ -525,7 +502,7 @@ if __name__ == "__main__":
         action_pred_unnormalized = normalizer.unnormalize(action_pred_dict)
 
 
-        background_img = np.array(raw_sample['image'].squeeze(0))         # [H, W, 3]
+        background_img = np.array(raw_sample['image'])         # [N, H, W, 3]
 
         extrinsic_w2c = raw_sample['extrinsic'] # [N, 4, 4]
         extrinsic_c2w = invert_extrinsics(extrinsic_w2c)
@@ -537,16 +514,38 @@ if __name__ == "__main__":
                 ])
 
         if cfg.testing.target_width != 384 or cfg.testing.target_height != 384:
-            # Convert from RGB to BGR for OpenCV compatibility (assuming input is RGB)
-            background_img = cv2.cvtColor(background_img, cv2.COLOR_RGB2BGR)
+            # Check if background_img is a sequence [N, H, W, 3] or single frame [H, W, 3]
+            is_sequence = background_img.ndim == 4
             
-            # Resize image from 384x384 to target resolution
-            original_size = background_img.shape[:2]  # (height, width)
-            target_size = (cfg.testing.target_width, cfg.testing.target_height)  # (width, height) for cv2.resize
-            
-            print(f"Original background image size: {original_size[1]}x{original_size[0]}")
-            background_img = cv2.resize(background_img, target_size, interpolation=cv2.INTER_CUBIC)
-            print(f"Resized background image to: {background_img.shape[1]}x{background_img.shape[0]}")
+            if is_sequence:
+                # Process each frame in the sequence
+                num_frames, orig_h, orig_w = background_img.shape[:3]
+                print(f"Original background image size: {orig_w}x{orig_h} ({num_frames} frames)")
+                
+                target_size = (cfg.testing.target_width, cfg.testing.target_height)  # (width, height) for cv2.resize
+                resized_frames = []
+                
+                for frame_idx in range(num_frames):
+                    # Convert from RGB to BGR for OpenCV compatibility
+                    frame_bgr = cv2.cvtColor(background_img[frame_idx], cv2.COLOR_RGB2BGR)
+                    # Resize frame
+                    frame_resized = cv2.resize(frame_bgr, target_size, interpolation=cv2.INTER_CUBIC)
+                    resized_frames.append(frame_resized)
+                
+                background_img = np.stack(resized_frames, axis=0)  # [N, H, W, 3]
+                print(f"Resized background image to: {background_img.shape[2]}x{background_img.shape[1]} ({num_frames} frames)")
+            else:
+                # Single frame processing (original code)
+                # Convert from RGB to BGR for OpenCV compatibility
+                background_img = cv2.cvtColor(background_img, cv2.COLOR_RGB2BGR)
+                
+                # Resize image from 384x384 to target resolution
+                original_size = background_img.shape[:2]  # (height, width)
+                target_size = (cfg.testing.target_width, cfg.testing.target_height)  # (width, height) for cv2.resize
+                
+                print(f"Original background image size: {original_size[1]}x{original_size[0]}")
+                background_img = cv2.resize(background_img, target_size, interpolation=cv2.INTER_CUBIC)
+                print(f"Resized background image to: {background_img.shape[1]}x{background_img.shape[0]}")
             
             # Extract camera intrinsics
 
@@ -602,12 +601,22 @@ if __name__ == "__main__":
        
             # Convert single frame [H, W, 3] to sequence format [N, H, W, 3] for vis_hand_plot
             # Since we have multiple frames in the sequence, we need to repeat the image for each frame
-            num_frames = 30
-            background_img = cv2.cvtColor(background_img, cv2.COLOR_BGR2RGB)
-            image_sequence = np.repeat(background_img[np.newaxis, :, :, :], num_frames, axis=0)  # [N, H, W, 3]
-                    
+
+            # num_frames = 30
+            # image_sequence = np.repeat(background_img[np.newaxis, :, :, :], num_frames, axis=0)  # [N, H, W, 3]
+
+            # Convert BGR to RGB for visualization
+            # Handle both single frame [H, W, 3] and multi-frame [N, H, W, 3] cases
+            if cfg.testing.target_width != 384 or cfg.testing.target_height != 384:
+                if background_img.ndim == 4:
+                    # Multi-frame: convert each frame from BGR to RGB
+                    background_img = np.stack([cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in background_img], axis=0)
+                else:
+                    # Single frame: convert directly
+                    background_img = cv2.cvtColor(background_img, cv2.COLOR_BGR2RGB)
+            
             vis_hand_plot_comparison(mano_data['predicted']['rot'], mano_data['predicted']['trans'], mano_data['predicted']['theta'],mano_data['ground_truth']['rot']
-            , mano_data['ground_truth']['trans'], mano_data['ground_truth']['theta'], mano_data['beta'], mano_data['sides'], image_sequence, intrinsic, extrinsic_c2w, output_dir, fps=30)
+            , mano_data['ground_truth']['trans'], mano_data['ground_truth']['theta'], mano_data['beta'], mano_data['sides'], background_img, intrinsic, extrinsic_c2w, output_dir, fps=30)
 
         elif cfg.testing.visualize_type == 'skeleton':
             
