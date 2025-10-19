@@ -37,7 +37,7 @@ dataset:
   shape_meta: ${shape_meta}
   history: ${history} # frames
   seed: 42
-  val_ratio: 0.005
+  val_ratio: 0.95
   return_numpy: False # whether to return numpy arrays
   normalizer_dataloader_cfg:
     batch_size: 4096
@@ -118,6 +118,9 @@ tokenizer:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: wrist
+        model_config:
+          <<: *base_model_config
+          output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
           nb_code: 4096    # partially override the base quantizer config
@@ -129,6 +132,9 @@ tokenizer:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: hand
+        quantizer_config:
+          <<: *base_quantizer_config
+          num_quantizers: 8
     use_part: True
   actions: 
     wrist: 
@@ -137,6 +143,9 @@ tokenizer:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: wrist
+        model_config:
+          <<: *base_model_config
+          output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
           nb_code: 4096    # partially override the base quantizer config
@@ -148,6 +157,9 @@ tokenizer:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: hand
+        quantizer_config:
+          <<: *base_quantizer_config
+          num_quantizers: 4
     use_part: True
 
 optimizer:
@@ -164,15 +176,15 @@ optimizer:
 
 
 training:
-  device: cuda:3
+  device: cuda:7
   num_epochs: 10
   tqdm_interval_sec: 1.0
   max_train_steps: 
-  max_val_steps: 100
+  max_val_steps: # 100
   val_per_epoch: 1
   ckpt_save_interval: 1
-  normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.16/19.47_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
-  valid_tokenizer_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.16/22.08_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=9
+  normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.17/14.08_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  valid_tokenizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.16/23.19_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=7
   # if valid_tokenizer_path is not None, will validate the tokenizer
   save_path: 
 
