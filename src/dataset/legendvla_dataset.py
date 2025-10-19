@@ -172,8 +172,8 @@ class LegendVLADataset(BaseImageDataset):
             state_presence, action_presence, processed_action, processed_state, self.hand_ndim
         )
 
-        image = process_image(sample['image'], self.history, self.n_obs_image_steps, self.aug_transform)
-
+        # image = process_image(sample['image'], self.history, self.n_obs_image_steps, self.aug_transform)
+        image = sample['image'][self.history:]
         instruction = sample['instruction'][self.history]
         instruction_num = sample['instruction_num'][self.history]
         # sample a random instruction from the candidate instructions
@@ -247,8 +247,39 @@ class LegendVLADataset(BaseImageDataset):
         self.normalizer = normalizer
 
     def set_return_raw_sample(self, return_raw_sample: bool):
-        """Set whether to return raw sample data (for testing/debugging purposes)"""
+        """Set whether to return raw sample data (for testing/debugging purposes)
+        
+        When enabling raw sample mode, recreates samplers to load more image frames
+        for visualization purposes (history + horizon frames instead of just history + 1).
+        """
+        if self.return_raw_sample == return_raw_sample:
+            # No change needed
+            return
+            
         self.return_raw_sample = return_raw_sample
+        
+        # Recreate samplers with appropriate image frame loading
+        self.samplers = []
+        self.sampler_lens = []
+        
+        for i, replay_buffer in enumerate(self.replay_buffers):
+            # Determine how many image frames to load
+            # For inference/visualization, we need history + horizon frames
+            # For training, we only need history + 1 frames
+            image_frames_to_load = self.history + 30 if return_raw_sample else self.history + 1
+            
+            sampler = SequenceSampler(
+                replay_buffer=replay_buffer,
+                sequence_length=self.horizon,
+                pad_before=self.pad_before,
+                pad_after=self.pad_after,
+                episode_mask=self.train_masks[i],
+                key_first_k=dict(image=image_frames_to_load))
+            self.samplers.append(sampler)
+            self.sampler_lens.append(len(sampler))
+        
+        print(f"Samplers recreated: {'raw mode' if return_raw_sample else 'training mode'} - loading {image_frames_to_load} image frames")
+
 
     def get_normalizer(self):
         # Merge all data

@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from src.utils.geometry import transform_wrist_to_target_frame
+from src.utils.geometry import transform_wrist_to_target_frame, transform_wrist_to_target_frame_per_frame
 # manopth.manolayer will be imported dynamically in HandVisualizer.__init__()
 
 # Transformation utilities are implemented as methods within HandVisualizer class
@@ -962,10 +962,12 @@ class HandVisualizer:
                          gt_mano_sequence: torch.Tensor = None, gt_wrist_sequence: torch.Tensor = None,
                          presence: int = 3) -> None:
         """
-        Generate 2D projection video showing hand motion predictions overlaid on static background image
+        Generate 2D projection video showing hand motion predictions overlaid on background image(s)
         
         Args:
-            background_img: Static background image to use for all frames
+            background_img: Background image - can be:
+                           - Static image [H, W, 3] to use for all frames
+                           - Image sequence [N, H, W, 3] with one frame per prediction
             mano_sequence: MANO parameters sequence [n, 30] where n is the number of future frames
             wrist_sequence: Wrist parameters sequence [n, 18] where n is the number of future frames
             output_path: Output video path
@@ -979,20 +981,34 @@ class HandVisualizer:
             gt_wrist_sequence: Ground truth wrist parameters sequence [n, 18] (optional)
             presence: Hand visibility flag (1=left only, 2=right only, 3=both visible) (optional)
         """
+        # Check if background is a sequence or single image
+        is_sequence = background_img.ndim == 4
+        
         # Get video properties from background image
-        height, width = background_img.shape[:2]
+        if is_sequence:
+            height, width = background_img.shape[1:3]
+            print(f"Using image sequence with {background_img.shape[0]} frames")
+        else:
+            height, width = background_img.shape[:2]
+            print(f"Using static background image")
+        
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         
         # Create video writer
         video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
         num_frames = len(mano_sequence)
-        print(f"Generating video with static background image...")
-        print(f"Hand motion prediction will be overlaid on the same background for {num_frames} frames")
+        print(f"Generating video with {num_frames} frames...")
         
-        # Generate frames using static background and prediction sequence
+        # Generate frames
         for i in range(num_frames):
             print(f"Processing frame {i+1}/{num_frames}")
+            
+            # Get the background frame for this iteration
+            if is_sequence:
+                frame_bg = background_img[i] if i < len(background_img) else background_img[-1]
+            else:
+                frame_bg = background_img
             
             # Get extrinsic matrix for this frame if available
             extrinsic_matrix = extrinsic_sequence[i] if extrinsic_sequence is not None else None
@@ -1001,13 +1017,14 @@ class HandVisualizer:
             gt_mano_frame = gt_mano_sequence[i] if gt_mano_sequence is not None else None
             gt_wrist_frame = gt_wrist_sequence[i] if gt_wrist_sequence is not None else None
             
-            # Create visualization by overlaying prediction on static background image
-            vis_frame = self.visualize_2d_frame(background_img, mano_sequence[i], wrist_sequence[i],
+            # Create visualization by overlaying prediction on background frame
+            vis_frame = self.visualize_2d_frame(frame_bg, mano_sequence[i], wrist_sequence[i],
                                            fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix,
                                            show_mesh=show_mesh, mesh_alpha=mesh_alpha,
                                            gt_mano_params=gt_mano_frame, gt_wrist_params=gt_wrist_frame,
                                            presence=presence)
             
+            # Convert RGB to BGR for OpenCV VideoWriter            
             # Write frame to video
             video_writer.write(vis_frame)
         
@@ -1154,7 +1171,8 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
     gt_mano_sequence =  raw_sample['action'][:, 18:]  # [30, 30]]
 
     # transform the gt wrist sequence to the target frame
-    gt_wrist_sequence = transform_wrist_to_target_frame(gt_wrist_sequence, raw_sample['extrinsic'][0])
+    # Use per-frame transformation since extrinsic is [N, 4, 4]
+    gt_wrist_sequence = transform_wrist_to_target_frame_per_frame(gt_wrist_sequence, raw_sample['extrinsic'])
     # Extract presence data (single integer for all frames)
     presence = raw_sample['presence'][0]
     intrinsic_matrix = raw_sample['intrinsic'][0]

@@ -2130,7 +2130,6 @@ def vis_hand_plot_comparison(rot_pred, trans_pred, theta_pred, rot_gt, trans_gt,
     rot_c_pred, trans_c_pred = {}, {}
     rot_c_gt, trans_c_gt = {}, {}
     for side in sides:
-        # print(rot[side].device, trans[side].device, camera_extrinsics.device)
         rot_c_pred[side], trans_c_pred[side] = world_to_camera(camera_extrinsics, rot=rot_pred[side], trans=trans_pred[side])
         rot_c_gt[side], trans_c_gt[side] = world_to_camera(camera_extrinsics, rot=rot_gt[side], trans=trans_gt[side])
 
@@ -2145,10 +2144,7 @@ def vis_hand_plot_comparison(rot_pred, trans_pred, theta_pred, rot_gt, trans_gt,
         raw_frames = np.array(raw_frames)
     else:
         raw_frames = image_paths
-    # print(raw_frames.shape)
-    # print(intrinsic_matrix)
 
-    # print(raw_frames)
     hand_2d_render_comparison(hand_data_pred, hand_data_gt, torch.Tensor(intrinsic_matrix),
                     output_path=f"{output_dir}_render.mp4", raw_frames=raw_frames, 
                     fps=fps, blend_alpha=0.5)

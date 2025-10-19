@@ -343,12 +343,13 @@ class PaliGemmaVLAProcessor:
     def __init__(
         self,
         tokenizer,
-        fast_tokenizer,
+        hand_tokenizer,
         num_image_tokens: int,
         max_seq_len: int,
         ignore_index: int = -100,
         image_size: int = 224,
         tokenizer_padding: str = "longest", # longest or max_length
+        hand_tokenizer_type: str = "fast", # "fast" or "vq"
     ):
         super().__init__()
 
@@ -357,7 +358,7 @@ class PaliGemmaVLAProcessor:
         self.max_seq_len = max_seq_len
         self.ignore_index = ignore_index
         self.tokenizer_padding = tokenizer_padding
-
+        self.hand_tokenizer_type = hand_tokenizer_type
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
         tokens_to_add = {"additional_special_tokens": [
             self.IMAGE_TOKEN, 
@@ -386,36 +387,100 @@ class PaliGemmaVLAProcessor:
         tokenizer.add_eos_token = False
 
         self.tokenizer = tokenizer
-        self.fast_tokenizer = fast_tokenizer
+        if self.hand_tokenizer_type == "fast":
+            self.fast_tokenizer = hand_tokenizer
+            self.setup_fast_tokenizer_mappings()
+        elif self.hand_tokenizer_type == "vq":
+            self.vq_tokenizer = hand_tokenizer
+            self.setup_vq_tokenizer_mappings()
+        else:
+            raise ValueError(f"Unknown hand_tokenizer_type: {hand_tokenizer_type}")
 
-        self.fast_token_id2gemma_token_id = {
-            k: {} for k in self.fast_tokenizer.keys()
-        }
-        sum_fast_vocab_size = sum([self.fast_tokenizer[k].vocab_size for k in self.fast_tokenizer.keys()])
-        vocab_size = self.tokenizer.vocab_size
-        special_tokens = self.tokenizer.all_special_ids
-        token_id_replace = []
-        replace_size = 0
-        for i in range(vocab_size - 1, -1, -1):
-            if i in special_tokens:
+    def setup_fast_tokenizer_mappings(self):
+            self.fast_token_id2gemma_token_id = {
+                k: {} for k in self.fast_tokenizer.keys()
+            }
+            sum_fast_vocab_size = sum([self.fast_tokenizer[k].vocab_size for k in self.fast_tokenizer.keys()])
+            vocab_size = self.tokenizer.vocab_size
+            special_tokens = self.tokenizer.all_special_ids
+            token_id_replace = []
+            replace_size = 0
+            for i in range(vocab_size - 1, -1, -1):
+                if i in special_tokens:
+                    continue
+                token_id_replace.append(i)
+                replace_size += 1
+                if replace_size >= sum_fast_vocab_size:
+                    break
+            assert replace_size == sum_fast_vocab_size, "The replace size is not equal to the sum of the fast tokenizer vocab size"
+
+            token_id_replace = token_id_replace[::-1]
+            replace_id = 0
+            for k in self.fast_tokenizer.keys():
+                tk = self.fast_tokenizer[k]
+                for i in range(tk.vocab_size):
+                    self.fast_token_id2gemma_token_id[k][i] = token_id_replace[replace_id]
+                    replace_id += 1
+            self.gemma_token_id2fast_token_id = {}
+            for key, id_map in self.fast_token_id2gemma_token_id.items():
+                self.gemma_token_id2fast_token_id[key] = {v: k for k, v in id_map.items()}
+
+    def setup_vq_tokenizer_mappings(self, vq_tokenizer):
+        """
+        Build mappings between VQ action tokens (nested dict: group -> part -> vq_id)
+        and base VLM (Gemma) tokenizer token ids (excluding special ids).
+
+        Produces:
+        - self.vq_token_id2gemma_token_id[group][part][vq_id] = gemma_id
+        - self.gemma_token_id2vq_token_id[gemma_id] = (group, part, vq_id)
+        """
+
+        # ---------- count total VQ tokens ----------
+        total_vq_vocab_size = 0
+        for group_name in vq_tokenizer.keys():
+            for part_name, processor in vq_tokenizer[group_name].items():
+                total_vq_vocab_size += processor.vocab_size
+
+        # ---------- collect a pool of usable Gemma ids (skip specials) ----------
+        base_vocab_size = self.tokenizer.vocab_size
+        special_ids = set(self.tokenizer.all_special_ids or [])
+        usable = []
+        for tid in range(base_vocab_size - 1, -1, -1):  # from high to low
+            if tid in special_ids:
                 continue
-            token_id_replace.append(i)
-            replace_size += 1
-            if replace_size >= sum_fast_vocab_size:
+            usable.append(tid)
+            if len(usable) >= total_vq_vocab_size:
                 break
-        assert replace_size == sum_fast_vocab_size, "The replace size is not equal to the sum of the fast tokenizer vocab size"
+        assert len(usable) == total_vq_vocab_size, (
+            f"Not enough free Gemma ids: need {total_vq_vocab_size}, got {len(usable)}"
+        )
+        usable.reverse()  # low→high for determinism
 
-        token_id_replace = token_id_replace[::-1]
-        replace_id = 0
-        for k in self.fast_tokenizer.keys():
-            tk = self.fast_tokenizer[k]
-            for i in range(tk.vocab_size):
-                self.fast_token_id2gemma_token_id[k][i] = token_id_replace[replace_id]
-                replace_id += 1
-        self.gemma_token_id2fast_token_id = {}
-        for key, id_map in self.fast_token_id2gemma_token_id.items():
-            self.gemma_token_id2fast_token_id[key] = {v: k for k, v in id_map.items()}
+        # ---------- make mappings (nested forward; flat reverse) ----------
+        self.vq_token_id2gemma_token_id = {
+            group_name: {part_name: {} for part_name in vq_tokenizer[group_name].keys()}
+            for group_name in vq_tokenizer.keys()
+        }
+        self.gemma_token_id2vq_token_id = {}
 
+        replace_idx = 0
+
+        # To keep deterministic order across runs, sort the keys
+        for group_name in sorted(vq_tokenizer.keys()):
+            sub = vq_tokenizer[group_name]
+            for part_name in sorted(sub.keys()):
+                processor = sub[part_name]
+                vocab_sz = processor.vocab_size
+                # Map vq_id = 0..vocab_sz-1 → consecutive Gemma ids from `usable`
+                for vq_id in range(vocab_sz):
+                    gemma_id = usable[replace_idx]
+                    replace_idx += 1
+                    self.vq_token_id2gemma_token_id[group_name][part_name][vq_id] = gemma_id
+                    self.gemma_token_id2vq_token_id[gemma_id] = (group_name, part_name, vq_id)
+
+        # (Optional) sanity checks
+        assert replace_idx == total_vq_vocab_size
+    
     def __call__(
         self,
         text: str,
@@ -455,9 +520,24 @@ class PaliGemmaVLAProcessor:
         )
 
         # We assume the states and actions are in [-1, 1]
-        discrete_states = self.fast_tokenizer['states'](states)[0]
-        if objective != "train_flow":
-            discrete_actions = self.fast_tokenizer['actions'](actions)[0]
+        if self.hand_tokenizer_type == "fast":
+            discrete_states = self.fast_tokenizer['states'](states)[0]
+            if objective != "train_flow":
+                discrete_actions = self.fast_tokenizer['actions'](actions)[0]
+        elif self.hand_tokenizer_type == "vq":
+            states_wrist_raw = self.vq_tokenizer['states']['wrist'](states[:, :18])  # [G,B,T,L]
+            states_hand_raw  = self.vq_tokenizer['states']['hand'](states[:, 18:])   # [G,B,T,L]
+            discrete_states_wrist = self.flatten_groups(states_wrist_raw)  # 1D
+            discrete_states_hand  = self.flatten_groups(states_hand_raw)   # 1D
+            discrete_states = np.concatenate([discrete_states_wrist, discrete_states_hand], axis=0)  # 1D
+            if objective != "train_flow":
+                actions_wrist_raw = self.vq_tokenizer['actions']['wrist'](actions[:, :18])  # [G,B,T,L]
+                actions_hand_raw  = self.vq_tokenizer['actions']['hand'](actions[:, 18:])   # [G,B,T,L]
+                discrete_actions_wrist = self.flatten_groups(actions_wrist_raw)  # 1D
+                discrete_actions_hand  = self.flatten_groups(actions_hand_raw)   # 1D
+                discrete_actions = np.concatenate([discrete_actions_wrist, discrete_actions_hand], axis=0)  # 1D
+        else:
+            raise ValueError(f"Unknown hand_tokenizer_type: {self.hand_tokenizer_type}")
 
         text = text.replace('.', '')
         text = text.lower()
@@ -487,11 +567,41 @@ class PaliGemmaVLAProcessor:
         
         input_ids = inputs['input_ids'] # [L]
         assert input_ids.ndim == 1, f"The input_ids should be 1D array, got {input_ids.ndim}D array."
-        discrete_states = np.array([self.fast_token_id2gemma_token_id['states'][id] for id in discrete_states])
-        input_ids = set_token_id(input_ids, self.state_token_id, discrete_states)
-        if objective != "train_flow":
-            discrete_actions = np.array([self.fast_token_id2gemma_token_id['actions'][id] for id in discrete_actions])
-            input_ids = set_token_id(input_ids, self.action_token_id, discrete_actions)
+
+        if self.hand_tokenizer_type == "fast":
+            discrete_states = np.array([self.fast_token_id2gemma_token_id['states'][id] for id in discrete_states])
+            input_ids = set_token_id(input_ids, self.state_token_id, discrete_states)
+            if objective != "train_flow":
+                discrete_actions = np.array([self.fast_token_id2gemma_token_id['actions'][id] for id in discrete_actions])
+                input_ids = set_token_id(input_ids, self.action_token_id, discrete_actions)
+        elif self.hand_tokenizer_type == "vq":
+            states_wrist_raw = self.vq_tokenizer['states']['wrist'](states[:, :18])  # [G,B,T,L]
+            states_hand_raw  = self.vq_tokenizer['states']['hand'](states[:, 18:])   # [G,B,T,L]
+            vq_ids_1d, (G, T, Lw, Lh) = self.flatten_time_interleave_wrist_hand(
+                states_wrist_raw, states_hand_raw
+            )
+            self.states_vq_meta = {"G": G, "T": T, "Lw": Lw, "Lh": Lh}
+            wrist_len = G*Lw*T
+            mapped_states_1d = np.concatenate([
+                self.map_vq_to_gemma_1d(vq_ids_1d[:wrist_len], group="states", part="wrist", mapping=self.vq_token_id2gemma_token_id),
+                self.map_vq_to_gemma_1d(vq_ids_1d[wrist_len:], group="states", part="hand", mapping=self.vq_token_id2gemma_token_id)
+            ], axis=0)
+            input_ids = set_token_id(input_ids, self.state_token_id, mapped_states_1d)
+            if objective != "train_flow":
+                actions_wrist_raw = self.vq_tokenizer['actions']['wrist'](actions[:, :18])  # [G,B,T,L]
+                actions_hand_raw  = self.vq_tokenizer['actions']['hand'](actions[:, 18:])   # [G,B,T,L]
+                vq_ids_1d, (G, T, Lw, Lh) = self.flatten_time_interleave_wrist_hand(
+                    actions_wrist_raw, actions_hand_raw
+                )
+                self.actions_vq_meta = {"G": G, "T": T, "Lw": Lw, "Lh": Lh}
+                wrist_len = G*Lw*T
+                mapped_actions_1d = np.concatenate([
+                    self.map_vq_to_gemma_1d(vq_ids_1d[:wrist_len], group="actions", part="wrist", mapping=self.vq_token_id2gemma_token_id),
+                    self.map_vq_to_gemma_1d(vq_ids_1d[wrist_len:], group="actions", part="hand", mapping=self.vq_token_id2gemma_token_id)
+                ], axis=0)
+                input_ids = set_token_id(input_ids, self.action_token_id, mapped_actions_1d)
+        else:
+            raise ValueError(f"Unknown hand_tokenizer_type: {self.hand_tokenizer_type}")
         inputs['input_ids'] = input_ids
 
         if objective != "train_flow":
@@ -512,6 +622,43 @@ class PaliGemmaVLAProcessor:
         output = {"pixel_values": pixel_values, **inputs}
         return output
 
+    def flatten_groups(self, tokens_by_group_batchTL):  
+        # Input shape: [G, B, T, L]
+        x = np.asarray(tokens_by_group_batchTL)
+        if x.ndim == 4:
+            # Get [G, T, L] by batch=0
+            x = x[:, 0] 
+        assert x.ndim == 3  # [G, T, L]
+        G, T, L = x.shape
+        # Flatten the tokens by the fixed order: first time, then group, then L dimension
+        out = []
+        for t in range(T):
+            for g in range(G):
+                out.extend(x[g, t].tolist())   # L tokens
+        return np.asarray(out, dtype=np.int64)  # 1D
+    def flatten_time_interleave_wrist_hand(self, wrist_raw, hand_raw):
+        """
+        Flatten the wrist and hand tokens by the fixed order: first time, then group, then L dimension
+        """
+        W = wrist_raw.squeeze(1)# [G, T, L]
+        H = hand_raw.squeeze(1)   # [G, T, L]
+        G, T, Lw = W.shape[0], W.shape[1], W.shape[2]
+        Lh = H.shape[2]
+        seq = []
+        for t in range(T):
+            # First wrist@t (by g then by l)
+            for g in range(G):
+                seq.extend(W[g, t].tolist())   # L vq_ids
+            # Then hand@t
+            for g in range(G):
+                seq.extend(H[g, t].tolist())
+        return np.asarray(seq, dtype=np.int64), (G, T, Lw, Lh)
+
+    def map_vq_to_gemma_1d(self, vq_ids_1d, group, part, mapping):
+        """Map the 1D vq_id sequence to the gemma_id 1D sequence."""
+        # If different groups use different vocab, you can write part as f"{part}.g{g}", and map separately after splitting by the outer layer.
+        return np.asarray([mapping[group][part][int(vq)] for vq in vq_ids_1d], dtype=np.int64)
+
     def decode(self, output_ids):
         if self.action_begin_token_id not in output_ids:
             warnings.warn("The action begin token is not found in the output_ids")
@@ -522,13 +669,51 @@ class PaliGemmaVLAProcessor:
         start_idx = np.argmax(output_ids == self.action_begin_token_id) + 1
         end_idx = np.argmax(output_ids == self.action_end_token_id)
         action_tokens = output_ids[start_idx:end_idx].copy()
-        for idx, token in enumerate(action_tokens):
-            if token not in self.gemma_token_id2fast_token_id['actions']:
-                warnings.warn(f"The token {token} is not found in the actions")
+        if self.hand_tokenizer_type == "fast":
+            for idx, token in enumerate(action_tokens):
+                if token not in self.gemma_token_id2fast_token_id['actions']:
+                    warnings.warn(f"The token {token} is not found in the actions")
+                    return {}
+                action_tokens[idx] = self.gemma_token_id2fast_token_id['actions'][token]
+            
+            actions = self.fast_tokenizer['actions'].decode([action_tokens])
+        elif self.hand_tokenizer_type == "vq":
+            # -------- VQ branch: reconstruct time-interleaved wrist/hand --------
+            meta = getattr(self, "actions_vq_meta", None)
+            if not meta:
+                warnings.warn("Missing actions_vq_meta; cache (G,T,Lw,Lh) during encode.")
                 return {}
-            action_tokens[idx] = self.gemma_token_id2fast_token_id['actions'][token]
-        
-        actions = self.fast_tokenizer['actions'].decode([action_tokens])
+            G, T, Lw, Lh = int(meta["G"]), int(meta["T"]), int(meta["Lw"]), int(meta["Lh"])
+            per_part = lambda L: G * L
+            per_t = per_part(Lw) + per_part(Lh)
+
+            # gemma -> (group_name, part_name, vq_id)
+            triples = [self.gemma_token_id2vq_token_id.get(int(tok)) for tok in action_tokens]
+            triples = [t for t in triples if t and t[0] == "actions" and t[1] in ("wrist","hand")]
+
+            expected = T * per_t
+            if len(triples) < expected:
+                warnings.warn(f"Short sequence: {len(triples)} < {expected}")
+                T = len(triples) // per_t
+
+            wrist_ids = np.zeros((G, T, Lw), dtype=np.int64)
+            hand_ids  = np.zeros((G, T, Lh), dtype=np.int64)
+
+            idx = 0
+            for t in range(T):
+                block = triples[idx: idx + per_t]; idx += per_t
+                wrist_block = block[: per_part(Lw)]
+                hand_block  = block[per_part(Lw):]
+
+                for g in range(G):
+                    w_slice = wrist_block[g*Lw : (g+1)*Lw]
+                    h_slice = hand_block [g*Lh : (g+1)*Lh]
+                    wrist_ids[g, t] = [vv for (grp,part,vv) in w_slice if part=="wrist"][:Lw] or [0]*Lw
+                    hand_ids [g, t] = [vv for (grp,part,vv) in h_slice if part=="hand" ][:Lh] or [0]*Lh
+
+            acts_wrist = self.vq_tokenizer["actions"]["wrist"].decode(wrist_ids)
+            acts_hand  = self.vq_tokenizer["actions"]["hand" ].decode(hand_ids)
+            actions = np.concatenate([acts_wrist, acts_hand], axis=-1)
         return {'actions': actions}
 
 
@@ -540,4 +725,3 @@ def set_token_id(input_ids, token_id, discrete_tokens):
     
     input_ids[condition] = discrete_tokens[:available_tokens]
     return input_ids
-
