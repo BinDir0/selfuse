@@ -53,60 +53,6 @@ class VQActionProcessor(ProcessorMixin):
         
         # Metadata storage for bimanual encoding
         self.vq_meta = None
-    
-    @staticmethod
-    def setup_vq_gemma_mappings(vq_tokenizer_dict: dict, gemma_tokenizer):
-        """
-        Build mappings between VQ action tokens and Gemma tokenizer token IDs.
-        
-        Args:
-            vq_tokenizer_dict: Dict with keys like 'states', 'actions', values are VQActionProcessor
-            gemma_tokenizer: The Gemma tokenizer
-            
-        Returns:
-            Tuple of (vq_token_id2gemma_token_id, gemma_token_id2vq_token_id)
-        """
-        # Count total VQ tokens
-        total_vq_vocab_size = 0
-        for group_name, vq_processor in vq_tokenizer_dict.items():
-            for part_name in vq_processor.vq_model.keys():
-                total_vq_vocab_size += vq_processor.vq_model[part_name].vocab_size
-        
-        # Collect usable Gemma IDs (skip special tokens)
-        base_vocab_size = gemma_tokenizer.vocab_size
-        special_ids = set(gemma_tokenizer.all_special_ids or [])
-        usable = []
-        for tid in range(base_vocab_size - 1, -1, -1):
-            if tid not in special_ids:
-                usable.append(tid)
-                if len(usable) >= total_vq_vocab_size:
-                    break
-        
-        assert len(usable) == total_vq_vocab_size, (
-            f"Not enough free Gemma ids: need {total_vq_vocab_size}, got {len(usable)}"
-        )
-        usable.reverse()  # low→high for determinism
-        
-        # Build mappings
-        vq_token_id2gemma_token_id = {
-            group_name: {part_name: {} for part_name in vq_processor.vq_model.keys()}
-            for group_name, vq_processor in vq_tokenizer_dict.items()
-        }
-        gemma_token_id2vq_token_id = {}
-        
-        replace_idx = 0
-        for group_name in sorted(vq_tokenizer_dict.keys()):
-            vq_processor = vq_tokenizer_dict[group_name]
-            for part_name in sorted(vq_processor.vq_model.keys()):
-                vocab_sz = vq_processor.vq_model[part_name].vocab_size
-                for vq_id in range(vocab_sz):
-                    gemma_id = usable[replace_idx]
-                    replace_idx += 1
-                    vq_token_id2gemma_token_id[group_name][part_name][vq_id] = gemma_id
-                    gemma_token_id2vq_token_id[gemma_id] = (group_name, part_name, vq_id)
-        
-        assert replace_idx == total_vq_vocab_size
-        return vq_token_id2gemma_token_id, gemma_token_id2vq_token_id
           
     def __call__(self, action_chunk: np.array) -> List[np.ndarray]:
         """
