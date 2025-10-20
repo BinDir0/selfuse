@@ -440,8 +440,10 @@ class PaliGemmaVLAProcessor:
         # ---------- count total VQ tokens ----------
         total_vq_vocab_size = 0
         for group_name in self.vq_tokenizer.keys():
-            for part_name, processor in self.vq_tokenizer[group_name].items():
-                total_vq_vocab_size += processor.vocab_size
+            vq_processor = self.vq_tokenizer[group_name]  # VQActionProcessor
+            for part_name in vq_processor.vq_model.keys():  # "wrist", "hand"
+                model = vq_processor.vq_model[part_name]
+                total_vq_vocab_size += model.vocab_size
 
         # ---------- collect a pool of usable Gemma ids (skip specials) ----------
         base_vocab_size = self.tokenizer.vocab_size
@@ -460,7 +462,7 @@ class PaliGemmaVLAProcessor:
 
         # ---------- make mappings (nested forward; flat reverse) ----------
         self.vq_token_id2gemma_token_id = {
-            group_name: {part_name: {} for part_name in self.vq_tokenizer[group_name].keys()}
+            group_name: {part_name: {} for part_name in self.vq_tokenizer[group_name].vq_model.keys()}
             for group_name in self.vq_tokenizer.keys()
         }
         self.gemma_token_id2vq_token_id = {}
@@ -469,10 +471,10 @@ class PaliGemmaVLAProcessor:
 
         # To keep deterministic order across runs, sort the keys
         for group_name in sorted(self.vq_tokenizer.keys()):
-            sub = self.vq_tokenizer[group_name]
-            for part_name in sorted(sub.keys()):
-                processor = sub[part_name]
-                vocab_sz = processor.vocab_size
+            vq_processor = self.vq_tokenizer[group_name]  # VQActionProcessor
+            for part_name in sorted(vq_processor.vq_model.keys()):  # "wrist", "hand"
+                model = vq_processor.vq_model[part_name]
+                vocab_sz = model.vocab_size
                 # Map vq_id = 0..vocab_sz-1 → consecutive Gemma ids from `usable`
                 for vq_id in range(vocab_sz):
                     gemma_id = usable[replace_idx]
@@ -524,19 +526,22 @@ class PaliGemmaVLAProcessor:
         # We assume the states and actions are in [-1, 1]
         # Encode states and actions to get token counts for prompt construction
         if self.hand_tokenizer_type == "fast":
+
             discrete_states = self.fast_tokenizer['states'](states)[0]
+
             if objective != "train_flow":
+
                 discrete_actions = self.fast_tokenizer['actions'](actions)[0]
+
         elif self.hand_tokenizer_type == "vq":
-            # Encode states using VQ tokenizer for bimanual data
-            # _encode_bimanual_vq expects [T, D] input and returns (tokens_1d, meta)
-            discrete_states, (G_s, T_s, Lw_s, Lh_s) = self._encode_bimanual_vq(states, group='states')
-            self.states_vq_meta = {"G": G_s, "T": T_s, "Lw": Lw_s, "Lh": Lh_s}
-            
+
+            discrete_states = self.vq_tokenizer['states'](states)[0]
+            self.states_vq_meta = self.vq_tokenizer['states'].vq_meta
+
             if objective != "train_flow":
-                # Encode actions using VQ tokenizer for bimanual data
-                discrete_actions, (G_a, T_a, Lw_a, Lh_a) = self._encode_bimanual_vq(actions, group='actions')
-                self.actions_vq_meta = {"G": G_a, "T": T_a, "Lw": Lw_a, "Lh": Lh_a}
+                
+                discrete_actions = self.vq_tokenizer['actions'](actions)[0]
+                self.actions_vq_meta = self.vq_tokenizer['actions'].vq_meta
         else:
             raise ValueError(f"Unknown hand_tokenizer_type: {self.hand_tokenizer_type}")
 
@@ -576,6 +581,12 @@ class PaliGemmaVLAProcessor:
                 discrete_actions = np.array([self.fast_token_id2gemma_token_id['actions'][id] for id in discrete_actions])
                 input_ids = set_token_id(input_ids, self.action_token_id, discrete_actions)
         elif self.hand_tokenizer_type == "vq":
+            # Extract metadata from vq_meta
+            G_s = self.states_vq_meta["G"]
+            T_s = self.states_vq_meta["T"]
+            Lw_s = self.states_vq_meta["Lw"]
+            Lh_s = self.states_vq_meta["Lh"]
+            
             # Map VQ tokens to Gemma space (discrete_states already encoded above)
             mapped_states_1d = self.map_vq_to_gemma_1d(
                 discrete_states, 
@@ -586,6 +597,12 @@ class PaliGemmaVLAProcessor:
             input_ids = set_token_id(input_ids, self.state_token_id, mapped_states_1d)
             
             if objective != "train_flow":
+                # Extract metadata from actions vq_meta
+                G_a = self.actions_vq_meta["G"]
+                T_a = self.actions_vq_meta["T"]
+                Lw_a = self.actions_vq_meta["Lw"]
+                Lh_a = self.actions_vq_meta["Lh"]
+                
                 # Map VQ tokens to Gemma space (discrete_actions already encoded above)
                 mapped_actions_1d = self.map_vq_to_gemma_1d(
                     discrete_actions,
@@ -615,118 +632,7 @@ class PaliGemmaVLAProcessor:
 
         output = {"pixel_values": pixel_values, **inputs}
         return output
-    
-    def _encode_bimanual_vq(self, data, group='states'):
-        """
-        Encode bimanual data (left + right wrist and hand) using VQ tokenizer.
-        Returns tokens in time-interleaved order.
-        
-        Args:
-            data: np.ndarray [T, D] where D = 2*wrist_dim + 2*hand_dim
-                  Layout: [left_wrist, right_wrist, left_hand, right_hand]
-            group: 'states' or 'actions'
-            
-        Returns:
-            tokens_1d: np.ndarray, 1D flattened discrete tokens in time order
-            meta: tuple (G, T, Lw, Lh) - metadata for decoding
-        """
-        # Convert to torch tensor
-        if isinstance(data, np.ndarray):
-            data_tensor = torch.from_numpy(data).float()
-        elif isinstance(data, torch.Tensor):
-            data_tensor = data
-        
-        # Define dimension slices
-        w = self.wrist_dim
-        h = self.hand_dim
-        
-        # Split data into 4 parts - expecting [T, D] input
-        wrist_left_data = data_tensor[:, :w]                      # [T, w]
-        wrist_right_data = data_tensor[:, w:2*w]                  # [T, w]
-        hand_left_data = data_tensor[:, 2*w:2*w+h]                # [T, h]
-        hand_right_data = data_tensor[:, 2*w+h:2*w+2*h]           # [T, h]
-        
-        # Add batch dimension for VQ model: [T, D] -> [B=1, T, D]
-        wrist_left_data = wrist_left_data.unsqueeze(0)            # [1, T, w]
-        wrist_right_data = wrist_right_data.unsqueeze(0)          # [1, T, w]
-        hand_left_data = hand_left_data.unsqueeze(0)              # [1, T, h]
-        hand_right_data = hand_right_data.unsqueeze(0)            # [1, T, h]
-        
-        # Encode each part using VQ model's encode method: returns [G, B, T, L]
-        wrist_left_raw = self.vq_tokenizer[group]['wrist'].encode(wrist_left_data)
-        wrist_right_raw = self.vq_tokenizer[group]['wrist'].encode(wrist_right_data)
-        hand_left_raw = self.vq_tokenizer[group]['hand'].encode(hand_left_data)
-        hand_right_raw = self.vq_tokenizer[group]['hand'].encode(hand_right_data)
-        
-        # Flatten with time-interleaved order and get metadata
-        tokens_1d, meta = self._flatten_bimanual_time_interleaved(
-            wrist_left_raw, wrist_right_raw, hand_left_raw, hand_right_raw
-        )
-        
-        return tokens_1d, meta
-    
-    def _flatten_bimanual_time_interleaved(self, wrist_left_raw, wrist_right_raw, 
-                                           hand_left_raw, hand_right_raw):
-        """
-        Flatten bimanual tokens in time-interleaved order.
-        
-        Args:
-            wrist_left_raw: [G, B, T, L] - left wrist tokens
-            wrist_right_raw: [G, B, T, L] - right wrist tokens
-            hand_left_raw: [G, B, T, L] - left hand tokens
-            hand_right_raw: [G, B, T, L] - right hand tokens
-            
-        Returns:
-            tokens_1d: np.ndarray, 1D array with time-interleaved tokens
-            meta: tuple (G, T, Lw, Lh) - metadata for decoding
-        """
-        # Squeeze batch dimension and convert to numpy
-        WL = np.asarray(wrist_left_raw).squeeze(1)   # [G, T, L]
-        WR = np.asarray(wrist_right_raw).squeeze(1)  # [G, T, L]
-        HL = np.asarray(hand_left_raw).squeeze(1)    # [G, T, L]
-        HR = np.asarray(hand_right_raw).squeeze(1)   # [G, T, L]
-        
-        G, T, Lw = WL.shape
-        Lh = HL.shape[2]
-        
-        seq = []
-        # Iterate through time (outer loop for time locality)
-        for t in range(T):
-            # At each timestep, add: left_wrist, right_wrist, left_hand, right_hand
-            # For each part, iterate through groups
-            
-            # Left wrist at time t
-            for g in range(G):
-                seq.extend(WL[g, t].tolist())
-            
-            # Right wrist at time t
-            for g in range(G):
-                seq.extend(WR[g, t].tolist())
-            
-            # Left hand at time t
-            for g in range(G):
-                seq.extend(HL[g, t].tolist())
-            
-            # Right hand at time t
-            for g in range(G):
-                seq.extend(HR[g, t].tolist())
-        
-        return np.asarray(seq, dtype=np.int64), (G, T, Lw, Lh)
-    
-    def flatten_groups(self, tokens_by_group_batchTL):  
-        # Input shape: [G, B, T, L]
-        x = np.asarray(tokens_by_group_batchTL)
-        if x.ndim == 4:
-            # Get [G, T, L] by batch=0
-            x = x[:, 0] 
-        assert x.ndim == 3  # [G, T, L]
-        G, T, L = x.shape
-        # Flatten the tokens by the fixed order: first time, then group, then L dimension
-        out = []
-        for t in range(T):
-            for g in range(G):
-                out.extend(x[g, t].tolist())   # L tokens
-        return np.asarray(out, dtype=np.int64)  # 1D
+
 
     def map_vq_to_gemma_1d(self, vq_ids_1d, group, mapping, G, T, Lw, Lh):
         """
@@ -789,91 +695,23 @@ class PaliGemmaVLAProcessor:
             if not meta:
                 warnings.warn("Missing actions_vq_meta; cache (G,T,Lw,Lh) during encode.")
                 return {}
-            G, T, Lw, Lh = int(meta["G"]), int(meta["T"]), int(meta["Lw"]), int(meta["Lh"])
             
-            # Convert Gemma tokens back to VQ tokens (time-interleaved format)
-            vq_tokens = []
+            # Convert Gemma tokens back to VQ tokens (1D array in time-interleaved format)
+            vq_tokens_1d = []
             for tok in action_tokens:
                 if tok in self.gemma_token_id2vq_token_id:
                     group_name, part_name, vq_id = self.gemma_token_id2vq_token_id[tok]
                     if group_name == "actions" and part_name in ("wrist", "hand"):
-                        vq_tokens.append((part_name, vq_id))
+                        vq_tokens_1d.append(vq_id)
                     else:
                         warnings.warn(f"Token {tok} maps to unexpected group/part: {group_name}/{part_name}")
                 else:
                     warnings.warn(f"Token {tok} not found in VQ mappings")
             
-            # Separate wrist and hand VQ IDs from time-interleaved sequence
-            wrist_per_t = 2 * G * Lw  # left + right wrist
-            hand_per_t = 2 * G * Lh   # left + right hand
-            tokens_per_t = wrist_per_t + hand_per_t
+            vq_tokens_1d = np.array(vq_tokens_1d, dtype=np.int64)
             
-            # Check if we have enough tokens
-            expected = T * tokens_per_t
-            if len(vq_tokens) < expected:
-                warnings.warn(f"Short sequence: {len(vq_tokens)} < {expected}")
-                T = len(vq_tokens) // tokens_per_t
-            
-            # Reconstruct [G, T, L] format for wrist and hand
-            wrist_ids_left = np.zeros((G, T, Lw), dtype=np.int64)
-            wrist_ids_right = np.zeros((G, T, Lw), dtype=np.int64)
-            hand_ids_left = np.zeros((G, T, Lh), dtype=np.int64)
-            hand_ids_right = np.zeros((G, T, Lh), dtype=np.int64)
-            b=0 # batch index
-            for t in range(T):
-                start = t * tokens_per_t
-                timestep_tokens = vq_tokens[start : start + tokens_per_t]
-                
-                # Extract wrist tokens (first wrist_per_t tokens)
-                wrist_tokens_t = timestep_tokens[:wrist_per_t]
-                # Left wrist: first G*Lw tokens
-                for g in range(G):
-                    for l in range(Lw):
-                        idx = g * Lw + l
-                        if idx < len(wrist_tokens_t):
-                            part_name, vq_id = wrist_tokens_t[idx]
-                            if part_name == "wrist":
-                                wrist_ids_left[g, b, t, l] = vq_id
-                
-                # Right wrist: next G*Lw tokens
-                for g in range(G):
-                    for l in range(Lw):
-                        idx = G * Lw + g * Lw + l
-                        if idx < len(wrist_tokens_t):
-                            part_name, vq_id = wrist_tokens_t[idx]
-                            if part_name == "wrist":
-                                wrist_ids_right[g, b, t, l] = vq_id
-                
-                # Extract hand tokens (remaining tokens)
-                hand_tokens_t = timestep_tokens[wrist_per_t:]
-                # Left hand: first G*Lh tokens
-                for g in range(G):
-                    for l in range(Lh):
-                        idx = g * Lh + l
-                        if idx < len(hand_tokens_t):
-                            part_name, vq_id = hand_tokens_t[idx]
-                            if part_name == "hand":
-                                hand_ids_left[g, b, t, l] = vq_id
-                
-                # Right hand: next G*Lh tokens
-                for g in range(G):
-                    for l in range(Lh):
-                        idx = G * Lh + g * Lh + l
-                        if idx < len(hand_tokens_t):
-                            part_name, vq_id = hand_tokens_t[idx]
-                            if part_name == "hand":
-                                hand_ids_right[g, b, t, l] = vq_id
-            
-            # Decode each part using VQ tokenizer   need batch size
-            acts_wrist_left = self.vq_tokenizer["actions"]["wrist"].forward_decoder(wrist_ids_left)
-            acts_wrist_right = self.vq_tokenizer["actions"]["wrist"].forward_decoder(wrist_ids_right)
-            acts_hand_left = self.vq_tokenizer["actions"]["hand"].forward_decoder(hand_ids_left)
-            acts_hand_right = self.vq_tokenizer["actions"]["hand"].forward_decoder(hand_ids_right)
-            
-            # Concatenate: [left_wrist, right_wrist, left_hand, right_hand]
-            actions = np.concatenate([
-                acts_wrist_left, acts_wrist_right, acts_hand_left, acts_hand_right
-            ], axis=-1)
+            # Decode using VQActionProcessor
+            actions = self.vq_tokenizer["actions"].decode(vq_tokens_1d, meta=meta)
         return {'actions': actions}
 
 

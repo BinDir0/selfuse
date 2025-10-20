@@ -49,7 +49,7 @@ from src.dataset.base_dataset import BaseImageDataset
 from src.dataset.paligemma_processing import PaliGemmaVLAProcessor, PaliGemmaProcessor
 from transformers import AutoTokenizer
 from src.model.action.fast_tokenizer import UniversalActionProcessor
-from src.model.action.vq_model import MotionVQModel
+from src.model.action.vq_tokenizer import VQActionProcessor
 from src.utils.mano_vis import mano_forward, vis_hand_plot, vis_hand_plot_comparison
 from src.utils.mano_utils import rot6d_to_rotmat, sample_to_manovis
 from visualize import HandVisualizer, sample_for_vis
@@ -346,22 +346,12 @@ if __name__ == "__main__":
         )
     }
     vq_tokenizer = {
-        "states":{
-            "wrist":MotionVQModel.from_pretrained(
-            os.path.join(cfg.processor.hand_states_tokenizer_path, "wrist")
-            ),
-            "hand":MotionVQModel.from_pretrained(
-            os.path.join(cfg.processor.hand_states_tokenizer_path, "hand")
-            )
-        },
-        "actions":{
-            "wrist":MotionVQModel.from_pretrained(
-            os.path.join(cfg.processor.hand_actions_tokenizer_path, "wrist")
-            ),
-            "hand":MotionVQModel.from_pretrained(
-            os.path.join(cfg.processor.hand_actions_tokenizer_path, "hand")
-            )
-        }
+        "states": VQActionProcessor.from_pretrained(
+            cfg.processor.hand_states_tokenizer_path
+        ),
+        "actions": VQActionProcessor.from_pretrained(
+            cfg.processor.hand_actions_tokenizer_path
+        )
     }
     vla_processor = PaliGemmaVLAProcessor(
         tokenizer,
@@ -394,7 +384,7 @@ if __name__ == "__main__":
         normalizer = pickle.load(open(normalizer_path, 'rb'))
         print(f"Normalizer loaded from {normalizer_path}")
     else:
-        print(f"Normalizer file not found at {normalizer_path}")
+        print(f"Normalizer file not found at {normalizer_path}") 
         print("Computing normalizer from dataset...")
         normalizer = dataset.vla_dataset.get_normalizer()
         print("Normalizer computed successfully")
@@ -636,7 +626,33 @@ if __name__ == "__main__":
             
             vis_hand_plot_comparison(mano_data['predicted']['rot'], mano_data['predicted']['trans'], mano_data['predicted']['theta'],mano_data['ground_truth']['rot']
             , mano_data['ground_truth']['trans'], mano_data['ground_truth']['theta'], mano_data['beta'], mano_data['sides'], background_img, intrinsic, extrinsic_c2w, output_dir, fps=30)
+        elif cfg.testing.visualize_type == 'tokenizer':
+            mano_shape = raw_sample['action_shape'] # [N, 20]
+            action_wrist = raw_sample['action'][:,:18]
+            action_hand = raw_sample['action'][:,18:]
+            mano_data = sample_to_manovis(action_pred, action_wrist, action_hand, mano_shape, extrinsic_c2w)
+            output_dir = f"/data/fanlian/outputs/test_tokenizer_workspace/{i}"
+            encoded_action_gt = vq_tokenizer['actions'](raw_sample['action'])[0]
+            decoded_action_gt = vq_tokenizer['actions'].decode(encoded_action_gt)
+            mano_data_decoded = sample_to_manovis(decoded_action_gt, action_wrist, action_hand, mano_shape, extrinsic_c2w)
+            # Convert single frame [H, W, 3] to sequence format [N, H, W, 3] for vis_hand_plot
+            # Since we have multiple frames in the sequence, we need to repeat the image for each frame
 
+            # num_frames = 30
+            # image_sequence = np.repeat(background_img[np.newaxis, :, :, :], num_frames, axis=0)  # [N, H, W, 3]
+
+            # Convert BGR to RGB for visualization
+            # Handle both single frame [H, W, 3] and multi-frame [N, H, W, 3] cases
+            if cfg.testing.target_width != 384 or cfg.testing.target_height != 384:
+                if background_img.ndim == 4:
+                    # Multi-frame: convert each frame from BGR to RGB
+                    background_img = np.stack([cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in background_img], axis=0)
+                else:
+                    # Single frame: convert directly
+                    background_img = cv2.cvtColor(background_img, cv2.COLOR_BGR2RGB)
+            
+            vis_hand_plot_comparison(mano_data_decoded['ground_truth']['rot'], mano_data_decoded['ground_truth']['trans'], mano_data_decoded['ground_truth']['theta'],mano_data['ground_truth']['rot']
+            , mano_data['ground_truth']['trans'], mano_data['ground_truth']['theta'], mano_data['beta'], mano_data['sides'], background_img, intrinsic, extrinsic_c2w, output_dir, fps=30)            
         elif cfg.testing.visualize_type == 'skeleton':
             
             mano_root = cfg.testing.mano_root_dir

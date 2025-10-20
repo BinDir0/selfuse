@@ -100,7 +100,7 @@ class BaseVQModel(nn.Module):
 
     def forward_decoder(self, x):
         bs = x.shape[0]
-        x_d = self.quantizer.dequantize(x)
+        x_d = self.quantizer.get_output_from_indices(x)
         x_d = x_d.view(bs, -1, self.code_dim).permute(0, 2, 1).contiguous()
         x_decoder = self.decoder(x_d)
         x_out = self.postprocess(x_decoder)
@@ -147,7 +147,7 @@ class GroupResidualVQModel(BaseVQModel):
 
     def forward_decoder(self, x):
         bs = x.shape[1]
-        x_d = self.quantizer.dequantize(x)
+        x_d = self.quantizer.get_output_from_indices(x)
         x_d = x_d.view(bs, -1, self.code_dim).permute(0, 2, 1).contiguous()
         x_decoder = self.decoder(x_d)
         x_out = self.postprocess(x_decoder)
