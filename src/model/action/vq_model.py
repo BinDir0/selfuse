@@ -29,7 +29,6 @@ class BaseVQModel(nn.Module):
         self.code_dim = config.quantizer_config.codebook_dim
         self.motion_dim = motion_dim if motion_dim is not None else config.motion_dim
         self.quantizer_name = config.quantizer_config.quantizer_name
-
         model_config = config.model_config
         self.encoder = Encoder(
             input_emb_width=self.motion_dim,
@@ -210,7 +209,7 @@ class MotionVQModel(PreTrainedModel):
         self.wrist_dim = config.wrist_dim
         self.hand_dim = config.hand_dim
         self.commit_weight = config.loss_config.commit_weight
-
+        self.vocab_size = config.vocab_size
         if self.use_part is not None:
             if self.use_part == "wrist":
                 self.model = self._create_vq_model(config, motion_dim=self.wrist_dim)

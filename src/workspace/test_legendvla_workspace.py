@@ -49,6 +49,7 @@ from src.dataset.base_dataset import BaseImageDataset
 from src.dataset.paligemma_processing import PaliGemmaVLAProcessor, PaliGemmaProcessor
 from transformers import AutoTokenizer
 from src.model.action.fast_tokenizer import UniversalActionProcessor
+from src.model.action.vq_model import MotionVQModel
 from src.utils.mano_vis import mano_forward, vis_hand_plot, vis_hand_plot_comparison
 from src.utils.mano_utils import rot6d_to_rotmat, sample_to_manovis
 from visualize import HandVisualizer, sample_for_vis
@@ -344,15 +345,33 @@ if __name__ == "__main__":
             os.path.join(cfg.processor.fast_tokenizer_path, "actions")
         )
     }
-    
+    vq_tokenizer = {
+        "states":{
+            "wrist":MotionVQModel.from_pretrained(
+            os.path.join(cfg.processor.hand_states_tokenizer_path, "wrist")
+            ),
+            "hand":MotionVQModel.from_pretrained(
+            os.path.join(cfg.processor.hand_states_tokenizer_path, "hand")
+            )
+        },
+        "actions":{
+            "wrist":MotionVQModel.from_pretrained(
+            os.path.join(cfg.processor.hand_actions_tokenizer_path, "wrist")
+            ),
+            "hand":MotionVQModel.from_pretrained(
+            os.path.join(cfg.processor.hand_actions_tokenizer_path, "hand")
+            )
+        }
+    }
     vla_processor = PaliGemmaVLAProcessor(
         tokenizer,
-        fast_tokenizer,
+        vq_tokenizer,
         num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
         max_seq_len=cfg.policy.cfg.max_vlm_tokens,
         ignore_index=cfg.ignore_index,
         image_size=cfg.policy.vision_tower.config.image_size,
         tokenizer_padding=cfg.tokenizer_padding,
+        hand_tokenizer_type=cfg.processor.hand_tokenizer_type,
     )
     vlm_processor = PaliGemmaProcessor(
         tokenizer,

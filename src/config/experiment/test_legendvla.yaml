@@ -72,7 +72,10 @@ n_latency_steps: 0
 
 # Processor configuration
 processor: 
-  fast_tokenizer_path: /data/fanlian/tokenizers/state20-2048action10-1024
+  fast_tokenizer_path: /data/fanlian/tokenizers/fast_tokenizers
+  hand_states_tokenizer_path: /data/fanlian/tokenizers/grvq_tokenizers/states
+  hand_actions_tokenizer_path: /data/fanlian/tokenizers/grvq_tokenizers/actions
+  hand_tokenizer_type: 'vq' # 'vq' or 'fast'
 
 # Flow matching configuration
 flow: 
@@ -210,4 +213,4 @@ testing:
   show_gt: True
   target_width: 1920
   target_height: 1080
-  visualize_type: 'skeleton' # mesh or skeleton
+  visualize_type: 'mesh' # mesh or skeleton

@@ -152,6 +152,12 @@ class MotionVQModelConfig(PretrainedConfig):
         self.motion_dim = motion_dim
         self.wrist_dim = wrist_dim
         self.hand_dim = hand_dim
+
+        # Vocabulary size
+        if quantizer_config['shared_codebook']:
+            self.vocab_size = quantizer_config['nb_code']
+        else:
+            self.vocab_size = quantizer_config['nb_code'] * quantizer_config['num_quantizers']
         
         # Nested configs - handle dict, Config object, or None
         if model_config is None:
