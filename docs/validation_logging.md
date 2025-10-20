@@ -173,3 +173,5 @@ if (epoch + 1) % self.cfg.training.val_per_epoch == 0:
 默认使用与训练相同的 `dataloader`。如果需要单独的验证集，需要修改代码创建 `val_dataloader`。
 
 
+
+

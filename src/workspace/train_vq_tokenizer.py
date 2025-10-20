@@ -23,6 +23,7 @@ class TrainVQTokenizerWorkspace(BaseWorkspace):
         super().__init__(cfg)
 
         self.tokenizer_cfg = cfg.tokenizer
+        self.shape_meta = cfg.shape_meta
         self.dataset = hydra.utils.instantiate(cfg.dataset)
         if cfg.training.normalizer_path is not None:
             normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
@@ -306,8 +307,8 @@ class TrainVQTokenizerWorkspace(BaseWorkspace):
         '''
         if part is None : 
             return data.clone() if torch.is_tensor(data) else data.copy() # copy to avoid in-place modification
-        wrist_dim = self.tokenizer_cfg['states']['wrist']['config']['wrist_dim']
-        hand_dim = self.tokenizer_cfg['states']['hand']['config']['hand_dim']
+        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0] // 2
+        hand_dim = self.shape_meta['obs']['state']['hand']['shape'][0] // 2
         if part == 'wrist': 
             return torch.cat([data[..., :wrist_dim], data[..., wrist_dim:2*wrist_dim]], dim=0)
         elif part == 'hand':
