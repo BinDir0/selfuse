@@ -355,13 +355,12 @@ if __name__ == "__main__":
     }
     vla_processor = PaliGemmaVLAProcessor(
         tokenizer,
-        vq_tokenizer,
+        hand_tokenizer=vq_tokenizer if cfg.testing.tokenizer_type == 'vq' else fast_tokenizer,
         num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
         max_seq_len=cfg.policy.cfg.max_vlm_tokens,
         ignore_index=cfg.ignore_index,
         image_size=cfg.policy.vision_tower.config.image_size,
         tokenizer_padding=cfg.tokenizer_padding,
-        hand_tokenizer_type=cfg.processor.hand_tokenizer_type,
     )
     vlm_processor = PaliGemmaProcessor(
         tokenizer,
@@ -632,9 +631,35 @@ if __name__ == "__main__":
             action_hand = raw_sample['action'][:,18:]
             mano_data = sample_to_manovis(action_pred, action_wrist, action_hand, mano_shape, extrinsic_c2w)
             output_dir = f"/data/fanlian/outputs/test_tokenizer_workspace/{i}"
-            encoded_action_gt = vq_tokenizer['actions'](raw_sample['action'])[0]
-            decoded_action_gt = vq_tokenizer['actions'].decode(encoded_action_gt)
-            mano_data_decoded = sample_to_manovis(decoded_action_gt, action_wrist, action_hand, mano_shape, extrinsic_c2w)
+
+            if cfg.testing.tokenizer_type == 'vq':
+                # VQ model expects normalized data (as trained)
+                action_dict = {"actions": raw_sample['action']}
+                action_normalized = normalizer.normalize(action_dict)['actions']
+                
+                encoded_action_gt = vq_tokenizer['actions'](action_normalized)
+                decoded_action_normalized = vq_tokenizer['actions'].decode(encoded_action_gt)[0]
+                
+                # Unnormalize to get back to original scale
+                decoded_dict = {"actions": torch.from_numpy(decoded_action_normalized).unsqueeze(0)}
+                decoded_action_gt = normalizer.unnormalize(decoded_dict)['actions'].squeeze(0).numpy()
+                print("decoded_action_gt_vq:", decoded_action_gt.shape)
+
+            elif cfg.testing.tokenizer_type == 'fast':
+                # Fast model also expects normalized data (as trained)
+                action_dict = {"actions": raw_sample['action']}
+                action_normalized = normalizer.normalize(action_dict)['actions']
+                
+                encoded_action_gt = fast_tokenizer['actions'](action_normalized)
+                decoded_action_normalized = fast_tokenizer['actions'].decode(encoded_action_gt)[0]
+                
+                # Unnormalize to get back to original scale
+                decoded_dict = {"actions": torch.from_numpy(decoded_action_normalized).unsqueeze(0)}
+                decoded_action_gt = normalizer.unnormalize(decoded_dict)['actions'].squeeze(0).numpy()
+                print("decoded_action_gt_fast:", decoded_action_gt.shape)
+
+            mano_data_decoded = sample_to_manovis(action_pred, decoded_action_gt[:, :18], decoded_action_gt[:, 18:], mano_shape, extrinsic_c2w)
+
             # Convert single frame [H, W, 3] to sequence format [N, H, W, 3] for vis_hand_plot
             # Since we have multiple frames in the sequence, we need to repeat the image for each frame
 
