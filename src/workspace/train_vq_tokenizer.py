@@ -300,20 +300,25 @@ class TrainVQTokenizerWorkspace(BaseWorkspace):
     def get_partial_motion(self, data, part = None): 
         '''
         Args: 
-            data: torch.Tensor
+            data: torch.Tensor with layout [left_trans(3), right_trans(3), left_rot(6), right_rot(6), hand_left(15), hand_right(15)]
             part: str, 'wrist', 'hand', or None(both)
         Returns:
-            partial_data: torch.Tensor with partial motion
+            partial_data: torch.Tensor with partial motion, stacked along batch dimension (dim=0)
         '''
         if part is None : 
             return data.clone() if torch.is_tensor(data) else data.copy() # copy to avoid in-place modification
-        wrist_dim = self.shape_meta['obs']['state']['wrist']['shape'][0] // 2
-        hand_dim = self.shape_meta['obs']['state']['hand']['shape'][0] // 2
+        
+        # Data layout: [left_trans(3), right_trans(3), left_rot(6), right_rot(6), hand_left(15), hand_right(15)]
         if part == 'wrist': 
-            return torch.cat([data[..., :wrist_dim], data[..., wrist_dim:2*wrist_dim]], dim=0)
+            # Reconstruct: left_wrist = [left_trans + left_rot], right_wrist = [right_trans + right_rot]
+            left_wrist = torch.cat([data[..., 0:3], data[..., 6:12]], dim=-1)  # [..., 9]
+            right_wrist = torch.cat([data[..., 3:6], data[..., 12:18]], dim=-1)  # [..., 9]
+            return torch.cat([left_wrist, right_wrist], dim=0)  # Stack left and right along batch dim
         elif part == 'hand':
-            return torch.cat([data[..., 2*wrist_dim:2*wrist_dim+hand_dim], 
-                              data[..., 2*wrist_dim+hand_dim:2*wrist_dim+2*hand_dim]], dim=0)
+            # Extract hand data directly (already in correct layout)
+            left_hand = data[..., 18:33]  # [..., 15]
+            right_hand = data[..., 33:48]  # [..., 15]
+            return torch.cat([left_hand, right_hand], dim=0)  # Stack left and right along batch dim
         else:   
             raise ValueError(f"Invalid part: {part}")
 
