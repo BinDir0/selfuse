@@ -218,3 +218,45 @@ class UniversalActionProcessor(ProcessorMixin):
             time_horizon=time_horizon,
             action_dim=action_dim,
         )
+
+    def setup_tokenizer_gemma_mappings(self, usable_token_ids: list, start_idx: int = 0):
+        """
+        Build mappings between Fast action tokens and Gemma tokenizer token IDs for this processor.
+        
+        Args:
+            usable_token_ids: List of usable Gemma token IDs
+            start_idx: Starting index in usable_token_ids to use
+            
+        Returns:
+            Tuple of (token_id2gemma_token_id, gemma_token_id2token_id, end_idx)
+            - token_id2gemma_token_id: {token_id: gemma_id}
+            - gemma_token_id2token_id: {gemma_id: token_id}
+            - end_idx: Next index to use in usable_token_ids
+        """
+        # Initialize mappings (one-level for Fast tokenizer)
+        token_id2gemma_token_id = {}
+        gemma_token_id2token_id = {}
+        
+        replace_idx = start_idx
+        for i in range(self.vocab_size):
+            gemma_id = usable_token_ids[replace_idx]
+            replace_idx += 1
+            token_id2gemma_token_id[i] = gemma_id
+            gemma_token_id2token_id[gemma_id] = i
+        
+        return token_id2gemma_token_id, gemma_token_id2token_id, replace_idx
+
+    def map_hand_tokens2gemma(self, hand_tokens_1d, mapping):
+        """
+        Map VQ token IDs to Gemma token IDs while preserving time-interleaved order.
+        
+        Args:
+            vq_ids_1d: 1D array of VQ token IDs [t0_wrist, t0_hand, t1_wrist, t1_hand, ...]
+            mapping: vq_token_id2gemma_token_id dict
+            
+        Returns:
+            1D array of Gemma token IDs [t0_wrist, t0_hand, t1_wrist, t1_hand, ...]
+        """
+
+        
+        return np.array([mapping[id] for id in hand_tokens_1d])
