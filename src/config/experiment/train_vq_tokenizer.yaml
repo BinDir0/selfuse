@@ -5,10 +5,10 @@ _target_: src.workspace.train_vq_tokenizer.TrainVQTokenizerWorkspace
 
 image_shape: [224, 224, 3]
 dataset_paths:
- - /share_data/datasets/taco/taco_45pca_newpresence.zarr
- - /share_data/datasets/OakInk-v2/oakink2.zarr
- - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/datasets/EgoDex/egodex_train.zarr
+ - /share_data/guantianrui/datasets/taco/taco_45pca_newpresence.zarr
+ - /share_data/guantianrui/datasets/OakInk-v2/oakink2.zarr
+ - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
+ - /share_data/guantianrui/datasets/EgoDex/egodex_train.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -94,6 +94,7 @@ base_loss_config: &base_loss_config
 # Define base tokenizer arguments
 base_tokenizer_args: &base_tokenizer_args
   use_part: wrist
+  horizon: ${n_obs_state_steps}
   motion_dim: ${eval:'${shape_meta.obs.state.shape[0]}//2'}
   wrist_dim: ${eval:'${shape_meta.obs.state.wrist.shape[0]}//2'} # per wrist
   hand_dim: ${eval:'${shape_meta.obs.state.hand.shape[0]}//2'} # per hand
@@ -120,12 +121,12 @@ tokenizer:
         use_part: wrist
         model_config:
           <<: *base_model_config
-          output_emb_width: 512
+          #output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          nb_code: 4096    # partially override the base quantizer config
-          codebook_dim: 512
-          num_groups: 2
+          # nb_code: 4096    # partially override the base quantizer config
+          # codebook_dim: 512
+          # num_groups: 2
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -134,7 +135,7 @@ tokenizer:
         use_part: hand
         quantizer_config:
           <<: *base_quantizer_config
-          num_quantizers: 8
+          num_quantizers: 4
     use_part: True
   actions: 
     wrist: 
@@ -143,20 +144,22 @@ tokenizer:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: wrist
+        horizon: ${n_action_steps}
         model_config:
           <<: *base_model_config
-          output_emb_width: 512
+          #output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          nb_code: 4096    # partially override the base quantizer config
-          codebook_dim: 512
-          num_groups: 2
+          # nb_code: 4096    # partially override the base quantizer config
+          # codebook_dim: 512
+          # num_groups: 1
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: hand
+        horizon: ${n_action_steps}
         quantizer_config:
           <<: *base_quantizer_config
           num_quantizers: 4
@@ -177,11 +180,11 @@ optimizer:
 
 training:
   device: cuda:7
-  num_epochs: 10
+  num_epochs: 200
   tqdm_interval_sec: 1.0
   max_train_steps: 
   max_val_steps: # 100
-  val_per_epoch: 1
+  val_per_epoch: 50
   ckpt_save_interval: 1
   normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.17/14.08_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   valid_tokenizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.16/23.19_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=7

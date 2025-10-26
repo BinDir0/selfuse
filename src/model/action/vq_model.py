@@ -205,6 +205,7 @@ class MotionVQModel(PreTrainedModel):
     def __init__(self, config: MotionVQModelConfig):
         super().__init__(config)
         self.use_part = config.use_part
+        self.horizon = config.horizon
         self.motion_dim = config.motion_dim
         self.wrist_dim = config.wrist_dim
         self.hand_dim = config.hand_dim

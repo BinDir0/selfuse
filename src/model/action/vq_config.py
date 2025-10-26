@@ -125,6 +125,7 @@ class MotionVQModelConfig(PretrainedConfig):
         self,
         # Motion dimensions
         use_part: Optional[str] = None, # "wrist", "hand", None for full state
+        horizon: int = 30, # time horizon
         motion_dim: int = 24, # full motion dimension
         wrist_dim: int = 9, # wrist motion dimension
         hand_dim: int = 15, # hand motion dimension
@@ -138,6 +139,7 @@ class MotionVQModelConfig(PretrainedConfig):
         """
         Args:
             use_part: Which part to use ("wrist", "hand", None for full state)
+            horizon: Time horizon
             motion_dim: Full motion dimension
             wrist_dim: Wrist motion dimension
             hand_dim: Hand motion dimension
@@ -149,6 +151,7 @@ class MotionVQModelConfig(PretrainedConfig):
         
         # Motion dimensions
         self.use_part = use_part
+        self.horizon = horizon
         self.motion_dim = motion_dim
         self.wrist_dim = wrist_dim
         self.hand_dim = hand_dim
@@ -185,6 +188,7 @@ class MotionVQModelConfig(PretrainedConfig):
         output = {
             'model_type': self.model_type,
             'use_part': self.use_part,
+            'horizon': self.horizon,
             'motion_dim': self.motion_dim,
             'wrist_dim': self.wrist_dim,
             'hand_dim': self.hand_dim,

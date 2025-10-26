@@ -13,26 +13,26 @@ lora_dropout: 0.0
 image_shape: [224, 224, 3]
 vla_dataset_paths:
 #  - /share_data/datasets/taco/10episodes.zarr
- - /share_data/datasets/taco/taco_45pca_newpresence.zarr
- - /share_data/datasets/OakInk-v2/oakink2.zarr
- - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/datasets/EgoDex/egodex_train.zarr
+ - /share_data/guantianrui/datasets/taco/taco_45pca_newpresence.zarr
+ - /share_data/guantianrui/datasets/OakInk-v2/oakink2.zarr
+ - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
+ - /share_data/guantianrui/datasets/EgoDex/egodex_train.zarr
 vlm_dataset_paths:
- - "/share_data/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
- - "/share_data/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
- - "/share_data/datasets/VLM/FineVision/alfworldgpt_filtered"  # high level subtask action
- - "/share_data/datasets/VLM/FineVision/indoor_qa_filtered" 
- - "/share_data/datasets/VLM/FineVision/LLaVA_Instruct_150K_filtered" 
- - "/share_data/datasets/VLM/FineVision/cocoqa_filtered" 
- - "/share_data/datasets/VLM/FineVision/cambrian(filtered)_processed_filtered"
- - "/share_data/datasets/VLM/FineVision/lnqa_filtered"
- - "/share_data/datasets/VLM/FineVision/lrv_normal(filtered)_filtered"
- - "/share_data/datasets/VLM/FineVision/lvis_instruct4v_filtered"
- - "/share_data/datasets/VLM/FineVision/vqav2_filtered"
- - "/share_data/datasets/VLM/FineVision/sharegpt4v(llava)_filtered" 
- - "/share_data/datasets/VLM/FineVision/sharegpt4v(sam)_filtered" 
- - "/share_data/datasets/VLM/FineVision/textcaps_filtered" 
- - "/share_data/datasets/VLM/FineVision/image_textualization(filtered)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
+ - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
+ - "/share_data/guantianrui/datasets/VLM/FineVision/alfworldgpt_filtered"  # high level subtask action
+ - "/share_data/guantianrui/datasets/VLM/FineVision/indoor_qa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/LLaVA_Instruct_150K_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/cocoqa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/cambrian(filtered)_processed_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/lnqa_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/lrv_normal(filtered)_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/lvis_instruct4v_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/vqav2_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(llava)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(sam)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/textcaps_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/image_textualization(filtered)_filtered" 
 
 shape_meta: &shape_meta
   obs:
@@ -75,7 +75,7 @@ dataset:
     _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}
     split: train
-    cache_dir: /share_data/datasets/VLM/FineVision/.cache
+    cache_dir: /share_data/guantianrui/datasets/VLM/FineVision/.cache
     seed: 42
     weights: [0.5, 0.5, 0.5]
     val_ratio: 0.005
@@ -89,7 +89,7 @@ n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
 processor: 
-  fast_tokenizer_path: /share_data/tokenizers/FAST/taco-oakink/state20-2048action10-1024 # may need to change
+  fast_tokenizer_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024 # may need to change
 
 dataloader:
   batch_size: 8
@@ -132,7 +132,7 @@ training:
   lr_warmup_steps: 2000
   train_vlm: True
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
-  pretrained_model_path: /share_data/checkpoints/paligemma-3b-pt-224
+  pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
   resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
   normalizer_path: # /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
   num_epochs: 10
