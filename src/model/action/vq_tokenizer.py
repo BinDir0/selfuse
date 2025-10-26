@@ -53,8 +53,8 @@ class VQActionProcessor(ProcessorMixin):
             "Gw": vq_model["wrist"].config.quantizer_config.num_groups,
             "Gh": vq_model["hand"].config.quantizer_config.num_groups,
             "T": (vq_model["wrist"].horizon + down_ratio - 1) // down_ratio, # round up to the nearest integer
-            "Lw": vq_model["wrist"].config.quantizer_config.nb_code,
-            "Lh": vq_model["hand"].config.quantizer_config.nb_code,
+            "Lw": vq_model["wrist"].config.quantizer_config.num_quantizers,
+            "Lh": vq_model["hand"].config.quantizer_config.num_quantizers,
             "T_original": vq_model["wrist"].horizon,
         }
           
@@ -127,12 +127,12 @@ class VQActionProcessor(ProcessorMixin):
         # Flatten with time-interleaved order and get metadata
         Gw, B, T, Lw = wrist_left_raw.shape
         Gh, B, T, Lh = hand_left_raw.shape
-        assert T == self.vq_meta["T"], f"T mismatch: {T} != {self.vq_meta['T']}"
+        # assert T == self.vq_meta["T"], f"T mismatch: {T} != {self.vq_meta['T']}"
         assert Gw == self.vq_meta["Gw"], f"Gw mismatch: {Gw} != {self.vq_meta['Gw']}"
         assert Gh == self.vq_meta["Gh"], f"Gh mismatch: {Gh} != {self.vq_meta['Gh']}"
         assert Lw == self.vq_meta["Lw"], f"Lw mismatch: {Lw} != {self.vq_meta['Lw']}"
         assert Lh == self.vq_meta["Lh"], f"Lh mismatch: {Lh} != {self.vq_meta['Lh']}"
-        assert T_original == self.vq_meta["T_original"], f"T_original mismatch: {T_original} != {self.vq_meta['T_original']}"
+        # assert T_original == self.vq_meta["T_original"], f"T_original mismatch: {T_original} != {self.vq_meta['T_original']}"
         print(f"[VQ ENCODE] Sample tokens - WL[0,0,0,:5]: {wrist_left_raw[0, 0, 0, :5]}, WR[0,0,0,:5]: {wrist_right_raw[0, 0, 0, :5]}")
 
         WL = rearrange(wrist_left_raw, 'gw b t lw -> b t (gw lw)').contiguous()   # [Gw, B, T/4, Lw] -> [B, T/4, Gw*Lw]

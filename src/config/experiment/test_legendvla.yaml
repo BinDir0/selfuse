@@ -201,7 +201,7 @@ testing:
   seed: 42
   checkpoint_path: /data/fanlian/checkpoints/mp_rank_00_model_states.pt
   device: auto
-  normalizer_path: /data/fanlian/normalizer/normalizer.pkl
+  normalizer_path: /data/fanlian/normalizer/vq_normalizer/normalizer.pkl
   num_samples: 5
   mano_root_dir: /home/fanlian/mano_v1_2/models
   fps: 30
