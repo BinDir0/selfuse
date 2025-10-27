@@ -37,7 +37,7 @@ dataset:
   shape_meta: ${shape_meta}
   history: ${history} # frames
   seed: 42
-  val_ratio: 0.95
+  val_ratio: 0.05
   return_numpy: False # whether to return numpy arrays
   normalizer_dataloader_cfg:
     batch_size: 4096
@@ -71,10 +71,10 @@ val_dataloader:
 base_model_config: &base_model_config
   down_t: 2
   stride_t: 2
-  width: 256
+  width: 512
   depth: 3
   dilation_growth_rate: 3
-  output_emb_width: 256
+  output_emb_width: 512
   activate: relu
   norm: null
   num_conv_layers: 3
@@ -82,7 +82,7 @@ base_model_config: &base_model_config
 base_quantizer_config: &base_quantizer_config
   quantizer_name: group_residualvq
   nb_code: 1024
-  codebook_dim: 256
+  codebook_dim: 512
   num_quantizers: 8
   num_groups: 1
   shared_codebook: True
@@ -124,9 +124,8 @@ tokenizer:
           #output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          # nb_code: 4096    # partially override the base quantizer config
-          # codebook_dim: 512
-          # num_groups: 2
+          nb_code: 2048    # partially override the base quantizer config
+          num_groups: 1
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -135,7 +134,8 @@ tokenizer:
         use_part: hand
         quantizer_config:
           <<: *base_quantizer_config
-          num_quantizers: 4
+          nb_code: 2048    # partially override the base quantizer config
+          num_groups: 1
     use_part: True
   actions: 
     wrist: 
@@ -150,9 +150,8 @@ tokenizer:
           #output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          # nb_code: 4096    # partially override the base quantizer config
-          # codebook_dim: 512
-          # num_groups: 1
+          nb_code: 2048    # partially override the base quantizer config
+          num_groups: 1
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -162,7 +161,8 @@ tokenizer:
         horizon: ${n_action_steps}
         quantizer_config:
           <<: *base_quantizer_config
-          num_quantizers: 4
+          nb_code: 2048    # partially override the base quantizer config
+          num_groups: 1
     use_part: True
 
 optimizer:
@@ -179,15 +179,15 @@ optimizer:
 
 
 training:
-  device: cuda:7
-  num_epochs: 200
+  device: cuda:5
+  num_epochs: 10
   tqdm_interval_sec: 1.0
   max_train_steps: 
   max_val_steps: # 100
-  val_per_epoch: 50
+  val_per_epoch: 1
   ckpt_save_interval: 1
-  normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.17/14.08_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
-  valid_tokenizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.16/23.19_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=7
+  normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.27/10.59_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  valid_tokenizer_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.16/23.19_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=7
   # if valid_tokenizer_path is not None, will validate the tokenizer
   save_path: 
 

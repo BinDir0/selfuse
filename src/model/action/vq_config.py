@@ -156,12 +156,6 @@ class MotionVQModelConfig(PretrainedConfig):
         self.wrist_dim = wrist_dim
         self.hand_dim = hand_dim
 
-        # Vocabulary size
-        if quantizer_config['shared_codebook']:
-            self.vocab_size = quantizer_config['nb_code']
-        else:
-            self.vocab_size = quantizer_config['nb_code'] * quantizer_config['num_quantizers']
-        
         # Nested configs - handle dict, Config object, or None
         if model_config is None:
             self.model_config = ModelArchConfig()
@@ -177,6 +171,12 @@ class MotionVQModelConfig(PretrainedConfig):
             self.loss_config = LossConfig()
         else: 
             self.loss_config = LossConfig(**loss_config)
+
+        # Vocabulary size
+        if quantizer_config['shared_codebook']:
+            self.vocab_size = self.quantizer_config.nb_code
+        else:
+            self.vocab_size = self.quantizer_config.nb_code * self.quantizer_config.num_quantizers
     
     def to_dict(self):
         """
