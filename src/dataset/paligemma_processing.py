@@ -485,7 +485,6 @@ class PaliGemmaVLAProcessor:
         discrete_states = self.hand_tokenizer['states'](states)[0]
 
         if objective != "train_flow":
-
             discrete_actions = self.hand_tokenizer['actions'](actions)[0]
 
 

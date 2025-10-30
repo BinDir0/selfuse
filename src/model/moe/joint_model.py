@@ -131,114 +131,6 @@ def forward_insulation_scaled_dot_product_attention(
     return attn_output
 
 
-def forward_mixture_layers(
-    mixtures: nn.ModuleDict,
-    attention_mask: torch.Tensor,
-    position_ids_all: dict[torch.LongTensor],
-    embeds_all: dict[torch.FloatTensor],
-    layer_idx: int,
-    post_attn_skip_names: Tuple[str, ...] = ("vlm"),
-    kv_caches: dict[KVCache] = {},
-    cache_mode: str = "append_non_active",
-    time_cond: Optional[torch.FloatTensor] = None,
-    sdpa: callable = forward_mixture_scaled_dot_product_attention,
-) -> dict[torch.FloatTensor]:
-    """the usual norm + attn + res + norm + mlp + res"""
-    active_mixture_names = list(embeds_all.keys())
-
-    # [Batch_Size, Seq_Len, Hidden_Size]
-    residuals_pre_attn = embeds_all
-    hidden_states_input_norm = {}
-    for name in active_mixture_names:
-        hidden_states_input_norm[name] = mixtures[name].layer_func(
-            "forward_norm",
-            layer_idx,
-            "input_layernorm",
-            embeds_all[name],
-            time_cond,
-        )  # a bit convoluted
-    hidden_states_pre_attn = hidden_states_input_norm
-
-    # [Batch_Size, Seq_Len, Hidden_Size]
-    hidden_states_post_attn = forward_mixture_attn(
-        mixtures,
-        hidden_states_all=hidden_states_pre_attn,
-        attention_mask=attention_mask,
-        position_ids_all=position_ids_all,
-        layer_idx=layer_idx,
-        post_attn_skip_names=post_attn_skip_names,
-        kv_caches=kv_caches,
-        cache_mode=cache_mode,
-        sdpa=sdpa,
-    )
-    hidden_states_pre_res = hidden_states_post_attn
-
-    # [Batch_Size, Seq_Len, Hidden_Size]
-    hidden_states_post_res = {}
-    for name in active_mixture_names:
-        if name in post_attn_skip_names:
-            hidden_states_post_res[name] = None
-        else:
-            hidden_states_pre_res[name] = mixtures[name].layer_func(
-                "forward_adaptive_scale",
-                layer_idx,
-                "post_attn",
-                hidden_states_pre_res[name],
-                time_cond,
-            )
-            hidden_states_post_res[name] = (
-                residuals_pre_attn[name] + hidden_states_pre_res[name]
-            )
-    hidden_states_pre_post_attn = hidden_states_post_res
-
-    # [Batch_Size, Seq_Len, Hidden_Size]
-    residuals_pre_post_attn = hidden_states_pre_post_attn
-    hidden_states_post_post_attn = {}
-    for name in active_mixture_names:
-        if name in post_attn_skip_names:
-            hidden_states_post_post_attn[name] = None
-        else:
-            hidden_states_post_post_attn[name] = mixtures[name].layer_func(
-                "forward_norm",
-                layer_idx,
-                "post_attention_layernorm",
-                hidden_states_pre_post_attn[name],
-                time_cond,
-            )
-    hidden_states_pre_mlp = hidden_states_post_post_attn
-
-    # [Batch_Size, Seq_Len, Hidden_Size]
-    hidden_states_pos_mlp = {}
-    for name in active_mixture_names:
-        if name in post_attn_skip_names:
-            hidden_states_pos_mlp[name] = None
-        else:
-            hidden_states_pos_mlp[name] = mixtures[name].layer_func(
-                "mlp",
-                layer_idx,
-                hidden_states_pre_mlp[name],
-            )
-    hidden_states_pre_final_res = hidden_states_pos_mlp
-
-    # [Batch_Size, Seq_Len, Hidden_Size]
-    hidden_states_final = {}
-    for name in active_mixture_names:
-        if name in post_attn_skip_names:
-            hidden_states_final[name] = None
-        else:
-            hidden_states_pre_final_res[name] = mixtures[name].layer_func(
-                "forward_adaptive_scale",
-                layer_idx,
-                "final",
-                hidden_states_pre_final_res[name],
-                time_cond,
-            )
-            hidden_states_final[name] = (
-                residuals_pre_post_attn[name] + hidden_states_pre_final_res[name]
-            )
-    return hidden_states_final
-
-
 def forward_mixture_attn(
     mixtures: nn.ModuleDict,
     attention_mask: torch.Tensor,
@@ -394,6 +286,114 @@ def forward_mixture_attn(
                 "forward_o_proj", layer_idx, attn_outputs[name]
             )
     return attn_outputs_final
+
+
+def forward_mixture_layers(
+    mixtures: nn.ModuleDict,
+    attention_mask: torch.Tensor,
+    position_ids_all: dict[torch.LongTensor],
+    embeds_all: dict[torch.FloatTensor],
+    layer_idx: int,
+    post_attn_skip_names: Tuple[str, ...] = ("vlm"),
+    kv_caches: dict[KVCache] = {},
+    cache_mode: str = "append_non_active",
+    time_cond: Optional[torch.FloatTensor] = None,
+    sdpa: callable = forward_mixture_scaled_dot_product_attention,
+) -> dict[torch.FloatTensor]:
+    """the usual norm + attn + res + norm + mlp + res"""
+    active_mixture_names = list(embeds_all.keys())
+
+    # [Batch_Size, Seq_Len, Hidden_Size]
+    residuals_pre_attn = embeds_all
+    hidden_states_input_norm = {}
+    gates_input_norm = {}
+    for name in active_mixture_names:
+        hidden_states_input_norm[name], gates_input_norm[name] = mixtures[name].layer_func(
+            "forward_norm",
+            layer_idx,
+            "input_layernorm",
+            embeds_all[name],
+            time_cond,
+        )  # a bit convoluted
+    hidden_states_pre_attn = hidden_states_input_norm
+
+    # [Batch_Size, Seq_Len, Hidden_Size]
+    hidden_states_post_attn = forward_mixture_attn(
+        mixtures,
+        hidden_states_all=hidden_states_pre_attn,
+        attention_mask=attention_mask,
+        position_ids_all=position_ids_all,
+        layer_idx=layer_idx,
+        post_attn_skip_names=post_attn_skip_names,
+        kv_caches=kv_caches,
+        cache_mode=cache_mode,
+        sdpa=sdpa,
+    )
+    hidden_states_pre_res = hidden_states_post_attn
+
+    # [Batch_Size, Seq_Len, Hidden_Size]
+    hidden_states_post_res = {}
+    for name in active_mixture_names:
+        if name in post_attn_skip_names:
+            hidden_states_post_res[name] = None
+        else:
+            hidden_states_pre_res[name] = mixtures[name].layer_func(
+                "forward_adaptive_scale",
+                layer_idx,
+                hidden_states_pre_res[name],
+                gates_input_norm[name],
+            )
+            hidden_states_post_res[name] = (
+                residuals_pre_attn[name] + hidden_states_pre_res[name]
+            )
+    hidden_states_pre_post_attn = hidden_states_post_res
+
+    # [Batch_Size, Seq_Len, Hidden_Size]
+    residuals_pre_post_attn = hidden_states_pre_post_attn
+    hidden_states_post_post_attn = {}
+    gates_post_post_attn = {}
+    for name in active_mixture_names:
+        if name in post_attn_skip_names:
+            hidden_states_post_post_attn[name] = None
+        else:
+            hidden_states_post_post_attn[name], gates_post_post_attn[name] = mixtures[name].layer_func(
+                "forward_norm",
+                layer_idx,
+                "post_attention_layernorm",
+                hidden_states_pre_post_attn[name],
+                time_cond,
+            )
+    hidden_states_pre_mlp = hidden_states_post_post_attn
+
+    # [Batch_Size, Seq_Len, Hidden_Size]
+    hidden_states_pos_mlp = {}
+    for name in active_mixture_names:
+        if name in post_attn_skip_names:
+            hidden_states_pos_mlp[name] = None
+        else:
+            hidden_states_pos_mlp[name] = mixtures[name].layer_func(
+                "mlp",
+                layer_idx,
+                hidden_states_pre_mlp[name],
+            )
+    hidden_states_pre_final_res = hidden_states_pos_mlp
+
+    # [Batch_Size, Seq_Len, Hidden_Size]
+    hidden_states_final = {}
+    for name in active_mixture_names:
+        if name in post_attn_skip_names:
+            hidden_states_final[name] = None
+        else:
+            hidden_states_pre_final_res[name] = mixtures[name].layer_func(
+                "forward_adaptive_scale",
+                layer_idx,
+                hidden_states_pre_final_res[name],
+                gates_post_post_attn[name],
+            )
+            hidden_states_final[name] = (
+                residuals_pre_post_attn[name] + hidden_states_pre_final_res[name]
+            )
+    return hidden_states_final
 
 
 # should have named this `MoE`

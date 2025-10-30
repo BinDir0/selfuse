@@ -125,7 +125,7 @@ tokenizer:
         quantizer_config:
           <<: *base_quantizer_config
           nb_code: 2048    # partially override the base quantizer config
-          num_groups: 1
+          num_groups: 2
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -135,7 +135,7 @@ tokenizer:
         quantizer_config:
           <<: *base_quantizer_config
           nb_code: 2048    # partially override the base quantizer config
-          num_groups: 1
+          num_groups: 2
     use_part: True
   actions: 
     wrist: 
@@ -151,7 +151,7 @@ tokenizer:
         quantizer_config:
           <<: *base_quantizer_config
           nb_code: 2048    # partially override the base quantizer config
-          num_groups: 1
+          num_groups: 2
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -162,7 +162,7 @@ tokenizer:
         quantizer_config:
           <<: *base_quantizer_config
           nb_code: 2048    # partially override the base quantizer config
-          num_groups: 1
+          num_groups: 2
     use_part: True
 
 optimizer:
@@ -179,7 +179,7 @@ optimizer:
 
 
 training:
-  device: cuda:5
+  device: cuda:7
   num_epochs: 10
   tqdm_interval_sec: 1.0
   max_train_steps: 

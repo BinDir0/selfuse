@@ -4,7 +4,7 @@ exp_name: "pretrain_deepspeed"
 _target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
 objective:  # ar, flow, or None(None means both)
 
-action_expert_adaptive_mode:  # adaLN, adaLN-Zero, or None
+action_expert_adaptive_mode: adaLN-Zero # adaLN, adaLN-Zero, or None
 quantize: False
 lora: False
 lora_r: 32
@@ -133,8 +133,8 @@ training:
   train_vlm: True
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
-  resume_checkpoint_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
-  normalizer_path: # /share_data/normalizer/egodex-hoi4d-oakink-taco/normalizer.pkl
+  resume_checkpoint_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
+  normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.27/18.13_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   num_epochs: 10
   use_bf16: True
   clipping:
@@ -174,7 +174,7 @@ mixture:
   vlm:   # gemma
     hidden_size: 2048
     intermediate_size: 16384
-    use_final_norm: False
+    use_final_norm: True
     cache: True
     use_quantize: ${quantize}
     use_lora: ${lora}
@@ -190,8 +190,8 @@ mixture:
     adaptive_mode: ${action_expert_adaptive_mode}
     rope_theta: ${action_expert_rope_theta}
 
-time_hidden_size: 256 # only applicable if using adaptive
-time_max_period: 100.0
+time_hidden_size: 1024 # only applicable if using adaptive
+time_max_period: 1000.0
 action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
 
 # Fixed

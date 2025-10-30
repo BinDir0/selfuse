@@ -19,6 +19,7 @@ from src.model.common.kv_cache import KVCache
 from src.model.common.modules import (
     ActionEncoder,
     SinusoidalPosEmb,
+    TimeEncoder,
 )
 from src.utils.monitor import log_execution_time
 
@@ -82,8 +83,9 @@ class LegendVLA(nn.Module):
                 self.action_hidden_size,
                 time_cond=False,
             )
-            self.time_embedding = SinusoidalPosEmb(
-                cfg.time_hidden_size, cfg.time_max_period
+            self.time_embedding = nn.Sequential(
+                SinusoidalPosEmb(cfg.time_hidden_size, cfg.time_max_period), 
+                TimeEncoder(cfg.time_hidden_size), 
             )
         else:  # matching pi0
             self.action_encoder = ActionEncoder(
@@ -1081,3 +1083,15 @@ class LegendVLAInference(LegendVLA):
         """
         return super().infer_action(input)
 
+
+if __name__ == "__main__":
+    from omegaconf import OmegaConf
+    import hydra
+    # allows arbitrary python code execution in configs using the ${eval:''} resolver
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    cfg = OmegaConf.load("src/config/experiment/pretrain_legendvla_deepspeed.yaml")
+    config = OmegaConf.to_yaml(cfg.policy, resolve=True)
+    print(config)
+    model = hydra.utils.instantiate(cfg.policy)
+    for name, param in model.named_parameters():
+        print(name, param.shape)

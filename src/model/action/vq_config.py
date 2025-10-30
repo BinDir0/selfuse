@@ -173,7 +173,7 @@ class MotionVQModelConfig(PretrainedConfig):
             self.loss_config = LossConfig(**loss_config)
 
         # Vocabulary size
-        if quantizer_config['shared_codebook']:
+        if self.quantizer_config.shared_codebook:
             self.vocab_size = self.quantizer_config.nb_code
         else:
             self.vocab_size = self.quantizer_config.nb_code * self.quantizer_config.num_quantizers

@@ -15,8 +15,8 @@ machine_rank: 0
 main_process_ip: 172.16.0.11 # need to change to the main process ip
 main_process_port: 11451 # need to change to the main process port
 main_training_function: main
-num_machines: 1 # need to change to the correct number
-num_processes: 4 # need to change to the correct number, sum of gpus of all nodes
+num_machines: 6 # need to change to the correct number
+num_processes: 44 # need to change to the correct number, sum of gpus of all nodes
 rdzv_backend: static
 same_network: true
 tpu_env: []

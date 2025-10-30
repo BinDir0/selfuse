@@ -17,6 +17,7 @@ from src.model.common.modules import (
     GemmaRotaryEmbedding,
     AdaptiveLayerscale, 
     AdaptiveRMSNorm,
+    AdaLNZero,
 )
 from src.model.common.utils import apply_rotary_pos_emb, repeat_kv
 
@@ -33,11 +34,18 @@ class Mixture(nn.Module):
         if config.use_final_norm:
             self.adaptive_mode = config.get("adaptive_mode", None)
             if self.adaptive_mode:
-                self.norm = AdaptiveRMSNorm(
-                    config.hidden_size,
-                    config.time_hidden_size,
-                    eps=config.rms_norm_eps,
-                )
+                if self.adaptive_mode == "adaLN-Zero":
+                    self.norm = AdaLNZero(
+                        config.hidden_size,
+                        config.time_hidden_size,
+                        eps=config.rms_norm_eps,
+                    )
+                else:
+                    self.norm = AdaptiveRMSNorm(
+                        config.hidden_size,
+                        config.time_hidden_size,
+                        eps=config.rms_norm_eps,
+                    )
             else:
                 self.norm = GemmaRMSNorm(
                     config.hidden_size,
@@ -73,7 +81,7 @@ class Mixture(nn.Module):
     ) -> torch.FloatTensor | None:
         if hasattr(self, "norm"):
             args = [x] if self.adaptive_mode is None else [x, cond]
-            return self.norm(*args)
+            return self.norm(*args)[0] # output the normalized x
         else:
             return x
 
@@ -89,24 +97,27 @@ class MixtureDecoderLayer(nn.Module):
 
         self.adaptive_mode = config.get("adaptive_mode", None)
         if self.adaptive_mode:
-            self.input_layernorm = AdaptiveRMSNorm(
-                config.hidden_size,
-                config.time_hidden_size,
-                eps=config.rms_norm_eps,
-            )
-            self.post_attention_layernorm = AdaptiveRMSNorm(
-                config.hidden_size,
-                config.time_hidden_size,
-                eps=config.rms_norm_eps,
-            )
             if self.adaptive_mode == "adaLN-Zero":
-                self.post_adaptive_scale = AdaptiveLayerscale(
+                self.input_layernorm = AdaLNZero(
                     config.hidden_size,
                     config.time_hidden_size,
+                    eps=config.rms_norm_eps,
                 )
-                self.final_adaptive_scale = AdaptiveLayerscale(
+                self.post_attention_layernorm = AdaLNZero(
                     config.hidden_size,
                     config.time_hidden_size,
+                    eps=config.rms_norm_eps,
+                )
+            else:
+                self.input_layernorm = AdaptiveRMSNorm(
+                    config.hidden_size,
+                    config.time_hidden_size,
+                    eps=config.rms_norm_eps,
+                )
+                self.post_attention_layernorm = AdaptiveRMSNorm(
+                    config.hidden_size,
+                    config.time_hidden_size,
+                    eps=config.rms_norm_eps,
                 )
         else:
             self.input_layernorm = GemmaRMSNorm(
@@ -129,17 +140,11 @@ class MixtureDecoderLayer(nn.Module):
 
     def forward_adaptive_scale(
         self,
-        stage: str,
         x: torch.FloatTensor,
-        cond: Optional[torch.FloatTensor] = None,
+        gate: Optional[torch.FloatTensor] = None,
     ) -> torch.FloatTensor:
         if self.adaptive_mode == "adaLN-Zero":
-            if stage == "post_attn":
-                return self.post_adaptive_scale(x, cond)
-            elif stage == "final":
-                return self.final_adaptive_scale(x, cond)
-            else:
-                raise ValueError(f"Invalid stage for adaptive scaling: {stage}!")
+            return x * gate
         return x
 
 
