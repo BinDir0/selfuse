@@ -606,7 +606,7 @@ def transform_to_target_frame(pose, target_extrinsic):
         target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
         we assume the target_extrinsic is world2cam, and we want to transform the pose in the world frame to the camera frame
     Returns:
-        pose: torch.Tensor, shape: [T, 4, 4] or [B, T, 4, 4] in target frame
+        pose: torch.Tensor or np.ndarray, shape: [T, 4, 4] or [B, T, 4, 4] in target frame
     '''
     assert pose.dtype == target_extrinsic.dtype, "pose and target_extrinsic must have the same dtype"
     # print(f"pose.shape: {pose.shape}, target_extrinsic.shape: {target_extrinsic.shape}")
@@ -644,7 +644,7 @@ def transform_wrist_to_target_frame(wrist_action, target_extrinsic):
         target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
         we assume the target_extrinsic is world2cam, and we want to transform the wrist action in the world frame to the camera frame
     Returns:
-        wrist_action: torch.Tensor, shape: [T, 18] or [B, T, 18]
+        wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
     '''
     assert wrist_action.dtype == target_extrinsic.dtype, "wrist_action and target_extrinsic must have the same dtype"
     if isinstance(wrist_action, np.ndarray):
@@ -766,3 +766,30 @@ def transform_wrist_to_target_frame_per_frame(wrist_action, target_extrinsic):
         wrist_action_transformed = wrist_action_transformed.numpy()
     
     return wrist_action_transformed
+
+def transform_points_to_target_frame(points, target_extrinsic):
+    '''
+    Transform the points to the target frame.
+    Args:
+        points: torch.Tensor or np.ndarray, shape: [T, 3] or [B, T, 3]
+        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
+    Returns:
+        points: torch.Tensor or np.ndarray, shape: [T, 3] or [B, T, 3]
+    '''
+    assert points.dtype == target_extrinsic.dtype, "points and target_extrinsic must have the same dtype"
+    # print(f"points.shape: {points.shape}, target_extrinsic.shape: {target_extrinsic.shape}")
+    if isinstance(points, np.ndarray):
+        is_numpy = True
+        points = torch.from_numpy(points)
+        target_extrinsic = torch.from_numpy(target_extrinsic)
+    else:
+        is_numpy = False
+    target_extrinsic = target_extrinsic.unsqueeze(-3)
+
+    homo_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1).unsqueeze(-1)
+    homo_points = torch.matmul(target_extrinsic, homo_points)
+    points = homo_points[..., :3, 0]
+    
+    if is_numpy:
+        points = points.numpy()
+    return points

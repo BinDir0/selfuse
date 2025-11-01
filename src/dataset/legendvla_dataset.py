@@ -20,7 +20,12 @@ from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
 from src.utils.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
-from src.utils.geometry import transform_wrist_to_target_frame, homo_matrix_from_trans_6drot, homo_matrix_to_trans_6drot
+from src.utils.geometry import (
+    transform_wrist_to_target_frame, 
+    homo_matrix_from_trans_6drot, 
+    homo_matrix_to_trans_6drot, 
+    transform_points_to_target_frame,
+)
 from src.model.common.normalizer import LinearNormalizer
 from .base_dataset import BaseImageDataset, BaseDataCollator
 from .base_vl_preprocessor import BaseVLPreprocessor
@@ -110,6 +115,7 @@ class LegendVLADataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
+        self.motion_type = shape_meta['obs']['state']['type']
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
@@ -212,7 +218,8 @@ class LegendVLADataset(BaseImageDataset):
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 
             history = self.history, 
-            n_obs_state_steps = self.n_obs_state_steps
+            n_obs_state_steps = self.n_obs_state_steps, 
+            motion_type = self.motion_type,
         )
         image = process_image(sample['image'], self.history, self.n_obs_image_steps, self.aug_transform)
 
@@ -578,6 +585,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.shape_meta = shape_meta
+        self.motion_type = shape_meta['obs']['state']['type']
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
         self.dims = dims
@@ -617,7 +625,8 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 
             history = self.history, 
-            n_obs_state_steps = self.n_obs_state_steps
+            n_obs_state_steps = self.n_obs_state_steps,
+            motion_type = self.motion_type,
         )
         if self.dims is not None:
             dim_slice = slice(self.dims[0], self.dims[1])
@@ -810,6 +819,7 @@ def process_state_action(
     history, 
     n_obs_state_steps, 
     normalizer : Optional[LinearNormalizer] = None, 
+    motion_type = 'mano',
 ):
     '''
     Args:
@@ -823,6 +833,7 @@ def process_state_action(
         history: int
         n_obs_state_steps: int
         normalizer: Optional[LinearNormalizer]
+        motion_type: str, 'mano' or 'keypoint'
     Returns:
         state: np.ndarray, shape: [T, wrist_dim + hand_dim]
         action: np.ndarray, shape: [H, wrist_dim + hand_dim]
@@ -845,11 +856,22 @@ def process_state_action(
     processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[history])
     processed_wrist_action = transform_wrist_to_target_frame(wrist_action[history:], extrinsic[history])
 
+    if motion_type == 'mano':
+        processed_hand_state = transform_points_to_target_frame(hand_state.reshape(-1, 3), extrinsic[history])
+        processed_hand_state = processed_hand_state.reshape(hand_state.shape)
+        processed_hand_action = transform_points_to_target_frame(hand_action.reshape(-1, 3), extrinsic[history])
+        processed_hand_action = processed_hand_action.reshape(hand_action.shape)
+    elif motion_type == 'keypoint':
+        processed_hand_state = hand_state
+        processed_hand_action = hand_action
+    else:
+        raise ValueError(f"Unsupported motion type: {motion_type}")
+
     # use delta of wrist translation and hand mano params as action
     state_presence = presence[state_slice]
     action_presence = presence[history:]
-    processed_state = np.concatenate([processed_wrist_state, hand_state], axis=-1)
-    processed_action = np.concatenate([processed_wrist_action, hand_action], axis=-1)
+    processed_state = np.concatenate([processed_wrist_state, processed_hand_state], axis=-1)
+    processed_action = np.concatenate([processed_wrist_action, processed_hand_action], axis=-1)
     processed_state, processed_action, action_valid_mask = get_presence_value(
         state_presence, action_presence, processed_action, processed_state, hand_ndim
     )

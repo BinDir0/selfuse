@@ -46,10 +46,11 @@ shape_meta: &shape_meta
       hand: 
         shape: [30]
       shape: [48]
-      type: low_dim
+      type: mano # keypoint or mano
       horizon: ${n_obs_state_steps}
   action:
     shape: [48]
+    type: mano # keypoint or mano
     horizon: ${n_action_steps}
 
 dataset:
