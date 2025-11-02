@@ -333,7 +333,63 @@ class HandVisualizer:
                 cv2.circle(img_copy, pos, 6, color, -1)
         
         return img_copy
-    
+        
+    def draw_keypoint(self, img: np.ndarray, wrist_2d: np.ndarray, 
+                               keypoints_2d: np.ndarray, 
+                               color: Tuple[int, int, int], 
+                               line_color: Tuple[int, int, int] = None,
+                               thickness: int = 2) -> np.ndarray:
+        """
+        Draw hand keypoint skeleton (wrist + 5 finger tips) on image
+        
+        Args:
+            img: Input image
+            wrist_2d: 2D wrist position [2] or None
+            keypoints_2d: 2D keypoint coordinates [5, 2] - 5 finger tips in order: 
+                         thumb, index, middle, ring, pinky
+            color: Keypoint color (B, G, R)
+            line_color: Line color (B, G, R), if None uses same as keypoint color
+            thickness: Line thickness
+            
+        Returns:
+            img_with_keypoints: Image with keypoint skeleton drawn
+        """
+        if wrist_2d is None or keypoints_2d is None:
+            return img
+        
+        # Validate input shapes
+        if keypoints_2d.shape != (5, 2):
+            raise ValueError(f"Expected keypoints_2d shape [5, 2], got {keypoints_2d.shape}")
+        if wrist_2d.shape != (2,):
+            raise ValueError(f"Expected wrist_2d shape [2], got {wrist_2d.shape}")
+            
+        # Only copy if we're actually going to modify the image
+        img_copy = img.copy()
+        h, w = img.shape[:2]
+        
+        # Use line_color if provided, otherwise use same as keypoint color
+        if line_color is None:
+            line_color = color
+        
+        # Convert to integer coordinates
+        wrist_pos = tuple(wrist_2d.astype(int))
+        
+        # Draw lines from wrist to each finger tip
+        for i in range(5):  # 5 finger tips: thumb, index, middle, ring, pinky
+            tip_pos = tuple(keypoints_2d[i].astype(int))
+        
+        # Draw finger tip keypoints as filled circles
+        for tip_pos in keypoints_2d:
+            pos = tuple(tip_pos.astype(int))
+            if 0 <= pos[0] < w and 0 <= pos[1] < h:
+                cv2.circle(img_copy, pos, 6, color, -1)
+        
+        # Draw wrist position as a larger filled circle
+        if 0 <= wrist_pos[0] < w and 0 <= wrist_pos[1] < h:
+            cv2.circle(img_copy, wrist_pos, 8, color, -1)
+        
+        return img_copy
+
     def draw_hand_mesh(self, img: np.ndarray, vertices_2d: np.ndarray, vertices_3d: np.ndarray,
                       color: Tuple[int, int, int], alpha: float = 0.3) -> np.ndarray:
         """
@@ -954,33 +1010,60 @@ class HandVisualizer:
         
         return vis_img
     
-    def generate_2d_projection_video(self, background_img: np.ndarray, 
-                         mano_sequence: torch.Tensor, wrist_sequence: torch.Tensor,
-                         output_path: str, fps: int = 30, fx: float = None, fy: float = None,
-                         cx: float = None, cy: float = None, extrinsic_sequence: torch.Tensor = None,
-                         show_mesh: bool = False, mesh_alpha: float = 1.0,
-                         gt_mano_sequence: torch.Tensor = None, gt_wrist_sequence: torch.Tensor = None,
-                         presence: int = 3) -> None:
+    def generate_2d_video(self, background_img: np.ndarray,
+                          wrist_sequence: torch.Tensor,
+                          output_path: str,
+                          fps: int = 30,
+                          fx: float = None,
+                          fy: float = None,
+                          cx: float = None,
+                          cy: float = None,
+                          extrinsic_sequence: torch.Tensor = None,
+                          presence: int = 3,
+                          # For projection mode (mesh visualization)
+                          mano_sequence: torch.Tensor = None,
+                          show_mesh: bool = False,
+                          mesh_alpha: float = 1.0,
+                          gt_mano_sequence: torch.Tensor = None,
+                          gt_wrist_sequence: torch.Tensor = None,
+                          # For keypoint mode
+                          keypoint_sequence: torch.Tensor = None,
+                          gt_keypoint_sequence: torch.Tensor = None,
+                          mode: str = "skeleton") -> None:
         """
-        Generate 2D projection video showing hand motion predictions overlaid on background image(s)
+        Generate 2D video showing hand predictions overlaid on background image(s).
+        Supports both mesh skeleton and keypoint visualization modes.
         
         Args:
             background_img: Background image - can be:
                            - Static image [H, W, 3] to use for all frames
                            - Image sequence [N, H, W, 3] with one frame per prediction
-            mano_sequence: MANO parameters sequence [n, 30] where n is the number of future frames
             wrist_sequence: Wrist parameters sequence [n, 18] where n is the number of future frames
             output_path: Output video path
             fps: Video frame rate
             fx, fy: Camera focal lengths (optional)
             cx, cy: Camera principal point (optional)
             extrinsic_sequence: Sequence of 4x4 extrinsic matrices [n, 4, 4] (optional)
-            show_mesh: Whether to show hand mesh (faces) (optional)
-            mesh_alpha: Transparency of mesh (0.0 to 1.0) (optional)
-            gt_mano_sequence: Ground truth MANO parameters sequence [n, 30] (optional)
-            gt_wrist_sequence: Ground truth wrist parameters sequence [n, 18] (optional)
             presence: Hand visibility flag (1=left only, 2=right only, 3=both visible) (optional)
+            mano_sequence: MANO parameters sequence [n, 30] - required for "skeleton" mode
+            show_mesh: Whether to show hand mesh (faces) - only for "skeleton" mode (optional)
+            mesh_alpha: Transparency of mesh (0.0 to 1.0) - only for "skeleton" mode (optional)
+            gt_mano_sequence: Ground truth MANO parameters sequence [n, 30] - only for "skeleton" mode (optional)
+            gt_wrist_sequence: Ground truth wrist parameters sequence [n, 18] (optional)
+            mode: Visualization mode - "skeleton" (default) or "keypoint"
         """
+        # Validate mode and required parameters
+        if mode == "skeleton":
+            if mano_sequence is None:
+                raise ValueError("mano_sequence is required for 'projection' mode")
+            sequence_length = len(mano_sequence)
+        elif mode == "keypoint":
+            if keypoint_sequence is None:
+                raise ValueError("keypoint_sequence is required for 'keypoint' mode")
+            sequence_length = len(keypoint_sequence)
+        else:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'projection' or 'keypoint'")
+        
         # Check if background is a sequence or single image
         is_sequence = background_img.ndim == 4
         
@@ -997,12 +1080,11 @@ class HandVisualizer:
         # Create video writer
         video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
-        num_frames = len(mano_sequence)
-        print(f"Generating video with {num_frames} frames...")
+        print(f"Generating {mode} video with {sequence_length} frames...")
         
         # Generate frames
-        for i in range(num_frames):
-            print(f"Processing frame {i+1}/{num_frames}")
+        for i in range(sequence_length):
+            print(f"Processing frame {i+1}/{sequence_length}")
             
             # Get the background frame for this iteration
             if is_sequence:
@@ -1013,25 +1095,232 @@ class HandVisualizer:
             # Get extrinsic matrix for this frame if available
             extrinsic_matrix = extrinsic_sequence[i] if extrinsic_sequence is not None else None
             
-            # Get ground truth for this frame if available
-            gt_mano_frame = gt_mano_sequence[i] if gt_mano_sequence is not None else None
-            gt_wrist_frame = gt_wrist_sequence[i] if gt_wrist_sequence is not None else None
+            # Create visualization based on mode
+            if mode == "skeleton":
+                gt_mano_frame = gt_mano_sequence[i] if gt_mano_sequence is not None else None
+                gt_wrist_frame = gt_wrist_sequence[i] if gt_wrist_sequence is not None else None
+                
+                vis_frame = self.visualize_2d_frame(
+                    frame_bg, mano_sequence[i], wrist_sequence[i],
+                    fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix,
+                    show_mesh=show_mesh, mesh_alpha=mesh_alpha,
+                    gt_mano_params=gt_mano_frame, gt_wrist_params=gt_wrist_frame,
+                    presence=presence
+                )
+            else:  # keypoint mode
+                gt_keypoint_frame = gt_keypoint_sequence[i] if gt_keypoint_sequence is not None else None
+                gt_wrist_frame = gt_wrist_sequence[i] if gt_wrist_sequence is not None else None
+                
+                vis_frame = self.visualize_2d_keypoint_frame(
+                    frame_bg, keypoint_sequence[i], wrist_sequence[i],
+                    fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix,
+                    gt_keypoint_params=gt_keypoint_frame, gt_wrist_params=gt_wrist_frame,
+                    presence=presence
+                )
             
-            # Create visualization by overlaying prediction on background frame
-            vis_frame = self.visualize_2d_frame(frame_bg, mano_sequence[i], wrist_sequence[i],
-                                           fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix,
-                                           show_mesh=show_mesh, mesh_alpha=mesh_alpha,
-                                           gt_mano_params=gt_mano_frame, gt_wrist_params=gt_wrist_frame,
-                                           presence=presence)
-            
-            # Convert RGB to BGR for OpenCV VideoWriter            
             # Write frame to video
             video_writer.write(vis_frame)
         
         # Release video writer
         video_writer.release()
-        print(f"Video with predictions saved to: {output_path}")
+        print(f"Video with {mode} predictions saved to: {output_path}")
     
+
+    def visualize_2d_keypoint_frame(self, frame_img: np.ndarray, keypoint_params: torch.Tensor,
+                                   wrist_params: torch.Tensor, fx: float = None, fy: float = None,
+                                   cx: float = None, cy: float = None, extrinsic_matrix: torch.Tensor = None,
+                                   gt_keypoint_params: torch.Tensor = None, gt_wrist_params: torch.Tensor = None,
+                                   presence: int = 3) -> np.ndarray:
+        """
+        Visualize a single frame with hand keypoint predictions and optionally ground truth
+        
+        Args:
+            frame_img: Current frame image
+            keypoint_params: Keypoint parameters [30] (15 left + 15 right) for prediction
+                           Format: [left_keypoints(15), right_keypoints(15)]
+                           Each 15D = 5 fingers × 3D (xyz) in order: thumb, index, middle, ring, pinky
+            wrist_params: Wrist parameters [18] (3+3 translation + 6+6 rotation) in camera frame for prediction
+            fx, fy: Camera focal lengths (optional)
+            cx, cy: Camera principal point (optional)
+            extrinsic_matrix: 4x4 world-to-camera transformation matrix (optional)
+            gt_keypoint_params: Ground truth keypoint parameters [30] (optional)
+            gt_wrist_params: Ground truth wrist parameters [18] (optional)
+            presence: Hand visibility flag (1=left only, 2=right only, 3=both visible) (optional)
+            
+        Returns:
+            vis_img: Visualization image with prediction (and optionally ground truth)
+        """
+        # Convert to numpy if needed
+        if isinstance(keypoint_params, torch.Tensor):
+            keypoint_params = keypoint_params.cpu().numpy()
+        if isinstance(wrist_params, torch.Tensor):
+            wrist_params = wrist_params.cpu().numpy()
+        
+        # Extract wrist positions from wrist_params [18] = [left_trans(3), right_trans(3), left_rot6d(6), right_rot6d(6)]
+        left_wrist_pos_3d = wrist_params[:3]  # [3]
+        right_wrist_pos_3d = wrist_params[3:6]  # [3]
+        
+        # Extract keypoints: [30] = [left_keypoints(15), right_keypoints(15)]
+        left_keypoints_3d_flat = keypoint_params[:15]  # [15]
+        right_keypoints_3d_flat = keypoint_params[15:]  # [15]
+        
+        # Reshape to [5, 3]: 5 finger tips, each with xyz coordinates
+        left_keypoints_3d = left_keypoints_3d_flat.reshape(5, 3)  # [5, 3]
+        right_keypoints_3d = right_keypoints_3d_flat.reshape(5, 3)  # [5, 3]
+        
+        # Transform to world coordinates if extrinsic matrix is provided
+        if extrinsic_matrix is not None:
+            extrinsic_np = self._to_numpy(extrinsic_matrix)
+            R_wc = extrinsic_np[:3, :3]
+            t_wc = extrinsic_np[:3, 3]
+            
+            # Transform left keypoints and wrist
+            left_keypoints_3d = (R_wc @ left_keypoints_3d.T).T + t_wc.reshape(1, 3)
+            left_wrist_pos_3d = R_wc @ left_wrist_pos_3d + t_wc
+            
+            # Transform right keypoints and wrist
+            right_keypoints_3d = (R_wc @ right_keypoints_3d.T).T + t_wc.reshape(1, 3)
+            right_wrist_pos_3d = R_wc @ right_wrist_pos_3d + t_wc
+        
+        # Project to 2D
+        img_size = (frame_img.shape[1], frame_img.shape[0])
+        show_left_hand = presence in [1, 3]
+        show_right_hand = presence in [2, 3]
+        
+        left_wrist_2d = None
+        left_keypoints_2d = None
+        right_wrist_2d = None
+        right_keypoints_2d = None
+        
+        if show_left_hand:
+            left_wrist_2d = self.project_3d_to_2d(
+                torch.from_numpy(left_wrist_pos_3d).unsqueeze(0), img_size,
+                fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)[0]  # [2]
+            left_keypoints_2d = self.project_3d_to_2d(
+                torch.from_numpy(left_keypoints_3d), img_size,
+                fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)  # [5, 2]
+        
+        if show_right_hand:
+            right_wrist_2d = self.project_3d_to_2d(
+                torch.from_numpy(right_wrist_pos_3d).unsqueeze(0), img_size,
+                fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)[0]  # [2]
+            right_keypoints_2d = self.project_3d_to_2d(
+                torch.from_numpy(right_keypoints_3d), img_size,
+                fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)  # [5, 2]
+        
+        # Draw visualization layers
+        vis_img = frame_img.copy()
+        
+        # Layer 1: Draw ground truth first (if provided) - in green
+        if gt_keypoint_params is not None and gt_wrist_params is not None:
+            # Convert to numpy if needed
+            if isinstance(gt_keypoint_params, torch.Tensor):
+                gt_keypoint_params = gt_keypoint_params.cpu().numpy()
+            if isinstance(gt_wrist_params, torch.Tensor):
+                gt_wrist_params = gt_wrist_params.cpu().numpy()
+            
+            # Extract ground truth wrist positions
+            gt_left_wrist_pos_3d = gt_wrist_params[:3]
+            gt_right_wrist_pos_3d = gt_wrist_params[3:6]
+            
+            # Extract ground truth keypoints
+            gt_left_keypoints_3d_flat = gt_keypoint_params[:15]
+            gt_right_keypoints_3d_flat = gt_keypoint_params[15:]
+            gt_left_keypoints_3d = gt_left_keypoints_3d_flat.reshape(5, 3)
+            gt_right_keypoints_3d = gt_right_keypoints_3d_flat.reshape(5, 3)
+            
+            # Transform to world coordinates if extrinsic matrix is provided
+            if extrinsic_matrix is not None:
+                gt_left_keypoints_3d = (R_wc @ gt_left_keypoints_3d.T).T + t_wc.reshape(1, 3)
+                gt_left_wrist_pos_3d = R_wc @ gt_left_wrist_pos_3d + t_wc
+                gt_right_keypoints_3d = (R_wc @ gt_right_keypoints_3d.T).T + t_wc.reshape(1, 3)
+                gt_right_wrist_pos_3d = R_wc @ gt_right_wrist_pos_3d + t_wc
+            
+            # Project ground truth to 2D
+            gt_left_wrist_2d = None
+            gt_left_keypoints_2d = None
+            gt_right_wrist_2d = None
+            gt_right_keypoints_2d = None
+            
+            if show_left_hand:
+                gt_left_wrist_2d = self.project_3d_to_2d(
+                    torch.from_numpy(gt_left_wrist_pos_3d).unsqueeze(0), img_size,
+                    fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)[0]
+                gt_left_keypoints_2d = self.project_3d_to_2d(
+                    torch.from_numpy(gt_left_keypoints_3d), img_size,
+                    fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)
+            
+            if show_right_hand:
+                gt_right_wrist_2d = self.project_3d_to_2d(
+                    torch.from_numpy(gt_right_wrist_pos_3d).unsqueeze(0), img_size,
+                    fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)[0]
+                gt_right_keypoints_2d = self.project_3d_to_2d(
+                    torch.from_numpy(gt_right_keypoints_3d), img_size,
+                    fx=fx, fy=fy, cx=cx, cy=cy, extrinsic_matrix=extrinsic_matrix)
+            
+            # Draw ground truth keypoints (green)
+            if show_left_hand and gt_left_keypoints_2d is not None and gt_left_wrist_2d is not None:
+                vis_img = self.draw_keypoint(
+                    vis_img, gt_left_wrist_2d, gt_left_keypoints_2d,
+                    self.gt_skeleton_color, self.gt_skeleton_color, thickness=2)
+            
+            if show_right_hand and gt_right_keypoints_2d is not None and gt_right_wrist_2d is not None:
+                vis_img = self.draw_keypoint(
+                    vis_img, gt_right_wrist_2d, gt_right_keypoints_2d,
+                    self.gt_skeleton_color, self.gt_skeleton_color, thickness=2)
+        
+        # Layer 2: Draw prediction keypoints on top (orange)
+        if show_left_hand and left_keypoints_2d is not None and left_wrist_2d is not None:
+            vis_img = self.draw_keypoint(
+                vis_img, left_wrist_2d, left_keypoints_2d,
+                self.pred_skeleton_color, self.pred_skeleton_color, thickness=2)
+        
+        if show_right_hand and right_keypoints_2d is not None and right_wrist_2d is not None:
+            vis_img = self.draw_keypoint(
+                vis_img, right_wrist_2d, right_keypoints_2d,
+                self.pred_skeleton_color, self.pred_skeleton_color, thickness=2)
+        
+        return vis_img
+    
+    def generate_2d_keypoint_video(self, background_img: np.ndarray, 
+                                   keypoint_sequence: torch.Tensor, wrist_sequence: torch.Tensor,
+                                   output_path: str, fps: int = 30, fx: float = None, fy: float = None,
+                                   cx: float = None, cy: float = None, extrinsic_sequence: torch.Tensor = None,
+                                   gt_keypoint_sequence: torch.Tensor = None, gt_wrist_sequence: torch.Tensor = None,
+                                   presence: int = 3) -> None:
+        """
+        Generate 2D projection video showing hand keypoint predictions overlaid on background image(s).
+        This is a convenience wrapper around generate_2d_video with mode="keypoint".
+        
+        Args:
+            background_img: Background image - can be:
+                           - Static image [H, W, 3] to use for all frames
+                           - Image sequence [N, H, W, 3] with one frame per prediction
+            keypoint_sequence: Keypoint parameters sequence [n, 30] where n is the number of future frames
+                             Format: [left_keypoints(15), right_keypoints(15)] per frame
+            wrist_sequence: Wrist parameters sequence [n, 18] where n is the number of future frames
+            output_path: Output video path
+            fps: Video frame rate
+            fx, fy: Camera focal lengths (optional)
+            cx, cy: Camera principal point (optional)
+            extrinsic_sequence: Sequence of 4x4 extrinsic matrices [n, 4, 4] (optional)
+            gt_keypoint_sequence: Ground truth keypoint parameters sequence [n, 30] (optional)
+            gt_wrist_sequence: Ground truth wrist parameters sequence [n, 18] (optional)
+            presence: Hand visibility flag (1=left only, 2=right only, 3=both visible) (optional)
+        """
+        self.generate_2d_video(
+            background_img=background_img,
+            wrist_sequence=wrist_sequence,
+            output_path=output_path,
+            fps=fps,
+            fx=fx, fy=fy, cx=cx, cy=cy,
+            extrinsic_sequence=extrinsic_sequence,
+            presence=presence,
+            keypoint_sequence=keypoint_sequence,
+            gt_keypoint_sequence=gt_keypoint_sequence,
+            gt_wrist_sequence=gt_wrist_sequence,
+            mode="keypoint"
+        )    
     def generate_3d_mesh_skeleton_video(self, mano_sequence: torch.Tensor, wrist_sequence: torch.Tensor,
                                        output_path: str, fps: int = 30, extrinsic_sequence: torch.Tensor = None,
                                        gt_mano_sequence: torch.Tensor = None, gt_wrist_sequence: torch.Tensor = None,

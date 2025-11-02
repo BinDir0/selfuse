@@ -12,15 +12,15 @@ lora_dropout: 0.0
 # Data configuration
 image_shape: [224, 224, 3]
 vla_dataset_paths:
- - /data/fanlian/datasets/taco_test_seen.zarr
- - /data/fanlian/datasets/taco_test_unseen_task.zarr
- - /data/fanlian/datasets/oakink2_test_seen.zarr
- - /data/fanlian/datasets/oakink2_test_unseen_task.zarr
- - /data/fanlian/datasets/hoi4d_test_seen.zarr
- - /data/fanlian/datasets/hoi4d_test_unseen_object.zarr
- - /data/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
- - /data/fanlian/datasets/egodex_test_seen.zarr
- - /data/fanlian/datasets/egodex_test_unseen_task.zarr
+ - /mnt/disk0/fanlian/datasets/taco_test_seen.zarr
+ - /mnt/disk0/fanlian/datasets/taco_test_unseen_task.zarr
+ - /mnt/disk0/fanlian/datasets/oakink2_test_seen.zarr
+ - /mnt/disk0/fanlian/datasets/oakink2_test_unseen_task.zarr
+ - /mnt/disk0/fanlian/datasets/hoi4d_test_seen.zarr
+ - /mnt/disk0/fanlian/datasets/hoi4d_test_unseen_object.zarr
+ - /mnt/disk0/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
+ - /mnt/disk0/fanlian/datasets/egodex_test_seen.zarr
+ - /mnt/disk0/fanlian/datasets/egodex_test_unseen_task.zarr
 
 
 # Shape metadata
@@ -72,9 +72,9 @@ n_latency_steps: 0
 
 # Processor configuration
 processor: 
-  fast_tokenizer_path: /data/fanlian/tokenizers/fast_tokenizers
-  hand_states_tokenizer_path: /data/fanlian/tokenizers/tokenizer/states
-  hand_actions_tokenizer_path: /data/fanlian/tokenizers/tokenizer/actions
+  fast_tokenizer_path: /mnt/disk0/fanlian/tokenizers/fast_tokenizer
+  hand_states_tokenizer_path: /mnt/disk0/fanlian/tokenizers/vq_tokenizer/states
+  hand_actions_tokenizer_path: /mnt/disk0/fanlian/tokenizers/vq_tokenizer/actions
   hand_tokenizer_type: 'vq' # 'vq' or 'fast'
 
 # Flow matching configuration
@@ -141,7 +141,7 @@ policy:
     time_max_period: ${time_max_period}
     flow_sig_min: ${flow.sig_min}
     # Add pretrained_model_path for loading pre-trained VLM weights
-    pretrained_model_path: /data/fanlian/paligemma-3b-pt-224
+    pretrained_model_path: /mnt/disk0/fanlian/pretrained_vlm/paligemma-3b-pt-224
     loss_weights: 
       ce_loss_weight: 1.0
       flow_loss_weight: 10.0
@@ -199,13 +199,13 @@ policy:
 # Testing configuration
 testing:
   seed: 42
-  checkpoint_path: /data/fanlian/checkpoints/mp_rank_00_model_states.pt
+  checkpoint_path: /mnt/disk0/fanlian/checkpoints/mp_rank_00_model_states.pt
   device: auto
-  normalizer_path: /data/fanlian/normalizer/vq_normalizer/normalizer.pkl
+  normalizer_path: /mnt/disk0/fanlian/normalizer/normalizer.pkl
   num_samples: 5
   mano_root_dir: /home/fanlian/mano_v1_2/models
   fps: 30
-  output_dir: /data/fanlian/visualize
+  output_dir: /mnt/disk0/fanlian/visualize
   video_name: visualize.mp4
   video_3d_name: visualize_3d.mp4
   show_mesh: True

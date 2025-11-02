@@ -112,17 +112,15 @@ class VQActionProcessor(ProcessorMixin):
         
         hand_left_data = action_chunk_tensor[..., 18:18+h]                # [B, T, h]
         hand_right_data = action_chunk_tensor[..., 18+h:18+2*h]           # [B, T, h]
-        print(f"[VQ ENCODE] Ground Truth:")
-        print(f"[VQ ENCODE] wrist_left[0, 0, :3]: {wrist_left_data[0, 0, :3]}, wrist_right[0, 0, :3]: {wrist_right_data[0, 0, :3]}")
+
         
         # Encode each part using VQ model's encode method: returns [G, B, T/4, L]
-        print(f"[VQ ENCODE] Input shapes - wrist_left: {wrist_left_data.shape}, hand_left: {hand_left_data.shape}")
         wrist_left_raw = self.vq_model["wrist"].encode(wrist_left_data) # [G, B, T/4, Lw]   
         wrist_right_raw = self.vq_model['wrist'].encode(wrist_right_data) # [G, B, T/4, Lw]
         hand_left_raw = self.vq_model['hand'].encode(hand_left_data) # [G, B, T/4, Lh]
         hand_right_raw = self.vq_model['hand'].encode(hand_right_data) # [G, B, T/4, Lh]
         
-        print(f"[VQ ENCODE] Raw output shapes - wrist_left: {wrist_left_raw.shape}, hand_left: {hand_left_raw.shape}")
+
         
         # Flatten with time-interleaved order and get metadata
         Gw, B, T, Lw = wrist_left_raw.shape
@@ -133,13 +131,11 @@ class VQActionProcessor(ProcessorMixin):
         assert Lw == self.vq_meta["Lw"], f"Lw mismatch: {Lw} != {self.vq_meta['Lw']}"
         assert Lh == self.vq_meta["Lh"], f"Lh mismatch: {Lh} != {self.vq_meta['Lh']}"
         # assert T_original == self.vq_meta["T_original"], f"T_original mismatch: {T_original} != {self.vq_meta['T_original']}"
-        print(f"[VQ ENCODE] Sample tokens - WL[0,0,0,:5]: {wrist_left_raw[0, 0, 0, :5]}, WR[0,0,0,:5]: {wrist_right_raw[0, 0, 0, :5]}")
 
         WL = rearrange(wrist_left_raw, 'gw b t lw -> b t (gw lw)').contiguous()   # [Gw, B, T/4, Lw] -> [B, T/4, Gw*Lw]
         WR = rearrange(wrist_right_raw, 'gw b t lw -> b t (gw lw)').contiguous()  # [Gw, B, T/4, Lw] -> [B, T/4, Gw*Lw]
         HL = rearrange(hand_left_raw, 'gh b t lh -> b t (gh lh)').contiguous()    # [Gh, B, T/4, Lh] -> [B, T/4, Gh*Lh]
         HR = rearrange(hand_right_raw, 'gh b t lh -> b t (gh lh)').contiguous()   # [Gh, B, T/4, Lh] -> [B, T/4, Gh*Lh]
-        print(f"[VQ ENCODE] Final shapes - WL: {WL.shape}, HL: {HL.shape}, HR: {HR.shape}, WR: {WR.shape}")
         total_tokens = torch.cat([WL, WR, HL, HR], dim=-1).flatten(start_dim=1) # [B, T/4 * (Gw*Lw + Gh*Lh)*2]
         return total_tokens.tolist()
     

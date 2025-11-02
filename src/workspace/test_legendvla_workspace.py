@@ -587,8 +587,6 @@ if __name__ == "__main__":
 
         action_in_camera = raw_sample['action'].clone()
         action_in_camera[:,:18] = transform_wrist_to_target_frame(action_in_camera[:,:18], extrinsic_w2c[0])
-        
-        print(state_in_camera.squeeze(0).shape, action_pred_unnormalized["actions"].squeeze(0).shape)
         action_pred = get_absolute_action(state_in_camera.squeeze(0), action_pred_unnormalized["actions"].squeeze(0))
 
         # Plot action comparison (2D curves)
@@ -605,7 +603,9 @@ if __name__ == "__main__":
             action_wrist = raw_sample['action'][:,:18]
             action_hand = raw_sample['action'][:,18:]
             mano_data = sample_to_manovis(action_pred, action_wrist, action_hand, mano_shape, extrinsic_c2w)
-            output_dir = f"/data/fanlian/outputs/test_legendvla_workspace/{i}"
+            output_dir_base = os.path.join(cfg.testing.output_dir, "test_legendvla_workspace")
+            os.makedirs(output_dir_base, exist_ok=True)
+            output_dir = os.path.join(output_dir_base, f"{i}_mesh")
        
             # Convert single frame [H, W, 3] to sequence format [N, H, W, 3] for vis_hand_plot
             # Since we have multiple frames in the sequence, we need to repeat the image for each frame
@@ -625,40 +625,82 @@ if __name__ == "__main__":
             
             vis_hand_plot_comparison(mano_data['predicted']['rot'], mano_data['predicted']['trans'], mano_data['predicted']['theta'],mano_data['ground_truth']['rot']
             , mano_data['ground_truth']['trans'], mano_data['ground_truth']['theta'], mano_data['beta'], mano_data['sides'], background_img, intrinsic, extrinsic_c2w, output_dir, fps=30)
+        
         elif cfg.testing.visualize_type == 'tokenizer':
             mano_shape = raw_sample['action_shape'] # [N, 20]
             action_wrist = raw_sample['action'][:,:18]
             action_hand = raw_sample['action'][:,18:]
-            mano_data = sample_to_manovis(action_pred, action_wrist, action_hand, mano_shape, extrinsic_c2w)
-            output_dir = f"/data/fanlian/outputs/test_tokenizer_workspace/{i}"
+            output_dir_base = os.path.join(cfg.testing.output_dir, "test_tokenizer_workspace")
+            os.makedirs(output_dir_base, exist_ok=True)
+            output_dir = os.path.join(output_dir_base, str(i))
 
             if cfg.testing.tokenizer_type == 'vq':
                 # VQ model expects normalized data (as trained)
-                action_dict = {"actions": raw_sample['action']}
-                action_normalized = normalizer.normalize(action_dict)['actions']
-                
-                encoded_action_gt = vq_tokenizer['actions'](action_normalized)
+                encoded_action_gt = vq_tokenizer['actions'](inputs['actions'])
                 decoded_action_normalized = vq_tokenizer['actions'].decode(encoded_action_gt)[0]
                 
                 # Unnormalize to get back to original scale
                 decoded_dict = {"actions": torch.from_numpy(decoded_action_normalized).unsqueeze(0)}
                 decoded_action_gt = normalizer.unnormalize(decoded_dict)['actions'].squeeze(0).numpy()
-                print("decoded_action_gt_vq:", decoded_action_gt.shape)
-
+                decoded_action_gt = get_absolute_action(state_in_camera.squeeze(0), decoded_action_gt)
+                decoded_action_gt = decoded_action_gt.cpu().numpy()
             elif cfg.testing.tokenizer_type == 'fast':
                 # Fast model also expects normalized data (as trained)
-                action_dict = {"actions": raw_sample['action']}
-                action_normalized = normalizer.normalize(action_dict)['actions']
-                
-                encoded_action_gt = fast_tokenizer['actions'](action_normalized)
+                encoded_action_gt = fast_tokenizer['actions'](inputs['actions'])
                 decoded_action_normalized = fast_tokenizer['actions'].decode(encoded_action_gt)[0]
                 
                 # Unnormalize to get back to original scale
                 decoded_dict = {"actions": torch.from_numpy(decoded_action_normalized).unsqueeze(0)}
                 decoded_action_gt = normalizer.unnormalize(decoded_dict)['actions'].squeeze(0).numpy()
-                print("decoded_action_gt_fast:", decoded_action_gt.shape)
+                decoded_action_gt = get_absolute_action(state_in_camera.squeeze(0), decoded_action_gt)
+                decoded_action_gt = decoded_action_gt.cpu().numpy()
+            # Compute error between decoded and ground truth
+            # Convert tensor to numpy array
+            if isinstance(action_in_camera, torch.Tensor):
+                gt_action = action_in_camera.cpu().numpy()  # [H, 48]
+            else:
+                gt_action = np.array(action_in_camera)  # [H, 48]
+            
+            # Left wrist translation error (0:3)
+            left_wrist_trans_error = np.sqrt(np.mean((decoded_action_gt[:, 0:3] - gt_action[:, 0:3]) ** 2, axis=0))
+            print(f"Left wrist translation error (X, Y, Z): {left_wrist_trans_error}, Mean: {np.mean(left_wrist_trans_error):.6f}")
+            
+            # Left wrist rotation error (6:12) - using geodesic distance
+            left_wrist_rot_6d_decoded = torch.from_numpy(decoded_action_gt[:, 6:12]).float()
+            left_wrist_rot_6d_gt = torch.from_numpy(gt_action[:, 6:12]).float()
+            left_wrist_rot_mat_decoded = rot6d_to_rotmat(left_wrist_rot_6d_decoded).numpy()  # [H, 3, 3]
+            left_wrist_rot_mat_gt = rot6d_to_rotmat(left_wrist_rot_6d_gt).numpy()
+            R_rel_left = np.matmul(left_wrist_rot_mat_decoded.transpose(0, 2, 1), left_wrist_rot_mat_gt)
+            trace_left = np.trace(R_rel_left, axis1=1, axis2=2)
+            trace_left = np.clip(trace_left, -1, 3)  # Clamp for numerical stability
+            left_wrist_rot_error_deg = np.arccos((trace_left - 1) / 2) * 180 / np.pi
+            print(f"Left wrist rotation error (degrees): Mean: {np.mean(left_wrist_rot_error_deg):.6f}, Std: {np.std(left_wrist_rot_error_deg):.6f}")
+            
+            # Right wrist translation error (3:6)
+            right_wrist_trans_error = np.sqrt(np.mean((decoded_action_gt[:, 3:6] - gt_action[:, 3:6]) ** 2, axis=0))
+            print(f"Right wrist translation error (X, Y, Z): {right_wrist_trans_error}, Mean: {np.mean(right_wrist_trans_error):.6f}")
+            
+            # Right wrist rotation error (12:18) - using geodesic distance
+            right_wrist_rot_6d_decoded = torch.from_numpy(decoded_action_gt[:, 12:18]).float()
+            right_wrist_rot_6d_gt = torch.from_numpy(gt_action[:, 12:18]).float()
+            right_wrist_rot_mat_decoded = rot6d_to_rotmat(right_wrist_rot_6d_decoded).numpy()  # [H, 3, 3]
+            right_wrist_rot_mat_gt = rot6d_to_rotmat(right_wrist_rot_6d_gt).numpy()
+            R_rel_right = np.matmul(right_wrist_rot_mat_decoded.transpose(0, 2, 1), right_wrist_rot_mat_gt)
+            trace_right = np.trace(R_rel_right, axis1=1, axis2=2)
+            trace_right = np.clip(trace_right, -1, 3)  # Clamp for numerical stability
+            right_wrist_rot_error_deg = np.arccos((trace_right - 1) / 2) * 180 / np.pi
+            print(f"Right wrist rotation error (degrees): Mean: {np.mean(right_wrist_rot_error_deg):.6f}, Std: {np.std(right_wrist_rot_error_deg):.6f}")
+            
+            # Left mano error (18:33)
+            left_mano_error = np.sqrt(np.mean((decoded_action_gt[:, 18:33] - gt_action[:, 18:33]) ** 2, axis=0))
+            print(f"Left mano error (15 dims): Mean: {np.mean(left_mano_error):.6f}, Std: {np.std(left_mano_error):.6f}")
+            
+            # Right mano error (33:48)
+            right_mano_error = np.sqrt(np.mean((decoded_action_gt[:, 33:48] - gt_action[:, 33:48]) ** 2, axis=0))
+            print(f"Right mano error (15 dims): Mean: {np.mean(right_mano_error):.6f}, Std: {np.std(right_mano_error):.6f}")
 
-            mano_data_decoded = sample_to_manovis(action_pred, decoded_action_gt[:, :18], decoded_action_gt[:, 18:], mano_shape, extrinsic_c2w)
+
+            mano_data_decoded = sample_to_manovis(decoded_action_gt, action_wrist, action_hand, mano_shape, extrinsic_c2w)
 
             # Convert single frame [H, W, 3] to sequence format [N, H, W, 3] for vis_hand_plot
             # Since we have multiple frames in the sequence, we need to repeat the image for each frame
@@ -676,8 +718,8 @@ if __name__ == "__main__":
                     # Single frame: convert directly
                     background_img = cv2.cvtColor(background_img, cv2.COLOR_BGR2RGB)
             
-            vis_hand_plot_comparison(mano_data_decoded['ground_truth']['rot'], mano_data_decoded['ground_truth']['trans'], mano_data_decoded['ground_truth']['theta'],mano_data['ground_truth']['rot']
-            , mano_data['ground_truth']['trans'], mano_data['ground_truth']['theta'], mano_data['beta'], mano_data['sides'], background_img, intrinsic, extrinsic_c2w, output_dir, fps=30)            
+            vis_hand_plot_comparison(mano_data_decoded['predicted']['rot'], mano_data_decoded['predicted']['trans'], mano_data_decoded['predicted']['theta'],mano_data_decoded['predicted']['rot']
+            , mano_data_decoded['ground_truth']['trans'], mano_data_decoded['ground_truth']['theta'], mano_data_decoded['beta'], mano_data_decoded['sides'], background_img, intrinsic, extrinsic_c2w, output_dir, fps=30)            
         elif cfg.testing.visualize_type == 'skeleton':
             
             mano_root = cfg.testing.mano_root_dir
@@ -726,16 +768,15 @@ if __name__ == "__main__":
             presence_desc = {1: "left hand only", 2: "right hand only", 3: "both hands"}
             print(f"  - Hand visibility: {presence_desc.get(presence, 'unknown')} (presence={presence})")
             
-            # Create output directory if it doesn't exist
-            os.makedirs(cfg.testing.output_dir, exist_ok=True)
+            # Create output directory base (consistent with other visualization types)
+            output_dir_base = os.path.join(cfg.testing.output_dir, "test_skeleton_workspace")
+            os.makedirs(output_dir_base, exist_ok=True)
             
             # Construct full output paths with sample index to avoid overwriting
             # Extract base name and extension from video names
-            video_2d_base = os.path.splitext(cfg.testing.video_name)[0]
-            video_3d_base = os.path.splitext(cfg.testing.video_3d_name)[0]
             
-            output_path_2d = os.path.join(cfg.testing.output_dir, f"{video_2d_base}_sample_{i+1:03d}.mp4")
-            output_path_3d = os.path.join(cfg.testing.output_dir, f"{video_3d_base}_sample_{i+1:03d}.mp4")
+            output_path_2d = os.path.join(output_dir, f"{i}_skeleton.mp4")
+            # output_path_3d = os.path.join(output_dir_base, str(i), f"{i}.mp4")
             
             # Prepare ground truth data if show_gt is enabled
             gt_mano_seq = gt_mano_sequence if cfg.testing.show_gt else None
@@ -743,7 +784,7 @@ if __name__ == "__main__":
             
             # Generate 2D projection video (original functionality)
             print(f"Generating 2D projection video...")
-            visualizer.generate_2d_projection_video(background_img, mano_sequence, wrist_sequence, 
+            visualizer.generate_2d_video(background_img, mano_sequence, wrist_sequence, 
                                         output_path_2d, cfg.testing.fps, fx=fx, fy=fy, cx=cx, cy=cy,
                                         extrinsic_sequence = None,
                                         show_mesh=cfg.testing.show_mesh, mesh_alpha=cfg.testing.mesh_alpha,
