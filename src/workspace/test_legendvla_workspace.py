@@ -720,25 +720,27 @@ if __name__ == "__main__":
             
             vis_hand_plot_comparison(mano_data_decoded['predicted']['rot'], mano_data_decoded['predicted']['trans'], mano_data_decoded['predicted']['theta'],mano_data_decoded['predicted']['rot']
             , mano_data_decoded['ground_truth']['trans'], mano_data_decoded['ground_truth']['theta'], mano_data_decoded['beta'], mano_data_decoded['sides'], background_img, intrinsic, extrinsic_c2w, output_dir, fps=30)            
-        elif cfg.testing.visualize_type == 'skeleton':
+        
+        
+        elif cfg.testing.visualize_type == 'keypoint':
             
             mano_root = cfg.testing.mano_root_dir
             print(f"Initializing hand visualizer with MANO root: {mano_root}")
             visualizer = HandVisualizer(mano_root=mano_root)
 
             # all states and actions are in camera frame after preprocessing
-            mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, presence = sample_for_vis(
+            keypoint_sequence, wrist_sequence, gt_keypoint_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, presence = sample_for_vis(
                 action_pred, raw_sample)
 
             # Move to device and convert to float32 to avoid dtype issues
-            mano_sequence = mano_sequence.to(visualizer.device).float()
+            keypoint_sequence = keypoint_sequence.to(visualizer.device).float()
             wrist_sequence = wrist_sequence.to(visualizer.device).float()
             if cfg.testing.show_gt:
-                gt_mano_sequence = gt_mano_sequence.to(visualizer.device).float()
+                gt_keypoint_sequence = gt_keypoint_sequence.to(visualizer.device).float()
                 gt_wrist_sequence = gt_wrist_sequence.to(visualizer.device).float()
             
             
-            num_frames = mano_sequence.shape[0]
+            num_frames = keypoint_sequence.shape[0]
             print(f"Detected {num_frames} frames in the prediction sequences")
             
             # Scale camera intrinsics accordingly
@@ -764,41 +766,29 @@ if __name__ == "__main__":
             else:
                 print("No extrinsic data available, using identity transformation")
             
-            # Display presence information
-            presence_desc = {1: "left hand only", 2: "right hand only", 3: "both hands"}
-            print(f"  - Hand visibility: {presence_desc.get(presence, 'unknown')} (presence={presence})")
-            
             # Create output directory base (consistent with other visualization types)
-            output_dir_base = os.path.join(cfg.testing.output_dir, "test_skeleton_workspace")
+            output_dir_base = os.path.join(cfg.testing.output_dir, "test_keypoint_workspace")
             os.makedirs(output_dir_base, exist_ok=True)
+
             
-            # Construct full output paths with sample index to avoid overwriting
-            # Extract base name and extension from video names
-            
-            output_path_2d = os.path.join(output_dir, f"{i}_skeleton.mp4")
+            output_path_2d = os.path.join(output_dir_base, f"{i}_keypoint.mp4")
             # output_path_3d = os.path.join(output_dir_base, str(i), f"{i}.mp4")
             
             # Prepare ground truth data if show_gt is enabled
-            gt_mano_seq = gt_mano_sequence if cfg.testing.show_gt else None
+            gt_keypoint_seq = gt_keypoint_sequence if cfg.testing.show_gt else None
             gt_wrist_seq = gt_wrist_sequence if cfg.testing.show_gt else None
             
             # Generate 2D projection video (original functionality)
             print(f"Generating 2D projection video...")
-            visualizer.generate_2d_video(background_img, mano_sequence, wrist_sequence, 
-                                        output_path_2d, cfg.testing.fps, fx=fx, fy=fy, cx=cx, cy=cy,
+            visualizer.generate_2d_video(background_img, wrist_sequence, output_path_2d, cfg.testing.fps,
+                                        fx=fx, fy=fy, cx=cx, cy=cy,
                                         extrinsic_sequence = None,
+                                        keypoint_sequence=keypoint_sequence,
                                         show_mesh=cfg.testing.show_mesh, mesh_alpha=cfg.testing.mesh_alpha,
-                                        gt_mano_sequence=gt_mano_seq, gt_wrist_sequence=gt_wrist_seq,
-                                        presence=presence)
+                                        gt_keypoint_sequence=gt_keypoint_seq, gt_wrist_sequence=gt_wrist_seq,
+                                        presence=presence, mode = 'keypoint')
             
-            # Generate 3D mesh and skeleton video in 3D coordinate space
-            # print(f"Generating 3D mesh + skeleton video...")
-            # visualizer.generate_3d_mesh_skeleton_video(mano_sequence, wrist_sequence,
-            #                                           output_path_3d, cfg.testing.fps, 
-            #                                           extrinsic_sequence=None,
-            #                                           gt_mano_sequence=gt_mano_seq, gt_wrist_sequence=gt_wrist_seq,
-            #                                           presence=presence)
-            
+
             print(f"Sample {i+1}/{len(sample_indices)} (index {sample_idx}) completed:")
             print(f"  2D projection video: {output_path_2d}")
             # print(f"  3D mesh + skeleton video: {output_path_3d}")
