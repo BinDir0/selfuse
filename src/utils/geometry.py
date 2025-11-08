@@ -771,10 +771,11 @@ def transform_points_to_target_frame(points, target_extrinsic):
     '''
     Transform the points to the target frame.
     Args:
-        points: torch.Tensor or np.ndarray, shape: [T, 3] or [B, T, 3]
+        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
+            where 30 = 10 points * 3D (5 left hand fingertip points + 5 right hand fingertip points)
         target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
     Returns:
-        points: torch.Tensor or np.ndarray, shape: [T, 3] or [B, T, 3]
+        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
     '''
     assert points.dtype == target_extrinsic.dtype, "points and target_extrinsic must have the same dtype"
     # print(f"points.shape: {points.shape}, target_extrinsic.shape: {target_extrinsic.shape}")
@@ -784,12 +785,105 @@ def transform_points_to_target_frame(points, target_extrinsic):
         target_extrinsic = torch.from_numpy(target_extrinsic)
     else:
         is_numpy = False
-    target_extrinsic = target_extrinsic.unsqueeze(-3)
-
-    homo_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1).unsqueeze(-1)
-    homo_points = torch.matmul(target_extrinsic, homo_points)
-    points = homo_points[..., :3, 0]
+    
+    # Determine if batched or not
+    if points.ndim == 2:
+        points = points.unsqueeze(0)  # [1, T, 30]
+        target_extrinsic = target_extrinsic.unsqueeze(0)  # [1, 4, 4]
+        remove_batch = True
+    else:
+        remove_batch = False
+    
+    B, T = points.shape[0], points.shape[1]
+    # Reshape from [B, T, 30] to [B, T, 10, 3] (10 points, each with 3D coordinates)
+    points = points.reshape(B, T, 10, 3)  # [B, T, 10, 3]
+    
+    # Prepare target_extrinsic: [B, 1, 4, 4] for broadcasting
+    target_extrinsic = target_extrinsic.unsqueeze(1)  # [B, 1, 4, 4]
+    
+    # Convert points to homogeneous coordinates: [B, T, 10, 4]
+    homo_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)  # [B, T, 10, 4]
+    homo_points = homo_points.unsqueeze(-1)  # [B, T, 10, 4, 1]
+    
+    # Transform: target_extrinsic[b] @ homo_points[b, t, n]
+    homo_points_transformed = torch.matmul(target_extrinsic, homo_points)  # [B, T, 10, 4, 1]
+    
+    # Extract transformed points (first 3 dimensions)
+    points_transformed = homo_points_transformed[..., :3, 0]  # [B, T, 10, 3]
+    
+    # Reshape back to [B, T, 30]
+    points_transformed = points_transformed.reshape(B, T, 30)  # [B, T, 30]
+    
+    # Remove batch dimension if it was added
+    if remove_batch:
+        points_transformed = points_transformed.squeeze(0)  # [T, 30]
     
     if is_numpy:
-        points = points.numpy()
-    return points
+        points_transformed = points_transformed.numpy()
+    return points_transformed
+
+def transform_points_to_target_frame_per_frame(points, target_extrinsic):
+    '''
+    Transform the points to the target frame with per-frame extrinsics.
+    Args:
+        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
+            where 30 = 10 points * 3D (5 left hand fingertip points + 5 right hand fingertip points)
+        target_extrinsic: torch.Tensor or np.ndarray, shape: [N, 4, 4] or [B, N, 4, 4]
+            where N should equal T. We assume the target_extrinsic is world2cam, and we want to 
+            transform the points in the world frame to the camera frame for each frame.
+    Returns:
+        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
+    '''
+    assert points.dtype == target_extrinsic.dtype, "points and target_extrinsic must have the same dtype"
+    
+    # Check if input is numpy array
+    if isinstance(points, np.ndarray):
+        is_numpy = True
+        points = torch.from_numpy(points)
+        target_extrinsic = torch.from_numpy(target_extrinsic)
+    else:
+        is_numpy = False
+    
+    # Determine if batched or not
+    if points.ndim == 2:
+        # Add batch dimension for processing
+        points = points.unsqueeze(0)  # [1, T, 30]
+        target_extrinsic = target_extrinsic.unsqueeze(0)  # [1, T, 4, 4]
+        remove_batch = True
+    else:
+        remove_batch = False
+    
+    B, T = points.shape[0], points.shape[1]
+    
+    # Reshape from [B, T, 30] to [B, T, 10, 3] (10 points, each with 3D coordinates)
+    points = points.reshape(B, T, 10, 3)  # [B, T, 10, 3]
+    
+    # Convert points to homogeneous coordinates: [B, T, 10, 4]
+    homo_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)  # [B, T, 10, 4]
+    
+    # Reshape to [B, T, 10, 4, 1] for matrix multiplication
+    homo_points = homo_points.unsqueeze(-1)  # [B, T, 10, 4, 1]
+    
+    # Expand target_extrinsic from [B, T, 4, 4] to [B, T, 1, 4, 4] to broadcast over 10 points
+    target_extrinsic = target_extrinsic.unsqueeze(2)  # [B, T, 1, 4, 4]
+    
+    # Transform each frame with its corresponding extrinsic
+    # target_extrinsic: [B, T, 1, 4, 4], homo_points: [B, T, 10, 4, 1]
+    # Broadcast multiplication: target_extrinsic[b, t, 0] @ homo_points[b, t, n]
+    homo_points_transformed = torch.matmul(target_extrinsic, homo_points)  # [B, T, 10, 4, 1]
+    
+    # Extract transformed points (first 3 dimensions)
+    points_transformed = homo_points_transformed[..., :3, 0]  # [B, T, 10, 3]
+    
+    # Reshape back to [B, T, 30]
+    points_transformed = points_transformed.reshape(B, T, 30)  # [B, T, 30]
+    
+    # Remove batch dimension if it was added
+    if remove_batch:
+        points_transformed = points_transformed.squeeze(0)  # [T, 30]
+    
+    # Convert back to numpy if input was numpy
+    if is_numpy:
+        points_transformed = points_transformed.numpy()
+    
+    return points_transformed

@@ -146,10 +146,20 @@ class LegendVLADataset(BaseImageDataset):
         return val_set
 
     def sample_for_inference(self, sample):
+        # Select data keys based on motion_type
+        if self.motion_type == 'mano':
+            hand_state_key = 'state/hand'
+            hand_action_key = 'action/hand'
+        elif self.motion_type == 'keypoint':
+            hand_state_key = 'state/fingertips'
+            hand_action_key = 'action/fingertips'
+        else:
+            raise ValueError(f"Unsupported motion_type: {self.motion_type}")
+        
         wrist_state = sample['state/wrist'].astype(np.float32)
-        hand_state = sample['state/hand'].astype(np.float32)
+        hand_state = sample[hand_state_key].astype(np.float32)
         wrist_action = sample['action/wrist'].astype(np.float32)
-        hand_action = sample['action/hand'].astype(np.float32)        
+        hand_action = sample[hand_action_key].astype(np.float32)        
         presence = sample['presence']
         extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
         step = self.history // self.n_obs_state_steps
@@ -208,11 +218,21 @@ class LegendVLADataset(BaseImageDataset):
         return data
 
     def _sample_to_data(self, sample):
+        # Select data keys based on motion_type
+        if self.motion_type == 'mano':
+            hand_state_key = 'state/hand'
+            hand_action_key = 'action/hand'
+        elif self.motion_type == 'keypoint':
+            hand_state_key = 'state/fingertips'
+            hand_action_key = 'action/fingertips'
+        else:
+            raise ValueError(f"Unsupported motion_type: {self.motion_type}")
+        
         state, action, action_valid_mask = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
-            hand_state = sample['state/hand'].astype(np.float32), 
+            hand_state = sample[hand_state_key].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
-            hand_action = sample['action/hand'].astype(np.float32), 
+            hand_action = sample[hand_action_key].astype(np.float32), 
             extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4), # [Horizon, 16] -> [Horizon, 4, 4]
             presence = sample['presence'], 
             normalizer = self.normalizer, 
@@ -615,11 +635,21 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         return val_set
 
     def _sample_to_data(self, sample):
+        # Select data keys based on motion_type
+        if self.motion_type == 'mano':
+            hand_state_key = 'state/hand'
+            hand_action_key = 'action/hand'
+        elif self.motion_type == 'keypoint':
+            hand_state_key = 'state/fingertips'
+            hand_action_key = 'action/fingertips'
+        else:
+            raise ValueError(f"Unsupported motion_type: {self.motion_type}")
+        
         state, action, _ = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
-            hand_state = sample['state/hand'].astype(np.float32), 
+            hand_state = sample[hand_state_key].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
-            hand_action = sample['action/hand'].astype(np.float32), 
+            hand_action = sample[hand_action_key].astype(np.float32), 
             extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4), # [Horizon, 16] -> [Horizon, 4, 4]
             presence = sample['presence'], 
             normalizer = self.normalizer, 
@@ -856,12 +886,12 @@ def process_state_action(
     processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[history])
     processed_wrist_action = transform_wrist_to_target_frame(wrist_action[history:], extrinsic[history])
 
-    if motion_type == 'mano':
-        processed_hand_state = transform_points_to_target_frame(hand_state.reshape(-1, 3), extrinsic[history])
+    if motion_type == 'keypoint':
+        processed_hand_state = transform_points_to_target_frame(hand_state, extrinsic[history])
         processed_hand_state = processed_hand_state.reshape(hand_state.shape)
-        processed_hand_action = transform_points_to_target_frame(hand_action.reshape(-1, 3), extrinsic[history])
+        processed_hand_action = transform_points_to_target_frame(hand_action, extrinsic[history])
         processed_hand_action = processed_hand_action.reshape(hand_action.shape)
-    elif motion_type == 'keypoint':
+    elif motion_type == 'mano':
         processed_hand_state = hand_state
         processed_hand_action = hand_action
     else:

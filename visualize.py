@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from src.utils.geometry import transform_wrist_to_target_frame, transform_wrist_to_target_frame_per_frame
+from src.utils.geometry import transform_wrist_to_target_frame_per_frame, transform_points_to_target_frame_per_frame
 # manopth.manolayer will be imported dynamically in HandVisualizer.__init__()
 
 # Transformation utilities are implemented as methods within HandVisualizer class
@@ -1453,15 +1453,16 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
         action_pred = torch.from_numpy(action_pred)
         
     wrist_sequence = action_pred[:, :18]  # Expected shape: [30, 18]    
-    mano_sequence = action_pred[:, 18:]  # Expected shape: [30, 30]
+    hand_sequence = action_pred[:, 18:]  # Expected shape: [30, 30]
 
     # Extract ground truth data
     gt_wrist_sequence = raw_sample['action'][:, :18] # [30, 18]
-    gt_mano_sequence =  raw_sample['action'][:, 18:]  # [30, 30]]
+    gt_hand_sequence =  raw_sample['action'][:, 18:]  # [30, 30]]
 
     # transform the gt wrist sequence to the target frame
     # Use per-frame transformation since extrinsic is [N, 4, 4]
     gt_wrist_sequence = transform_wrist_to_target_frame_per_frame(gt_wrist_sequence, raw_sample['extrinsic'])
+    gt_hand_sequence = transform_points_to_target_frame_per_frame(gt_hand_sequence, raw_sample['extrinsic'])
     # Extract presence data (single integer for all frames)
     presence = raw_sample['presence'][0]
     intrinsic_matrix = raw_sample['intrinsic'][0]
@@ -1472,11 +1473,11 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
 
     
     # Replicate for all frames (30 frames)
-    num_frames = mano_sequence.shape[0]
+    num_frames = hand_sequence.shape[0]
     # Use numpy repeat: first expand dims, then repeat along first axis
     extrinsic_matrices = extrinsic_matrix.unsqueeze(0).repeat(num_frames, 1, 1)  # [30, 4, 4]
     
-    return mano_sequence, wrist_sequence, gt_mano_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, presence
+    return hand_sequence, wrist_sequence, gt_hand_sequence, gt_wrist_sequence, intrinsic_matrix, extrinsic_matrices, presence
 
 def load_complete_data(path: str, sample_id: int = 0) -> tuple:
     """

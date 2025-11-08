@@ -36,10 +36,11 @@ shape_meta: &shape_meta
       hand: 
         shape: [30]
       shape: [48]
-      type: low_dim
+      type: keypoint
       horizon: ${n_obs_state_steps}
   action:
     shape: [48]
+    type: keypoint
     horizon: ${n_action_steps}
 
 # Dataset configuration
@@ -213,5 +214,5 @@ testing:
   show_gt: True
   target_width: 1920
   target_height: 1080
-  visualize_type: 'tokenizer' # mesh or skeleton or tokenizer
+  visualize_type: 'keypoint' # mesh or skeleton or tokenizer
   tokenizer_type: 'vq' # vq or fast
