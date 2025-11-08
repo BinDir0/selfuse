@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from src.utils.geometry import transform_wrist_to_target_frame_per_frame, transform_points_to_target_frame_per_frame
+from src.utils.geometry import transform_wrist_to_target_frame
 # manopth.manolayer will be imported dynamically in HandVisualizer.__init__()
 
 # Transformation utilities are implemented as methods within HandVisualizer class
@@ -1457,12 +1457,12 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
 
     # Extract ground truth data
     gt_wrist_sequence = raw_sample['action'][:, :18] # [30, 18]
-    gt_hand_sequence =  raw_sample['action'][:, 18:]  # [30, 30]]
+    gt_hand_sequence =  raw_sample['action'][:, 18:]  # [30, 30]
 
     # transform the gt wrist sequence to the target frame
     # Use per-frame transformation since extrinsic is [N, 4, 4]
-    gt_wrist_sequence = transform_wrist_to_target_frame_per_frame(gt_wrist_sequence, raw_sample['extrinsic'])
-    gt_hand_sequence = transform_points_to_target_frame_per_frame(gt_hand_sequence, raw_sample['extrinsic'])
+    gt_wrist_sequence = transform_wrist_to_target_frame(gt_wrist_sequence, raw_sample['extrinsic'])
+    gt_hand_sequence = transform_wrist_to_target_frame(gt_hand_sequence, raw_sample['extrinsic'])
     # Extract presence data (single integer for all frames)
     presence = raw_sample['presence'][0]
     intrinsic_matrix = raw_sample['intrinsic'][0]

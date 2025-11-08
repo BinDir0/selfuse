@@ -391,8 +391,6 @@ class TrainVQTokenizerWorkspace(BaseWorkspace):
                                 if metric_value.ndim > 0:
                                     continue # ignore array with dimension > 0
                                 metric_value = metric_value.item()
-                            else: 
-                                continue # ignore other types
                             flat_dict[f'{prefix}/{key}/{part}/{metric_name}'] = metric_value
                 else:
                     # Single level: e.g., {'loss': 0.5, 'recon_loss': 0.3}
@@ -405,12 +403,16 @@ class TrainVQTokenizerWorkspace(BaseWorkspace):
                             if metric_value.ndim > 0:
                                 continue # ignore array with dimension > 0
                             metric_value = metric_value.item()
-                        else: 
-                            continue # ignore other types
                         flat_dict[f'{prefix}/{key}/{metric_name}'] = metric_value
             else:
                 # Direct value
                 if isinstance(value, torch.Tensor):
+                    if value.dim() > 0:
+                        continue # ignore tensor with dimension > 0
+                    value = value.item()
+                elif isinstance(value, np.ndarray):
+                    if value.ndim > 0:
+                        continue # ignore array with dimension > 0
                     value = value.item()
                 flat_dict[f'{prefix}/{key}'] = value
         

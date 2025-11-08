@@ -24,7 +24,7 @@ from src.utils.geometry import (
     transform_wrist_to_target_frame, 
     homo_matrix_from_trans_6drot, 
     homo_matrix_to_trans_6drot, 
-    transform_points_to_target_frame,
+    transform_hand_points_to_wrist_frame,
 )
 from src.model.common.normalizer import LinearNormalizer
 from .base_dataset import BaseImageDataset, BaseDataCollator
@@ -146,27 +146,17 @@ class LegendVLADataset(BaseImageDataset):
         return val_set
 
     def sample_for_inference(self, sample):
-        # Select data keys based on motion_type
-        if self.motion_type == 'mano':
-            hand_state_key = 'state/hand'
-            hand_action_key = 'action/hand'
-        elif self.motion_type == 'keypoint':
-            hand_state_key = 'state/fingertips'
-            hand_action_key = 'action/fingertips'
-        else:
-            raise ValueError(f"Unsupported motion_type: {self.motion_type}")
-        
         wrist_state = sample['state/wrist'].astype(np.float32)
-        hand_state = sample[hand_state_key].astype(np.float32)
+        hand_state = sample[f'state/{self.motion_type}'].astype(np.float32)
         wrist_action = sample['action/wrist'].astype(np.float32)
-        hand_action = sample[hand_action_key].astype(np.float32)        
+        hand_action = sample[f'action/{self.motion_type}'].astype(np.float32)        
         presence = sample['presence']
         extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
         step = self.history // self.n_obs_state_steps
         state_slice = [self.history - i * step for i in range(0, self.n_obs_state_steps)]
         state_slice = state_slice[::-1]
         # use first self.hand_ndim components of hand state and action
-        all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims, i.e. 45 in MANO hand params
+        all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims, e.g. 45 in MANO hand params
         # processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
         # processed_wrist_action = transform_wrist_to_target_frame(wrist_action[self.history:], extrinsic[self.history])
 
@@ -219,20 +209,11 @@ class LegendVLADataset(BaseImageDataset):
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
-        if self.motion_type == 'mano':
-            hand_state_key = 'state/hand'
-            hand_action_key = 'action/hand'
-        elif self.motion_type == 'keypoint':
-            hand_state_key = 'state/fingertips'
-            hand_action_key = 'action/fingertips'
-        else:
-            raise ValueError(f"Unsupported motion_type: {self.motion_type}")
-        
         state, action, action_valid_mask = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
-            hand_state = sample[hand_state_key].astype(np.float32), 
+            hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
-            hand_action = sample[hand_action_key].astype(np.float32), 
+            hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
             extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4), # [Horizon, 16] -> [Horizon, 4, 4]
             presence = sample['presence'], 
             normalizer = self.normalizer, 
@@ -636,20 +617,11 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
-        if self.motion_type == 'mano':
-            hand_state_key = 'state/hand'
-            hand_action_key = 'action/hand'
-        elif self.motion_type == 'keypoint':
-            hand_state_key = 'state/fingertips'
-            hand_action_key = 'action/fingertips'
-        else:
-            raise ValueError(f"Unsupported motion_type: {self.motion_type}")
-        
         state, action, _ = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
-            hand_state = sample[hand_state_key].astype(np.float32), 
+            hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
-            hand_action = sample[hand_action_key].astype(np.float32), 
+            hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
             extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4), # [Horizon, 16] -> [Horizon, 4, 4]
             presence = sample['presence'], 
             normalizer = self.normalizer, 
@@ -882,20 +854,24 @@ def process_state_action(
         hand_action[history:, :hand_ndim], 
         hand_action[history:, all_hand_ndim:all_hand_ndim + hand_ndim]
     ], axis=-1)
+    processed_wrist_state = wrist_state[state_slice]
+    processed_wrist_action = wrist_action[history:]
 
-    processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[history])
-    processed_wrist_action = transform_wrist_to_target_frame(wrist_action[history:], extrinsic[history])
-
-    if motion_type == 'keypoint':
-        processed_hand_state = transform_points_to_target_frame(hand_state, extrinsic[history])
+    if motion_type == 'fingertips': 
+        # TODO: We can try transform the fingertips to the camera coordinate system or wrist frame coordinate system
+        processed_hand_state = transform_hand_points_to_wrist_frame(hand_state, processed_wrist_state)
         processed_hand_state = processed_hand_state.reshape(hand_state.shape)
-        processed_hand_action = transform_points_to_target_frame(hand_action, extrinsic[history])
+        processed_hand_action = transform_hand_points_to_wrist_frame(hand_action, processed_wrist_action)
         processed_hand_action = processed_hand_action.reshape(hand_action.shape)
     elif motion_type == 'mano':
         processed_hand_state = hand_state
         processed_hand_action = hand_action
     else:
         raise ValueError(f"Unsupported motion type: {motion_type}")
+
+    # transform the wrist state and action to the camera coordinate system
+    processed_wrist_state = transform_wrist_to_target_frame(processed_wrist_state, extrinsic[history])
+    processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[history])
 
     # use delta of wrist translation and hand mano params as action
     state_presence = presence[state_slice]

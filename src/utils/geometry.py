@@ -8,6 +8,7 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 
 _FLOAT_EPS = np.finfo(np.float64).eps
 
@@ -519,6 +520,7 @@ def rot_matrix_from_6drot(rot):
     
     return rot_matrix
 
+
 def rot_matrix_to_6drot(rot_matrix):
     '''
     Convert 3x3 rotation matrix to 6D rotation representation.
@@ -561,6 +563,34 @@ def rot_matrix_to_6drot(rot_matrix):
     
     return rot_6d
 
+
+def homo_coordinates_to_cartesian(homo_coordinates, eps=1e-6):
+    '''
+    Convert homogeneous coordinates to Cartesian coordinates.
+    Args:
+        homo_coordinates: torch.Tensor or np.ndarray, shape: [..., 4]
+    Returns:
+        cartesian_coordinates: torch.Tensor or np.ndarray, shape: [..., 3]
+    '''
+    cartesian_coordinates = homo_coordinates[..., :3] / (homo_coordinates[..., 3:4] + eps)
+    return cartesian_coordinates
+
+
+def homo_coordinates_from_cartesian(cartesian_coordinates):
+    '''
+    Convert homogeneous coordinates to Cartesian coordinates.
+    Args:
+        cartesian_coordinates: torch.Tensor or np.ndarray, shape: [..., 3]
+    Returns:
+        homo_coordinates: torch.Tensor or np.ndarray, shape: [..., 4]
+    '''
+    if isinstance(cartesian_coordinates, np.ndarray):
+        homo_coordinates = np.concatenate([cartesian_coordinates, np.ones_like(cartesian_coordinates[..., :1])], axis=-1)
+    else: 
+        homo_coordinates = torch.cat([cartesian_coordinates, torch.ones_like(cartesian_coordinates[..., :1])], dim=-1)
+    return homo_coordinates
+
+
 def homo_matrix_to_trans_6drot(homo_matrix):
     '''
     Args:
@@ -573,6 +603,7 @@ def homo_matrix_to_trans_6drot(homo_matrix):
     trans = homo_matrix[..., :3, 3]
     rot_6d = rot_matrix_to_6drot(rot_matrix)
     return trans, rot_6d
+
 
 def homo_matrix_from_trans_6drot(trans, rot_6d):
     '''
@@ -598,13 +629,35 @@ def homo_matrix_from_trans_6drot(trans, rot_6d):
         homo_matrix = homo_matrix.cpu().numpy()
     return homo_matrix
 
-def transform_to_target_frame(pose, target_extrinsic):
+
+def homo_matrix_from_wrist_pose(wrist_pose): 
     '''
+    Convert wrist pose to homogeneous matrix.
+    Args:
+        wrist_pose: torch.Tensor or np.ndarray, shape: [..., 18] 
+        including left_trans(3), right_trans(3), left_rot6d(6), right_rot6d(6)
+    Returns:
+        homo_matrix_left: torch.Tensor or np.ndarray, shape: [..., 4, 4]
+        homo_matrix_right: torch.Tensor or np.ndarray, shape: [..., 4, 4]
+    '''
+    assert wrist_pose.shape[-1] == 18, "wrist_pose must have 18 elements"
+    left_trans = wrist_pose[..., :3]  # [..., 3]
+    right_trans = wrist_pose[..., 3:6]  # [..., 3]
+    left_rot6d = wrist_pose[..., 6:12]  # [..., 6]
+    right_rot6d = wrist_pose[..., 12:18]  # [..., 6]
+    homo_matrix_left = homo_matrix_from_trans_6drot(left_trans, left_rot6d)  # [..., 4, 4]
+    homo_matrix_right = homo_matrix_from_trans_6drot(right_trans, right_rot6d)  # [..., 4, 4]
+    return homo_matrix_left, homo_matrix_right
+
+
+def transform_pose_to_target_frame(pose, target_extrinsic):
+    f'''
     Transform the pose to the target frame.
     Args:
         pose: torch.Tensor or np.ndarray, shape: [T, 4, 4] or [B, T, 4, 4] in world frame
-        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
+        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [T, 4, 4] or [B, 4, 4]
         we assume the target_extrinsic is world2cam, and we want to transform the pose in the world frame to the camera frame
+        if wrist_pose.ndim > target_extrinsic.ndim, we assume to broadcast the time dimension of target_extrinsic
     Returns:
         pose: torch.Tensor or np.ndarray, shape: [T, 4, 4] or [B, T, 4, 4] in target frame
     '''
@@ -616,7 +669,8 @@ def transform_to_target_frame(pose, target_extrinsic):
         target_extrinsic = torch.from_numpy(target_extrinsic)
     else:
         is_numpy = False
-    target_extrinsic = target_extrinsic.unsqueeze(-3)
+    if pose.ndim > target_extrinsic.ndim:
+        target_extrinsic = target_extrinsic.unsqueeze(-3) # unsqueeze the time dimension 
 
     '''
     # use pseudo-inverse to avoid NaN
@@ -635,147 +689,45 @@ def transform_to_target_frame(pose, target_extrinsic):
         pose = pose.numpy()
     return pose
 
+
 # TODO: check whether the target_extrinsic is cam2world or world2cam
-def transform_wrist_to_target_frame(wrist_action, target_extrinsic):
+def transform_wrist_to_target_frame(wrist_pose, target_extrinsic):
     '''
     Transform the wrist action to the target frame.
     Args:
-        wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
-        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
+        wrist_pose: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
+        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [T, 4, 4] or [B, 4, 4] or [B, T, 4, 4]
         we assume the target_extrinsic is world2cam, and we want to transform the wrist action in the world frame to the camera frame
+        if wrist_pose.ndim > target_extrinsic.ndim, we assume to broadcast the time dimension of target_extrinsic
     Returns:
-        wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
+        wrist_pose: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
     '''
-    assert wrist_action.dtype == target_extrinsic.dtype, "wrist_action and target_extrinsic must have the same dtype"
-    if isinstance(wrist_action, np.ndarray):
-        is_numpy = True
-        wrist_action = torch.from_numpy(wrist_action)
-        target_extrinsic = torch.from_numpy(target_extrinsic)
-    else:
-        is_numpy = False
-
-    T = wrist_action.shape[-2]
-
-    # left wrist rotation is the first 6 elements, right wrist rotation is the last 6 elements
-    wrist_rot_6d = torch.cat([wrist_action[..., 6:12], wrist_action[..., 12:18]], dim=-2)
-    wrist_pose = torch.zeros(wrist_rot_6d.shape[:-1] + (4, 4))
-    wrist_pose[..., :3, 3] = torch.cat([wrist_action[..., :3], wrist_action[..., 3:6]], dim=-2)
-    wrist_pose[..., :3, :3] = rot_matrix_from_6drot(wrist_rot_6d)
-    wrist_pose[..., 3, 3] = 1
-
-    wrist_pose = transform_to_target_frame(wrist_pose, target_extrinsic)
-
-    wrist_rot_6d = rot_matrix_to_6drot(wrist_pose[..., :3, :3])
-    # print(wrist_action[..., :3].shape, wrist_pose[..., 0:T, :3, 3].shape, wrist_pose.shape)
-    wrist_action[..., :3] = wrist_pose[..., 0:T, :3, 3]
-    wrist_action[..., 3:6] = wrist_pose[..., T:2*T, :3, 3]
-    wrist_action[..., 6:12] = wrist_rot_6d[..., 0:T, :]
-    wrist_action[..., 12:18] = wrist_rot_6d[..., T:2*T, :]
-
-    if is_numpy:
-        wrist_action = wrist_action.numpy()
+    assert wrist_pose.dtype == target_extrinsic.dtype, "wrist_pose and target_extrinsic must have the same dtype"
     
-    return wrist_action
+    homo_wrist_pose_left, homo_wrist_pose_right = homo_matrix_from_wrist_pose(wrist_pose)
+    homo_wrist_pose_left = transform_pose_to_target_frame(homo_wrist_pose_left, target_extrinsic)
+    homo_wrist_pose_right = transform_pose_to_target_frame(homo_wrist_pose_right, target_extrinsic)
 
-def transform_wrist_to_target_frame_per_frame(wrist_action, target_extrinsic):
+    wrist_trans_left, wrist_rot_6d_left = homo_matrix_to_trans_6drot(homo_wrist_pose_left) # [..., 3], [..., 6]
+    wrist_trans_right, wrist_rot_6d_right = homo_matrix_to_trans_6drot(homo_wrist_pose_right) # [..., 3], [..., 6]
+    if isinstance(wrist_trans_left, np.ndarray):
+        wrist_pose = np.concatenate([wrist_trans_left, wrist_trans_right, wrist_rot_6d_left, wrist_rot_6d_right], axis=-1)
+    else: 
+        wrist_pose = torch.cat([wrist_trans_left, wrist_trans_right, wrist_rot_6d_left, wrist_rot_6d_right], dim=-1)
+    return wrist_pose
+
+
+def transform_hand_points_to_target_frame(points, target_extrinsic):
     '''
-    Transform the wrist action to the target frame with per-frame extrinsics.
+    Transform the hand's points to the target frame.
     Args:
-        wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
-        target_extrinsic: torch.Tensor or np.ndarray, shape: [N, 4, 4] or [B, N, 4, 4]
-        where N should equal T. We assume the target_extrinsic is world2cam, and we want to 
-        transform the wrist action in the world frame to the camera frame for each frame.
+        points: torch.Tensor or np.ndarray, shape: [T, D] or [B, T, D]
+            where D = (D//3) points * 3D (e.g. 5 left hand fingertip points + 5 right hand fingertip points)
+        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [T, 4, 4] or [B, 4, 4] or [B, T, 4, 4]
+        we assume the target_extrinsic is world2cam, and we want to transform the points in the world frame to the camera frame
+        if points.ndim + 1 > target_extrinsic.ndim, we assume to broadcast the time dimension of target_extrinsic
     Returns:
-        wrist_action: torch.Tensor or np.ndarray, shape: [T, 18] or [B, T, 18]
-    '''
-    assert wrist_action.dtype == target_extrinsic.dtype, "wrist_action and target_extrinsic must have the same dtype"
-    
-    # Check if input is numpy array
-    if isinstance(wrist_action, np.ndarray):
-        is_numpy = True
-        wrist_action = torch.from_numpy(wrist_action)
-        target_extrinsic = torch.from_numpy(target_extrinsic)
-    else:
-        is_numpy = False
-    
-    # Determine if batched or not
-    if wrist_action.ndim == 2:
-        # Add batch dimension for processing
-        wrist_action = wrist_action.unsqueeze(0)  # [1, T, 18]
-        target_extrinsic = target_extrinsic.unsqueeze(0)  # [1, N, 4, 4]
-        remove_batch = True
-    else:
-        remove_batch = False
-    
-    B, T = wrist_action.shape[0], wrist_action.shape[1]
-    
-    # Extract left and right wrist positions: [B, T, 3] each
-    left_wrist_pos = wrist_action[..., :3]  # [B, T, 3]
-    right_wrist_pos = wrist_action[..., 3:6]  # [B, T, 3]
-    
-    # Extract left and right wrist rotations (6D representation): [B, T, 6] each
-    left_wrist_rot_6d = wrist_action[..., 6:12]  # [B, T, 6]
-    right_wrist_rot_6d = wrist_action[..., 12:18]  # [B, T, 6]
-    
-    # Convert 6D rotation to rotation matrices: [B, T, 3, 3] each
-    left_wrist_rot_mat = rot_matrix_from_6drot(left_wrist_rot_6d)  # [B, T, 3, 3]
-    right_wrist_rot_mat = rot_matrix_from_6drot(right_wrist_rot_6d)  # [B, T, 3, 3]
-    
-    # Create homogeneous transformation matrices for left and right wrists
-    left_wrist_pose = torch.zeros((B, T, 4, 4), dtype=wrist_action.dtype, device=wrist_action.device)
-    left_wrist_pose[..., :3, :3] = left_wrist_rot_mat
-    left_wrist_pose[..., :3, 3] = left_wrist_pos
-    left_wrist_pose[..., 3, 3] = 1
-    
-    right_wrist_pose = torch.zeros((B, T, 4, 4), dtype=wrist_action.dtype, device=wrist_action.device)
-    right_wrist_pose[..., :3, :3] = right_wrist_rot_mat
-    right_wrist_pose[..., :3, 3] = right_wrist_pos
-    right_wrist_pose[..., 3, 3] = 1
-    
-    # Transform each frame with its corresponding extrinsic
-    # target_extrinsic: [B, T, 4, 4], left_wrist_pose: [B, T, 4, 4]
-    # We need to do matrix multiplication for each frame: target_extrinsic[b, t] @ left_wrist_pose[b, t]
-    left_wrist_pose_transformed = torch.matmul(target_extrinsic, left_wrist_pose)  # [B, T, 4, 4]
-    right_wrist_pose_transformed = torch.matmul(target_extrinsic, right_wrist_pose)  # [B, T, 4, 4]
-    
-    
-    # Extract transformed positions and rotations
-    left_wrist_pos_transformed = left_wrist_pose_transformed[..., :3, 3]  # [B, T, 3]
-    right_wrist_pos_transformed = right_wrist_pose_transformed[..., :3, 3]  # [B, T, 3]
-    
-    left_wrist_rot_mat_transformed = left_wrist_pose_transformed[..., :3, :3]  # [B, T, 3, 3]
-    right_wrist_rot_mat_transformed = right_wrist_pose_transformed[..., :3, :3]  # [B, T, 3, 3]
-    
-    # Convert rotation matrices back to 6D representation
-    left_wrist_rot_6d_transformed = rot_matrix_to_6drot(left_wrist_rot_mat_transformed)  # [B, T, 6]
-    right_wrist_rot_6d_transformed = rot_matrix_to_6drot(right_wrist_rot_mat_transformed)  # [B, T, 6]
-    
-    # Reconstruct wrist_action
-    wrist_action_transformed = torch.zeros_like(wrist_action)
-    wrist_action_transformed[..., :3] = left_wrist_pos_transformed
-    wrist_action_transformed[..., 3:6] = right_wrist_pos_transformed
-    wrist_action_transformed[..., 6:12] = left_wrist_rot_6d_transformed
-    wrist_action_transformed[..., 12:18] = right_wrist_rot_6d_transformed
-    
-    # Remove batch dimension if it was added
-    if remove_batch:
-        wrist_action_transformed = wrist_action_transformed.squeeze(0)  # [T, 18]
-    
-    # Convert back to numpy if input was numpy
-    if is_numpy:
-        wrist_action_transformed = wrist_action_transformed.numpy()
-    
-    return wrist_action_transformed
-
-def transform_points_to_target_frame(points, target_extrinsic):
-    '''
-    Transform the points to the target frame.
-    Args:
-        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
-            where 30 = 10 points * 3D (5 left hand fingertip points + 5 right hand fingertip points)
-        target_extrinsic: torch.Tensor or np.ndarray, shape: [4, 4] or [B, 4, 4]
-    Returns:
-        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
+        points: torch.Tensor or np.ndarray, shape: [T, D] or [B, T, D]
     '''
     assert points.dtype == target_extrinsic.dtype, "points and target_extrinsic must have the same dtype"
     # print(f"points.shape: {points.shape}, target_extrinsic.shape: {target_extrinsic.shape}")
@@ -785,105 +737,55 @@ def transform_points_to_target_frame(points, target_extrinsic):
         target_extrinsic = torch.from_numpy(target_extrinsic)
     else:
         is_numpy = False
-    
-    # Determine if batched or not
-    if points.ndim == 2:
-        points = points.unsqueeze(0)  # [1, T, 30]
-        target_extrinsic = target_extrinsic.unsqueeze(0)  # [1, 4, 4]
-        remove_batch = True
-    else:
-        remove_batch = False
-    
-    B, T = points.shape[0], points.shape[1]
-    # Reshape from [B, T, 30] to [B, T, 10, 3] (10 points, each with 3D coordinates)
-    points = points.reshape(B, T, 10, 3)  # [B, T, 10, 3]
-    
-    # Prepare target_extrinsic: [B, 1, 4, 4] for broadcasting
-    target_extrinsic = target_extrinsic.unsqueeze(1)  # [B, 1, 4, 4]
-    
-    # Convert points to homogeneous coordinates: [B, T, 10, 4]
-    homo_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)  # [B, T, 10, 4]
-    homo_points = homo_points.unsqueeze(-1)  # [B, T, 10, 4, 1]
-    
-    # Transform: target_extrinsic[b] @ homo_points[b, t, n]
-    homo_points_transformed = torch.matmul(target_extrinsic, homo_points)  # [B, T, 10, 4, 1]
-    
-    # Extract transformed points (first 3 dimensions)
-    points_transformed = homo_points_transformed[..., :3, 0]  # [B, T, 10, 3]
-    
-    # Reshape back to [B, T, 30]
-    points_transformed = points_transformed.reshape(B, T, 30)  # [B, T, 30]
-    
-    # Remove batch dimension if it was added
-    if remove_batch:
-        points_transformed = points_transformed.squeeze(0)  # [T, 30]
-    
-    if is_numpy:
-        points_transformed = points_transformed.numpy()
-    return points_transformed
 
-def transform_points_to_target_frame_per_frame(points, target_extrinsic):
+    if points.ndim + 1 > target_extrinsic.ndim:
+        target_extrinsic = target_extrinsic.unsqueeze(-3) # unsqueeze the time dimension 
+
+    points = rearrange(points, '... (d 3) -> ... d 3')
+    points = homo_coordinates_from_cartesian(points).unsqueeze(-1) # [..., d, 3] -> [..., d, 4, 1]
+    target_extrinsic = target_extrinsic.unsqueeze(-3) # [..., 4, 4] -> [..., 1, 4, 4], broadcast the number of points dimension
+    points = torch.matmul(target_extrinsic, points).squeeze(-1) # [..., d, 4, 1] -> [..., d, 4]
+    points = homo_coordinates_to_cartesian(points) # [..., d, 3]
+    points = rearrange(points, '... d 3 -> ... (d 3)') # [..., d, 3] -> [..., D]
+    if is_numpy:
+        points = points.numpy()
+    return points
+
+
+def transform_hand_points_to_wrist_frame(hand_points, wrist_pose):
     '''
-    Transform the points to the target frame with per-frame extrinsics.
+    Transform the hand's points to the wrist frame.
     Args:
-        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
-            where 30 = 10 points * 3D (5 left hand fingertip points + 5 right hand fingertip points)
-        target_extrinsic: torch.Tensor or np.ndarray, shape: [N, 4, 4] or [B, N, 4, 4]
-            where N should equal T. We assume the target_extrinsic is world2cam, and we want to 
-            transform the points in the world frame to the camera frame for each frame.
+        hand_points: torch.Tensor or np.ndarray, shape: [T, D] or [B, T, D]
+            where D = (D//3) points * 3D (e.g. 5 left hand fingertip points + 5 right hand fingertip points)
+            each coordinate is in the base coordinate system
+        wrist_pose: torch.Tensor or np.ndarray, shape: [T, wrist_dim] or [B, T, wrist_dim]
+            i.e. wrist_dim = 18, [left_trans(3), right_trans(3), left_rot6d(6), right_rot6d(6)]
     Returns:
-        points: torch.Tensor or np.ndarray, shape: [T, 30] or [B, T, 30]
+        hand_points: torch.Tensor or np.ndarray, shape: [T, D] or [B, T, D]
     '''
-    assert points.dtype == target_extrinsic.dtype, "points and target_extrinsic must have the same dtype"
-    
-    # Check if input is numpy array
-    if isinstance(points, np.ndarray):
+    assert hand_points.dtype == wrist_pose.dtype, "hand_points and wrist_pose must have the same dtype"
+    if isinstance(hand_points, np.ndarray):
         is_numpy = True
-        points = torch.from_numpy(points)
-        target_extrinsic = torch.from_numpy(target_extrinsic)
+        hand_points = torch.from_numpy(hand_points)
+        wrist_pose = torch.from_numpy(wrist_pose)
     else:
         is_numpy = False
-    
-    # Determine if batched or not
-    if points.ndim == 2:
-        # Add batch dimension for processing
-        points = points.unsqueeze(0)  # [1, T, 30]
-        target_extrinsic = target_extrinsic.unsqueeze(0)  # [1, T, 4, 4]
-        remove_batch = True
-    else:
-        remove_batch = False
-    
-    B, T = points.shape[0], points.shape[1]
-    
-    # Reshape from [B, T, 30] to [B, T, 10, 3] (10 points, each with 3D coordinates)
-    points = points.reshape(B, T, 10, 3)  # [B, T, 10, 3]
-    
-    # Convert points to homogeneous coordinates: [B, T, 10, 4]
-    homo_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)  # [B, T, 10, 4]
-    
-    # Reshape to [B, T, 10, 4, 1] for matrix multiplication
-    homo_points = homo_points.unsqueeze(-1)  # [B, T, 10, 4, 1]
-    
-    # Expand target_extrinsic from [B, T, 4, 4] to [B, T, 1, 4, 4] to broadcast over 10 points
-    target_extrinsic = target_extrinsic.unsqueeze(2)  # [B, T, 1, 4, 4]
-    
-    # Transform each frame with its corresponding extrinsic
-    # target_extrinsic: [B, T, 1, 4, 4], homo_points: [B, T, 10, 4, 1]
-    # Broadcast multiplication: target_extrinsic[b, t, 0] @ homo_points[b, t, n]
-    homo_points_transformed = torch.matmul(target_extrinsic, homo_points)  # [B, T, 10, 4, 1]
-    
-    # Extract transformed points (first 3 dimensions)
-    points_transformed = homo_points_transformed[..., :3, 0]  # [B, T, 10, 3]
-    
-    # Reshape back to [B, T, 30]
-    points_transformed = points_transformed.reshape(B, T, 30)  # [B, T, 30]
-    
-    # Remove batch dimension if it was added
-    if remove_batch:
-        points_transformed = points_transformed.squeeze(0)  # [T, 30]
-    
-    # Convert back to numpy if input was numpy
+
+    D = hand_points.shape[-1]
+    # Get left and right hand points
+    hand_points_left = hand_points[..., :D//2]
+    hand_points_right = hand_points[..., D//2:]
+    # Get wrist pose homogeneous matrix, i.e. T_wrist2world
+    homo_wrist_pose_left, homo_wrist_pose_right = homo_matrix_from_wrist_pose(wrist_pose)
+    # Get T_world2wrist
+    homo_world2wrist_left = torch.linalg.pinv(homo_wrist_pose_left)
+    homo_world2wrist_right = torch.linalg.pinv(homo_wrist_pose_right)
+    # Get T_wrist2world
+    hand_points_left = transform_hand_points_to_target_frame(hand_points_left, homo_world2wrist_left)
+    hand_points_right = transform_hand_points_to_target_frame(hand_points_right, homo_world2wrist_right)
+    hand_points = torch.cat([hand_points_left, hand_points_right], dim=-1)
+
     if is_numpy:
-        points_transformed = points_transformed.numpy()
-    
-    return points_transformed
+        hand_points = hand_points.numpy()
+    return hand_points
