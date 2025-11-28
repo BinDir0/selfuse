@@ -1,5 +1,3 @@
-torch==2.8.0
-torchvision==0.23.0
 pydantic==2.11.7
 hydra-core
 wandb
@@ -26,7 +24,7 @@ vector_quantize_pytorch
 PyRender
 scipy 
 matplotlib
-chumpy
+# chumpy
 #manotorch
 #manopth
 #pyrealsense2

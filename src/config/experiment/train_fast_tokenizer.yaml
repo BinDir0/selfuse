@@ -5,10 +5,11 @@ _target_: src.workspace.train_fast_tokenizer.TrainFastTokenizerWorkspace
 
 image_shape: [224, 224, 3]
 dataset_paths:
- - /share_data/datasets/taco/taco_45pca_newpresence.zarr
- - /share_data/datasets/OakInk-v2/oakink2.zarr
- - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/datasets/EgoDex/egodex_train.zarr
+#  - /share_data/datasets/taco/taco_45pca_newpresence.zarr
+#  - /share_data/datasets/OakInk-v2/oakink2.zarr
+#  - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
+#  - /share_data/datasets/EgoDex/egodex_train.zarr
+ - /share_data/yeyuyao/egodex_filter_test.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -22,10 +23,11 @@ shape_meta: &shape_meta
       hand: 
         shape: [30]
       shape: [48]
-      type: low_dim
+      type: fingertips # fingertips or mano
       horizon: ${n_obs_state_steps}
   action:
     shape: [48]
+    type: fingertips # fingertips or mano
     horizon: ${n_action_steps}
 
 dataset:

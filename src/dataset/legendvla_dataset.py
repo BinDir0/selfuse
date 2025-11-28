@@ -841,6 +841,7 @@ def process_state_action(
         action: np.ndarray, shape: [H, wrist_dim + hand_dim]
         action_valid_mask: np.ndarray, shape: [H, wrist_dim + hand_dim]
     '''
+
     step = history // n_obs_state_steps
     state_slice = [history - i * step for i in range(0, n_obs_state_steps)]
     state_slice = state_slice[::-1]

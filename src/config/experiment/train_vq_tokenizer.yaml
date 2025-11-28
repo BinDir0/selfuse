@@ -5,24 +5,25 @@ _target_: src.workspace.train_vq_tokenizer.TrainVQTokenizerWorkspace
 
 image_shape: [224, 224, 3]
 dataset_paths:
- - /share_data/guantianrui/datasets/taco/taco_train.zarr
- - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train.zarr
- - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/guantianrui/datasets/EgoDex/egodex_train.zarr
+#  - /share_data/guantianrui/datasets/taco/taco_train.zarr
+#  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train.zarr
+#  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
+#  - /share_data/guantianrui/datasets/EgoDex/egodex_train.zarr
+ - /share_data/yeyuyao/egodex_filter_test.zarr
 
 test_seendataset_paths: 
-  - /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
-  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_test_seen.zarr
-  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen.zarr 
-  - /share_data/guantianrui/datasets/EgoDex/egodex_test_seen.zarr
+  # - /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
+  # - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_test_seen.zarr
+  # - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen.zarr 
+  # - /share_data/guantianrui/datasets/EgoDex/egodex_test_seen.zarr
 
 test_unseendataset_paths: 
-  - /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
-  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_test_unseen_object.zarr
-  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_test_unseen_room_layout.zarr
-  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene.zarr  
-  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_task.zarr
-  - /share_data/guantianrui/datasets/EgoDex/egodex_test_unseen_task.zarr
+  # - /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
+  # - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_test_unseen_object.zarr
+  # - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_test_unseen_room_layout.zarr
+  # - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene.zarr  
+  # - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_task.zarr
+  # - /share_data/guantianrui/datasets/EgoDex/egodex_test_unseen_task.zarr
 
 shape_meta: &shape_meta
   obs:
@@ -36,10 +37,11 @@ shape_meta: &shape_meta
       hand: 
         shape: [30]
       shape: [48]
-      type: low_dim
+      type: fingertips # fingertips or mano
       horizon: ${n_obs_state_steps}
   action:
     shape: [48]
+    type: fingertips # fingertips or mano
     horizon: ${n_action_steps}
 
 dataset:
@@ -135,11 +137,12 @@ tokenizer:
         use_part: wrist
         model_config:
           <<: *base_model_config
-          #output_emb_width: 512
+          output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          # nb_code: 2048    # partially override the base quantizer config
-          # num_groups: 2
+          nb_code: 4096    # partially override the base quantizer config
+          num_quantizers: 4
+          num_groups: 2
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -148,8 +151,9 @@ tokenizer:
         use_part: hand
         quantizer_config:
           <<: *base_quantizer_config
-          # nb_code: 2048    # partially override the base quantizer config
-          # num_groups: 2
+          nb_code: 4096    # partially override the base quantizer config
+          num_quantizers: 4
+          num_groups: 2
     use_part: True
   actions: 
     wrist: 
@@ -161,10 +165,10 @@ tokenizer:
         horizon: ${n_action_steps}
         model_config:
           <<: *base_model_config
-          #output_emb_width: 512
+          output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          # nb_code: 2048    # partially override the base quantizer config
+          nb_code: 4096    # partially override the base quantizer config
           # num_groups: 2
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
@@ -175,7 +179,7 @@ tokenizer:
         horizon: ${n_action_steps}
         quantizer_config:
           <<: *base_quantizer_config
-          # nb_code: 2048    # partially override the base quantizer config
+          nb_code: 4096    # partially override the base quantizer config
           # num_groups: 2
     use_part: True
 
@@ -193,14 +197,14 @@ optimizer:
 
 
 training:
-  device: cuda:1
+  device: cuda:0
   num_epochs: 10
   tqdm_interval_sec: 1.0
   max_train_steps: 
   max_val_steps: # 100
   val_per_epoch: 1
   ckpt_save_interval: 1
-  normalizer_path: /home/chenzhang/project/EgoVLA/outputs/2025.10.27/10.59_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  normalizer_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.27/10.59_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   valid_tokenizer_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.16/23.19_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=7
   # if valid_tokenizer_path is not None, will validate the tokenizer
   save_path: 
