@@ -343,7 +343,7 @@ class PaliGemmaVLAProcessor:
     def __init__(
         self,
         tokenizer,
-        hand_tokenizer,
+        motion_tokenizer,
         num_image_tokens: int,
         max_seq_len: int,
         ignore_index: int = -100,
@@ -387,9 +387,9 @@ class PaliGemmaVLAProcessor:
         tokenizer.add_eos_token = False
 
         self.tokenizer = tokenizer
-        self.hand_tokenizer = hand_tokenizer
+        self.motion_tokenizer = motion_tokenizer
         
-        total_vocab_size = sum([self.hand_tokenizer[k].vocab_size for k in self.hand_tokenizer.keys()])
+        total_vocab_size = sum([self.motion_tokenizer[k].vocab_size for k in self.motion_tokenizer.keys()])
 
         vocab_size = tokenizer.vocab_size
         special_tokens = tokenizer.all_special_ids
@@ -407,38 +407,23 @@ class PaliGemmaVLAProcessor:
         
         # Step 3: Build mappings using each processor's setup method
         # Use unified naming - structure will differ based on tokenizer type
-        self.hand_token_id2gemma_token_id = {}
-        self.gemma_token_id2hand_token_id = {}
+        self.motion_token_id2gemma_token_id = {}
+        self.gemma_token_id2motion_token_id = {}
         
         replace_idx = 0
-        for group_name in sorted(hand_tokenizer.keys()):
-            processor = hand_tokenizer[group_name]
+        for group_name in sorted(motion_tokenizer.keys()):
+            processor = motion_tokenizer[group_name]
             forward, reverse, replace_idx = processor.setup_tokenizer_gemma_mappings(
                 token_id_replace, replace_idx
             )
-            # hand_token_id2gemma_token_id[group_name] = gemma_id (FAST), hand_token_id2gemma_token_id[group_name][part_name] = gemma_id (VQ)
-            self.hand_token_id2gemma_token_id[group_name] = forward
+            # motion_token_id2gemma_token_id[group_name] = gemma_id (FAST), motion_token_id2gemma_token_id[group_name][part_name] = gemma_id (VQ)
+            self.motion_token_id2gemma_token_id[group_name] = forward
             
             # Initialize inner dict for this group
-            self.gemma_token_id2hand_token_id[group_name] = {}
+            self.gemma_token_id2motion_token_id[group_name] = {}
             
-            # Build reverse mapping
-            # Check structure: if reverse values are tuples, it's VQ (two-level)
-            # Otherwise it's Fast (one-level)
-            first_key = next(iter(reverse))
-            first_value = reverse[first_key]
-            
-            if isinstance(first_value, tuple):
-                # VQ tokenizer: reverse[gemma_id] = (part_name, vq_id)
-                # Need to prepend group_name
-                print("ecnode using vq tokenizer")
-                for gemma_id, (part_name, vq_id) in reverse.items():
-                    self.gemma_token_id2hand_token_id[group_name][gemma_id] = (group_name, part_name, vq_id)
-            else:
-                # Fast tokenizer: reverse[gemma_id] = token_id
-                # Convert to tuple format for consistency: (group_name, "tokens", token_id)
-                for gemma_id, token_id in reverse.items():
-                    self.gemma_token_id2hand_token_id[group_name][gemma_id] = token_id
+            for gemma_id, token_id in reverse.items():
+                self.gemma_token_id2motion_token_id[group_name][gemma_id] = token_id
         
         assert replace_idx == total_vocab_size
     
@@ -482,11 +467,10 @@ class PaliGemmaVLAProcessor:
 
         # We assume the states and actions are in [-1, 1]
         # Encode states and actions to get token counts for prompt construction
-        discrete_states = self.hand_tokenizer['states'](states)[0]
+        discrete_states = self.motion_tokenizer['states'](states)[0]
 
         if objective != "train_flow":
-            discrete_actions = self.hand_tokenizer['actions'](actions)[0]
-
+            discrete_actions = self.motion_tokenizer['actions'](actions)[0]
 
         text = text.replace('.', '')
         text = text.lower()
@@ -517,20 +501,19 @@ class PaliGemmaVLAProcessor:
         input_ids = inputs['input_ids'] # [L]
         assert input_ids.ndim == 1, f"The input_ids should be 1D array, got {input_ids.ndim}D array."
 
-        mapped_states_1d = self.hand_tokenizer['states'].map_hand_tokens2gemma(
+        mapped_states_1d = self.motion_tokenizer['states'].map_motion_tokens2gemma(
             discrete_states, 
-            mapping=self.hand_token_id2gemma_token_id['states'],
+            mapping=self.motion_token_id2gemma_token_id['states'],
         )
         input_ids = set_token_id(input_ids, self.state_token_id, mapped_states_1d)
         
         if objective != "train_flow":
             # Map VQ tokens to Gemma space (discrete_actions already encoded above)
-            mapped_actions_1d = self.hand_tokenizer['actions'].map_hand_tokens2gemma(
+            mapped_actions_1d = self.motion_tokenizer['actions'].map_motion_tokens2gemma(
                 discrete_actions,
-                mapping=self.hand_token_id2gemma_token_id['actions'],
+                mapping=self.motion_token_id2gemma_token_id['actions'],
             )
             input_ids = set_token_id(input_ids, self.action_token_id, mapped_actions_1d)
-
 
         if objective != "train_flow":
             labels = input_ids.copy()
@@ -562,24 +545,12 @@ class PaliGemmaVLAProcessor:
         action_tokens = output_ids[start_idx:end_idx].copy()
         
         for idx, token in enumerate(action_tokens):
-            if token not in self.gemma_token_id2hand_token_id['actions']:
+            if token not in self.gemma_token_id2motion_token_id['actions']:
                 warnings.warn(f"The token {token} is not found in the actions")
                 return {}
-            
-            mapped_value = self.gemma_token_id2hand_token_id['actions'][token]
-            
-            # Check if the MAPPED VALUE is a tuple (VQ) or int (Fast)
-            if isinstance(mapped_value, tuple):
-                print("decode using vq tokenizer")
-                # VQ tokenizer: (group_name, part_name, vq_id)
-                group_name, part_name, vq_id = mapped_value
-                action_tokens[idx] = vq_id
-            else:
-                # Fast tokenizer: just token_id
-                action_tokens[idx] = mapped_value
+            action_tokens[idx] = self.gemma_token_id2motion_token_id['actions'][token]
         
-        actions = self.hand_tokenizer['actions'].decode([action_tokens])
-
+        actions = self.motion_tokenizer['actions'].decode([action_tokens])
         return {'actions': actions}
 
 

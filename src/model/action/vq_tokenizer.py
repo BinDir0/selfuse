@@ -112,15 +112,12 @@ class VQActionProcessor(ProcessorMixin):
         
         hand_left_data = action_chunk_tensor[..., 18:18+h]                # [B, T, h]
         hand_right_data = action_chunk_tensor[..., 18+h:18+2*h]           # [B, T, h]
-
         
         # Encode each part using VQ model's encode method: returns [G, B, T/4, L]
         wrist_left_raw = self.vq_model["wrist"].encode(wrist_left_data) # [G, B, T/4, Lw]   
         wrist_right_raw = self.vq_model['wrist'].encode(wrist_right_data) # [G, B, T/4, Lw]
         hand_left_raw = self.vq_model['hand'].encode(hand_left_data) # [G, B, T/4, Lh]
         hand_right_raw = self.vq_model['hand'].encode(hand_right_data) # [G, B, T/4, Lh]
-        
-
         
         # Flatten with time-interleaved order and get metadata
         Gw, B, T, Lw = wrist_left_raw.shape
@@ -269,7 +266,7 @@ class VQActionProcessor(ProcessorMixin):
         Returns:
             Tuple of (token_id2gemma_token_id, gemma_token_id2token_id, end_idx)
             - token_id2gemma_token_id: {part: {vq_id: gemma_id}}
-            - gemma_token_id2token_id: {gemma_id: (part, vq_id)}
+            - gemma_token_id2token_id: {gemma_id: vq_id}
             - end_idx: Next index to use in usable_token_ids
         """
         # Initialize mappings for this VQ processor (two-level: part -> vq_id)
@@ -284,11 +281,11 @@ class VQActionProcessor(ProcessorMixin):
                 gemma_id = usable_token_ids[replace_idx]
                 replace_idx += 1
                 token_id2gemma_token_id[part_name][vq_id] = gemma_id
-                gemma_token_id2token_id[gemma_id] = (part_name, vq_id)
+                gemma_token_id2token_id[gemma_id] = vq_id
         
         return token_id2gemma_token_id, gemma_token_id2token_id, replace_idx
 
-    def map_hand_tokens2gemma(self, hand_tokens_1d, mapping):
+    def map_motion_tokens2gemma(self, motion_tokens_1d, mapping):
         """
         Map VQ token IDs to Gemma token IDs while preserving time-interleaved order.
         
@@ -317,13 +314,13 @@ class VQActionProcessor(ProcessorMixin):
             # Extract and map wrist tokens for this timestep
             wrist_start = start
             wrist_end = start + bimanual_wrist_per_t
-            for vq in hand_tokens_1d[wrist_start:wrist_end]:
+            for vq in motion_tokens_1d[wrist_start:wrist_end]:
                 mapped_interleaved.append(mapping['wrist'][int(vq)])
             
             # Extract and map hand tokens for this timestep
             hand_start = start + bimanual_wrist_per_t
             hand_end = start + tokens_per_t
-            for vq in hand_tokens_1d[hand_start:hand_end]:
+            for vq in motion_tokens_1d[hand_start:hand_end]:
                 mapped_interleaved.append(mapping['hand'][int(vq)])
         
         return np.asarray(mapped_interleaved, dtype=np.int64)

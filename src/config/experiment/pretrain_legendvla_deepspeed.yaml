@@ -47,11 +47,11 @@ shape_meta: &shape_meta
       hand: 
         shape: [30]
       shape: [48]
-      type: mano # fingertips or mano
+      type: fingertips # fingertips or mano
       horizon: ${n_obs_state_steps}
   action:
     shape: [48]
-    type: mano # fingertips or mano
+    type: fingertips # fingertips or mano
     horizon: ${n_action_steps}
 
 dataset:
@@ -90,8 +90,43 @@ n_obs_state_steps: 1
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
-processor: 
-  fast_tokenizer_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024 # may need to change
+vla_processor: 
+  _target_: src.dataset.paligemma_processing.PaliGemmaVLAProcessor
+  tokenizer: 
+    _target_: transformers.AutoTokenizer.from_pretrained
+    pretrained_model_name_or_path: ${training.pretrained_model_path}
+    padding_side: right
+  # motion_tokenizer: # FAST tokenizer
+  #   states:
+  #     _target_: src.model.action.fast_tokenizer.UniversalActionProcessor.from_pretrained
+  #     pretrained_model_name_or_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024/states
+  #   actions:
+  #     _target_: src.model.action.fast_tokenizer.UniversalActionProcessor.from_pretrained
+  #     pretrained_model_name_or_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024/actions
+  motion_tokenizer: 
+    states: 
+      _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
+      load_directory: /home/chenzhang/projects/EgoVLA/outputs/2025.11.28/17.52_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=79/states # may need to change
+    actions:
+      _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
+      load_directory: /home/chenzhang/projects/EgoVLA/outputs/2025.11.28/17.52_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=79/actions # may need to change
+  num_image_tokens: ${policy.vision_tower.config.num_image_tokens}
+  max_seq_len: ${max_vlm_tokens}
+  ignore_index: ${ignore_index}
+  image_size: ${policy.vision_tower.config.image_size}
+  tokenizer_padding: ${tokenizer_padding} 
+
+vlm_processor: 
+  _target_: src.dataset.paligemma_processing.PaliGemmaProcessor
+  tokenizer: 
+    _target_: transformers.AutoTokenizer.from_pretrained
+    pretrained_model_name_or_path: ${training.pretrained_model_path}
+    padding_side: right
+  num_image_tokens: ${policy.vision_tower.config.num_image_tokens}
+  max_seq_len: ${max_vlm_tokens}
+  ignore_index: ${ignore_index}
+  image_size: ${policy.vision_tower.config.image_size}
+  tokenizer_padding: ${tokenizer_padding} 
 
 dataloader:
   batch_size: 8
@@ -136,7 +171,7 @@ training:
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
-  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2025.10.27/18.13_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  normalizer_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.27/18.13_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   num_epochs: 10
   use_bf16: True
   clipping:

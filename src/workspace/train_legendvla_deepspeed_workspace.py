@@ -201,35 +201,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         print("--> dataset instantiated")
         accelerator.wait_for_everyone()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            cfg.policy.cfg.pretrained_model_path, padding_side="right"
-        )
-        self.fast_tokenizer = {
-            "states": UniversalActionProcessor.from_pretrained(
-                os.path.join(cfg.processor.fast_tokenizer_path, "states")
-            ),
-            "actions": UniversalActionProcessor.from_pretrained(
-                os.path.join(cfg.processor.fast_tokenizer_path, "actions")
-            )
-        }
-        
-        self.vla_processor = PaliGemmaVLAProcessor(
-            self.tokenizer,
-            self.fast_tokenizer,
-            num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
-            max_seq_len=cfg.policy.cfg.max_vlm_tokens,
-            ignore_index=cfg.ignore_index,
-            image_size=cfg.policy.vision_tower.config.image_size,
-            tokenizer_padding=cfg.tokenizer_padding,
-        )
-        self.vlm_processor = PaliGemmaProcessor(
-            self.tokenizer,
-            num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
-            max_seq_len=cfg.policy.cfg.max_vlm_tokens,
-            ignore_index=cfg.ignore_index,
-            image_size=cfg.policy.vision_tower.config.image_size,
-            tokenizer_padding=cfg.tokenizer_padding,
-        )
+        self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+        self.vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
         dataset.vla_dataset.set_preprocessor(self.vla_processor)
         if dataset.vlm_dataset is not None:
             dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
