@@ -159,3 +159,5 @@ logs/
 
 # test files
 _test
+
+.pylintrc
