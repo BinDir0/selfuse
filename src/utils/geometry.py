@@ -741,12 +741,12 @@ def transform_hand_points_to_target_frame(points, target_extrinsic):
     if points.ndim + 1 > target_extrinsic.ndim:
         target_extrinsic = target_extrinsic.unsqueeze(-3) # unsqueeze the time dimension 
 
-    points = rearrange(points, '... (d 3) -> ... d 3')
+    points = rearrange(points, '... (d c) -> ... d c', c=3)
     points = homo_coordinates_from_cartesian(points).unsqueeze(-1) # [..., d, 3] -> [..., d, 4, 1]
     target_extrinsic = target_extrinsic.unsqueeze(-3) # [..., 4, 4] -> [..., 1, 4, 4], broadcast the number of points dimension
     points = torch.matmul(target_extrinsic, points).squeeze(-1) # [..., d, 4, 1] -> [..., d, 4]
     points = homo_coordinates_to_cartesian(points) # [..., d, 3]
-    points = rearrange(points, '... d 3 -> ... (d 3)') # [..., d, 3] -> [..., D]
+    points = rearrange(points, '... d c -> ... (d c)', c=3) # [..., d, 3] -> [..., D]
     if is_numpy:
         points = points.numpy()
     return points

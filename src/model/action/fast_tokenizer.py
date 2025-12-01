@@ -21,13 +21,6 @@ def _process_dct_chunk(action_chunk: np.array) -> np.array:
     return dct(action_chunk, axis=0, norm="ortho").flatten()
 
 
-def _process_single_dct_to_string(tokens, scale, min_token):
-    """Helper function to process a single dct_token array"""
-    rounded_tokens = np.around(tokens * scale) - min_token
-    rounded_tokens = rounded_tokens.astype(int)
-    return "".join(map(chr, rounded_tokens))
-
-
 class UniversalActionProcessor(ProcessorMixin):
     attributes: ClassVar[list[str]] = ["bpe_tokenizer"]
     bpe_tokenizer_class: str = "AutoTokenizer"
@@ -246,7 +239,7 @@ class UniversalActionProcessor(ProcessorMixin):
         
         return token_id2gemma_token_id, gemma_token_id2token_id, replace_idx
 
-    def map_hand_tokens2gemma(self, hand_tokens_1d, mapping):
+    def map_motion_tokens2gemma(self, motion_tokens_1d, mapping):
         """
         Map VQ token IDs to Gemma token IDs while preserving time-interleaved order.
         
@@ -259,4 +252,4 @@ class UniversalActionProcessor(ProcessorMixin):
         """
 
         
-        return np.array([mapping[id] for id in hand_tokens_1d])
+        return np.array([mapping[id] for id in motion_tokens_1d])

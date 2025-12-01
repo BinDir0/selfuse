@@ -59,7 +59,6 @@ class BaseVQModel(nn.Module):
     
     def _create_quantizer(self, quantizer_config):
         """Factory method for quantizer creation."""
-        print(quantizer_config)
         levels_dict = {
             256: [8, 6, 5], 512: [8, 8, 8],
             1024: [8, 5, 5, 5], 2048: [8, 8, 6, 5],

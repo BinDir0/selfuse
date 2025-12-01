@@ -76,7 +76,7 @@ processor:
   fast_tokenizer_path: /mnt/disk0/fanlian/tokenizers/fast_tokenizer
   hand_states_tokenizer_path: /mnt/disk0/fanlian/tokenizers/vq_tokenizer/states
   hand_actions_tokenizer_path: /mnt/disk0/fanlian/tokenizers/vq_tokenizer/actions
-  hand_tokenizer_type: 'vq' # 'vq' or 'fast'
+  motion_tokenizer_type: 'vq' # 'vq' or 'fast'
 
 # Flow matching configuration
 flow: 

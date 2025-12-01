@@ -355,7 +355,7 @@ if __name__ == "__main__":
     }
     vla_processor = PaliGemmaVLAProcessor(
         tokenizer,
-        hand_tokenizer=vq_tokenizer if cfg.testing.tokenizer_type == 'vq' else fast_tokenizer,
+        motion_tokenizer=vq_tokenizer if cfg.testing.tokenizer_type == 'vq' else fast_tokenizer,
         num_image_tokens=cfg.policy.vision_tower.config.num_image_tokens,
         max_seq_len=cfg.policy.cfg.max_vlm_tokens,
         ignore_index=cfg.ignore_index,
