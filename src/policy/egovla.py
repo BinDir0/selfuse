@@ -8,7 +8,6 @@ from src.model.action.base_action_head import BaseActionHead
 from src.model.retargeting.base_retargeting import BaseRetargeting
 from src.model.common.normalizer import LinearNormalizer
 from src.utils.geometry import rot_matrix_from_6drot
-from src.utils.pytorch_util import dict_apply
 from .base_policy import BasePolicy
 
 class EgoVLA(BasePolicy):

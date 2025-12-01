@@ -1,7 +1,6 @@
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 import pathlib
 import hydra

@@ -3,7 +3,6 @@
 import logging
 from typing import ClassVar
 from multiprocessing import Pool, cpu_count
-from functools import partial
 from tqdm import tqdm
 import os
 

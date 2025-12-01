@@ -3,8 +3,6 @@ Propise dataset for LegendVLA
 Every action is the delta of the next predicted absolute state and the state at the beginning of the action chunk.
 '''
 
-import os
-from tkinter import W
 from typing import Dict, Optional
 import torch
 import numpy as np
@@ -14,7 +12,6 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from PIL import Image
 import torch.nn.utils.rnn as rnn_utils
-import random
 from datasets import load_dataset
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer

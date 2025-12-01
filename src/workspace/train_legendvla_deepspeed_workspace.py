@@ -11,16 +11,13 @@ import os
 import hydra
 import torch
 from omegaconf import OmegaConf
-from typing import Optional
 import pathlib
 from contextlib import nullcontext, contextmanager
 from torch.utils.data import DataLoader
 import copy
 import random
 import numpy as np
-from torch import nn
 import pickle
-from transformers import AutoTokenizer
 import accelerate
 from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs
@@ -28,15 +25,12 @@ from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.dataset.base_dataset import BaseImageDataset
-from src.dataset.paligemma_processing import PaliGemmaVLAProcessor, PaliGemmaProcessor
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.json_logger import JsonLogger
 from src.utils.pytorch_util import dict_apply
 from src.utils.plotting import plot_l1_loss_as_bar
 from src.model.common.model_average import ModelAveraging
-from src.model.action.fast_tokenizer import UniversalActionProcessor
 from src.utils.metric import get_action_accuracy
-from src.utils.optim import CosineAnnealingWarmupRestarts, get_num_params_in_billions
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 

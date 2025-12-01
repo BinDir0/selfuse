@@ -13,7 +13,6 @@ from typing import Optional, Tuple
 import hydra
 import torch
 from torch import nn
-from einops import rearrange
 
 from src.model.common.kv_cache import KVCache
 from src.model.common.modules import (

@@ -15,7 +15,6 @@ import pathlib
 from torch.utils.data import DataLoader
 import copy
 import random
-import tqdm
 import numpy as np
 import pickle
 
@@ -26,9 +25,8 @@ from src.dataset.base_dataset import BaseImageDataset
 from src.dataset.nvila_preprocessor import NVILAPreprocessor
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.json_logger import JsonLogger
-from src.model.common.lr_scheduler import get_scheduler
 import accelerate
-from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 

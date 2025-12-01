@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import os
 
 import mujoco
 from dex_retargeting.retargeting_config import RetargetingConfig

@@ -1,5 +1,3 @@
-import torch
-import torch.nn as nn
 from src.model.common.module_attr_mixin import ModuleAttrMixin
 
 class BaseActionHead(ModuleAttrMixin):

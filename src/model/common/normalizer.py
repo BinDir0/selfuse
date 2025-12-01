@@ -1,6 +1,5 @@
 from typing import Union, Dict, Optional
 
-import unittest
 import zarr
 import numpy as np
 import torch

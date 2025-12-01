@@ -2,7 +2,6 @@ import numpy as np
 from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
-import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 import pathlib
 import hydra
@@ -13,7 +12,6 @@ import json
 
 from src.workspace.base_workspace import BaseWorkspace
 from src.model.action.vq_model import MotionVQModel
-from src.utils.plotting import plot_histogram
 from src.utils.pytorch_util import dict_apply
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)

@@ -2,7 +2,6 @@ import logging
 
 import torch
 import torch.nn as nn
-import accelerate
 
 log = logging.getLogger(__name__)
 

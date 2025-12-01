@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from typing import Dict, Union, List
+from typing import Dict, Union
 
 class BaseVLPreprocessor:
     def __call__(

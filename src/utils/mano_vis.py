@@ -3,13 +3,11 @@ import numpy as np
 import cv2
 import imageio
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from tqdm import trange
 from manotorch.manolayer import ManoLayer
-from manotorch.utils.geometry import axis_angle_to_matrix, rotation_to_axis_angle
-from src.utils.mano_utils import rot6d_to_rotmat, rot6d_to_aa, world_to_camera
-from decord import VideoReader
+from manotorch.utils.geometry import rotation_to_axis_angle
+from src.utils.mano_utils import world_to_camera
 from copy import deepcopy
 from PIL import Image
 

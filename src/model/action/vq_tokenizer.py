@@ -3,8 +3,7 @@
 
 import logging
 import os
-import pickle
-from typing import Optional, Union, List
+from typing import Union, List
 import numpy as np
 import torch
 import torch.nn as nn

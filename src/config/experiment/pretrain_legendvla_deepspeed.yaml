@@ -172,7 +172,7 @@ training:
   pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
   normalizer_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.27/18.13_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
-  num_epochs: 10
+  num_epochs: 100
   use_bf16: True
   clipping:
     enabled: True

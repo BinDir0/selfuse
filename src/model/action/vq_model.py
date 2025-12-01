@@ -3,9 +3,8 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional
-from transformers import PreTrainedModel, PretrainedConfig
+from transformers import PreTrainedModel
 from vector_quantize_pytorch import GroupedResidualVQ, ResidualVQ, FSQ
 
 from .encdec import Encoder, Decoder

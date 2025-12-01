@@ -1,7 +1,6 @@
 from typing import Dict, List, Any
 
 import torch
-import torch.nn
 from src.model.common.normalizer import LinearNormalizer
 
 class BaseLowdimDataset(torch.utils.data.Dataset):

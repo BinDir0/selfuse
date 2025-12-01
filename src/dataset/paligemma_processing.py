@@ -1,9 +1,8 @@
-from typing import Dict, List, Tuple
+from typing import Tuple
 import warnings
 import re
 
 import torch
-import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 
