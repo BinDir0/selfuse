@@ -788,15 +788,19 @@ def get_absolute_action(state, relative_action):
     This is the inverse operation of get_relative_action.
     
     Args:
-        state: torch.Tensor, shape: [wrist_dim + hand_dim] - current state
-        relative_action: torch.Tensor, shape: [H, wrist_dim + hand_dim] - relative action
+        state: torch.Tensor or np.ndarray, shape: [wrist_dim + hand_dim] - current state
+        relative_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] - relative action
     Returns:
-        absolute_action: torch.Tensor, shape: [H, wrist_dim + hand_dim] - absolute action
+        absolute_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] - absolute action
     '''
-    # For hand parameters, absolute action = relative action + state
-    absolute_action = state + relative_action
+    # Create a copy of relative_action to store absolute_action
+    if isinstance(relative_action, torch.Tensor):
+        absolute_action = relative_action.clone()
+    else:
+        absolute_action = relative_action.copy()
     
     # For wrist parameters, absolute action = state @ relative action
+    # This is the inverse of: relative = pinv(state) @ action
     for idx in range(2): 
         wrist_relative_action_homo_mat = homo_matrix_from_trans_6drot(relative_action[..., idx*3 : idx*3+3], relative_action[..., 6+idx*6 : 6+idx*6+6])
         wrist_state_homo_mat = homo_matrix_from_trans_6drot(state[idx*3 : idx*3+3], state[6+idx*6 : 6+idx*6+6])
@@ -804,6 +808,10 @@ def get_absolute_action(state, relative_action):
         trans, rot_6d = homo_matrix_to_trans_6drot(wrist_action_homo_mat)
         absolute_action[..., idx*3 : idx*3+3] = trans
         absolute_action[..., 6+idx*6 : 6+idx*6+6] = rot_6d
+    
+    # For hand parameters, absolute action = relative action + state
+    # This is the inverse of: relative = action - state
+    absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]
     
     return absolute_action
 

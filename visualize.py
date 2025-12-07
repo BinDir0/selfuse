@@ -10,7 +10,8 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from src.utils.geometry import transform_wrist_to_target_frame
+from tqdm import tqdm
+from src.utils.geometry import transform_wrist_to_target_frame, transform_hand_points_to_target_frame
 # manopth.manolayer will be imported dynamically in HandVisualizer.__init__()
 
 # Transformation utilities are implemented as methods within HandVisualizer class
@@ -1083,9 +1084,7 @@ class HandVisualizer:
         print(f"Generating {mode} video with {sequence_length} frames...")
         
         # Generate frames
-        for i in range(sequence_length):
-            print(f"Processing frame {i+1}/{sequence_length}")
-            
+        for i in tqdm(range(sequence_length), desc=f"Processing {mode} frames", unit="frame"):
             # Get the background frame for this iteration
             if is_sequence:
                 frame_bg = background_img[i] if i < len(background_img) else background_img[-1]
@@ -1459,10 +1458,10 @@ def sample_for_vis(action_pred: torch.Tensor, raw_sample: dict) -> dict:
     gt_wrist_sequence = raw_sample['action'][:, :18] # [30, 18]
     gt_hand_sequence =  raw_sample['action'][:, 18:]  # [30, 30]
 
-    # transform the gt wrist sequence to the target frame
+    # transform the gt wrist sequence to the camera frame
     # Use per-frame transformation since extrinsic is [N, 4, 4]
     gt_wrist_sequence = transform_wrist_to_target_frame(gt_wrist_sequence, raw_sample['extrinsic'])
-    gt_hand_sequence = transform_wrist_to_target_frame(gt_hand_sequence, raw_sample['extrinsic'])
+    gt_hand_sequence = transform_hand_points_to_target_frame(gt_hand_sequence, raw_sample['extrinsic'])
     # Extract presence data (single integer for all frames)
     presence = raw_sample['presence'][0]
     intrinsic_matrix = raw_sample['intrinsic'][0]

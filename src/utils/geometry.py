@@ -789,3 +789,43 @@ def transform_hand_points_to_wrist_frame(hand_points, wrist_pose):
     if is_numpy:
         hand_points = hand_points.numpy()
     return hand_points
+
+
+def transform_hand_points_from_wrist_to_camera_frame(hand_points, wrist_pose_in_camera):
+    '''
+    Transform the hand's points from wrist frame to camera frame.
+    Args:
+        hand_points: torch.Tensor or np.ndarray, shape: [T, D] or [B, T, D]
+            where D = (D//3) points * 3D (e.g. 5 left hand fingertip points + 5 right hand fingertip points)
+            each coordinate is in the wrist coordinate system
+        wrist_pose_in_camera: torch.Tensor or np.ndarray, shape: [T, wrist_dim] or [B, T, wrist_dim]
+            i.e. wrist_dim = 18, [left_trans(3), right_trans(3), left_rot6d(6), right_rot6d(6)]
+            wrist pose in camera coordinate system
+    Returns:
+        hand_points: torch.Tensor or np.ndarray, shape: [T, D] or [B, T, D]
+            hand points in camera coordinate system
+    '''
+    assert hand_points.dtype == wrist_pose_in_camera.dtype, "hand_points and wrist_pose_in_camera must have the same dtype"
+    if isinstance(hand_points, np.ndarray):
+        is_numpy = True
+        hand_points = torch.from_numpy(hand_points)
+        wrist_pose_in_camera = torch.from_numpy(wrist_pose_in_camera)
+    else:
+        is_numpy = False
+
+    D = hand_points.shape[-1]
+    # Get left and right hand points
+    hand_points_left = hand_points[..., :D//2]
+    hand_points_right = hand_points[..., D//2:]
+    
+    # Get wrist pose homogeneous matrix in camera frame, i.e. T_wrist2camera
+    homo_wrist_pose_left, homo_wrist_pose_right = homo_matrix_from_wrist_pose(wrist_pose_in_camera)
+    
+    # Transform hand points from wrist frame to camera frame
+    hand_points_left = transform_hand_points_to_target_frame(hand_points_left, homo_wrist_pose_left)
+    hand_points_right = transform_hand_points_to_target_frame(hand_points_right, homo_wrist_pose_right)
+    hand_points = torch.cat([hand_points_left, hand_points_right], dim=-1)
+
+    if is_numpy:
+        hand_points = hand_points.numpy()
+    return hand_points
