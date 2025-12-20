@@ -3,7 +3,7 @@ name: legendvla
 exp_name: "test_legendvla"
 
 # Model configuration
-action_expert_adaptive_mode:  # adaLN, adaLN-Zero, or None
+action_expert_adaptive_mode: adaLN-Zero # adaLN, adaLN-Zero, or None
 quantize: False
 lora: False
 lora_r: 32
@@ -12,15 +12,16 @@ lora_dropout: 0.0
 # Data configuration
 image_shape: [224, 224, 3]
 vla_dataset_paths:
- - /mnt/disk0/fanlian/datasets/taco_test_seen.zarr
- - /mnt/disk0/fanlian/datasets/taco_test_unseen_task.zarr
- - /mnt/disk0/fanlian/datasets/oakink2_test_seen.zarr
- - /mnt/disk0/fanlian/datasets/oakink2_test_unseen_task.zarr
- - /mnt/disk0/fanlian/datasets/hoi4d_test_seen.zarr
- - /mnt/disk0/fanlian/datasets/hoi4d_test_unseen_object.zarr
- - /mnt/disk0/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
- - /mnt/disk0/fanlian/datasets/egodex_test_seen.zarr
- - /mnt/disk0/fanlian/datasets/egodex_test_unseen_task.zarr
+#  - /mnt/disk0/fanlian/datasets/taco_test_seen.zarr
+#  - /mnt/disk0/fanlian/datasets/taco_test_unseen_task.zarr
+#  - /mnt/disk0/fanlian/datasets/oakink2_test_seen.zarr
+#  - /mnt/disk0/fanlian/datasets/oakink2_test_unseen_task.zarr
+#  - /mnt/disk0/fanlian/datasets/hoi4d_test_seen.zarr
+#  - /mnt/disk0/fanlian/datasets/hoi4d_test_unseen_object.zarr
+#  - /mnt/disk0/fanlian/datasets/hoi4d_test_unseen_room_layout.zarr
+#  - /mnt/disk0/fanlian/datasets/egodex_test_seen.zarr
+#  - /mnt/disk0/fanlian/datasets/egodex_test_unseen_task.zarr
+ - /mnt/disk0/fanlian/datasets/egodex_filter_test.zarr
 
 
 # Shape metadata
@@ -36,11 +37,11 @@ shape_meta: &shape_meta
       hand: 
         shape: [30]
       shape: [48]
-      type: keypoint
+      type: fingertips # fingertips or mano
       horizon: ${n_obs_state_steps}
   action:
     shape: [48]
-    type: keypoint
+    type: fingertips # fingertips or mano
     horizon: ${n_action_steps}
 
 # Dataset configuration
@@ -74,8 +75,8 @@ n_latency_steps: 0
 # Processor configuration
 processor: 
   fast_tokenizer_path: /mnt/disk0/fanlian/tokenizers/fast_tokenizer
-  hand_states_tokenizer_path: /mnt/disk0/fanlian/tokenizers/vq_tokenizer/states
-  hand_actions_tokenizer_path: /mnt/disk0/fanlian/tokenizers/vq_tokenizer/actions
+  hand_states_tokenizer_path: /mnt/disk0/fanlian/tokenizers/keypoint_tokenizer/epoch=79/states
+  hand_actions_tokenizer_path: /mnt/disk0/fanlian/tokenizers/keypoint_tokenizer/epoch=79/actions
   motion_tokenizer_type: 'vq' # 'vq' or 'fast'
 
 # Flow matching configuration
@@ -87,10 +88,9 @@ flow:
   num_inference_steps: 10
 
 # Model architecture parameters
-time_hidden_size: 256
-time_max_period: 100.0
-action_expert_rope_theta: 100.0
-
+time_hidden_size: 1024 # only applicable if using adaptive
+time_max_period: 1000.0
+action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
 # Fixed model parameters
 ignore_index: -100
 image_token_index: 257152
@@ -110,11 +110,11 @@ mixture:
   vlm:
     hidden_size: 2048
     intermediate_size: 16384
-    use_final_norm: False
+    use_final_norm: True
     cache: True
     use_quantize: ${quantize}
     use_lora: ${lora}
-    adaptive_mode:
+    adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0
   action:
     hidden_size: 1024
@@ -194,7 +194,7 @@ policy:
       head_dim: 256
       rms_norm_eps: 1e-6
       attention_bias: False
-      attention_dropout: 0.0
+      attention_dropout: 0.1
       pad_token_id: ${pad_token_id}
 
 # Testing configuration
