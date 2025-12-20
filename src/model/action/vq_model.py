@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 from transformers import PreTrainedModel
+from einops import rearrange
 from vector_quantize_pytorch import GroupedResidualVQ, ResidualVQ, FSQ
 
 from .encdec import Encoder, Decoder
@@ -26,6 +27,7 @@ class BaseVQModel(nn.Module):
         super().__init__()
         """Initialize encoder/decoder and quantizer based on config."""
         self.code_dim = config.quantizer_config.codebook_dim
+        self.codebook_size = config.quantizer_config.nb_code
         self.motion_dim = motion_dim if motion_dim is not None else config.motion_dim
         self.quantizer_name = config.quantizer_config.quantizer_name
         model_config = config.model_config
@@ -129,9 +131,9 @@ class ResidualVQModel(BaseVQModel):
         B, T, D = x.shape
         x_in = self.preprocess(x)
         x_enc = self.encoder(x_in).permute(0, 2, 1)
-        x_quant, indices, commit_loss = self.quantizer(x_enc)
+        x_quant, indices, commit_loss = self.quantizer(x_enc) # indices: B, T/4, layer
         x_out = self.postprocess(self.decoder(x_quant.permute(0, 2, 1)))[:, :T, :]
-        return x_out, commit_loss.mean(), torch.tensor(-1, device=x.device)
+        return x_out, commit_loss.mean(), calculate_perplexity_grvq(indices, self.codebook_size)
 
 
 class GroupResidualVQModel(BaseVQModel):
@@ -157,7 +159,7 @@ class GroupResidualVQModel(BaseVQModel):
         x_enc = self.encoder(x_in).permute(0, 2, 1)
         x_quant, indices, commit_loss = self.quantizer(x_enc) # indices: 2, B, T/4, layer
         x_out = self.postprocess(self.decoder(x_quant.permute(0, 2, 1)))[:, :T, :]
-        return x_out, commit_loss.mean(), torch.tensor(-1, device=x.device)
+        return x_out, commit_loss.mean(), calculate_perplexity_grvq(indices, self.codebook_size)
 
 
 class FSQModel(BaseVQModel):
@@ -245,6 +247,32 @@ class MotionVQModel(PreTrainedModel):
             'loss_recons': recon_loss,
             'perplexity': perplexity,
             'loss_commit': commit_loss,
-            'pred_motion': pred_motion,
+            'avg_pred_motion': pred_motion.mean(),
         }
+
+
+def calculate_perplexity_grvq(indices, codebook_size, eps=1e-5):
+    """
+    Calculate perplexity for Grouped Residual VQ.
+    Args:
+        indices: [Groups, Batch, Length, Layers] or [Batch, Length, Layers]
+        codebook_size: int
+    Returns:
+        perplexities: [Groups, Layers] or [Layers]
+    """
+    is_grouped = len(indices.shape) == 4
+    if not is_grouped:
+        indices = indices.unsqueeze(0)
+
+    flat_indices = rearrange(indices, 'g b t l -> g l (b t)').long()
+    G, L, N = flat_indices.shape
+    counts = torch.zeros(G, L, codebook_size, device=indices.device)
+    src = torch.ones_like(flat_indices, dtype=torch.float32)
+    counts.scatter_add_(2, flat_indices, src) 
+    probs = counts / counts.sum(dim=-1, keepdim=True)
+    perplexities = torch.exp(-torch.sum(probs * torch.log(probs + eps), dim=-1))
+            
+    if not is_grouped:
+        perplexities = perplexities.squeeze(0)
+    return perplexities
 

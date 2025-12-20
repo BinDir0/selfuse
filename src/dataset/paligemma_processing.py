@@ -313,8 +313,6 @@ class PaliGemmaProcessor:
         condition = (labels == self.sep_token_id)
         if not np.any(condition):
             warnings.warn("The separator token is not found in the input_ids")
-            # print(f"text length: {len(text.split(' '))}, target length: {len(target.split(' '))}")
-            # print(f"text: {text}, target: {target}")
             sep_idx = len(labels) - 1
         else : 
             sep_idx = np.argmax(condition)
@@ -391,11 +389,11 @@ class PaliGemmaVLAProcessor:
         total_vocab_size = sum([self.motion_tokenizer[k].vocab_size for k in self.motion_tokenizer.keys()])
 
         vocab_size = tokenizer.vocab_size
-        special_tokens = tokenizer.all_special_ids
+        added_tokens = list(tokenizer.added_tokens_encoder.values())
         token_id_replace = []
         replace_size = 0
         for i in range(vocab_size - 1, -1, -1):
-            if i in special_tokens:
+            if i in added_tokens:
                 continue
             token_id_replace.append(i)
             replace_size += 1
@@ -561,3 +559,29 @@ def set_token_id(input_ids, token_id, discrete_tokens):
     
     input_ids[condition] = discrete_tokens[:available_tokens]
     return input_ids
+
+
+if __name__ == "__main__":
+    from omegaconf import OmegaConf
+    import hydra
+    # allows arbitrary python code execution in configs using the ${eval:''} resolver
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    cfg = OmegaConf.load("src/config/experiment/pretrain_legendvla_deepspeed.yaml")
+    config = OmegaConf.to_yaml(cfg.vla_processor, resolve=True)
+    print(config)
+    vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+    print(f"image_token_id: {vla_processor.image_token_id}")
+    print(f"state_token_id: {vla_processor.state_token_id}")
+    print(f"action_token_id: {vla_processor.action_token_id}")
+    print(f"action_begin_token_id: {vla_processor.action_begin_token_id}")
+    print(f"action_end_token_id: {vla_processor.action_end_token_id}")
+    if 'states' in vla_processor.gemma_token_id2motion_token_id:
+        print(f"states gemma_token_id2motion_token_id: {np.min(list(vla_processor.gemma_token_id2motion_token_id['states'].keys()))} {np.max(list(vla_processor.gemma_token_id2motion_token_id['states'].keys()))}")
+    if 'actions' in vla_processor.gemma_token_id2motion_token_id:
+        print(f"actions gemma_token_id2motion_token_id: {np.min(list(vla_processor.gemma_token_id2motion_token_id['actions'].keys()))} {np.max(list(vla_processor.gemma_token_id2motion_token_id['actions'].keys()))}")
+
+
+    vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
+    print(f"image_token_id: {vlm_processor.image_token_id}")
+    print(f"tokenizer.all_special_ids: {vlm_processor.tokenizer.all_special_ids}")
+    print(f"tokenizer.all_special_tokens: {vlm_processor.tokenizer.all_special_tokens}")

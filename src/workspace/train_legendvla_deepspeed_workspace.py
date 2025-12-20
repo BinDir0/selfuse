@@ -151,7 +151,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # Load pretrained weights and freeze non-lora weights in VLM before deepspeed optimizer setup
         # cause deepspeed will back up the parameters, manually load pretrained weights after setup can't affect these parameters
-        if cfg.training.load_pretrained_vlm_weights:
+        if cfg.training.load_pretrained_pi05_weights:
+            model.load_pretrained_pi05_weights()
+        elif cfg.training.load_pretrained_vlm_weights:
             model.load_pretrained_vlm_weights()
         if cfg.lora:
             model.freeze_non_lora_weights_in_vlm()

@@ -9,7 +9,7 @@ dataset_paths:
 #  - /share_data/datasets/OakInk-v2/oakink2.zarr
 #  - /share_data/datasets/hoi4d_segmented/hoi4d_train.zarr
 #  - /share_data/datasets/EgoDex/egodex_train.zarr
- - /share_data/yeyuyao/egodex_filter_test.zarr
+ - /share_data/yeyuyao/egodex_filter_train.zarr
 
 shape_meta: &shape_meta
   obs:

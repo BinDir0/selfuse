@@ -206,7 +206,7 @@ class LegendVLADataset(BaseImageDataset):
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
-        state, action, action_valid_mask = process_state_action(
+        state, action, action_valid_mask, state_presence, action_presence = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
             hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
@@ -535,6 +535,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         max_train_episodes=None,
         return_numpy=True, # whether to return numpy arrays
         normalizer_dataloader_cfg=None,
+        debug=False, 
     ):
         
         super().__init__()
@@ -590,6 +591,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.return_numpy = return_numpy
         self.normalizer = None
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
+        self.debug = debug
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -614,7 +616,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
-        state, action, _ = process_state_action(
+        state, action, action_valid_mask, state_presence, action_presence = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
             hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
@@ -631,6 +633,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             dim_slice = slice(self.dims[0], self.dims[1])
             state = state[:, dim_slice]
             action = action[:, dim_slice]
+            action_valid_mask = action_valid_mask[:, dim_slice]
 
         data = {
             'states': state,
@@ -660,6 +663,8 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         data = self._sample_to_data(sample)
         if not self.return_numpy:
             data = dict_apply(data, torch.from_numpy) 
+        if self.debug: 
+            data.update({'idx': idx})
         return data
 
     def __len__(self):
@@ -735,8 +740,8 @@ class BaseDataCollator(BaseDataCollator):
                 batch[key] = torch.stack([item[key] for item in data_list], axis=0)
             elif isinstance(data_list[0][key], np.ndarray): # numpy
                 batch[key] = np.stack([item[key] for item in data_list], axis=0)
-            else: # other types
-                raise ValueError(f"Unsupported type: {type(data_list[0][key])} for key: {key}")
+            else: # list
+                batch[key] = [item[key] for item in data_list]
         return batch
 
 
@@ -889,8 +894,9 @@ def process_state_action(
         state = processed_state
         action = processed_action
 
-    return state, action, action_valid_mask
+    return state, action, action_valid_mask, state_presence, action_presence
 
+# TODO: maybe we need to use the same augmentation for all images in the action chunk
 def process_image(image, history, n_obs_image_steps, aug_transform = None):
     '''
     Args:
@@ -920,6 +926,7 @@ def process_image(image, history, n_obs_image_steps, aug_transform = None):
     return images_to_process
 
 
+# TODO: consider action valid mask when calculating normalizer
 def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
     # Merge all data
     if normalizer_dataset is None:
@@ -929,7 +936,10 @@ def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
     normalizer = LinearNormalizer()
     normalizer.start_streaming_fit(keys=next(iter(dataloader)).keys())
     for batch in tqdm(dataloader, desc="Calculating normalizer"):
-        input_data = {k: v.reshape(-1, v.shape[-1]) for k, v in batch.items()}
+        input_data = {
+            k: v.reshape(-1, v.shape[-1]) for k, v in batch.items() \
+            if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray)
+        }
         normalizer.update_streaming_fit(input_data)
     normalizer.finish_streaming_fit()
     # ignore the wrist rotation

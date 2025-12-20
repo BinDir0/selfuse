@@ -285,6 +285,167 @@ class LegendVLA(nn.Module):
         self.joint_model.load_state_dict(joint_model_state_dict, strict=False)
         log.info("Loaded pre-trained weights for lm part of the joint model")
 
+    @log_execution_time(log)
+    def load_pretrained_pi05_weights(self):
+        """
+        Load pre-trained weights from Pi0.5 checkpoint.
+        
+        Loads weights for:
+        - Vision tower (SigLIP)
+        - Multi-modal projector
+        - Language model (Gemma 2B) - VLM mixture
+        - Action expert (Gemma 300M) - Action mixture
+        - LM head
+        - Time embedding MLPs
+        
+        Skips only:
+        - action_in_proj (action encoder, incompatible dimensions)
+        - action_out_proj (action decoder, incompatible dimensions)
+        
+        The weights are loaded from safetensors file in the pretrained_model_path.
+        LoRA weights are preserved and not overwritten.
+        """
+        import os
+        import glob
+
+        from safetensors import safe_open
+
+        # load tensors from file
+        pretrained_model_path = getattr(self.cfg, 'pretrained_pi05_model_path', None)
+        if pretrained_model_path is None:
+            raise ValueError(
+                "pretrained_pi05_model_path not found in cfg. "
+            )
+        if not os.path.exists(pretrained_model_path):
+            raise FileNotFoundError(f"Pi0.5 model file not found: {pretrained_model_path}")
+        log.info(f"Loading Pi0.5 model from: {pretrained_model_path}")
+        
+        # Load all tensors from the safetensors file
+        safetensors_files = glob.glob(
+            os.path.join(pretrained_model_path, "*.safetensors")
+        )
+        tensors = {}
+        for safetensors_file in safetensors_files:
+            with safe_open(safetensors_file, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    tensors[key] = f.get_tensor(key)
+        log.info(f"Loaded {len(tensors)} tensors from Pi0.5 checkpoint")
+
+        # Get target dtype from model (check a parameter to determine current dtype)
+        target_dtype = next(self.parameters()).dtype
+        source_dtype = next(iter(tensors.values())).dtype
+        log.info(f"Target model dtype: {target_dtype}, Pi0.5 checkpoint dtype: {source_dtype}")
+        if target_dtype != source_dtype:
+            log.info(f"Will convert loaded weights from {source_dtype} to {target_dtype}")
+
+        # Track which parameters are loaded
+        loaded_my_model_params = set()
+        used_pi05_params = set()
+
+        # load vision tower --- "paligemma_with_expert.paligemma.model.vision_tower.vision_model" -> "vision_model"
+        vision_tower_state_dict = self.vision_tower.state_dict()
+        for k, v in tensors.items():
+            if "paligemma_with_expert.paligemma.model.vision_tower" in k:
+                new_key = k.replace("paligemma_with_expert.paligemma.model.vision_tower.", "")
+                if new_key in vision_tower_state_dict:
+                    # Convert to target dtype if needed
+                    vision_tower_state_dict[new_key] = v.to(dtype=target_dtype)
+                    loaded_my_model_params.add(f"vision_tower.{new_key}")
+                    used_pi05_params.add(k)
+        self.vision_tower.load_state_dict(vision_tower_state_dict, strict=True)
+        log.info("Loaded vision tower weights")
+
+        # load projector --- "paligemma_with_expert.paligemma.model.multi_modal_projector" -> ""
+        multi_modal_projector_state_dict = self.multi_modal_projector.state_dict()
+        for k, v in tensors.items():
+            if "paligemma_with_expert.paligemma.model.multi_modal_projector" in k:
+                new_key = k.replace("paligemma_with_expert.paligemma.model.multi_modal_projector.", "")
+                if new_key in multi_modal_projector_state_dict:
+                    # Convert to target dtype if needed
+                    multi_modal_projector_state_dict[new_key] = v.to(dtype=target_dtype)
+                    loaded_my_model_params.add(f"multi_modal_projector.{new_key}")
+                    used_pi05_params.add(k)
+        self.multi_modal_projector.load_state_dict(
+            multi_modal_projector_state_dict, strict=True
+        )
+        log.info("Loaded multi-modal projector weights")
+
+        # load joint model (both VLM and action mixtures)
+        # preserve LoRA weights
+        joint_model_state_dict = self.joint_model.state_dict()
+        lora_keys = []
+        for key in joint_model_state_dict.keys():
+            if "lora_" in key:
+                lora_keys.append(key)
+        # Remove LoRA keys from state dict to avoid overwriting
+        for key in lora_keys:
+            del joint_model_state_dict[key]
+        
+        # load VLM mixture --- "paligemma_with_expert.paligemma.model.language_model" -> "mixtures.vlm"
+        for k, v in tensors.items():
+            if "paligemma_with_expert.paligemma.model.language_model" in k:
+                new_key = k.replace("paligemma_with_expert.paligemma.model.language_model.", "mixtures.vlm.")
+                if new_key in joint_model_state_dict:
+                    # Convert to target dtype if needed
+                    joint_model_state_dict[new_key] = v.to(dtype=target_dtype)
+                    loaded_my_model_params.add(f"joint_model.{new_key}")
+                    used_pi05_params.add(k)
+        
+        # load action expert mixture --- "paligemma_with_expert.gemma_expert.model" -> "mixtures.action"
+        for k, v in tensors.items():
+            if "paligemma_with_expert.gemma_expert.model" in k:
+                new_key = k.replace("paligemma_with_expert.gemma_expert.model.", "mixtures.action.")
+                new_key = new_key.replace("dense", "modulation") # Pi0.5 uses name dense for AdaLN-Zero
+                if new_key in joint_model_state_dict:
+                    # Convert to target dtype if needed
+                    joint_model_state_dict[new_key] = v.to(dtype=target_dtype)
+                    loaded_my_model_params.add(f"joint_model.{new_key}")
+                    used_pi05_params.add(k)
+        self.joint_model.load_state_dict(joint_model_state_dict, strict=False)
+        log.info("Loaded joint model weights (VLM mixture + action mixture)")
+
+        # load lm_head if present in our model
+        if self.use_lm_head and hasattr(self, 'lm_head'):
+            lm_head_state_dict = self.lm_head.state_dict()
+            for k, v in tensors.items():
+                if k == "paligemma_with_expert.paligemma.lm_head.weight":
+                    # Note: In PaliGemma, lm_head.weight is tied with embed_tokens.weight
+                    # We also tie them in our model, so loading lm_head will also update embed_tokens
+                    # pi05 vocab only contains all the useful tokens, so we need to slice the weights
+                    lm_head_state_dict["weight"][:v.shape[0]] = v.to(dtype=target_dtype)
+                    loaded_my_model_params.add("lm_head.weight")
+                    loaded_my_model_params.add("embed_tokens.weight")  # tied weights
+                    used_pi05_params.add(k)
+            self.lm_head.load_state_dict(lm_head_state_dict, strict=True)
+            log.info("Loaded lm_head weights (tied with embed_tokens)")
+        else:
+            log.warning("lm_head not found or use_lm_head=False, skipping lm_head weight loading")
+
+        # load time embedding MLPs --- "time_mlp_in/out" -> "time_embedding"
+        # Pi0.5 uses separate time_mlp_in and time_mlp_out
+        # Map to our TimeEncoder: time_embedding = nn.Sequential(SinusoidalPosEmb, TimeEncoder)
+        # TimeEncoder has linear_1 and linear_2
+        time_embedding_state_dict = self.time_embedding.state_dict()
+        for k, v in tensors.items():
+            if k.startswith("time_mlp_in."):
+                # Map time_mlp_in to TimeEncoder's linear_1
+                # time_mlp_in.weight/bias -> time_embedding.1.linear_1.weight/bias
+                param_name = k.replace("time_mlp_in.", "1.linear_1.")
+                # Convert to target dtype if needed
+                time_embedding_state_dict[param_name] = v.to(dtype=target_dtype)
+                loaded_my_model_params.add(f"time_embedding.{param_name}")
+                used_pi05_params.add(k)
+            elif k.startswith("time_mlp_out."):
+                # Map time_mlp_out to TimeEncoder's linear_2
+                # time_mlp_out.weight/bias -> time_embedding.1.linear_2.weight/bias
+                param_name = k.replace("time_mlp_out.", "1.linear_2.")
+                # Convert to target dtype if needed
+                time_embedding_state_dict[param_name] = v.to(dtype=target_dtype)
+                loaded_my_model_params.add(f"time_embedding.{param_name}")
+                used_pi05_params.add(k)
+        self.time_embedding.load_state_dict(time_embedding_state_dict, strict=True)
+        log.info("Loaded time embedding weights (TimeEncoder)")
+
     def freeze_non_lora_weights_in_vlm(self):
         """
         Freeze non-LoRA weights in VLM components while keeping LoRA weights trainable.
@@ -1086,11 +1247,22 @@ class LegendVLAInference(LegendVLA):
 if __name__ == "__main__":
     from omegaconf import OmegaConf
     import hydra
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     # allows arbitrary python code execution in configs using the ${eval:''} resolver
     OmegaConf.register_new_resolver("eval", eval, replace=True)
     cfg = OmegaConf.load("src/config/experiment/pretrain_legendvla_deepspeed.yaml")
     config = OmegaConf.to_yaml(cfg.policy, resolve=True)
     print(config)
     model = hydra.utils.instantiate(cfg.policy)
-    for name, param in model.named_parameters():
-        print(name, param.shape)
+    model.load_pretrained_vlm_weights()
+    from src.utils.embedding_analysis import analyze_embedding_distribution, print_analysis_report
+    embeddings = model.embed_tokens.weight.data[1000:2000]
+    print(f"embeddings shape: {embeddings.shape}")
+    results = analyze_embedding_distribution(
+        embeddings,
+        sample_size=2000,
+        plot=True,
+        save_path=f"outputs/embedding_analysis.png",
+    )
+    print_analysis_report(results)
+    # model.load_pretrained_pi05_weights()

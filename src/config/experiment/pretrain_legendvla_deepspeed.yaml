@@ -13,27 +13,26 @@ lora_dropout: 0.0
 image_shape: [224, 224, 3]
 vla_dataset_paths:
 #  - /share_data/datasets/taco/10episodes.zarr
-#  - /share_data/guantianrui/datasets/taco/taco_train.zarr
-#  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train.zarr
+ - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+ - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
 #  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
-#  - /share_data/guantianrui/datasets/EgoDex/egodex_train.zarr
- - /share_data/yeyuyao/egodex_filter_test.zarr
+ - /share_data/yeyuyao/egodex_filter_train.zarr
 vlm_dataset_paths:
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
+ - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/alfworldgpt_filtered"  # high level subtask action
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/indoor_qa_filtered" 
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/LLaVA_Instruct_150K_filtered" 
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/cocoqa_filtered" 
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/cambrian(filtered)_processed_filtered"
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/lnqa_filtered"
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/lrv_normal(filtered)_filtered"
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/lvis_instruct4v_filtered"
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/vqav2_filtered"
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(llava)_filtered" 
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(sam)_filtered" 
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/textcaps_filtered" 
-#  - "/share_data/guantianrui/datasets/VLM/FineVision/image_textualization(filtered)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/alfworldgpt_filtered"  # high level subtask action
+ - "/share_data/guantianrui/datasets/VLM/FineVision/indoor_qa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/LLaVA_Instruct_150K_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/cocoqa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/cambrian(filtered)_processed_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/lnqa_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/lrv_normal(filtered)_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/lvis_instruct4v_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/vqav2_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(llava)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(sam)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/textcaps_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/image_textualization(filtered)_filtered" 
 
 shape_meta: &shape_meta
   obs:
@@ -69,7 +68,7 @@ dataset:
     objective: ${objective}
     normalizer_dataloader_cfg:
       batch_size: 4096
-      num_workers: 96
+      num_workers: 192
       shuffle: False
       pin_memory: True
       persistent_workers: True
@@ -86,7 +85,7 @@ dataset:
 history: 30
 n_action_steps: 30
 n_obs_image_steps: 1
-n_obs_state_steps: 1
+n_obs_state_steps: 15
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
@@ -106,10 +105,10 @@ vla_processor:
   motion_tokenizer: 
     states: 
       _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
-      load_directory: /home/chenzhang/projects/EgoVLA/outputs/2025.11.28/17.52_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=79/states # may need to change
+      load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2025.12.08/states # may need to change
     actions:
       _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
-      load_directory: /home/chenzhang/projects/EgoVLA/outputs/2025.11.28/17.52_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=79/actions # may need to change
+      load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2025.12.08/actions # may need to change
   num_image_tokens: ${policy.vision_tower.config.num_image_tokens}
   max_seq_len: ${max_vlm_tokens}
   ignore_index: ${ignore_index}
@@ -170,8 +169,9 @@ training:
   train_vlm: True
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
+  pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
-  normalizer_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.27/18.13_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2025.12.08/11.53_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   num_epochs: 100
   use_bf16: True
   clipping:
@@ -264,6 +264,7 @@ policy:
     flow_sig_min: ${flow.sig_min}
     # Add pretrained_model_path for loading pre-trained VLM weights
     pretrained_model_path: ${training.pretrained_model_path}
+    pretrained_pi05_model_path: ${training.pretrained_pi05_model_path}
     loss_weights: 
       ce_loss_weight: 1.0
       flow_loss_weight: 10.0

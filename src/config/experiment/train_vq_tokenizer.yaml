@@ -5,11 +5,10 @@ _target_: src.workspace.train_vq_tokenizer.TrainVQTokenizerWorkspace
 
 image_shape: [224, 224, 3]
 dataset_paths:
-#  - /share_data/guantianrui/datasets/taco/taco_train.zarr
-#  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train.zarr
+ - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+ - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
 #  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
-#  - /share_data/guantianrui/datasets/EgoDex/egodex_train.zarr
- - /share_data/yeyuyao/egodex_filter_test.zarr
+ - /share_data/yeyuyao/egodex_filter_train_presence_clean.zarr
 
 test_seendataset_paths: 
   # - /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
@@ -61,6 +60,7 @@ dataset:
     shuffle: True
     pin_memory: True
     persistent_workers: True
+  debug: True
 
 history: 30
 n_action_steps: 30
@@ -70,14 +70,14 @@ n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
 dataloader:
-  batch_size: 512
+  batch_size: 4096
   num_workers: 24
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 512
+  batch_size: 4096
   num_workers: 24
   shuffle: False
   pin_memory: True
@@ -102,6 +102,10 @@ base_quantizer_config: &base_quantizer_config
   num_quantizers: 8
   num_groups: 1
   shared_codebook: True
+  decay: 0.999
+  kmeans_init: True
+  threshold_ema_dead_code: 2.0
+  use_cosine_sim: True
 
 base_loss_config: &base_loss_config
   recons_loss: l2
@@ -123,38 +127,43 @@ base_tokenizer_args: &base_tokenizer_args
 
 # Define base optimizer arguments
 base_optimizer: &base_optimizer
-  lr: 5e-4
+  lr: 1e-4
   betas: [0.9, 0.999]
   weight_decay: 1e-4
 
 tokenizer: 
-  states: 
-    wrist: 
-      _target_: src.model.action.vq_model.MotionVQModel
-      config:
-        _target_: src.model.action.vq_config.MotionVQModelConfig
-        <<: *base_tokenizer_args
-        use_part: wrist
-        model_config:
-          <<: *base_model_config
-          output_emb_width: 512
-        quantizer_config:
-          <<: *base_quantizer_config
-          nb_code: 4096    # partially override the base quantizer config
-          num_quantizers: 4
-          num_groups: 2
-    hand: 
-      _target_: src.model.action.vq_model.MotionVQModel
-      config:
-        _target_: src.model.action.vq_config.MotionVQModelConfig
-        <<: *base_tokenizer_args
-        use_part: hand
-        quantizer_config:
-          <<: *base_quantizer_config
-          nb_code: 4096    # partially override the base quantizer config
-          num_quantizers: 4
-          num_groups: 2
-    use_part: True
+  # states: 
+  #   wrist: 
+  #     _target_: src.model.action.vq_model.MotionVQModel
+  #     config:
+  #       _target_: src.model.action.vq_config.MotionVQModelConfig
+  #       <<: *base_tokenizer_args
+  #       use_part: wrist
+  #       model_config:
+  #         <<: *base_model_config
+  #         # norm: LN
+  #         output_emb_width: 512
+  #       quantizer_config:
+  #         <<: *base_quantizer_config
+  #         nb_code: 2048    # partially override the base quantizer config
+  #         num_quantizers: 4
+  #         num_groups: 2
+  #   hand: 
+  #     _target_: src.model.action.vq_model.MotionVQModel
+  #     config:
+  #       _target_: src.model.action.vq_config.MotionVQModelConfig
+  #       <<: *base_tokenizer_args
+  #       use_part: hand
+  #       model_config:
+  #         <<: *base_model_config
+  #         # norm: LN
+  #         output_emb_width: 512
+  #       quantizer_config:
+  #         <<: *base_quantizer_config
+  #         nb_code: 2048    # partially override the base quantizer config
+  #         num_quantizers: 4
+  #         num_groups: 2
+  #   use_part: True
   actions: 
     wrist: 
       _target_: src.model.action.vq_model.MotionVQModel
@@ -165,11 +174,13 @@ tokenizer:
         horizon: ${n_action_steps}
         model_config:
           <<: *base_model_config
+          norm: LN
           output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          nb_code: 4096    # partially override the base quantizer config
-          # num_groups: 2
+          nb_code: 1024    # partially override the base quantizer config
+          num_quantizers: 4
+          num_groups: 2
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -177,10 +188,15 @@ tokenizer:
         <<: *base_tokenizer_args
         use_part: hand
         horizon: ${n_action_steps}
+        model_config:
+          <<: *base_model_config
+          norm: LN
+          output_emb_width: 512
         quantizer_config:
           <<: *base_quantizer_config
-          nb_code: 4096    # partially override the base quantizer config
-          # num_groups: 2
+          nb_code: 1024    # partially override the base quantizer config
+          num_quantizers: 4
+          num_groups: 2
     use_part: True
 
 optimizer:
@@ -197,14 +213,19 @@ optimizer:
 
 
 training:
-  device: cuda:0
-  num_epochs: 200
+  seed: 42
+  device: cuda:1
+  num_epochs: 10
   tqdm_interval_sec: 1.0
   max_train_steps: 
   max_val_steps: # 100
   val_per_epoch: 1
-  ckpt_save_interval: 20
-  normalizer_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.27/10.59_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  log_perplexity_interval: 1
+  clipping:
+    enabled: True
+    max_grad_norm: 1.0
+  ckpt_save_interval: 2
+  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2025.12.08/11.53_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   valid_tokenizer_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.16/23.19_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=7
   # if valid_tokenizer_path is not None, will validate the tokenizer
   save_path: 
