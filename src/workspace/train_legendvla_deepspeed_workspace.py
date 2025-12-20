@@ -202,6 +202,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         dataset.vla_dataset.set_preprocessor(self.vla_processor)
         if dataset.vlm_dataset is not None:
             dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
+        # According to the PaliGemma paper, we can initialize the motion token embeddings 
+        # to gain better performance.
+        self.model.init_motion_token_embeddings(self.vla_processor.total_motion_token_list)
         
         print("Computing normalizer...")
         if cfg.training.normalizer_path is not None:

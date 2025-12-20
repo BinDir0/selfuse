@@ -204,6 +204,24 @@ class LegendVLA(nn.Module):
         gemma_parameters.extend(list(self.embed_tokens.parameters()))
         return gemma_parameters
 
+    @torch.no_grad()
+    def init_motion_token_embeddings(self, motion_token_list):
+        """
+        Initialize the motion token embeddings.
+        
+        Args:
+            motion_token_list: List of motion token IDs
+        """
+        device = self.embed_tokens.weight.device
+        indices = torch.LongTensor(motion_token_list).to(device)
+        init_values = torch.randn(
+            len(indices), 
+            self.vlm_hidden_size, 
+            dtype=self.embed_tokens.weight.dtype,
+            device=device,
+        ) * 0.02
+        self.embed_tokens.weight[indices] = init_values
+
     @log_execution_time(log)
     def load_pretrained_vlm_weights(self):
         """
@@ -1256,7 +1274,8 @@ if __name__ == "__main__":
     model = hydra.utils.instantiate(cfg.policy)
     model.load_pretrained_vlm_weights()
     from src.utils.embedding_analysis import analyze_embedding_distribution, print_analysis_report
-    embeddings = model.embed_tokens.weight.data[1000:2000]
+    model.init_motion_token_embeddings([i for i in range(256000-10000, 256000)])
+    embeddings = model.embed_tokens.weight.data[256000-20000:256000-10000]
     print(f"embeddings shape: {embeddings.shape}")
     results = analyze_embedding_distribution(
         embeddings,

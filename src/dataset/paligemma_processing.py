@@ -423,6 +423,7 @@ class PaliGemmaVLAProcessor:
                 self.gemma_token_id2motion_token_id[group_name][gemma_id] = token_id
         
         assert replace_idx == total_vocab_size
+        self.total_motion_token_list = token_id_replace[:total_vocab_size]
     
     def __call__(
         self,
@@ -575,6 +576,7 @@ if __name__ == "__main__":
     print(f"action_token_id: {vla_processor.action_token_id}")
     print(f"action_begin_token_id: {vla_processor.action_begin_token_id}")
     print(f"action_end_token_id: {vla_processor.action_end_token_id}")
+    print(f"total_motion_token_list: {vla_processor.total_motion_token_list}")
     if 'states' in vla_processor.gemma_token_id2motion_token_id:
         print(f"states gemma_token_id2motion_token_id: {np.min(list(vla_processor.gemma_token_id2motion_token_id['states'].keys()))} {np.max(list(vla_processor.gemma_token_id2motion_token_id['states'].keys()))}")
     if 'actions' in vla_processor.gemma_token_id2motion_token_id:
