@@ -167,7 +167,9 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 2000
   train_vlm: True
+  init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
+  load_pretrained_pi05_weights: True # load pretrained weights from PI05
   pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
