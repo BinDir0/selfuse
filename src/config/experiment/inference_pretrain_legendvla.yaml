@@ -1,0 +1,58 @@
+# @package _global_
+
+# 继承训练配置
+defaults:
+  - pretrain_legendvla_deepspeed
+
+# 覆盖实验名称
+name: legendvla_inference
+exp_name: "inference_pretrain"
+
+# 推理专用配置
+inference:
+  # checkpoint路径
+  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2025.11.04/16.24_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=102500-eval_l1_loss=0.0366/pytorch_model/mp_rank_00_model_states.pt
+  
+  # 设备配置
+  device: cuda:0
+  
+  # 数据配置
+  use_val_dataset: True  # True: 使用验证集, False: 使用训练集
+  batch_size: 8
+  num_workers: 8
+  
+  # 推理控制
+  max_steps: 10  # 最大推理步数，null表示推理所有数据
+  skip_first: 0  # 跳过前N个batch
+  
+  # 其他配置
+  seed: 42
+
+# 覆盖dataloader配置（推理时不需要shuffle）
+dataloader:
+  batch_size: ${inference.batch_size}
+  num_workers: ${inference.num_workers}
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: ${inference.batch_size}
+  num_workers: ${inference.num_workers}
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+# 禁用wandb日志
+logging:
+  mode: disabled
+
+# 使用较小的数据集进行快速测试（可选）
+# Only support single dataset inference
+vla_dataset_paths:
+  - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+
+# 如果只想推理特定的数据集，可以取消下面的注释并修改
+# vla_dataset_paths:
+#   - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+

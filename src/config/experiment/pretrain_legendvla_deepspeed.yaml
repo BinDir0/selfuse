@@ -167,7 +167,7 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 2000
   train_vlm: True
-  init_motion_token_embeddings: True # initialize motion token embeddings
+  init_motion_token_embeddings: False # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   load_pretrained_pi05_weights: True # load pretrained weights from PI05
   pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
