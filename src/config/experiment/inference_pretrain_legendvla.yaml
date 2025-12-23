@@ -11,7 +11,7 @@ exp_name: "inference_pretrain"
 # 推理专用配置
 inference:
   # checkpoint路径
-  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2025.11.04/16.24_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=102500-eval_l1_loss=0.0366/pytorch_model/mp_rank_00_model_states.pt
+  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2025.12.12/20.24_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=135000-eval_l1_loss=0.0403/pytorch_model/mp_rank_00_model_states.pt
   
   # 设备配置
   device: cuda:0

@@ -100,18 +100,24 @@ class GemmaMLP(nn.Module):
 
 
 class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim: int, max_period: float = 10000.0):
+    def __init__(self, dim: int, min_period: float = 0.0003, max_period: float = 10000.0):
         super().__init__()
+        assert dim % 2 == 0, "dim must be even"
         self.half_dim = dim // 2
+        self.min_period = min_period
         self.max_period = max_period
 
-    def forward(self, t: torch.FloatTensor) -> torch.FloatTensor:
-        emb = math.log(self.max_period) / (self.half_dim - 1)
-        emb = torch.exp(
-            torch.arange(self.half_dim, device=t.device, dtype=t.dtype) * -emb
-        )
-        emb = t[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        # t shape: (B, ) or (B, 1)
+        if t.ndim == 2:
+            t = t.squeeze(-1)
+        fraction = torch.linspace(0.0, 1.0, self.half_dim, device=t.device, dtype=torch.float64)
+        # period = min * (max/min)^fraction
+        period = self.min_period * (self.max_period / self.min_period) ** fraction
+        scaling_factor = 1.0 / period * 2 * math.pi
+        emb = t[:, None] * scaling_factor[None, :]
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
+        emb = emb.to(t.dtype)
         return emb
 
 

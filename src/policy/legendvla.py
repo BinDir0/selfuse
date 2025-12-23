@@ -83,7 +83,7 @@ class LegendVLA(nn.Module):
                 time_cond=False,
             )
             self.time_embedding = nn.Sequential(
-                SinusoidalPosEmb(cfg.time_hidden_size, cfg.time_max_period), 
+                SinusoidalPosEmb(cfg.time_hidden_size, cfg.time_min_period, cfg.time_max_period), 
                 TimeEncoder(cfg.time_hidden_size), 
             )
         else:  # matching pi0

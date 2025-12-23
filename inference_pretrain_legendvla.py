@@ -268,6 +268,10 @@ class LegendVLAInference:
         included_key = [
             'image',
             'depth', 
+            'state/wrist',
+            'state/shape', 
+            'state/mano',
+            'state/fingertips', 
             'instruction',
             'instruction_num', 
             'extrinsic',

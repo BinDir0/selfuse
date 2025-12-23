@@ -221,6 +221,7 @@ class LegendVLADataset(BaseImageDataset):
         )
         image = process_image(sample['image'], self.history, self.n_obs_image_steps, self.aug_transform)
 
+        intrinsic = sample['intrinsic'][self.history].astype(np.float32)
         instruction = sample['instruction'][self.history]
         instruction_num = sample['instruction_num'][self.history]
         # sample a random instruction from the candidate instructions
@@ -228,7 +229,14 @@ class LegendVLADataset(BaseImageDataset):
         instruction = instruction[idx]
 
         # Process all images in batch
-        processed_results = self.preprocessor(images=image, text=instruction, states=state, actions=action, objective=self.objective)
+        processed_results = self.preprocessor(
+            images=image, 
+            text=instruction, 
+            states=state, 
+            actions=action, 
+            intrinsic=intrinsic, 
+            objective=self.objective,
+        )
 
         data = {
             'input_ids': processed_results['input_ids'],
@@ -850,6 +858,8 @@ def process_state_action(
         state: np.ndarray, shape: [T, wrist_dim + hand_dim]
         action: np.ndarray, shape: [H, wrist_dim + hand_dim]
         action_valid_mask: np.ndarray, shape: [H, wrist_dim + hand_dim]
+        state_presence: np.ndarray, shape: [H]
+        action_presence: np.ndarray, shape: [H]
     '''
 
     step = history // n_obs_state_steps

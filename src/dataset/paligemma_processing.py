@@ -431,6 +431,7 @@ class PaliGemmaVLAProcessor:
         images: np.ndarray,
         states: np.ndarray,
         actions: np.ndarray,
+        intrinsic: np.ndarray,
         objective: str = None,
         truncation: bool = True,
     ) -> dict:
@@ -440,6 +441,7 @@ class PaliGemmaVLAProcessor:
             images: np.ndarray [T_image, C, H, W] or [T_image, H, W, C]
             state: np.ndarray [T_state, state_dim]
             action: np.ndarray [Horizon, action_dim]
+            intrinsic: np.ndarray [4]
             objective: str, 'ar' or 'flow' or None, None means both
             truncation: bool
 
@@ -455,6 +457,11 @@ class PaliGemmaVLAProcessor:
         else:
             scale_factor = 1.0
 
+        if images.shape[-1] == 3: 
+            original_height, original_width = images.shape[1], images.shape[2]
+        else:
+            original_height, original_width = images.shape[2], images.shape[3]
+        intrinsic = get_resized_intrinsic(intrinsic, original_width, original_height, self.image_size)
         pixel_values = process_images(
             images,
             size=(self.image_size, self.image_size),
@@ -470,9 +477,11 @@ class PaliGemmaVLAProcessor:
         if objective != "train_flow":
             discrete_actions = self.motion_tokenizer['actions'](actions)[0]
 
+        intrinsic_str = f"fx:{intrinsic[0]:.2f} fy:{intrinsic[1]:.2f} cx:{intrinsic[2]:.2f} cy:{intrinsic[3]:.2f}"
         text = text.replace('.', '')
         text = text.lower()
-        text = f"What should the robot do to {text} with the state {self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
+        text = f"what should the robot do to {text} with the state {self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
+        text = f"Using camera {intrinsic_str}, {text}"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
         input_string = add_image_action_tokens_to_prompt(
             prefix_prompt=text,
@@ -551,6 +560,22 @@ class PaliGemmaVLAProcessor:
         actions = self.motion_tokenizer['actions'].decode([action_tokens])
         return {'actions': actions}
 
+
+def get_resized_intrinsic(intrinsic, original_width: int, original_height: int, img_size: int = 384): 
+    '''
+    Return intrinsic after resizing the images. 
+    Args: 
+        intrinsic: np.ndarray [..., 4]
+        original_width: int
+        original_height: int
+        img_size: int = 384
+    Returns: 
+        intrinsic: np.ndarray [..., 4]
+    '''
+    scale_x = img_size / original_width
+    scale_y = img_size / original_height
+    intrinsic = intrinsic * np.array([scale_x, scale_y, scale_x, scale_y])
+    return intrinsic
 
 def set_token_id(input_ids, token_id, discrete_tokens):
     condition = (input_ids == token_id)

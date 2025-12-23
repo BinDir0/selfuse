@@ -150,11 +150,11 @@ flow:
 
 optimizer:
   action: 
-    lr: 4e-5
+    lr: 8e-5
     betas: [0.9, 0.999]
     weight_decay: 1e-4
   vlm:
-    lr: 5e-6 # We can try smaller learning rate than action for VLM
+    lr: 1e-5 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.999]
     weight_decay: 1e-4
 
@@ -167,7 +167,7 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 2000
   train_vlm: True
-  init_motion_token_embeddings: False # initialize motion token embeddings
+  init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   load_pretrained_pi05_weights: True # load pretrained weights from PI05
   pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
@@ -230,7 +230,8 @@ mixture:
     rope_theta: ${action_expert_rope_theta}
 
 time_hidden_size: 1024 # only applicable if using adaptive
-time_max_period: 1000.0
+time_min_period: 0.004
+time_max_period: 4.0
 action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
 
 # Fixed
@@ -262,6 +263,7 @@ policy:
     num_inference_steps: ${flow.num_inference_steps}
     action_expert_adaptive_mode: ${action_expert_adaptive_mode}
     time_hidden_size: ${time_hidden_size}
+    time_min_period: ${time_min_period}
     time_max_period: ${time_max_period}
     flow_sig_min: ${flow.sig_min}
     # Add pretrained_model_path for loading pre-trained VLM weights
