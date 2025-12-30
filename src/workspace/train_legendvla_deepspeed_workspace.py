@@ -206,7 +206,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # to gain better performance.
         if cfg.training.init_motion_token_embeddings:
             self.model.init_motion_token_embeddings(self.vla_processor.total_motion_token_list)
-        
+        # Initialize extra token embeddings.
+        self.model.init_motion_token_embeddings([id for id in range(257152, 257216)])
+
         print("Computing normalizer...")
         if cfg.training.normalizer_path is not None:
             normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))

@@ -1274,12 +1274,12 @@ if __name__ == "__main__":
     model = hydra.utils.instantiate(cfg.policy)
     model.load_pretrained_vlm_weights()
     from src.utils.embedding_analysis import analyze_embedding_distribution, print_analysis_report
-    model.init_motion_token_embeddings([i for i in range(256000-10000, 256000)])
-    embeddings = model.embed_tokens.weight.data[256000-20000:256000-10000]
+    model.init_motion_token_embeddings([i for i in range(257152, 257216)])
+    embeddings = model.embed_tokens.weight.data[257152:257216]
     print(f"embeddings shape: {embeddings.shape}")
     results = analyze_embedding_distribution(
         embeddings,
-        sample_size=2000,
+        sample_size=200,
         plot=True,
         save_path=f"outputs/embedding_analysis.png",
     )

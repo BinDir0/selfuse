@@ -596,6 +596,7 @@ if __name__ == "__main__":
     print(config)
     vla_processor = hydra.utils.instantiate(cfg.vla_processor)
     print(f"vocab_size: {vla_processor.tokenizer.vocab_size}")
+    print(f"len(tokenizer): {len(vla_processor.tokenizer)}")
     print(f"image_token_id: {vla_processor.image_token_id}")
     print(f"state_token_id: {vla_processor.state_token_id}")
     print(f"action_token_id: {vla_processor.action_token_id}")
