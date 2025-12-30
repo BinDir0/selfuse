@@ -480,8 +480,7 @@ class PaliGemmaVLAProcessor:
         intrinsic_str = f"fx:{intrinsic[0]:.2f} fy:{intrinsic[1]:.2f} cx:{intrinsic[2]:.2f} cy:{intrinsic[3]:.2f}"
         text = text.replace('.', '')
         text = text.lower()
-        text = f"what should the robot do to {text} with the state {self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
-        text = f"Using camera {intrinsic_str}, {text}"
+        text = f"{text} using camera {intrinsic_str}{self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
         input_string = add_image_action_tokens_to_prompt(
             prefix_prompt=text,
@@ -596,6 +595,7 @@ if __name__ == "__main__":
     config = OmegaConf.to_yaml(cfg.vla_processor, resolve=True)
     print(config)
     vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+    print(f"vocab_size: {vla_processor.tokenizer.vocab_size}")
     print(f"image_token_id: {vla_processor.image_token_id}")
     print(f"state_token_id: {vla_processor.state_token_id}")
     print(f"action_token_id: {vla_processor.action_token_id}")
