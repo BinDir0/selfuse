@@ -2,9 +2,54 @@ import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 import torch.nn as nn
 import itertools
+import time
+from functools import wraps
 
 import random
 from utils import *
+
+# 全局时间统计字典
+time_stats = {}
+
+def time_tracker(func):
+    """装饰器：记录函数的调用次数和累计耗时"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        func_name = func.__name__
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = time.perf_counter() - start
+        
+        if func_name not in time_stats:
+            time_stats[func_name] = {'calls': 0, 'total_time': 0.0}
+        time_stats[func_name]['calls'] += 1
+        time_stats[func_name]['total_time'] += elapsed
+        
+        return result
+    return wrapper
+
+def print_time_stats():
+    """打印所有函数的时间统计"""
+    print("\n" + "="*60)
+    print("函数耗时统计:")
+    print("="*60)
+    print(f"{'函数名':<25} {'调用次数':>10} {'总耗时(s)':>12} {'平均耗时(ms)':>14}")
+    print("-"*60)
+    
+    # 按总耗时降序排序
+    sorted_stats = sorted(time_stats.items(), key=lambda x: x[1]['total_time'], reverse=True)
+    
+    for func_name, stats in sorted_stats:
+        calls = stats['calls']
+        total = stats['total_time']
+        avg_ms = (total / calls * 1000) if calls > 0 else 0
+        print(f"{func_name:<25} {calls:>10} {total:>12.4f} {avg_ms:>14.4f}")
+    print("="*60 + "\n")
+
+def reset_time_stats():
+    """重置时间统计"""
+    global time_stats
+    time_stats = {}
 
 args_game = dotdict({
     'augumentation': 10,
@@ -28,6 +73,7 @@ dim5_sol = torch.tensor([[1,1,0,0,0],[1,-1,0,0,0],[-1,1,0,0,0],[-1,-1,0,0,0],
                          [0,0,1,0,1],[0,0,1,0,-1],[0,0,-1,0,1],[0,0,-1,0,-1],
                          [0,0,0,1,1],[0,0,0,1,-1],[0,0,0,-1,1],[0,0,0,-1,-1]])
 
+@time_tracker
 def generate_inverse_mappings(d, order):
     inverse_mapping = [0] * d
     for i, val in enumerate(order):
@@ -35,6 +81,7 @@ def generate_inverse_mappings(d, order):
     #print(inverse_mapping)
     return inverse_mapping
 
+@time_tracker
 def get_permuted_tensors(tensor1, tensor2):
     """Generate all possible tensors obtained by permuting the axes of A"""
     d = len(tensor1.shape)
@@ -73,6 +120,14 @@ class Game():
         self.best = 0
         self.best_board = torch.zeros(size=(upper_bound, dim))
 
+        r = range(-boundary, boundary + 1)
+        all_actions_list = list(itertools.product(r, repeat=dim))
+        self.all_actions = torch.tensor(all_actions_list, dtype=torch.float32)
+        self.zero_action_idx = len(self.all_actions) // 2
+        self.all_actions_sq_norms = torch.sum(self.all_actions**2, dim=1)
+        
+
+    @time_tracker
     def getInitBoard(self):
         """
         Returns:
@@ -89,6 +144,7 @@ class Game():
         
         return startBoard
 
+    @time_tracker
     def getBoardSize(self):
         """
         Returns:
@@ -96,6 +152,7 @@ class Game():
         """
         return (self.upper_bound, self.dim)
 
+    @time_tracker
     def getActionSize(self):
         """
         Returns:
@@ -105,6 +162,7 @@ class Game():
         # NOTE: for simplicity, we let (0,0,...,0) to be possible but illegal action.
         return actionSize
 
+    @time_tracker
     def getNextState(self, board, action):
         """
         Input:
@@ -121,64 +179,60 @@ class Game():
         nextBoard[minplace, :] = self.getAction(action)
         return nextBoard
 
+    @time_tracker
     def getPointNum(self, board):
         maxdim, _ = torch.max(torch.abs(board), dim=1)
         _, minplace = torch.min(maxdim, dim=0)
         pointnum = minplace.item()
         return pointnum
     
-    def checkAngle(self, v1, v2):
-        '''
-        Input: v1, v2 are two vectors.
-        Return: 1 if feasible, otherwise 0
-        NOTE: If v1=v2, should return 0
-        '''
-        inner_prod = torch.dot(v1, v2)
-        if inner_prod <= 0:
-            return 1
-        squarenorm1 = torch.dot(v1, v1)
-        squarenorm2 = torch.dot(v2, v2)
-        if 4 * (inner_prod ** 2) <= squarenorm1 * squarenorm2:
-            return 1
-        return 0
-    
+    @time_tracker
     def getAction(self, x):
-        tmp = 1
-        action = torch.zeros(size=(self.dim,))
-        for i in range(self.dim - 1, -1, -1):
-            action[i] = ((x // tmp) % (2 * self.boundary + 1)) - self.boundary
-            tmp = tmp * (2 * self.boundary + 1)
-        return action
+        return self.all_actions[x]
 
+    @time_tracker
     def getValidMoves(self, board):
         """
-        Input:
-            board: current board
-            player: current player
-
-        Returns:
-            validMoves: a binary vector of length self.getActionSize(), 1 for
-                        moves that are valid from the current board and player,
-                        0 for invalid moves
+        向量化实现的合法动作检查
         """
-        len = self.getActionSize()
-        validMoves = torch.ones(size = (len,))
         pointnum = self.getPointNum(board)
+        if pointnum == 0:
+            v = torch.ones(len(self.all_actions))
+            v[self.zero_action_idx] = 0
+            return v
 
-        for i in range(len):
-            action = self.getAction(i)
-            
-            if i == len // 2:
-                validMoves[i] = 0
-                continue
-            for j in range(pointnum):
-                if self.checkAngle(action, board[j]) == 0:
-                    validMoves[i] = 0
-                    break
+        # 获取当前棋盘上已有的向量 (pointnum, dim)
+        placed_vectors = board[:pointnum, :]
         
-        return validMoves
+        # 1. 矩阵乘法计算所有候选动作与已放向量的内积 (num_actions, pointnum)
+        # inner_prods[i, j] 是第 i 个候选动作与第 j 个已放向量的点积
+        # [num_actions, dim] @ [dim, pointnum] = [num_actions, pointnum]
+        inner_prods = torch.mm(self.all_actions, placed_vectors.t()) 
+        
+        # 2. 获取已放向量的模长平方 (pointnum,)
+        placed_sq_norms = torch.sum(placed_vectors**2, dim=1)
+        
+        # 3. 角度检查公式：4 * (v1·v2)^2 <= |v1|^2 * |v2|^2 或者 v1·v2 <= 0
+        # 我们寻找“冲突”的动作：(v1·v2 > 0) 且 (4 * (v1·v2)^2 > |v1|^2 * |v2|^2)
+        
+        lhs = 4 * (inner_prods ** 2)
 
+        # [num_actions, 1] * [1, pointnum] = [num_actions, pointnum]
+        rhs = self.all_actions_sq_norms.unsqueeze(1) * placed_sq_norms.unsqueeze(0)
+        
+        # 判定冲突条件
+        conflicts = (inner_prods > 0) & (lhs > rhs)
+        
+        # 只要与任何一个已放向量冲突，该动作就非法
+        is_invalid = torch.any(conflicts, dim=1)
+        
+        # 生成返回向量
+        valid_moves = (~is_invalid).float()
+        valid_moves[self.zero_action_idx] = 0 # 排除全零向量
+        
+        return valid_moves
 
+    @time_tracker
     def getGameEnded(self, board):
         """
         Input:
@@ -204,9 +258,11 @@ class Game():
         else:
             return 0
 
+    @time_tracker
     def getCanonicalForm(self, board, player):
         return board
 
+    @time_tracker
     def getSymmetries(self, board, pi):
         """
         Input:
@@ -225,17 +281,10 @@ class Game():
         pi_tensor = torch.tensor(pi).view(*new_shape)
         return get_permuted_tensors(pi_tensor, board)
 
+    @time_tracker
     def stringRepresentation(self, board):
-        """
-        Input:
-            board: current board
+        # --- 字符串转换极其慢，改用字节流 ---
+        # 只转已经放了向量的部分，减少哈希负担
+        pointnum = self.getPointNum(board)
+        return board[:pointnum, :].numpy().tobytes()
 
-        Returns:
-            boardString: a quick conversion of board to a string format.
-                         Required by MCTS for hashing.
-        """
-        # convert the tensor to a nested Python list
-        board_list = board.tolist()
-        # convert the nested list to a string
-        string = str(board_list)
-        return string

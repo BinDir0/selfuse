@@ -21,7 +21,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 log = logging.getLogger(__name__)
 
 
-def executeEpisode_parallel(nnet, args):
+def executeEpisode_parallel(nnet, args, rank):
     """
     This function executes one episode of self-play, starting with player 1.
     As the game is played, each turn is added as a training example to
@@ -42,10 +42,12 @@ def executeEpisode_parallel(nnet, args):
     board = game.getInitBoard()
     curPlayer = 1
     episodeStep = 0
-    mcts = MCTS(game, nnet, args)  # reset search tree
+    mcts = MCTS(game, nnet, args, rank)  # reset search tree
 
     while True:
         episodeStep += 1
+        if rank == 0: 
+            print(f'Rank {rank} is playing step {episodeStep}')
         canonicalBoard = game.getCanonicalForm(board, curPlayer)
         temp = int(episodeStep < args.tempThreshold)
 
@@ -60,17 +62,17 @@ def executeEpisode_parallel(nnet, args):
         r = game.getGameEnded(board)
 
         if r != 0:
-            log.info('Finish one episode')
+            if rank == 0:
+                log.info('Finish one episode')
             return [(x[0], x[2], r * ((-1) ** (x[1] != curPlayer))) for x in trainExamples], game.best, game.best_board
 
-def executeEpisode_parallel_pack(nnet, args):
-    torch.cuda.init()
+def executeEpisode_parallel_pack(nnet, args, iter_num, rank):
     trainExamples = []
     best_num = 0
     best_board = torch.zeros(size=(args.upper_bound, args.dim))
-    for i in range(1):
+    for i in range(iter_num):
         # run episode
-        tmpexample, tmpbest, tmpboard = executeEpisode_parallel(nnet, args)
+        tmpexample, tmpbest, tmpboard = executeEpisode_parallel(nnet, args, rank)
         trainExamples.extend(tmpexample)
         if tmpbest > best_num:
             best_num = tmpbest
@@ -88,7 +90,7 @@ class Coach():
         self.game = game
         self.nnet = nnet
         self.args = args
-        self.mcts = MCTS(self.game, self.nnet, self.args)
+        self.mcts = MCTS(self.game, self.nnet, self.args, 0)
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
 
@@ -138,22 +140,16 @@ class Coach():
         examples in trainExamples (which has a maximum length of maxlenofQueue).
         """
 
-        for i in range(1, self.args.numIters + 1):
+        for i in tqdm(range(1, self.args.numIters + 1), desc='Training'):
             # bookkeeping
             log.info(f'Starting Iter #{i} ...')
             # examples of the iteration
             iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
             if not self.skipFirstSelfPlay or i > 1:
-                num_process = 8
-
                 # Create a multiprocessing pool with the desired number of processes
-                pool = multiprocessing.Pool(processes=num_process)
-                results = pool.starmap(executeEpisode_parallel_pack, [(self.nnet, self.args) for i in range(num_process)])
-    
-                # Close the pool to indicate that no more tasks will be submitted
-                pool.close()
-                # Wait for all processes to complete
-                pool.join()
+                iter_num = self.args.numEps // self.args.num_process
+                with multiprocessing.Pool(processes=self.args.num_process) as pool:
+                    results = pool.starmap(executeEpisode_parallel_pack, [(self.nnet, self.args, iter_num, rank) for rank in range(self.args.num_process)])
 
                 results_trainexamples, results_bestnum, results_bestboard = zip(*results)
                 train_examples = list(chain.from_iterable(results_trainexamples))

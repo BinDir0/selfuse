@@ -1,7 +1,10 @@
 import logging
 import math
-
+from tqdm import tqdm
+from collections import defaultdict
 import numpy as np
+import time
+from Game import print_time_stats
 
 EPS = 1e-8
 
@@ -13,17 +16,21 @@ class MCTS():
     This class handles the MCTS tree.
     """
 
-    def __init__(self, game, nnet, args):
+    def __init__(self, game, nnet, args, rank):
         self.game = game
         self.nnet = nnet
         self.args = args
-        self.Qsa = {}  # stores Q values for s,a (as defined in the paper)
-        self.Nsa = {}  # stores #times edge s,a was visited
-        self.Ns = {}  # stores #times board s was visited
+        self.rank = rank # Process rank
+        self.action_size = game.getActionSize()
+        
+        # 向量化存储：以 s 为键，值为 numpy 数组
+        self.Qsa = {}  # stores Q values for all actions at state s, shape: (action_size,)
+        self.Nsa = {}  # stores visit counts for all actions at state s, shape: (action_size,)
+        self.Ns = defaultdict(lambda: 0)  # stores #times board s was visited
         self.Ps = {}  # stores initial policy (returned by neural net)
 
         self.Es = {}  # stores game.getGameEnded ended for board s
-        self.Vs = {}  # stores game.getValidMoves for board s
+        self.Vs = {}  # stores game.getValidMoves for board s (numpy array)
 
     def getActionProb(self, canonicalBoard, temp=1):
         """
@@ -34,22 +41,28 @@ class MCTS():
             probs: a policy vector where the probability of the ith action is
                    proportional to Nsa[(s,a)]**(1./temp)
         """
-        for i in range(self.args.numMCTSSims):
-            self.search(canonicalBoard)
+        if self.rank == 0:
+            for i in tqdm(range(self.args.numMCTSSims), desc=f'Rank {self.rank} is searching'):
+                self.search(canonicalBoard)
+        else: 
+            for i in range(self.args.numMCTSSims):
+                self.search(canonicalBoard)
 
         s = self.game.stringRepresentation(canonicalBoard)
-        counts = [self.Nsa[(s, a)] if (s, a) in self.Nsa else 0 for a in range(self.game.getActionSize())]
+        
+        # 向量化获取 counts
+        counts = self.Nsa[s] if s in self.Nsa else np.zeros(self.action_size)
 
         if temp == 0:
             bestAs = np.array(np.argwhere(counts == np.max(counts))).flatten()
             bestA = np.random.choice(bestAs)
-            probs = [0] * len(counts)
+            probs = np.zeros(self.action_size)
             probs[bestA] = 1
             return probs
 
-        counts = [x ** (1. / temp) for x in counts]
-        counts_sum = float(sum(counts))
-        probs = [x / counts_sum for x in counts]
+        counts = np.power(counts, 1. / temp)
+        counts_sum = np.sum(counts)
+        probs = counts / counts_sum if counts_sum > 0 else counts
         return probs
 
     def search(self, canonicalBoard):
@@ -69,7 +82,6 @@ class MCTS():
         """
 
         s = self.game.stringRepresentation(canonicalBoard)
-
         if s not in self.Es:
             self.Es[s] = self.game.getGameEnded(canonicalBoard)
         if self.Es[s] != 0:
@@ -79,14 +91,13 @@ class MCTS():
         if s not in self.Ps:
             # leaf node
             self.Ps[s], v = self.nnet.predict(canonicalBoard)
-            valids = self.game.getValidMoves(canonicalBoard)
-            self.Ps[s] = self.Ps[s] * (valids.numpy())  # masking invalid moves
+            valids = self.game.getValidMoves(canonicalBoard).cpu().numpy()
+            self.Ps[s] = self.Ps[s] * valids  # masking invalid moves
             sum_Ps_s = np.sum(self.Ps[s])
             if sum_Ps_s > 0:
                 self.Ps[s] /= sum_Ps_s  # renormalize
             else:
                 # if all valid moves were masked make all valid moves equally probable
-
                 # NB! All valid moves may be masked if either your NNet architecture is insufficient or you've get overfitting or something else.
                 # If you have got dozens or hundreds of these messages you should pay attention to your NNet and/or training process.   
                 log.error("All valid moves were masked, doing a workaround.")
@@ -95,42 +106,57 @@ class MCTS():
 
             self.Vs[s] = valids
             self.Ns[s] = 0
+            # 初始化 Qsa 和 Nsa 向量 (numpy)
+            self.Qsa[s] = np.zeros(self.action_size, dtype=np.float32)
+            self.Nsa[s] = np.zeros(self.action_size, dtype=np.float32)
             return v
 
         valids = self.Vs[s]
-        cur_best = -float('inf')
-        best_act = -1
+        Qsa_s = self.Qsa[s]
+        Nsa_s = self.Nsa[s]
+        Ps_s = self.Ps[s]
+        
+        # 找出有效动作的索引
+        valid_actions = np.where(valids > 0)[0]
+        
+        # 找出有效但未访问的动作，进行扩展
+        unvisited_mask = Nsa_s[valid_actions] == 0
+        unvisited_actions = valid_actions[unvisited_mask]
+        
+        for a in unvisited_actions:
+            # NOTE: look one step ahead!
+            tmp_next_s = self.game.getNextState(canonicalBoard, a)
+            tmp_v = self.search(tmp_next_s)
+            Qsa_s[a] = tmp_v
+            Nsa_s[a] = 1
 
-
-        for a in range(self.game.getActionSize()):
-            if valids[a]:
-                if (s, a) not in self.Qsa:                  # NOTE: look one step ahead!
-                    tmp_next_s = self.game.getNextState(canonicalBoard, a)
-                    tmp_v = self.search(tmp_next_s)
-                    self.Qsa[(s, a)] = tmp_v
-                    self.Nsa[(s, a)] = 1
-
-
-        for a in range(self.game.getActionSize()):
-            if valids[a]:
-                u = self.Qsa[(s, a)] + self.Ps[s][a] * math.sqrt(self.Ns[s]) / (
-                            1 + self.Nsa[(s, a)]) * (self.args.cpuct1 + math.log2((1 + self.args.cpuct2 + self.Ns[s]) / self.args.cpuct2))
-                if u > cur_best:
-                    cur_best = u
-                    best_act = a
-
-        a = best_act
+        # 只对有效动作计算 UCB
+        # u = Q(s,a) + P(s,a) * sqrt(N(s)) / (1 + N(s,a)) * (cpuct1 + log2((1 + cpuct2 + N(s)) / cpuct2))
+        Ns_val = self.Ns[s]
+        
+        Qsa_valid = Qsa_s[valid_actions]
+        Nsa_valid = Nsa_s[valid_actions]
+        Ps_valid = Ps_s[valid_actions]
+        
+        exploration_term = Ps_valid * math.sqrt(Ns_val) / (1 + Nsa_valid) * \
+                          (self.args.cpuct1 + math.log2((1 + self.args.cpuct2 + Ns_val) / self.args.cpuct2))
+        
+        ucb_valid = Qsa_valid + exploration_term
+        
+        # 选择最佳动作（在有效动作中）
+        best_idx = np.argmax(ucb_valid)
+        a = valid_actions[best_idx]
+        
         next_s = self.game.getNextState(canonicalBoard, a)
-
         v = self.search(next_s)
 
-        if (s, a) in self.Qsa:
-            self.Qsa[(s, a)] = (self.Nsa[(s, a)] * self.Qsa[(s, a)] + v) / (self.Nsa[(s, a)] + 1)
-            self.Nsa[(s, a)] += 1
-
+        # 更新 Q 值和访问计数
+        if Nsa_s[a] > 0:
+            Qsa_s[a] = (Nsa_s[a] * Qsa_s[a] + v) / (Nsa_s[a] + 1)
+            Nsa_s[a] += 1
         else:
-            self.Qsa[(s, a)] = v
-            self.Nsa[(s, a)] = 1
+            Qsa_s[a] = v
+            Nsa_s[a] = 1
 
         self.Ns[s] += 1
         

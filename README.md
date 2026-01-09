@@ -8,8 +8,8 @@ The Kissing Number Game is implemented in ```Game.py```. ```Coach.py``` contains
 An optional first step, which will make everything easier:
 
 ```
-conda create --name KissingNumber python=3.8.16
-conda activate KissingNumber
+conda create --name kissingnumber python=3.10
+conda activate kissingnumber
 ```
 
 Then, install our project:

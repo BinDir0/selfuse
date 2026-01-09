@@ -1,4 +1,5 @@
 import logging
+import warnings
 
 import coloredlogs
 
@@ -7,21 +8,33 @@ from Game import Game
 from NeuralNet import NeuralNet as nn
 from utils import *
 import multiprocessing as mp
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+import numpy as np
+import torch
+torch.set_num_threads(1)
+
+warnings.filterwarnings("ignore", message="The PyTorch API of nested tensors is in prototype stage")
 
 log = logging.getLogger(__name__)
 
 coloredlogs.install(level='INFO')  # Change this to DEBUG to see more info.
 
 args = dotdict({
-    'numIters': 200,
-    'numEps': 20,              # Number of complete self-play games to simulate during a new iteration.
-    'tempThreshold': 15,        #
-    'updateThreshold': 0.6,     #
-    'maxlenOfQueue': 200000,    # Number of game examples to train the neural networks.
-    'numMCTSSims': 30,          # Number of games moves for MCTS to simulate.
+    'numIters': 500,
+    'numEps': 240,              # Number of complete self-play games to simulate during a new iteration.
+    'tempThreshold': 35,        #
+    'updateThreshold': 0.55,     #
+    'maxlenOfQueue': 500000,    # Number of game examples to train the neural networks.
+    'numMCTSSims': 800,          # Number of games moves for MCTS to simulate.
     'arenaCompare': 40,         #
     'cpuct1': 1.25,
     'cpuct2': 10000,
+    'num_process': 120,           # Number of parallel processes for self-play.
 
     'dim': 6, 
     'boundary': 2, 
@@ -33,8 +46,6 @@ args = dotdict({
     'numItersForTrainExamplesHistory': 20,
 
 })
-
-
 
 
 def main():

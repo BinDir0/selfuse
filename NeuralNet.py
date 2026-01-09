@@ -17,91 +17,31 @@ import torch.optim as optim
 
 args = dotdict({
     'lr': 1e-3,
-    'dropout': 0.3,
-    'epochs': 1000,
-    'batch_size': 64,
+    'dropout': 0.1,
+    'epochs': 10,
+    'batch_size': 256,
     'cuda': torch.cuda.is_available(),
     'num_channels': 512,
 })
 
 class TransformerEncoder(nn.Module):
+    """Wrapper around PyTorch's TransformerEncoder to maintain the same interface."""
     def __init__(self, num_layers, num_heads, hidden_size, dropout):
         super().__init__()
-        self.num_layers = num_layers
-        self.layers = nn.ModuleList([EncoderLayer(num_heads, hidden_size, dropout) for _ in range(num_layers)])
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            activation='relu',
+            batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
     def forward(self, x, mask):
-        for i in range(self.num_layers):
-            x = self.layers[i](x, mask)
-        return x
-
-class EncoderLayer(nn.Module):
-    def __init__(self, num_heads, hidden_size, dropout):
-        super().__init__()
-        self.self_attn = MultiheadAttention(num_heads, hidden_size, dropout)
-        self.norm1 = nn.LayerNorm(hidden_size)
-        self.ffn = FeedForward(hidden_size, dropout)
-        self.norm2 = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x, mask):
-        residual = x
-        x = self.self_attn(x, x, x, mask)
-        x = self.norm1(residual + self.dropout(x))
-        residual = x
-        x = self.ffn(x)
-        x = self.norm2(residual + self.dropout(x))
-        return x
-
-class MultiheadAttention(nn.Module):
-    def __init__(self, num_heads, hidden_size, dropout):
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = hidden_size // num_heads
-        self.query = nn.Linear(hidden_size, hidden_size)
-        self.key = nn.Linear(hidden_size, hidden_size)
-        self.value = nn.Linear(hidden_size, hidden_size)
-        self.dropout = nn.Dropout(dropout)
-        self.out = nn.Linear(hidden_size, hidden_size)
-        
-    def forward(self, query, key, value, mask):
-        batch_size = query.size(0)
-
-        query.weights = self.query.weight.data  # get the weights from the linear layer
-        query.norm = torch.norm(query.weights)  # calculate the norm of the weights
-        key.weights = self.key.weight.data  # get the weights from the linear layer
-        key.norm = torch.norm(key.weights)  # calculate the norm of the weights
-        value.weights = self.value.weight.data  # get the weights from the linear layer
-        value.norm = torch.norm(value.weights)  # calculate the norm of the weights
-
-        Q = self.query(query).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        K = self.key(key).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        V = self.value(value).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        attn_scores = torch.matmul(Q, K.transpose(-1, -2)) / (self.head_dim ** 0.5)
-        mask = mask[:, None, None, :].repeat(1, self.num_heads, 1, 1)
-        attn_scores.masked_fill_(mask, float('-inf'))
-        attn_probs = F.softmax(attn_scores, dim=-1)
-        attn_probs = self.dropout(attn_probs)
-        
-        attn_output = torch.matmul(attn_probs, V)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.num_heads * self.head_dim)
-        attn_output = self.out(attn_output)
-        return attn_output
-
-class FeedForward(nn.Module):
-    def __init__(self, hidden_size, dropout):
-        super().__init__()
-        self.linear1 = nn.Linear(hidden_size, hidden_size * 4)
-        self.linear2 = nn.Linear(hidden_size * 4, hidden_size)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x):
-        x = F.relu(self.linear1(x))
-        x = self.dropout(x)
-        x = self.linear2(x)
-        x = self.dropout(x)
-        return x
+        # mask: (batch_size, seq_len), True means masked position
+        # PyTorch's src_key_padding_mask uses the same convention
+        return self.encoder(x, src_key_padding_mask=mask)
 
 class KissingNNet(nn.Module):
     def __init__(self, dim, boundary, upper_bound):
@@ -170,8 +110,6 @@ class NeuralNet():
     def __init__(self, game):
         self.game = game
         self.nnet = KissingNNet(game.dim, game.boundary, game.upper_bound)
-        if args.cuda:
-            self.nnet.cuda()
 
     def train(self, examples):
         """
@@ -184,6 +122,8 @@ class NeuralNet():
                       the given board, and v is its value. The examples has
                       board in its canonical form.
         """
+        if args.cuda: 
+            self.nnet = self.nnet.to(torch.device('cuda'))
         optimizer = optim.Adam(self.nnet.parameters(), lr=args.lr)
         batch_size = min(args.batch_size, len(examples))
         batch_count = int(len(examples) / batch_size)
@@ -197,14 +137,10 @@ class NeuralNet():
             lr_lambda=lr_lambda, \
         )
 
-        
-
         for epoch in range(args.epochs):
             self.nnet.train()
             pi_losses = AverageMeter()
             v_losses = AverageMeter()
-
-            
 
             t = tqdm(range(batch_count), desc='Training Net')
             for _ in t:
@@ -235,6 +171,8 @@ class NeuralNet():
                 optimizer.step()
                 scheduler.step()
 
+        self.nnet = self.nnet.to(torch.device('cpu'))
+
     def predict(self, board):
         """
         Input:
@@ -250,7 +188,6 @@ class NeuralNet():
 
         # preparing input
         board = board.float()
-        if args.cuda: board = board.contiguous().cuda()
         board = board.view(1, self.game.upper_bound, self.game.dim)
         self.nnet.eval()
         with torch.no_grad():
@@ -289,7 +226,7 @@ class NeuralNet():
         # https://github.com/pytorch/examples/blob/master/imagenet/main.py#L98
         filepath = os.path.join(folder, filename)
         if not os.path.exists(filepath):
-            raise ("No model in path {}".format(filepath))
+            raise FileNotFoundError(f"No model in path {filepath}")
         map_location = None if args.cuda else 'cpu'
-        checkpoint = torch.load(filepath, map_location=map_location)
+        checkpoint = torch.load(filepath, map_location=map_location, weights_only=True)
         self.nnet.load_state_dict(checkpoint['state_dict'])
