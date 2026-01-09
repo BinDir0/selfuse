@@ -251,5 +251,90 @@ Nsight 是 Nvidia 用于监控 GPU 使用情况的一个库，他能准确的告
 ![](assets/NVTX.png)
 
 
+### VSCode Debugger
+
+这部分讲解 DeepSpeed 分布式训练（多机或单机多卡）中使用 VS Code 进行断点调试的方案。
+
+
+**注意：如要使用这种调试方案，不要在软链接（Symlink）路径下打开 VS Code！**
+*   **现象**：调试器能连接，但断点变灰（Unverified Breakpoint），程序不暂停。
+*   **原因**：Python 运行的是文件的真实物理路径，而 VS Code 打开的是软链路径，两者路径不匹配导致断点失效。
+*   **解决**：请直接打开项目的**真实物理路径** (Real Path) 进行开发和调试。
+
+#### 1. 安装依赖
+在训练环境中安装 `debugpy`：
+```bash
+pip install debugpy
+```
+
+#### 2. 修改入口代码 (如 `train.py`)
+在代码最开头（`import deepspeed` 之后）注入调试钩子，确保只在 **Rank 0** 挂起：
+
+```python
+import os
+import deepspeed
+
+# 1. 获取本地 Rank，避免所有卡都监听端口
+local_rank = int(os.environ.get("LOCAL_RANK", -1))
+
+if local_rank == 0:
+    import debugpy
+    # 2. 监听端口，等待 VS Code 连接
+    # 0.0.0.0 允许从外部/容器外连接，5678 是常用端口
+    debugpy.listen(("0.0.0.0", 5678))
+    
+    print(f"👻 Rank {local_rank}: 等待 VS Code 调试器连接 (端口 5678)...")
+    print(f"👉 请确保 VS Code 打开的是真实路径 (非软链接)！")
+    
+    # 3. 程序在此暂停，直到调试器挂载
+    debugpy.wait_for_client()
+    print(f"✅ 调试器已连接，开始训练...")
+
+# ... 后续训练代码 ...
+```
+
+#### 3. 配置 VS Code (`launch.json`)
+在 `.vscode/launch.json` 中添加 **Remote Attach** 配置：
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Attach to DeepSpeed (Rank 0)",
+            "type": "python",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "${workspaceFolder}"
+                }
+            ],
+            "justMyCode": true
+        }
+    ]
+}
+```
+
+#### 4. 启动命令 (设置超时)
+启动训练时，务必设置 **NCCL 超时时间**，否则 Rank 0 暂停调试时，其他 GPU 会因超时报错退出。
+
+在启动脚本（比如`pretrain_legendvla_deepspeed.sh`）中添加这两个环境变量：
+```bash
+# 设置 NCCL 超时为 1 小时 (单位毫秒: 3600000)
+export NCCL_TIMEOUT=3600000 
+export NCCL_ASYNC_ERROR_HANDLING=1
+```
+
+#### 5. 调试流程
+1.  终端运行启动脚本，看到 `等待 VS Code 调试器连接...` 日志。
+2.  在 VS Code 中打好断点（**确保是真实路径下的文件**）。
+3.  按 **F5** 启动 "Attach to DeepSpeed (Rank 0)"。
+4.  程序将恢复运行并在断点处暂停。
+
 ## Project Structure
 
