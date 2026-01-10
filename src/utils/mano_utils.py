@@ -37,7 +37,7 @@ def mano_forward(rot, trans, theta, beta, sides=['right'], relative=False):
             continue
             
         
-        manolayer = ManoLayer(side=side, use_pca=False, ncomps=15, 
+        manolayer = ManoLayer(side=side, use_pca=False, ncomps=45, 
                               center_idx=0 if relative else None,
                               mano_assets_root='beingvla/models/motion/mano').to(rot[side].device)
         
@@ -1278,20 +1278,8 @@ def sample_to_manovis(action_pred: torch.Tensor, action_wrist: torch.Tensor, act
     right_rot_gt = rot_matrix_from_6drot(right_rot_6d_gt)  # [N, 3, 3]
     
     # Parse hand actions [N, 30]: left_hand(15) + right_hand(15)
-    left_hand_15d_gt = action_hand[:, :15]  # [N, 15]
-    right_hand_15d_gt = action_hand[:, 15:30]  # [N, 15]
-
-    # Parse predicted actions [N, 48]: wrist(18) + hand(30)
-    action_pred_wrist_w = transform_wrist_to_target_frame(action_pred[:, :18], extrinsic_c2w[0])
-    left_trans_pred = action_pred_wrist_w[:, :3]  # [N, 3]
-    right_trans_pred = action_pred_wrist_w[:, 3:6]  # [N, 3]
-    left_rot_6d_pred = action_pred_wrist_w[:, 6:12]  # [N, 6]
-    right_rot_6d_pred = action_pred_wrist_w[:, 12:18]  # [N, 6]
-    left_rot_pred = rot_matrix_from_6drot(left_rot_6d_pred)  # [N, 3, 3]
-    right_rot_pred = rot_matrix_from_6drot(right_rot_6d_pred)  # [N, 3, 3]
-
-    left_hand_15d_pred = action_pred[:, 18:33]  # [N, 15]
-    right_hand_15d_pred = action_pred[:, 33:48]  # [N, 15]
+    left_hand_15d_gt = action_hand[:, :45]  # [N, 30]
+    right_hand_15d_gt = action_hand[:, 45:90]  # [N, 30]
 
     # Parse mano_shape [N, 20]: left_shape(10) + right_shape(10)
     left_beta = mano_shape[:, :10]  # [N, 10]
@@ -1311,20 +1299,6 @@ def sample_to_manovis(action_pred: torch.Tensor, action_wrist: torch.Tensor, act
             'theta': {
                 'left': left_hand_15d_gt,   # [N, 15]
                 'right': right_hand_15d_gt  # [N, 15]
-            }
-        },
-        'predicted': {
-            'rot': {
-                'left': left_rot_pred,   # [N, 3, 3]
-                'right': right_rot_pred  # [N, 3, 3]
-            },
-            'trans': {
-                'left': left_trans_pred,   # [N, 3]
-                'right': right_trans_pred  # [N, 3]
-            },
-            'theta': {
-                'left': left_hand_15d_pred,   # [N, 15]
-                'right': right_hand_15d_pred  # [N, 15]
             }
         },
         'beta': {

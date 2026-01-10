@@ -72,6 +72,7 @@ dataset:
       shuffle: False
       pin_memory: True
       persistent_workers: True
+    use_relative_action: False
   vlm_dataset:
     _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}

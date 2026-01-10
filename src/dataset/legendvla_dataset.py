@@ -16,7 +16,7 @@ from datasets import load_dataset
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
 from src.utils.sampler import (
-    SequenceSampler, get_val_mask, downsample_mask)
+    SequenceSampler, VariableLengthSequenceSampler, get_val_mask, downsample_mask)
 from src.utils.geometry import (
     transform_wrist_to_target_frame, 
     homo_matrix_from_trans_6drot, 
@@ -218,6 +218,7 @@ class LegendVLADataset(BaseImageDataset):
             history = self.history, 
             n_obs_state_steps = self.n_obs_state_steps, 
             motion_type = self.motion_type,
+            use_relative_action = self.use_relative_action,
         )
         image = process_image(sample['image'], self.history, self.n_obs_image_steps, self.aug_transform)
 
@@ -543,20 +544,27 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         max_train_episodes=None,
         return_numpy=True, # whether to return numpy arrays
         normalizer_dataloader_cfg=None,
-        debug=False, 
+        debug=False,
+        use_relative_action=False,
+        action_chunk_lengths=None,  # List of action chunk lengths, e.g., [4, 8, 16, 32]
     ):
         
         super().__init__()
         self.history = history
+        self.action_chunk_lengths = action_chunk_lengths if action_chunk_lengths is not None else [horizon]
 
         # Initialize storage lists
         self.replay_buffers = []
         self.train_masks = []
+        # Structure: samplers[zarr_idx] = sampler (VariableLengthSequenceSampler)
         self.samplers = []
+        # Structure: sampler_lens[zarr_idx] = length
         self.sampler_lens = []
+        # Cumulative lengths for indexing: zarr_idx -> cumulative_length
+        self.cumulative_lengths = []
         
         # Process each zarr file
-        for zarr_path in zarr_paths:
+        for zarr_idx, zarr_path in enumerate(zarr_paths):
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
                 zarr_path, keys=['state', 'action', 'extrinsic', 'presence'], lazy_load=False)
@@ -575,18 +583,19 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             )
             self.train_masks.append(train_mask)
             
-            # Create sampler
-            sampler = SequenceSampler(
+            # Create a single sampler that selects appropriate chunk length for each position
+            # For each starting position, select the largest chunk_length that fits
+            # This ensures each position is sampled only once with the appropriate length
+            sampler = VariableLengthSequenceSampler(
                 replay_buffer=replay_buffer,
-                sequence_length=horizon,
+                history=history,
+                action_chunk_lengths=self.action_chunk_lengths,
                 pad_before=pad_before,
-                pad_after=pad_after,
                 episode_mask=train_mask,
                 key_first_k=dict())
             self.samplers.append(sampler)
-            
-            # Record sampler length
             self.sampler_lens.append(len(sampler))
+            self.cumulative_lengths.append(len(sampler))
 
         self.horizon = horizon
         self.pad_before = pad_before
@@ -600,30 +609,35 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.normalizer = None
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.debug = debug
+        self.use_relative_action = use_relative_action
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
+        val_set.cumulative_lengths = []
 
         for i, replay_buffer in enumerate(self.replay_buffers):
-            # Create validation set sampler
-            sampler = SequenceSampler(
+            # Create validation set sampler that selects appropriate chunk length for each position
+            sampler = VariableLengthSequenceSampler(
                 replay_buffer=replay_buffer,
-                sequence_length=self.horizon,
+                history=self.history,
+                action_chunk_lengths=self.action_chunk_lengths,
                 pad_before=self.pad_before,
-                pad_after=self.pad_after,
                 episode_mask=~self.train_masks[i],
                 key_first_k=dict())
+            
             val_set.samplers.append(sampler)
-            val_set.train_masks.append(~self.train_masks[i])
             val_set.sampler_lens.append(len(sampler))
+            val_set.train_masks.append(~self.train_masks[i])
+            val_set.cumulative_lengths.append(len(sampler))
             
         return val_set
 
-    def _sample_to_data(self, sample):
+    def _sample_to_data(self, sample, action_chunk_length=None):
         # Select data keys based on motion_type
+        # action_chunk_length is used to determine how many action steps to extract
         state, action, action_valid_mask, state_presence, action_presence = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
             hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
@@ -636,7 +650,14 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             history = self.history, 
             n_obs_state_steps = self.n_obs_state_steps,
             motion_type = self.motion_type,
+            use_relative_action = self.use_relative_action,
         )
+        
+        # Crop action to the specified chunk length (no padding)
+        if action_chunk_length is not None and action.shape[0] > action_chunk_length:
+            action = action[:action_chunk_length]
+            action_valid_mask = action_valid_mask[:action_chunk_length]
+        
         if self.dims is not None:
             dim_slice = slice(self.dims[0], self.dims[1])
             state = state[:, dim_slice]
@@ -646,6 +667,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         data = {
             'states': state,
             'actions': action,
+            'action_chunk_length': action_chunk_length if action_chunk_length is not None else action.shape[0],
         }
         return data
 
@@ -657,18 +679,36 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.normalizer = normalizer
 
     def get_collator(self):
-        return BaseDataCollator()
+        return VariableLengthActionCollator()
 
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
         # Find corresponding sampler
         curr_idx = idx
-        for i, length in enumerate(self.sampler_lens):
-            if curr_idx < length:
-                sample = self.samplers[i].sample_sequence(curr_idx)
+        selected_zarr_idx = None
+        selected_sampler_idx = None
+        
+        # Find which zarr file this index belongs to
+        for zarr_idx, cumulative_length in enumerate(self.cumulative_lengths):
+            if curr_idx < cumulative_length:
+                selected_zarr_idx = zarr_idx
+                selected_sampler_idx = curr_idx
                 break
-            curr_idx -= length
-            
-        data = self._sample_to_data(sample)
+            curr_idx -= cumulative_length
+        
+        if selected_zarr_idx is None:
+            raise IndexError(f"Index {idx} out of range")
+        
+        # Sample from the corresponding sampler (which already selected appropriate chunk length)
+        sample = self.samplers[selected_zarr_idx].sample_sequence(selected_sampler_idx)
+        
+        # Get chunk length from sample (stored by VariableLengthSequenceSampler)
+        action_chunk_length = sample.get('_chunk_length')
+        # Remove internal metadata
+        if '_chunk_length' in sample:
+            del sample['_chunk_length']
+        
+        # Process data with the specific chunk length
+        data = self._sample_to_data(sample, action_chunk_length=action_chunk_length)
         if not self.return_numpy:
             data = dict_apply(data, torch.from_numpy) 
         if self.debug: 
@@ -676,7 +716,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         return data
 
     def __len__(self):
-        return sum(self.sampler_lens)
+        return sum(self.cumulative_lengths)
 
 
 class LegendVLDataCollator(BaseDataCollator):
@@ -728,6 +768,51 @@ class LegendUnifiedDataCollator(LegendVLDataCollator):
 
     def __call__(self, data_list):
         return super().__call__(data_list)
+
+class VariableLengthActionCollator(BaseDataCollator):
+    """
+    Collator for variable length action chunks.
+    Groups samples by action_chunk_length to ensure same-length batches.
+    """
+    def __init__(self):
+        super().__init__()
+    
+    def __call__(self, data_list):
+        """
+        Group samples by action_chunk_length and collate each group separately.
+        Returns a dictionary with batches for each chunk length.
+        """
+        # Group samples by action_chunk_length
+        grouped_data = {}
+        for item in data_list:
+            chunk_length = item.get('action_chunk_length', item['actions'].shape[0])
+            if chunk_length not in grouped_data:
+                grouped_data[chunk_length] = []
+            grouped_data[chunk_length].append(item)
+        
+        # Collate each group
+        batches = {}
+        for chunk_length, group_data in grouped_data.items():
+            batch = {}
+            for key in group_data[0].keys():
+                if key == 'action_chunk_length':
+                    # Skip action_chunk_length, it's the same for all in this group
+                    continue
+                values = [item[key] for item in group_data]
+                if isinstance(values[0], torch.Tensor):
+                    batch[key] = torch.stack(values, dim=0)
+                elif isinstance(values[0], np.ndarray):
+                    batch[key] = torch.from_numpy(np.stack(values, axis=0))
+                else:
+                    batch[key] = values
+            batches[chunk_length] = batch
+        
+        # If all samples have the same length, return a single batch
+        if len(batches) == 1:
+            return list(batches.values())[0]
+        
+        # Otherwise return batches grouped by length
+        return batches
 
 class BaseDataCollator(BaseDataCollator):
     def __init__(self):
@@ -840,6 +925,7 @@ def process_state_action(
     n_obs_state_steps, 
     normalizer : Optional[LinearNormalizer] = None, 
     motion_type = 'mano',
+    use_relative_action = False,
 ):
     '''
     Args:
@@ -902,8 +988,8 @@ def process_state_action(
     processed_state, processed_action, action_valid_mask = get_presence_value(
         state_presence, action_presence, processed_action, processed_state, hand_ndim
     )
-
-    processed_action = get_relative_action(processed_state[-1], processed_action)
+    if use_relative_action:
+        processed_action = get_relative_action(processed_state[-1], processed_action)
 
     if normalizer is not None:
         state = normalizer['states'](processed_state)

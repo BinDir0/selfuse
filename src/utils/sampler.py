@@ -151,4 +151,125 @@ class SequenceSampler:
                 data[sample_start_idx:sample_end_idx] = sample
             result[key] = data
         return result
+
+
+class VariableLengthSequenceSampler:
+    """
+    Sampler that selects appropriate chunk length for each starting position.
+    For each position, selects the largest chunk_length that fits in the remaining episode.
+    """
+    def __init__(self, 
+        replay_buffer: ReplayBuffer, 
+        history: int,
+        action_chunk_lengths: list,
+        pad_before: int = 0,
+        keys=None,
+        key_first_k=dict(),
+        episode_mask: Optional[np.ndarray] = None,
+        ):
+        """
+        Args:
+            replay_buffer: ReplayBuffer instance
+            history: Number of history steps
+            action_chunk_lengths: List of possible action chunk lengths, e.g., [4, 8, 16, 32]
+            pad_before: Padding before sequence
+            keys: Keys to sample from replay buffer
+            key_first_k: Dict of key: k for performance optimization
+            episode_mask: Mask for which episodes to include
+        """
+        if keys is None:
+            keys = list(replay_buffer.keys())
         
+        episode_ends = replay_buffer.episode_ends[:]
+        if episode_mask is None:
+            episode_mask = np.ones(episode_ends.shape, dtype=bool)
+        
+        # Sort chunk lengths in descending order to select largest that fits
+        self.action_chunk_lengths = sorted(action_chunk_lengths, reverse=True)
+        self.history = history
+        self.pad_before = pad_before
+        
+        # Create indices: for each starting position, select appropriate chunk length
+        indices = []
+        chunk_lengths = []
+        
+        for i in range(len(episode_ends)):
+            if not episode_mask[i]:
+                continue
+            start_idx = 0
+            if i > 0:
+                start_idx = episode_ends[i-1]
+            end_idx = episode_ends[i]
+            episode_length = end_idx - start_idx
+            
+            min_start = -pad_before
+            max_start = episode_length - history - min(self.action_chunk_lengths)  # At least need history + min chunk
+            
+            for idx in range(min_start, max_start + 1):
+                buffer_start_idx = max(idx, 0) + start_idx
+                # Calculate remaining length from this position
+                remaining_length = end_idx - buffer_start_idx
+                available_action_length = remaining_length - history
+                
+                # Select the largest chunk_length that fits
+                selected_chunk_length = None
+                for chunk_length in self.action_chunk_lengths:
+                    if available_action_length >= chunk_length:
+                        selected_chunk_length = chunk_length
+                        break
+                
+                if selected_chunk_length is not None:
+                    sequence_length = history + selected_chunk_length
+                    buffer_end_idx = min(buffer_start_idx + sequence_length, end_idx)
+                    sample_start_idx = 0
+                    sample_end_idx = sequence_length
+                    
+                    indices.append([
+                        buffer_start_idx, buffer_end_idx,
+                        sample_start_idx, sample_end_idx
+                    ])
+                    chunk_lengths.append(selected_chunk_length)
+        
+        self.indices = np.array(indices) if indices else np.zeros((0, 4), dtype=np.int64)
+        self.chunk_lengths = np.array(chunk_lengths) if chunk_lengths else np.array([], dtype=np.int64)
+        self.keys = list(keys)
+        self.replay_buffer = replay_buffer
+        self.key_first_k = key_first_k
+    
+    def __len__(self):
+        return len(self.indices)
+    
+    def sample_sequence(self, idx):
+        buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.indices[idx]
+        chunk_length = self.chunk_lengths[idx]
+        
+        result = dict()
+        for key in self.keys:
+            input_arr = self.replay_buffer[key]
+            if key not in self.key_first_k:
+                sample = input_arr[buffer_start_idx:buffer_end_idx]
+            else:
+                n_data = buffer_end_idx - buffer_start_idx
+                k_data = min(self.key_first_k[key], n_data)
+                sample = np.full((n_data,) + input_arr.shape[1:], 
+                    fill_value=0, dtype=input_arr.dtype)
+
+                sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
+
+            
+            data = sample
+            if (sample_start_idx > 0) or (sample_end_idx < (self.history + chunk_length)):
+                data = np.zeros(
+                    shape=(self.history + chunk_length,) + input_arr.shape[1:],
+                    dtype=input_arr.dtype)
+                if sample_start_idx > 0:
+                    data[:sample_start_idx] = sample[0]
+                if sample_end_idx < (self.history + chunk_length):
+                    data[sample_end_idx:] = sample[-1]
+                data[sample_start_idx:sample_end_idx] = sample
+            result[key] = data
+        
+        # Store chunk_length in result for later use
+        result['_chunk_length'] = chunk_length
+        return result
+         

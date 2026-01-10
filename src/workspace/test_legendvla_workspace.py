@@ -927,7 +927,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 # %%
 if __name__ == "__main__":
     # Load config
-    config_path = "/home/fanlian/EgoVLA/src/config/experiment/test_legendvla.yaml"
+    config_path = "/home/zengfanlian/EgoVLA/src/config/experiment/test_legendvla.yaml"
     cfg = OmegaConf.load(config_path)
     
     # Initialize workspace and run

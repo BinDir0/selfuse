@@ -39,10 +39,10 @@ def mano_forward(rot, trans, theta, beta, sides=['right'], relative=False):
         if side not in rot:
             continue
         
-        manolayer = ManoLayer(side=side, use_pca=True, ncomps=15, 
+        manolayer = ManoLayer(side=side, use_pca=False, ncomps=45, 
                               center_idx=0 if relative else None,
-                              mano_assets_root='/home/fanlian/mano_v1_2',
-                              flat_hand_mean=True).to(rot[side].device)
+                              mano_assets_root='/share_data/zengfanlian/mano_v1_2',
+                              flat_hand_mean=False).to(rot[side].device)
         
         # Prepare mano input
         wrist_pos = rotation_to_axis_angle(rot[side])

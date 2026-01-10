@@ -61,6 +61,8 @@ dataset:
     pin_memory: True
     persistent_workers: True
   debug: True
+  use_relative_action: False
+  action_chunk_lengths: [4, 8, 16, 32]  # Variable length action chunks, no padding
 
 history: 30
 n_action_steps: 30
@@ -99,7 +101,7 @@ base_quantizer_config: &base_quantizer_config
   quantizer_name: group_residualvq
   nb_code: 1024
   codebook_dim: 512
-  num_quantizers: 8
+  num_quantizers: 4
   num_groups: 1
   shared_codebook: True
   decay: 0.999
@@ -114,7 +116,7 @@ base_loss_config: &base_loss_config
 # Define base tokenizer arguments
 base_tokenizer_args: &base_tokenizer_args
   use_part: wrist
-  horizon: ${n_obs_state_steps}
+  horizon: 4  # 4 steps for independent tokenization
   motion_dim: ${eval:'${shape_meta.obs.state.shape[0]}//2'}
   wrist_dim: ${eval:'${shape_meta.obs.state.wrist.shape[0]}//2'} # per wrist
   hand_dim: ${eval:'${shape_meta.obs.state.hand.shape[0]}//2'} # per hand
@@ -132,46 +134,13 @@ base_optimizer: &base_optimizer
   weight_decay: 1e-4
 
 tokenizer: 
-  # states: 
-  #   wrist: 
-  #     _target_: src.model.action.vq_model.MotionVQModel
-  #     config:
-  #       _target_: src.model.action.vq_config.MotionVQModelConfig
-  #       <<: *base_tokenizer_args
-  #       use_part: wrist
-  #       model_config:
-  #         <<: *base_model_config
-  #         # norm: LN
-  #         output_emb_width: 512
-  #       quantizer_config:
-  #         <<: *base_quantizer_config
-  #         nb_code: 2048    # partially override the base quantizer config
-  #         num_quantizers: 4
-  #         num_groups: 2
-  #   hand: 
-  #     _target_: src.model.action.vq_model.MotionVQModel
-  #     config:
-  #       _target_: src.model.action.vq_config.MotionVQModelConfig
-  #       <<: *base_tokenizer_args
-  #       use_part: hand
-  #       model_config:
-  #         <<: *base_model_config
-  #         # norm: LN
-  #         output_emb_width: 512
-  #       quantizer_config:
-  #         <<: *base_quantizer_config
-  #         nb_code: 2048    # partially override the base quantizer config
-  #         num_quantizers: 4
-  #         num_groups: 2
-  #   use_part: True
-  actions: 
+  motion: 
     wrist: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: wrist
-        horizon: ${n_action_steps}
         model_config:
           <<: *base_model_config
           norm: LN
@@ -187,7 +156,6 @@ tokenizer:
         _target_: src.model.action.vq_config.MotionVQModelConfig
         <<: *base_tokenizer_args
         use_part: hand
-        horizon: ${n_action_steps}
         model_config:
           <<: *base_model_config
           norm: LN
@@ -200,12 +168,7 @@ tokenizer:
     use_part: True
 
 optimizer:
-  states: 
-    wrist: 
-      <<: *base_optimizer
-    hand: 
-      <<: *base_optimizer
-  actions: 
+  motion: 
     wrist: 
       <<: *base_optimizer
     hand: 
