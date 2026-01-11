@@ -21,7 +21,7 @@ class dotdict(dict):
     def __getattr__(self, name):
         return self[name]
     
-    # for parallism
+    # for parallism (pickle support for spawn mode)
     def __getstate__(self):
         return dict(self)
 

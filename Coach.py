@@ -13,143 +13,138 @@ from Game import Game
 
 import multiprocessing
 import copy
+import wandb
 from utils import *
 from itertools import chain
 import torch
-torch.multiprocessing.set_sharing_strategy('file_system')
+
+# 强制使用 spawn 模式，这是 GPU 多进程的前提
+try:
+    torch.multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
 
 log = logging.getLogger(__name__)
 
 
-def executeEpisode_parallel(nnet, args, rank):
+def executeEpisode_parallel(nnet, args, rank, cosine_set):
     """
-    This function executes one episode of self-play, starting with player 1.
-    As the game is played, each turn is added as a training example to
-    trainExamples. The game is played till the game ends. After the game
-    ends, the outcome of the game is used to assign values to each example
-    in trainExamples.
-
-    It uses a temp=1 if episodeStep < tempThreshold, and thereafter
-    uses temp=0.
-
-    Returns:
-        trainExamples: a list of examples of the form (canonicalBoard, currPlayer, pi,v)
-                        pi is the MCTS informed policy vector, v is +1 if
-                        the player eventually won the game, else -1.
+    Worker 进程：自动分配 GPU 并执行搜索
     """
+    # --- 自动分配 GPU ---
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        gpu_id = rank % gpu_count # 轮询分配
+        torch.cuda.set_device(gpu_id)
+        device = torch.device(f'cuda:{gpu_id}')
+    else:
+        device = torch.device('cpu')
+
+    nnet.to(device)
+    nnet.eval()
+
     trainExamples = []
-    game = Game(args.dim, args.boundary, args.upper_bound, print_result=0)
+
+    seed_gram = args.get('seed_gram', None)
+    
+    # 确保如果是 Tensor 且在 GPU 上，转回 CPU
+    if seed_gram is not None and isinstance(seed_gram, torch.Tensor):
+        seed_gram = seed_gram.cpu() 
+
+    game = Game(args.dim, args.boundary, args.upper_bound, print_result=0, device='cpu', 
+                cosine_set=cosine_set, seed_gram=seed_gram)
+    
     board = game.getInitBoard()
-    curPlayer = 1
+    curPlayer = 1 
     episodeStep = 0
-    mcts = MCTS(game, nnet, args, rank)  # reset search tree
+    mcts = MCTS(game, nnet, args, rank) 
+
+    # --- 修复：局部跟踪本局的最佳成绩 ---
+    episode_best_m = 1  # 初始球数为 1
+    episode_best_board = board.clone()
 
     while True:
         episodeStep += 1
-        if rank == 0: 
-            print(f'Rank {rank} is playing step {episodeStep}')
+        
         canonicalBoard = game.getCanonicalForm(board, curPlayer)
         temp = int(episodeStep < args.tempThreshold)
 
+        # MCTS 搜索
         pi = mcts.getActionProb(canonicalBoard, temp=temp)
+        
+        # 数据收集
         sym = game.getSymmetries(canonicalBoard, pi)
         for b, p in sym:
-            trainExamples.append([b, curPlayer, p, None])
+            b_numpy = b.cpu().numpy() if isinstance(b, torch.Tensor) else b
+            trainExamples.append([b_numpy, curPlayer, p, None])
 
         action = np.random.choice(len(pi), p=pi)
         board = game.getNextState(board, action)
 
+        # --- 修复：每一检查当前状态是否打破了记录 ---
+        # 读取当前球数 (channel 1, row 1, col 0) 和 是否死亡 (channel 1, row 1, col 1)
+        current_m = int(board[1, 1, 0].item())
+        is_dead = int(board[1, 1, 1].item())
+
+        # 如果当前状态是存活的，且球数更多，则更新最佳记录
+        if is_dead < 0.5 and current_m > episode_best_m:
+            episode_best_m = current_m
+            episode_best_board = board.cpu().clone()
+
         r = game.getGameEnded(board)
 
         if r != 0:
-            if rank == 0:
-                log.info('Finish one episode')
-            return [(x[0], x[2], r * ((-1) ** (x[1] != curPlayer))) for x in trainExamples], game.best, game.best_board
+            # Reward 归一化
+            min_s = getattr(args, 'min_score', 0)
+            max_s = getattr(args, 'max_score', args.upper_bound)
+            
+            # 注意：这里的 r 是最终球数。
+            norm_r = 2.0 * (r - min_s) / (max_s - min_s + 1e-5) - 1.0
+            norm_r = max(-1.0, min(1.0, norm_r))
 
-def executeEpisode_parallel_pack(nnet, args, iter_num, rank):
+            # 返回训练数据、本局最佳球数、本局最佳棋盘
+            return [(x[0], x[2], norm_r) for x in trainExamples], episode_best_m, episode_best_board
+
+def executeEpisode_parallel_pack(nnet, args, iter_num, rank, cosine_set):
     trainExamples = []
     best_num = 0
-    best_board = torch.zeros(size=(args.upper_bound, args.dim))
+    # 初始化 CPU tensor
+    best_board = torch.zeros(size=(2, args.upper_bound, args.upper_bound)) 
+    
     for i in range(iter_num):
-        # run episode
-        tmpexample, tmpbest, tmpboard = executeEpisode_parallel(nnet, args, rank)
+        tmpexample, tmpbest, tmpboard = executeEpisode_parallel(nnet, args, rank, cosine_set)
         trainExamples.extend(tmpexample)
+        
+        # 记录这一批次中最好的
         if tmpbest > best_num:
             best_num = tmpbest
-            best_board = torch.clone(tmpboard)
+            best_board = tmpboard.clone()
+            
     return trainExamples, best_num, best_board
         
 
 class Coach():
-    """
-    This class executes the self-play + learning. It uses the functions defined
-    in Game and NeuralNet. args are specified in main.py.
-    """
-
     def __init__(self, game, nnet, args):
         self.game = game
         self.nnet = nnet
         self.args = args
         self.mcts = MCTS(self.game, self.nnet, self.args, 0)
-        self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
-        self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
-
-    def executeEpisode(self):
-        """
-        This function executes one episode of self-play, starting with player 1.
-        As the game is played, each turn is added as a training example to
-        trainExamples. The game is played till the game ends. After the game
-        ends, the outcome of the game is used to assign values to each example
-        in trainExamples.
-
-        It uses a temp=1 if episodeStep < tempThreshold, and thereafter
-        uses temp=0.
-
-        Returns:
-            trainExamples: a list of examples of the form (canonicalBoard, currPlayer, pi,v)
-                           pi is the MCTS informed policy vector, v is +1 if
-                           the player eventually won the game, else -1.
-        """
-        trainExamples = []
-        board = self.game.getInitBoard()
-        self.curPlayer = 1
-        episodeStep = 0
-
-        while True:
-            episodeStep += 1
-            canonicalBoard = self.game.getCanonicalForm(board, self.curPlayer)
-            temp = int(episodeStep < self.args.tempThreshold)
-
-            pi = self.mcts.getActionProb(canonicalBoard, temp=temp)
-            sym = self.game.getSymmetries(canonicalBoard, pi)
-            for b, p in sym:
-                trainExamples.append([b, self.curPlayer, p, None])
-
-            action = np.random.choice(len(pi), p=pi)
-            board = self.game.getNextState(board, action)
-
-            r = self.game.getGameEnded(board)
-
-            if r != 0:
-                return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
+        self.trainExamplesHistory = [] 
+        self.skipFirstSelfPlay = False 
 
     def learn(self):
-        """
-        Performs numIters iterations with numEps episodes of self-play in each
-        iteration. After every iteration, it retrains neural network with
-        examples in trainExamples (which has a maximum length of maxlenofQueue).
-        """
-
         for i in tqdm(range(1, self.args.numIters + 1), desc='Training'):
-            # bookkeeping
             log.info(f'Starting Iter #{i} ...')
-            # examples of the iteration
             iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
+            
             if not self.skipFirstSelfPlay or i > 1:
-                # Create a multiprocessing pool with the desired number of processes
-                iter_num = self.args.numEps // self.args.num_process
+                iter_num = max(1, self.args.numEps // self.args.num_process)
+                
+                cpu_net = copy.deepcopy(self.nnet).cpu()
+                cosine_set = self.game.cosine_set.cpu().tolist()
+                
                 with multiprocessing.Pool(processes=self.args.num_process) as pool:
-                    results = pool.starmap(executeEpisode_parallel_pack, [(self.nnet, self.args, iter_num, rank) for rank in range(self.args.num_process)])
+                    results = pool.starmap(executeEpisode_parallel_pack, [(cpu_net, self.args, iter_num, rank, cosine_set) for rank in range(self.args.num_process)])
 
                 results_trainexamples, results_bestnum, results_bestboard = zip(*results)
                 train_examples = list(chain.from_iterable(results_trainexamples))
@@ -157,25 +152,52 @@ class Coach():
                 # Update best result
                 np_bestnum = np.array(results_bestnum)
                 best_index = np.argmax(np_bestnum)
-                best_num = np_bestnum[best_index]
+                global_best_num = np_bestnum[best_index]
 
-                if best_num > self.game.best:
-                    print("New result found, num of points:", best_num, flush=True)
-                    print(results_bestboard[best_index], flush=True)
-                    print(" ", flush=True)
-                    self.game.best = best_num
+                print(f"\n[Iter {i}] Best Kissing Number Found: {global_best_num}", flush=True)
+                
+                m = int(global_best_num)
+                # 打印 Gram Matrix 的左上角部分
+                if m > 0:
+                    # best_board shape is (2, bound, bound), channel 0 is Gram
+                    gram_matrix = results_bestboard[best_index][0]
+                    print(gram_matrix[:min(m, 10), :min(m, 10)], flush=True)
+                print(" ", flush=True)
+                
+                # 记录到 Game 类中以便保存 (尽管并行时 Game 是新建的，但这里是主进程)
+                if global_best_num > self.game.best:
+                    self.game.best = global_best_num
                     self.game.best_board = torch.clone(results_bestboard[best_index])
+                    self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='best_ever.pth.tar')
+                
+                # Save checkpoint
+                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
+                
+                try:
+                    wandb.log({
+                        "global/best_kissing_number": global_best_num,
+                        "global/iteration": i
+                    })
+                except: pass
 
-                # Create a deque and add the results to it
                 iterationTrainExamples = deque(train_examples)
 
-            # shuffle examples before training
+            self.trainExamplesHistory.append(iterationTrainExamples)
+            if len(self.trainExamplesHistory) > self.args.numItersForTrainExamplesHistory:
+                self.trainExamplesHistory.pop(0)
+            
             trainExamples = []
-            trainExamples.extend(iterationTrainExamples)
+            for e in self.trainExamplesHistory:
+                trainExamples.extend(e)
             shuffle(trainExamples)
-            self.nnet.train(trainExamples)
 
-            log.info('NEW MODEL')
+            self.nnet.train(trainExamples)
+            
+            if i % 10 == 0:
+                self.saveTrainExamples(i)
+                self.nnet.save_checkpoint(folder=self.args.checkpoint, filename=self.getCheckpointFile(i))
+
+            log.info('NEW MODEL SAVED')
 
     def getCheckpointFile(self, iteration):
         return 'checkpoint_' + str(iteration) + '.pth.tar'
@@ -202,6 +224,4 @@ class Coach():
             with open(examplesFile, "rb") as f:
                 self.trainExamplesHistory = Unpickler(f).load()
             log.info('Loading done!')
-
-            # examples based on the model were already collected (loaded)
             self.skipFirstSelfPlay = True
