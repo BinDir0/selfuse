@@ -14,10 +14,10 @@ image_shape: [224, 224, 3]
 depth_image_shape: [224, 224]
 vla_dataset_paths:
 #  - /share_data/datasets/taco/10episodes.zarr
- - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+#  - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
 #  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/yeyuyao/egodex_filter_train.zarr
+#  - /share_data/yeyuyao/egodex_filter_train.zarr
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
@@ -73,7 +73,7 @@ dataset:
       shuffle: False
       pin_memory: True
       persistent_workers: True
-    use_relative_action: False
+    use_relative_action: True
   vlm_dataset:
     _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}
@@ -112,6 +112,7 @@ vla_processor:
       _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
       load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2025.12.08/actions # may need to change
   num_image_tokens: ${policy.vision_tower.config.num_image_tokens}
+  num_depth_image_tokens: ${depth_image_seq_len}
   max_seq_len: ${max_vlm_tokens}
   ignore_index: ${ignore_index}
   image_size: ${policy.vision_tower.config.image_size}
@@ -178,7 +179,7 @@ training:
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
-  normalizer_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.12.08/11.53_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2025.12.08/11.53_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   num_epochs: 2
   use_bf16: True
   clipping:
@@ -254,7 +255,7 @@ text_seq_len: ${eval:'${state_seq_len}+64'}
 answer_seq_len: 256 
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
-max_vlm_tokens: ${eval:'${image_seq_len}*(${shape_meta.obs.rgb.horizon})+${depth_image_seq_len}+${text_seq_len}+${answer_seq_len}'} # +1 for depth image
+max_vlm_tokens: ${eval:'(${image_seq_len}+${depth_image_seq_len})*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} # +1 for depth image
 tokenizer_padding: longest # longest or max_length
 # when we use longest, we set several discrete buckets of token_len for the VLM tokens
 token_len_buckets: [768, 832, 896, 960, '${max_vlm_tokens}']

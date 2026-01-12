@@ -53,6 +53,7 @@ class LegendVLADataset(BaseImageDataset):
         self.history = history
         self.objective = objective
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
+        self.use_relative_action = use_relative_action
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
         self.return_raw_sample = return_raw_sample
@@ -79,7 +80,7 @@ class LegendVLADataset(BaseImageDataset):
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
                 zarr_path, 
-                keys=['image', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'intrinsic', 'presence'], 
+                keys=['image', 'depth', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'intrinsic', 'presence'], 
                 lazy_load=True
             )
             self.replay_buffers.append(replay_buffer)
@@ -528,10 +529,8 @@ class LegendUnifiedDataset(BaseImageDataset):
             return self.vla_dataset[idx]
         elif self.vlm_dataset is not None:
             sample = self.vlm_dataset[idx - len(self.vla_dataset)]
-            for key in self.shape_meta.keys():
-                if key not in sample and "valid_mask" not in key:
-                    sample[key] = torch.zeros(self.shape_meta[key])
-                    sample[f"{key}_valid_mask"] = torch.zeros(self.shape_meta[key], dtype=torch.bool)
+            sample['actions'] = torch.zeros(self.shape_meta['actions'])
+            sample['actions_valid_mask'] = torch.zeros(self.shape_meta['actions'], dtype=torch.bool)
             return sample
         else:
             raise ValueError("No dataset to get item from")
@@ -712,9 +711,9 @@ class LegendVLDataCollator(BaseDataCollator):
         labels_batch = [item['labels'] for item in data_list]
         max_token_len = max([item.shape[-1] for item in input_ids_batch])
         bucket = None
-        for len in self.token_len_buckets:
-            if max_token_len <= len:
-                bucket = len
+        for l in self.token_len_buckets:
+            if max_token_len <= l:
+                bucket = l
                 break
         assert bucket is not None, "No bucket found for the max token length"
         batch["input_ids"] = rnn_utils.pad_sequence(
@@ -728,8 +727,20 @@ class LegendVLDataCollator(BaseDataCollator):
             padding_value=self.ignore_index
         )
         batch["attention_mask"] = (batch["input_ids"] != self.pad_token_id).long()
+        depth_values = []
+        depth_ids = []
+        for idx, item in enumerate(data_list):
+            if 'depth_values' in item:
+                depth_values.append(item['depth_values'])
+                depth_ids.append(idx)
+        if len(depth_values) > 0:
+            batch['depth_values'] = torch.stack(depth_values, dim=0)
+            depth_ids_tensor = torch.ones(len(data_list), dtype=torch.int32) * self.ignore_index
+            for i, idx in enumerate(depth_ids): 
+                depth_ids_tensor[idx] = i
+            batch['depth_ids'] = depth_ids_tensor
         for key in data_list[0].keys():
-            if key != 'input_ids' and key != 'attention_mask' and key != 'labels':
+            if key != 'input_ids' and key != 'attention_mask' and key != 'labels' and key != 'depth_values':
                 batch[key] = torch.stack([item[key] for item in data_list])
 
         return batch

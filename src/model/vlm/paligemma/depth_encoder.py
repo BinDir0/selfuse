@@ -78,6 +78,7 @@ class DINOv2DepthEncoder(nn.Module):
                 self.dinov2 = torch.hub.load('facebookresearch/dinov2', model_name)
             if "dinov2_model_path" in config:
                 self.dinov2.load_state_dict(torch.load(config["dinov2_model_path"]))
+                print(f"Loaded DINOv2 model from {config['dinov2_model_path']}")
         except Exception as e:
             raise ImportError(f"Failed to load DINOv2. Error: {e}")
         

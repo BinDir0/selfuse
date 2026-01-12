@@ -571,6 +571,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Add depth_values if available
         if "depth_values" in batch:
             inputs["depth_values"] = batch["depth_values"].to(self.dtype)
+            inputs["depth_ids"] = batch["depth_ids"]
         if self.objective_func != "train_ar":
             inputs["action_position_ids"] = action_position_ids
             inputs["actions"] = batch["actions"].to(self.dtype)

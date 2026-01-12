@@ -698,6 +698,7 @@ class LegendVLA(nn.Module):
         input_ids: torch.LongTensor,
         pixel_values: torch.FloatTensor,
         depth_values: Optional[torch.FloatTensor] = None,
+        depth_ids: Optional[torch.LongTensor] = None,
     ) -> torch.FloatTensor:
         """
         Forward pass through SigLIP vision encoder and text embedding, then combine them.
@@ -727,39 +728,39 @@ class LegendVLA(nn.Module):
             T = None
 
         # Extract RGB vision features
-        rgb_image_feature = self.vision_tower(pixel_values)
-        rgb_image_feature = self.multi_modal_projector(rgb_image_feature)
+        rgb_image_features = self.vision_tower(pixel_values)
+        rgb_image_features = self.multi_modal_projector(rgb_image_features)
         
         # Extract depth features if enabled
         if self.use_depth and depth_values is not None:
             # Handle depth images similar to pixel_values
             if depth_values.ndim == 5:
-                B, T, C, H, W = depth_values.shape
+                Bd, T, C, H, W = depth_values.shape
                 # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
-                depth_values = depth_values.view(B * T, C, H, W)
+                depth_values = depth_values.view(Bd * T, C, H, W)
             else:
                 T = None
             
             # Extract depth features using DINOv2
-            depth_image_feature = self.depth_encoder(depth_values)
-            depth_image_feature = self.depth_modal_projector(depth_image_feature)
-            
-            # Concatenate RGB and depth tokens along token dimension
-            # Each RGB token is paired with corresponding depth token
-            # [B*T, num_patches, embed_dim] + [B*T, num_patches, embed_dim]
-            # -> [B*T, num_patches*2, embed_dim]
-            paired_image_features = torch.cat([rgb_image_feature, depth_image_feature], dim=1)
-        else:
-            paired_image_features = rgb_image_feature
-        
+            depth_image_features = self.depth_encoder(depth_values)
+            depth_image_features = self.depth_modal_projector(depth_image_features)
+        else: 
+            depth_image_features = None
+
         if T is not None:
             # image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
-            paired_image_features = paired_image_features.view(B, -1, paired_image_features.shape[-1])
+            rgb_image_features = rgb_image_features.view(B, -1, rgb_image_features.shape[-1])
+            if depth_image_features is not None:
+                depth_image_features = depth_image_features.view(Bd, -1, depth_image_features.shape[-1])
 
         # normalize the image features
-        _, _, embed_dim = paired_image_features.shape
+        _, _, embed_dim = rgb_image_features.shape
         bsz, seq_len = input_ids.shape
-        scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
+        scaled_image_features = rgb_image_features / (self.vlm_hidden_size**0.5)
+        if depth_image_features is not None:
+            scaled_depth_features = depth_image_features / (self.vlm_hidden_size**0.5)
+        else: 
+            scaled_depth_features = None
 
         # put embedding together - image, text, padding
         final_embedding = torch.full(
@@ -776,9 +777,16 @@ class LegendVLA(nn.Module):
         for i in range(bsz):
             image_indices = image_mask[i].nonzero(as_tuple=True)[0]
             num_image_tokens = len(image_indices)
-            final_embedding[i, image_indices] = scaled_image_features[
-                i, :num_image_tokens
-            ]
+            if depth_ids is not None and depth_ids[i] >= 0:
+                # Each RGB token is paired with corresponding depth token
+                paired_image_features = torch.cat([
+                    scaled_image_features[i].view(T, -1, embed_dim),
+                    scaled_depth_features[depth_ids[i]].view(T, -1, embed_dim),
+                ], dim=1) # [T, 2*num_patches, embed_dim] 
+                paired_image_features = paired_image_features.view(-1, embed_dim)
+            else: 
+                paired_image_features = scaled_image_features[i]
+            final_embedding[i, image_indices] = paired_image_features[:num_image_tokens]
         return final_embedding
 
     @torch.inference_mode()
@@ -817,8 +825,13 @@ class LegendVLA(nn.Module):
         kv_caches = self.joint_model.build_mixture_caches()
 
         # merge the text tokens and the image tokens
-        depth_values = input["depth_values"]
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values)
+        if 'depth_values' in input:
+            depth_values = input["depth_values"]
+            depth_ids = input["depth_ids"]
+        else:
+            depth_values = None
+            depth_ids = None
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
         
         # forward pass thru the vlm, cache the kv
         _, kv_caches = self.joint_model(
@@ -898,8 +911,13 @@ class LegendVLA(nn.Module):
         kv_caches = self.joint_model.build_mixture_caches()
 
         # merge the text tokens and the image tokens
-        depth_values = input["depth_values"]
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values)
+        if 'depth_values' in input:
+            depth_values = input["depth_values"]
+            depth_ids = input["depth_ids"]
+        else:
+            depth_values = None
+            depth_ids = None
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
 
         # sample pure action noise
         action = torch.randn(
@@ -966,7 +984,13 @@ class LegendVLA(nn.Module):
         q_len = input_ids.size(1)
 
         # text tokens + image tokens
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        if 'depth_values' in input:
+            depth_values = input["depth_values"]
+            depth_ids = input["depth_ids"]
+        else:
+            depth_values = None
+            depth_ids = None
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
 
         # build causal mask and position ids for text
         (
@@ -1045,7 +1069,13 @@ class LegendVLA(nn.Module):
         vlm_position_ids = batch["vlm_position_ids"]
 
         # text tokens + image tokens
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        if 'depth_values' in batch:
+            depth_values = batch["depth_values"]
+            depth_ids = batch["depth_ids"]
+        else:
+            depth_values = None
+            depth_ids = None
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
         
         output = self.joint_model(
             attention_mask=causal_mask,
@@ -1115,7 +1145,13 @@ class LegendVLA(nn.Module):
         psi_t = self.psi_t(x0, x1, t)
 
         # text tokens + image tokens
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        if 'depth_values' in batch:
+            depth_values = batch["depth_values"]
+            depth_ids = batch["depth_ids"]
+        else:
+            depth_values = None
+            depth_ids = None
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
 
         # inference with noisy action
         # [Batch_Size, Embed_Dim]
@@ -1201,7 +1237,13 @@ class LegendVLA(nn.Module):
         psi_t = self.psi_t(x0, x1, t)
 
         # text tokens + image tokens
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        if 'depth_values' in batch:
+            depth_values = batch["depth_values"]
+            depth_ids = batch["depth_ids"]
+        else:
+            depth_values = None
+            depth_ids = None
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
         
         # inference with noisy action
         # [Batch_Size, Embed_Dim]

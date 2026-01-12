@@ -221,7 +221,7 @@ def process_depth_images(
     
     # Normalize the depth images to have mean 0 and standard deviation 1
     depth_images = depth_images[:, np.newaxis, :, :] # [T, H, W] -> [T, 1, H, W]
-    depth_images = depth_images.repeat(1, 3, 1, 1) # [T, 1, H, W] -> [T, 3, H, W]
+    depth_images = np.tile(depth_images, (1, 3, 1, 1)) # [T, 1, H, W] -> [T, 3, H, W]
     depth_images = normalize(depth_images, mean=image_mean, std=image_std)
     
     return depth_images
