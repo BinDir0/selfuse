@@ -179,6 +179,55 @@ def process_images(
     return images
 
 
+def process_depth_images(
+    depth_images: np.ndarray,
+    size: Tuple[int, int],
+    rescale_factor: float = 1.0,
+) -> np.ndarray:
+    """Process depth images using numpy operations for CPU-based preprocessing.
+    
+    Args:
+        depth_images: np.ndarray [B, H, W] or [B, 1, H, W] or [B, H, W, 1]
+        size: Tuple[int, int] - target size (height, width)
+        rescale_factor: float - scaling factor for pixel values (default 1.0)
+        
+    Returns:
+        np.ndarray [B, 1, H, W] - processed depth images
+    """
+    # Convert to numpy if input is torch tensor
+    if isinstance(depth_images, torch.Tensor):
+        depth_images = depth_images.cpu().numpy()
+    
+    # Handle different input formats
+    if depth_images.ndim == 2:
+        # Single image: [H, W] -> [1, 1, H, W]
+        depth_images = depth_images[np.newaxis, np.newaxis, :, :]
+    elif depth_images.ndim == 3:
+        # Batch of images: [B, H, W] or [H, W, 1]
+        if depth_images.shape[-1] == 1:
+            # [B, H, W, 1] -> [B, 1, H, W]
+            depth_images = np.transpose(depth_images, (0, 3, 1, 2))
+        else:
+            # [B, H, W] -> [B, 1, H, W]
+            depth_images = depth_images[:, np.newaxis, :, :]
+    elif depth_images.ndim == 4:
+        # [B, 1, H, W] or [B, H, W, 1]
+        if depth_images.shape[-1] == 1:
+            # [B, H, W, 1] -> [B, 1, H, W]
+            depth_images = np.transpose(depth_images, (0, 3, 1, 2))
+        # else: already [B, 1, H, W]
+    
+    # Rescale the pixel values if needed
+    if rescale_factor != 1.0:
+        depth_images = rescale(depth_images, scale=rescale_factor)
+    
+    # Resize the depth images to the desired size using PIL
+    depth_images = resize(depth_images, size=size)
+    
+    # Depth images are not normalized (keep raw values)
+    return depth_images
+
+
 class PaliGemmaProcessor:
     IMAGE_TOKEN = "<image>"
     LOCALIZATION_TOKEN_NUM = 1024
@@ -434,6 +483,7 @@ class PaliGemmaVLAProcessor:
         intrinsic: np.ndarray,
         objective: str = None,
         truncation: bool = True,
+        depth_images: np.ndarray = None,
     ) -> dict:
         '''
         Args: 
@@ -444,10 +494,12 @@ class PaliGemmaVLAProcessor:
             intrinsic: np.ndarray [4]
             objective: str, 'ar' or 'flow' or None, None means both
             truncation: bool
+            depth_images: np.ndarray [T_image, H, W] or [T_image, 1, H, W] (optional)
 
         Returns:
             dict:
                 - pixel_values: torch.FloatTensor [T_image, C, H, W]
+                - depth_values: torch.FloatTensor [T_image, 1, H, W] (if depth_images provided)
                 - input_ids: torch.LongTensor [L]
                 - labels: torch.LongTensor [L]
                 - attention_mask: torch.LongTensor [L]
@@ -469,6 +521,18 @@ class PaliGemmaVLAProcessor:
             image_mean=IMAGENET_STANDARD_MEAN,
             image_std=IMAGENET_STANDARD_STD,
         )
+        
+        # Process depth images if provided
+        depth_values = None
+        if depth_images is not None:
+            # Determine scale factor for depth (typically depth is in meters, normalize to [0, 1])
+            # Adjust this based on your depth data range
+            depth_scale_factor = 1.0  # No rescaling by default, adjust if needed
+            depth_values = process_depth_images(
+                depth_images,
+                size=(self.image_size, self.image_size),
+                rescale_factor=depth_scale_factor,
+            )
 
         # We assume the states and actions are in [-1, 1]
         # Encode states and actions to get token counts for prompt construction
@@ -537,6 +601,8 @@ class PaliGemmaVLAProcessor:
             inputs['answer_start_idx'] = np.array(np.sum(attention_mask))
 
         output = {"pixel_values": pixel_values, **inputs}
+        if depth_values is not None:
+            output["depth_values"] = depth_values
         return output
 
     def decode(self, output_ids):

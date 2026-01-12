@@ -21,6 +21,7 @@ from src.model.common.modules import (
     TimeEncoder,
 )
 from src.utils.monitor import log_execution_time
+from src.model.vlm.paligemma.depth_encoder import DINOv2DepthEncoder
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,18 @@ class LegendVLA(nn.Module):
         # Vision
         self.vision_tower = vision_tower
         self.multi_modal_projector = multi_modal_projector
+        
+        # Depth encoder (optional)
+        self.use_depth = cfg.use_depth
+        if self.use_depth:
+            vision_hidden_size = vision_tower.config.hidden_size
+            self.depth_encoder = DINOv2DepthEncoder(
+                model_name=cfg.depth_model_name,
+                image_size=518,  # DINOv2 default
+                patch_size=14,   # DINOv2 default
+                output_dim=vision_hidden_size,  # Match SigLIP vision encoder output dim
+                freeze_backbone=cfg.freeze_depth_encoder,
+            )
 
         # Mixtures
         self.joint_model = joint_model
@@ -689,6 +702,7 @@ class LegendVLA(nn.Module):
         self,
         input_ids: torch.LongTensor,
         pixel_values: torch.FloatTensor,
+        depth_values: Optional[torch.FloatTensor] = None,
     ) -> torch.FloatTensor:
         """
         Forward pass through SigLIP vision encoder and text embedding, then combine them.
@@ -696,6 +710,7 @@ class LegendVLA(nn.Module):
         Args:
             input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
             pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values (normalized)
+            depth_values (Optional[torch.FloatTensor]): [B, 1, H, W] or [B, T, 1, H, W] Depth images (optional)
         
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
@@ -716,7 +731,29 @@ class LegendVLA(nn.Module):
         else:
             T = None
 
-        selected_image_feature = self.vision_tower(pixel_values)
+        # Extract RGB vision features
+        rgb_image_feature = self.vision_tower(pixel_values)
+        
+        # Extract depth features if enabled
+        if self.use_depth and depth_values is not None:
+            # Handle depth images similar to pixel_values
+            if depth_values.ndim == 5:
+                # [B, T, 1, H, W] -> [B*T, 1, H, W]
+                depth_values = depth_values.view(-1, 1, H, W)
+            else:
+                T = None
+            
+            # Extract depth features using DINOv2
+            depth_image_feature = self.depth_encoder(depth_values.type_as(pixel_values))
+            
+            # Concatenate RGB and depth tokens along token dimension
+            # Each RGB token is paired with corresponding depth token
+            # [B*T, num_patches, embed_dim] + [B*T, num_patches, embed_dim]
+            # -> [B*T, num_patches*2, embed_dim]
+            selected_image_feature = torch.cat([rgb_image_feature, depth_image_feature], dim=1)
+        else:
+            selected_image_feature = rgb_image_feature
+        
         image_features = self.multi_modal_projector(selected_image_feature)
 
         if T is not None:
@@ -784,7 +821,8 @@ class LegendVLA(nn.Module):
         kv_caches = self.joint_model.build_mixture_caches()
 
         # merge the text tokens and the image tokens
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        depth_values = input["depth_values"]
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values)
         
         # forward pass thru the vlm, cache the kv
         _, kv_caches = self.joint_model(
@@ -864,7 +902,8 @@ class LegendVLA(nn.Module):
         kv_caches = self.joint_model.build_mixture_caches()
 
         # merge the text tokens and the image tokens
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        depth_values = input["depth_values"]
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values)
 
         # sample pure action noise
         action = torch.randn(

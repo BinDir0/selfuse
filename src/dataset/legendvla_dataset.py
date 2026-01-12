@@ -229,6 +229,11 @@ class LegendVLADataset(BaseImageDataset):
         idx = np.random.randint(0, instruction_num)
         instruction = instruction[idx]
 
+        # Get depth images if available
+        depth_images = None
+        if 'depth' in sample:
+            depth_images = process_image(sample['depth'], self.history, self.n_obs_image_steps, self.aug_transform)
+        
         # Process all images in batch
         processed_results = self.preprocessor(
             images=image, 
@@ -237,6 +242,7 @@ class LegendVLADataset(BaseImageDataset):
             actions=action, 
             intrinsic=intrinsic, 
             objective=self.objective,
+            depth_images=depth_images,
         )
 
         data = {
@@ -245,6 +251,9 @@ class LegendVLADataset(BaseImageDataset):
             'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
         }
+        # Add depth_values if available
+        if 'depth_values' in processed_results:
+            data['depth_values'] = processed_results['depth_values']
         if self.objective != "train_ar":
             data['actions'] = action
             data['actions_valid_mask'] = action_valid_mask
@@ -637,7 +646,6 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
     def _sample_to_data(self, sample, action_chunk_length=None):
         # Select data keys based on motion_type
-        # action_chunk_length is used to determine how many action steps to extract
         state, action, action_valid_mask, state_presence, action_presence = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
             hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
@@ -785,7 +793,7 @@ class VariableLengthActionCollator(BaseDataCollator):
         # Group samples by action_chunk_length
         grouped_data = {}
         for item in data_list:
-            chunk_length = item.get('action_chunk_length', item['actions'].shape[0])
+            chunk_length = item['action_chunk_length']
             if chunk_length not in grouped_data:
                 grouped_data[chunk_length] = []
             grouped_data[chunk_length].append(item)

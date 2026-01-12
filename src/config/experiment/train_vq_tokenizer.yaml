@@ -134,7 +134,39 @@ base_optimizer: &base_optimizer
   weight_decay: 1e-4
 
 tokenizer: 
-  motion: 
+  states: 
+    wrist: 
+      _target_: src.model.action.vq_model.MotionVQModel
+      config:
+        _target_: src.model.action.vq_config.MotionVQModelConfig
+        <<: *base_tokenizer_args
+        use_part: wrist
+        model_config:
+          <<: *base_model_config
+          norm: LN
+          output_emb_width: 512
+        quantizer_config:
+          <<: *base_quantizer_config
+          nb_code: 1024    # partially override the base quantizer config
+          num_quantizers: 4
+          num_groups: 2
+    hand: 
+      _target_: src.model.action.vq_model.MotionVQModel
+      config:
+        _target_: src.model.action.vq_config.MotionVQModelConfig
+        <<: *base_tokenizer_args
+        use_part: hand
+        model_config:
+          <<: *base_model_config
+          norm: LN
+          output_emb_width: 512
+        quantizer_config:
+          <<: *base_quantizer_config
+          nb_code: 1024    # partially override the base quantizer config
+          num_quantizers: 4
+          num_groups: 2
+    use_part: True
+  actions: 
     wrist: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -168,7 +200,12 @@ tokenizer:
     use_part: True
 
 optimizer:
-  motion: 
+  states: 
+    wrist: 
+      <<: *base_optimizer
+    hand: 
+      <<: *base_optimizer
+  actions: 
     wrist: 
       <<: *base_optimizer
     hand: 
