@@ -66,7 +66,7 @@ dataset:
 
 history: 30
 n_action_steps: 30
-n_obs_image_steps: 2
+n_obs_image_steps: 1
 n_obs_state_steps: 15
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
@@ -149,7 +149,7 @@ tokenizer:
           <<: *base_quantizer_config
           nb_code: 1024    # partially override the base quantizer config
           num_quantizers: 4
-          num_groups: 2
+          num_groups: 1
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -164,7 +164,7 @@ tokenizer:
           <<: *base_quantizer_config
           nb_code: 1024    # partially override the base quantizer config
           num_quantizers: 4
-          num_groups: 2
+          num_groups: 1
     use_part: True
   actions: 
     wrist: 
@@ -181,7 +181,7 @@ tokenizer:
           <<: *base_quantizer_config
           nb_code: 1024    # partially override the base quantizer config
           num_quantizers: 4
-          num_groups: 2
+          num_groups: 1
     hand: 
       _target_: src.model.action.vq_model.MotionVQModel
       config:
@@ -196,7 +196,7 @@ tokenizer:
           <<: *base_quantizer_config
           nb_code: 1024    # partially override the base quantizer config
           num_quantizers: 4
-          num_groups: 2
+          num_groups: 1
     use_part: True
 
 optimizer:

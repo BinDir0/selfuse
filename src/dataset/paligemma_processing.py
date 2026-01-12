@@ -1,15 +1,18 @@
+from math import e
 from typing import Tuple
 import warnings
 import re
 
 import torch
 import numpy as np
-from PIL import Image
+import cv2
 
 from src.utils.pytorch_util import dict_apply
 
 IMAGENET_STANDARD_MEAN = np.array([0.5, 0.5, 0.5])
 IMAGENET_STANDARD_STD = np.array([0.5, 0.5, 0.5])
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
+IMAGENET_STD = np.array([0.229, 0.224, 0.225])
 
 
 def add_image_tokens_to_prompt(
@@ -75,38 +78,47 @@ def rescale(
 def resize(
     image: np.ndarray,
     size: Tuple[int, int],
+    is_depth: bool = False,
 ) -> np.ndarray:
-    """Highly optimized batch resize using PIL.Image with memory efficiency.
+    """Batch resize, supports RGB image, depth image and grayscale image.
     
     Args:
-        image: np.ndarray [B, C, H, W]
+        image: np.ndarray - input image
+            - [B, C, H, W]: RGB image (C=3) or grayscale image (C=1)
+            - [B, H, W]: depth image
         size: Tuple[int, int] - (height, width)
         
     Returns:
-        np.ndarray - resized image
+        np.ndarray - resized image, keep the same dimension format as the input
     """
     height, width = size
-    batch_size, channels, orig_height, orig_width = image.shape
     
-    resized_image = np.zeros((batch_size, channels, height, width), dtype=np.float32)
-    temp_hwc = np.zeros((orig_height, orig_width, channels), dtype=np.uint8)
+    if image.ndim == 3:  # [B, H, W]
+        resized_image = np.zeros((image.shape[0], height, width), dtype=image.dtype)
+    elif image.ndim == 4:  # [B, C, H, W]
+        resized_image = np.zeros((image.shape[0], image.shape[1], height, width), dtype=image.dtype)
+    else: 
+        raise ValueError(f"Invalid input dimension: {image.ndim}")
+    is_gray = (image.shape[1] == 1)
     
-    for b in range(batch_size):
-        # Convert from [C, H, W] to [H, W, C] for PIL
-        img_hwc = np.transpose(image[b], (1, 2, 0))
+    for b in range(image.shape[0]):
+        img = image[b]
+        if img.ndim == 3: # [C, H, W] -> [H, W, C]
+            img = img.transpose(1, 2, 0)
         
-        # Handle different input data types efficiently
-        if img_hwc.dtype == np.uint8:
-            pil_image = Image.fromarray(img_hwc)
-        elif img_hwc.dtype in [np.float32, np.float64]:
-            pil_image = Image.fromarray((img_hwc * 255).astype(np.uint8))
+        # Resize
+        if is_depth: 
+            resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)
+        else:
+            resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
         
-        resized_pil = pil_image.resize((width, height), Image.Resampling.BILINEAR)
-        
-        resized_hwc = np.array(resized_pil, dtype=np.float32) / 255.0
-        
-        # Convert back to [C, H, W]
-        resized_image[b] = np.transpose(resized_hwc, (2, 0, 1))
+        if is_gray: # [H, W] -> [H, W, 1]
+            resized_img = resized_img[..., np.newaxis]
+        # [H, W, C] -> [C, H, W]
+        if img.ndim == 3:
+            resized_image[b] = resized_img.transpose(2, 0, 1)
+        else:
+            resized_image[b] = resized_img
     
     return resized_image
 
@@ -183,39 +195,22 @@ def process_depth_images(
     depth_images: np.ndarray,
     size: Tuple[int, int],
     rescale_factor: float = 1.0,
+    image_mean: np.ndarray = IMAGENET_MEAN,
+    image_std: np.ndarray = IMAGENET_STD,
 ) -> np.ndarray:
     """Process depth images using numpy operations for CPU-based preprocessing.
     
     Args:
-        depth_images: np.ndarray [B, H, W] or [B, 1, H, W] or [B, H, W, 1]
+        depth_images: np.ndarray [T, H, W]
         size: Tuple[int, int] - target size (height, width)
         rescale_factor: float - scaling factor for pixel values (default 1.0)
         
     Returns:
-        np.ndarray [B, 1, H, W] - processed depth images
+        np.ndarray [T, 3, H, W] - processed depth images
     """
     # Convert to numpy if input is torch tensor
     if isinstance(depth_images, torch.Tensor):
         depth_images = depth_images.cpu().numpy()
-    
-    # Handle different input formats
-    if depth_images.ndim == 2:
-        # Single image: [H, W] -> [1, 1, H, W]
-        depth_images = depth_images[np.newaxis, np.newaxis, :, :]
-    elif depth_images.ndim == 3:
-        # Batch of images: [B, H, W] or [H, W, 1]
-        if depth_images.shape[-1] == 1:
-            # [B, H, W, 1] -> [B, 1, H, W]
-            depth_images = np.transpose(depth_images, (0, 3, 1, 2))
-        else:
-            # [B, H, W] -> [B, 1, H, W]
-            depth_images = depth_images[:, np.newaxis, :, :]
-    elif depth_images.ndim == 4:
-        # [B, 1, H, W] or [B, H, W, 1]
-        if depth_images.shape[-1] == 1:
-            # [B, H, W, 1] -> [B, 1, H, W]
-            depth_images = np.transpose(depth_images, (0, 3, 1, 2))
-        # else: already [B, 1, H, W]
     
     # Rescale the pixel values if needed
     if rescale_factor != 1.0:
@@ -224,7 +219,11 @@ def process_depth_images(
     # Resize the depth images to the desired size using PIL
     depth_images = resize(depth_images, size=size)
     
-    # Depth images are not normalized (keep raw values)
+    # Normalize the depth images to have mean 0 and standard deviation 1
+    depth_images = depth_images[:, np.newaxis, :, :] # [T, H, W] -> [T, 1, H, W]
+    depth_images = depth_images.repeat(1, 3, 1, 1) # [T, 1, H, W] -> [T, 3, H, W]
+    depth_images = normalize(depth_images, mean=image_mean, std=image_std)
+    
     return depth_images
 
 
@@ -391,15 +390,19 @@ class PaliGemmaVLAProcessor:
         tokenizer,
         motion_tokenizer,
         num_image_tokens: int,
+        num_depth_image_tokens: int,
         max_seq_len: int,
         ignore_index: int = -100,
         image_size: int = 224,
+        depth_image_size: int = 224, 
         tokenizer_padding: str = "longest", # longest or max_length
     ):
         super().__init__()
 
         self.image_seq_length = num_image_tokens
+        self.depth_image_seq_length = num_depth_image_tokens
         self.image_size = image_size
+        self.depth_image_size = depth_image_size
         self.max_seq_len = max_seq_len
         self.ignore_index = ignore_index
         self.tokenizer_padding = tokenizer_padding
@@ -494,7 +497,7 @@ class PaliGemmaVLAProcessor:
             intrinsic: np.ndarray [4]
             objective: str, 'ar' or 'flow' or None, None means both
             truncation: bool
-            depth_images: np.ndarray [T_image, H, W] or [T_image, 1, H, W] (optional)
+            depth_images: np.ndarray [T_image, 3, H, W]
 
         Returns:
             dict:
@@ -529,9 +532,11 @@ class PaliGemmaVLAProcessor:
             # Adjust this based on your depth data range
             depth_scale_factor = 1.0  # No rescaling by default, adjust if needed
             depth_values = process_depth_images(
-                depth_images,
-                size=(self.image_size, self.image_size),
+                depth_images=depth_images,
+                size=(self.depth_image_size, self.depth_image_size),
                 rescale_factor=depth_scale_factor,
+                image_mean=IMAGENET_MEAN,
+                image_std=IMAGENET_STD,
             )
 
         # We assume the states and actions are in [-1, 1]
@@ -546,11 +551,14 @@ class PaliGemmaVLAProcessor:
         text = text.lower()
         text = f"{text} using camera {intrinsic_str}{self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
+        depth_image_seq_len = 0
+        if depth_images is not None:
+            depth_image_seq_len = self.depth_image_seq_length * depth_images.shape[0]
         input_string = add_image_action_tokens_to_prompt(
             prefix_prompt=text,
             bos_token=self.tokenizer.bos_token,
             eos_token=self.tokenizer.eos_token,
-            image_seq_len=self.image_seq_length * images.shape[0],
+            image_seq_len=self.image_seq_length * images.shape[0] + depth_image_seq_len,
             image_token=self.IMAGE_TOKEN,
             action_begin_token=self.ACTION_BEGIN_TOKEN,
             action_end_token=self.ACTION_END_TOKEN,
@@ -626,14 +634,14 @@ class PaliGemmaVLAProcessor:
         return {'actions': actions}
 
 
-def get_resized_intrinsic(intrinsic, original_width: int, original_height: int, img_size: int = 384): 
+def get_resized_intrinsic(intrinsic, original_width: int, original_height: int, img_size: int = 224): 
     '''
     Return intrinsic after resizing the images. 
     Args: 
         intrinsic: np.ndarray [..., 4]
         original_width: int
         original_height: int
-        img_size: int = 384
+        img_size: int = 224
     Returns: 
         intrinsic: np.ndarray [..., 4]
     '''

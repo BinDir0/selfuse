@@ -21,7 +21,6 @@ from src.model.common.modules import (
     TimeEncoder,
 )
 from src.utils.monitor import log_execution_time
-from src.model.vlm.paligemma.depth_encoder import DINOv2DepthEncoder
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +31,10 @@ class LegendVLA(nn.Module):
         self, 
         cfg,
         shape_meta,
+        depth_encoder, 
         vision_tower,
         multi_modal_projector,
+        depth_modal_projector,
         joint_model,
     ):
         super().__init__()
@@ -75,14 +76,8 @@ class LegendVLA(nn.Module):
         # Depth encoder (optional)
         self.use_depth = cfg.use_depth
         if self.use_depth:
-            vision_hidden_size = vision_tower.config.hidden_size
-            self.depth_encoder = DINOv2DepthEncoder(
-                model_name=cfg.depth_model_name,
-                image_size=518,  # DINOv2 default
-                patch_size=14,   # DINOv2 default
-                output_dim=vision_hidden_size,  # Match SigLIP vision encoder output dim
-                freeze_backbone=cfg.freeze_depth_encoder,
-            )
+            self.depth_encoder = depth_encoder
+            self.depth_modal_projector = depth_modal_projector
 
         # Mixtures
         self.joint_model = joint_model
@@ -710,7 +705,7 @@ class LegendVLA(nn.Module):
         Args:
             input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
             pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values (normalized)
-            depth_values (Optional[torch.FloatTensor]): [B, 1, H, W] or [B, T, 1, H, W] Depth images (optional)
+            depth_values (Optional[torch.FloatTensor]): [B, C, H, W] or [B, T, C, H, W] Depth images (optional)
         
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
@@ -733,37 +728,38 @@ class LegendVLA(nn.Module):
 
         # Extract RGB vision features
         rgb_image_feature = self.vision_tower(pixel_values)
+        rgb_image_feature = self.multi_modal_projector(rgb_image_feature)
         
         # Extract depth features if enabled
         if self.use_depth and depth_values is not None:
             # Handle depth images similar to pixel_values
             if depth_values.ndim == 5:
-                # [B, T, 1, H, W] -> [B*T, 1, H, W]
-                depth_values = depth_values.view(-1, 1, H, W)
+                B, T, C, H, W = depth_values.shape
+                # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
+                depth_values = depth_values.view(B * T, C, H, W)
             else:
                 T = None
             
             # Extract depth features using DINOv2
-            depth_image_feature = self.depth_encoder(depth_values.type_as(pixel_values))
+            depth_image_feature = self.depth_encoder(depth_values)
+            depth_image_feature = self.depth_modal_projector(depth_image_feature)
             
             # Concatenate RGB and depth tokens along token dimension
             # Each RGB token is paired with corresponding depth token
             # [B*T, num_patches, embed_dim] + [B*T, num_patches, embed_dim]
             # -> [B*T, num_patches*2, embed_dim]
-            selected_image_feature = torch.cat([rgb_image_feature, depth_image_feature], dim=1)
+            paired_image_features = torch.cat([rgb_image_feature, depth_image_feature], dim=1)
         else:
-            selected_image_feature = rgb_image_feature
+            paired_image_features = rgb_image_feature
         
-        image_features = self.multi_modal_projector(selected_image_feature)
-
         if T is not None:
             # image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
-            image_features = image_features.view(B, -1, image_features.shape[-1])
+            paired_image_features = paired_image_features.view(B, -1, paired_image_features.shape[-1])
 
         # normalize the image features
-        _, _, embed_dim = image_features.shape
+        _, _, embed_dim = paired_image_features.shape
         bsz, seq_len = input_ids.shape
-        scaled_image_features = image_features / (self.vlm_hidden_size**0.5)
+        scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
 
         # put embedding together - image, text, padding
         final_embedding = torch.full(
