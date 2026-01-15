@@ -90,6 +90,10 @@ class LegendVLAInference:
             "causal_mask": causal_mask,
         }
         
+        if "depth_values" in batch:
+            inputs["depth_values"] = batch["depth_values"].to(self.device).to(self.dtype)
+            inputs["depth_ids"] = batch["depth_ids"].to(self.device)
+
         # 添加ground truth actions用于对比（如果有）
         if "actions" in batch:
             inputs["actions"] = batch["actions"].to(self.device).to(self.dtype)

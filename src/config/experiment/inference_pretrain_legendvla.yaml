@@ -11,7 +11,7 @@ exp_name: "inference_pretrain"
 # 推理专用配置
 inference:
   # checkpoint路径
-  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2025.12.12/20.24_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=135000-eval_l1_loss=0.0403/pytorch_model/mp_rank_00_model_states.pt
+  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.13/03.05_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=100000-eval_l1_loss=0.0422/pytorch_model/mp_rank_00_model_states.pt
   
   # 设备配置
   device: cuda:0
@@ -50,7 +50,7 @@ logging:
 # 使用较小的数据集进行快速测试（可选）
 # Only support single dataset inference
 vla_dataset_paths:
-  - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
 
 # 如果只想推理特定的数据集，可以取消下面的注释并修改
 # vla_dataset_paths:
