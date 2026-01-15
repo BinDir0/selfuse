@@ -59,7 +59,7 @@ class StreamingReplayBuffer(ReplayBuffer):
             # Use references for image, because image is too large to load into memory
             # Use references for all other data according to the lazy_load flag
             buffer._data = buffer._data | cls._load_zarr_recursive(
-                data, prefix_key=key, lazy_load=lazy_load if key != 'image' else True
+                data, prefix_key=key, lazy_load=lazy_load if key != 'image' and key != 'depth' else True
             )
                 
         return buffer

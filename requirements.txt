@@ -25,6 +25,7 @@ PyRender
 scipy 
 matplotlib
 seaborn
+xformers
 # chumpy
 #manotorch
 #manopth

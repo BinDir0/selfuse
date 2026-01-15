@@ -56,18 +56,17 @@ dataset:
   return_numpy: False # whether to return numpy arrays
   normalizer_dataloader_cfg:
     batch_size: 4096
-    num_workers: 192
-    shuffle: True
+    num_workers: 24
+    shuffle: False
     pin_memory: True
     persistent_workers: True
   debug: True
-  use_relative_action: False
-  action_chunk_lengths: [4, 8, 16, 32]  # Variable length action chunks, no padding
+  use_relative_action: True
 
-history: 30
-n_action_steps: 30
+history: 32
+n_action_steps: 32
 n_obs_image_steps: 1
-n_obs_state_steps: 15
+n_obs_state_steps: 16
 n_latency_steps: 0
 # Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
 
@@ -93,16 +92,18 @@ base_model_config: &base_model_config
   depth: 3
   dilation_growth_rate: 3
   output_emb_width: 512
-  activate: relu
-  norm: null
+  activation: silu
+  norm: GN
   num_conv_layers: 3
+  encoder_causal: True
+  decoder_causal: False
 
 base_quantizer_config: &base_quantizer_config
   quantizer_name: group_residualvq
-  nb_code: 1024
+  codebook_size: 2048
   codebook_dim: 512
   num_quantizers: 4
-  num_groups: 1
+  num_groups: 2
   shared_codebook: True
   decay: 0.999
   kmeans_init: True
@@ -116,10 +117,10 @@ base_loss_config: &base_loss_config
 # Define base tokenizer arguments
 base_tokenizer_args: &base_tokenizer_args
   use_part: wrist
-  horizon: 4  # 4 steps for independent tokenization
-  motion_dim: ${eval:'${shape_meta.obs.state.shape[0]}//2'}
-  wrist_dim: ${eval:'${shape_meta.obs.state.wrist.shape[0]}//2'} # per wrist
-  hand_dim: ${eval:'${shape_meta.obs.state.hand.shape[0]}//2'} # per hand
+  horizon: 32 
+  motion_dim: ${eval:'${shape_meta.obs.state.shape[0]}'}
+  wrist_dim: ${eval:'${shape_meta.obs.state.wrist.shape[0]}'} 
+  hand_dim: ${eval:'${shape_meta.obs.state.hand.shape[0]}'}
   model_config:
     <<: *base_model_config
   quantizer_config:
@@ -134,87 +135,45 @@ base_optimizer: &base_optimizer
   weight_decay: 1e-4
 
 tokenizer: 
-  states: 
-    wrist: 
-      _target_: src.model.action.vq_model.MotionVQModel
-      config:
-        _target_: src.model.action.vq_config.MotionVQModelConfig
-        <<: *base_tokenizer_args
-        use_part: wrist
-        model_config:
-          <<: *base_model_config
-          norm: LN
-          output_emb_width: 512
-        quantizer_config:
-          <<: *base_quantizer_config
-          nb_code: 1024    # partially override the base quantizer config
-          num_quantizers: 4
-          num_groups: 1
-    hand: 
-      _target_: src.model.action.vq_model.MotionVQModel
-      config:
-        _target_: src.model.action.vq_config.MotionVQModelConfig
-        <<: *base_tokenizer_args
-        use_part: hand
-        model_config:
-          <<: *base_model_config
-          norm: LN
-          output_emb_width: 512
-        quantizer_config:
-          <<: *base_quantizer_config
-          nb_code: 1024    # partially override the base quantizer config
-          num_quantizers: 4
-          num_groups: 1
-    use_part: True
-  actions: 
-    wrist: 
-      _target_: src.model.action.vq_model.MotionVQModel
-      config:
-        _target_: src.model.action.vq_config.MotionVQModelConfig
-        <<: *base_tokenizer_args
-        use_part: wrist
-        model_config:
-          <<: *base_model_config
-          norm: LN
-          output_emb_width: 512
-        quantizer_config:
-          <<: *base_quantizer_config
-          nb_code: 1024    # partially override the base quantizer config
-          num_quantizers: 4
-          num_groups: 1
-    hand: 
-      _target_: src.model.action.vq_model.MotionVQModel
-      config:
-        _target_: src.model.action.vq_config.MotionVQModelConfig
-        <<: *base_tokenizer_args
-        use_part: hand
-        model_config:
-          <<: *base_model_config
-          norm: LN
-          output_emb_width: 512
-        quantizer_config:
-          <<: *base_quantizer_config
-          nb_code: 1024    # partially override the base quantizer config
-          num_quantizers: 4
-          num_groups: 1
-    use_part: True
+  wrist: 
+    _target_: src.model.action.vq_model.MotionVQModel
+    config:
+      _target_: src.model.action.vq_config.MotionVQModelConfig
+      <<: *base_tokenizer_args
+      use_part: wrist
+      model_config:
+        <<: *base_model_config
+        output_emb_width: 512
+      quantizer_config:
+        <<: *base_quantizer_config
+        codebook_size: 4096    # partially override the base quantizer config
+        num_quantizers: 8
+        num_groups: 2
+  # hand: 
+  #   _target_: src.model.action.vq_model.MotionVQModel
+  #   config:
+  #     _target_: src.model.action.vq_config.MotionVQModelConfig
+  #     <<: *base_tokenizer_args
+  #     use_part: hand
+  #     model_config:
+  #       <<: *base_model_config
+  #       output_emb_width: 512
+  #     quantizer_config:
+  #       <<: *base_quantizer_config
+  #       codebook_size: 4096    # partially override the base quantizer config
+  #       num_quantizers: 4
+  #       num_groups: 2
 
 optimizer:
-  states: 
-    wrist: 
-      <<: *base_optimizer
-    hand: 
-      <<: *base_optimizer
-  actions: 
-    wrist: 
-      <<: *base_optimizer
-    hand: 
-      <<: *base_optimizer
+  wrist: 
+    <<: *base_optimizer
+  hand: 
+    <<: *base_optimizer
 
 
 training:
   seed: 42
-  device: cuda:1
+  device: cuda:0
   num_epochs: 10
   tqdm_interval_sec: 1.0
   max_train_steps: 
@@ -225,7 +184,7 @@ training:
     enabled: True
     max_grad_norm: 1.0
   ckpt_save_interval: 2
-  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2025.12.08/11.53_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.15/17.29_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   valid_tokenizer_path: # /home/chenzhang/project/EgoVLA/outputs/2025.10.16/23.19_vq_tokenizer_train_vq_tokenizer/epoch_checkpoints/epoch=7
   # if valid_tokenizer_path is not None, will validate the tokenizer
   save_path: 

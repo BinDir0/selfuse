@@ -17,7 +17,7 @@ vla_dataset_paths:
 #  - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
 #  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
-#  - /share_data/yeyuyao/egodex_filter_train.zarr
+ - /share_data/yeyuyao/egodex_filter_train.zarr
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
@@ -238,7 +238,8 @@ mixture:
 time_hidden_size: 1024 # only applicable if using adaptive
 time_min_period: 0.004
 time_max_period: 4.0
-action_expert_rope_theta: 100.0   # since action/proprio seq_len is pretty small
+action_expert_rope_theta: 10000.0   # since action/proprio seq_len is pretty small
+# pi0.5 uses 10000 for  action expert
 
 # Fixed
 imagenet_mean: [0.485, 0.456, 0.406]

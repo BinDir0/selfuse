@@ -554,6 +554,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         max_train_episodes=None,
         return_numpy=True, # whether to return numpy arrays
         normalizer_dataloader_cfg=None,
+        use_relative_action=False,
         debug=False, 
     ):
         
@@ -611,6 +612,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
         self.normalizer = None
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.debug = debug
+        self.use_relative_action = use_relative_action
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -635,7 +637,7 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
-        state, action, action_valid_mask, state_presence, action_presence = process_state_action(
+        state, action, _, _, _ = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
             hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
@@ -647,12 +649,12 @@ class LegendVLALowLevelDataset(BaseImageDataset):
             history = self.history, 
             n_obs_state_steps = self.n_obs_state_steps,
             motion_type = self.motion_type,
+            use_relative_action = self.use_relative_action,
         )
         if self.dims is not None:
             dim_slice = slice(self.dims[0], self.dims[1])
             state = state[:, dim_slice]
             action = action[:, dim_slice]
-            action_valid_mask = action_valid_mask[:, dim_slice]
 
         data = {
             'states': state,
@@ -752,51 +754,6 @@ class LegendUnifiedDataCollator(LegendVLDataCollator):
     def __call__(self, data_list):
         return super().__call__(data_list)
 
-class VariableLengthActionCollator(BaseDataCollator):
-    """
-    Collator for variable length action chunks.
-    Groups samples by action_chunk_length to ensure same-length batches.
-    """
-    def __init__(self):
-        super().__init__()
-    
-    def __call__(self, data_list):
-        """
-        Group samples by action_chunk_length and collate each group separately.
-        Returns a dictionary with batches for each chunk length.
-        """
-        # Group samples by action_chunk_length
-        grouped_data = {}
-        for item in data_list:
-            chunk_length = item['action_chunk_length']
-            if chunk_length not in grouped_data:
-                grouped_data[chunk_length] = []
-            grouped_data[chunk_length].append(item)
-        
-        # Collate each group
-        batches = {}
-        for chunk_length, group_data in grouped_data.items():
-            batch = {}
-            for key in group_data[0].keys():
-                if key == 'action_chunk_length':
-                    # Skip action_chunk_length, it's the same for all in this group
-                    continue
-                values = [item[key] for item in group_data]
-                if isinstance(values[0], torch.Tensor):
-                    batch[key] = torch.stack(values, dim=0)
-                elif isinstance(values[0], np.ndarray):
-                    batch[key] = torch.from_numpy(np.stack(values, axis=0))
-                else:
-                    batch[key] = values
-            batches[chunk_length] = batch
-        
-        # If all samples have the same length, return a single batch
-        if len(batches) == 1:
-            return list(batches.values())[0]
-        
-        # Otherwise return batches grouped by length
-        return batches
-
 class BaseDataCollator(BaseDataCollator):
     def __init__(self):
         super().__init__()
@@ -852,6 +809,7 @@ def get_relative_action(state, action):
     Returns:
         action: np.ndarray, shape: [H, wrist_dim + hand_dim]
     '''
+    action = action.copy() # avoid modifying the original action
     for idx in range(2): 
         wrist_action_homo_mat = homo_matrix_from_trans_6drot(action[..., idx*3 : idx*3+3], action[..., 6+idx*6 : 6+idx*6+6])
         wrist_state_homo_mat = homo_matrix_from_trans_6drot(state[idx*3 : idx*3+3], state[6+idx*6 : 6+idx*6+6])
