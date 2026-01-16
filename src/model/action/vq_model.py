@@ -330,8 +330,8 @@ class MotionVQModel(PreTrainedModel):
             'loss_recons': recon_loss,
             'perplexity': perplexity,
             'loss_commit': commit_loss.mean(),
-            'avg_pred_state': pred_state.mean(),
-            'avg_pred_action': pred_action.mean(),
+            'avg_abs_pred_state': pred_state.abs().mean(),
+            'avg_abs_pred_action': pred_action.abs().mean(),
         }
 
 

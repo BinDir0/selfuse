@@ -43,7 +43,6 @@ class LegendVLADataset(BaseImageDataset):
             use_relative_action=False,
             max_train_episodes=None,
             train_mode=True,
-            token_len_buckets=None, 
             return_raw_sample=False,
         ):
         
@@ -118,7 +117,6 @@ class LegendVLADataset(BaseImageDataset):
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
         self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
         self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
-        self.token_len_buckets = token_len_buckets
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -266,8 +264,6 @@ class LegendVLADataset(BaseImageDataset):
 
     def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
         self.preprocessor = preprocessor
-        if self.token_len_buckets is None:
-            self.token_len_buckets = [preprocessor.max_seq_len]
 
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer = normalizer
@@ -329,7 +325,6 @@ class LegendVLADataset(BaseImageDataset):
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
-            token_len_buckets=self.token_len_buckets,
         )
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -370,7 +365,6 @@ class LegendVLMDataset(BaseImageDataset):
             seed=42,
             val_ratio=0.0,
             train_mode=True,
-            token_len_buckets=None,
         ):
         
         super().__init__()
@@ -381,7 +375,6 @@ class LegendVLMDataset(BaseImageDataset):
         self.datasets = None
         self.preprocessor = None
         self.train_mode = train_mode
-        self.token_len_buckets = token_len_buckets
         self.aug_transform = None
         if self.train_mode:
             self.aug_transform = transforms.Compose([
@@ -468,13 +461,10 @@ class LegendVLMDataset(BaseImageDataset):
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
-            token_len_buckets=self.token_len_buckets,
         )
 
     def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
         self.preprocessor = preprocessor
-        if self.token_len_buckets is None:
-            self.token_len_buckets = [preprocessor.max_seq_len]
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
@@ -491,20 +481,18 @@ class LegendUnifiedDataset(BaseImageDataset):
     def __init__(self,
         vla_dataset: LegendVLADataset,
         vlm_dataset: LegendVLMDataset = None,
-        token_len_buckets: list = None,
     ):
         super().__init__()
         self.vla_dataset = vla_dataset
         self.vlm_dataset = vlm_dataset
         self.shape_meta = None
-        self.token_len_buckets = token_len_buckets
         
         print(f"LegendUnifiedDataset initialized with {len(self.vla_dataset)} VLA samples")
         if self.vlm_dataset is not None:
             print(f"LegendUnifiedDataset initialized with {len(self.vlm_dataset)} VLM samples")
 
     def get_collator(self):
-        return LegendUnifiedDataCollator(token_len_buckets=self.token_len_buckets)
+        return LegendVLDataCollator()
 
     def set_return_raw_sample(self, return_raw_sample: bool):
         """Set whether to return raw sample data for VLA dataset (for testing/debugging purposes)"""
@@ -514,7 +502,6 @@ class LegendUnifiedDataset(BaseImageDataset):
         return LegendUnifiedDataset(
             vla_dataset=self.vla_dataset.get_validation_dataset(),
             vlm_dataset=self.vlm_dataset.get_validation_dataset() if self.vlm_dataset is not None else None, 
-            token_len_buckets=self.token_len_buckets
         )
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -693,11 +680,10 @@ class LegendVLALowLevelDataset(BaseImageDataset):
 
 
 class LegendVLDataCollator(BaseDataCollator):
-    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, token_len_buckets: list = None):
+    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100):
         super().__init__()
         self.pad_token_id = pad_token_id
         self.ignore_index = ignore_index
-        self.token_len_buckets = token_len_buckets
 
     def __call__(self, data_list):
         """
@@ -711,13 +697,6 @@ class LegendVLDataCollator(BaseDataCollator):
         batch = {}
         input_ids_batch = [item['input_ids'] for item in data_list]
         labels_batch = [item['labels'] for item in data_list]
-        max_token_len = max([item.shape[-1] for item in input_ids_batch])
-        bucket = None
-        for l in self.token_len_buckets:
-            if max_token_len <= l:
-                bucket = l
-                break
-        assert bucket is not None, "No bucket found for the max token length"
         batch["input_ids"] = rnn_utils.pad_sequence(
             input_ids_batch,
             batch_first=True,
@@ -746,13 +725,6 @@ class LegendVLDataCollator(BaseDataCollator):
                 batch[key] = torch.stack([item[key] for item in data_list])
 
         return batch
-
-class LegendUnifiedDataCollator(LegendVLDataCollator):
-    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, token_len_buckets: list = None):
-        super().__init__(pad_token_id=pad_token_id, ignore_index=ignore_index, token_len_buckets=token_len_buckets)
-
-    def __call__(self, data_list):
-        return super().__call__(data_list)
 
 class BaseDataCollator(BaseDataCollator):
     def __init__(self):

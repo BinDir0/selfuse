@@ -590,9 +590,9 @@ class LegendVLA(nn.Module):
             cnt = vlm_token_cnts[idx].item()
             start = answer_start_idx[idx].item()
             answer_len = cnt - start
-            causal_mask[idx, :start, :start] = 0  # image/text attend to itself
+            causal_mask[idx, :cnt, :start] = 0  # image/text/answer attend to image/text
             mask = torch.tril(torch.ones((answer_len, answer_len), dtype=torch.bool, device=device))
-            causal_mask[idx, start:start+answer_len, start:start+answer_len] = torch.where(
+            causal_mask[idx, start:cnt, start:cnt] = torch.where(
                 mask, 0, torch.finfo(dtype).min
             ) # answer tokens attend to answer tokens before them
             causal_mask[idx, action_start:, :start] = (
