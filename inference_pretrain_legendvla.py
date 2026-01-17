@@ -101,6 +101,136 @@ class LegendVLAInference:
         
         return inputs
     
+    def _get_origin_index(self, dataset, idx: int):
+        """Get the origin index (buffer_start_idx) for a given dataset index
+        
+        Returns:
+            buffer_start_idx: The starting index of the sequence in the original zarr dataset.
+            
+        Note:
+            - origin_indices: sequence start index (buffer_start_idx)
+            - origin_indices + history: observation frame index (the frame that the model actually sees)
+            To access the observation frame data (instruction, intrinsic, etc.), use origin_indices + history.
+        """
+        curr_idx = idx
+        dataset_idx = 0
+        local_idx = None
+        
+        # Find which sampler this index belongs to
+        for i, length in enumerate(dataset.sampler_lens):
+            if curr_idx < length:
+                local_idx = curr_idx
+                dataset_idx = i
+                break
+            curr_idx -= length
+        
+        if local_idx is None:
+            raise ValueError(f"Index {idx} is out of range")
+        
+        # Get buffer_start_idx from sampler indices
+        sampler = dataset.samplers[dataset_idx]
+        buffer_start_idx, buffer_end_idx, _, _ = sampler.indices[local_idx]
+        
+        return buffer_start_idx
+    
+    def _get_origin_indices(self, dataset, sample_indices):
+        """Get origin indices for each sample
+        
+        Uses set_return_raw_sample to get raw samples, then extracts buffer_start_idx
+        from sampler indices and calculates the observation frame index.
+        
+        Args:
+            dataset: The dataset instance
+            sample_indices: Array of sample indices
+            
+        Returns:
+            origin_indices: Array of observation frame indices for each sample
+        """
+        # Temporarily enable raw sample mode to get dataset information
+        original_return_raw_sample = dataset.return_raw_sample
+        dataset.set_return_raw_sample(True)
+        
+        try:
+            origin_indices = []
+            history = dataset.history if hasattr(dataset, 'history') else 0
+            
+            # Get raw samples and extract origin indices
+            # We need to reconstruct the actual observation frame index for each sample
+            # by finding the original idx used in sampler creation
+            for sample_idx in sample_indices:
+                # Get raw sample to access dataset_idx
+                raw_sample = dataset[int(sample_idx)]
+                dataset_idx = raw_sample['dataset_idx'].item() if hasattr(raw_sample['dataset_idx'], 'item') else raw_sample['dataset_idx']
+                
+                # Find local_idx for this sample
+                curr_idx = int(sample_idx)
+                local_idx = None
+                for i, length in enumerate(dataset.sampler_lens):
+                    if curr_idx < length:
+                        local_idx = curr_idx
+                        break
+                    curr_idx -= length
+                
+                if local_idx is None:
+                    raise ValueError(f"Index {sample_idx} is out of range")
+                
+                # Get buffer_start_idx and sample_start_idx from sampler indices
+                sampler = dataset.samplers[dataset_idx]
+                buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = sampler.indices[local_idx]
+                
+                # Calculate actual observation frame index
+                # The observation frame is at position 'history' in the loaded sequence
+                # For image data, sampler loads history+1 frames starting from buffer_start_idx
+                # The observation frame in the original dataset is at buffer_start_idx + history
+                # However, when pad_before > 0, multiple samples may have the same buffer_start_idx
+                # but different actual observation frames. We need to reconstruct the original idx.
+                
+                # Reconstruct original idx from sample_start_idx and buffer_start_idx
+                replay_buffer = sampler.replay_buffer
+                episode_ends = replay_buffer.episode_ends
+                episode_idx = np.searchsorted(episode_ends, buffer_start_idx)
+                episode_start_idx = episode_ends[episode_idx - 1] if episode_idx > 0 else 0
+                
+                # From sampler logic: start_offset = buffer_start_idx - (idx + start_idx)
+                # sample_start_idx = start_offset
+                # So: idx = buffer_start_idx - episode_start_idx - sample_start_idx
+                original_idx = buffer_start_idx - episode_start_idx - sample_start_idx
+                
+                # Calculate actual observation frame index
+                # raw_sample['image'][0] corresponds to sample['image'][history]
+                # sample['image'] is loaded from buffer_start_idx, with padding at the beginning
+                # When pad_before > 0, sample['image'][:sample_start_idx] are padded copies
+                # So sample['image'][history] corresponds to:
+                # - If history < sample_start_idx: sample['image'][history] is padding, actual frame is at buffer_start_idx
+                # - If history >= sample_start_idx: sample['image'][history] = buffer_start_idx + history - sample_start_idx
+                # But when original_idx < 0, buffer_start_idx = episode_start_idx (clamped)
+                # So the actual observation frame index is: episode_start_idx + original_idx + history
+                # where original_idx = buffer_start_idx - episode_start_idx - sample_start_idx
+                # Simplifying: observation_frame_idx = buffer_start_idx - sample_start_idx + history
+                # But this only works when original_idx >= 0
+                # When original_idx < 0: observation_frame_idx = episode_start_idx + original_idx + history
+                # = episode_start_idx + (buffer_start_idx - episode_start_idx - sample_start_idx) + history
+                # = buffer_start_idx - sample_start_idx + history
+                # So in both cases: observation_frame_idx = buffer_start_idx - sample_start_idx + history
+                
+                # However, we need to account for padding: if history < sample_start_idx,
+                # sample['image'][history] is padding, so it corresponds to buffer_start_idx
+                if history < sample_start_idx:
+                    # sample['image'][history] is padding, actual frame is at buffer_start_idx
+                    observation_frame_idx = buffer_start_idx
+                else:
+                    # sample['image'][history] is real data at buffer_start_idx + history - sample_start_idx
+                    observation_frame_idx = buffer_start_idx + history - sample_start_idx
+                
+                # Save the actual observation frame index, not buffer_start_idx
+                origin_indices.append(observation_frame_idx)
+            
+            origin_indices = np.array(origin_indices)
+            return origin_indices
+        finally:
+            # Restore original return_raw_sample setting
+            dataset.set_return_raw_sample(original_return_raw_sample)
+    
     def update_results(self, results, batch_result): 
         for key in batch_result:
             if key not in results:
@@ -158,17 +288,26 @@ class LegendVLAInference:
         results = {}
         total_l1_loss = 0.0
         num_valid_samples = 0
+        actual_batch_count = 0  # Track actual batch count (after skipping)
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(dataloader, desc="推理进度")):
                 # 检查是否达到最大推理步数
-                if cfg.inference.max_steps and batch_idx >= cfg.inference.max_steps:
+                if cfg.inference.max_steps and actual_batch_count >= cfg.inference.max_steps:
                     print(f"达到最大推理步数 {cfg.inference.max_steps}，停止推理")
                     break
                 
                 # 检查是否跳过前N个batch
                 if batch_idx < cfg.inference.skip_first:
                     continue
+                
+                # 获取实际的batch大小（最后一个batch可能小于batch_size）
+                actual_batch_size = batch["input_ids"].shape[0]
+                
+                # 计算实际的样本索引（考虑skip_first）
+                batch_start_idx = batch_idx * cfg.inference.batch_size
+                batch_end_idx = min(batch_start_idx + actual_batch_size, len(inference_dataset))
+                sample_indices = np.arange(start=batch_start_idx, stop=batch_end_idx)
                 
                 # 预处理
                 inputs = self.preprocess_batch(batch)
@@ -206,10 +345,15 @@ class LegendVLAInference:
                         num_valid_samples += 1
                 
                 # 保存样本索引用于加载原始数据
-                batch_result["sample_indices"] = np.arange(
-                    start=batch_idx*cfg.inference.batch_size, 
-                    stop=(batch_idx+1)*cfg.inference.batch_size, 
-                )
+                batch_result["sample_indices"] = sample_indices
+                
+                # 获取每个样本对应的原始数据索引 (origin_frame_indices)
+                # origin_frame_indices 是观察帧在原始数据集中的索引
+                origin_frame_indices = self._get_origin_indices(inference_dataset, sample_indices)
+                
+                batch_result["origin_frame_indices"] = origin_frame_indices
+                
+                actual_batch_count += 1
                 
                 self.update_results(results, batch_result)
         
@@ -250,6 +394,7 @@ class LegendVLAInference:
         
         total_samples = len(merged_results['pred_actions'])
         inference_indices = merged_results['sample_indices']
+        origin_frame_indices = merged_results['origin_frame_indices']
         print(f"总共 {total_samples} 个样本")
         
         # 创建输出zarr
@@ -282,11 +427,12 @@ class LegendVLAInference:
             'intrinsic',
             'presence',
         ]
+        # Use origin_frame_indices directly to index original dataset (already includes history offset)
         for key in included_key:
             if key in origin_dataset['data']: 
                 root.create_dataset(
                     key, 
-                    data=origin_dataset['data'][key][inference_indices], 
+                    data=origin_dataset['data'][key][origin_frame_indices], 
                     chunks=True,
                     compression='gzip',
                     compression_opts=1

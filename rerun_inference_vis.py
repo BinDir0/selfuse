@@ -11,9 +11,12 @@ from src.utils.geometry import (
     homo_matrix_from_trans_6drot,
     homo_matrix_to_trans_6drot,
     rot_matrix_to_6drot,
-    rot_matrix_from_6drot
+    rot_matrix_from_6drot,
+    transform_hand_points_to_wrist_frame,
+    transform_wrist_to_target_frame,
+    transform_hand_points_to_target_frame,
 )
-from src.dataset.legendvla_dataset import get_absolute_action
+from src.dataset.legendvla_dataset import get_absolute_action, get_relative_action
 
 def get_colored_point_cloud(color_rgb, depth, width, height, K, depth_scale=0.001, min_depth=0.1, max_depth=5.0):
     X_grid, Y_grid = np.meshgrid(np.arange(width), np.arange(height))
@@ -98,10 +101,9 @@ class HandVisualizer:
             if finger in hand_data['fingers']:
                 tip_arr = hand_data['fingers'][finger]
                 if frame_idx < len(tip_arr):
-                    tip_wrist = tip_arr[frame_idx]  # 4x4 matrix, tip position in wrist frame
-                    # Wrist -> Camera: tip_cam = wrist_cam @ tip_wrist
-                    tip_cam_homo = wrist_pose_cam @ tip_wrist
-                    tip_cam = tip_cam_homo[:3, 3]
+                    tip_matrix = tip_arr[frame_idx]  # 4x4 matrix, tip position already in camera frame
+                    # Tip is already in camera coordinate system (after get_absolute_action transformation)
+                    tip_cam = tip_matrix[:3, 3]
                     current_tips_cam[finger] = tip_cam
                     
                     self.history[hand_name][finger].append(tip_cam)
@@ -182,6 +184,7 @@ def get_data_from_zarr(zarr_path, origin_zarr_path=None, sample_idx=None, use_re
     
     # Get sample indices directly from zarr file
     sample_indices = z['sample_indices'][:]  # (N,) start frame indices in original dataset
+    origin_frame_indices = z['origin_frame_indices'][:]  # (N,) origin frame indices in original dataset
     # Get original dataset path: prefer user input, then try zarr attributes
     if origin_zarr_path is None:
         if 'zarr_paths' in z.attrs:
@@ -196,21 +199,20 @@ def get_data_from_zarr(zarr_path, origin_zarr_path=None, sample_idx=None, use_re
     num_samples = len(sample_indices)
     if sample_idx is None:
         sample_idx = np.random.randint(0, num_samples)
-    
+
+    # Get gt_actions and pred_actions for selected sample: (30, 48)
+    gt_actions = z['gt_actions'][sample_idx]  # (30, 48)
+    pred_actions = z['pred_actions'][sample_idx]  # (30, 48)
     # sample_indices[i] is the START frame index in original dataset
     # Each sample contains 30 consecutive frames
-    start_frame_idx = sample_indices[sample_idx]
-    frame_indices = np.arange(start_frame_idx, start_frame_idx + 30)  # 30 consecutive frames
+    start_frame_idx = origin_frame_indices[sample_idx]
+    frame_indices = np.arange(start_frame_idx, start_frame_idx + gt_actions.shape[0])  # 30 consecutive frames
     
     print(f"Selected sample {sample_idx}/{num_samples}")
     print(f"Sample index in zarr: {sample_idx}")
     print(f"Original start frame index: {start_frame_idx}")
     print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} (30 frames)")
     print(f"Original dataset path: {origin_zarr_path}")
-    
-    # Get gt_actions and pred_actions for selected sample: (30, 48)
-    gt_actions = z['gt_actions'][sample_idx]  # (30, 48)
-    pred_actions = z['pred_actions'][sample_idx]  # (30, 48)
     
     # Check if actions are relative
     # Priority: user parameter > zarr attributes > default True (as per config)
@@ -243,68 +245,47 @@ def get_data_from_zarr(zarr_path, origin_zarr_path=None, sample_idx=None, use_re
         state_extrinsic_flat = origin_z['data']['extrinsic'][state_frame_idx]  # (16,) float32 (world2cam, 4x4 flattened)
         world2cam = state_extrinsic_flat.reshape(4, 4)  # (4, 4) world2cam
         
-        # Convert wrist state from world to camera coordinate system
-        # wrist_state_world format: [left_trans3, right_trans3, left_6drot, right_6drot]
-        wrist_state_cam = np.zeros_like(wrist_state_world)
-        
-        for idx in range(2):  # left and right hand
-            # Get wrist transform in world coordinate
-            trans_world = wrist_state_world[idx*3 : idx*3+3]
-            rot_6d_world = wrist_state_world[6+idx*6 : 6+idx*6+6]
-            wrist_world_homo = homo_matrix_from_trans_6drot(trans_world, rot_6d_world)  # [4, 4]
-            
-            # Transform to camera coordinate: T_cam_wrist = world2cam @ T_world_wrist
-            wrist_cam_homo = world2cam @ wrist_world_homo  # [4, 4]
-            
-            # Convert back to trans and 6drot
-            trans_cam, rot_6d_cam = homo_matrix_to_trans_6drot(wrist_cam_homo)
-            wrist_state_cam[idx*3 : idx*3+3] = trans_cam
-            wrist_state_cam[6+idx*6 : 6+idx*6+6] = rot_6d_cam
-        
-        # Convert fingertip keypoints: first to camera frame, then to wrist frame
-        # Following process_state_action: transform_hand_points_to_wrist_frame
+        # Convert fingertip keypoints from world to wrist frame using transform_hand_points_to_wrist_frame
         # hand_state_world format: [left_keypoints_15, right_keypoints_15] = (30,) = 2*15
-        hand_state_wrist = np.zeros_like(hand_state_world)
+        # wrist_state_world format: [left_trans3, right_trans3, left_6drot, right_6drot] = (18,)
+        # Reshape to (1, D) for function compatibility
+        hand_state_world_reshaped = hand_state_world.reshape(1, -1)  # (1, 30)
+        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)  # (1, 18)
+        hand_state_wrist_reshaped = transform_hand_points_to_wrist_frame(hand_state_world_reshaped, wrist_state_world_reshaped)
+        hand_state_wrist = hand_state_wrist_reshaped.reshape(-1)  # (30,)
         
-        for idx in range(2):  # left and right hand
-            keypoints_world = hand_state_world[idx*15 : idx*15+15].reshape(5, 3)  # (5, 3) - 5 fingers, 3 coords each
-            
-            # Step 1: Transform from world to camera: P_cam = world2cam @ P_world
-            keypoints_world_homo = np.concatenate([keypoints_world, np.ones((5, 1))], axis=-1)  # (5, 4)
-            keypoints_cam_homo = (world2cam @ keypoints_world_homo.T).T  # (5, 4)
-            keypoints_cam = keypoints_cam_homo[:, :3]  # (5, 3)
-            
-            # Step 2: Transform from camera to wrist frame: P_wrist = pinv(T_cam_wrist) @ P_cam
-            # Get wrist transform in camera frame (already computed above)
-            wrist_cam_homo = homo_matrix_from_trans_6drot(
-                wrist_state_cam[idx*3 : idx*3+3],
-                wrist_state_cam[6+idx*6 : 6+idx*6+6]
-            )  # [4, 4] T_cam_wrist
-            
-            # Get T_wrist_cam = pinv(T_cam_wrist)
-            wrist_wrist2cam_homo = np.linalg.pinv(wrist_cam_homo)  # [4, 4] T_wrist_cam
-            
-            # Transform keypoints from camera to wrist frame
-            keypoints_cam_homo = np.concatenate([keypoints_cam, np.ones((5, 1))], axis=-1)  # (5, 4)
-            keypoints_wrist_homo = (wrist_wrist2cam_homo @ keypoints_cam_homo.T).T  # (5, 4)
-            keypoints_wrist = keypoints_wrist_homo[:, :3]  # (5, 3)
-            
-            hand_state_wrist[idx*15 : idx*15+15] = keypoints_wrist.reshape(-1)
+        # Convert wrist state from world to camera coordinate system using transform_wrist_to_target_frame
+        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)  # (1, 18)
+        wrist_state_cam_reshaped = transform_wrist_to_target_frame(wrist_state_world_reshaped, world2cam)
+        wrist_state_cam = wrist_state_cam_reshaped.reshape(-1)  # (18,)
         
-        # Convert to format expected by get_absolute_action: [wrist_dim + hand_dim]
-        # wrist_dim = 18 (left_trans3 + right_trans3 + left_6drot + right_6drot) - in camera coords
-        # hand_dim = 30 (left_keypoints_15 + right_keypoints_15) - in wrist coords (matching process_state_action)
         initial_state = np.concatenate([wrist_state_cam, hand_state_wrist])  # (48,)
+
+        wrist_action_world = origin_z['data']['action']['wrist'][frame_indices]  # (18,) = 2*9 (trans3 + 6drot for each hand)
+        hand_action_world = origin_z['data']['action']['fingertips'][frame_indices]  # (30,) = 2*15 (15 keypoints for each hand)     
         
+        # Transform wrist from world to camera
+        wrist_action_cam = transform_wrist_to_target_frame(wrist_action_world, extrinsic)  # (30, 18) in camera coordinate
+
+        fingertips_cam = transform_hand_points_to_target_frame(hand_action_world, extrinsic)  # (30, 30) in camera coordinate
+
+        hand_action_wrist_reshaped = transform_hand_points_to_wrist_frame(hand_action_world, wrist_action_world)
+
+        wrist_action_cam_reshaped = transform_wrist_to_target_frame(wrist_action_world, world2cam)
+
+        gt_actions_cam = np.concatenate([wrist_action_cam, fingertips_cam], axis=-1) 
+
+        initial_action = np.concatenate([wrist_action_cam_reshaped, hand_action_wrist_reshaped], axis=-1)  # (48,)
+
+        relative_action = get_relative_action(initial_state, initial_action.copy())
         print(f"Using relative actions, initial state at frame {state_frame_idx}")
         print(f"Initial state shape: {initial_state.shape}")
         print(f"Converted state from world to camera coordinate system")
         
-        # Recover absolute actions from relative actions
-        # Now both initial_state and gt_actions/pred_actions are in camera coordinate system
-        gt_actions = get_absolute_action(initial_state, gt_actions)
-        pred_actions = get_absolute_action(initial_state, pred_actions)
-        print("Converted relative actions to absolute actions")
+        gt_actions = get_absolute_action(initial_state, gt_actions, extrinsic)
+        pred_actions = get_absolute_action(initial_state, pred_actions, extrinsic)
+        # print(gt_actions-gt_actions_cam)
+        print("Converted relative actions to absolute actions and transformed to corresponding frame's camera coordinate system")
     
     data = {
         'image': image,  # (30, H, W, 3) uint8
