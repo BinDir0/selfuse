@@ -378,9 +378,7 @@ class PaliGemmaProcessor:
 
 class PaliGemmaVLAProcessor:
     IMAGE_TOKEN = "<image>"
-    STATE_BEGIN_TOKEN = "<state_begin>"
     STATE_TOKEN = "<state>"
-    STATE_END_TOKEN = "<state_end>"
     ACTION_BEGIN_TOKEN = "<action_begin>"
     ACTION_TOKEN = "<action>"
     ACTION_END_TOKEN = "<action_end>"
@@ -396,6 +394,7 @@ class PaliGemmaVLAProcessor:
         image_size: int = 224,
         depth_image_size: int = 224, 
         tokenizer_padding: str = "longest", # longest or max_length
+        last_skip_tokens: int = 128, # the number of tokens to skip at the end of the vocabulary
     ):
         super().__init__()
 
@@ -411,9 +410,7 @@ class PaliGemmaVLAProcessor:
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
         tokens_to_add = {"additional_special_tokens": [
             self.IMAGE_TOKEN, 
-            self.STATE_BEGIN_TOKEN, 
             self.STATE_TOKEN,
-            self.STATE_END_TOKEN, 
             self.ACTION_BEGIN_TOKEN, 
             self.ACTION_TOKEN, 
             self.ACTION_END_TOKEN,
@@ -444,7 +441,7 @@ class PaliGemmaVLAProcessor:
         added_tokens = list(tokenizer.added_tokens_encoder.values())
         token_id_replace = []
         replace_size = 0
-        for i in range(vocab_size - 1, -1, -1):
+        for i in range(vocab_size - 1 - last_skip_tokens, -1, -1):
             if i in added_tokens:
                 continue
             token_id_replace.append(i)
@@ -549,7 +546,7 @@ class PaliGemmaVLAProcessor:
         intrinsic_str = f"fx:{intrinsic[0]:.2f} fy:{intrinsic[1]:.2f} cx:{intrinsic[2]:.2f} cy:{intrinsic[3]:.2f}"
         text = text.replace('.', '')
         text = text.lower()
-        text = f"{text} using camera {intrinsic_str}{self.STATE_BEGIN_TOKEN}{self.STATE_TOKEN * len(discrete_states)}{self.STATE_END_TOKEN}?"
+        text = f"Task: {text}, Camera intrinsic: {intrinsic_str}, States: {self.STATE_TOKEN * len(discrete_states)};Action: "
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
         depth_image_seq_len = 0
         if depth_images is not None:

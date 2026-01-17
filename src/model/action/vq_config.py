@@ -22,11 +22,15 @@ class ModelArchConfig(PretrainedConfig):
         depth: int = 3,
         dilation_growth_rate: int = 3,
         output_emb_width: int = 256,
-        activate: str = "relu", # "relu", "gelu", "silu"
+        activation: str = "silu", # "relu", "gelu", "silu"
         norm: Optional[str] = None, # "LN", "GN", "BN"
         num_conv_layers: int = 3,
+        encoder_causal: bool = True, # whether to use causal convolution for encoder
+        decoder_causal: bool = False, # whether to use causal convolution for decoder
         **kwargs
     ):
+        # For decoder, we do not use causal convolution by default
+        # except when we need real-time streaming inference
         super().__init__(**kwargs)
         self.down_t = down_t
         self.stride_t = stride_t
@@ -34,9 +38,11 @@ class ModelArchConfig(PretrainedConfig):
         self.depth = depth
         self.dilation_growth_rate = dilation_growth_rate
         self.output_emb_width = output_emb_width
-        self.activate = activate
+        self.activation = activation
         self.norm = norm
         self.num_conv_layers = num_conv_layers
+        self.encoder_causal = encoder_causal
+        self.decoder_causal = decoder_causal
     
     def to_dict(self):
         """Override to only save relevant parameters."""
@@ -48,9 +54,11 @@ class ModelArchConfig(PretrainedConfig):
             'depth': self.depth,
             'dilation_growth_rate': self.dilation_growth_rate,
             'output_emb_width': self.output_emb_width,
-            'activate': self.activate,
+            'activation': self.activation,
             'norm': self.norm,
             'num_conv_layers': self.num_conv_layers,
+            'encoder_causal': self.encoder_causal,
+            'decoder_causal': self.decoder_causal,
         }
 
 
@@ -62,7 +70,7 @@ class QuantizerConfig(PretrainedConfig):
     def __init__(
         self,
         quantizer_name: str = "group_residualvq", # "residualvq", "group_residualvq", "fsq"
-        nb_code: int = 1024, # codebook size (vocabulary size)
+        codebook_size: int = 1024, # codebook size (vocabulary size)
         codebook_dim: int = 256, # codebook embedding dimension
         num_quantizers: int = 8, # number of quantizers for Res_VQ
         num_groups: int = 1, # number of groups for Group_Res_VQ
@@ -71,7 +79,7 @@ class QuantizerConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
         self.quantizer_name = quantizer_name
-        self.nb_code = nb_code
+        self.codebook_size = codebook_size
         self.codebook_dim = codebook_dim
         self.num_quantizers = num_quantizers
         self.num_groups = num_groups
@@ -82,7 +90,7 @@ class QuantizerConfig(PretrainedConfig):
         return {
             'model_type': self.model_type,
             'quantizer_name': self.quantizer_name,
-            'nb_code': self.nb_code,
+            'codebook_size': self.codebook_size,
             'codebook_dim': self.codebook_dim,
             'num_quantizers': self.num_quantizers,
             'num_groups': self.num_groups,
@@ -125,10 +133,10 @@ class MotionVQModelConfig(PretrainedConfig):
         self,
         # Motion dimensions
         use_part: Optional[str] = None, # "wrist", "hand", None for full state
-        horizon: int = 30, # time horizon
-        motion_dim: int = 24, # full motion dimension
-        wrist_dim: int = 9, # wrist motion dimension
-        hand_dim: int = 15, # hand motion dimension
+        horizon: int = 32, # time horizon
+        motion_dim: int = 48, # full motion dimension
+        wrist_dim: int = 18, # wrist motion dimension
+        hand_dim: int = 30, # hand motion dimension
         
         model_config: Optional[Dict[str, Any]] = None,
         quantizer_config: Optional[Dict[str, Any]] = None,
@@ -174,9 +182,9 @@ class MotionVQModelConfig(PretrainedConfig):
 
         # Vocabulary size
         if self.quantizer_config.shared_codebook:
-            self.vocab_size = self.quantizer_config.nb_code
+            self.vocab_size = self.quantizer_config.codebook_size
         else:
-            self.vocab_size = self.quantizer_config.nb_code * self.quantizer_config.num_quantizers
+            self.vocab_size = self.quantizer_config.codebook_size * self.quantizer_config.num_quantizers
     
     def to_dict(self):
         """
