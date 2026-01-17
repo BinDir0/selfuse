@@ -166,83 +166,167 @@ class HandVisualizer:
             rr.log(f"{base_path_2d}/tips", rr.Points2D(points_2d, radii=10, colors=colors_2d))
 
 
-def get_data_from_zarr(zarr_path, origin_zarr_path=None, sample_idx=None, use_relative_action=None):
+def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=None):
     """
-    Load data from zarr file.
+    Load data directly from original zarr dataset (which now contains gt_action and pred_action).
     
     Args:
-        zarr_path: Path to inference results zarr file
-        origin_zarr_path: Path to original dataset zarr file. If None, try to read from inference zarr attributes.
-        sample_idx: Index of sample to load. If None, randomly select one.
+        origin_zarr_path: Path to original dataset zarr file (which contains gt_action and pred_action)
+        frame_idx: Index of frame to load. If None, randomly select one from frames that have pred_action.
+        use_relative_action: Whether actions are relative. If None, default to True.
     
     Returns:
-        dict with keys: 'image', 'depth', 'intrinsic', 'extrinsic', 'gt_actions', 'sample_idx'
+        dict with keys: 'image', 'depth', 'intrinsic', 'extrinsic', 'gt_actions', 'pred_actions', 'frame_idx'
         All arrays have shape (T,) where T=30 is the number of timesteps for the selected sample
-        'sample_idx' is the actual sample index used (may be randomly selected if None was passed)
+        'frame_idx' is the actual frame index used (may be randomly selected if None was passed)
     """
-    z = zarr.open(zarr_path, mode='r')
-    
-    # Get sample indices directly from zarr file
-    sample_indices = z['sample_indices'][:]  # (N,) start frame indices in original dataset
-    origin_frame_indices = z['origin_frame_indices'][:]  # (N,) origin frame indices in original dataset
-    # Get original dataset path: prefer user input, then try zarr attributes
-    if origin_zarr_path is None:
-        if 'zarr_paths' in z.attrs:
-            origin_zarr_path = z.attrs['zarr_paths']
-        else:
-            raise ValueError("Cannot find original dataset path. Please provide origin_zarr_path parameter or ensure zarr_paths is in zarr attributes.")
-    
     if not os.path.exists(origin_zarr_path):
         raise FileNotFoundError(f"Original dataset zarr file not found: {origin_zarr_path}")
     
-    # Randomly select a sample if not specified
-    num_samples = len(sample_indices)
-    if sample_idx is None:
-        sample_idx = np.random.randint(0, num_samples)
-
-    # Get gt_actions and pred_actions for selected sample: (30, 48)
-    gt_actions = z['gt_actions'][sample_idx]  # (30, 48)
-    pred_actions = z['pred_actions'][sample_idx]  # (30, 48)
-    # sample_indices[i] is the START frame index in original dataset
-    # Each sample contains 30 consecutive frames
-    start_frame_idx = origin_frame_indices[sample_idx]
-    frame_indices = np.arange(start_frame_idx, start_frame_idx + gt_actions.shape[0])  # 30 consecutive frames
-    
-    print(f"Selected sample {sample_idx}/{num_samples}")
-    print(f"Sample index in zarr: {sample_idx}")
-    print(f"Original start frame index: {start_frame_idx}")
-    print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} (30 frames)")
-    print(f"Original dataset path: {origin_zarr_path}")
-    
-    # Check if actions are relative
-    # Priority: user parameter > zarr attributes > default True (as per config)
-    if use_relative_action is None:
-        use_relative_action = z.attrs.get('use_relative_action', True)
-    
     # Load original dataset
     origin_z = zarr.open(origin_zarr_path, mode='r')
-
-    image = origin_z['data']['image'][frame_indices]  # (30, H, W, 3) uint8
-    depth = origin_z['data']['depth'][frame_indices]  # (30, H, W) uint16
-    intrinsic = origin_z['data']['intrinsic'][frame_indices]  # (30, 4) float32 [fx, fy, cx, cy]
-    extrinsic_flat = origin_z['data']['extrinsic'][frame_indices]  # (30, 16) float32 (world2cam, 4x4 flattened)
+    data_group = origin_z['data']
     
-    # Reshape extrinsic from (30, 16) to (30, 4, 4)
-    extrinsic = extrinsic_flat.reshape(-1, 4, 4)  # (30, 4, 4)
+    # Check if gt_action and pred_action exist
+    if 'pred_action' not in data_group:
+        raise ValueError(f"pred_action not found in dataset. Please ensure inference results have been saved to the dataset.")
+    if 'gt_action' not in data_group:
+        raise ValueError(f"gt_action not found in dataset. Please ensure inference results have been saved to the dataset.")
+    
+    pred_action_ds = data_group['pred_action']
+    gt_action_ds = data_group['gt_action']
+    dataset_size = pred_action_ds.shape[0]
+    
+    # Determine horizon from action shape
+    # pred_action_ds should be (N, H, D) where N=dataset_size, H=horizon, D=action_dim
+    if len(pred_action_ds.shape) >= 2:
+        horizon = pred_action_ds.shape[1]  # Typically 30
+    else:
+        # Fallback: assume horizon is 30 if shape is unexpected
+        horizon = 30
+        print(f"Warning: Unexpected pred_action shape {pred_action_ds.shape}, assuming horizon={horizon}")
+    
+    # Get episode boundaries to ensure we don't select frames too close to episode end
+    episode_ends = None
+    if 'meta' in origin_z and 'episode_ends' in origin_z['meta']:
+        episode_ends = np.array(origin_z['meta']['episode_ends'][:])
+        print(f"Found episode_ends in meta: {len(episode_ends)} episodes")
+    elif 'episode_ends' in origin_z.attrs:
+        episode_ends = np.array(origin_z.attrs['episode_ends'])
+        print(f"Found episode_ends in attrs: {len(episode_ends)} episodes")
+    else:
+        print("No episode_ends found, will only check dataset size boundary")
+    
+    print(f"Dataset size: {dataset_size}, Horizon: {horizon}")
+    
+    # Find valid frames that are at least 'horizon' frames away from episode end
+    if episode_ends is not None:
+        # episode_ends contains the end index (exclusive) of each episode
+        # More efficient: iterate through episodes and find valid frames in each
+        valid_frames = []
+        episode_start = 0
+        
+        for episode_end in episode_ends:
+            # For this episode, valid frames are those where frame + horizon <= episode_end
+            # i.e., frame <= episode_end - horizon
+            episode_valid_end = episode_end - horizon
+            if episode_valid_end >= episode_start:
+                # Add all valid frames in this episode
+                episode_valid = np.arange(episode_start, episode_valid_end + 1)
+                valid_frames.append(episode_valid)
+            episode_start = episode_end
+        
+        if len(valid_frames) > 0:
+            valid_frames = np.concatenate(valid_frames)
+        else:
+            valid_frames = np.array([], dtype=np.int64)
+        
+        if len(valid_frames) == 0:
+            raise ValueError(f"No valid frames found that are at least {horizon} frames away from episode end.")
+        
+        print(f"Found {len(valid_frames)} valid frames (out of {dataset_size} total)")
+    else:
+        # If no episode information, just ensure we don't exceed dataset size
+        valid_frames = np.arange(dataset_size - horizon + 1)
+        print(f"Using {len(valid_frames)} valid frames (no episode info, only checking dataset size)")
+    
+    # Randomly select a frame if not specified
+    if frame_idx is None:
+        if len(valid_frames) == 0:
+            raise ValueError(f"No valid frames available. Dataset size: {dataset_size}, horizon: {horizon}")
+        frame_idx = np.random.choice(valid_frames)
+    else:
+        if frame_idx >= dataset_size:
+            raise ValueError(f"frame_idx {frame_idx} is out of range (dataset size: {dataset_size})")
+        # Check if the selected frame is valid
+        if episode_ends is not None:
+            episode_idx = np.searchsorted(episode_ends, frame_idx, side='right')
+            if episode_idx < len(episode_ends):
+                episode_end = episode_ends[episode_idx]
+                if frame_idx + horizon > episode_end:
+                    raise ValueError(f"frame_idx {frame_idx} is too close to episode end (episode ends at {episode_end}, need {horizon} frames)")
+    
+    # Get gt_actions and pred_actions for selected frame: (H, D) where H is horizon
+    pred_actions = pred_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
+    gt_actions = gt_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
+    
+    # Determine actual horizon from action shape
+    horizon = pred_actions.shape[0]  # Typically 30
+    
+    # Frame indices for this sample (consecutive frames starting from frame_idx)
+    frame_indices = np.arange(frame_idx, frame_idx + horizon)
+    
+    # Final check: ensure frame_indices don't exceed dataset size or episode end
+    if frame_indices[-1] >= dataset_size:
+        # Truncate to available frames
+        valid_mask = frame_indices < dataset_size
+        frame_indices = frame_indices[valid_mask]
+        pred_actions = pred_actions[:len(frame_indices)]
+        gt_actions = gt_actions[:len(frame_indices)]
+        horizon = len(frame_indices)
+    elif episode_ends is not None:
+        # Check episode boundary
+        episode_idx = np.searchsorted(episode_ends, frame_idx, side='right')
+        if episode_idx < len(episode_ends):
+            episode_end = episode_ends[episode_idx]
+            if frame_indices[-1] >= episode_end:
+                # Truncate to episode end
+                valid_mask = frame_indices < episode_end
+                frame_indices = frame_indices[valid_mask]
+                pred_actions = pred_actions[:len(frame_indices)]
+                gt_actions = gt_actions[:len(frame_indices)]
+                horizon = len(frame_indices)
+    
+    print(f"Selected frame {frame_idx} from dataset (size: {dataset_size})")
+    print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} ({horizon} frames)")
+    print(f"Dataset path: {origin_zarr_path}")
+    
+    # Default to True if not specified
+    if use_relative_action is None:
+        use_relative_action = True
+    
+    # Load image, depth, intrinsic, extrinsic from original dataset
+    image = data_group['image'][frame_indices]  # (H, H_img, W_img, 3) uint8
+    depth = data_group['depth'][frame_indices]  # (H, H_img, W_img) uint16
+    intrinsic = data_group['intrinsic'][frame_indices]  # (H, 4) float32 [fx, fy, cx, cy]
+    extrinsic_flat = data_group['extrinsic'][frame_indices]  # (H, 16) float32 (world2cam, 4x4 flattened)
+    
+    # Reshape extrinsic from (H, 16) to (H, 4, 4)
+    extrinsic = extrinsic_flat.reshape(-1, 4, 4)  # (H, 4, 4)
     
     if use_relative_action:
-        # history is typically 30, the initial state is at start_frame_idx
-        state_frame_idx = start_frame_idx
+        # history is typically 30, the initial state is at frame_idx
+        state_frame_idx = frame_idx
         
         # Load wrist and hand state from original dataset
         # Note: state is in WORLD coordinate system
         # Format: [left_trans3, right_trans3, left_6drot, right_6drot, left_hand, right_hand]
-        wrist_state_world = origin_z['data']['state']['wrist'][state_frame_idx]  # (18,) = 2*9 (trans3 + 6drot for each hand)
-        hand_state_world = origin_z['data']['state']['fingertips'][state_frame_idx]  # (30,) = 2*15 (15 keypoints for each hand)
+        wrist_state_world = data_group['state']['wrist'][state_frame_idx]  # (18,) = 2*9 (trans3 + 6drot for each hand)
+        hand_state_world = data_group['state']['fingertips'][state_frame_idx]  # (30,) = 2*15 (15 keypoints for each hand)
         
         # Get camera extrinsic (world2cam) for the state frame
         # Note: extrinsic is already loaded above, but we need the one at state_frame_idx
-        state_extrinsic_flat = origin_z['data']['extrinsic'][state_frame_idx]  # (16,) float32 (world2cam, 4x4 flattened)
+        state_extrinsic_flat = data_group['extrinsic'][state_frame_idx]  # (16,) float32 (world2cam, 4x4 flattened)
         world2cam = state_extrinsic_flat.reshape(4, 4)  # (4, 4) world2cam
         
         # Convert fingertip keypoints from world to wrist frame using transform_hand_points_to_wrist_frame
@@ -261,13 +345,13 @@ def get_data_from_zarr(zarr_path, origin_zarr_path=None, sample_idx=None, use_re
         
         initial_state = np.concatenate([wrist_state_cam, hand_state_wrist])  # (48,)
 
-        wrist_action_world = origin_z['data']['action']['wrist'][frame_indices]  # (18,) = 2*9 (trans3 + 6drot for each hand)
-        hand_action_world = origin_z['data']['action']['fingertips'][frame_indices]  # (30,) = 2*15 (15 keypoints for each hand)     
+        wrist_action_world = data_group['action']['wrist'][frame_indices]  # (H, 18) = 2*9 (trans3 + 6drot for each hand)
+        hand_action_world = data_group['action']['fingertips'][frame_indices]  # (H, 30) = 2*15 (15 keypoints for each hand)     
         
         # Transform wrist from world to camera
-        wrist_action_cam = transform_wrist_to_target_frame(wrist_action_world, extrinsic)  # (30, 18) in camera coordinate
+        wrist_action_cam = transform_wrist_to_target_frame(wrist_action_world, extrinsic)  # (H, 18) in camera coordinate
 
-        fingertips_cam = transform_hand_points_to_target_frame(hand_action_world, extrinsic)  # (30, 30) in camera coordinate
+        fingertips_cam = transform_hand_points_to_target_frame(hand_action_world, extrinsic)  # (H, 30) in camera coordinate
 
         hand_action_wrist_reshaped = transform_hand_points_to_wrist_frame(hand_action_world, wrist_action_world)
 
@@ -284,17 +368,16 @@ def get_data_from_zarr(zarr_path, origin_zarr_path=None, sample_idx=None, use_re
         
         gt_actions = get_absolute_action(initial_state, gt_actions, extrinsic)
         pred_actions = get_absolute_action(initial_state, pred_actions, extrinsic)
-        # print(gt_actions-gt_actions_cam)
         print("Converted relative actions to absolute actions and transformed to corresponding frame's camera coordinate system")
     
     data = {
-        'image': image,  # (30, H, W, 3) uint8
-        'depth': depth,  # (30, H, W) uint16
-        'intrinsic': intrinsic,  # (30, 4) float32 [fx, fy, cx, cy]
-        'extrinsic': extrinsic,  # (30, 4, 4) float32 (world2cam)
-        'gt_actions': gt_actions,  # (30, 48) float32
-        'pred_actions': pred_actions,  # (30, 48) float32
-        'sample_idx': sample_idx,  # int - actual sample index used
+        'image': image,  # (H, H_img, W_img, 3) uint8
+        'depth': depth,  # (H, H_img, W_img) uint16
+        'intrinsic': intrinsic,  # (H, 4) float32 [fx, fy, cx, cy]
+        'extrinsic': extrinsic,  # (H, 4, 4) float32 (world2cam)
+        'gt_actions': gt_actions,  # (H, 48) float32
+        'pred_actions': pred_actions,  # (H, 48) float32
+        'frame_idx': frame_idx,  # int - actual frame index used
     }
     return data
 
@@ -386,9 +469,8 @@ def gt_actions_to_hands_data(gt_actions):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--zarr_path", type=str, required=True, help="Path to zarr file with inference results.")
-    parser.add_argument("--origin_zarr_path", type=str, default=None, help="Path to original dataset zarr file. If None, try to read from inference zarr attributes.")
-    parser.add_argument("--sample_idx", type=int, default=None, help="Index of sample to visualize. If None, randomly select one.")
+    parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file (which contains gt_action and pred_action).")
+    parser.add_argument("--frame_idx", type=int, default=None, help="Index of frame to visualize. If None, randomly select one from frames that have pred_action.")
     parser.add_argument("--target_width", type=int, default=None, help="Target image width. If None, use original width.")
     parser.add_argument("--target_height", type=int, default=None, help="Target image height. If None, use original height.")
     parser.add_argument("--depth_scale", type=float, default=1.0)
@@ -396,14 +478,14 @@ def main():
     parser.add_argument("--max_depth", type=float, default=1.5)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--save_path", type=str, default=None, help="Path to save rrd file. If None, use spawn/notebook_show.")
-    parser.add_argument("--use_relative_action", type=lambda x: (str(x).lower() == 'true'), default=None, help="Whether actions are relative. If None, try to read from zarr attributes, default to True.")
+    parser.add_argument("--use_relative_action", type=lambda x: (str(x).lower() == 'true'), default=None, help="Whether actions are relative. If None, default to True.")
     args = parser.parse_args()
 
-    if not os.path.exists(args.zarr_path):
-        raise FileNotFoundError(f"Zarr file not found: {args.zarr_path}")
+    if not os.path.exists(args.origin_zarr_path):
+        raise FileNotFoundError(f"Zarr file not found: {args.origin_zarr_path}")
 
-    print(f"Loading data from zarr: {args.zarr_path}")
-    zarr_data = get_data_from_zarr(args.zarr_path, origin_zarr_path=args.origin_zarr_path, sample_idx=args.sample_idx, use_relative_action=args.use_relative_action)
+    print(f"Loading data from zarr: {args.origin_zarr_path}")
+    zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=args.frame_idx, use_relative_action=args.use_relative_action)
     
     # Extract images and depth: (T, H, W, 3) and (T, H, W)
     rgb_images = np.array(zarr_data['image'])  # (T, H, W, 3) uint8
@@ -457,24 +539,24 @@ def main():
         intrinsics_flat[:, 2] *= scale_x  # cx
         intrinsics_flat[:, 3] *= scale_y  # cy
     
-    # Get actual sample_idx that was used
-    actual_sample_idx = zarr_data['sample_idx']
+    # Get actual frame_idx that was used
+    actual_frame_idx = zarr_data['frame_idx']
     
-    # Initialize Rerun with unique app name based on sample_idx
-    app_name = f"rgbd_hand_action_visv2_sample_{actual_sample_idx}"
+    # Initialize Rerun with unique app name based on frame_idx
+    app_name = f"rgbd_hand_action_visv2_frame_{actual_frame_idx}"
     rr.init(app_name)
     
     # Save to rrd file if save_path is provided, otherwise use spawn
     if args.save_path:
-        # If save_path is a directory, create unique filename with sample_idx
+        # If save_path is a directory, create unique filename with frame_idx
         if os.path.isdir(args.save_path):
-            save_filename = f"visualization_sample_{actual_sample_idx}.rrd"
+            save_filename = f"visualization_frame_{actual_frame_idx}.rrd"
             save_path = os.path.join(args.save_path, save_filename)
         else:
-            # If it's a file, add sample_idx to filename
+            # If it's a file, add frame_idx to filename
             base_path = os.path.splitext(args.save_path)[0]
             ext = os.path.splitext(args.save_path)[1] or '.rrd'
-            save_path = f"{base_path}_sample_{actual_sample_idx}{ext}"
+            save_path = f"{base_path}_frame_{actual_frame_idx}{ext}"
         rr.save(save_path)
         print(f"Saving visualization to: {save_path}")
     else:
