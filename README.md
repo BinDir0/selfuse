@@ -158,8 +158,55 @@ python ds_to_universal.py \
 在上面的转换中，你需要把 `pytorch_model` 文件夹作为输入，直接替换同样的位置作为输出。
 然后 config file 当中填的 path 为 `pytorch_model` 文件夹的父文件夹（Accelerate 保存的文件夹）。
 
-## Inference
-
+## Inference Visualization
+### 环境配置
+环境建议使用legendvla环境，加装rerun sdk，用3d环境的话可能要装一下torch等。
+### 使用方法
+python rerun_inference_vis.py --origin_zarr_path /share_data/guantianrui/datasets/taco/taco_test_seen.zarr --frame_idx 5000 --save_path /share_data/zengfanlian --target_width 1920 --target_height 1080
+完整参数示例：
+```bash
+python rerun_inference_vis.py  \
+  ----origin_zarr_path \
+  --frame_idx \
+  --target_width 1920 \
+  --target_height 1080 \
+  --depth_scale defualt 1.0\
+  --min_depth   defualt 0.1\
+  --max_depth   defualt 1.5\
+  --save_path \
+  ----use_relative_action default True
+```
+Note:如果没有指定frame_id的话，将会随机自动选择（会确保所取的位置距离episode结束有足够30帧）
+### 输出示例
+```bash
+Loading data from zarr: /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
+Found episode_ends in meta: 74 episodes
+Dataset size: 10849, Horizon: 30
+Found 8703 valid frames (out of 10849 total)
+Selected frame 5000 from dataset (size: 10849)
+Frame range: 5000 to 5029 (30 frames)
+Dataset path: /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
+L1 Loss: 0.018833 (overall, matching inference script calculation)
+  Per timestep: min=0.003089, max=0.024336, mean=0.018833
+  Using actions_valid_mask from dataset
+Using relative actions, initial state at frame 5000
+Initial state shape: (48,)
+Converted state from world to camera coordinate system
+Converted relative actions to absolute actions and transformed to corresponding frame's camera coordinate system
+Loaded 30 frames (timesteps) from selected sample
+GT hands data: left=30, right=30
+Pred hands data: left=30, right=30
+Resizing from (384, 384) to (1920, 1080)
+Scale factors: x=5.0000, y=2.8125
+Saving visualization to: /share_data/zengfanlian/visualization_frame_5000.rrd
+```
+将保存好的.rrd文件下载到本地，直接用rerun打开即可使用。
+### 可用的测试集路径
+  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen.zarr
+  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene.zarr
+  - /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
+  - /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
+  - /share_data/yeyuyao/egodex_filter_test.zarr
 
 ## Visualization
 
