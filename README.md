@@ -208,6 +208,12 @@ Saving visualization to: /share_data/zengfanlian/visualization_frame_5000.rrd
   - /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
   - /share_data/yeyuyao/egodex_filter_test.zarr
 
+## Dataset zarr Visualization
+###使用示例
+```bash
+python rerun_dataset_zarr_vis.py --origin_zarr_path /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr --frame_idx 2000 --save_path /share_data/zengfanlian --target_width 1920 --target_height 1080 --horizon 30
+```
+使用方法和inference基本相同，但zarr可视化可以选择想要可视化的frame数量(horizon), 终端会print出这些frames里unique的instruction以供检查。可视化里手为灰色骨架是state，蓝色为action。
 ## Visualization
 
 `visualize.py`提供模型预测结果的可视化，能够将30帧手部运动预测序列渲染为两个视频：2D投影视频（将3D手部姿态投影到背景图像上）和3D可视化视频（在3D空间中显示手部mesh和骨架结构）。
