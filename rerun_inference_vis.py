@@ -197,6 +197,11 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
     gt_action_ds = data_group['gt_action']
     dataset_size = pred_action_ds.shape[0]
     
+    # Check if actions_valid_mask exists (optional, if not found, assume all actions are valid)
+    has_valid_mask = 'actions_valid_mask' in data_group
+    if has_valid_mask:
+        actions_valid_mask_ds = data_group['actions_valid_mask']
+    
     # Determine horizon from action shape
     # pred_action_ds should be (N, H, D) where N=dataset_size, H=horizon, D=action_dim
     if len(pred_action_ds.shape) >= 2:
@@ -270,6 +275,13 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
     pred_actions = pred_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
     gt_actions = gt_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
     
+    # Get actions_valid_mask if available
+    if has_valid_mask:
+        actions_valid_mask = actions_valid_mask_ds[frame_idx]  # (H, D) e.g., (30, 48)
+    else:
+        # If not found, assume all actions are valid
+        actions_valid_mask = np.ones_like(pred_actions, dtype=bool)
+    
     # Determine actual horizon from action shape
     horizon = pred_actions.shape[0]  # Typically 30
     
@@ -300,6 +312,40 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
     print(f"Selected frame {frame_idx} from dataset (size: {dataset_size})")
     print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} ({horizon} frames)")
     print(f"Dataset path: {origin_zarr_path}")
+    
+    # Calculate L1 loss between pred_actions and gt_actions (before coordinate transformation)
+    # pred_actions and gt_actions shape: (H, D) where H=horizon, D=action_dim
+    # Use actions_valid_mask from dataset if available, otherwise assume all actions are valid
+    # actions_valid_mask shape: (H, D) where H=horizon, D=action_dim
+    
+    # Calculate L1 loss similar to inference script
+    # In inference script: pred_actions shape is (batch_size, H, D)
+    #   actions_valid_num = np.sum(actions_valid_mask, axis=(1,2))  # (batch_size,)
+    #   batch_l1_loss = np.sum(np.abs(valid_pred - valid_gt), axis=(1,2)) / actions_valid_num.clip(min=1)
+    # Here: pred_actions shape is (H, D), so we sum over all dimensions
+    valid_pred = pred_actions * actions_valid_mask
+    valid_gt = gt_actions * actions_valid_mask
+    # Sum over all dimensions (horizon and action_dim) to get total valid actions
+    actions_valid_num = np.sum(actions_valid_mask)
+    
+    if actions_valid_num > 0:
+        # Calculate L1 loss: sum over all dimensions, then divide by total valid actions
+        # This matches the inference script calculation
+        total_l1_error = np.sum(np.abs(valid_pred - valid_gt))
+        mean_l1_loss = total_l1_error / actions_valid_num
+        
+        # Also calculate per-timestep L1 loss for detailed information
+        actions_valid_num_per_timestep = np.sum(actions_valid_mask, axis=1)  # (H,)
+        l1_loss_per_timestep = np.sum(np.abs(valid_pred - valid_gt), axis=1) / actions_valid_num_per_timestep.clip(min=1)
+        
+        print(f"L1 Loss: {mean_l1_loss:.6f} (overall, matching inference script calculation)")
+        print(f"  Per timestep: min={np.min(l1_loss_per_timestep):.6f}, max={np.max(l1_loss_per_timestep):.6f}, mean={np.mean(l1_loss_per_timestep):.6f}")
+        if has_valid_mask:
+            print(f"  Using actions_valid_mask from dataset")
+        else:
+            print(f"  Using default mask (all actions valid)")
+    else:
+        print("Warning: No valid actions found for L1 loss calculation")
     
     # Default to True if not specified
     if use_relative_action is None:
