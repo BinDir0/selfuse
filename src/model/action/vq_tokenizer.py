@@ -13,13 +13,15 @@
 # - Gh: hand groups (number of hand groups)
 # - Lw: wrist quantizers (number of wrist quantizer layers)
 # - Lh: hand quantizers (number of hand quantizer layers)
-# - w: wrist_dim (wrist data dimension, typically 9: 3 translation + 6 rotation)
-# - h: hand_dim (hand data dimension, typically 15)
+# - w: wrist_dim (bimanual wrist data dimension, typically 18: 2*(3 translation + 6 rotation))
+# - h: hand_dim (bimanual hand data dimension, typically 30: 2*15)
 #
 # Data Layout Specification:
 # ==========================
 # Input action data layout: [B, T_original, D_total]
-#   D_total = 2*wrist_dim + 2*hand_dim = 2*9 + 2*15 = 48
+#   D_total = wrist_dim + hand_dim = 18 + 30 = 48
+#   where wrist_dim = 18 (left_wrist(9) + right_wrist(9))
+#   and hand_dim = 30 (left_hand(15) + right_hand(15))
 #   Specific order: [left_trans(3), right_trans(3), left_rot(6), right_rot(6), 
 #                    hand_left(15), hand_right(15)]
 #
@@ -57,8 +59,8 @@ class VQActionProcessor(ProcessorMixin):
     
     Attributes:
         vq_model: Dict[str, MotionVQModel] - Dictionary with 'wrist' and 'hand' keys
-        wrist_dim: int - Dimension of wrist data (typically 9: 3 trans + 6 rot)
-        hand_dim: int - Dimension of hand data (typically 15)
+        wrist_dim: int - Dimension of bimanual wrist data (typically 18: 2*(3 trans + 6 rot))
+        hand_dim: int - Dimension of bimanual hand data (typically 30: 2*15)
         vocab_size: int - Total vocabulary size (sum of wrist and hand vocab sizes)
         vq_meta: Dict[str, int] - Metadata about VQ model structure
     """
@@ -75,8 +77,8 @@ class VQActionProcessor(ProcessorMixin):
         Args:
             vq_model: Dictionary with 'wrist' and 'hand' keys, each containing a MotionVQModel.
                       The models should be trained separately for wrist and hand data.
-            wrist_dim: Dimension of wrist data (typically 9: 3 translation + 6 rotation)
-            hand_dim: Dimension of hand data (typically 15 for MANO hand parameters)
+            wrist_dim: Dimension of bimanual wrist data (typically 18: 2*(3 translation + 6 rotation))
+            hand_dim: Dimension of bimanual hand data (typically 30: 2*15 for MANO hand parameters)
         """
         if not isinstance(vq_model, dict):
             raise ValueError("vq_model must be a dictionary with 'wrist' and 'hand' keys")
@@ -167,25 +169,27 @@ class VQActionProcessor(ProcessorMixin):
         action_tensor: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Split bimanual action tensor into wrist and hand parts, with left and right concatenated.
+        Split bimanual action tensor into wrist and hand parts.
         
         Args:
-            action_tensor: [B, T_original, D_total] where D_total = 2*wrist_dim + 2*hand_dim
+            action_tensor: [B, T_original, D_total] where D_total = wrist_dim + hand_dim
                 Layout: [left_trans(3), right_trans(3), left_rot(6), right_rot(6),
                         hand_left(15), hand_right(15)]
+                where wrist_dim = 18 (left_wrist(9) + right_wrist(9))
+                and hand_dim = 30 (left_hand(15) + right_hand(15))
         
         Returns:
             Tuple of (wrist_bimanual, hand_bimanual) tensors
-            - wrist_bimanual: [B, T_original, 2*wrist_dim] = [left_wrist, right_wrist] concatenated
-            - hand_bimanual: [B, T_original, 2*hand_dim] = [left_hand, right_hand] concatenated
+            - wrist_bimanual: [B, T_original, wrist_dim] = [left_wrist, right_wrist] concatenated
+            - hand_bimanual: [B, T_original, hand_dim] = [left_hand, right_hand] concatenated
         """
         B, T_original, D_total = action_tensor.shape
         
-        # Expected total dimension
-        expected_dim = 2 * self.wrist_dim + 2 * self.hand_dim
+        # Expected total dimension (wrist_dim and hand_dim are already bimanual dimensions)
+        expected_dim = self.wrist_dim + self.hand_dim
         if D_total != expected_dim:
             raise ValueError(
-                f"Expected action dimension {expected_dim} (2*{self.wrist_dim} + 2*{self.hand_dim}), "
+                f"Expected action dimension {expected_dim} ({self.wrist_dim} + {self.hand_dim}), "
                 f"got {D_total}"
             )
         
@@ -198,18 +202,19 @@ class VQActionProcessor(ProcessorMixin):
         left_rot = action_tensor[..., 6:12]
         # Right rotation: indices 12:18
         right_rot = action_tensor[..., 12:18]
-        # Left hand: indices 18:18+hand_dim
-        hand_left = action_tensor[..., 18:18+self.hand_dim]
-        # Right hand: indices 18+hand_dim:18+2*hand_dim
-        hand_right = action_tensor[..., 18+self.hand_dim:18+2*self.hand_dim]
+        # Left hand: indices 18:18+hand_dim_single
+        hand_dim_single = self.hand_dim // 2
+        hand_left = action_tensor[..., 18:18+hand_dim_single]
+        # Right hand: indices 18+hand_dim_single:18+hand_dim
+        hand_right = action_tensor[..., 18+hand_dim_single:18+self.hand_dim]
         
         # Reconstruct wrist data (translation + rotation) and concatenate left and right
-        wrist_left = torch.cat([left_trans, left_rot], dim=-1)   # [B, T_original, wrist_dim]
-        wrist_right = torch.cat([right_trans, right_rot], dim=-1)  # [B, T_original, wrist_dim]
-        wrist_bimanual = torch.cat([wrist_left, wrist_right], dim=-1)  # [B, T_original, 2*wrist_dim]
+        wrist_left = torch.cat([left_trans, left_rot], dim=-1)   # [B, T_original, wrist_dim_single]
+        wrist_right = torch.cat([right_trans, right_rot], dim=-1)  # [B, T_original, wrist_dim_single]
+        wrist_bimanual = torch.cat([wrist_left, wrist_right], dim=-1)  # [B, T_original, wrist_dim]
         
         # Concatenate left and right hand data
-        hand_bimanual = torch.cat([hand_left, hand_right], dim=-1)  # [B, T_original, 2*hand_dim]
+        hand_bimanual = torch.cat([hand_left, hand_right], dim=-1)  # [B, T_original, hand_dim]
         
         return wrist_bimanual, hand_bimanual
     
@@ -294,7 +299,7 @@ class VQActionProcessor(ProcessorMixin):
                 - List of arrays/tensors with shape [T_state, D]
                 - np.ndarray with shape [T_state, D] or [B, T_state, D]
                 - torch.Tensor with shape [T_state, D] or [B, T_state, D]
-                where D = 2*wrist_dim + 2*hand_dim
+                where D = wrist_dim + hand_dim (wrist_dim and hand_dim are bimanual dimensions)
                 Layout: [left_trans(3), right_trans(3), left_rot(6), right_rot(6),
                         hand_left(15), hand_right(15)]
             action_chunk: Input actions in same format as state_chunk, but can have different T_action
@@ -435,8 +440,8 @@ class VQActionProcessor(ProcessorMixin):
         
         Returns:
             Tuple of (wrist_tokens, hand_tokens)
-            - wrist_tokens: [B, T_downsampled, Gw*Lw]
-            - hand_tokens: [B, T_downsampled, Gh*Lh]
+            - wrist_tokens: [Gw, B, T_downsampled, Lw]
+            - hand_tokens: [Gh, B, T_downsampled, Lh]
         """
         B, N = tokens_tensor.shape
         
@@ -461,6 +466,8 @@ class VQActionProcessor(ProcessorMixin):
         # Reshape back to [G, B, T_downsampled, L] format for decoding
         wrist_tokens = tokens_reshaped[:, :, :Gw*Lw]
         hand_tokens = tokens_reshaped[:, :, Gw*Lw:]
+        wrist_tokens = rearrange(wrist_tokens, 'b t (g l) -> g b t l', g=Gw, l=Lw)
+        hand_tokens = rearrange(hand_tokens, 'b t (g l) -> g b t l', g=Gh, l=Lh)
         
         return wrist_tokens, hand_tokens
     
@@ -473,21 +480,24 @@ class VQActionProcessor(ProcessorMixin):
         Reconstruct bimanual data from wrist and hand parts to original format.
         
         Args:
-            wrist_bimanual_data: [B, T_original, 2*wrist_dim] = [left_wrist, right_wrist] concatenated
-            hand_bimanual_data: [B, T_original, 2*hand_dim] = [left_hand, right_hand] concatenated
+            wrist_bimanual_data: [B, T_original, wrist_dim] = [left_wrist, right_wrist] concatenated
+            hand_bimanual_data: [B, T_original, hand_dim] = [left_hand, right_hand] concatenated
         
         Returns:
             Reconstructed data: [B, T_original, D_total]
             Layout: [left_trans(3), right_trans(3), left_rot(6), right_rot(6),
                     hand_left(15), hand_right(15)]
+            where D_total = wrist_dim + hand_dim
         """
-        # Split wrist data into left and right
-        wrist_left = wrist_bimanual_data[..., :self.wrist_dim]  # [B, T_original, wrist_dim]
-        wrist_right = wrist_bimanual_data[..., self.wrist_dim:]  # [B, T_original, wrist_dim]
+        # Split wrist data into left and right (wrist_dim is already bimanual)
+        wrist_dim_single = self.wrist_dim // 2
+        wrist_left = wrist_bimanual_data[..., :wrist_dim_single]  # [B, T_original, wrist_dim_single]
+        wrist_right = wrist_bimanual_data[..., wrist_dim_single:]  # [B, T_original, wrist_dim_single]
         
-        # Split hand data into left and right
-        hand_left = hand_bimanual_data[..., :self.hand_dim]  # [B, T_original, hand_dim]
-        hand_right = hand_bimanual_data[..., self.hand_dim:]  # [B, T_original, hand_dim]
+        # Split hand data into left and right (hand_dim is already bimanual)
+        hand_dim_single = self.hand_dim // 2
+        hand_left = hand_bimanual_data[..., :hand_dim_single]  # [B, T_original, hand_dim_single]
+        hand_right = hand_bimanual_data[..., hand_dim_single:]  # [B, T_original, hand_dim_single]
         
         # Reconstruct original format
         return torch.cat([
@@ -537,6 +547,8 @@ class VQActionProcessor(ProcessorMixin):
         # Unify tokens to tensors
         state_tokens_tensor = self._unify_tokens_to_tensor(state_tokens)
         action_tokens_tensor = self._unify_tokens_to_tensor(action_tokens)
+        print(f"state_tokens_tensor: {state_tokens_tensor.shape}")
+        print(f"action_tokens_tensor: {action_tokens_tensor.shape}")
         
         # Verify batch size matches
         if state_tokens_tensor.shape[0] != action_tokens_tensor.shape[0]:
@@ -554,6 +566,10 @@ class VQActionProcessor(ProcessorMixin):
         # Structure: [wrist_tokens, hand_tokens]
         state_wrist_idx, state_hand_idx = self._split_interleaved_tokens(state_tokens_tensor)
         action_wrist_idx, action_hand_idx = self._split_interleaved_tokens(action_tokens_tensor)
+        print(f"state_wrist_idx: {state_wrist_idx.shape}")
+        print(f"state_hand_idx: {state_hand_idx.shape}")
+        print(f"action_wrist_idx: {action_wrist_idx.shape}")
+        print(f"action_hand_idx: {action_hand_idx.shape}")
         
         # Infer T_original if not provided
         if T_state_original is None or T_action_original is None:
@@ -617,21 +633,22 @@ class VQActionProcessor(ProcessorMixin):
         }
         
         # Read dimensions from config if not provided
+        # Note: wrist_dim and hand_dim should be bimanual dimensions (2x single hand)
         if wrist_dim is None or hand_dim is None:
             wrist_config_path = os.path.join(wrist_model_path, "config.json")
             if os.path.exists(wrist_config_path):
                 with open(wrist_config_path, 'r') as f:
                     config = json.load(f)
                     if wrist_dim is None:
-                        wrist_dim = config.get("wrist_dim", 9)
+                        wrist_dim = config.get("wrist_dim", 18)
                     if hand_dim is None:
-                        hand_dim = config.get("hand_dim", 15)
+                        hand_dim = config.get("hand_dim", 30)
             else:
                 logger.warning(f"Config file not found at {wrist_config_path}, using defaults")
                 if wrist_dim is None:
-                    wrist_dim = 9
+                    wrist_dim = 18  # 2 * 9 (bimanual)
                 if hand_dim is None:
-                    hand_dim = 15
+                    hand_dim = 30  # 2 * 15 (bimanual)
         
         logger.info(
             f"VQ tokenizer loaded from {load_directory} "
@@ -698,21 +715,39 @@ class VQActionProcessor(ProcessorMixin):
         
         Args:
             motion_tokens_1d: 1D array of VQ token IDs with time-interleaved order:
-                [t0_wrist_left, t0_wrist_right, t0_hand_left, t0_hand_right,
-                 t1_wrist_left, t1_wrist_right, t1_hand_left, t1_hand_right, ...]
+                [t0_wrist, t0_hand, t1_wrist, t1_hand, ...]
             mapping: Dictionary mapping VQ token IDs to Gemma token IDs:
                 {part_name: {vq_id: gemma_id}}
         
         Returns:
             1D array of Gemma token IDs with same time-interleaved order
         """
-        wrist_tokens, hand_tokens = self._split_interleaved_tokens(
-            torch.from_numpy(motion_tokens_1d).unsqueeze(0)
-        )
-        wrist_tokens = wrist_tokens.squeeze(0)
-        hand_tokens = hand_tokens.squeeze(0)
+        assert motion_tokens_1d.ndim == 1, f"Motion tokens must be 1D array, got {motion_tokens_1d.ndim}D array"
+        Gw = int(self.vq_meta["Gw"])
+        Gh = int(self.vq_meta["Gh"])
+        Lw = int(self.vq_meta["Lw"])
+        Lh = int(self.vq_meta["Lh"])
+        bimanual_wrist_per_t = Gw * Lw  # wrist
+        bimanual_hand_per_t = Gh * Lh   # hand
+        tokens_per_t = bimanual_wrist_per_t + bimanual_hand_per_t
         
-        mapped_wrist_tokens = [mapping['wrist'][int(token)] for token in wrist_tokens]
-        mapped_hand_tokens = [mapping['hand'][int(token)] for token in hand_tokens]
+        # Step 1: Separate and map wrist/hand tokens, then re-interleave
+        mapped_interleaved = []
+        T = len(motion_tokens_1d) // tokens_per_t
         
-        return np.concatenate([mapped_wrist_tokens, mapped_hand_tokens])
+        for t in range(T):
+            start = t * tokens_per_t
+            
+            # Extract and map wrist tokens for this timestep
+            wrist_start = start
+            wrist_end = start + bimanual_wrist_per_t
+            for vq in motion_tokens_1d[wrist_start:wrist_end]:
+                mapped_interleaved.append(mapping['wrist'][int(vq)])
+            
+            # Extract and map hand tokens for this timestep
+            hand_start = start + bimanual_wrist_per_t
+            hand_end = start + tokens_per_t
+            for vq in motion_tokens_1d[hand_start:hand_end]:
+                mapped_interleaved.append(mapping['hand'][int(vq)])
+        
+        return np.asarray(mapped_interleaved, dtype=np.int64)

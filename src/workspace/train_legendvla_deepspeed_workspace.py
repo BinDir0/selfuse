@@ -84,7 +84,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         else: 
             self.objective_func = "train_" + cfg.training.objective
         print(f"Training with objective function: {self.objective_func}")
-        print(f"Token len buckets: {cfg.token_len_buckets}")
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)

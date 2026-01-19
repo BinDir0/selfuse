@@ -184,6 +184,8 @@ class BaseVQModel(nn.Module):
             action_indices: torch.Tensor, shape: (N, T_action_downsampled, Q) or (G, N, T_action_downsampled, Q)
             where Q is the number of quantizers and G is the number of groups for grouped residual VQ
         """
+        assert state.shape[-1] == self.motion_dim and action.shape[-1] == self.motion_dim, \
+            f"State and action must have dimension {self.motion_dim}"
         # motion_concat: (N, D, T_s'+T_a')(after padding)
         motion_concat, T_downsampled_state = self.process_motion(state, action)
         # (N, codebook_dim, T_motion_downsampled = ceil((T_s'+T_a')/total_stride))
@@ -240,6 +242,8 @@ class BaseVQModel(nn.Module):
             perplexity: torch.Tensor, shape: (Q) or (G, Q)
             # Q is the number of quantizers, G is the number of groups for grouped residual VQ
         """
+        assert state.shape[-1] == self.motion_dim and action.shape[-1] == self.motion_dim, \
+            f"State and action must have dimension {self.motion_dim}"
         T_state, T_action = state.shape[1], action.shape[1]
         # motion_concat: (N, D, T_s'+T_a')(after padding)
         motion_concat, T_downsampled_state = self.process_motion(state, action)

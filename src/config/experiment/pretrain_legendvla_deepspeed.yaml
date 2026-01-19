@@ -104,12 +104,8 @@ vla_processor:
   #     _target_: src.model.action.fast_tokenizer.UniversalActionProcessor.from_pretrained
   #     pretrained_model_name_or_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024/actions
   motion_tokenizer: 
-    states: 
-      _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
-      load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2025.12.08/states # may need to change
-    actions:
-      _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
-      load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2025.12.08/actions # may need to change
+    _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
+    load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2026.01.16 # may need to change
   num_image_tokens: ${policy.vision_tower.config.num_image_tokens}
   num_depth_image_tokens: ${depth_image_seq_len}
   max_seq_len: ${max_vlm_tokens}

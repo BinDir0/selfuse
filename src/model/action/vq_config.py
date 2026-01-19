@@ -135,8 +135,8 @@ class MotionVQModelConfig(PretrainedConfig):
         use_part: Optional[str] = None, # "wrist", "hand", None for full state
         horizon: int = 32, # time horizon
         motion_dim: int = 48, # full motion dimension
-        wrist_dim: int = 18, # wrist motion dimension
-        hand_dim: int = 30, # hand motion dimension
+        wrist_dim: int = 18, # bimanual wrist dimension
+        hand_dim: int = 30, # bimanual hand dimension 
         
         model_config: Optional[Dict[str, Any]] = None,
         quantizer_config: Optional[Dict[str, Any]] = None,
