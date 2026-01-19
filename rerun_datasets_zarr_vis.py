@@ -16,7 +16,6 @@ from src.utils.geometry import (
     transform_wrist_to_target_frame,
     transform_hand_points_to_target_frame,
 )
-from src.dataset.legendvla_dataset import get_absolute_action, get_relative_action, transform_hand_from_wrist_to_camera
 
 def get_colored_point_cloud(color_rgb, depth, width, height, K, depth_scale=0.001, min_depth=0.1, max_depth=5.0):
     X_grid, Y_grid = np.meshgrid(np.arange(width), np.arange(height))
@@ -86,9 +85,9 @@ class HandVisualizer:
         if frame_idx >= len(hand_data['wrist']): return
         
         base_path_3d = f"{root_3d_path}/{hand_name}"
-        # Extract action type (gt/pred) from root_3d_path for 2D overlay path
-        # root_3d_path format: "/world/camera_pose/hands/gt" or "/world/camera_pose/hands/pred"
-        action_type = root_3d_path.split('/')[-1] if '/' in root_3d_path else 'gt'
+        # Extract action type (state/action) from root_3d_path for 2D overlay path
+        # root_3d_path format: "/world/camera_pose/hands/state" or "/world/camera_pose/hands/action"
+        action_type = root_3d_path.split('/')[-1] if '/' in root_3d_path else 'state'
         base_path_2d = f"{image_root_path}/overlay/{action_type}/{hand_name}" 
 
         wrist_pose_cam = hand_data['wrist'][frame_idx]  # T_camera_wrist
@@ -165,18 +164,18 @@ class HandVisualizer:
             rr.log(f"{base_path_2d}/tips", rr.Points2D(points_2d, radii=10, colors=colors_2d))
 
 
-def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=None):
+def get_data_from_zarr(origin_zarr_path, frame_idx=None, horizon=30):
     """
-    Load data directly from original zarr dataset (which now contains gt_action and pred_action).
+    Load data directly from original zarr dataset.
     
     Args:
-        origin_zarr_path: Path to original dataset zarr file (which contains gt_action and pred_action)
-        frame_idx: Index of frame to load. If None, randomly select one from frames that have pred_action.
-        use_relative_action: Whether actions are relative. If None, default to True.
+        origin_zarr_path: Path to original dataset zarr file
+        frame_idx: Index of frame to load. If None, randomly select one from valid frames.
+        horizon: Number of timesteps to load (default: 30)
     
     Returns:
-        dict with keys: 'image', 'depth', 'intrinsic', 'extrinsic', 'gt_actions', 'pred_actions', 'frame_idx'
-        All arrays have shape (T,) where T=30 is the number of timesteps for the selected sample
+        dict with keys: 'image', 'depth', 'intrinsic', 'extrinsic', 'state', 'action', 'instruction', 'frame_idx'
+        All arrays have shape (T,) where T=horizon is the number of timesteps for the selected sample
         'frame_idx' is the actual frame index used (may be randomly selected if None was passed)
     """
     if not os.path.exists(origin_zarr_path):
@@ -186,21 +185,8 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
     origin_z = zarr.open(origin_zarr_path, mode='r')
     data_group = origin_z['data']
     
-    # Check if gt_action and pred_action exist
-    if 'pred_action' not in data_group:
-        raise ValueError(f"pred_action not found in dataset. Please ensure inference results have been saved to the dataset.")
-    if 'gt_action' not in data_group:
-        raise ValueError(f"gt_action not found in dataset. Please ensure inference results have been saved to the dataset.")
-    if 'actions_valid_mask' not in data_group:
-        raise ValueError(f"actions_valid_mask not found in dataset. Please ensure inference results have been saved to the dataset.")
-    pred_action_ds = data_group['pred_action']
-    gt_action_ds = data_group['gt_action']
-    dataset_size = pred_action_ds.shape[0]
-    actions_valid_mask_ds = data_group['actions_valid_mask']
-    
-    # Determine horizon from action shape
-    # pred_action_ds should be (N, H, D) where N=dataset_size, H=horizon, D=action_dim
-    horizon = pred_action_ds.shape[1]  # Typically 30
+    # Get dataset size from image data
+    dataset_size = data_group['image'].shape[0]
     episode_ends = np.array(origin_z['meta']['episode_ends'][:])
     
     print(f"Dataset size: {dataset_size}, Horizon: {horizon}")
@@ -247,23 +233,14 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
                 if frame_idx + horizon > episode_end:
                     raise ValueError(f"frame_idx {frame_idx} is too close to episode end (episode ends at {episode_end}, need {horizon} frames)")
     
-    # Get gt_actions and pred_actions for selected frame: (H, D) where H is horizon
-    pred_actions = pred_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
-    gt_actions = gt_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
-    
-    actions_valid_mask = actions_valid_mask_ds[frame_idx]  # (H, D) e.g., (30, 48)
-
-    # Frame indices for this sample +1 because the "action" is the action in the next frame
-    frame_indices = np.arange(frame_idx, frame_idx + horizon) + 1
+    # Frame indices for this sample
+    frame_indices = np.arange(frame_idx, frame_idx + horizon) 
     
     # Final check: ensure frame_indices don't exceed dataset size or episode end
     if frame_indices[-1] >= dataset_size:
         # Truncate to available frames
         valid_mask = frame_indices < dataset_size
         frame_indices = frame_indices[valid_mask]
-        pred_actions = pred_actions[:len(frame_indices)]
-        gt_actions = gt_actions[:len(frame_indices)]
-        actions_valid_mask = actions_valid_mask[:len(frame_indices)]
         horizon = len(frame_indices)
     # Check episode boundary
     episode_idx = np.searchsorted(episode_ends, frame_idx, side='right')
@@ -273,137 +250,55 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
             # Truncate to episode end
             valid_mask = frame_indices < episode_end
             frame_indices = frame_indices[valid_mask]
-            pred_actions = pred_actions[:len(frame_indices)]
-            gt_actions = gt_actions[:len(frame_indices)]
-            actions_valid_mask = actions_valid_mask[:len(frame_indices)]
             horizon = len(frame_indices)
     
     print(f"Selected frame {frame_idx} from dataset (size: {dataset_size})")
     print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} ({horizon} frames)")
     print(f"Dataset path: {origin_zarr_path}")
     
-    # Calculate L1 loss between pred_actions and gt_actions (before coordinate transformation)
-    # pred_actions and gt_actions shape: (H, D) where H=horizon, D=action_dim
-    # Use actions_valid_mask from dataset if available, otherwise assume all actions are valid
-    # actions_valid_mask shape: (H, D) where H=horizon, D=action_dim
-    
-    # Calculate L1 loss similar to inference script
-    # In inference script: pred_actions shape is (batch_size, H, D)
-    #   actions_valid_num = np.sum(actions_valid_mask, axis=(1,2))  # (batch_size,)
-    #   batch_l1_loss = np.sum(np.abs(valid_pred - valid_gt), axis=(1,2)) / actions_valid_num.clip(min=1)
-    # Here: pred_actions shape is (H, D), so we sum over all dimensions
-    valid_pred = pred_actions * actions_valid_mask
-    valid_gt = gt_actions * actions_valid_mask
-    # Sum over all dimensions (horizon and action_dim) to get total valid actions
-    actions_valid_num = np.sum(actions_valid_mask)
-    
-    if actions_valid_num > 0:
-        # Calculate L1 loss: sum over all dimensions, then divide by total valid actions
-        # This matches the inference script calculation
-        total_l1_error = np.sum(np.abs(valid_pred - valid_gt))
-        mean_l1_loss = total_l1_error / actions_valid_num
-        
-        # Also calculate per-timestep L1 loss for detailed information
-        actions_valid_num_per_timestep = np.sum(actions_valid_mask, axis=1)  # (H,)
-        l1_loss_per_timestep = np.sum(np.abs(valid_pred - valid_gt), axis=1) / actions_valid_num_per_timestep.clip(min=1)
-        
-        print(f"L1 Loss: {mean_l1_loss:.6f} (overall, matching inference script calculation)")
-        print(f"  Per timestep: min={np.min(l1_loss_per_timestep):.6f}, max={np.max(l1_loss_per_timestep):.6f}, mean={np.mean(l1_loss_per_timestep):.6f}")
-
-    else:
-        print("Warning: No valid actions found for L1 loss calculation")
-    
-    # Default to True if not specified
-    if use_relative_action is None:
-        use_relative_action = True
-    
-    # Load image, depth, intrinsic, extrinsic from original dataset
+    # Load image, depth, intrinsic, extrinsic, state, action from original dataset
     image = data_group['image'][frame_indices]  # (H, H_img, W_img, 3) uint8
     depth = data_group['depth'][frame_indices]  # (H, H_img, W_img) uint16
     intrinsic = data_group['intrinsic'][frame_indices]  # (H, 4) float32 [fx, fy, cx, cy]
     extrinsic_flat = data_group['extrinsic'][frame_indices]  # (H, 16) float32 (world2cam, 4x4 flattened)
-    
-    # Reshape extrinsic from (H, 16) to (H, 4, 4)
     extrinsic = extrinsic_flat.reshape(-1, 4, 4)  # (H, 4, 4)
+    wrist_state_world = data_group['state']['wrist'][frame_indices]  # (H, 18) = 2*9 (trans3 + 6drot for each hand)
+    hand_state_world = data_group['state']['fingertips'][frame_indices]  # (H, 30) = 2*15 (15 keypoints for each hand)
+    wrist_action_world = data_group['action']['wrist'][frame_indices]  # (H, 18) = 2*9 (trans3 + 6drot for each hand)
+    hand_action_world = data_group['action']['fingertips'][frame_indices]  # (H, 30) = 2*15 (15 keypoints for each hand)
     
-    if use_relative_action:
-        # history is typically 30, the initial state is at frame_idx
-        state_frame_idx = frame_idx
-        
-        # Load wrist and hand state from original dataset
-        # Note: state is in WORLD coordinate system
-        # Format: [left_trans3, right_trans3, left_6drot, right_6drot, left_hand, right_hand]
-        wrist_state_world = data_group['state']['wrist'][state_frame_idx]  # (18,) = 2*9 (trans3 + 6drot for each hand)
-        hand_state_world = data_group['state']['fingertips'][state_frame_idx]  # (30,) = 2*15 (15 keypoints for each hand)
-        
-        # Get camera extrinsic (world2cam) for the state frame
-        # Note: extrinsic is already loaded above, but we need the one at state_frame_idx
-        state_extrinsic_flat = data_group['extrinsic'][state_frame_idx]  # (16,) float32 (world2cam, 4x4 flattened)
-        world2cam = state_extrinsic_flat.reshape(4, 4)  # (4, 4) world2cam
-        
-        # Convert fingertip keypoints from world to wrist frame using transform_hand_points_to_wrist_frame
-        # hand_state_world format: [left_keypoints_15, right_keypoints_15] = (30,) = 2*15
-        # wrist_state_world format: [left_trans3, right_trans3, left_6drot, right_6drot] = (18,)
-        # Reshape to (1, D) for function compatibility
-        hand_state_world_reshaped = hand_state_world.reshape(1, -1)  # (1, 30)
-        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)  # (1, 18)
-        hand_state_wrist_reshaped = transform_hand_points_to_wrist_frame(hand_state_world_reshaped, wrist_state_world_reshaped)
-        hand_state_wrist = hand_state_wrist_reshaped.reshape(-1)  # (30,)
-        
-        # Convert wrist state from world to camera coordinate system using transform_wrist_to_target_frame
-        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)  # (1, 18)
-        wrist_state_cam_reshaped = transform_wrist_to_target_frame(wrist_state_world_reshaped, world2cam)
-        wrist_state_cam = wrist_state_cam_reshaped.reshape(-1)  # (18,)
-        
-        initial_state = np.concatenate([wrist_state_cam, hand_state_wrist])  # (48,)
-
-        wrist_action_world = data_group['action']['wrist'][frame_indices]  # (H, 18) = 2*9 (trans3 + 6drot for each hand)
-        hand_action_world = data_group['action']['fingertips'][frame_indices]  # (H, 30) = 2*15 (15 keypoints for each hand)     
-        
-        # Transform wrist from world to camera
-        wrist_action_cam = transform_wrist_to_target_frame(wrist_action_world, extrinsic)  # (H, 18) in camera coordinate
-
-        fingertips_cam = transform_hand_points_to_target_frame(hand_action_world, extrinsic)  # (H, 30) in camera coordinate
-
-        hand_action_wrist_reshaped = transform_hand_points_to_wrist_frame(hand_action_world, wrist_action_world)
-
-        wrist_action_cam_reshaped = transform_wrist_to_target_frame(wrist_action_world, world2cam)
-
-        gt_actions_cam = np.concatenate([wrist_action_cam, fingertips_cam], axis=-1) 
-
-        initial_action = np.concatenate([wrist_action_cam_reshaped, hand_action_wrist_reshaped], axis=-1)  # (48,)
-
-        relative_action = get_relative_action(initial_state, initial_action.copy())
-        print(f"Using relative actions, initial state at frame {state_frame_idx}")
-        print(f"Initial state shape: {initial_state.shape}")
-        print(f"Converted state from world to camera coordinate system")
-        
-        gt_actions_rel2wrist = get_absolute_action(initial_state, gt_actions)
-        gt_actions_cam = transform_hand_from_wrist_to_camera(gt_actions_rel2wrist, extrinsic)
-        pred_actions_rel2wrist = get_absolute_action(initial_state, pred_actions)
-        pred_actions_cam = transform_hand_from_wrist_to_camera(pred_actions_rel2wrist, extrinsic)
-        print("Converted relative actions to absolute actions and transformed to corresponding frame's camera coordinate system")
+    # Transform to camera coordinate
+    wrist_state_cam = transform_wrist_to_target_frame(wrist_state_world, extrinsic)  # (H, 18) in camera coordinate
+    hand_state_cam = transform_hand_points_to_target_frame(hand_state_world, extrinsic)  # (H, 30) in camera coordinate
+    state_cam = np.concatenate([wrist_state_cam, hand_state_cam], axis=-1)  # (H, 48) in camera coordinate
+    wrist_action_cam = transform_wrist_to_target_frame(wrist_action_world, extrinsic)  # (H, 18) in camera coordinate
+    fingertips_action_cam = transform_hand_points_to_target_frame(hand_action_world, extrinsic)  # (H, 30) in camera coordinate
+    action_cam = np.concatenate([wrist_action_cam, fingertips_action_cam], axis=-1)  # (H, 48) in camera coordinate
+    
+    # Load instruction
+    if 'instruction' in data_group:
+        instruction = data_group['instruction'][frame_indices]  # (H,) string array
     else:
-        gt_actions_cam = transform_hand_from_wrist_to_camera(gt_actions, extrinsic)
-        pred_actions_cam = transform_hand_from_wrist_to_camera(pred_actions, extrinsic)
-        print("Converted absolute actions to corresponding frame's camera coordinate system")
+        instruction = None
+
     data = {
         'image': image,  # (H, H_img, W_img, 3) uint8
         'depth': depth,  # (H, H_img, W_img) uint16
         'intrinsic': intrinsic,  # (H, 4) float32 [fx, fy, cx, cy]
         'extrinsic': extrinsic,  # (H, 4, 4) float32 (world2cam)
-        'gt_actions': gt_actions_cam,  # (H, 48) float32
-        'pred_actions': pred_actions_cam,  # (H, 48) float32
+        'state': state_cam,  # (H, 48) float32
+        'action': action_cam,  # (H, 48) float32
+        'instruction': instruction,  # (H,) string array or None
         'frame_idx': frame_idx,  # int - actual frame index used
     }
     return data
 
 
-def gt_actions_to_hands_data(gt_actions):
+def actions_to_hands_data(actions):
     """
-    Convert gt_actions to hands_data format for all timesteps.
+    Convert actions to hands_data format for all timesteps.
     
-    gt_actions format (T, 48) where T=30 is number of timesteps:
+    actions format (T, 48) where T is number of timesteps:
     For each timestep:
     - left_trans3: [0:3]
     - right_trans3: [3:6]
@@ -413,14 +308,14 @@ def gt_actions_to_hands_data(gt_actions):
     - right_keypoints_15: [33:48] (5 fingers * 3 coords)
     
     Args:
-        gt_actions: np.ndarray, shape (T, 48) where T=30
+        actions: np.ndarray, shape (T, 48)
     
     Returns:
         dict with 'left' and 'right' keys, each containing:
         - 'wrist': array of shape (T, 4, 4) transform matrices
         - 'fingers': dict with finger names and arrays of shape (T, 4, 4) transform matrices
     """
-    T = gt_actions.shape[0]  # Number of timesteps (30)
+    T = actions.shape[0]  # Number of timesteps
     
     finger_names = ['Thumb', 'Index', 'Middle', 'Ring', 'Little']
     
@@ -432,7 +327,7 @@ def gt_actions_to_hands_data(gt_actions):
     
     # Process each timestep
     for t in range(T):
-        action = gt_actions[t]  # (48,)
+        action = actions[t]  # (48,)
         # Extract data
         left_trans = action[0:3]
         right_trans = action[3:6]
@@ -486,8 +381,9 @@ def gt_actions_to_hands_data(gt_actions):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file (which contains gt_action and pred_action).")
-    parser.add_argument("--frame_idx", type=int, default=None, help="Index of frame to visualize. If None, randomly select one from frames that have pred_action.")
+    parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file.")
+    parser.add_argument("--frame_idx", type=int, default=None, help="Index of frame to visualize. If None, randomly select one from valid frames.")
+    parser.add_argument("--horizon", type=int, default=30, help="Number of timesteps to visualize (default: 30).")
     parser.add_argument("--target_width", type=int, default=None, help="Target image width. If None, use original width.")
     parser.add_argument("--target_height", type=int, default=None, help="Target image height. If None, use original height.")
     parser.add_argument("--depth_scale", type=float, default=1.0)
@@ -495,14 +391,23 @@ def main():
     parser.add_argument("--max_depth", type=float, default=1.5)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--save_path", type=str, default=None, help="Path to save rrd file. If None, use spawn/notebook_show.")
-    parser.add_argument("--use_relative_action", type=lambda x: (str(x).lower() == 'true'), default=None, help="Whether actions are relative. If None, default to True.")
     args = parser.parse_args()
 
     if not os.path.exists(args.origin_zarr_path):
         raise FileNotFoundError(f"Zarr file not found: {args.origin_zarr_path}")
 
     print(f"Loading data from zarr: {args.origin_zarr_path}")
-    zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=args.frame_idx, use_relative_action=args.use_relative_action)
+    zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=args.frame_idx, horizon=args.horizon)
+    
+    # Print instruction if available
+    if zarr_data['instruction'] is not None:
+        # Get unique instructions (they should be the same for all frames in a sample)
+        unique_instructions = np.unique(zarr_data['instruction'])
+        if len(unique_instructions) > 0:
+            print(f"\n=== Instruction ===")
+            for i, instr in enumerate(unique_instructions):
+                print(f"  {i}: {instr}")
+            print("=" * 50)
     
     # Extract images and depth: (T, H, W, 3) and (T, H, W)
     rgb_images = np.array(zarr_data['image'])  # (T, H, W, 3) uint8
@@ -514,16 +419,16 @@ def main():
     # Extract extrinsics: (T, 4, 4) world2cam
     camera_transforms_raw = zarr_data['extrinsic']  # (T, 4, 4) world2cam
     
-    # Convert gt_actions and pred_actions to hands_data format: (T, 48) -> hands_data with T frames
-    gt_actions = zarr_data['gt_actions']  # (T, 48)
-    pred_actions = zarr_data['pred_actions']  # (T, 48)
-    gt_hands_data = gt_actions_to_hands_data(gt_actions)
-    pred_hands_data = gt_actions_to_hands_data(pred_actions)
+    # Convert state and action to hands_data format: (T, 48) -> hands_data with T frames
+    states = zarr_data['state']  # (T, 48)
+    actions = zarr_data['action']  # (T, 48)
+    state_hands_data = actions_to_hands_data(states)
+    action_hands_data = actions_to_hands_data(actions)
     
-    T = len(rgb_images)  # Number of timesteps (30)
+    T = len(rgb_images)  # Number of timesteps
     print(f"Loaded {T} frames (timesteps) from selected sample")
-    print(f"GT hands data: left={len(gt_hands_data['left']['wrist'])}, right={len(gt_hands_data['right']['wrist'])}")
-    print(f"Pred hands data: left={len(pred_hands_data['left']['wrist'])}, right={len(pred_hands_data['right']['wrist'])}")
+    print(f"State hands data: left={len(state_hands_data['left']['wrist'])}, right={len(state_hands_data['right']['wrist'])}")
+    print(f"Action hands data: left={len(action_hands_data['left']['wrist'])}, right={len(action_hands_data['right']['wrist'])}")
     
     # Resize images, depth, and adjust intrinsics if target dimensions are specified
     orig_h, orig_w = rgb_images[0].shape[:2]
@@ -581,9 +486,9 @@ def main():
     
     # 设置世界坐标系 Y-UP
     rr.log("/world", rr.ViewCoordinates.RIGHT_HAND_Y_UP)
-    # Create two visualizers with different color schemes
-    viz_gt = HandVisualizer(history_len=10, color_scheme='gt')
-    viz_pred = HandVisualizer(history_len=10, color_scheme='pred')
+    # Create two visualizers with different color schemes: state (gt) and action (pred)
+    viz_state = HandVisualizer(history_len=10, color_scheme='gt')
+    viz_action = HandVisualizer(history_len=10, color_scheme='pred')
 
     frame_idx = 0
     num_frames = T  # All timesteps for the selected sample
@@ -645,42 +550,42 @@ def main():
         )
         rr.log("/world/camera_pose/point_cloud", rr.Points3D(points, colors=colors))
 
-        # Hands Visualization - GT and Pred
+        # Hands Visualization - State and Action
         identity_transform = np.eye(4, dtype=np.float32)
         
-        # Visualize GT hands
+        # Visualize State hands (like GT)
         for hand_name in ['left', 'right']:
-            if hand_name in gt_hands_data and i < len(gt_hands_data[hand_name]['wrist']):
-                viz_gt.log(
-                    root_3d_path="/world/camera_pose/hands/gt", # 3D 
+            if hand_name in state_hands_data and i < len(state_hands_data[hand_name]['wrist']):
+                viz_state.log(
+                    root_3d_path="/world/camera_pose/hands/state", # 3D 
                     image_root_path="/world/camera_pose/camera", # 2D 
                     hand_name=hand_name,
-                    hand_data=gt_hands_data[hand_name],
+                    hand_data=state_hands_data[hand_name],
                     frame_idx=i,
                     world_to_camera=identity_transform,  
                     K=K
                 )
                 if i == 0 and args.debug:
-                    wrist_pose_camera = gt_hands_data[hand_name]['wrist'][i]
-                    print(f"\n=== Frame {i} - GT {hand_name} wrist (Camera Frame) ===")
+                    wrist_pose_camera = state_hands_data[hand_name]['wrist'][i]
+                    print(f"\n=== Frame {i} - State {hand_name} wrist (Camera Frame) ===")
                     print(f"Translation: {wrist_pose_camera[:3, 3]}")
                     print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
         
-        # Visualize Pred hands
+        # Visualize Action hands (like Pred)
         for hand_name in ['left', 'right']:
-            if hand_name in pred_hands_data and i < len(pred_hands_data[hand_name]['wrist']):
-                viz_pred.log(
-                    root_3d_path="/world/camera_pose/hands/pred", # 3D 
+            if hand_name in action_hands_data and i < len(action_hands_data[hand_name]['wrist']):
+                viz_action.log(
+                    root_3d_path="/world/camera_pose/hands/action", # 3D 
                     image_root_path="/world/camera_pose/camera", # 2D 
                     hand_name=hand_name,
-                    hand_data=pred_hands_data[hand_name],
+                    hand_data=action_hands_data[hand_name],
                     frame_idx=i,
                     world_to_camera=identity_transform,  
                     K=K
                 )
                 if i == 0 and args.debug:
-                    wrist_pose_camera = pred_hands_data[hand_name]['wrist'][i]
-                    print(f"\n=== Frame {i} - Pred {hand_name} wrist (Camera Frame) ===")
+                    wrist_pose_camera = action_hands_data[hand_name]['wrist'][i]
+                    print(f"\n=== Frame {i} - Action {hand_name} wrist (Camera Frame) ===")
                     print(f"Translation: {wrist_pose_camera[:3, 3]}")
                     print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
 
@@ -688,3 +593,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+

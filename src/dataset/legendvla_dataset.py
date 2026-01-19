@@ -22,6 +22,8 @@ from src.utils.geometry import (
     homo_matrix_from_trans_6drot, 
     homo_matrix_to_trans_6drot, 
     transform_hand_points_to_wrist_frame,
+    transform_hand_points_to_target_frame,
+    transform_hand_points_from_wrist_to_camera_frame,
 )
 from src.model.common.normalizer import LinearNormalizer
 from .base_dataset import BaseImageDataset, BaseDataCollator
@@ -800,7 +802,9 @@ def get_absolute_action(state, relative_action):
     
     Args:
         state: torch.Tensor or np.ndarray, shape: [wrist_dim + hand_dim] - current state
+            state is in the first frame's camera coordinate system, where wrist is in cam frame and hand is in wrist frame
         relative_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] - relative action
+
     Returns:
         absolute_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] - absolute action
     '''
@@ -823,6 +827,54 @@ def get_absolute_action(state, relative_action):
     # For hand parameters, absolute action = relative action + state
     # This is the inverse of: relative = action - state
     absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]
+    
+    return absolute_action
+
+
+def transform_hand_from_wrist_to_camera(absolute_action, extrinsic):
+    '''
+    Transform hand points from wrist frame to camera coordinate system.
+    This function transforms hand points from wrist frame to first frame's camera coordinate,
+    then to target frames' camera coordinates.
+    
+    Args:
+        absolute_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] or [wrist_dim + hand_dim]
+            absolute action where hand is in wrist frame
+        extrinsic: torch.Tensor or np.ndarray, shape: [H, 4, 4] or [4, 4] - camera extrinsic (world2cam) for each frame
+    Returns:
+        absolute_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] or [wrist_dim + hand_dim]
+            absolute action where hand is in camera frame
+    '''
+    # Create a copy to avoid modifying the input
+    if isinstance(absolute_action, torch.Tensor):
+        absolute_action = absolute_action.clone()
+    else:
+        absolute_action = absolute_action.copy()
+    
+    hand_points_wrist = absolute_action[..., 18:]  # (H, 30) or (30,) - hand in wrist frame
+    wrist_action_initial = absolute_action[..., :18]  # (H, 18) or (18,) - wrist in first frame's cam coordinate
+    
+    # Transform hand points from wrist frame to first frame's cam coordinate
+    if absolute_action.ndim > 1:
+        # Multiple frames
+        hand_points_cam_initial = transform_hand_points_from_wrist_to_camera_frame(hand_points_wrist, wrist_action_initial)
+    else:
+        # Single frame
+        hand_points_cam_initial = transform_hand_points_from_wrist_to_camera_frame(hand_points_wrist.reshape(1, -1), wrist_action_initial.reshape(1, -1))
+        hand_points_cam_initial = hand_points_cam_initial.reshape(-1)
+    
+    # Now both wrist and hand are in first frame's cam coordinate
+    absolute_action[..., 18:] = hand_points_cam_initial
+    initial_extrinsic_inv = np.linalg.inv(extrinsic[0])
+    # Transform wrist from first frame's cam coordinate to world, then to target frames' cam coordinates
+    wrist_action_world = transform_wrist_to_target_frame(wrist_action_initial, initial_extrinsic_inv)  # Transform to world
+    wrist_action_target = transform_wrist_to_target_frame(wrist_action_world, extrinsic)  # Transform to target frames
+    absolute_action[..., :18] = wrist_action_target
+    
+    # Transform hand points from first frame's cam coordinate to world, then to target frames' cam coordinates
+    hand_points_world = transform_hand_points_to_target_frame(hand_points_cam_initial, initial_extrinsic_inv)  # Transform to world
+    hand_points_target = transform_hand_points_to_target_frame(hand_points_world, extrinsic)  # Transform to target frames
+    absolute_action[..., 18:] = hand_points_target
     
     return absolute_action
 
