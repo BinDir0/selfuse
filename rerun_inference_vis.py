@@ -165,96 +165,80 @@ class HandVisualizer:
             rr.log(f"{base_path_2d}/tips", rr.Points2D(points_2d, radii=10, colors=colors_2d))
 
 
-def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=None):
+def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=None, use_relative_action=None):
     """
-    Load data directly from original zarr dataset (which now contains gt_action and pred_action).
+    Load data from inference results zarr file and corresponding original dataset.
     
     Args:
-        origin_zarr_path: Path to original dataset zarr file (which contains gt_action and pred_action)
-        frame_idx: Index of frame to load. If None, randomly select one from frames that have pred_action.
+        inference_zarr_path: Path to inference results zarr file (contains pred_actions, gt_actions, etc.)
+        origin_zarr_path: Path to original dataset zarr file (for loading image, depth, etc.). 
+                         If None, try to infer from inference zarr metadata.
+        sample_idx: Index of sample to load from inference results. If None, randomly select one.
         use_relative_action: Whether actions are relative. If None, default to True.
     
     Returns:
         dict with keys: 'image', 'depth', 'intrinsic', 'extrinsic', 'gt_actions', 'pred_actions', 'frame_idx'
         All arrays have shape (T,) where T=30 is the number of timesteps for the selected sample
-        'frame_idx' is the actual frame index used (may be randomly selected if None was passed)
+        'frame_idx' is the actual frame index in original dataset (from origin_frame_indices)
     """
+    if not os.path.exists(inference_zarr_path):
+        raise FileNotFoundError(f"Inference results zarr file not found: {inference_zarr_path}")
+    
+    # Load inference results
+    inference_z = zarr.open(inference_zarr_path, mode='r')
+    
+    # Check required keys
+    required_keys = ['pred_actions', 'gt_actions', 'actions_valid_mask', 'origin_frame_indices']
+    for key in required_keys:
+        if key not in inference_z:
+            raise ValueError(f"{key} not found in inference results. Please ensure inference has been completed.")
+    
+    pred_actions_all = inference_z['pred_actions']  # (N, H, D)
+    gt_actions_all = inference_z['gt_actions']  # (N, H, D)
+    actions_valid_mask_all = inference_z['actions_valid_mask']  # (N, H, D)
+    origin_frame_indices_all = inference_z['origin_frame_indices']  # (N,)
+    
+    num_samples = pred_actions_all.shape[0]
+    horizon = pred_actions_all.shape[1]  # Typically 30
+    
+    print(f"Inference results: {num_samples} samples, Horizon: {horizon}")
+    
+    # Randomly select a sample if not specified
+    if sample_idx is None:
+        sample_idx = np.random.randint(0, num_samples)
+    else:
+        if sample_idx >= num_samples:
+            raise ValueError(f"sample_idx {sample_idx} is out of range (num_samples: {num_samples})")
+    
+    # Get data for selected sample
+    pred_actions = pred_actions_all[sample_idx]  # (H, D)
+    gt_actions = gt_actions_all[sample_idx]  # (H, D)
+    actions_valid_mask = actions_valid_mask_all[sample_idx]  # (H, D)
+    origin_frame_idx = int(origin_frame_indices_all[sample_idx])  # int - observation frame index in original dataset
+    
+    print(f"Selected sample {sample_idx}, origin frame index: {origin_frame_idx}")
+    
+    # Get origin_zarr_path from metadata if not provided
+    if origin_zarr_path is None:
+        if 'origin_zarr_path' in inference_z.attrs:
+            origin_zarr_path = inference_z.attrs['origin_zarr_path']
+        else:
+            raise ValueError("origin_zarr_path not provided and not found in inference zarr metadata")
+    
     if not os.path.exists(origin_zarr_path):
         raise FileNotFoundError(f"Original dataset zarr file not found: {origin_zarr_path}")
     
     # Load original dataset
     origin_z = zarr.open(origin_zarr_path, mode='r')
     data_group = origin_z['data']
-    
-    # Check if gt_action and pred_action exist
-    if 'pred_action' not in data_group:
-        raise ValueError(f"pred_action not found in dataset. Please ensure inference results have been saved to the dataset.")
-    if 'gt_action' not in data_group:
-        raise ValueError(f"gt_action not found in dataset. Please ensure inference results have been saved to the dataset.")
-    if 'actions_valid_mask' not in data_group:
-        raise ValueError(f"actions_valid_mask not found in dataset. Please ensure inference results have been saved to the dataset.")
-    pred_action_ds = data_group['pred_action']
-    gt_action_ds = data_group['gt_action']
-    dataset_size = pred_action_ds.shape[0]
-    actions_valid_mask_ds = data_group['actions_valid_mask']
-    
-    # Determine horizon from action shape
-    # pred_action_ds should be (N, H, D) where N=dataset_size, H=horizon, D=action_dim
-    horizon = pred_action_ds.shape[1]  # Typically 30
     episode_ends = np.array(origin_z['meta']['episode_ends'][:])
     
-    print(f"Dataset size: {dataset_size}, Horizon: {horizon}")
+    # Frame indices for this sample: origin_frame_idx is the observation frame
+    # Actions are for frames [origin_frame_idx, origin_frame_idx + horizon)
+    frame_indices = np.arange(origin_frame_idx, origin_frame_idx + horizon) + 1
     
-    # Find valid frames that are at least 'horizon' frames away from episode end
-
-    valid_frames = []
-    episode_start = 0
-    
-    for episode_end in episode_ends:
-        # For this episode, valid frames are those where frame + horizon <= episode_end
-        # i.e., frame <= episode_end - horizon
-        episode_valid_end = episode_end - horizon
-        if episode_valid_end >= episode_start:
-            # Add all valid frames in this episode
-            episode_valid = np.arange(episode_start, episode_valid_end + 1)
-            valid_frames.append(episode_valid)
-        episode_start = episode_end
-    
-    if len(valid_frames) > 0:
-        valid_frames = np.concatenate(valid_frames)
-    else:
-        valid_frames = np.array([], dtype=np.int64)
-    
-    if len(valid_frames) == 0:
-        raise ValueError(f"No valid frames found that are at least {horizon} frames away from episode end.")
-    
-    print(f"Found {len(valid_frames)} valid frames (out of {dataset_size} total)")
- 
-    
-    # Randomly select a frame if not specified
-    if frame_idx is None:
-        if len(valid_frames) == 0:
-            raise ValueError(f"No valid frames available. Dataset size: {dataset_size}, horizon: {horizon}")
-        frame_idx = np.random.choice(valid_frames)
-    else:
-        if frame_idx >= dataset_size:
-            raise ValueError(f"frame_idx {frame_idx} is out of range (dataset size: {dataset_size})")
-        # Check if the selected frame is valid
-        if episode_ends is not None:
-            episode_idx = np.searchsorted(episode_ends, frame_idx, side='right')
-            if episode_idx < len(episode_ends):
-                episode_end = episode_ends[episode_idx]
-                if frame_idx + horizon > episode_end:
-                    raise ValueError(f"frame_idx {frame_idx} is too close to episode end (episode ends at {episode_end}, need {horizon} frames)")
-    
-    # Get gt_actions and pred_actions for selected frame: (H, D) where H is horizon
-    pred_actions = pred_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
-    gt_actions = gt_action_ds[frame_idx]  # (H, D) e.g., (30, 48)
-    
-    actions_valid_mask = actions_valid_mask_ds[frame_idx]  # (H, D) e.g., (30, 48)
-
-    # Frame indices for this sample +1 because the "action" is the action in the next frame
-    frame_indices = np.arange(frame_idx, frame_idx + horizon) + 1
+    # Get dataset size
+    dataset_size = data_group['image'].shape[0]
     
     # Final check: ensure frame_indices don't exceed dataset size or episode end
     if frame_indices[-1] >= dataset_size:
@@ -265,8 +249,9 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
         gt_actions = gt_actions[:len(frame_indices)]
         actions_valid_mask = actions_valid_mask[:len(frame_indices)]
         horizon = len(frame_indices)
+    
     # Check episode boundary
-    episode_idx = np.searchsorted(episode_ends, frame_idx, side='right')
+    episode_idx = np.searchsorted(episode_ends, origin_frame_idx, side='right')
     if episode_idx < len(episode_ends):
         episode_end = episode_ends[episode_idx]
         if frame_indices[-1] >= episode_end:
@@ -278,9 +263,11 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
             actions_valid_mask = actions_valid_mask[:len(frame_indices)]
             horizon = len(frame_indices)
     
-    print(f"Selected frame {frame_idx} from dataset (size: {dataset_size})")
+    print(f"Selected sample {sample_idx} from inference results")
+    print(f"Origin frame index: {origin_frame_idx}")
     print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} ({horizon} frames)")
-    print(f"Dataset path: {origin_zarr_path}")
+    print(f"Inference zarr path: {inference_zarr_path}")
+    print(f"Original dataset path: {origin_zarr_path}")
     
     # Calculate L1 loss between pred_actions and gt_actions (before coordinate transformation)
     # pred_actions and gt_actions shape: (H, D) where H=horizon, D=action_dim
@@ -327,8 +314,8 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
     extrinsic = extrinsic_flat.reshape(-1, 4, 4)  # (H, 4, 4)
     
     if use_relative_action:
-        # history is typically 30, the initial state is at frame_idx
-        state_frame_idx = frame_idx
+        # history is typically 30, the initial state is at origin_frame_idx
+        state_frame_idx = origin_frame_idx
         
         # Load wrist and hand state from original dataset
         # Note: state is in WORLD coordinate system
@@ -394,7 +381,7 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, use_relative_action=Non
         'extrinsic': extrinsic,  # (H, 4, 4) float32 (world2cam)
         'gt_actions': gt_actions_cam,  # (H, 48) float32
         'pred_actions': pred_actions_cam,  # (H, 48) float32
-        'frame_idx': frame_idx,  # int - actual frame index used
+        'frame_idx': origin_frame_idx,  # int - observation frame index in original dataset
     }
     return data
 
@@ -486,10 +473,11 @@ def gt_actions_to_hands_data(gt_actions):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--inference_zarr_path", type=str, required=True, help="Path to inference results zarr file (contains pred_actions, gt_actions, etc.).")
     parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file (which contains gt_action and pred_action).")
-    parser.add_argument("--frame_idx", type=int, default=None, help="Index of frame to visualize. If None, randomly select one from frames that have pred_action.")
-    parser.add_argument("--target_width", type=int, default=None, help="Target image width. If None, use original width.")
-    parser.add_argument("--target_height", type=int, default=None, help="Target image height. If None, use original height.")
+    parser.add_argument("--sample_idx", type=int, default=None, help="Index of sample to load from inference results. If None, randomly select one.")
+    parser.add_argument("--target_width", type=int, default=1920, help="Target image width. If None, use original width.")
+    parser.add_argument("--target_height", type=int, default=1080, help="Target image height. If None, use original height.")
     parser.add_argument("--depth_scale", type=float, default=1.0)
     parser.add_argument("--min_depth", type=float, default=0.1)
     parser.add_argument("--max_depth", type=float, default=1.5)
@@ -498,11 +486,16 @@ def main():
     parser.add_argument("--use_relative_action", type=lambda x: (str(x).lower() == 'true'), default=None, help="Whether actions are relative. If None, default to True.")
     args = parser.parse_args()
 
-    if not os.path.exists(args.origin_zarr_path):
-        raise FileNotFoundError(f"Zarr file not found: {args.origin_zarr_path}")
+    if not os.path.exists(args.inference_zarr_path):
+        raise FileNotFoundError(f"Inference zarr file not found: {args.inference_zarr_path}")
 
-    print(f"Loading data from zarr: {args.origin_zarr_path}")
-    zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=args.frame_idx, use_relative_action=args.use_relative_action)
+    print(f"Loading data from inference zarr: {args.inference_zarr_path}")
+    zarr_data = get_data_from_zarr(
+        args.inference_zarr_path, 
+        origin_zarr_path=args.origin_zarr_path,
+        sample_idx=args.sample_idx, 
+        use_relative_action=args.use_relative_action
+    )
     
     # Extract images and depth: (T, H, W, 3) and (T, H, W)
     rgb_images = np.array(zarr_data['image'])  # (T, H, W, 3) uint8

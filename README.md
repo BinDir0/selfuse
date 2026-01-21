@@ -162,19 +162,20 @@ python ds_to_universal.py \
 ### 环境配置
 环境建议使用legendvla环境，加装rerun sdk，用3d环境的话可能要装一下torch等。
 ### 使用方法
-python rerun_inference_vis.py --origin_zarr_path /share_data/guantianrui/datasets/taco/taco_test_seen.zarr --frame_idx 5000 --save_path /share_data/zengfanlian --target_width 1920 --target_height 1080
+python rerun_inference_vis.py inference_zarr_path /share_data/xxxx/outputs/xxxx.zarr --origin_zarr_path /share_data/guantianrui/datasets/taco/taco_test_seen.zarr --sample_idx 200 --save_path /share_data/zengfanlian --target_width 1920 --target_height 1080
 完整参数示例：
 ```bash
 python rerun_inference_vis.py  \
-  ----origin_zarr_path \
-  --frame_idx \
+  --inference_zarr_path \
+  --origin_zarr_path \
+  --sample_idx \
   --target_width 1920 \
   --target_height 1080 \
   --depth_scale defualt 1.0\
   --min_depth   defualt 0.1\
   --max_depth   defualt 1.5\
   --save_path \
-  ----use_relative_action default True
+  --use_relative_action default True
 ```
 Note:如果没有指定frame_id的话，将会随机自动选择（会确保所取的位置距离episode结束有足够30帧）
 ### 输出示例
@@ -206,7 +207,7 @@ Saving visualization to: /share_data/zengfanlian/visualization_frame_5000.rrd
   - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene.zarr
   - /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
   - /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
-  - /share_data/yeyuyao/egodex_filter_test.zarr
+  <!-- - /share_data/yeyuyao/egodex_filter_test.zarr -->
 
 ## Dataset zarr Visualization
 ###使用示例
