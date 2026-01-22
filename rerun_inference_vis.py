@@ -142,7 +142,7 @@ class HandVisualizer:
 
         wrist_2d = self._project_to_2d(wrist_t_cam, K)
         if wrist_2d:
-            rr.log(f"{base_path_2d}/wrist", rr.Points2D([wrist_2d], radii=20, colors=[255, 255, 255]))
+            rr.log(f"{base_path_2d}/wrist", rr.Points2D([wrist_2d], radii=20, colors=self.structure_color))
 
         points_2d = []
         colors_2d = []
@@ -158,7 +158,7 @@ class HandVisualizer:
                     if wrist_2d:
                         rr.log(
                             f"{base_path_2d}/bones/{finger}",
-                            rr.LineStrips2D([[wrist_2d, tip_2d]], radii=5, colors=[150, 150, 150])
+                            rr.LineStrips2D([[wrist_2d, tip_2d]], radii=5, colors=self.spoke_color)
                         )
         
         if points_2d:
@@ -217,7 +217,6 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
     origin_frame_idx = int(origin_frame_indices_all[sample_idx])  # int - observation frame index in original dataset
     
     print(f"Selected sample {sample_idx}, origin frame index: {origin_frame_idx}")
-    
     # Get origin_zarr_path from metadata if not provided
     if origin_zarr_path is None:
         if 'origin_zarr_path' in inference_z.attrs:
@@ -309,7 +308,8 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
     depth = data_group['depth'][frame_indices]  # (H, H_img, W_img) uint16
     intrinsic = data_group['intrinsic'][frame_indices]  # (H, 4) float32 [fx, fy, cx, cy]
     extrinsic_flat = data_group['extrinsic'][frame_indices]  # (H, 16) float32 (world2cam, 4x4 flattened)
-    
+    presence = data_group['presence'][frame_indices]  # (H, 2) int32 (presence of left and right hand)
+    print(f"presence: {presence[0]}")
     # Reshape extrinsic from (H, 16) to (H, 4, 4)
     extrinsic = extrinsic_flat.reshape(-1, 4, 4)  # (H, 4, 4)
     
@@ -471,6 +471,44 @@ def gt_actions_to_hands_data(gt_actions):
 
 
 
+def calculate_position_errors(gt_hands_data, pred_hands_data, frame_idx):
+    """
+    Calculate position errors for wrists and fingertips at a given frame.
+    
+    Returns:
+        dict with structure:
+        {
+            'left': {
+                'wrist': float (L2 distance),
+                'Thumb': float,
+                'Index': float,
+                'Middle': float,
+                'Ring': float,
+                'Little': float
+            },
+            'right': { ... same as left ... }
+        }
+    """
+    errors = {}
+    finger_names = ['Thumb', 'Index', 'Middle', 'Ring', 'Little']
+    
+    for hand_name in ['left', 'right']:
+        errors[hand_name] = {}
+        
+        # Wrist position error
+        gt_wrist_pos = gt_hands_data[hand_name]['wrist'][frame_idx][:3, 3]
+        pred_wrist_pos = pred_hands_data[hand_name]['wrist'][frame_idx][:3, 3]
+        errors[hand_name]['wrist'] = float(np.linalg.norm(gt_wrist_pos - pred_wrist_pos))
+        
+        # Fingertip position errors
+        for finger in finger_names:
+            gt_finger_pos = gt_hands_data[hand_name]['fingers'][finger][frame_idx][:3, 3]
+            pred_finger_pos = pred_hands_data[hand_name]['fingers'][finger][frame_idx][:3, 3]
+            errors[hand_name][finger] = float(np.linalg.norm(gt_finger_pos - pred_finger_pos))
+    
+    return errors
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--inference_zarr_path", type=str, required=True, help="Path to inference results zarr file (contains pred_actions, gt_actions, etc.).")
@@ -553,7 +591,7 @@ def main():
     actual_frame_idx = zarr_data['frame_idx']
     
     # Initialize Rerun with unique app name based on frame_idx
-    app_name = f"rgbd_hand_action_visv2_frame_{actual_frame_idx}"
+    app_name = f"rgbd_hand_action_vis_frame_{actual_frame_idx}"
     rr.init(app_name)
     
     # Save to rrd file if save_path is provided, otherwise use spawn
@@ -580,6 +618,12 @@ def main():
 
     frame_idx = 0
     num_frames = T  # All timesteps for the selected sample
+    
+    # Store errors for statistics
+    all_errors = {
+        'left': {'wrist': [], 'Thumb': [], 'Index': [], 'Middle': [], 'Ring': [], 'Little': []},
+        'right': {'wrist': [], 'Thumb': [], 'Index': [], 'Middle': [], 'Ring': [], 'Little': []}
+    }
 
     for i in range(num_frames):
         rr.set_time("frame_idx", sequence=frame_idx)
@@ -676,6 +720,40 @@ def main():
                     print(f"\n=== Frame {i} - Pred {hand_name} wrist (Camera Frame) ===")
                     print(f"Translation: {wrist_pose_camera[:3, 3]}")
                     print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
+        
+        # Calculate and log position errors
+        errors = calculate_position_errors(gt_hands_data, pred_hands_data, i)
+        
+        # Store errors for statistics
+        for hand_name in ['left', 'right']:
+            all_errors[hand_name]['wrist'].append(errors[hand_name]['wrist'])
+            for finger in ['Thumb', 'Index', 'Middle', 'Ring', 'Little']:
+                all_errors[hand_name][finger].append(errors[hand_name][finger])
+        
+        # Format errors as text for display
+        error_text = f"Frame {i} Position Errors (meters)\n"
+        error_text += "=" * 50 + "\n\n"
+        
+        # Left hand
+        error_text += "LEFT Hand:\n"
+        error_text += f"  Wrist:  {errors['left']['wrist']:.6f} m\n"
+        error_text += f"  Thumb:  {errors['left']['Thumb']:.6f} m\n"
+        error_text += f"  Index:  {errors['left']['Index']:.6f} m\n"
+        error_text += f"  Middle: {errors['left']['Middle']:.6f} m\n"
+        error_text += f"  Ring:   {errors['left']['Ring']:.6f} m\n"
+        error_text += f"  Little: {errors['left']['Little']:.6f} m\n"
+        
+        
+        # Right hand
+        error_text += "RIGHT Hand:\n"
+        error_text += f"  Wrist:  {errors['right']['wrist']:.6f} m\n"
+        error_text += f"  Thumb:  {errors['right']['Thumb']:.6f} m\n"
+        error_text += f"  Index:  {errors['right']['Index']:.6f} m\n"
+        error_text += f"  Middle: {errors['right']['Middle']:.6f} m\n"
+        error_text += f"  Ring:   {errors['right']['Ring']:.6f} m\n"
+        error_text += f"  Little: {errors['right']['Little']:.6f} m\n"
+        # Log as text document
+        rr.log("/position_errors", rr.TextDocument(error_text, media_type=rr.MediaType.TEXT))
 
         frame_idx += 1
 
