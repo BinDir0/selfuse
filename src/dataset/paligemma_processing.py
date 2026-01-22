@@ -551,7 +551,7 @@ class PaliGemmaVLAProcessor:
             prefix_prompt=text,
             bos_token=self.tokenizer.bos_token,
             eos_token=self.tokenizer.eos_token,
-            image_seq_len=self.image_seq_length * images.shape[0] + depth_image_seq_len,
+            image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             action_begin_token=self.ACTION_BEGIN_TOKEN,
             action_end_token=self.ACTION_END_TOKEN,

@@ -16,7 +16,7 @@ from datasets import load_dataset
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
 from src.utils.sampler import (
-    SequenceSampler, VariableLengthSequenceSampler, get_val_mask, downsample_mask)
+    SequenceSampler, get_val_mask, downsample_mask, RatioSampler)
 from src.utils.geometry import (
     transform_wrist_to_target_frame, 
     homo_matrix_from_trans_6drot, 
@@ -26,11 +26,11 @@ from src.utils.geometry import (
     transform_hand_points_from_wrist_to_camera_frame,
 )
 from src.model.common.normalizer import LinearNormalizer
-from .base_dataset import BaseImageDataset, BaseDataCollator
+from .base_dataset import BaseRatioDataset, BaseLowdimDataset, BaseDataCollator
 from .base_vl_preprocessor import BaseVLPreprocessor
 
 
-class LegendVLADataset(BaseImageDataset):
+class LegendVLADataset(BaseRatioDataset):
     def __init__(self,
             zarr_paths,
             horizon=1,
@@ -46,9 +46,9 @@ class LegendVLADataset(BaseImageDataset):
             max_train_episodes=None,
             train_mode=True,
             return_raw_sample=False,
+            depth_clip_range=None,
+            regenerate_mappings_every=10000,
         ):
-        
-        super().__init__()
         self.zarr_paths = zarr_paths
         self.preprocessor = None
         self.history = history
@@ -58,6 +58,8 @@ class LegendVLADataset(BaseImageDataset):
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
         self.return_raw_sample = return_raw_sample
+        self.depth_clip_range = depth_clip_range
+        self.regenerate_mappings_every = regenerate_mappings_every
 
         # Initialize storage lists
         self.replay_buffers = []
@@ -80,7 +82,7 @@ class LegendVLADataset(BaseImageDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, 
+                zarr_path['path'], 
                 keys=['image', 'depth', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'intrinsic', 'presence'], 
                 lazy_load=True
             )
@@ -111,6 +113,8 @@ class LegendVLADataset(BaseImageDataset):
             # Record sampler length
             self.sampler_lens.append(len(sampler))
 
+        weights = [path['weight'] for path in zarr_paths]
+        super().__init__(weights, self.sampler_lens, regenerate_mappings_every, seed)
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -227,7 +231,8 @@ class LegendVLADataset(BaseImageDataset):
             self.history, 
             self.n_obs_image_steps,
             sample.get('depth', None), 
-            self.aug_transform
+            self.aug_transform, 
+            self.depth_clip_range,
         )
 
         intrinsic = sample['intrinsic'][self.history].astype(np.float32)
@@ -315,7 +320,8 @@ class LegendVLADataset(BaseImageDataset):
             shape_meta=self.shape_meta,
             history=self.history,
             max_train_episodes=self.max_train_episodes, 
-            return_numpy=True
+            return_numpy=True, 
+            use_relative_action=self.use_relative_action,
         )
         normalizer = get_normalizer(self.normalizer_dataloader_cfg, normalizer_dataset)
         self.normalizer = normalizer
@@ -331,14 +337,20 @@ class LegendVLADataset(BaseImageDataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
-        curr_idx = idx
-        dataset_idx = 0
-        for i, length in enumerate(self.sampler_lens):
-            if curr_idx < length:
-                sample = self.samplers[i].sample_sequence(curr_idx)
-                dataset_idx = i
-                break
-            curr_idx -= length
+        # For validation, we need to directly sample from the validation set
+        if not self.train_mode:
+            curr_idx = idx
+            dataset_idx = 0
+            for i, length in enumerate(self.sampler_lens):
+                if curr_idx < length:
+                    sample = self.samplers[i].sample_sequence(curr_idx)
+                    dataset_idx = i
+                    break
+                curr_idx -= length
+        else: 
+            dataset_idx, sample_idx = self.mappings[idx]
+            sample = self.samplers[dataset_idx].sample_sequence(sample_idx)
+            self.maybe_update_mappings()
         
         # Return raw sample if requested (for testing/debugging purposes)
         if self.return_raw_sample:
@@ -346,7 +358,7 @@ class LegendVLADataset(BaseImageDataset):
             data = self.sample_for_inference(sample)
             torch_data = dict_apply(data, torch.from_numpy)
             # Add dataset source information
-            torch_data['dataset_source'] = self.zarr_paths[dataset_idx]
+            torch_data['dataset_source'] = self.zarr_paths[dataset_idx]['path']
             torch_data['dataset_idx'] = dataset_idx
             return torch_data
             
@@ -358,17 +370,17 @@ class LegendVLADataset(BaseImageDataset):
         return sum(self.sampler_lens)
 
 
-class LegendVLMDataset(BaseImageDataset):
-    def __init__(self,
-            dataset_paths,
-            split='train',
-            cache_dir=None,
-            weights=[0.5, 0.5, 0.5],
-            seed=42,
-            val_ratio=0.0,
-            train_mode=True,
-        ):
-        
+class LegendVLMDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        dataset_paths,
+        split='train',
+        cache_dir=None,
+        weights=[0.5, 0.5, 0.5],
+        seed=42,
+        val_ratio=0.0,
+        train_mode=True,
+    ):
         super().__init__()
         self.dataset_paths = dataset_paths
         self.split = split
@@ -479,7 +491,7 @@ class LegendVLMDataset(BaseImageDataset):
         return len(self.train_datasets)
 
 
-class LegendUnifiedDataset(BaseImageDataset):
+class LegendUnifiedDataset(torch.utils.data.Dataset):
     def __init__(self,
         vla_dataset: LegendVLADataset,
         vlm_dataset: LegendVLMDataset = None,
@@ -495,6 +507,26 @@ class LegendUnifiedDataset(BaseImageDataset):
 
     def get_collator(self):
         return LegendVLDataCollator()
+
+    def get_sampler(
+        self, 
+        batch_size: int, 
+        vla_ratio: float = 1/8, 
+        per_batch_ratio: bool = True, 
+        shuffle: bool = True, 
+        seed: int = 42, 
+        drop_last: bool = False,
+    ): 
+        return RatioSampler(
+            vla_size=len(self.vla_dataset),
+            vlm_size=len(self.vlm_dataset) if self.vlm_dataset is not None else 0,
+            vla_ratio=vla_ratio,
+            batch_size=batch_size,
+            per_batch_ratio=per_batch_ratio,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_last,
+        )
 
     def set_return_raw_sample(self, return_raw_sample: bool):
         """Set whether to return raw sample data for VLA dataset (for testing/debugging purposes)"""
@@ -528,7 +560,7 @@ class LegendUnifiedDataset(BaseImageDataset):
         return len(self.vla_dataset) + len(self.vlm_dataset) if self.vlm_dataset is not None else len(self.vla_dataset)
 
 
-class LegendVLALowLevelDataset(BaseImageDataset):
+class LegendVLALowLevelDataset(BaseLowdimDataset):
     def __init__(
         self,
         zarr_paths,
@@ -752,6 +784,8 @@ class BaseDataCollator(BaseDataCollator):
         return batch
 
 
+
+
 def get_presence_value(state_presence, action_presence, action, state, hand_ndim):
     action_valid_mask = np.zeros_like(action, dtype=bool)
 
@@ -967,7 +1001,7 @@ def process_state_action(
 
 # TODO: maybe we need to use the same augmentation for all images in the action chunk
 # TODO: we can try more advanced augmentation techniques, notably, we should care about the depth image augmentation
-def process_image(image, history, n_obs_image_steps, depth_image = None, aug_transform = None):
+def process_image(image, history, n_obs_image_steps, depth_image = None, aug_transform = None, depth_clip_range = None):
     '''
     Args:
         image: np.ndarray, shape: [N, H, W, 3]
@@ -988,6 +1022,10 @@ def process_image(image, history, n_obs_image_steps, depth_image = None, aug_tra
     depth_images_to_process = None
     if depth_image is not None:
         depth_images_to_process = depth_image[image_slice]
+        depth_images_to_process = np.clip(depth_images_to_process, depth_clip_range[0], depth_clip_range[1])
+        depth_max_value = np.max(depth_images_to_process)
+        # normalize the depth images to [0, 1]
+        depth_images_to_process = depth_images_to_process / (depth_max_value + 1e-6)
     if aug_transform is not None:
         augmented_images = []
         for img_np in images_to_process:

@@ -13,11 +13,15 @@ lora_dropout: 0.0
 image_shape: [224, 224, 3]
 depth_image_shape: [224, 224]
 vla_dataset_paths:
-#  - /share_data/datasets/taco/10episodes.zarr
- - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
- - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
-#  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/yeyuyao/egodex_filter_train.zarr
+#  - name: taco 
+#    path: /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+#    weight: 1
+ - name: oakink2
+   path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
+   weight: 1
+#  - name: egodex
+#    path: /share_data/yeyuyao/egodex_filter_train.zarr
+#    weight: 5
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
@@ -40,6 +44,10 @@ shape_meta: &shape_meta
     rgb:
       shape: ${image_shape}
       type: rgb
+      horizon: ${n_obs_image_steps}
+    depth:
+      shape: ${depth_image_shape}
+      type: depth
       horizon: ${n_obs_image_steps}
     state:
       wrist:
@@ -73,7 +81,10 @@ dataset:
       shuffle: False
       pin_memory: True
       persistent_workers: True
+      use_relative_action: ${dataset.vla_dataset.use_relative_action}
     use_relative_action: False
+    depth_clip_range: ${depth_clip_range}
+    regenerate_mappings_every: 10000
   vlm_dataset:
     _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}
@@ -174,7 +185,7 @@ training:
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
-  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2025.12.08/11.53_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.16/14.12_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
   num_epochs: 2
   use_bf16: True
   clipping:
@@ -234,9 +245,10 @@ time_hidden_size: 1024 # only applicable if using adaptive
 time_min_period: 0.004
 time_max_period: 4.0
 action_expert_rope_theta: 10000.0   # since action/proprio seq_len is pretty small
-# pi0.5 uses 10000 for  action expert
+# pi0.5 uses 10000 for action expert
 
 # Fixed
+depth_clip_range: [0.0, 2.5]
 imagenet_mean: [0.485, 0.456, 0.406]
 imagenet_std: [0.229, 0.224, 0.225]
 ignore_index: -100
@@ -251,7 +263,7 @@ text_seq_len: ${eval:'${state_seq_len}+64'}
 answer_seq_len: 256 
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
-max_vlm_tokens: ${eval:'(${image_seq_len}+${depth_image_seq_len})*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'} # +1 for depth image
+max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'}
 tokenizer_padding: longest # longest or max_length
 
 policy: 
@@ -274,6 +286,7 @@ policy:
     pretrained_pi05_model_path: ${training.pretrained_pi05_model_path}
     # Depth image support
     use_depth: True  # Enable depth image processing with DINOv2
+    depth_dropout: 0.1
     loss_weights: 
       ce_loss_weight: 1.0
       flow_loss_weight: 5.0
@@ -282,10 +295,10 @@ policy:
     _target_: src.model.vlm.paligemma.depth_encoder.DINOv2DepthEncoder
     config: 
       model_name: "dinov2_vitb14_reg" # DINOv2 model: dinov2_vits14, dinov2_vitb14, dinov2_vitl14
-      freeze_backbone: True  # Freeze DINOv2 backbone weights
+      freeze_backbone: False  # Freeze DINOv2 backbone weights
       image_size: 224
       patch_size: 14
-      output_dim: 1152
+      output_dim: 768
       dinov2_repo_path: ${training.dinov2_repo_path}
       dinov2_model_path: ${training.dinov2_model_path}
 
@@ -312,19 +325,7 @@ policy:
     _target_: src.model.vlm.paligemma.siglip.PaliGemmaMultiModalProjector
     config:
       vision_config:
-        hidden_size: 1152
-        projection_dim: 2048
-      lora:
-        r: ${lora_r}
-        dropout: ${lora_dropout}
-    use_quantize: ${quantize}
-    use_lora: ${lora}
-
-  depth_modal_projector: 
-    _target_: src.model.vlm.paligemma.depth_encoder.PaliGemmaMultiModalProjector
-    config:
-      vision_config:
-        hidden_size: 1152
+        hidden_size: ${eval:'${policy.depth_encoder.config.output_dim}+${policy.vision_tower.config.hidden_size}'} # 1152+768=1920
         projection_dim: 2048
       lora:
         r: ${lora_r}

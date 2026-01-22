@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 import hydra
 import torch
 from torch import nn
+import random
 
 from src.model.common.kv_cache import KVCache
 from src.model.common.modules import (
@@ -34,7 +35,6 @@ class LegendVLA(nn.Module):
         depth_encoder, 
         vision_tower,
         multi_modal_projector,
-        depth_modal_projector,
         joint_model,
     ):
         super().__init__()
@@ -76,8 +76,11 @@ class LegendVLA(nn.Module):
         # Depth encoder (optional)
         self.use_depth = cfg.use_depth
         if self.use_depth:
+            self.depth_dropout = cfg.get("depth_dropout", 0.1)
             self.depth_encoder = depth_encoder
-            self.depth_modal_projector = depth_modal_projector
+            self.depth_missing_embeddings = nn.Parameter(
+                torch.zeros(self.depth_encoder.depth_seq_len, self.depth_encoder.output_dim)
+            )
 
         # Mixtures
         self.joint_model = joint_model
@@ -85,10 +88,9 @@ class LegendVLA(nn.Module):
         # Action, proprio, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
         if self.action_expert_adaptive_mode:  # adaLN or adaLN-Zero
-            self.action_encoder = ActionEncoder(
+            self.action_encoder = nn.Linear(
                 self.action_dim,
                 self.action_hidden_size,
-                time_cond=False,
             )
             self.time_embedding = nn.Sequential(
                 SinusoidalPosEmb(cfg.time_hidden_size, cfg.time_min_period, cfg.time_max_period), 
@@ -137,6 +139,7 @@ class LegendVLA(nn.Module):
             list(self.action_encoder.parameters())
             + list(self.action_decoder.parameters())
             + list(self.joint_model.mixtures["action"].parameters())
+            + list(self.time_embedding.parameters())
         )
 
     @property
@@ -154,6 +157,19 @@ class LegendVLA(nn.Module):
             list(self.vision_tower.parameters())
             + list(self.multi_modal_projector.parameters())
             + self.trainable_gemma_parameters
+            + self.trainable_depth_parameters
+        )
+
+    @property
+    def trainable_depth_parameters(self):
+        """
+        Get all trainable parameters for the depth encoder.
+        """
+        if not self.use_depth:
+            return []
+        return (
+            list(self.depth_encoder.parameters())
+            + [self.depth_missing_embeddings]
         )
 
     @property
@@ -284,15 +300,40 @@ class LegendVLA(nn.Module):
         log.info("Loaded pre-trained weights for vision tower")
 
         # load projector --- "multi_modal_projector.linear" -> "linear"
+        # Note: The new projector has concatenated RGB (1152) + Depth (768) = 1920 input dims
+        # We only load the first 1152 dims (RGB) from pretrained weights, and zero-init the rest (Depth)
         multi_modal_projector_state_dict = self.multi_modal_projector.state_dict()
         for k, v in tensors.items():
             if "multi_modal_projector" in k:
                 new_key = k.replace("multi_modal_projector.", "")
-                multi_modal_projector_state_dict[new_key] = v
+                if new_key in multi_modal_projector_state_dict:
+                    current_param = multi_modal_projector_state_dict[new_key]
+                    
+                    # Handle weight matrix: shape [input_dim, output_dim]
+                    # For regular Linear: weight shape is [out_features, in_features] (transposed)
+                    # For LoRA: weight shape is [out_features, in_features], 
+                    # lora_A is [r, in_features], lora_B is [out_features, r]
+                    if "weight" in new_key and len(current_param.shape) == 2:
+                        # Check if current model has larger input dimension (first dim for transposed weight)
+                        if current_param.shape[1] > v.shape[1]:
+                            # Current model input dim (1920) > pretrained input dim (1152)
+                            # Load pretrained weights to the first part, zero-init the rest
+                            current_param[:, :v.shape[1]] = v
+                            current_param[:, v.shape[1]:] = 0.0
+                            multi_modal_projector_state_dict[new_key] = current_param
+                            log.info(f"Loaded partial weights for {new_key}: \
+                                    first {v.shape[1]} input dims from pretrained, \
+                                    remaining {current_param.shape[1] - v.shape[1]} dims zero-initialized.")
+                        else:
+                            # Dimensions match or current is smaller, load normally
+                            multi_modal_projector_state_dict[new_key] = v
+                    else:
+                        # For bias, lora_B, or other parameters, load normally
+                        multi_modal_projector_state_dict[new_key] = v
         self.multi_modal_projector.load_state_dict(
             multi_modal_projector_state_dict, strict=True
         )
-        log.info("Loaded pre-trained weights for projector")
+        log.info("Loaded pre-trained weights for projector (RGB part only, Depth part zero-initialized)")
 
         # load lm --- do not change any lora weights
         joint_model_state_dict = self.joint_model.state_dict()
@@ -382,19 +423,40 @@ class LegendVLA(nn.Module):
         log.info("Loaded vision tower weights")
 
         # load projector --- "paligemma_with_expert.paligemma.model.multi_modal_projector" -> ""
+        # Note: The new projector has concatenated RGB (1152) + Depth (768) = 1920 input dims
+        # We only load the first 1152 dims (RGB) from pretrained weights, and zero-init the rest (Depth)
         multi_modal_projector_state_dict = self.multi_modal_projector.state_dict()
         for k, v in tensors.items():
             if "paligemma_with_expert.paligemma.model.multi_modal_projector" in k:
                 new_key = k.replace("paligemma_with_expert.paligemma.model.multi_modal_projector.", "")
                 if new_key in multi_modal_projector_state_dict:
-                    # Convert to target dtype if needed
-                    multi_modal_projector_state_dict[new_key] = v.to(dtype=target_dtype)
+                    current_param = multi_modal_projector_state_dict[new_key]
+                    
+                    # Handle weight matrix: shape [out_features, in_features] (transposed)
+                    if "weight" in new_key and len(current_param.shape) == 2:
+                        # Check if current model has larger input dimension
+                        if current_param.shape[1] > v.shape[1]:
+                            # Current model input dim (1920) > pretrained input dim (1152)
+                            # Load pretrained weights to the first part, zero-init the rest
+                            current_param[:, :v.shape[1]] = v.to(dtype=target_dtype)
+                            current_param[:, v.shape[1]:] = 0.0
+                            multi_modal_projector_state_dict[new_key] = current_param
+                            log.info(f"Loaded partial weights for {new_key}: "
+                                    f"first {v.shape[1]} input dims from pretrained, "
+                                    f"remaining {current_param.shape[1] - v.shape[1]} dims zero-initialized.")
+                        else:
+                            # Dimensions match or current is smaller, load normally
+                            multi_modal_projector_state_dict[new_key] = v.to(dtype=target_dtype)
+                    else:
+                        # For bias or other parameters, load normally
+                        multi_modal_projector_state_dict[new_key] = v.to(dtype=target_dtype)
+                    
                     loaded_my_model_params.add(f"multi_modal_projector.{new_key}")
                     used_pi05_params.add(k)
         self.multi_modal_projector.load_state_dict(
             multi_modal_projector_state_dict, strict=True
         )
-        log.info("Loaded multi-modal projector weights")
+        log.info("Loaded multi-modal projector weights (RGB part only, Depth part zero-initialized)")
 
         # load joint model (both VLM and action mixtures)
         # preserve LoRA weights
@@ -706,7 +768,8 @@ class LegendVLA(nn.Module):
         Args:
             input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
             pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values (normalized)
-            depth_values (Optional[torch.FloatTensor]): [B, C, H, W] or [B, T, C, H, W] Depth images (optional)
+            depth_values (Optional[torch.FloatTensor]): [Bd, C, H, W] or [Bd, T, C, H, W] Depth images (optional)
+            depth_ids (Optional[torch.LongTensor]): [B] Depth image indices corresponding to the depth values (optional)
         
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
@@ -729,7 +792,6 @@ class LegendVLA(nn.Module):
 
         # Extract RGB vision features
         rgb_image_features = self.vision_tower(pixel_values)
-        rgb_image_features = self.multi_modal_projector(rgb_image_features)
         
         # Extract depth features if enabled
         if self.use_depth and depth_values is not None:
@@ -743,7 +805,6 @@ class LegendVLA(nn.Module):
             
             # Extract depth features using DINOv2
             depth_image_features = self.depth_encoder(depth_values)
-            depth_image_features = self.depth_modal_projector(depth_image_features)
         else: 
             depth_image_features = None
 
@@ -754,17 +815,11 @@ class LegendVLA(nn.Module):
                 depth_image_features = depth_image_features.view(Bd, -1, depth_image_features.shape[-1])
 
         # normalize the image features
-        _, _, embed_dim = rgb_image_features.shape
         bsz, seq_len = input_ids.shape
-        scaled_image_features = rgb_image_features / (self.vlm_hidden_size**0.5)
-        if depth_image_features is not None:
-            scaled_depth_features = depth_image_features / (self.vlm_hidden_size**0.5)
-        else: 
-            scaled_depth_features = None
 
-        # put embedding together - image, text, padding
+        # put embedding together - image, text, answer, padding
         final_embedding = torch.full(
-            (bsz, seq_len, embed_dim), self.pad_token_id, dtype=dtype, device=device
+            (bsz, seq_len, self.vlm_hidden_size), self.pad_token_id, dtype=dtype, device=device
         )
 
         # [Batch_Size, Seq_Len]
@@ -776,17 +831,22 @@ class LegendVLA(nn.Module):
         final_embedding[text_mask] = inputs_embeds[text_mask].to(final_embedding.dtype)
         for i in range(bsz):
             image_indices = image_mask[i].nonzero(as_tuple=True)[0]
-            num_image_tokens = len(image_indices)
-            if depth_ids is not None and depth_ids[i] >= 0:
+            if depth_ids is not None and depth_ids[i] >= 0 and \
+                not (self.training and random.random() < self.depth_dropout):
                 # Each RGB token is paired with corresponding depth token
-                paired_image_features = torch.cat([
-                    scaled_image_features[i].view(T, -1, embed_dim),
-                    scaled_depth_features[depth_ids[i]].view(T, -1, embed_dim),
-                ], dim=1) # [T, 2*num_patches, embed_dim] 
-                paired_image_features = paired_image_features.view(-1, embed_dim)
+                depth_image_feature = depth_image_features[depth_ids[i]]
             else: 
-                paired_image_features = scaled_image_features[i]
-            final_embedding[i, image_indices] = paired_image_features[:num_image_tokens]
+                if T is not None:
+                    depth_image_feature = self.depth_missing_embeddings.repeat(T, 1)
+                else:
+                    depth_image_feature = self.depth_missing_embeddings
+            paired_image_features = torch.cat([
+                rgb_image_features[i], depth_image_feature
+            ], dim=-1) # [num_patches, rgb_embed_dim+depth_embed_dim] 
+            paired_image_features = paired_image_features.view(-1, paired_image_features.shape[-1])
+            paired_image_features = self.multi_modal_projector(paired_image_features)
+            scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
+            final_embedding[i, image_indices] = scaled_image_features
         return final_embedding
 
     @torch.inference_mode()

@@ -24,7 +24,6 @@ from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
-from src.dataset.base_dataset import BaseImageDataset
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.json_logger import JsonLogger
 from src.utils.pytorch_util import dict_apply
@@ -185,13 +184,25 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         else: 
             model.freeze_non_lora_weights_in_vlm()
 
-        self.optimizer = DummyOptim(
-            all_trainable_parameters, 
-        )
+        all_trainable_params_list = []
+        for params_dict in all_trainable_parameters:
+            all_trainable_params_list.extend(params_dict['params'])
+        
+        trainable_param_ids = {id(p) for p in all_trainable_params_list}
+
+        for i, param in enumerate(all_trainable_params_list):
+            assert param.requires_grad, \
+                f"Parameter at index {i} is in optimizer groups but requires_grad is False"
+
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert id(param) in trainable_param_ids, \
+                    f"Parameter '{name}' requires grad but is NOT in the optimizer parameters list"
+        
+        self.optimizer = DummyOptim(all_trainable_parameters)
         
         print("--> Configure dataset and dataloader...................")
         # Configure dataset and dataloader
-        dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.dataset)
         print("--> dataset instantiated")
         accelerator.wait_for_everyone()

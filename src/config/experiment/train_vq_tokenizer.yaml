@@ -60,6 +60,7 @@ dataset:
     shuffle: False
     pin_memory: True
     persistent_workers: True
+    use_relative_action: ${dataset.use_relative_action}
   debug: True
   use_relative_action: False
 
@@ -146,7 +147,7 @@ tokenizer:
   #       output_emb_width: 512
   #     quantizer_config:
   #       <<: *base_quantizer_config
-  #       codebook_size: 2048    # partially override the base quantizer config
+  #       codebook_size: 4096    # partially override the base quantizer config
   #       num_quantizers: 4
   #       num_groups: 2
   hand: 
@@ -160,7 +161,7 @@ tokenizer:
         output_emb_width: 512
       quantizer_config:
         <<: *base_quantizer_config
-        codebook_size: 2048    # partially override the base quantizer config
+        codebook_size: 4096    # partially override the base quantizer config
         num_quantizers: 4
         num_groups: 2
 

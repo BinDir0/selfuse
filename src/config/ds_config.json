@@ -48,5 +48,13 @@
         "number_checkpoints": null,
         "synchronize_checkpoint_boundary": false,
         "profile": false
+    }, 
+    "flops_profiler": {
+        "enabled": false,
+        "profile_step": 100,
+        "module_depth": -1,
+        "top_modules": 10,
+        "detailed": true,
+        "output_file": "/share_data/chenzhang/projects/EgoVLA/outputs/flops_profiler.txt"
     }
 }
