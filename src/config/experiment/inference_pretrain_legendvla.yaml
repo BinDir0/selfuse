@@ -11,19 +11,27 @@ exp_name: "inference_pretrain"
 # 推理专用配置
 inference:
   # checkpoint路径
-  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.13/03.05_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=130000-eval_l1_loss=0.0413/pytorch_model/mp_rank_00_model_states.pt
+  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.16/16.28_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=115000-eval_l1_loss=0.0344/pytorch_model/mp_rank_00_model_states.pt
+  
+  # checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.13/03.05_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=130000-eval_l1_loss=0.0413/pytorch_model/mp_rank_00_model_states.pt
   
   # 设备配置
   device: cuda:0
   
   # 数据配置
-  use_val_dataset: True  # True: 使用验证集, False: 使用训练集
-  batch_size: 8
+  # Note: If val_ratio=0.0 in dataset config, all data is used regardless of this setting
+  use_val_dataset: False  # True: 使用验证集（需要 val_ratio > 0）, False: 使用训练集或完整数据集
+  batch_size: 32
   num_workers: 8
   
   # 推理控制
-  max_steps: 10  # 最大推理步数，null表示推理所有数据
+  max_steps: null  # 最大推理步数，null表示推理所有数据
   skip_first: 0  # 跳过前N个batch
+  save_interval: null  # 每N个batch更新一次元数据并打印进度（数据已实时写入zarr）。设置为null则不定期更新
+  
+  # 精度配置
+  use_mixed_precision: True  # True: 使用混合精度（bf16/fp16）加速推理，False: 使用全精度（fp32）获得最高精度
+                             # 注意：混合精度通常对结果影响很小（<1%），但能显著加速推理
   
   # 其他配置
   seed: 42
@@ -47,12 +55,21 @@ val_dataloader:
 logging:
   mode: disabled
 
+# 覆盖dataset配置：使用所有数据（不分割训练/验证集）
+dataset:
+  vla_dataset:
+    val_ratio: 0.0  # 不使用验证集，所有数据都用于推理
+    max_train_episodes: null  # 不限制episode数量，使用所有数据
+
 # 使用较小的数据集进行快速测试（可选）
 # Only support single dataset inference
 vla_dataset_paths:
-  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
+  - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen.zarr
+  # - /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene.zarr
+  # - /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
+  # - /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
+  # - /share_data/yeyuyao/egodex_filter_test.zarr
 
 # 如果只想推理特定的数据集，可以取消下面的注释并修改
 # vla_dataset_paths:
 #   - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
-

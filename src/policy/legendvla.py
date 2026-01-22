@@ -1020,61 +1020,105 @@ class LegendVLA(nn.Module):
     def infer_discrete_action(
         self,
         input: dict,
-    ) -> Tuple:
-        """
-        Discrete action generation inference function using Autoregressive VLA.
-        
-        Args:
-            input (dict): Input dictionary containing:
-                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
-                - attention_mask (torch.Tensor): [B, seq_len] Attention mask for text tokens
-                - kv_cache (Optional[KVCache]): Optional KV cache for autoregressive generation
-        
-        Returns:
-            Tuple: Output dictionary containing:
-                - logits (torch.FloatTensor): [B, seq_len, vocab_size] Next token logits
-                - kv_cache (Optional[KVCache]): Updated KV cache if provided
-        """
-        # Extract inputs from dict
+        max_new_tokens: int = 128,  
+        action_end_token_id: int = -1,
+    ) -> dict:
+
         input_ids = input["input_ids"]
         pixel_values = input["pixel_values"]
-        attention_mask = input["attention_mask"]
-        kv_cache = input.get("kv_cache", None)
-        q_len = input_ids.size(1)
+        
+        start_len = input["answer_start_idx"].max().item()
+        current_input_ids = input_ids[:, :start_len]
+      
+        bsz = current_input_ids.size(0)
+        device = current_input_ids.device
 
-        # text tokens + image tokens
         if 'depth_values' in input:
             depth_values = input["depth_values"]
             depth_ids = input["depth_ids"]
         else:
             depth_values = None
             depth_ids = None
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
 
-        # build causal mask and position ids for text
+        kv_caches = {"vlm": self.build_text_cache()}
+
+        inputs_embeds = self._forward_siglip_and_text_embedding(
+            current_input_ids, pixel_values, depth_values, depth_ids
+        )
+
+
+        seq_len = inputs_embeds.size(1)
+        attention_mask = torch.ones((bsz, seq_len), device=device, dtype=torch.long)
+        
         (
             causal_mask,
             position_ids,
         ) = self.build_causal_mask_and_position_ids_for_text(
-            q_len, attention_mask, kv_cache
+            seq_len, attention_mask, kv_caches["vlm"]
         )
 
-        hidden_states = self.joint_model(
+        output = self.joint_model(
             attention_mask=causal_mask,
             position_ids_all={"vlm": position_ids},
             embeds_all={"vlm": inputs_embeds},
-            kv_caches={"vlm": kv_cache},
-            cache_mode="append",  # new tokens for the active mixture
-            final_layer_post_attn_skip_names=[],  # do not skip vlm last layer
-        )["vlm"]
-        logits = self.lm_head(hidden_states)
-        output = {
-            "logits": logits,
+            kv_caches=kv_caches,
+            cache_mode="append",
+            final_layer_post_attn_skip_names=[], 
+        )
+        
+        hidden_states = output["vlm"]
+        logits = self.lm_head(hidden_states) # [B, Seq_Len, Vocab]
+        next_token_logits = logits[:, -1, :] # [B, Vocab]
+        next_token = torch.argmax(next_token_logits, dim=-1) # Greedy Search [B]
+
+        generated_ids = [next_token]
+        
+        finished = torch.zeros(bsz, dtype=torch.bool, device=device)
+
+        for _ in range(max_new_tokens - 1):
+
+            current_input_ids = next_token.unsqueeze(1) # [B, 1]
+            inputs_embeds = self.embed_tokens(current_input_ids)
+
+            current_pos = kv_caches["vlm"].num_items() # Get current sequence length from cache
+            position_ids = torch.full((bsz, 1), current_pos, device=device, dtype=torch.long)
+            
+            # Causal Mask for decoding single token is trivial (all zeros/ones depending on implementation)
+            # build_causal_mask..._for_text handles q_len=1 correctly with cache
+            causal_mask, _ = self.build_causal_mask_and_position_ids_for_text(
+                1, torch.ones((bsz, 1), device=device), kv_caches["vlm"]
+            )
+
+            #Forward Pass (Decode)
+            output = self.joint_model(
+                attention_mask=causal_mask,
+                position_ids_all={"vlm": position_ids},
+                embeds_all={"vlm": inputs_embeds},
+                kv_caches=kv_caches,
+                cache_mode="append", 
+                final_layer_post_attn_skip_names=[],
+            )
+
+            hidden_states = output["vlm"]
+            logits = self.lm_head(hidden_states) # [B, 1, Vocab]
+            next_token_logits = logits[:, -1, :]
+            next_token = torch.argmax(next_token_logits, dim=-1)
+
+
+            generated_ids.append(next_token)
+
+            if action_end_token_id != -1:
+                is_end = (next_token == action_end_token_id)
+                finished = finished | is_end
+                if finished.all():
+                    break
+
+        # [B, New_Len]
+        generated_ids = torch.stack(generated_ids, dim=1)
+        
+        return {
+            "generated_ids": generated_ids
         }
-        if kv_cache is not None:
-            output["kv_cache"] = kv_cache
-        return output
 
     # ---------- Flow matching training ----------#
 
