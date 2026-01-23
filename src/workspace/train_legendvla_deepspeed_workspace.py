@@ -521,7 +521,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         pred_actions,
                         eval_thresholds,
                     )
-                    eval_accuracy.append(batch_accuracy.cpu())
+                    eval_accuracy.append(batch_accuracy)
                     
                     # Compute L1 loss, num should not be 0 here since we have checked eval_sample
                     actions_valid_num = torch.sum(actions_valid_mask)

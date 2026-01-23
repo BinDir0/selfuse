@@ -12,24 +12,19 @@ from hydra.core.hydra_config import HydraConfig
 import zarr
 
 from src.policy.legendvla import LegendVLA
+from src.utils.metric import (
+    get_action_accuracy,
+    compute_all_metrics,
+    plot_all_visualizations,
+    compute_smoothness_metrics,
+    compute_error_heatmap,
+    compute_covariance_matrix,
+    compute_loss_over_time,
+    compute_trajectory_metrics,
+    compute_per_dimension_metrics,
+)
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
-
-
-def convert_to_serializable(obj):
-    """Convert numpy types and other non-serializable types to native Python types"""
-    if isinstance(obj, (np.integer, np.floating)):
-        return obj.item()
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, dict):
-        return {str(k): convert_to_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [convert_to_serializable(item) for item in obj]
-    elif hasattr(obj, '__dict__'):
-        return str(obj)
-    else:
-        return obj
 
 
 class LegendVLAInference:
@@ -43,9 +38,28 @@ class LegendVLAInference:
         # 设置数据类型
         self.dtype = torch.bfloat16 if cfg.training.use_bf16 else torch.float32
         
+        # 加载模型配置
+        print("正在加载模型配置...")
+        if hasattr(cfg.inference, 'model_config_path') and cfg.inference.model_config_path:
+            model_config_path = pathlib.Path(cfg.inference.model_config_path)
+            if not model_config_path.exists():
+                raise FileNotFoundError(f"模型配置文件不存在: {model_config_path}")
+            print(f"从配置文件加载模型配置: {model_config_path}")
+            model_cfg = OmegaConf.load(model_config_path)
+            self.model_cfg = model_cfg
+            # 使用模型配置中的 policy 配置来初始化模型
+            if 'policy' not in model_cfg:
+                raise ValueError(f"模型配置文件中未找到 'policy' 配置: {model_config_path}")
+            policy_cfg = model_cfg.policy
+        else:
+            # 如果没有指定 model_config_path，使用当前配置中的 policy
+            print("使用当前配置中的 policy 配置")
+            self.model_cfg = None
+            policy_cfg = cfg.policy
+        
         # 初始化模型
         print("正在初始化模型...")
-        self.model: LegendVLA = hydra.utils.instantiate(cfg.policy)
+        self.model: LegendVLA = hydra.utils.instantiate(policy_cfg)
         
         # 加载checkpoint
         if cfg.inference.checkpoint_path:
@@ -170,29 +184,37 @@ class LegendVLAInference:
         
         # 初始化数据集
         print("正在初始化数据集...")
-        self.dataset = hydra.utils.instantiate(cfg.dataset.vla_dataset)
+        self.dataset = hydra.utils.instantiate(cfg.dataset)
         
         # Get dataset names for separate tracking
         self.dataset_names = []
         if hasattr(cfg, 'vla_dataset_paths'):
             for path in cfg.vla_dataset_paths:
-                # Extract dataset name from path (e.g., "oakink2_test_seen" from ".../.../oakink2_test_seen.zarr")
-                # Ensure it's a string for JSON serialization
-                dataset_name = str(pathlib.Path(str(path)).stem)
-                self.dataset_names.append(dataset_name)
+                self.dataset_names.append(path['name'])
+        else: 
+            raise ValueError("未指定vla_dataset_paths")
         print(f"数据集: {self.dataset_names}")
         
         # 初始化processor
         print("正在初始化processor...")
-        self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+        if hasattr(self.model_cfg, 'vla_processor'):
+            self.vla_processor = hydra.utils.instantiate(self.model_cfg.vla_processor)
+        else:
+            assert hasattr(cfg, 'vla_processor'), "未指定vla_processor"
+            self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
         self.dataset.set_preprocessor(self.vla_processor)
         
         # 加载normalizer
         print("正在加载normalizer...")
-        if cfg.training.normalizer_path is not None:
-            self.normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
+
+        if hasattr(self.model_cfg, 'normalizer_path'):
+            self.normalizer = pickle.load(open(self.model_cfg.normalizer_path, 'rb'))
             self.dataset.set_normalizer(self.normalizer)
-            print(f"成功加载normalizer: {cfg.training.normalizer_path}")
+            print(f"成功加载normalizer: {self.model_cfg.normalizer_path}")
+        elif hasattr(cfg, 'normalizer_path'):
+            self.normalizer = pickle.load(open(cfg.normalizer_path, 'rb'))
+            self.dataset.set_normalizer(self.normalizer)
+            print(f"成功加载normalizer: {cfg.normalizer_path}")
         else:
             print("警告: 未指定normalizer路径，使用默认normalizer")
             self.normalizer = self.dataset.get_normalizer()
@@ -224,7 +246,6 @@ class LegendVLAInference:
         # 为每个数据集创建单独的 zarr 文件
         dataset_zarr_roots = {}
         zarr_datasets_per_dataset = {}
-        current_write_pos_per_dataset = {}
         
         for dataset_name in self.dataset_names:
             # Create separate zarr file for each dataset
@@ -232,20 +253,11 @@ class LegendVLAInference:
             store = zarr.DirectoryStore(str(zarr_path))
             dataset_zarr_roots[dataset_name] = zarr.group(store=store, overwrite=True)
             zarr_datasets_per_dataset[dataset_name] = {}
-            current_write_pos_per_dataset[dataset_name] = 0
             print(f"创建zarr文件: {zarr_path}")
         
         # 开始推理
         print("开始推理...")
         # Track statistics per dataset
-        dataset_stats = {
-            name: {
-                'total_l1_loss': 0.0,
-                'num_valid_samples': 0,
-                'total_samples': 0
-            }
-            for name in self.dataset_names
-        }
         actual_batch_count = 0  # Track actual batch count (after skipping)
         
         with torch.no_grad():
@@ -299,25 +311,6 @@ class LegendVLAInference:
                     
                     batch_result["gt_actions"] = gt_actions
                     batch_result["actions_valid_mask"] = actions_valid_mask
-                    
-                    actions_valid_num = np.sum(actions_valid_mask, axis=(1,2))
-                    
-                    is_valid = actions_valid_num > 0
-                    if np.any(is_valid):
-                        # 计算 Flow Matching 的 L1 loss
-                        valid_pred_fm = pred_actions_fm * actions_valid_mask
-                        valid_gt = gt_actions * actions_valid_mask
-                        batch_l1_loss_fm = np.sum(np.abs(valid_pred_fm - valid_gt), axis=(1,2)) / actions_valid_num.clip(min=1)
-                        batch_result["l1_loss"] = batch_l1_loss_fm
-                        batch_result["l1_error"] = np.abs(valid_pred_fm - valid_gt)
-                        
-                        # Accumulate loss and count per dataset
-                        for dataset_idx in range(len(self.dataset_names)):
-                            dataset_name = self.dataset_names[dataset_idx]
-                            mask = (dataset_indices == dataset_idx) & is_valid
-                            if np.any(mask):
-                                dataset_stats[dataset_name]['total_l1_loss'] += np.sum(batch_l1_loss_fm[mask])
-                                dataset_stats[dataset_name]['num_valid_samples'] += np.sum(mask)
                 
                 actual_batch_count += 1
                 
@@ -338,112 +331,204 @@ class LegendVLAInference:
                         self.append_batch_to_zarr(
                             dataset_zarr_roots[dataset_name],
                             zarr_datasets_per_dataset[dataset_name],
-                            dataset_batch_result,
-                            current_write_pos_per_dataset[dataset_name]
+                            dataset_batch_result
                         )
-                        
-                        num_samples = np.sum(mask)
-                        current_write_pos_per_dataset[dataset_name] += num_samples
-                        dataset_stats[dataset_name]['total_samples'] += num_samples
-                
-                # 定期保存检查点
-                save_interval = getattr(cfg.inference, 'save_interval', None)
-                if save_interval and actual_batch_count % save_interval == 0:
-                    total_samples = sum(current_write_pos_per_dataset.values())
-                    print(f"\n定期保存: 已处理 {actual_batch_count} 个batch，当前已保存 {total_samples} 个样本...")
-                    for dataset_name in self.dataset_names:
-                        print(f"  - {dataset_name}: {current_write_pos_per_dataset[dataset_name]} 个样本")
-                        # Save metadata to each dataset's zarr file
-                        dataset_zarr_roots[dataset_name].attrs['last_saved_batch'] = int(actual_batch_count)
-                        dataset_zarr_roots[dataset_name].attrs['last_saved_samples'] = int(current_write_pos_per_dataset[dataset_name])
-        
-        # 更新最终元数据
-        print("\n保存最终结果...")
-        for dataset_name in self.dataset_names:
-            zarr_root = dataset_zarr_roots[dataset_name]
-            zarr_datasets = zarr_datasets_per_dataset[dataset_name]
-            write_pos = current_write_pos_per_dataset[dataset_name]
-            
-            # Resize datasets to actual size
-            for key, dataset in zarr_datasets.items():
-                if write_pos < dataset.shape[0]:
-                    dataset.resize((write_pos,) + dataset.shape[1:])
-            
-            # Save metadata for each dataset zarr file
-            zarr_root.attrs['total_samples'] = int(write_pos)
-            zarr_root.attrs['dataset_name'] = str(dataset_name)
-            zarr_root.attrs['total_batches'] = int(actual_batch_count)
-            if hasattr(self.cfg.inference, 'checkpoint_path'):
-                zarr_root.attrs['checkpoint_path'] = str(self.cfg.inference.checkpoint_path)
-            
-            zarr_path = output_dir / f"inference_results_{dataset_name}.zarr"
-            print(f"✓ {dataset_name}: {zarr_path} (样本数: {write_pos})")
-        
+        # 保存 inference config 文件：
+        inference_config_path = output_dir / "inference_config.yaml"
+        with open(inference_config_path, 'w') as f:
+            OmegaConf.save(cfg, f)
+        print(f"推理配置已保存至: {inference_config_path}")
+
         # 打印并保存每个数据集的统计信息
-        print(f"\n推理完成!")
-        all_stats = {
-            'datasets': {},
-            'overall': {
-                'total_samples': 0,
-                'total_valid_samples': 0,
-                'avg_l1_loss': 0.0
-            }
+        print("\n开始计算统计信息和生成可视化...")
+        for dataset_name in self.dataset_names:
+            zarr_path = output_dir / f"inference_results_{dataset_name}.zarr"
+            if not zarr_path.exists():
+                print(f"警告: 未找到 zarr 文件 {zarr_path}，跳过")
+                continue
+            
+            print(f"\n处理数据集: {dataset_name}")
+            # 创建数据集特定的输出目录
+            dataset_output_dir = output_dir / dataset_name
+            dataset_output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 计算统计信息和生成可视化
+            self.compute_and_save_metrics(zarr_path, dataset_output_dir, dataset_name)
+        
+        print("\n统计信息和可视化计算完成！")
+    
+    def compute_and_save_metrics(self, zarr_path, output_dir, dataset_name):
+        """
+        从 zarr 文件读取数据，计算所有统计指标并生成可视化
+        
+        Args:
+            zarr_path: zarr 文件路径
+            output_dir: 输出目录
+            dataset_name: 数据集名称
+        """
+        # 读取 zarr 文件
+        store = zarr.DirectoryStore(str(zarr_path))
+        zarr_root = zarr.group(store=store)
+        
+        # 检查是否有必要的数据
+        if 'pred_actions' not in zarr_root:
+            print(f"  警告: {dataset_name} 中没有 pred_actions，跳过")
+            return
+        
+        pred_actions = zarr_root['pred_actions'][:]  # [N, H, D]
+        
+        # 保存基本信息
+        info_dict = {
+            'dataset_name': str(dataset_name),
+            'num_samples': int(pred_actions.shape[0]),
+            'horizon': int(pred_actions.shape[1]),
+            'action_dim': int(pred_actions.shape[2]),
+            'has_gt': 'gt_actions' in zarr_root,
+        }
+        info_path = output_dir / "info.json"
+        with open(info_path, 'w') as f:
+            json.dump(info_dict, f, indent=2)
+        
+        # 如果有 ground truth，计算统计信息和可视化
+        if 'gt_actions' not in zarr_root:
+            print(f"  注意: {dataset_name} 中没有 ground truth 数据，跳过统计计算")
+            return
+        
+        gt_actions = zarr_root['gt_actions'][:]  # [N, H, D]
+        
+        # 转换为 torch tensor
+        pred_tensor = torch.from_numpy(pred_actions).float()
+        gt_tensor = torch.from_numpy(gt_actions).float()
+        
+        # 计算所有指标
+        print(f"  计算统计指标...")
+        
+        # 1. 基本指标 (compute_all_metrics 包含的部分)
+        basic_metrics = compute_all_metrics(gt_tensor, pred_tensor)
+        
+        # 2. 动作准确度
+        accuracy_thresholds = [0.1, 0.2, 0.3, 0.5]
+        action_accuracy = get_action_accuracy(gt_tensor, pred_tensor, thresholds=accuracy_thresholds)
+        
+        # 3. 平滑度指标 (详细版本)
+        smoothness = compute_smoothness_metrics(gt_tensor, pred_tensor)
+        
+        # 4. 误差热图
+        error_heatmap = compute_error_heatmap(gt_tensor, pred_tensor)
+        
+        # 5. 协方差矩阵
+        covariance = compute_covariance_matrix(gt_tensor, pred_tensor)
+        
+        # 6. 每个时间步的损失
+        loss_l1_over_time = compute_loss_over_time(gt_tensor, pred_tensor, loss_type='l1')
+        loss_l2_over_time = compute_loss_over_time(gt_tensor, pred_tensor, loss_type='l2')
+        
+        # 7. 轨迹级别指标 (已在 basic_metrics 中，但保留详细版本)
+        trajectory_metrics = compute_trajectory_metrics(gt_tensor, pred_tensor)
+        
+        # 8. 每个维度指标 (已在 basic_metrics 中，但保留详细版本)
+        per_dim_metrics = compute_per_dimension_metrics(gt_tensor, pred_tensor)
+        
+        # 汇总所有指标到字典
+        metrics_dict = {
+            # 基本指标
+            'overall_mae': float(basic_metrics['overall_mae'].item()),
+            'first_diff_error': float(basic_metrics['first_diff_error'].item()),
+            'second_diff_error': float(basic_metrics['second_diff_error'].item()),
+            
+            # 动作准确度
+            'action_accuracy': {
+                f'threshold_{t}': float(action_accuracy[i].item())
+                for i, t in enumerate(accuracy_thresholds)
+            },
+            
+            # 平滑度详细指标
+            'smoothness': {
+                'first_diff_error': float(smoothness['first_diff_error'].item()),
+                'second_diff_error': float(smoothness['second_diff_error'].item()),
+                'first_diff_error_heatmap_mean': float(torch.mean(smoothness['first_diff_error_heatmap']).item()),
+                'second_diff_error_heatmap_mean': float(torch.mean(smoothness['second_diff_error_heatmap']).item()),
+            },
+            
+            # 误差热图统计
+            'error_heatmap': {
+                'mean': float(torch.mean(error_heatmap).item()),
+                'std': float(torch.std(error_heatmap).item()),
+                'max': float(torch.max(error_heatmap).item()),
+                'min': float(torch.min(error_heatmap).item()),
+            },
+            
+            # 协方差矩阵统计
+            'covariance': {
+                'gt_cov_trace': float(torch.trace(covariance['gt_cov']).item()),
+                'pred_cov_trace': float(torch.trace(covariance['pred_cov']).item()),
+                'error_cov_trace': float(torch.trace(covariance['error_cov']).item()),
+                'gt_cov_det': float(torch.det(covariance['gt_cov']).item()),
+                'pred_cov_det': float(torch.det(covariance['pred_cov']).item()),
+                'error_cov_det': float(torch.det(covariance['error_cov']).item()),
+            },
+            
+            # 每个时间步的损失
+            'loss_over_time': {
+                'l1_mean': float(torch.mean(loss_l1_over_time).item()),
+                'l1_std': float(torch.std(loss_l1_over_time).item()),
+                'l1_max': float(torch.max(loss_l1_over_time).item()),
+                'l1_min': float(torch.min(loss_l1_over_time).item()),
+                'l2_mean': float(torch.mean(loss_l2_over_time).item()),
+                'l2_std': float(torch.std(loss_l2_over_time).item()),
+                'l2_max': float(torch.max(loss_l2_over_time).item()),
+                'l2_min': float(torch.min(loss_l2_over_time).item()),
+            },
+            
+            # 轨迹级别指标
+            'trajectory': {
+                'endpoint_error_mean': float(torch.mean(trajectory_metrics['endpoint_error']).item()),
+                'endpoint_error_std': float(torch.std(trajectory_metrics['endpoint_error']).item()),
+                'trajectory_length_error_mean': float(torch.mean(trajectory_metrics['trajectory_length_error']).item()),
+                'trajectory_length_error_std': float(torch.std(trajectory_metrics['trajectory_length_error']).item()),
+                'mean_error_mean': float(torch.mean(trajectory_metrics['mean_error']).item()),
+                'mean_error_std': float(torch.std(trajectory_metrics['mean_error']).item()),
+                'max_error_mean': float(torch.mean(trajectory_metrics['max_error']).item()),
+                'max_error_std': float(torch.std(trajectory_metrics['max_error']).item()),
+            },
+            
+            # 每个维度指标
+            'per_dimension': {
+                'mae_per_dim': per_dim_metrics['mae_per_dim'].cpu().numpy().tolist(),
+                'mae_per_dim_mean': float(torch.mean(per_dim_metrics['mae_per_dim']).item()),
+                'mae_per_dim_std': float(torch.std(per_dim_metrics['mae_per_dim']).item()),
+                'mae_per_dim_max': float(torch.max(per_dim_metrics['mae_per_dim']).item()),
+                'mae_per_dim_min': float(torch.min(per_dim_metrics['mae_per_dim']).item()),
+            },
         }
         
-        for dataset_name in self.dataset_names:
-            stats = dataset_stats[dataset_name]
-            num_samples = stats['total_samples']
-            num_valid = stats['num_valid_samples']
-            
-            print(f"\n数据集: {dataset_name}")
-            print(f"  样本数量: {num_samples}")
-            
-            # Ensure dataset_name is a string for JSON serialization
-            dataset_name_str = str(dataset_name)
-            
-            if num_valid > 0:
-                avg_l1_loss = stats['total_l1_loss'] / num_valid
-                print(f"  有效样本数: {num_valid}")
-                print(f"  平均L1损失: {avg_l1_loss:.4f}")
-                
-                all_stats['datasets'][dataset_name_str] = {
-                    'total_samples': int(num_samples),
-                    'valid_samples': int(num_valid),
-                    'avg_l1_loss': float(avg_l1_loss)
-                }
-                
-                all_stats['overall']['total_samples'] += int(num_samples)
-                all_stats['overall']['total_valid_samples'] += int(num_valid)
-                all_stats['overall']['avg_l1_loss'] += float(stats['total_l1_loss'])
-            else:
-                all_stats['datasets'][dataset_name_str] = {
-                    'total_samples': int(num_samples),
-                    'valid_samples': 0,
-                    'avg_l1_loss': None
-                }
-                all_stats['overall']['total_samples'] += int(num_samples)
+        # 保存指标到 JSON
+        metrics_path = output_dir / "metrics.json"
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics_dict, f, indent=2)
+        print(f"  指标已保存至: {metrics_path}")
         
-        # Calculate overall average
-        if all_stats['overall']['total_valid_samples'] > 0:
-            all_stats['overall']['avg_l1_loss'] /= all_stats['overall']['total_valid_samples']
-            print(f"\n总体统计:")
-            print(f"  总样本数: {all_stats['overall']['total_samples']}")
-            print(f"  总有效样本数: {all_stats['overall']['total_valid_samples']}")
-            print(f"  总体平均L1损失: {all_stats['overall']['avg_l1_loss']:.4f}")
+        # 打印关键指标
+        print(f"    总体 MAE: {metrics_dict['overall_mae']:.4f}")
+        print(f"    一阶差分误差: {metrics_dict['first_diff_error']:.4f}")
+        print(f"    二阶差分误差: {metrics_dict['second_diff_error']:.4f}")
+        print(f"    平均端点误差: {metrics_dict['trajectory']['endpoint_error_mean']:.4f}")
+        print(f"    动作准确度 (threshold=0.1): {metrics_dict['action_accuracy']['threshold_0.1']:.4f}")
+        print(f"    动作准确度 (threshold=0.2): {metrics_dict['action_accuracy']['threshold_0.2']:.4f}")
         
-        # Convert all values to native Python types for JSON serialization
-        all_stats = convert_to_serializable(all_stats)
+        # 生成所有可视化
+        print(f"  生成可视化...")
+        plot_all_visualizations(
+            gt_tensor,
+            pred_tensor,
+            str(output_dir),
+            prefix='',
+        )
+        print(f"  可视化已保存至: {output_dir}")
         
-        # Save statistics to JSON
-        stats_path = output_dir / "inference_stats.json"
-        with open(stats_path, 'w') as f:
-            json.dump(all_stats, f, indent=2)
-        print(f"\n统计信息已保存至: {stats_path}")
     
-    def append_batch_to_zarr(self, root, zarr_datasets, batch_result, write_pos):
+    def append_batch_to_zarr(self, root, zarr_datasets, batch_result):
         """Append a batch of results to zarr file incrementally"""
-        batch_size = len(batch_result['pred_actions'])
-        
         # Keys to save
         keys_to_save = ['pred_actions', 'gt_actions', 'actions_valid_mask', 'origin_frame_indices']
         
@@ -456,27 +541,20 @@ class LegendVLAInference:
                 data = np.array(data)
             
             if key not in zarr_datasets:
-                # First time: create dataset with unknown size (resizable)
-                estimated_size = write_pos + batch_size * 100  # Rough estimate
-                shape = (estimated_size,) + data.shape[1:]
-                
+                # First time: create dataset with maxshape to allow appending
                 zarr_datasets[key] = root.create_dataset(
                     key,
-                    shape=shape,
+                    shape=(0,) + data.shape[1:],
+                    maxshape=(None,) + data.shape[1:],
                     dtype=data.dtype,
                     chunks=True,
                     compression='gzip',
                     compression_opts=1
                 )
             
-            # Resize if needed
+            # Directly append using zarr's append method
             dataset = zarr_datasets[key]
-            if write_pos + batch_size > dataset.shape[0]:
-                new_size = max(write_pos + batch_size, dataset.shape[0] * 2)
-                dataset.resize((new_size,) + dataset.shape[1:])
-            
-            # Write data
-            dataset[write_pos:write_pos + batch_size] = data
+            dataset.append(data, axis=0)
 
 
 @hydra.main(

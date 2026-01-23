@@ -1446,14 +1446,34 @@ class LegendVLAInference(LegendVLA):
 if __name__ == "__main__":
     from omegaconf import OmegaConf
     import hydra
+    import argparse
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from torch.utils.data import DataLoader
+    import pickle
+    import os
+    
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     # allows arbitrary python code execution in configs using the ${eval:''} resolver
     OmegaConf.register_new_resolver("eval", eval, replace=True)
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='测试 LegendVLA 模型')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch 大小，默认 4')
+    parser.add_argument('--save_path', type=str, default='outputs/causal_mask', 
+                       help='保存路径，默认 outputs/causal_mask')
+    parser.add_argument('--skip_embedding_analysis', action='store_true', 
+                       help='跳过 embedding 分析')
+    args = parser.parse_args()
+    
     cfg = OmegaConf.load("src/config/experiment/pretrain_legendvla_deepspeed.yaml")
     config = OmegaConf.to_yaml(cfg.policy, resolve=True)
     print(config)
     model = hydra.utils.instantiate(cfg.policy)
     model.load_pretrained_vlm_weights()
+    
+    # Embedding 分析（可选）
+    if not args.skip_embedding_analysis:
     from src.utils.embedding_analysis import analyze_embedding_distribution, print_analysis_report
     model.init_motion_token_embeddings([i for i in range(257152, 257216)])
     embeddings = model.embed_tokens.weight.data[257152:257216]
@@ -1465,4 +1485,186 @@ if __name__ == "__main__":
         save_path=f"outputs/embedding_analysis.png",
     )
     print_analysis_report(results)
+    
+    # 测试从 dataset 加载 batch 并可视化 causal mask
+    print("\n" + "="*80)
+    print("测试从 dataset 加载 batch 并可视化 causal mask")
+    print("="*80)
+    
+    import datasets
+    datasets.logging.set_verbosity_info()
+
+    # 实例化 dataset
+    print("\n1. 实例化 dataset...")
+    dataset = hydra.utils.instantiate(cfg.dataset)
+    print(f"   ✓ Dataset 初始化成功")
+    print(f"   - VLA dataset size: {len(dataset.vla_dataset)}")
+    if dataset.vlm_dataset is not None:
+        print(f"   - VLM dataset size: {len(dataset.vlm_dataset)}")
+    
+    # 设置 preprocessor
+    print("\n2. 设置 preprocessor...")
+    vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+    dataset.vla_dataset.set_preprocessor(vla_processor)
+    if dataset.vlm_dataset is not None:
+        vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
+        dataset.vlm_dataset.set_preprocessor(vlm_processor)
+    print(f"   ✓ Preprocessor 设置成功")
+    
+    # 设置 normalizer
+    print("\n3. 设置 normalizer...")
+    if hasattr(cfg.training, 'normalizer_path') and cfg.training.normalizer_path is not None:
+        normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
+        dataset.vla_dataset.set_normalizer(normalizer)
+        print(f"   ✓ Normalizer 从文件加载成功: {cfg.training.normalizer_path}")
+    else:
+        print(f"   ⚠ 未提供 normalizer_path，尝试计算 normalizer...")
+        try:
+            normalizer = dataset.vla_dataset.get_normalizer()
+            dataset.vla_dataset.set_normalizer(normalizer)
+            print(f"   ✓ Normalizer 计算成功")
+        except Exception as e:
+            print(f"   ⚠ 无法获取 normalizer: {e}")
+    
+    # 创建 DataLoader 并加载 batch
+    print(f"\n4. 创建 DataLoader 并加载 batch (batch_size={args.batch_size})...")
+    sampler = dataset.get_sampler(
+        batch_size=args.batch_size,
+        vla_ratio=1/2,
+        shuffle=True,
+        seed=42,
+        drop_last=False,
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_sampler=sampler,
+        collate_fn=dataset.get_collator(),
+        num_workers=0,
+    )
+    
+    # 获取第一个 batch
+    batch = next(iter(dataloader))
+    print(f"   ✓ Batch 加载成功")
+    print(f"   - Batch keys: {list(batch.keys())}")
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            print(f"   - {key}: shape={value.shape}, dtype={value.dtype}")
+    
+    # 构建 causal mask
+    print("\n5. 构建 causal mask...")
+    attention_mask = batch['attention_mask']
+    answer_start_idx = batch['answer_start_idx']
+    dtype = torch.float32
+    
+    causal_mask, vlm_position_ids, action_position_ids = model.build_causal_mask_and_position_ids(
+        attention_mask=attention_mask,
+        answer_start_idx=answer_start_idx,
+        dtype=dtype
+    )
+    
+    print(f"   ✓ Causal mask 构建成功")
+    print(f"   - causal_mask shape: {causal_mask.shape}")
+    print(f"   - vlm_position_ids shape: {vlm_position_ids.shape}")
+    print(f"   - action_position_ids shape: {action_position_ids.shape}")
+    
+    # 可视化 causal mask（为每个样本单独保存）
+    print(f"\n6. 可视化 causal mask（为每个样本单独保存）...")
+    
+    # 创建保存文件夹
+    save_dir = args.save_path if os.path.isdir(args.save_path) or args.save_path.endswith('/') else os.path.dirname(args.save_path)
+    if save_dir == '':
+        save_dir = 'outputs/causal_masks'
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"   - 保存目录: {save_dir}")
+    
+    max_vlm_tokens = attention_mask.shape[-1]
+    action_start = max_vlm_tokens
+    batch_size = causal_mask.shape[0]
+    
+    # 遍历每个样本
+    for sample_idx in range(batch_size):
+        print(f"\n   处理样本 {sample_idx + 1}/{batch_size}...")
+        
+        # 获取当前样本的 mask
+        mask_np = (causal_mask[sample_idx, 0].cpu().numpy() == 0)  # [seq_len, seq_len]
+        
+        # 获取当前样本的信息
+        vlm_token_cnt = int(attention_mask[sample_idx].sum().item())
+        answer_start = int(answer_start_idx[sample_idx].item())
+        
+        # 创建图形
+        fig, ax = plt.subplots(figsize=(12, 12))
+        
+        # 绘制 mask（1 表示可以 attend，0 表示不能 attend）
+        # 深色表示可以 attend，浅色表示不能 attend
+        im = ax.imshow(mask_np, cmap='gray_r', aspect='auto', vmin=0, vmax=1)
+        
+        # 添加颜色条
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Attention (1=can attend, 0=cannot attend)', rotation=270, labelpad=20)
+        
+        # 添加网格线
+        ax.set_xticks(np.arange(-0.5, mask_np.shape[1], 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, mask_np.shape[0], 1), minor=True)
+        ax.grid(which='minor', color='lightgray', linestyle='-', linewidth=0.5)
+        
+        # 添加区域标注
+        ax.axhline(y=vlm_token_cnt-0.5, color='red', linestyle='--', linewidth=2, label='VLM tokens end')
+        ax.axvline(x=vlm_token_cnt-0.5, color='red', linestyle='--', linewidth=2)
+        if answer_start < vlm_token_cnt:
+            ax.axhline(y=answer_start-0.5, color='blue', linestyle='--', linewidth=2, label='Answer start')
+            ax.axvline(x=answer_start-0.5, color='blue', linestyle='--', linewidth=2)
+        if action_start < mask_np.shape[0]:
+            ax.axhline(y=action_start-0.5, color='green', linestyle='--', linewidth=2, label='Action tokens start')
+            ax.axvline(x=action_start-0.5, color='green', linestyle='--', linewidth=2)
+        
+        ax.set_xlabel('Key Position (Token Index)', fontsize=12)
+        ax.set_ylabel('Query Position (Token Index)', fontsize=12)
+        ax.set_title(f'Causal Attention Mask (Sample {sample_idx})\n'
+                     f'VLM tokens: 0-{vlm_token_cnt-1} ({vlm_token_cnt} tokens), '
+                     f'Answer start: {answer_start}, Action start: {action_start}', 
+                     fontsize=14)
+        ax.legend(loc='upper right')
+        
+        # 保存图像
+        save_path = os.path.join(save_dir, f'causal_mask_sample_{sample_idx:03d}.png')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"      ✓ 已保存: {save_path}")
+        
+        # 打印当前样本的 mask 统计信息
+        print(f"      - Mask shape: {mask_np.shape}")
+        print(f"      - VLM tokens: 0-{vlm_token_cnt-1} ({vlm_token_cnt} tokens)")
+        print(f"      - Answer start index: {answer_start}")
+        print(f"      - Action tokens: {mask_np.shape[0] - action_start} tokens")
+        print(f"      - Mask values: min={mask_np.min():.3f}, max={mask_np.max():.3f}, mean={mask_np.mean():.3f}")
+        
+        # 分析 mask 结构
+        # VLM 区域（可以互相 attend）
+        vlm_region = mask_np[:vlm_token_cnt, :vlm_token_cnt]
+        vlm_attend_ratio = 100*vlm_region.sum()/vlm_region.size if vlm_region.size > 0 else 0
+        print(f"      - VLM region: {vlm_attend_ratio:.1f}% can attend")
+        
+        # Action 区域（causal）
+        if action_start < mask_np.shape[0]:
+            action_region = mask_np[action_start:, action_start:]
+            action_attend_ratio = 100*action_region.sum()/action_region.size if action_region.size > 0 else 0
+            print(f"      - Action region: {action_attend_ratio:.1f}% can attend")
+            
+            # Action 到 VLM 的连接
+            action_to_vlm = mask_np[action_start:, :vlm_token_cnt]
+            action_to_vlm_ratio = 100*action_to_vlm.sum()/action_to_vlm.size if action_to_vlm.size > 0 else 0
+            print(f"      - Action->VLM: {action_to_vlm_ratio:.1f}% can attend")
+    
+    # 打印总体统计信息
+    print(f"\n7. 总体统计信息:")
+    print(f"   - Batch size: {batch_size}")
+    print(f"   - 保存目录: {save_dir}")
+    print(f"   - 已保存 {batch_size} 个 causal mask 可视化图像")
+    
+    print("\n" + "="*80)
+    print("✅ Causal mask 可视化完成！")
+    print("="*80)
+    
     # model.load_pretrained_pi05_weights()
