@@ -16,7 +16,7 @@ from datasets import load_dataset
 from src.utils.pytorch_util import dict_apply
 from src.utils.streaming_replay_buffer import StreamingReplayBuffer
 from src.utils.sampler import (
-    SequenceSampler, get_val_mask, downsample_mask, RatioSampler)
+    SequenceSampler, get_val_mask, downsample_mask)
 from src.utils.geometry import (
     transform_wrist_to_target_frame, 
     homo_matrix_from_trans_6drot, 
@@ -47,7 +47,6 @@ class LegendVLADataset(BaseRatioDataset):
             train_mode=True,
             return_raw_sample=False,
             depth_clip_range=None,
-            regenerate_mappings_every=10000,
         ):
         self.zarr_paths = zarr_paths
         self.preprocessor = None
@@ -59,7 +58,6 @@ class LegendVLADataset(BaseRatioDataset):
         self.normalizer = None
         self.return_raw_sample = return_raw_sample
         self.depth_clip_range = depth_clip_range
-        self.regenerate_mappings_every = regenerate_mappings_every
 
         # Initialize storage lists
         self.replay_buffers = []
@@ -114,7 +112,7 @@ class LegendVLADataset(BaseRatioDataset):
             self.sampler_lens.append(len(sampler))
 
         weights = [path['weight'] for path in zarr_paths]
-        super().__init__(weights, self.sampler_lens, regenerate_mappings_every, seed)
+        super().__init__(weights, self.sampler_lens)
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -338,19 +336,14 @@ class LegendVLADataset(BaseRatioDataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
         # For validation, we need to directly sample from the validation set
-        if not self.train_mode:
-            curr_idx = idx
-            dataset_idx = 0
-            for i, length in enumerate(self.sampler_lens):
-                if curr_idx < length:
-                    sample = self.samplers[i].sample_sequence(curr_idx)
-                    dataset_idx = i
-                    break
-                curr_idx -= length
-        else: 
-            dataset_idx, sample_idx = self.mappings[idx]
-            sample = self.samplers[dataset_idx].sample_sequence(sample_idx)
-            self.maybe_update_mappings()
+        curr_idx = idx
+        dataset_idx = 0
+        for i, length in enumerate(self.sampler_lens):
+            if curr_idx < length:
+                sample = self.samplers[i].sample_sequence(curr_idx)
+                dataset_idx = i
+                break
+            curr_idx -= length
         
         # Return raw sample if requested (for testing/debugging purposes)
         if self.return_raw_sample:
@@ -512,21 +505,34 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
         self, 
         batch_size: int, 
         vla_ratio: float = 1/8, 
-        per_batch_ratio: bool = True, 
         shuffle: bool = True, 
         seed: int = 42, 
         drop_last: bool = False,
     ): 
-        return RatioSampler(
-            vla_size=len(self.vla_dataset),
-            vlm_size=len(self.vlm_dataset) if self.vlm_dataset is not None else 0,
-            vla_ratio=vla_ratio,
-            batch_size=batch_size,
-            per_batch_ratio=per_batch_ratio,
-            shuffle=shuffle,
-            seed=seed,
-            drop_last=drop_last,
-        )
+        from torch.utils.data import BatchSampler, SequentialSampler
+        from src.utils.sampler import UnifiedRatioSampler
+        # Extract weights and dataset lengths from vla_dataset
+        assert hasattr(self.vla_dataset, 'weights') and hasattr(self.vla_dataset, 'dataset_lengths'), \
+            "vla_dataset must have 'weights' and 'dataset_lengths' attributes"
+        
+        if shuffle: 
+            return UnifiedRatioSampler(
+                weights=self.vla_dataset.weights,
+                dataset_lengths=self.vla_dataset.dataset_lengths,
+                vla_size=len(self.vla_dataset),
+                vlm_size=len(self.vlm_dataset) if self.vlm_dataset is not None else 0,
+                vla_ratio=vla_ratio,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                seed=seed,
+                drop_last=drop_last,
+            )
+        else: 
+            return BatchSampler(
+                SequentialSampler(range(len(self))), 
+                batch_size=batch_size, 
+                drop_last=drop_last,
+            )
 
     def set_return_raw_sample(self, return_raw_sample: bool):
         """Set whether to return raw sample data for VLA dataset (for testing/debugging purposes)"""

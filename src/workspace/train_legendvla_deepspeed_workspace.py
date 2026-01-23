@@ -242,11 +242,26 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         dataset.vla_dataset.set_normalizer(normalizer)
 
         # configure training dataset
-        train_dataloader = DataLoader(dataset, collate_fn=dataset.get_collator(), **cfg.dataloader)
+        train_dataloader = DataLoader(
+            dataset=dataset, 
+            batch_sampler=dataset.get_sampler(**cfg.dataloader.batch_sampler),
+            collate_fn=dataset.get_collator(), 
+            **cfg.dataloader.loader
+        )
+        # Accelerate needs to know the batch size. 
+        # But Dataloader does not support batch_size argument, when we set batch_sampler, 
+        # so we set the batch_size here.
+        train_dataloader.__dict__["batch_size"] = cfg.dataloader.batch_sampler.batch_size
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, collate_fn=val_dataset.get_collator(), **cfg.val_dataloader)
+        val_dataloader = DataLoader(
+            dataset=val_dataset, 
+            batch_sampler=val_dataset.get_sampler(**cfg.val_dataloader.batch_sampler),
+            collate_fn=val_dataset.get_collator(), 
+            **cfg.val_dataloader.loader
+        )
+        val_dataloader.__dict__["batch_size"] = cfg.val_dataloader.batch_sampler.batch_size
 
         # Configure learning rate schedulers
         max_train_steps = len(train_dataloader) * cfg.training.num_epochs

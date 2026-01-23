@@ -13,9 +13,9 @@ lora_dropout: 0.0
 image_shape: [224, 224, 3]
 depth_image_shape: [224, 224]
 vla_dataset_paths:
-#  - name: taco 
-#    path: /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
-#    weight: 1
+ - name: taco 
+   path: /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+   weight: 1
  - name: oakink2
    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
    weight: 1
@@ -84,7 +84,6 @@ dataset:
       use_relative_action: ${dataset.vla_dataset.use_relative_action}
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
-    regenerate_mappings_every: 10000
   vlm_dataset:
     _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}
@@ -138,18 +137,26 @@ vlm_processor:
   tokenizer_padding: ${tokenizer_padding} 
 
 dataloader:
-  batch_size: 8
-  num_workers: 16
-  shuffle: True
-  pin_memory: True
-  persistent_workers: True
+  batch_sampler: 
+    batch_size: 8
+    vla_ratio: ${eval:'7/8'} # ratio of VLA samples in each batch
+    seed: 42
+    shuffle: True
+    drop_last: False
+  loader: 
+    num_workers: 16
+    pin_memory: True
+    persistent_workers: True
 
 val_dataloader:
-  batch_size: 8 # use the same batch size with training for best performance
-  num_workers: 16
-  shuffle: False
-  pin_memory: True
-  persistent_workers: True
+  batch_sampler: 
+    batch_size: 8
+    shuffle: False
+    drop_last: False
+  loader: 
+    num_workers: 16
+    pin_memory: True
+    persistent_workers: True
 
 flow: 
   sig_min: 0.001
