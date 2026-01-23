@@ -24,6 +24,8 @@ export NCCL_IB_TIMEOUT=600
 export NCCL_PXN_DISABLE=0
 export NCCL_MIN_CTAS=4
 
+# Enable expandable segments for better memory utilization
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 rm -f .deepspeed_env
 

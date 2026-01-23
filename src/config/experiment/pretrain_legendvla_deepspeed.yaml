@@ -15,13 +15,13 @@ depth_image_shape: [224, 224]
 vla_dataset_paths:
  - name: taco 
    path: /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
-   weight: 1
+   weight: 2
  - name: oakink2
    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
-   weight: 1
-#  - name: egodex
-#    path: /share_data/yeyuyao/egodex_filter_train.zarr
-#    weight: 5
+   weight: 3
+ - name: egodex
+   path: /share_data/yeyuyao/egodex_filter_train.zarr
+   weight: 5
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
@@ -38,6 +38,20 @@ vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(sam)_filtered" 
  - "/share_data/guantianrui/datasets/VLM/FineVision/textcaps_filtered" 
  - "/share_data/guantianrui/datasets/VLM/FineVision/image_textualization(filtered)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision/aguvis-stage-1"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/groundui"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/oodvqa"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/tallyqa"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/allava_laion"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/allava_vflan"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/mmevol"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/vision_flan(filtered)"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/visual7w"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/vizwiz(mathv360k)"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/vsr"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/wildvision"
+ - "/share_data/guantianrui/datasets/VLM/FineVision/yesbut"
+
 
 shape_meta: &shape_meta
   obs:
@@ -138,8 +152,8 @@ vlm_processor:
 
 dataloader:
   batch_sampler: 
-    batch_size: 8
-    vla_ratio: ${eval:'7/8'} # ratio of VLA samples in each batch
+    batch_size: 12
+    vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
     drop_last: False
@@ -150,7 +164,7 @@ dataloader:
 
 val_dataloader:
   batch_sampler: 
-    batch_size: 8
+    batch_size: 12
     shuffle: False
     drop_last: False
   loader: 

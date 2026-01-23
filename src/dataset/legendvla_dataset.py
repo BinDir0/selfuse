@@ -256,6 +256,7 @@ class LegendVLADataset(BaseRatioDataset):
             'answer_start_idx': processed_results['answer_start_idx'],
             'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
+            'states': state,
         }
         # Add depth_values if available
         if 'depth_values' in processed_results:
@@ -761,7 +762,7 @@ class LegendVLDataCollator(BaseDataCollator):
                 depth_ids_tensor[idx] = i
             batch['depth_ids'] = depth_ids_tensor
         for key in data_list[0].keys():
-            if key != 'input_ids' and key != 'attention_mask' and key != 'labels' and key != 'depth_values':
+            if key not in ['input_ids', 'attention_mask', 'labels', 'depth_values', 'states']:
                 batch[key] = torch.stack([item[key] for item in data_list])
 
         return batch

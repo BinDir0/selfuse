@@ -52,6 +52,61 @@ class TrainingState:
         self.update_step = state_dict["update_step"]
         self.global_step = state_dict["global_step"]
 
+class FullMemoryTracker:
+    def __init__(self, model):
+        self.model = model
+        self.stats = {}
+        self.hooks = []
+
+    def _get_tensor_mem(self, tensor):
+        if torch.is_tensor(tensor):
+            return tensor.element_size() * tensor.nelement() / (1024**2)
+        return 0
+
+    def hook_before(self, module, input, name):
+        # 记录进入该层前的显存状态
+        torch.cuda.synchronize() # 强制对齐，确保测得准，但会变慢
+        module._mem_before = torch.cuda.memory_allocated()
+
+    def hook_after(self, module, input, output, name):
+        # 记录离开该层后的显存状态
+        torch.cuda.synchronize()
+        mem_after = torch.cuda.memory_allocated()
+        
+        # 计算该层运行期间增加的显存（这包含了激活值和中间变量）
+        diff = (mem_after - module._mem_before) / (1024**2)
+        
+        # 计算参数和梯度的大小
+        param_mem = sum(p.element_size() * p.nelement() for p in module.parameters(recurse=False)) / (1024**2)
+        grad_mem = sum(p.grad.element_size() * p.grad.nelement() if p.grad is not None else 0 
+                       for p in module.parameters(recurse=False)) / (1024**2)
+
+        if name not in self.stats:
+            self.stats[name] = {'param': param_mem, 'peak_delta': 0, 'grad': 0, 'output': 0}
+        
+        self.stats[name]['peak_delta'] = max(self.stats[name]['peak_delta'], diff)
+        self.stats[name]['grad'] = max(self.stats[name]['grad'], grad_mem)
+        self.stats[name]['output'] = max(self.stats[name]['output'], self._get_tensor_mem(output))
+
+    def track(self):
+        for name, module in self.model.named_modules():
+            # 过滤掉层级太深的，看主要的 Block 即可
+            if len(list(module.children())) <= 3: 
+                h_pre = module.register_forward_pre_hook(lambda m, i, n=name: self.hook_before(m, i, n))
+                h_post = module.register_forward_hook(lambda m, i, o, n=name: self.hook_after(m, i, o, n))
+                self.hooks.extend([h_pre, h_post])
+
+    def report(self):
+        print(f"\n{'Module Name':<50} | {'Param(MB)':<10} | {'Grad(MB)':<10} | {'Output(MB)':<12} | {'Net-Delta(MB)':<12}")
+        print("-" * 105)
+        # 按增量排序，找出真正的显存大户
+        sorted_items = sorted(self.stats.items(), key=lambda x: x[1]['peak_delta'], reverse=True)
+        for name, s in sorted_items[:100]:
+            print(f"{name[:50]:<50} | {s['param']:>10.1f} | {s['grad']:>10.1f} | {s['output']:>12.1f} | {s['peak_delta']:>12.1f}")
+
+    def stop(self):
+        for h in self.hooks: h.remove()
+
 
 class TrainLegendVLAWorkspace(BaseWorkspace):
     include_keys = ['training_state', 'model_averaging']
@@ -68,6 +123,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # configure model
         self.model: LegendVLA
         self.model = hydra.utils.instantiate(cfg.policy) 
+        self.tracker = FullMemoryTracker(self.model)
         
         # do not save optimizer if resume=False
         if not cfg.training.resume:
@@ -330,10 +386,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         # Preprocess batch
                         inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
 
+                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                            self.tracker.track()
                         # Forward pass
                         with accelerator.autocast():
                             raw_loss = self.model(self.objective_func, inputs)
                         accelerator.backward(raw_loss["total_loss"])
+                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                            torch.cuda.empty_cache() 
+                            print(torch.cuda.memory_summary())
+                            self.tracker.report()
+                            self.tracker.stop()
 
                         # Gradient clipping
                         if accelerator.sync_gradients and cfg.training.clipping.enabled:
@@ -428,10 +491,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 # Compute validation loss
                 with accelerator.autocast():
                     loss = self.model(self.objective_func, inputs)
-                for key, loss in loss.items():
+                for key, loss_ in loss.items():
                     if key not in val_losses:
                         val_losses[key] = list()
-                    val_losses[key].append(loss)
+                    val_losses[key].append(loss_)
 
                 # Compute action accuracy if actions are available
                 if 'actions' in inputs and self.objective_func != "train_ar":
@@ -458,7 +521,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         pred_actions,
                         eval_thresholds,
                     )
-                    eval_accuracy.append(batch_accuracy)
+                    eval_accuracy.append(batch_accuracy.cpu())
                     
                     # Compute L1 loss, num should not be 0 here since we have checked eval_sample
                     actions_valid_num = torch.sum(actions_valid_mask)
