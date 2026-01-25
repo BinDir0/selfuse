@@ -239,7 +239,7 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, horizon=30):
     frame_indices = np.arange(frame_idx, frame_idx + horizon) 
     
     # Final check: ensure frame_indices don't exceed dataset size or episode end
-    if frame_indices[-1] >= dataset_size:
+    if len(frame_indices) > 0 and frame_indices[-1] >= dataset_size:
         # Truncate to available frames
         valid_mask = frame_indices < dataset_size
         frame_indices = frame_indices[valid_mask]
@@ -248,11 +248,15 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, horizon=30):
     episode_idx = np.searchsorted(episode_ends, frame_idx, side='right')
     if episode_idx < len(episode_ends):
         episode_end = episode_ends[episode_idx]
-        if frame_indices[-1] >= episode_end:
+        if len(frame_indices) > 0 and frame_indices[-1] >= episode_end:
             # Truncate to episode end
             valid_mask = frame_indices < episode_end
             frame_indices = frame_indices[valid_mask]
             horizon = len(frame_indices)
+    
+    # Ensure we have at least one frame
+    if len(frame_indices) == 0:
+        raise ValueError(f"After truncation, no valid frames remain for frame_idx {frame_idx} with horizon {horizon}")
     
     print(f"Selected frame {frame_idx} from dataset (size: {dataset_size})")
     print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} ({horizon} frames)")
@@ -384,7 +388,7 @@ def actions_to_hands_data(actions):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file.")
-    parser.add_argument("--frame_idx", type=int, default=None, help="Index of frame to visualize. If None, randomly select one from valid frames.")
+    parser.add_argument("--frame_idx", type=int, nargs='*', default=None, help="Index(es) of frame(s) to visualize. Can specify multiple frames: --frame_idx 100 200 300. If None, randomly select from valid frames.")
     parser.add_argument("--horizon", type=int, default=200, help="Number of timesteps to visualize (default: 30).")
     parser.add_argument("--target_width", type=int, default=None, help="Target image width. If None, use original width.")
     parser.add_argument("--target_height", type=int, default=None, help="Target image height. If None, use original height.")
@@ -399,6 +403,18 @@ def main():
     if not os.path.exists(args.origin_zarr_path):
         raise FileNotFoundError(f"Zarr file not found: {args.origin_zarr_path}")
 
+    # Handle frame_idx: can be empty list (None equivalent), or list of ints
+    # With nargs='*', args.frame_idx is always a list (empty if not provided)
+    if args.frame_idx is None or len(args.frame_idx) == 0:
+        frame_indices_to_process = None
+        num_samples_to_process = args.num_samples
+    else:
+        # frame_idx is a list of frame indices
+        frame_indices_to_process = args.frame_idx
+        num_samples_to_process = len(frame_indices_to_process)
+        if args.num_samples > 1 and args.num_samples != num_samples_to_process:
+            print(f"Warning: frame_idx is specified ({frame_indices_to_process}), ignoring num_samples ({args.num_samples}). Will process {num_samples_to_process} frame(s).")
+
     # Create save directory if it doesn't exist
     if args.save_path:
         if os.path.isdir(args.save_path):
@@ -409,15 +425,26 @@ def main():
             if parent_dir:
                 os.makedirs(parent_dir, exist_ok=True)
 
-    print(f"Starting to sample {args.num_samples} times from: {args.origin_zarr_path}")
+    print(f"Starting to process {num_samples_to_process} sample(s) from: {args.origin_zarr_path}")
+    if frame_indices_to_process is not None:
+        print(f"Using specified frame_idx: {frame_indices_to_process}")
+    else:
+        print(f"Will randomly select {num_samples_to_process} frame(s)")
 
-    for sample_count in range(args.num_samples):
+    for sample_count in range(num_samples_to_process):
         print(f"\n{'='*60}")
-        print(f"Processing Sample {sample_count + 1}/{args.num_samples}")
+        print(f"Processing Sample {sample_count + 1}/{num_samples_to_process}")
         print(f"{'='*60}")
         
-        # Load data from zarr (randomly selects frame if args.frame_idx is None)
-        zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=args.frame_idx, horizon=args.horizon)
+        # Get frame_idx for this iteration
+        if frame_indices_to_process is not None:
+            current_frame_idx = frame_indices_to_process[sample_count]
+            print(f"Processing frame_idx: {current_frame_idx}")
+        else:
+            current_frame_idx = None
+        
+        # Load data from zarr (randomly selects frame if current_frame_idx is None)
+        zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=current_frame_idx, horizon=args.horizon)
     
         # Get actual frame_idx that was used (needed for filename)
         actual_frame_idx = zarr_data['frame_idx']
@@ -620,10 +647,10 @@ def main():
 
             frame_idx += 1
         
-        print(f"Completed sample {sample_count + 1}/{args.num_samples}")
+        print(f"Completed sample {sample_count + 1}/{num_samples_to_process}")
     
     print(f"\n{'='*60}")
-    print(f"Finished processing all {args.num_samples} samples!")
+    print(f"Finished processing all {num_samples_to_process} sample(s)!")
     print(f"{'='*60}")
 
 if __name__ == "__main__":
