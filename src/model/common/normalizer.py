@@ -499,6 +499,9 @@ def _normalize(x, params, forward=True):
     if isinstance(x, np.ndarray):
         scale = scale.cpu().numpy()
         offset = offset.cpu().numpy()
+    else: 
+        scale = scale.to(x.device)
+        offset = offset.to(x.device)
     src_shape = x.shape
     x = x.reshape(-1, scale.shape[0])
     if forward:

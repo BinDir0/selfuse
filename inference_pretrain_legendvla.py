@@ -2,7 +2,6 @@ import os
 import hydra
 import torch
 from accelerate import Accelerator
-from accelerate.utils import gather_object, TorchDynamoPlugin
 from omegaconf import OmegaConf
 import pathlib
 from torch.utils.data import DataLoader
@@ -14,6 +13,7 @@ from hydra.core.hydra_config import HydraConfig
 import zarr
 
 from src.policy.legendvla import LegendVLA
+from src.utils.pytorch_util import dict_apply
 from src.utils.metric import (
     get_action_accuracy,
     compute_all_metrics,
@@ -102,7 +102,13 @@ class LegendVLAInference:
 
         self.model.eval()
         
+        # Get inference mode: "ar" (autoregressive) or "flow" (flow matching)
+        self.mode = cfg.inference.get("mode", "flow")
+        if self.mode not in ["ar", "flow"]:
+            raise ValueError(f"Invalid inference mode: {self.mode}. Must be 'ar' or 'flow'")
+        
         if self.is_main_process:
+            print(f"推理模式: {self.mode}")
             print("模型初始化完成")
     
     @property
@@ -178,6 +184,92 @@ class LegendVLAInference:
         
         return inputs
     
+    def preprocess_batch_ar(self, batch):
+        """Preprocess batch for autoregressive generation"""
+        input_ids = batch["input_ids"].to(self.device)
+        pixel_values = batch["pixel_values"].to(self.device).to(self.dtype)
+        attention_mask = batch.get("attention_mask", None)
+        
+        inputs = {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+        }
+        
+        if attention_mask is not None:
+            inputs["attention_mask"] = attention_mask.to(self.device)
+        
+        if "depth_values" in batch:
+            inputs["depth_values"] = batch["depth_values"].to(self.device).to(self.dtype)
+            inputs["depth_ids"] = batch["depth_ids"].to(self.device)
+        
+        # Add ground truth actions for comparison (if available)
+        if "actions" in batch:
+            inputs["actions"] = batch["actions"].to(self.device).to(self.dtype)
+            inputs["actions_valid_mask"] = batch["actions_valid_mask"].to(self.device)
+        
+        return inputs
+    
+    def _preprocess_for_autoregressive(self, inputs):
+        """
+        Preprocess inputs for autoregressive generation.
+        Extract generation parameters from config.
+        
+        Args:
+            inputs (dict): Preprocessed inputs from preprocess_batch_ar
+            
+        Returns:
+            dict: Generation parameters including max_new_tokens, temperature, etc.
+        """
+        generation_params = self.cfg.inference.autoregressive_config
+        if self.vla_processor is not None: 
+            generation_params['eos_token_id'] = self.vla_processor.eos_token_id
+            generation_params['allowed_token_ids'] = self.vla_processor.total_motion_token_list
+        return generation_params
+    
+    def _postprocess_autoregressive_results(self, generated_ids):
+        """
+        Postprocess autoregressive generation results.
+        Decode generated token IDs to actions using processor.
+        
+        Args:
+            generated_ids (torch.LongTensor): [B, prefill_len + num_generated] Generated token IDs
+            
+        Returns:
+            torch.FloatTensor: [B, T_action_original, D] Decoded actions (normalized)
+        """
+        generated_ids_np = generated_ids.cpu().numpy()  # [B, seq_len]
+        batch_size = generated_ids_np.shape[0]
+        pred_actions_list = []
+        
+        for i in range(batch_size):
+            output_ids = generated_ids_np[i]  # [seq_len]
+            
+            # Decode using processor
+            decoded_result = self.vla_processor.decode(
+                output_ids=output_ids,
+                T_state_original=self.T_state_original,
+                T_action_original=self.T_action_original,
+            )
+            
+            if decoded_result and 'actions' in decoded_result:
+                pred_actions_list.append(decoded_result['actions'])  # [T_action_original, D]
+            else:
+                # If decoding failed, use zeros as fallback
+                if self.T_action_original is not None:
+                    action_dim = 48  # Default action dimension
+                    pred_actions_list.append(
+                        np.zeros((self.T_action_original, action_dim), dtype=np.float32)
+                    )
+        
+        # Stack decoded actions
+        if len(pred_actions_list) > 0:
+            pred_actions_np = np.stack(pred_actions_list, axis=0)  # [B, T_action_original, D]
+            pred_actions = torch.from_numpy(pred_actions_np).to(self.device)
+        else:
+            pred_actions = None
+        
+        return pred_actions
+    
     def _get_origin_indices(self, dataset, sample_indices):
         """Get origin indices and dataset indices for each sample"""
         origin_indices = []
@@ -249,7 +341,7 @@ class LegendVLAInference:
         if self.is_main_process:
             print(f"数据集: {self.dataset_names}")
         
-        # 初始化processor
+        # Initialize processor
         if self.is_main_process:
             print("正在初始化processor...")
         if self.model_cfg is not None and self.model_cfg.vla_processor is not None:
@@ -258,6 +350,17 @@ class LegendVLAInference:
             assert hasattr(cfg, 'vla_processor'), "未指定vla_processor"
             self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
         self.dataset.set_preprocessor(self.vla_processor)
+        
+        # Get T_state_original and T_action_original from config
+        T_state_original = self.model_cfg['n_obs_state_steps']
+        T_action_original = self.model_cfg['n_action_steps']
+        
+        # Store for later use
+        self.T_state_original = T_state_original
+        self.T_action_original = T_action_original
+        
+        if self.is_main_process:
+            print(f"T_state_original: {T_state_original}, T_action_original: {T_action_original}")
         
         # 加载normalizer
         if self.is_main_process:
@@ -352,70 +455,64 @@ class LegendVLAInference:
                 batch_end_idx = batch_start_idx + actual_batch_size
                 sample_indices = np.arange(start=batch_start_idx, stop=batch_end_idx)
                 
-                # 预处理
-                inputs = self.preprocess_batch(batch)
+                # Preprocess based on mode
+                if self.mode == "flow":
+                    inputs = self.preprocess_batch(batch)
+                else:  # self.mode == "ar"
+                    inputs = self.preprocess_batch_ar(batch)
                 
-                # 推理
+                # Inference (different for each mode)
                 with torch.inference_mode(), torch.autocast(device_type=self.device.type, dtype=self.dtype):
-                    # 1. Flow Matching Inference
-                    pred_actions_fm = self.model("infer_action", inputs)
-                    
-                # --- 处理 Flow Matching 结果 ---
-                pred_actions_fm = pred_actions_fm.cpu().float().numpy()
-                pred_actions_fm = self.normalizer['actions'].unnormalize(pred_actions_fm)
+                    if self.mode == "flow":
+                        # Flow Matching Inference
+                        pred_actions = self.model("infer_action", inputs)
+                    else:  # self.mode == "ar"
+                        # Autoregressive generation
+                        # 1. Preprocess: get generation parameters
+                        generation_params = self._preprocess_for_autoregressive(inputs)
+                        
+                        # 3. Model inference
+                        generation_output = self.model("infer_autoregressive", inputs, **generation_params)
+
+                        pred_actions = self._postprocess_autoregressive_results(generation_output)
                 
+                pred_actions = self.normalizer['actions'].unnormalize(pred_actions)
                 # 保存结果
                 batch_result = {
-                    "pred_actions": pred_actions_fm,      # Flow Matching 结果
+                    "pred_actions": pred_actions,
                 }
                 
                 # 获取每个样本对应的原始数据索引
                 origin_frame_indices, dataset_indices = self._get_origin_indices(inference_dataset, sample_indices)
                 
-                batch_result["sample_indices"] = sample_indices
-                batch_result["origin_frame_indices"] = origin_frame_indices
-                batch_result["dataset_indices"] = dataset_indices
+                batch_result["sample_indices"] = torch.from_numpy(sample_indices).to(self.device)
+                batch_result["origin_frame_indices"] = torch.from_numpy(origin_frame_indices).to(self.device)
+                batch_result["dataset_indices"] = torch.from_numpy(dataset_indices).to(self.device)
                 
                 # 如果有ground truth，也保存并计算误差
                 if "actions" in inputs:
-                    gt_actions = inputs["actions"].cpu().float().numpy()
+                    gt_actions = inputs["actions"]
                     gt_actions = self.normalizer['actions'].unnormalize(gt_actions)
-                    actions_valid_mask = inputs["actions_valid_mask"].cpu().numpy()
+                    actions_valid_mask = inputs["actions_valid_mask"]
                     
                     batch_result["gt_actions"] = gt_actions
                     batch_result["actions_valid_mask"] = actions_valid_mask
                 
                 actual_batch_count += 1
                 
-                # 收集所有进程的结果到主进程
-                if self.accelerator.num_processes > 1:
-                    # 使用 gather_object 收集所有进程的 batch_result
-                    gathered_batch_results = gather_object(batch_result)
-                    
-                    # 主进程合并所有结果并写入
-                    if self.is_main_process:
-                        # gathered_batch_results 是一个列表，包含所有进程的结果
-                        if isinstance(gathered_batch_results, list) and len(gathered_batch_results) > 0:
-                            # 合并所有进程的结果
-                            merged_batch_result = {}
-                            total_samples = 0
-                            for key in gathered_batch_results[0].keys():
-                                if isinstance(gathered_batch_results[0][key], np.ndarray):
-                                    merged_batch_result[key] = np.concatenate([br[key] for br in gathered_batch_results], axis=0)
-                                    if key == "pred_actions":
-                                        total_samples = merged_batch_result[key].shape[0]
-                                else:
-                                    merged_batch_result[key] = gathered_batch_results[0][key]
-                            
-                            # 重新计算全局 sample_indices（合并后的结果）
-                            if "sample_indices" in merged_batch_result:
-                                # 使用合并后的数据重新计算全局索引
-                                merged_batch_result["sample_indices"] = np.arange(total_samples)
-                            
-                            batch_result = merged_batch_result
-                    else:
-                        # 非主进程跳过写入
-                        continue
+                # Gather results from all processes to main process
+                gathered_batch_results = self.accelerator.gather(batch_result)
+                gathered_batch_results_np = dict_apply(
+                    gathered_batch_results, lambda x: x.cpu().float().numpy()
+                )
+                total_samples = gathered_batch_results_np["pred_actions"].shape[0]
+                
+                # Recalculate global sample_indices (after merging)
+                if "sample_indices" in gathered_batch_results_np:
+                    # Recalculate global indices using merged data
+                    gathered_batch_results_np["sample_indices"] = np.arange(total_samples)
+                
+                batch_result = gathered_batch_results_np
                 
                 # Split batch by dataset and write to corresponding zarr files (只在主进程)
                 if self.is_main_process:
@@ -469,8 +566,7 @@ class LegendVLAInference:
             
             print("\n统计信息和可视化计算完成！")
         
-        # 清理 DDP
-        self.cleanup_ddp()
+        self.accelerator.end_training()
     
     def compute_and_save_metrics(self, zarr_path, output_dir, dataset_name):
         """

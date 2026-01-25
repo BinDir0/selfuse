@@ -31,16 +31,22 @@ logging:
 
 # 推理专用配置
 inference:
+  # 推理模式: "ar" (autoregressive) or "flow" (flow matching)
+  mode: ar
+  autoregressive_config: 
+    max_new_tokens: 30
+    temperature: 1.0
+    top_k: 10
+    top_p: 1.0
+    eos_token_id: null # will be set by the vla_processor
+    allowed_token_ids: null # will be set by the vla_processor
   # 模型配置文件路径（yaml文件，包含policy配置）
   # 如果指定，将从该文件加载模型配置并初始化模型
   # 如果不指定，将使用当前配置中的policy配置
   model_config_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.24/13.58_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
   
   # checkpoint路径（用于加载模型权重）
-  checkpoint_path: 
-  
-  # 设备配置
-  device: cuda:0
+  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.24/23.12_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=30000-eval_l1_loss=0.0544/pytorch_model/mp_rank_00_model_states.pt
   
   # 数据配置
   # Note: If val_ratio=0.0 in dataset config, all data is used regardless of this setting
@@ -55,10 +61,10 @@ inference:
                              # 注意：混合精度通常对结果影响很小（<1%），但能显著加速推理
 
   compile:  # torch.compile 配置
-    enabled: True
+    enabled: False
     mode: "default" # "default", "reduce-overhead", "max-autotune"
     dynamic: True # 是否动态编译
-    fullgraph: True # 是否使用全图编译
+    fullgraph: False # 是否使用全图编译
     backend: "inductor" # "inductor", "aot_eager", "aot_nvfuser", etc.
   
   # 其他配置

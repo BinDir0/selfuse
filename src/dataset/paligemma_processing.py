@@ -22,6 +22,7 @@ def add_image_tokens_to_prompt(
     image_seq_len,
     image_token,
     suffix_target, 
+    train_mode = True,
 ):
     # Quoting from the blog (https://huggingface.co/blog/paligemma#detailed-inference-process):
     #   The input text is tokenized normally.
@@ -30,7 +31,10 @@ def add_image_tokens_to_prompt(
     #   The tokenized text is also prefixed with a fixed number of <image> tokens.
     # NOTE: from the paper it looks like the `\n` should be tokenized separately, but in the HF implementation this is not done.
     #       ref to HF implementation: https://github.com/huggingface/transformers/blob/7f79a97399bb52aad8460e1da2f36577d5dccfed/src/transformers/models/paligemma/processing_paligemma.py#L55-L73
-    return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{suffix_target}{eos_token}"
+    if not train_mode: 
+        return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n"
+    else:
+        return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{suffix_target}{eos_token}"
 
 
 def add_image_action_tokens_to_prompt(
@@ -44,6 +48,7 @@ def add_image_action_tokens_to_prompt(
     action_token,
     action_seq_len,
     need_action = True, # if True, the action tokens will be added, otherwise only the image tokens will be added
+    train_mode = True, # if True, the eos token will be added
 ):
     # Quoting from the blog (https://huggingface.co/blog/paligemma#detailed-inference-process):
     #   The input text is tokenized normally.
@@ -52,7 +57,12 @@ def add_image_action_tokens_to_prompt(
     #   The tokenized text is also prefixed with a fixed number of <image> tokens.
     # NOTE: from the paper it looks like the `\n` should be tokenized separately, but in the HF implementation this is not done.
     #       ref to HF implementation: https://github.com/huggingface/transformers/blob/7f79a97399bb52aad8460e1da2f36577d5dccfed/src/transformers/models/paligemma/processing_paligemma.py#L55-L73
-    if need_action:
+    if not train_mode: 
+        prompt = f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n"
+        if need_action:
+            prompt += f"{action_begin_token}"
+        return prompt
+    elif need_action:
         return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{action_begin_token}{action_token * action_seq_len}{action_end_token}{eos_token}"
     else:
         return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n{eos_token}"
@@ -302,6 +312,7 @@ class PaliGemmaProcessor:
         images: np.ndarray,
         target: str, 
         truncation: bool = True,
+        train_mode = True,
     ) -> dict:
         '''
         Args: 
@@ -309,7 +320,7 @@ class PaliGemmaProcessor:
             images: np.ndarray [T, C, H, W] or [T, H, W, C]
             target: str
             truncation: bool
-
+            train_mode: bool
         Returns:
             dict:
                 - pixel_values: torch.FloatTensor [T, C, H, W]
@@ -345,6 +356,7 @@ class PaliGemmaProcessor:
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             suffix_target=target,
+            train_mode=train_mode,
         )
 
         # Returns the input_ids and attention_mask as PyTorch tensors
@@ -360,7 +372,8 @@ class PaliGemmaProcessor:
         labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
         condition = (labels == self.sep_token_id)
         if not np.any(condition):
-            warnings.warn("The separator token is not found in the input_ids")
+            if train_mode: # only warn in train mode
+                warnings.warn("The separator token is not found in the input_ids")
             sep_idx = len(labels) - 1
         else : 
             sep_idx = np.argmax(condition)
@@ -457,7 +470,6 @@ class PaliGemmaVLAProcessor:
         assert replace_size == total_vocab_size, "The replace size is not equal to the total vocab size"
         token_id_replace = token_id_replace[::-1]
         
-        
         forward, reverse, replace_idx = motion_tokenizer.setup_tokenizer_gemma_mappings(
             token_id_replace, 0
         )
@@ -477,6 +489,7 @@ class PaliGemmaVLAProcessor:
         objective: str = None,
         truncation: bool = True,
         depth_images: np.ndarray = None,
+        train_mode: bool = True,
     ) -> dict:
         '''
         Args: 
@@ -488,7 +501,7 @@ class PaliGemmaVLAProcessor:
             objective: str, 'ar' or 'flow' or None, None means both
             truncation: bool
             depth_images: np.ndarray [T_image, 3, H, W]
-
+            train_mode: bool
         Returns:
             dict:
                 - pixel_values: torch.FloatTensor [T_image, C, H, W]
@@ -555,6 +568,7 @@ class PaliGemmaVLAProcessor:
             action_token=self.ACTION_TOKEN,
             action_seq_len=len(discrete_actions) if objective != "train_flow" else 0,
             need_action=objective != "train_flow",
+            train_mode=train_mode,
         )
 
         # Returns the input_ids and attention_mask as PyTorch tensors
@@ -575,7 +589,7 @@ class PaliGemmaVLAProcessor:
         )
         input_ids = set_token_id(input_ids, self.state_token_id, mapped_states_1d)
         
-        if objective != "train_flow":
+        if objective != "train_flow" and train_mode:
             # Map VQ tokens to Gemma space (discrete_actions already encoded above)
             mapped_actions_1d = self.motion_tokenizer.map_motion_tokens2gemma(
                 np.array(discrete_actions),
@@ -583,7 +597,7 @@ class PaliGemmaVLAProcessor:
             )
             input_ids = set_token_id(input_ids, self.action_token_id, mapped_actions_1d)
 
-        if objective != "train_flow":
+        if objective != "train_flow" and train_mode:
             labels = input_ids.copy()
             if not np.any(labels == self.action_begin_token_id):
                 warnings.warn("The action begin token is not found in the input_ids")

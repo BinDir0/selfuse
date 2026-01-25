@@ -14,13 +14,16 @@ image_shape: [224, 224, 3]
 depth_image_shape: [224, 224]
 vla_dataset_paths:
  - name: taco 
-   path: /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+   path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
    weight: 2
  - name: oakink2
-   path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
-   weight: 3
+   path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
+   weight: 2
+ - name: holoassist
+   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_clean_nan.zarr
+   weight: 1
  - name: egodex
-   path: /share_data/yeyuyao/egodex_filter_train.zarr
+   path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
    weight: 5
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding

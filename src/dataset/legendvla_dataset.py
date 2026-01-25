@@ -252,6 +252,7 @@ class LegendVLADataset(BaseRatioDataset):
             intrinsic=intrinsic, 
             objective=self.objective,
             depth_images=depth_images,
+            train_mode=self.train_mode,
         )
 
         data = {
@@ -456,7 +457,12 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             augmented_images.append(augmented_np)
         images_to_process = np.stack(augmented_images)
         # Process all images in batch
-        processed_results = self.preprocessor(images=images_to_process, text=question, target=answer)
+        processed_results = self.preprocessor(
+            images=images_to_process, 
+            text=question, 
+            target=answer, 
+            train_mode=self.train_mode
+        )
 
         data = {
             'input_ids': processed_results['input_ids'],

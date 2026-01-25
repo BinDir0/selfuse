@@ -8,11 +8,12 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Union
 
 import hydra
 import torch
 from torch import nn
+from torch._dynamo import disable
 import random
 
 from src.model.common.kv_cache import KVCache
@@ -22,6 +23,7 @@ from src.model.common.modules import (
     TimeEncoder,
 )
 from src.utils.monitor import log_execution_time
+from src.utils.generation_utils import sample_token
 
 log = logging.getLogger(__name__)
 
@@ -450,6 +452,7 @@ class LegendVLA(nn.Module):
                     else:
                         # For bias or other parameters, load normally
                         multi_modal_projector_state_dict[new_key] = v.to(dtype=target_dtype)
+                        log.info(f"Loaded weights for {new_key}: {v.shape} -> {current_param.shape}")
                     
                     loaded_my_model_params.add(f"multi_modal_projector.{new_key}")
                     used_pi05_params.add(k)
@@ -755,10 +758,11 @@ class LegendVLA(nn.Module):
         return causal_mask, position_ids
 
     # ---------- Inference ----------#
+    @disable(recursive=False)
     def _forward_siglip_and_text_embedding(
         self,
         input_ids: torch.LongTensor,
-        pixel_values: torch.FloatTensor,
+        pixel_values: torch.FloatTensor = None,
         depth_values: Optional[torch.FloatTensor] = None,
         depth_ids: Optional[torch.LongTensor] = None,
     ) -> torch.FloatTensor:
@@ -780,39 +784,40 @@ class LegendVLA(nn.Module):
         # [Batch_Size, Seq_Len, Hidden_Size]
         inputs_embeds = self.embed_tokens(input_ids)
 
-        # image features from siglip and projector
-        # [Batch_Size, Channels, Height, Width] or [Batch_Size, Time, Channels, Height, Width] 
-        # -> [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
-        if pixel_values.ndim == 5:
-            B, T, C, H, W = pixel_values.shape
-            # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
-            pixel_values = pixel_values.view(B * T, C, H, W)
-        else:
-            T = None
-
-        # Extract RGB vision features
-        rgb_image_features = self.vision_tower(pixel_values)
-        
-        # Extract depth features if enabled
-        if self.use_depth and depth_values is not None:
-            # Handle depth images similar to pixel_values
-            if depth_values.ndim == 5:
-                Bd, T, C, H, W = depth_values.shape
+        if pixel_values is not None:
+            # image features from siglip and projector
+            # [Batch_Size, Channels, Height, Width] or [Batch_Size, Time, Channels, Height, Width] 
+            # -> [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
+            if pixel_values.ndim == 5:
+                B, T, C, H, W = pixel_values.shape
                 # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
-                depth_values = depth_values.view(Bd * T, C, H, W)
+                pixel_values = pixel_values.view(B * T, C, H, W)
             else:
                 T = None
-            
-            # Extract depth features using DINOv2
-            depth_image_features = self.depth_encoder(depth_values)
-        else: 
-            depth_image_features = None
 
-        if T is not None:
-            # image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
-            rgb_image_features = rgb_image_features.view(B, -1, rgb_image_features.shape[-1])
-            if depth_image_features is not None:
-                depth_image_features = depth_image_features.view(Bd, -1, depth_image_features.shape[-1])
+            # Extract RGB vision features
+            rgb_image_features = self.vision_tower(pixel_values)
+            
+            # Extract depth features if enabled
+            if self.use_depth and depth_values is not None:
+                # Handle depth images similar to pixel_values
+                if depth_values.ndim == 5:
+                    Bd, T, C, H, W = depth_values.shape
+                    # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
+                    depth_values = depth_values.view(Bd * T, C, H, W)
+                else:
+                    T = None
+                
+                # Extract depth features using DINOv2
+                depth_image_features = self.depth_encoder(depth_values)
+            else: 
+                depth_image_features = None
+
+            if T is not None:
+                # image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
+                rgb_image_features = rgb_image_features.view(B, -1, rgb_image_features.shape[-1])
+                if depth_image_features is not None:
+                    depth_image_features = depth_image_features.view(Bd, -1, depth_image_features.shape[-1])
 
         # normalize the image features
         bsz, seq_len = input_ids.shape
@@ -826,27 +831,29 @@ class LegendVLA(nn.Module):
         text_mask = (input_ids != self.image_token_index) & (
             input_ids != self.pad_token_id
         )
-        image_mask = input_ids == self.image_token_index
-        # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
         final_embedding[text_mask] = inputs_embeds[text_mask].to(final_embedding.dtype)
-        for i in range(bsz):
-            image_indices = image_mask[i].nonzero(as_tuple=True)[0]
-            if depth_ids is not None and depth_ids[i] >= 0 and \
-                not (self.training and random.random() < self.depth_dropout):
-                # Each RGB token is paired with corresponding depth token
-                depth_image_feature = depth_image_features[depth_ids[i]]
-            else: 
-                if T is not None:
-                    depth_image_feature = self.depth_missing_embeddings.repeat(T, 1)
-                else:
-                    depth_image_feature = self.depth_missing_embeddings
-            paired_image_features = torch.cat([
-                rgb_image_features[i], depth_image_feature
-            ], dim=-1) # [num_patches, rgb_embed_dim+depth_embed_dim] 
-            paired_image_features = paired_image_features.view(-1, paired_image_features.shape[-1])
-            paired_image_features = self.multi_modal_projector(paired_image_features)
-            scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
-            final_embedding[i, image_indices] = scaled_image_features
+        if pixel_values is not None:
+            image_mask = input_ids == self.image_token_index
+            # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
+            
+            for i in range(bsz):
+                image_indices = image_mask[i].nonzero(as_tuple=True)[0]
+                if depth_ids is not None and depth_ids[i] >= 0 and \
+                    not (self.training and random.random() < self.depth_dropout):
+                    # Each RGB token is paired with corresponding depth token
+                    depth_image_feature = depth_image_features[depth_ids[i]]
+                else: 
+                    if T is not None:
+                        depth_image_feature = self.depth_missing_embeddings.repeat(T, 1)
+                    else:
+                        depth_image_feature = self.depth_missing_embeddings
+                paired_image_features = torch.cat([
+                    rgb_image_features[i], depth_image_feature
+                ], dim=-1) # [num_patches, rgb_embed_dim+depth_embed_dim] 
+                paired_image_features = paired_image_features.view(-1, paired_image_features.shape[-1])
+                paired_image_features = self.multi_modal_projector(paired_image_features)
+                scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
+                final_embedding[i, image_indices] = scaled_image_features
         return final_embedding
 
     @torch.inference_mode()
@@ -1017,108 +1024,214 @@ class LegendVLA(nn.Module):
         return action
 
     @torch.inference_mode()
-    def infer_discrete_action(
+    def infer_single_step(
         self,
         input: dict,
-        max_new_tokens: int = 128,  
-        action_end_token_id: int = -1,
+        kv_cache: Optional[KVCache] = None,
     ) -> dict:
+        """
+        Inference function for discrete action generation.
+        
+        Args:
+            input (dict): Input dictionary containing:
+                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
+                - pixel_values (torch.FloatTensor, Optional): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
+                  If None, only text tokens are processed
+                - attention_mask (torch.LongTensor): [B, seq_len] Attention mask
+            kv_cache (Optional[KVCache]): Key-value cache for the generated tokens
 
+        Returns:
+            dict: Dictionary containing:
+                - logits (torch.FloatTensor): [B, seq_len, vocab_size] Logits for the generated tokens
+                - kv_cache (KVCache): Key-value cache for the generated tokens
+        """
         input_ids = input["input_ids"]
-        pixel_values = input["pixel_values"]
-        
-        start_len = input["answer_start_idx"].max().item()
-        current_input_ids = input_ids[:, :start_len]
-      
-        bsz = current_input_ids.size(0)
-        device = current_input_ids.device
+        pixel_values = input.get("pixel_values", None)
+        attention_mask = input["attention_mask"]
 
-        if 'depth_values' in input:
-            depth_values = input["depth_values"]
-            depth_ids = input["depth_ids"]
-        else:
-            depth_values = None
-            depth_ids = None
+        q_len = input_ids.size(1)
 
-        kv_caches = {"vlm": self.build_text_cache()}
+        # text tokens + image tokens
+        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
 
-        inputs_embeds = self._forward_siglip_and_text_embedding(
-            current_input_ids, pixel_values, depth_values, depth_ids
-        )
-
-
-        seq_len = inputs_embeds.size(1)
-        attention_mask = torch.ones((bsz, seq_len), device=device, dtype=torch.long)
-        
+        # build causal mask and position ids for text
         (
             causal_mask,
             position_ids,
         ) = self.build_causal_mask_and_position_ids_for_text(
-            seq_len, attention_mask, kv_caches["vlm"]
+            q_len, attention_mask, kv_cache
         )
 
-        output = self.joint_model(
+        hidden_states = self.joint_model(
             attention_mask=causal_mask,
             position_ids_all={"vlm": position_ids},
             embeds_all={"vlm": inputs_embeds},
-            kv_caches=kv_caches,
-            cache_mode="append",
-            final_layer_post_attn_skip_names=[], 
-        )
-        
-        hidden_states = output["vlm"]
-        logits = self.lm_head(hidden_states) # [B, Seq_Len, Vocab]
-        next_token_logits = logits[:, -1, :] # [B, Vocab]
-        next_token = torch.argmax(next_token_logits, dim=-1) # Greedy Search [B]
-
-        generated_ids = [next_token]
-        
-        finished = torch.zeros(bsz, dtype=torch.bool, device=device)
-
-        for _ in range(max_new_tokens - 1):
-
-            current_input_ids = next_token.unsqueeze(1) # [B, 1]
-            inputs_embeds = self.embed_tokens(current_input_ids)
-
-            current_pos = kv_caches["vlm"].num_items() # Get current sequence length from cache
-            position_ids = torch.full((bsz, 1), current_pos, device=device, dtype=torch.long)
-            
-            # Causal Mask for decoding single token is trivial (all zeros/ones depending on implementation)
-            # build_causal_mask..._for_text handles q_len=1 correctly with cache
-            causal_mask, _ = self.build_causal_mask_and_position_ids_for_text(
-                1, torch.ones((bsz, 1), device=device), kv_caches["vlm"]
-            )
-
-            #Forward Pass (Decode)
-            output = self.joint_model(
-                attention_mask=causal_mask,
-                position_ids_all={"vlm": position_ids},
-                embeds_all={"vlm": inputs_embeds},
-                kv_caches=kv_caches,
-                cache_mode="append", 
-                final_layer_post_attn_skip_names=[],
-            )
-
-            hidden_states = output["vlm"]
-            logits = self.lm_head(hidden_states) # [B, 1, Vocab]
-            next_token_logits = logits[:, -1, :]
-            next_token = torch.argmax(next_token_logits, dim=-1)
-
-
-            generated_ids.append(next_token)
-
-            if action_end_token_id != -1:
-                is_end = (next_token == action_end_token_id)
-                finished = finished | is_end
-                if finished.all():
-                    break
-
-        # [B, New_Len]
-        generated_ids = torch.stack(generated_ids, dim=1)
-        
-        return {
-            "generated_ids": generated_ids
+            kv_caches={"vlm": kv_cache},
+            cache_mode="append",  # new tokens for the active mixture
+            final_layer_post_attn_skip_names=[],  # do not skip vlm last layer
+        )["vlm"]
+        logits = self.lm_head(hidden_states)
+        output = {
+            "logits": logits,
         }
+        if kv_cache is not None:
+            output["kv_cache"] = kv_cache
+        return output
+
+    @torch.inference_mode()
+    def infer_autoregressive(
+        self,
+        input: dict,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int = 10,
+        top_p: float = 1.0,
+        allowed_token_ids: Optional[Union[torch.LongTensor, List[int], Tuple[int, int]]] = None,
+        eos_token_id: Optional[int] = None,
+        return_kv_cache: bool = False,
+    ) -> dict:
+        """
+        Multi-step autoregressive generation function, divided into prefill and incremental prediction phases.
+        
+        Args:
+            input (dict): Input dictionary containing:
+                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
+                - depth_values (torch.FloatTensor, Optional): [Bd, T, 3, H, W] Depth image values (normalized)
+                - depth_ids (torch.LongTensor, Optional): [B] Depth image IDs
+                - attention_mask (torch.LongTensor): [B, seq_len] Attention mask (optional)
+            max_new_tokens (int): Maximum number of new tokens to generate
+            temperature (float): Temperature parameter controlling sampling randomness
+            top_k (int): Top-k sampling parameter
+            top_p (float): Nucleus sampling parameter
+            allowed_token_ids (Optional[Union[torch.LongTensor, List[int], Tuple[int, int]]]): 
+                Allowed token ID range for sampling. Can be:
+                - Boolean mask tensor [vocab_size]
+                - List of token IDs
+                - Tuple (min_id, max_id) representing a range
+            eos_token_id (Optional[int]): End-of-sequence token ID, early stopping if this token is generated
+            return_kv_cache (bool): Whether to return KV cache
+        
+        Returns:
+            dict: Dictionary containing:
+                - generated_ids (torch.LongTensor): [B, prefill_len + num_generated] Generated token IDs
+                - kv_cache (KVCache, optional): KV cache (if return_kv_cache=True)
+        """
+        input_ids = input["input_ids"]
+        pixel_values = input["pixel_values"]
+        depth_values = input.get("depth_values", None)
+        depth_ids = input.get("depth_ids", None)
+        attention_mask = input.get("attention_mask", None)
+        
+        batch_size = input_ids.size(0)
+        device = input_ids.device
+        
+        # Create all-ones mask if attention_mask is not provided
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
+        
+        # Initialize KV cache
+        kv_cache = KVCache()
+        
+        # ========== Prefill Phase ==========
+        # Process initial input sequence and build KV cache
+        # Pass empty kv_cache to let the model build the cache
+        prefill_input = {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "depth_values": depth_values,
+            "depth_ids": depth_ids,
+            "attention_mask": attention_mask,
+        }
+        
+        prefill_output = self.infer_single_step(prefill_input, kv_cache=kv_cache)
+        prefill_logits = prefill_output["logits"]  # [B, seq_len, vocab_size]
+        kv_cache = prefill_output.get("kv_cache", kv_cache)
+        
+        # Sample first new token from the last position of prefill
+        next_token_logits = prefill_logits[:, -1, :]  # [B, vocab_size]
+        next_token_ids = sample_token(
+            next_token_logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            allowed_token_ids=allowed_token_ids,
+        )  # [B]
+        
+        # Collect generated token IDs
+        generated_ids = [input_ids.clone()]  # Save original input first
+        generated_ids.append(next_token_ids.unsqueeze(1))  # [B, 1]
+        
+        # Track finish status for each batch
+        finished_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        if eos_token_id is not None:
+            finished_mask = (next_token_ids == eos_token_id)
+        
+        # ========== Generation Phase ==========
+        # Incrementally generate new tokens
+        for _ in range(max_new_tokens - 1):
+            # Stop if all batches are finished
+            if finished_mask.all():
+                break
+            
+            # For finished batches, set next_token_ids to pad_token_id
+            # For unfinished batches, perform inference
+            active_mask = ~finished_mask
+            
+            # Prepare input_ids: use pad_token_id for finished batches, actual tokens for active batches
+            step_input_ids = next_token_ids.clone()
+            step_input_ids[finished_mask] = self.pad_token_id
+            
+            # Single-step inference (using KV cache)
+            # In generation phase, only need to pass the newly generated token
+            # Image tokens have already been processed in prefill phase
+            step_input = {
+                "input_ids": step_input_ids.unsqueeze(1),  # [B, 1]
+                "attention_mask": torch.ones(
+                    (batch_size, 1), dtype=torch.long, device=device
+                ) * active_mask.unsqueeze(1),  # [B, 1]
+            }
+            
+            step_output = self.infer_single_step(step_input, kv_cache=kv_cache)
+            step_logits = step_output["logits"]  # [B, 1, vocab_size]
+            kv_cache = step_output.get("kv_cache", kv_cache)
+            
+            # Initialize next_token_ids with pad_token_id for all batches
+            next_token_ids = torch.full(
+                (batch_size,), self.pad_token_id, dtype=torch.long, device=device
+            )
+            
+            # Sample next token only for active batches
+            if active_mask.any():
+                next_token_logits = step_logits[:, -1, :]  # [B, vocab_size]
+                next_token_ids_active = sample_token(
+                    next_token_logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    allowed_token_ids=allowed_token_ids,
+                )  # [B]
+                # Update active batches with sampled tokens
+                next_token_ids[active_mask] = next_token_ids_active[active_mask]
+            
+            # Update finish status
+            if eos_token_id is not None:
+                finished_mask = finished_mask | (next_token_ids == eos_token_id)
+            
+            # Save generated token
+            generated_ids.append(next_token_ids.unsqueeze(1))  # [B, 1]
+        
+        # Concatenate all generated token IDs
+        generated_ids_tensor = torch.cat(generated_ids, dim=1)  # [B, prefill_len + num_generated]
+        
+        result = {
+            "generated_ids": generated_ids_tensor,
+        }
+        
+        if return_kv_cache:
+            result["kv_cache"] = kv_cache
+        
+        return result
 
     # ---------- Flow matching training ----------#
 
@@ -1203,7 +1316,6 @@ class LegendVLA(nn.Module):
         return {
             "ce_loss": ce_loss,
         }
-
 
     def compute_flow_loss(
         self,
@@ -1400,7 +1512,7 @@ class LegendVLA(nn.Module):
             "flow_loss": flow_loss,
         }
 
-    def forward(self, mode: str, batch: dict) -> dict:
+    def forward(self, mode: str, batch: dict, **kwargs) -> dict:
         if mode == "train":
             return self.compute_loss(batch)
         elif mode == "train_ar": 
@@ -1411,8 +1523,8 @@ class LegendVLA(nn.Module):
             return self.infer_action(batch)
         elif mode == "infer_action_naive":
             return self.infer_action_naive(batch)
-        elif mode == "infer_discrete_action":
-            return self.infer_discrete_action(batch)
+        elif mode == "infer_autoregressive":
+            return self.infer_autoregressive(batch, **kwargs)
         else:
             raise ValueError(f"Invalid mode: {mode}")
         
