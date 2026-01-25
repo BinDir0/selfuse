@@ -141,7 +141,8 @@ class HandVisualizer:
 
         wrist_2d = self._project_to_2d(wrist_t_cam, K)
         if wrist_2d:
-            rr.log(f"{base_path_2d}/wrist", rr.Points2D([wrist_2d], radii=20, colors=[255, 255, 255]))
+            # Use structure_color for 2D wrist (same as rerun_inference_vis.py)
+            rr.log(f"{base_path_2d}/wrist", rr.Points2D([wrist_2d], radii=20, colors=self.structure_color))
 
         points_2d = []
         colors_2d = []
@@ -155,9 +156,10 @@ class HandVisualizer:
                     colors_2d.append(self.finger_colors[finger])
                     
                     if wrist_2d:
+                        # Use spoke_color for 2D bones (same as rerun_inference_vis.py)
                         rr.log(
                             f"{base_path_2d}/bones/{finger}",
-                            rr.LineStrips2D([[wrist_2d, tip_2d]], radii=5, colors=[150, 150, 150])
+                            rr.LineStrips2D([[wrist_2d, tip_2d]], radii=5, colors=self.spoke_color)
                         )
         
         if points_2d:
@@ -383,7 +385,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file.")
     parser.add_argument("--frame_idx", type=int, default=None, help="Index of frame to visualize. If None, randomly select one from valid frames.")
-    parser.add_argument("--horizon", type=int, default=30, help="Number of timesteps to visualize (default: 30).")
+    parser.add_argument("--horizon", type=int, default=200, help="Number of timesteps to visualize (default: 30).")
     parser.add_argument("--target_width", type=int, default=None, help="Target image width. If None, use original width.")
     parser.add_argument("--target_height", type=int, default=None, help="Target image height. If None, use original height.")
     parser.add_argument("--depth_scale", type=float, default=1.0)
@@ -391,209 +393,238 @@ def main():
     parser.add_argument("--max_depth", type=float, default=1.5)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--save_path", type=str, default=None, help="Path to save rrd file. If None, use spawn/notebook_show.")
+    parser.add_argument("--num_samples", type=int, default=100, help="Number of samples to save (default: 100).")
     args = parser.parse_args()
 
     if not os.path.exists(args.origin_zarr_path):
         raise FileNotFoundError(f"Zarr file not found: {args.origin_zarr_path}")
 
-    print(f"Loading data from zarr: {args.origin_zarr_path}")
-    zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=args.frame_idx, horizon=args.horizon)
-    
-    # Print instruction if available
-    if zarr_data['instruction'] is not None:
-        # Get unique instructions (they should be the same for all frames in a sample)
-        unique_instructions = np.unique(zarr_data['instruction'])
-        if len(unique_instructions) > 0:
-            print(f"\n=== Instruction ===")
-            for i, instr in enumerate(unique_instructions):
-                print(f"  {i}: {instr}")
-            print("=" * 50)
-    
-    # Extract images and depth: (T, H, W, 3) and (T, H, W)
-    rgb_images = np.array(zarr_data['image'])  # (T, H, W, 3) uint8
-    depth_images = np.array(zarr_data['depth']).astype(np.float32) / 1000.0  # (T, H, W) uint16 -> float32 meters
-    
-    # Extract intrinsics: (T, 4) [fx, fy, cx, cy]
-    intrinsics_flat = zarr_data['intrinsic']  # (T, 4)
-    
-    # Extract extrinsics: (T, 4, 4) world2cam
-    camera_transforms_raw = zarr_data['extrinsic']  # (T, 4, 4) world2cam
-    
-    # Convert state and action to hands_data format: (T, 48) -> hands_data with T frames
-    states = zarr_data['state']  # (T, 48)
-    actions = zarr_data['action']  # (T, 48)
-    state_hands_data = actions_to_hands_data(states)
-    action_hands_data = actions_to_hands_data(actions)
-    
-    T = len(rgb_images)  # Number of timesteps
-    print(f"Loaded {T} frames (timesteps) from selected sample")
-    print(f"State hands data: left={len(state_hands_data['left']['wrist'])}, right={len(state_hands_data['right']['wrist'])}")
-    print(f"Action hands data: left={len(action_hands_data['left']['wrist'])}, right={len(action_hands_data['right']['wrist'])}")
-    
-    # Resize images, depth, and adjust intrinsics if target dimensions are specified
-    orig_h, orig_w = rgb_images[0].shape[:2]
-    target_w = args.target_width if args.target_width is not None else orig_w
-    target_h = args.target_height if args.target_height is not None else orig_h
-    
-    if args.target_width is not None or args.target_height is not None:
-        scale_x = target_w / orig_w
-        scale_y = target_h / orig_h
-        
-        print(f"Resizing from ({orig_w}, {orig_h}) to ({target_w}, {target_h})")
-        print(f"Scale factors: x={scale_x:.4f}, y={scale_y:.4f}")
-        
-        # Resize RGB images for all timesteps
-        rgb_images_resized = []
-        for img in rgb_images:
-            rgb_images_resized.append(cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LINEAR))
-        rgb_images = np.array(rgb_images_resized)
-        
-        # Resize depth images for all timesteps
-        depth_images_resized = []
-        for d in depth_images:
-            depth_images_resized.append(cv2.resize(d, (target_w, target_h), interpolation=cv2.INTER_NEAREST))
-        depth_images = np.array(depth_images_resized)
-        
-        # Adjust intrinsics: scale fx, fy, cx, cy for all timesteps
-        intrinsics_flat = intrinsics_flat.copy()
-        intrinsics_flat[:, 0] *= scale_x  # fx
-        intrinsics_flat[:, 1] *= scale_y  # fy
-        intrinsics_flat[:, 2] *= scale_x  # cx
-        intrinsics_flat[:, 3] *= scale_y  # cy
-    
-    # Get actual frame_idx that was used
-    actual_frame_idx = zarr_data['frame_idx']
-    
-    # Initialize Rerun with unique app name based on frame_idx
-    app_name = f"rgbd_hand_action_visv2_frame_{actual_frame_idx}"
-    rr.init(app_name)
-    
-    # Save to rrd file if save_path is provided, otherwise use spawn
+    # Create save directory if it doesn't exist
     if args.save_path:
-        # If save_path is a directory, create unique filename with frame_idx
         if os.path.isdir(args.save_path):
-            save_filename = f"visualization_frame_{actual_frame_idx}.rrd"
-            save_path = os.path.join(args.save_path, save_filename)
+            os.makedirs(args.save_path, exist_ok=True)
         else:
-            # If it's a file, add frame_idx to filename
-            base_path = os.path.splitext(args.save_path)[0]
-            ext = os.path.splitext(args.save_path)[1] or '.rrd'
-            save_path = f"{base_path}_frame_{actual_frame_idx}{ext}"
-        rr.save(save_path)
-        print(f"Saving visualization to: {save_path}")
-    else:
-        rr.spawn(port=9878)
+            # If it's a file path, create parent directory
+            parent_dir = os.path.dirname(args.save_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+
+    print(f"Starting to sample {args.num_samples} times from: {args.origin_zarr_path}")
+
+    for sample_count in range(args.num_samples):
+        print(f"\n{'='*60}")
+        print(f"Processing Sample {sample_count + 1}/{args.num_samples}")
+        print(f"{'='*60}")
+        
+        # Load data from zarr (randomly selects frame if args.frame_idx is None)
+        zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=args.frame_idx, horizon=args.horizon)
     
-    # 设置世界坐标系 Y-UP
-    rr.log("/world", rr.ViewCoordinates.RIGHT_HAND_Y_UP)
-    # Create two visualizers with different color schemes: state (gt) and action (pred)
-    viz_state = HandVisualizer(history_len=10, color_scheme='gt')
-    viz_action = HandVisualizer(history_len=10, color_scheme='pred')
+        # Get actual frame_idx that was used (needed for filename)
+        actual_frame_idx = zarr_data['frame_idx']
+        
+        # Save instruction to txt file if available
+        if zarr_data['instruction'] is not None:
+            all_instructions = zarr_data['instruction']  # Get all instructions (T,) string array
+            if len(all_instructions) > 0 and args.save_path:
+                # Determine the base path for txt file (same as rrd file)
+                if os.path.isdir(args.save_path):
+                    txt_filename = f"sample_{sample_count:03d}_frame_{actual_frame_idx}.txt"
+                    txt_path = os.path.join(args.save_path, txt_filename)
+                else:
+                    base_path = os.path.splitext(args.save_path)[0]
+                    txt_path = f"{base_path}_sample_{sample_count:03d}_frame_{actual_frame_idx}.txt"
+                
+                # Write all instructions to txt file
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    for i, instr in enumerate(all_instructions):
+                        f.write(f"{instr}\n")
+                print(f"Saved instruction to: {txt_path}")
+        
+        # Extract images and depth: (T, H, W, 3) and (T, H, W)
+        rgb_images = np.array(zarr_data['image'])  # (T, H, W, 3) uint8
+        depth_images = np.array(zarr_data['depth']).astype(np.float32) / 1000.0  # (T, H, W) uint16 -> float32 meters
+        
+        # Extract intrinsics: (T, 4) [fx, fy, cx, cy]
+        intrinsics_flat = zarr_data['intrinsic']  # (T, 4)
+        
+        # Extract extrinsics: (T, 4, 4) world2cam
+        camera_transforms_raw = zarr_data['extrinsic']  # (T, 4, 4) world2cam
+        
+        # Convert state and action to hands_data format: (T, 48) -> hands_data with T frames
+        states = zarr_data['state']  # (T, 48)
+        actions = zarr_data['action']  # (T, 48)
+        state_hands_data = actions_to_hands_data(states)
+        action_hands_data = actions_to_hands_data(actions)
+        
+        T = len(rgb_images)  # Number of timesteps
+        print(f"Loaded {T} frames (timesteps) from selected sample")
+        print(f"State hands data: left={len(state_hands_data['left']['wrist'])}, right={len(state_hands_data['right']['wrist'])}")
+        print(f"Action hands data: left={len(action_hands_data['left']['wrist'])}, right={len(action_hands_data['right']['wrist'])}")
+        
+        # Resize images, depth, and adjust intrinsics if target dimensions are specified
+        orig_h, orig_w = rgb_images[0].shape[:2]
+        target_w = args.target_width if args.target_width is not None else orig_w
+        target_h = args.target_height if args.target_height is not None else orig_h
+        
+        if args.target_width is not None or args.target_height is not None:
+            scale_x = target_w / orig_w
+            scale_y = target_h / orig_h
+            
+            print(f"Resizing from ({orig_w}, {orig_h}) to ({target_w}, {target_h})")
+            print(f"Scale factors: x={scale_x:.4f}, y={scale_y:.4f}")
+            
+            # Resize RGB images for all timesteps
+            rgb_images_resized = []
+            for img in rgb_images:
+                rgb_images_resized.append(cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LINEAR))
+            rgb_images = np.array(rgb_images_resized)
+            
+            # Resize depth images for all timesteps
+            depth_images_resized = []
+            for d in depth_images:
+                depth_images_resized.append(cv2.resize(d, (target_w, target_h), interpolation=cv2.INTER_NEAREST))
+            depth_images = np.array(depth_images_resized)
+            
+            # Adjust intrinsics: scale fx, fy, cx, cy for all timesteps
+            intrinsics_flat = intrinsics_flat.copy()
+            intrinsics_flat[:, 0] *= scale_x  # fx
+            intrinsics_flat[:, 1] *= scale_y  # fy
+            intrinsics_flat[:, 2] *= scale_x  # cx
+            intrinsics_flat[:, 3] *= scale_y  # cy
+        
+        # Initialize Rerun with unique app name based on sample count and frame_idx
+        app_name = f"sample_{sample_count:03d}_frame_{actual_frame_idx}"
+        rr.init(app_name, spawn=False)
+        
+        # Save to rrd file if save_path is provided, otherwise use spawn (only for first sample)
+        if args.save_path:
+            # If save_path is a directory, create unique filename with sample count and frame_idx
+            if os.path.isdir(args.save_path):
+                save_filename = f"sample_{sample_count:03d}_frame_{actual_frame_idx}.rrd"
+                current_save_path = os.path.join(args.save_path, save_filename)
+            else:
+                # If it's a file, add sample count and frame_idx to filename
+                base_path = os.path.splitext(args.save_path)[0]
+                ext = os.path.splitext(args.save_path)[1] or '.rrd'
+                current_save_path = f"{base_path}_sample_{sample_count:03d}_frame_{actual_frame_idx}{ext}"
+            rr.save(current_save_path)
+            print(f"Saving visualization to: {current_save_path}")
+        elif sample_count == 0:
+            # Only spawn for the first sample if no save_path is provided
+            rr.spawn(port=9878)
+        
+        # 设置世界坐标系 Y-UP
+        rr.log("/world", rr.ViewCoordinates.RIGHT_HAND_Y_UP)
+        # Create two visualizers with different color schemes: state (gt) and action (pred)
+        viz_state = HandVisualizer(history_len=10, color_scheme='gt')
+        viz_action = HandVisualizer(history_len=10, color_scheme='pred')
 
-    frame_idx = 0
-    num_frames = T  # All timesteps for the selected sample
+        frame_idx = 0
+        num_frames = T  # All timesteps for the selected sample
 
-    for i in range(num_frames):
-        rr.set_time("frame_idx", sequence=frame_idx)
-        
-        # 可视化世界坐标系原点和轴
-        rr.log("/world/origin", rr.Points3D([0, 0, 0], radii=0.01, colors=[255, 255, 255]))
-        rr.log("/world/x", rr.Arrows3D(origins=[0, 0, 0], vectors=[0.1, 0, 0], radii=0.005, colors=[255, 0, 0]))
-        rr.log("/world/y", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0.1, 0], radii=0.005, colors=[0, 255, 0]))
-        rr.log("/world/z", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0, 0.1], radii=0.005, colors=[0, 0, 255]))
-        
-        color_rgb = rgb_images[i]
-        depth = depth_images[i]
-        
-        # zarr stores world2cam, need to invert for visualization
-        world2cam = camera_transforms_raw[i]  # (4, 4)
-        cam_pose_world = np.linalg.inv(world2cam)  # cam2world
-        
-        # Get intrinsic for this frame
-        K_flat = intrinsics_flat[i]  # [fx, fy, cx, cy]
-        K = np.array([
-            [K_flat[0], 0, K_flat[2]],
-            [0, K_flat[1], K_flat[3]],
-            [0, 0, 1]
-        ], dtype=np.float32)
+        for i in range(num_frames):
+            rr.set_time("frame_idx", sequence=frame_idx)
+            
+            # 可视化世界坐标系原点和轴
+            rr.log("/world/origin", rr.Points3D([0, 0, 0], radii=0.01, colors=[255, 255, 255]))
+            rr.log("/world/x", rr.Arrows3D(origins=[0, 0, 0], vectors=[0.1, 0, 0], radii=0.005, colors=[255, 0, 0]))
+            rr.log("/world/y", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0.1, 0], radii=0.005, colors=[0, 255, 0]))
+            rr.log("/world/z", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0, 0.1], radii=0.005, colors=[0, 0, 255]))
+            
+            color_rgb = rgb_images[i]
+            depth = depth_images[i]
+            
+            # zarr stores world2cam, need to invert for visualization
+            world2cam = camera_transforms_raw[i]  # (4, 4)
+            cam_pose_world = np.linalg.inv(world2cam)  # cam2world
+            
+            # Get intrinsic for this frame
+            K_flat = intrinsics_flat[i]  # [fx, fy, cx, cy]
+            K = np.array([
+                [K_flat[0], 0, K_flat[2]],
+                [0, K_flat[1], K_flat[3]],
+                [0, 0, 1]
+            ], dtype=np.float32)
 
-        # Log Camera Pose (World Frame)
-        rr.log("/world/camera_pose", rr.Transform3D(
-            translation=cam_pose_world[:3, 3], 
-            mat3x3=cam_pose_world[:3, :3]
-        ))
-        
-        if args.debug:
-            rr.log("/world/camera_pose/debug_axes/x", rr.Arrows3D(origins=[0, 0, 0], vectors=[0.1, 0, 0], radii=0.005, colors=[255, 0, 0]))
-            rr.log("/world/camera_pose/debug_axes/y", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0.1, 0], radii=0.005, colors=[0, 255, 0]))
-            rr.log("/world/camera_pose/debug_axes/z", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0, 0.1], radii=0.005, colors=[0, 0, 255]))
-        
-        # Camera Intrinsics & Image
-        rr.log("/world/camera_pose/camera", rr.Pinhole(
-            image_from_camera=K, 
-            width=color_rgb.shape[1], 
-            height=color_rgb.shape[0], 
-            camera_xyz=rr.ViewCoordinates.RDF 
-        ))
-        rr.log("/world/camera_pose/camera", rr.Image(color_rgb))
-        
-        # Resize depth to match image size if needed
-        if depth.shape[:2] != color_rgb.shape[:2]:
-            depth_resized = cv2.resize(depth, (color_rgb.shape[1], color_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
-        else:
-            depth_resized = depth
-        
-        # Point Cloud
-        points, colors = get_colored_point_cloud(
-            color_rgb, depth_resized, color_rgb.shape[1], color_rgb.shape[0], K, 
-            depth_scale=args.depth_scale, min_depth=args.min_depth, max_depth=args.max_depth
-        )
-        rr.log("/world/camera_pose/point_cloud", rr.Points3D(points, colors=colors))
+            # Log Camera Pose (World Frame)
+            rr.log("/world/camera_pose", rr.Transform3D(
+                translation=cam_pose_world[:3, 3], 
+                mat3x3=cam_pose_world[:3, :3]
+            ))
+            
+            if args.debug:
+                rr.log("/world/camera_pose/debug_axes/x", rr.Arrows3D(origins=[0, 0, 0], vectors=[0.1, 0, 0], radii=0.005, colors=[255, 0, 0]))
+                rr.log("/world/camera_pose/debug_axes/y", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0.1, 0], radii=0.005, colors=[0, 255, 0]))
+                rr.log("/world/camera_pose/debug_axes/z", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0, 0.1], radii=0.005, colors=[0, 0, 255]))
+            
+            # Camera Intrinsics & Image
+            rr.log("/world/camera_pose/camera", rr.Pinhole(
+                image_from_camera=K, 
+                width=color_rgb.shape[1], 
+                height=color_rgb.shape[0], 
+                camera_xyz=rr.ViewCoordinates.RDF 
+            ))
+            rr.log("/world/camera_pose/camera", rr.Image(color_rgb))
+            
+            # Resize depth to match image size if needed
+            if depth.shape[:2] != color_rgb.shape[:2]:
+                depth_resized = cv2.resize(depth, (color_rgb.shape[1], color_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+            else:
+                depth_resized = depth
+            
+            # Point Cloud
+            points, colors = get_colored_point_cloud(
+                color_rgb, depth_resized, color_rgb.shape[1], color_rgb.shape[0], K, 
+                depth_scale=args.depth_scale, min_depth=args.min_depth, max_depth=args.max_depth
+            )
+            rr.log("/world/camera_pose/point_cloud", rr.Points3D(points, colors=colors))
 
-        # Hands Visualization - State and Action
-        identity_transform = np.eye(4, dtype=np.float32)
-        
-        # Visualize State hands (like GT)
-        for hand_name in ['left', 'right']:
-            if hand_name in state_hands_data and i < len(state_hands_data[hand_name]['wrist']):
-                viz_state.log(
-                    root_3d_path="/world/camera_pose/hands/state", # 3D 
-                    image_root_path="/world/camera_pose/camera", # 2D 
-                    hand_name=hand_name,
-                    hand_data=state_hands_data[hand_name],
-                    frame_idx=i,
-                    world_to_camera=identity_transform,  
-                    K=K
-                )
-                if i == 0 and args.debug:
-                    wrist_pose_camera = state_hands_data[hand_name]['wrist'][i]
-                    print(f"\n=== Frame {i} - State {hand_name} wrist (Camera Frame) ===")
-                    print(f"Translation: {wrist_pose_camera[:3, 3]}")
-                    print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
-        
-        # Visualize Action hands (like Pred)
-        for hand_name in ['left', 'right']:
-            if hand_name in action_hands_data and i < len(action_hands_data[hand_name]['wrist']):
-                viz_action.log(
-                    root_3d_path="/world/camera_pose/hands/action", # 3D 
-                    image_root_path="/world/camera_pose/camera", # 2D 
-                    hand_name=hand_name,
-                    hand_data=action_hands_data[hand_name],
-                    frame_idx=i,
-                    world_to_camera=identity_transform,  
-                    K=K
-                )
-                if i == 0 and args.debug:
-                    wrist_pose_camera = action_hands_data[hand_name]['wrist'][i]
-                    print(f"\n=== Frame {i} - Action {hand_name} wrist (Camera Frame) ===")
-                    print(f"Translation: {wrist_pose_camera[:3, 3]}")
-                    print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
+            # Hands Visualization - State and Action
+            identity_transform = np.eye(4, dtype=np.float32)
+            
+            # Visualize State hands (like GT)
+            for hand_name in ['left', 'right']:
+                if hand_name in state_hands_data and i < len(state_hands_data[hand_name]['wrist']):
+                    viz_state.log(
+                        root_3d_path="/world/camera_pose/hands/state", # 3D 
+                        image_root_path="/world/camera_pose/camera", # 2D 
+                        hand_name=hand_name,
+                        hand_data=state_hands_data[hand_name],
+                        frame_idx=i,
+                        world_to_camera=identity_transform,  
+                        K=K
+                    )
+                    if i == 0 and args.debug:
+                        wrist_pose_camera = state_hands_data[hand_name]['wrist'][i]
+                        print(f"\n=== Frame {i} - State {hand_name} wrist (Camera Frame) ===")
+                        print(f"Translation: {wrist_pose_camera[:3, 3]}")
+                        print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
+            
+            # Visualize Action hands (like Pred)
+            for hand_name in ['left', 'right']:
+                if hand_name in action_hands_data and i < len(action_hands_data[hand_name]['wrist']):
+                    viz_action.log(
+                        root_3d_path="/world/camera_pose/hands/action", # 3D 
+                        image_root_path="/world/camera_pose/camera", # 2D 
+                        hand_name=hand_name,
+                        hand_data=action_hands_data[hand_name],
+                        frame_idx=i,
+                        world_to_camera=identity_transform,  
+                        K=K
+                    )
+                    if i == 0 and args.debug:
+                        wrist_pose_camera = action_hands_data[hand_name]['wrist'][i]
+                        print(f"\n=== Frame {i} - Action {hand_name} wrist (Camera Frame) ===")
+                        print(f"Translation: {wrist_pose_camera[:3, 3]}")
+                        print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
 
-        frame_idx += 1
+            frame_idx += 1
+        
+        print(f"Completed sample {sample_count + 1}/{args.num_samples}")
+    
+    print(f"\n{'='*60}")
+    print(f"Finished processing all {args.num_samples} samples!")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     main()
-
-
-
-
