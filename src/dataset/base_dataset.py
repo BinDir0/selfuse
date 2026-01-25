@@ -28,13 +28,14 @@ class BaseLowdimDataset(torch.utils.data.Dataset):
 class BaseRatioDataset(torch.utils.data.Dataset):
     def __init__(
         self, 
-        weights: List[float], 
-        dataset_lengths: List[int], 
+        weights: List[float] = None, 
+        dataset_lengths: List[int] = None, 
     ):
         self.weights = weights
-        weights_sum = sum(weights)
-        assert weights_sum > 0, "Weights must be non-zero"
-        self.weights = [weight / weights_sum for weight in weights]
+        if weights is not None:
+            weights_sum = sum(weights)
+            assert weights_sum > 0, "Weights must be non-zero"
+            self.weights = [weight / weights_sum for weight in weights]
         self.dataset_lengths = dataset_lengths
 
     def get_validation_dataset(self) -> 'BaseRatioDataset':

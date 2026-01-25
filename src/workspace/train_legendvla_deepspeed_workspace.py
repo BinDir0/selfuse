@@ -535,14 +535,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     break
             
             # Process validation loss
-            if len(val_losses) > 0:
-                for key in val_losses.keys():
-                    val_losses[key] = torch.stack(val_losses[key])
-                    val_losses[key] = accelerator.gather_for_metrics(val_losses[key])
-                
-                for key in val_losses.keys():
-                    val_losses[key] = torch.mean(val_losses[key]).item()
-                    step_log[f'val_{key}'] = val_losses[key]
+            for key in val_losses.keys():
+                val_losses[key] = torch.stack(val_losses[key])
+                val_losses[key] = accelerator.gather_for_metrics(val_losses[key].mean())
+            
+            for key in val_losses.keys():
+                val_losses[key] = torch.mean(val_losses[key]).item()
+                step_log[f'val_{key}'] = val_losses[key]
 
             # fill eval_accuracy and eval_l1_loss to the same length as dataloader
             # Note: we assume at least one action dimension is available for evaluation

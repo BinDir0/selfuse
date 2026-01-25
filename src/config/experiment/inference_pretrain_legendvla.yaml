@@ -1,40 +1,26 @@
-# @package _global_
-
-# 继承训练配置
-defaults:
-  - pretrain_legendvla_deepspeed
-
 # 覆盖实验名称
 name: legendvla_inference
 exp_name: "inference_pretrain"
 
 # 使用较小的数据集进行快速测试（可选）
 vla_dataset_paths:
- - name: taco 
-   path: /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
-   weight: 2
- - name: oakink2
-   path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
-   weight: 3
- - name: egodex
-   path: /share_data/yeyuyao/egodex_filter_train.zarr
-   weight: 5
-
-# 如果只想推理特定的数据集，可以取消下面的注释并修改
-# vla_dataset_paths:
-#   - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
+ - name: oakink2_test_seen
+   path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen_presence_clean.zarr 
+#  - name: oakink2_test_unseen_scene
+#    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene_presence_clean.zarr  
+#  - name: oakink2_test_unseen_task
+#    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_task_presence_clean.zarr
+#  - name: egodex_test
+#    path: /share_data/guantianrui/datasets/EgoDex/egodex_filter_test_presence_clean.zarr
+#  - name: taco_test_seen
+#    path: /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
+#  - name: taco_test_unseen_task
+#    path: /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
 
 # 覆盖dataloader配置（推理时不需要shuffle）
 dataloader:
-  batch_size: 32
-  num_workers: 32
-  shuffle: False
-  pin_memory: True
-  persistent_workers: False
-
-val_dataloader:
-  batch_size: 32
-  num_workers: 32
+  batch_size: 64
+  num_workers: 16
   shuffle: False
   pin_memory: True
   persistent_workers: False
@@ -43,43 +29,15 @@ val_dataloader:
 logging:
   mode: disabled
 
-history: 32
-n_action_steps: 32
-n_obs_image_steps: 1
-n_obs_state_steps: 16
-n_latency_steps: 0
-depth_clip_range: [0.0, 5.0]
-
-# 覆盖dataset配置：使用所有数据（不分割训练/验证集）
-dataset:
-  _target_: src.dataset.legendvla_dataset.LegendVLADataset
-  zarr_paths: ${vla_dataset_paths}
-  horizon: ${eval:'${n_action_steps}+${history}'}
-  pad_before: ${eval:'${history}+${n_latency_steps}'}
-  pad_after: ${eval:'${n_action_steps}-1'}
-  shape_meta: ${shape_meta}
-  seed: 42
-  val_ratio: 0
-  history: ${history} # frames
-  normalizer_dataloader_cfg:
-    batch_size: 4096
-    num_workers: 96
-    shuffle: False
-    pin_memory: True
-    persistent_workers: True
-    use_relative_action: ${dataset.vla_dataset.use_relative_action}
-  use_relative_action: False
-  depth_clip_range: ${depth_clip_range}
-
 # 推理专用配置
 inference:
   # 模型配置文件路径（yaml文件，包含policy配置）
   # 如果指定，将从该文件加载模型配置并初始化模型
   # 如果不指定，将使用当前配置中的policy配置
-  model_config_path: null  # 例如: /path/to/model_config.yaml
+  model_config_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.24/13.58_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
   
   # checkpoint路径（用于加载模型权重）
-  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.16/16.28_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=115000-eval_l1_loss=0.0344/pytorch_model/mp_rank_00_model_states.pt
+  checkpoint_path: 
   
   # 设备配置
   device: cuda:0
@@ -95,7 +53,23 @@ inference:
   # 精度配置
   use_mixed_precision: True  # True: 使用混合精度（bf16/fp16）加速推理，False: 使用全精度（fp32）获得最高精度
                              # 注意：混合精度通常对结果影响很小（<1%），但能显著加速推理
+
+  compile:  # torch.compile 配置
+    enabled: True
+    mode: "default" # "default", "reduce-overhead", "max-autotune"
+    dynamic: True # 是否动态编译
+    fullgraph: True # 是否使用全图编译
+    backend: "inductor" # "inductor", "aot_eager", "aot_nvfuser", etc.
   
   # 其他配置
   seed: 42
   
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    # need to change to the correct path for multi-node training
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+  sweep:
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    subdir: ${hydra.job.num}

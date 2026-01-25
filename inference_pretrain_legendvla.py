@@ -1,6 +1,8 @@
 import os
 import hydra
 import torch
+from accelerate import Accelerator
+from accelerate.utils import gather_object, TorchDynamoPlugin
 from omegaconf import OmegaConf
 import pathlib
 from torch.utils.data import DataLoader
@@ -31,20 +33,36 @@ class LegendVLAInference:
     def __init__(self, cfg: OmegaConf):
         self.cfg = cfg
         
+        # # 使用 torch.compile 编译模型（在 prepare 之前）
+        # if hasattr(cfg.inference.compile, 'enabled') and cfg.inference.compile.enabled:
+        #     dynamo_plugin = TorchDynamoPlugin(
+        #         backend=cfg.inference.compile.backend,  # Options: "inductor", "aot_eager", "aot_nvfuser", etc.
+        #         mode=cfg.inference.compile.mode,      # Options: "default", "reduce-overhead", "max-autotune"
+        #         fullgraph=cfg.inference.compile.fullgraph,
+        #         dynamic=cfg.inference.compile.dynamic
+        #     )
+        # else: 
+        #     dynamo_plugin = None
+
+        # 初始化 Accelerator
+        self.accelerator = Accelerator()
+        
         # 设置设备
-        self.device = torch.device(cfg.inference.device if torch.cuda.is_available() else "cpu")
+        self.device = self.accelerator.device
         print(f"使用设备: {self.device}")
         
         # 设置数据类型
-        self.dtype = torch.bfloat16 if cfg.training.use_bf16 else torch.float32
+        self.dtype = torch.bfloat16 if cfg.inference.use_mixed_precision else torch.float32
         
         # 加载模型配置
-        print("正在加载模型配置...")
+        if self.is_main_process:
+            print("正在加载模型配置...")
         if hasattr(cfg.inference, 'model_config_path') and cfg.inference.model_config_path:
             model_config_path = pathlib.Path(cfg.inference.model_config_path)
             if not model_config_path.exists():
                 raise FileNotFoundError(f"模型配置文件不存在: {model_config_path}")
-            print(f"从配置文件加载模型配置: {model_config_path}")
+            if self.is_main_process:
+                print(f"从配置文件加载模型配置: {model_config_path}")
             model_cfg = OmegaConf.load(model_config_path)
             self.model_cfg = model_cfg
             # 使用模型配置中的 policy 配置来初始化模型
@@ -53,26 +71,47 @@ class LegendVLAInference:
             policy_cfg = model_cfg.policy
         else:
             # 如果没有指定 model_config_path，使用当前配置中的 policy
-            print("使用当前配置中的 policy 配置")
+            if self.is_main_process:
+                print("使用当前配置中的 policy 配置")
             self.model_cfg = None
             policy_cfg = cfg.policy
         
         # 初始化模型
-        print("正在初始化模型...")
+        if self.is_main_process:
+            print("正在初始化模型...")
         self.model: LegendVLA = hydra.utils.instantiate(policy_cfg)
         
         # 加载checkpoint
         if cfg.inference.checkpoint_path:
-            print(f"正在加载checkpoint: {cfg.inference.checkpoint_path}")
+            if self.is_main_process:
+                print(f"正在加载checkpoint: {cfg.inference.checkpoint_path}")
             self.load_checkpoint(cfg.inference.checkpoint_path)
+        elif self.model_cfg is not None and self.model_cfg.training.pretrained_pi05_model_path is not None:
+            self.model.load_pretrained_pi05_weights()
+        elif self.model_cfg is not None and self.model_cfg.training.pretrained_vlm_model_path is not None:
+            self.model.load_pretrained_vlm_weights()
         
-        self.model.to(self.device)
+        if hasattr(cfg.inference.compile, 'enabled') and cfg.inference.compile.enabled:
+            self.model = torch.compile(
+                self.model,
+                mode=cfg.inference.compile.mode,
+                dynamic=cfg.inference.compile.dynamic,
+                fullgraph=cfg.inference.compile.fullgraph,
+                backend=cfg.inference.compile.backend
+            )
+
         self.model.eval()
-        print("模型初始化完成")
         
+        if self.is_main_process:
+            print("模型初始化完成")
+    
     @property
     def output_dir(self):
         return HydraConfig.get().runtime.output_dir
+    
+    @property
+    def is_main_process(self):
+        return self.accelerator.is_main_process
     
     def load_checkpoint(self, checkpoint_path):
         """加载checkpoint"""
@@ -88,18 +127,26 @@ class LegendVLAInference:
                 state_dict = state_dict['module']
             elif 'model_state_dict' in state_dict:
                 state_dict = state_dict['model_state_dict']
+            
             self.model.load_state_dict(state_dict)
-            print(f"成功加载模型权重")
+            if self.is_main_process:
+                print(f"成功加载模型权重")
         else:
-            print(f"警告: 未找到模型文件 {model_path}")
+            if self.is_main_process:
+                print(f"警告: 未找到模型文件 {model_path}")
     
     def preprocess_batch(self, batch):
         """预处理batch用于推理"""
         input_ids = batch["input_ids"].to(self.device)
         
+        # Get unwrapped model for mask building
+        if hasattr(self.model, 'module'):
+            model = self.model.module
+        else:
+            model = self.model
         # 构建causal mask和position ids
         causal_mask, vlm_position_ids, action_position_ids = (
-            self.model.build_causal_mask_and_position_ids(
+            model.build_causal_mask_and_position_ids(
                 batch["attention_mask"].to(self.device), 
                 batch["answer_start_idx"].to(self.device), 
                 self.dtype
@@ -107,7 +154,7 @@ class LegendVLAInference:
         )
         max_vlm_tokens = input_ids.shape[-1]
         vlm_mask, action_mask = (
-            self.model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
+            model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
         )
         
         inputs = {
@@ -183,8 +230,14 @@ class LegendVLAInference:
         cfg = self.cfg
         
         # 初始化数据集
-        print("正在初始化数据集...")
-        self.dataset = hydra.utils.instantiate(cfg.dataset)
+        if self.is_main_process:
+            print("正在初始化数据集...")
+        if self.model_cfg is not None and self.model_cfg.dataset is not None: 
+            vla_dataset_cfg = self.model_cfg.dataset.vla_dataset
+            vla_dataset_cfg.zarr_paths = cfg.vla_dataset_paths
+            self.dataset = hydra.utils.instantiate(vla_dataset_cfg)
+        else:
+            self.dataset = hydra.utils.instantiate(cfg.dataset)
         
         # Get dataset names for separate tracking
         self.dataset_names = []
@@ -193,11 +246,13 @@ class LegendVLAInference:
                 self.dataset_names.append(path['name'])
         else: 
             raise ValueError("未指定vla_dataset_paths")
-        print(f"数据集: {self.dataset_names}")
+        if self.is_main_process:
+            print(f"数据集: {self.dataset_names}")
         
         # 初始化processor
-        print("正在初始化processor...")
-        if hasattr(self.model_cfg, 'vla_processor'):
+        if self.is_main_process:
+            print("正在初始化processor...")
+        if self.model_cfg is not None and self.model_cfg.vla_processor is not None:
             self.vla_processor = hydra.utils.instantiate(self.model_cfg.vla_processor)
         else:
             assert hasattr(cfg, 'vla_processor'), "未指定vla_processor"
@@ -205,66 +260,82 @@ class LegendVLAInference:
         self.dataset.set_preprocessor(self.vla_processor)
         
         # 加载normalizer
-        print("正在加载normalizer...")
+        if self.is_main_process:
+            print("正在加载normalizer...")
 
-        if hasattr(self.model_cfg, 'normalizer_path'):
-            self.normalizer = pickle.load(open(self.model_cfg.normalizer_path, 'rb'))
+        if self.model_cfg is not None and self.model_cfg.training.normalizer_path is not None:
+            self.normalizer = pickle.load(open(self.model_cfg.training.normalizer_path, 'rb'))
             self.dataset.set_normalizer(self.normalizer)
-            print(f"成功加载normalizer: {self.model_cfg.normalizer_path}")
+            if self.is_main_process:
+                print(f"成功加载normalizer: {self.model_cfg.training.normalizer_path}")
         elif hasattr(cfg, 'normalizer_path'):
             self.normalizer = pickle.load(open(cfg.normalizer_path, 'rb'))
             self.dataset.set_normalizer(self.normalizer)
-            print(f"成功加载normalizer: {cfg.normalizer_path}")
+            if self.is_main_process:
+                print(f"成功加载normalizer: {cfg.normalizer_path}")
         else:
-            print("警告: 未指定normalizer路径，使用默认normalizer")
+            if self.is_main_process:
+                print("警告: 未指定normalizer路径，使用默认normalizer")
             self.normalizer = self.dataset.get_normalizer()
             self.dataset.set_normalizer(self.normalizer)
         
         # Select dataset based on configuration
         if hasattr(cfg.inference, 'use_val_dataset') and cfg.inference.use_val_dataset:
             inference_dataset = self.dataset.get_validation_dataset()
-            print("使用验证数据集")
+            if self.is_main_process:
+                print("使用验证数据集")
         else:
             inference_dataset = self.dataset
-            print("使用训练数据集" if cfg.dataset.vla_dataset.val_ratio > 0 else "使用完整数据集（包含训练集和验证集）")
+            if self.is_main_process:
+                print("使用完整数据集（包含训练集和验证集）")
         
         # 创建dataloader
         dataloader = DataLoader(
             inference_dataset, 
             collate_fn=inference_dataset.get_collator(),
-            batch_size=cfg.inference.batch_size,
-            num_workers=cfg.inference.num_workers,
+            batch_size=cfg.dataloader.batch_size,
+            num_workers=cfg.dataloader.num_workers,
             shuffle=False,
             pin_memory=True
         )
         
-        # 创建输出目录
-        output_dir = pathlib.Path(self.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"输出目录: {output_dir}")
+        # 使用 Accelerator 准备模型和 dataloader
+        self.model, dataloader = self.accelerator.prepare(self.model, dataloader)
         
-        # 为每个数据集创建单独的 zarr 文件
+        # 创建输出目录（只在主进程创建）
+        output_dir = pathlib.Path(self.output_dir)
+        if self.is_main_process:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"输出目录: {output_dir}")
+        # 同步所有进程，确保目录已创建
+        self.accelerator.wait_for_everyone()
+        
+        # 为每个数据集创建单独的 zarr 文件（只在主进程创建）
         dataset_zarr_roots = {}
         zarr_datasets_per_dataset = {}
         
-        for dataset_name in self.dataset_names:
-            # Create separate zarr file for each dataset
-            zarr_path = output_dir / f"inference_results_{dataset_name}.zarr"
-            store = zarr.DirectoryStore(str(zarr_path))
-            dataset_zarr_roots[dataset_name] = zarr.group(store=store, overwrite=True)
-            zarr_datasets_per_dataset[dataset_name] = {}
-            print(f"创建zarr文件: {zarr_path}")
+        if self.is_main_process:
+            for dataset_name in self.dataset_names:
+                # Create separate zarr file for each dataset
+                zarr_path = output_dir / f"inference_results_{dataset_name}.zarr"
+                store = zarr.DirectoryStore(str(zarr_path))
+                dataset_zarr_roots[dataset_name] = zarr.group(store=store, overwrite=True)
+                zarr_datasets_per_dataset[dataset_name] = {}
+                print(f"创建zarr文件: {zarr_path}")
         
         # 开始推理
-        print("开始推理...")
+        if self.is_main_process:
+            print("开始推理...")
         # Track statistics per dataset
         actual_batch_count = 0  # Track actual batch count (after skipping)
         
         with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(dataloader, desc="推理进度")):
+            dataloader_iter = tqdm(dataloader, desc="推理进度") if self.is_main_process else dataloader
+            for batch_idx, batch in enumerate(dataloader_iter):
                 # 检查是否达到最大推理步数
                 if cfg.inference.max_steps and actual_batch_count >= cfg.inference.max_steps:
-                    print(f"达到最大推理步数 {cfg.inference.max_steps}，停止推理")
+                    if self.is_main_process:
+                        print(f"达到最大推理步数 {cfg.inference.max_steps}，停止推理")
                     break
                 
                 # 检查是否跳过前N个batch
@@ -274,9 +345,11 @@ class LegendVLAInference:
                 # 获取实际的batch大小
                 actual_batch_size = batch["input_ids"].shape[0]
                 
-                # 计算实际的样本索引
-                batch_start_idx = batch_idx * cfg.inference.batch_size
-                batch_end_idx = min(batch_start_idx + actual_batch_size, len(inference_dataset))
+                # 计算样本索引（每个进程的索引是相对于该进程的数据）
+                # 由于使用 DistributedSampler，每个进程处理不同的数据子集
+                # 我们会在收集结果后重新计算全局索引
+                batch_start_idx = batch_idx * cfg.dataloader.batch_size
+                batch_end_idx = batch_start_idx + actual_batch_size
                 sample_indices = np.arange(start=batch_start_idx, stop=batch_end_idx)
                 
                 # 预处理
@@ -314,48 +387,90 @@ class LegendVLAInference:
                 
                 actual_batch_count += 1
                 
-                # Split batch by dataset and write to corresponding zarr files
-                for dataset_idx in range(len(self.dataset_names)):
-                    dataset_name = self.dataset_names[dataset_idx]
-                    mask = dataset_indices == dataset_idx
+                # 收集所有进程的结果到主进程
+                if self.accelerator.num_processes > 1:
+                    # 使用 gather_object 收集所有进程的 batch_result
+                    gathered_batch_results = gather_object(batch_result)
                     
-                    if np.any(mask):
-                        # Extract samples for this dataset
-                        dataset_batch_result = {}
-                        for key, value in batch_result.items():
-                            if isinstance(value, np.ndarray):
-                                dataset_batch_result[key] = value[mask]
-                            # Skip non-array fields like sample_indices
+                    # 主进程合并所有结果并写入
+                    if self.is_main_process:
+                        # gathered_batch_results 是一个列表，包含所有进程的结果
+                        if isinstance(gathered_batch_results, list) and len(gathered_batch_results) > 0:
+                            # 合并所有进程的结果
+                            merged_batch_result = {}
+                            total_samples = 0
+                            for key in gathered_batch_results[0].keys():
+                                if isinstance(gathered_batch_results[0][key], np.ndarray):
+                                    merged_batch_result[key] = np.concatenate([br[key] for br in gathered_batch_results], axis=0)
+                                    if key == "pred_actions":
+                                        total_samples = merged_batch_result[key].shape[0]
+                                else:
+                                    merged_batch_result[key] = gathered_batch_results[0][key]
+                            
+                            # 重新计算全局 sample_indices（合并后的结果）
+                            if "sample_indices" in merged_batch_result:
+                                # 使用合并后的数据重新计算全局索引
+                                merged_batch_result["sample_indices"] = np.arange(total_samples)
+                            
+                            batch_result = merged_batch_result
+                    else:
+                        # 非主进程跳过写入
+                        continue
+                
+                # Split batch by dataset and write to corresponding zarr files (只在主进程)
+                if self.is_main_process:
+                    for dataset_idx in range(len(self.dataset_names)):
+                        dataset_name = self.dataset_names[dataset_idx]
+                        mask = batch_result["dataset_indices"] == dataset_idx
                         
-                        # Write to corresponding zarr file
-                        self.append_batch_to_zarr(
-                            dataset_zarr_roots[dataset_name],
-                            zarr_datasets_per_dataset[dataset_name],
-                            dataset_batch_result
-                        )
-        # 保存 inference config 文件：
-        inference_config_path = output_dir / "inference_config.yaml"
-        with open(inference_config_path, 'w') as f:
-            OmegaConf.save(cfg, f)
-        print(f"推理配置已保存至: {inference_config_path}")
-
-        # 打印并保存每个数据集的统计信息
-        print("\n开始计算统计信息和生成可视化...")
-        for dataset_name in self.dataset_names:
-            zarr_path = output_dir / f"inference_results_{dataset_name}.zarr"
-            if not zarr_path.exists():
-                print(f"警告: 未找到 zarr 文件 {zarr_path}，跳过")
-                continue
-            
-            print(f"\n处理数据集: {dataset_name}")
-            # 创建数据集特定的输出目录
-            dataset_output_dir = output_dir / dataset_name
-            dataset_output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 计算统计信息和生成可视化
-            self.compute_and_save_metrics(zarr_path, dataset_output_dir, dataset_name)
+                        if np.any(mask):
+                            # Extract samples for this dataset
+                            dataset_batch_result = {}
+                            for key, value in batch_result.items():
+                                if isinstance(value, np.ndarray):
+                                    dataset_batch_result[key] = value[mask]
+                                # Skip non-array fields like sample_indices
+                            
+                            # Write to corresponding zarr file
+                            self.append_batch_to_zarr(
+                                dataset_zarr_roots[dataset_name],
+                                zarr_datasets_per_dataset[dataset_name],
+                                dataset_batch_result
+                            )
+                
+                # 同步所有进程
+                self.accelerator.wait_for_everyone()
         
-        print("\n统计信息和可视化计算完成！")
+        # 同步所有进程
+        self.accelerator.wait_for_everyone()
+        
+        # 保存 inference config 文件（只在主进程）
+        if self.is_main_process:
+            inference_config_path = output_dir / "inference_config.yaml"
+            with open(inference_config_path, 'w') as f:
+                OmegaConf.save(cfg, f)
+            print(f"推理配置已保存至: {inference_config_path}")
+
+            # 打印并保存每个数据集的统计信息
+            print("\n开始计算统计信息和生成可视化...")
+            for dataset_name in self.dataset_names:
+                zarr_path = output_dir / f"inference_results_{dataset_name}.zarr"
+                if not zarr_path.exists():
+                    print(f"警告: 未找到 zarr 文件 {zarr_path}，跳过")
+                    continue
+                
+                print(f"\n处理数据集: {dataset_name}")
+                # 创建数据集特定的输出目录
+                dataset_output_dir = output_dir / dataset_name
+                dataset_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 计算统计信息和生成可视化
+                self.compute_and_save_metrics(zarr_path, dataset_output_dir, dataset_name)
+            
+            print("\n统计信息和可视化计算完成！")
+        
+        # 清理 DDP
+        self.cleanup_ddp()
     
     def compute_and_save_metrics(self, zarr_path, output_dir, dataset_name):
         """
@@ -559,8 +674,8 @@ class LegendVLAInference:
 
 @hydra.main(
     version_base=None,
-    config_path=str(pathlib.Path(__file__).parent.joinpath("src/config")),
-    config_name="experiment/inference_single"
+    config_path=str(pathlib.Path(__file__).parent.joinpath("src/config/experiment")),
+    config_name="inference_pretrain_legendvla"
 )
 def main(cfg):
     inference = LegendVLAInference(cfg)

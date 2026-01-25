@@ -275,20 +275,40 @@ def plot_smoothness_analysis(
     gt_second_diff_mean = np.mean(gt_second_diff, axis=0)  # [H-2, D]
     pred_second_diff_mean = np.mean(pred_second_diff, axis=0)
     
+    # Define dimension ranges for averaging
+    dim_ranges = [
+        (0, 3, '[0, 3)'),
+        (3, 6, '[3, 6)'),
+        (6, 12, '[6, 12)'),
+        (12, 18, '[12, 18)'),
+        (18, 33, '[18, 33)'),
+        (33, 48, '[33, 48)'),
+    ]
+    
     # Create figure with 4 subplots: 2 for line plots, 2 for heatmaps
     fig, axes = plt.subplots(2, 2, figsize=(18, 12))
     
     # Plot first order difference (velocity) - line plot
     ax1 = axes[0, 0]
     time_steps_1 = np.arange(H - 1)
-    for d in range(D):
-        ax1.plot(time_steps_1, gt_first_diff_mean[:, d], 
-                label=f'GT {action_dim_names[d]}', linestyle='--', alpha=0.7)
-        ax1.plot(time_steps_1, pred_first_diff_mean[:, d], 
-                label=f'Pred {action_dim_names[d]}', linestyle='-', alpha=0.7)
+    for start, end, label in dim_ranges:
+        if start >= D:
+            continue
+        end = min(end, D)
+        if start >= end:
+            continue
+        
+        # Average over dimensions in this range
+        gt_mean_segment = np.mean(gt_first_diff_mean[:, start:end], axis=1)  # [H-1]
+        pred_mean_segment = np.mean(pred_first_diff_mean[:, start:end], axis=1)  # [H-1]
+        
+        ax1.plot(time_steps_1, gt_mean_segment, 
+                label=f'GT {label}', linestyle='--', alpha=0.7, linewidth=2)
+        ax1.plot(time_steps_1, pred_mean_segment, 
+                label=f'Pred {label}', linestyle='-', alpha=0.7, linewidth=2)
     ax1.set_xlabel('Time Step')
     ax1.set_ylabel('First Order Difference (Velocity)')
-    ax1.set_title('First Order Difference Comparison')
+    ax1.set_title('First Order Difference Comparison (Averaged by Dimension Ranges)')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
@@ -309,14 +329,24 @@ def plot_smoothness_analysis(
     # Plot second order difference (acceleration) - line plot
     ax3 = axes[1, 0]
     time_steps_2 = np.arange(H - 2)
-    for d in range(D):
-        ax3.plot(time_steps_2, gt_second_diff_mean[:, d], 
-                label=f'GT {action_dim_names[d]}', linestyle='--', alpha=0.7)
-        ax3.plot(time_steps_2, pred_second_diff_mean[:, d], 
-                label=f'Pred {action_dim_names[d]}', linestyle='-', alpha=0.7)
+    for start, end, label in dim_ranges:
+        if start >= D:
+            continue
+        end = min(end, D)
+        if start >= end:
+            continue
+        
+        # Average over dimensions in this range
+        gt_mean_segment = np.mean(gt_second_diff_mean[:, start:end], axis=1)  # [H-2]
+        pred_mean_segment = np.mean(pred_second_diff_mean[:, start:end], axis=1)  # [H-2]
+        
+        ax3.plot(time_steps_2, gt_mean_segment, 
+                label=f'GT {label}', linestyle='--', alpha=0.7, linewidth=2)
+        ax3.plot(time_steps_2, pred_mean_segment, 
+                label=f'Pred {label}', linestyle='-', alpha=0.7, linewidth=2)
     ax3.set_xlabel('Time Step')
     ax3.set_ylabel('Second Order Difference (Acceleration)')
-    ax3.set_title('Second Order Difference Comparison')
+    ax3.set_title('Second Order Difference Comparison (Averaged by Dimension Ranges)')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
@@ -524,6 +554,7 @@ def plot_trajectory_comparison(
 ):
     """
     Plot trajectory comparison for GT and Pred for a few sample trajectories.
+    Uses dimension ranges to reduce the number of subplots.
     """
     B, H, D = gt.shape
     if action_dim_names is None:
@@ -532,28 +563,54 @@ def plot_trajectory_comparison(
     num_samples = min(num_samples, B)
     time_steps = np.arange(H)
     
+    # Define dimension ranges for averaging
+    dim_ranges = [
+        (0, 3, '[0, 3)'),
+        (3, 6, '[3, 6)'),
+        (6, 12, '[6, 12)'),
+        (12, 18, '[12, 18)'),
+        (18, 33, '[18, 33)'),
+        (33, 48, '[33, 48)'),
+    ]
+    
+    # Filter valid ranges based on actual dimension size
+    valid_ranges = []
+    for start, end, label in dim_ranges:
+        if start >= D:
+            continue
+        end = min(end, D)
+        if start < end:
+            valid_ranges.append((start, end, label))
+    
+    num_dim_ranges = len(valid_ranges)
+    
     # Select random samples
     sample_indices = np.random.choice(B, num_samples, replace=False)
     
-    fig, axes = plt.subplots(num_samples, D, figsize=(max(15, D * 3), 4 * num_samples))
+    fig, axes = plt.subplots(num_samples, num_dim_ranges, figsize=(max(15, num_dim_ranges * 3), 4 * num_samples))
     if num_samples == 1:
         axes = axes.reshape(1, -1)
-    if D == 1:
+    if num_dim_ranges == 1:
         axes = axes.reshape(-1, 1)
     
     gt_np = gt.cpu().numpy()
     pred_np = pred.cpu().numpy()
     
     for i, sample_idx in enumerate(sample_indices):
-        for d in range(D):
-            ax = axes[i, d] if num_samples > 1 or D > 1 else axes[d]
-            ax.plot(time_steps, gt_np[sample_idx, :, d], 
-                   label='GT', marker='o', linestyle='--', alpha=0.7)
-            ax.plot(time_steps, pred_np[sample_idx, :, d], 
-                   label='Pred', marker='s', linestyle='-', alpha=0.7)
+        for j, (start, end, label) in enumerate(valid_ranges):
+            ax = axes[i, j] if num_samples > 1 or num_dim_ranges > 1 else axes[j]
+            
+            # Average over dimensions in this range
+            gt_mean_segment = np.mean(gt_np[sample_idx, :, start:end], axis=1)  # [H]
+            pred_mean_segment = np.mean(pred_np[sample_idx, :, start:end], axis=1)  # [H]
+            
+            ax.plot(time_steps, gt_mean_segment, 
+                   label='GT', marker='o', linestyle='--', alpha=0.7, linewidth=2)
+            ax.plot(time_steps, pred_mean_segment, 
+                   label='Pred', marker='s', linestyle='-', alpha=0.7, linewidth=2)
             ax.set_xlabel('Time Step')
-            ax.set_ylabel(f'Dim {d}')
-            ax.set_title(f'Sample {sample_idx}, Dim {d}')
+            ax.set_ylabel(f'Avg Value')
+            ax.set_title(f'Sample {sample_idx}, Dims {label}')
             ax.legend()
             ax.grid(True, alpha=0.3)
     

@@ -111,8 +111,11 @@ class LegendVLADataset(BaseRatioDataset):
             # Record sampler length
             self.sampler_lens.append(len(sampler))
 
-        weights = [path['weight'] for path in zarr_paths]
-        super().__init__(weights, self.sampler_lens)
+        if zarr_paths is not None and zarr_paths[0].get('weight', None) is not None:
+            weights = [path['weight'] for path in zarr_paths]
+            super().__init__(weights, self.sampler_lens)
+        else:
+            super().__init__()
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -512,11 +515,9 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
     ): 
         from torch.utils.data import BatchSampler, SequentialSampler
         from src.utils.sampler import UnifiedRatioSampler
-        # Extract weights and dataset lengths from vla_dataset
-        assert hasattr(self.vla_dataset, 'weights') and hasattr(self.vla_dataset, 'dataset_lengths'), \
-            "vla_dataset must have 'weights' and 'dataset_lengths' attributes"
-        
         if shuffle: 
+            assert hasattr(self.vla_dataset, 'weights') and hasattr(self.vla_dataset, 'dataset_lengths'), \
+                "vla_dataset must have 'weights' and 'dataset_lengths' attributes"
             return UnifiedRatioSampler(
                 weights=self.vla_dataset.weights,
                 dataset_lengths=self.vla_dataset.dataset_lengths,
@@ -599,7 +600,7 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path, keys=['state', 'action', 'extrinsic', 'presence'], lazy_load=False)
+                zarr_path['path'], keys=['state', 'action', 'extrinsic', 'presence'], lazy_load=False)
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask

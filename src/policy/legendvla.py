@@ -1296,7 +1296,6 @@ class LegendVLA(nn.Module):
             "flow_loss": flow_loss,
         }
 
-
     def compute_loss(self, batch: dict) -> dict:
         """
         Compute combined VLA loss with two components: cross-entropy loss (VLM) and flow matching loss (whole VLA).
@@ -1474,17 +1473,17 @@ if __name__ == "__main__":
     
     # Embedding 分析（可选）
     if not args.skip_embedding_analysis:
-    from src.utils.embedding_analysis import analyze_embedding_distribution, print_analysis_report
-    model.init_motion_token_embeddings([i for i in range(257152, 257216)])
-    embeddings = model.embed_tokens.weight.data[257152:257216]
-    print(f"embeddings shape: {embeddings.shape}")
-    results = analyze_embedding_distribution(
-        embeddings,
-        sample_size=200,
-        plot=True,
-        save_path=f"outputs/embedding_analysis.png",
-    )
-    print_analysis_report(results)
+        from src.utils.embedding_analysis import analyze_embedding_distribution, print_analysis_report
+        model.init_motion_token_embeddings([i for i in range(257152, 257216)])
+        embeddings = model.embed_tokens.weight.data[257152:257216]
+        print(f"embeddings shape: {embeddings.shape}")
+        results = analyze_embedding_distribution(
+            embeddings,
+            sample_size=200,
+            plot=True,
+            save_path=f"outputs/embedding_analysis.png",
+        )
+        print_analysis_report(results)
     
     # 测试从 dataset 加载 batch 并可视化 causal mask
     print("\n" + "="*80)
