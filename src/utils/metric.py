@@ -5,6 +5,8 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import zarr
+import json
 
 
 def get_smart_ticklabels(length: int, max_ticks: int = 8) -> List:
@@ -702,6 +704,176 @@ def plot_all_visualizations(
         save_path=os.path.join(output_dir, f'{prefix}smoothness_error_heatmaps.png'),
         action_dim_names=action_dim_names,
     )
+
+
+def compute_and_save_metrics(zarr_path, output_dir, dataset_name):
+    """
+    Read data from zarr file, compute all metrics and save visualizations.
+    
+    Args:
+        zarr_path: zarr file path
+        output_dir: output directory
+        dataset_name: dataset name
+    """
+    # Read zarr file
+    store = zarr.DirectoryStore(str(zarr_path))
+    zarr_root = zarr.group(store=store)
+    
+    # Check if there is necessary data
+    if 'pred_actions' not in zarr_root:
+        print(f"  Warning: {dataset_name} has no pred_actions, skipping")
+        return
+    
+    pred_actions = zarr_root['pred_actions'][:]  # [N, H, D]
+    
+    # Save basic information
+    info_dict = {
+        'dataset_name': str(dataset_name),
+        'num_samples': int(pred_actions.shape[0]),
+        'horizon': int(pred_actions.shape[1]),
+        'action_dim': int(pred_actions.shape[2]),
+        'has_gt': 'gt_actions' in zarr_root,
+    }
+    info_path = output_dir / "info.json"
+    with open(info_path, 'w') as f:
+        json.dump(info_dict, f, indent=2)
+    
+    # If there is ground truth, compute metrics and save visualizations
+    if 'gt_actions' not in zarr_root:
+        print(f"  Warning: {dataset_name} has no ground truth data, skipping metrics computation")
+        return
+    
+    gt_actions = zarr_root['gt_actions'][:]  # [N, H, D]
+    
+    # Convert to torch tensor
+    pred_tensor = torch.from_numpy(pred_actions).float()
+    gt_tensor = torch.from_numpy(gt_actions).float()
+    
+    # Compute all metrics
+    print(f"  计算统计指标...")
+    
+    # 1. Basic metrics (compute_all_metrics contains的部分)
+    basic_metrics = compute_all_metrics(gt_tensor, pred_tensor)
+    
+    # 2. Action accuracy
+    accuracy_thresholds = [0.1, 0.2, 0.3, 0.5]
+    action_accuracy = get_action_accuracy(gt_tensor, pred_tensor, thresholds=accuracy_thresholds)
+    
+    # 3. Smoothness metrics (detailed version)
+    smoothness = compute_smoothness_metrics(gt_tensor, pred_tensor)
+    
+    # 4. Error heatmap
+    error_heatmap = compute_error_heatmap(gt_tensor, pred_tensor)
+    
+    # 5. Covariance matrix
+    covariance = compute_covariance_matrix(gt_tensor, pred_tensor)
+    
+    # 6. Loss over time
+    loss_l1_over_time = compute_loss_over_time(gt_tensor, pred_tensor, loss_type='l1')
+    loss_l2_over_time = compute_loss_over_time(gt_tensor, pred_tensor, loss_type='l2')
+    
+    # 7. Trajectory level metrics (already in basic_metrics, but keep detailed version)
+    trajectory_metrics = compute_trajectory_metrics(gt_tensor, pred_tensor)
+    
+    # 8. Per dimension metrics (already in basic_metrics, but keep detailed version)
+    per_dim_metrics = compute_per_dimension_metrics(gt_tensor, pred_tensor)
+    
+    # Summarize all metrics to dictionary
+    metrics_dict = {
+        # Basic metrics
+        'overall_mae': float(basic_metrics['overall_mae'].item()),
+        'first_diff_error': float(basic_metrics['first_diff_error'].item()),
+        'second_diff_error': float(basic_metrics['second_diff_error'].item()),
+        
+        # Action accuracy
+        'action_accuracy': {
+            f'threshold_{t}': float(action_accuracy[i].item())
+            for i, t in enumerate(accuracy_thresholds)
+        },
+        
+        # Smoothness detailed metrics
+        'smoothness': {
+            'first_diff_error': float(smoothness['first_diff_error'].item()),
+            'second_diff_error': float(smoothness['second_diff_error'].item()),
+            'first_diff_error_heatmap_mean': float(torch.mean(smoothness['first_diff_error_heatmap']).item()),
+            'second_diff_error_heatmap_mean': float(torch.mean(smoothness['second_diff_error_heatmap']).item()),
+        },
+        
+        # Error heatmap statistics
+        'error_heatmap': {
+            'mean': float(torch.mean(error_heatmap).item()),
+            'std': float(torch.std(error_heatmap).item()),
+            'max': float(torch.max(error_heatmap).item()),
+            'min': float(torch.min(error_heatmap).item()),
+        },
+        
+        # Covariance matrix statistics
+        'covariance': {
+            'gt_cov_trace': float(torch.trace(covariance['gt_cov']).item()),
+            'pred_cov_trace': float(torch.trace(covariance['pred_cov']).item()),
+            'error_cov_trace': float(torch.trace(covariance['error_cov']).item()),
+            'gt_cov_det': float(torch.det(covariance['gt_cov']).item()),
+            'pred_cov_det': float(torch.det(covariance['pred_cov']).item()),
+            'error_cov_det': float(torch.det(covariance['error_cov']).item()),
+        },
+        
+        # Loss over time
+        'loss_over_time': {
+            'l1_mean': float(torch.mean(loss_l1_over_time).item()),
+            'l1_std': float(torch.std(loss_l1_over_time).item()),
+            'l1_max': float(torch.max(loss_l1_over_time).item()),
+            'l1_min': float(torch.min(loss_l1_over_time).item()),
+            'l2_mean': float(torch.mean(loss_l2_over_time).item()),
+            'l2_std': float(torch.std(loss_l2_over_time).item()),
+            'l2_max': float(torch.max(loss_l2_over_time).item()),
+            'l2_min': float(torch.min(loss_l2_over_time).item()),
+        },
+        
+        # Trajectory level metrics
+        'trajectory': {
+            'endpoint_error_mean': float(torch.mean(trajectory_metrics['endpoint_error']).item()),
+            'endpoint_error_std': float(torch.std(trajectory_metrics['endpoint_error']).item()),
+            'trajectory_length_error_mean': float(torch.mean(trajectory_metrics['trajectory_length_error']).item()),
+            'trajectory_length_error_std': float(torch.std(trajectory_metrics['trajectory_length_error']).item()),
+            'mean_error_mean': float(torch.mean(trajectory_metrics['mean_error']).item()),
+            'mean_error_std': float(torch.std(trajectory_metrics['mean_error']).item()),
+            'max_error_mean': float(torch.mean(trajectory_metrics['max_error']).item()),
+            'max_error_std': float(torch.std(trajectory_metrics['max_error']).item()),
+        },
+        
+        # Per dimension metrics
+        'per_dimension': {
+            'mae_per_dim': per_dim_metrics['mae_per_dim'].cpu().numpy().tolist(),
+            'mae_per_dim_mean': float(torch.mean(per_dim_metrics['mae_per_dim']).item()),
+            'mae_per_dim_std': float(torch.std(per_dim_metrics['mae_per_dim']).item()),
+            'mae_per_dim_max': float(torch.max(per_dim_metrics['mae_per_dim']).item()),
+            'mae_per_dim_min': float(torch.min(per_dim_metrics['mae_per_dim']).item()),
+        },
+    }
+    
+    # Save metrics to JSON
+    metrics_path = output_dir / "metrics.json"
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics_dict, f, indent=2)
+    print(f"  Metrics saved to: {metrics_path}")
+    
+    # Print key metrics
+    print(f"    Overall MAE: {metrics_dict['overall_mae']:.4f}")
+    print(f"    First order difference error: {metrics_dict['first_diff_error']:.4f}")
+    print(f"    Second order difference error: {metrics_dict['second_diff_error']:.4f}")
+    print(f"    Average endpoint error: {metrics_dict['trajectory']['endpoint_error_mean']:.4f}")
+    print(f"    Action accuracy (threshold=0.1): {metrics_dict['action_accuracy']['threshold_0.1']:.4f}")
+    print(f"    Action accuracy (threshold=0.2): {metrics_dict['action_accuracy']['threshold_0.2']:.4f}")
+    
+    # Generate all visualizations
+    print(f"  Generating visualizations...")
+    plot_all_visualizations(
+        gt_tensor,
+        pred_tensor,
+        str(output_dir),
+        prefix='',
+    )
+    print(f"  Visualizations saved to: {output_dir}")
 
 
 def main():

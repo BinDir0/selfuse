@@ -46,7 +46,7 @@ inference:
   model_config_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.24/13.58_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
   
   # checkpoint路径（用于加载模型权重）
-  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.24/23.12_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=30000-eval_l1_loss=0.0544/pytorch_model/mp_rank_00_model_states.pt
+  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.25/23.08_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=30000-eval_l1_loss=0.0515/pytorch_model/mp_rank_00_model_states.pt
   
   # 数据配置
   # Note: If val_ratio=0.0 in dataset config, all data is used regardless of this setting

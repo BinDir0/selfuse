@@ -14,17 +14,8 @@ import zarr
 
 from src.policy.legendvla import LegendVLA
 from src.utils.pytorch_util import dict_apply
-from src.utils.metric import (
-    get_action_accuracy,
-    compute_all_metrics,
-    plot_all_visualizations,
-    compute_smoothness_metrics,
-    compute_error_heatmap,
-    compute_covariance_matrix,
-    compute_loss_over_time,
-    compute_trajectory_metrics,
-    compute_per_dimension_metrics,
-)
+from src.utils.metric import compute_and_save_metrics
+from src.utils.plotting import plot_multilayer_attention_maps
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -33,7 +24,7 @@ class LegendVLAInference:
     def __init__(self, cfg: OmegaConf):
         self.cfg = cfg
         
-        # # 使用 torch.compile 编译模型（在 prepare 之前）
+        # # 使用 torchdynamo 编译模型（在 prepare 之前）
         # if hasattr(cfg.inference.compile, 'enabled') and cfg.inference.compile.enabled:
         #     dynamo_plugin = TorchDynamoPlugin(
         #         backend=cfg.inference.compile.backend,  # Options: "inductor", "aot_eager", "aot_nvfuser", etc.
@@ -221,6 +212,7 @@ class LegendVLAInference:
             dict: Generation parameters including max_new_tokens, temperature, etc.
         """
         generation_params = self.cfg.inference.autoregressive_config
+        generation_params = OmegaConf.to_container(generation_params, resolve=True)
         if self.vla_processor is not None: 
             generation_params['eos_token_id'] = self.vla_processor.eos_token_id
             generation_params['allowed_token_ids'] = self.vla_processor.total_motion_token_list
@@ -243,6 +235,7 @@ class LegendVLAInference:
         
         for i in range(batch_size):
             output_ids = generated_ids_np[i]  # [seq_len]
+            print(f"output_ids: {output_ids}")
             
             # Decode using processor
             decoded_result = self.vla_processor.decode(
@@ -327,6 +320,7 @@ class LegendVLAInference:
         if self.model_cfg is not None and self.model_cfg.dataset is not None: 
             vla_dataset_cfg = self.model_cfg.dataset.vla_dataset
             vla_dataset_cfg.zarr_paths = cfg.vla_dataset_paths
+            vla_dataset_cfg.mode = 'infer'
             self.dataset = hydra.utils.instantiate(vla_dataset_cfg)
         else:
             self.dataset = hydra.utils.instantiate(cfg.dataset)
@@ -432,6 +426,10 @@ class LegendVLAInference:
         # Track statistics per dataset
         actual_batch_count = 0  # Track actual batch count (after skipping)
         
+        # Track min/max loss samples for attention visualization
+        min_loss_sample = {'loss': float('inf'), 'attn_weights': None, 'metadata': None}
+        max_loss_sample = {'loss': float('-inf'), 'attn_weights': None, 'metadata': None}
+        
         with torch.no_grad():
             dataloader_iter = tqdm(dataloader, desc="推理进度") if self.is_main_process else dataloader
             for batch_idx, batch in enumerate(dataloader_iter):
@@ -474,7 +472,7 @@ class LegendVLAInference:
                         # 3. Model inference
                         generation_output = self.model("infer_autoregressive", inputs, **generation_params)
 
-                        pred_actions = self._postprocess_autoregressive_results(generation_output)
+                        pred_actions = self._postprocess_autoregressive_results(generation_output['generated_ids'])
                 
                 pred_actions = self.normalizer['actions'].unnormalize(pred_actions)
                 # 保存结果
@@ -497,6 +495,49 @@ class LegendVLAInference:
                     
                     batch_result["gt_actions"] = gt_actions
                     batch_result["actions_valid_mask"] = actions_valid_mask
+                    
+                    # Track min/max loss samples for attention visualization
+                    if hasattr(self.model, 'module'):
+                        model = self.model.module
+                    else:
+                        model = self.model
+                    
+                    if hasattr(model, 'attn_weights') and len(model.attn_weights) > 0:
+                        # Compute per-sample L1 loss
+                        abs_diff = torch.abs(pred_actions - gt_actions)
+                        per_sample_l1_loss = torch.sum(
+                            abs_diff.flatten(start_dim=1), dim=1
+                        ) / torch.sum(actions_valid_mask.flatten(start_dim=1), dim=1)  # [B]
+                        
+                        # attn_weights: list of [B, num_heads, seq_len, seq_len] for each layer
+                        attn_weights = torch.stack(model.attn_weights, dim=0)  # [num_layers, B, num_heads, seq_len, seq_len]
+                        
+                        # Get token segments if available
+                        token_segments = None
+                        if hasattr(inputs, 'token_segments'):
+                            token_segments = inputs['token_segments']
+                        
+                        # Find min/max loss samples in this batch
+                        for sample_idx in range(per_sample_l1_loss.shape[0]):
+                            current_loss = per_sample_l1_loss[sample_idx].item()
+                            metadata = {
+                                'batch_idx': batch_idx,
+                                'sample_idx': sample_idx,
+                                'l1_loss': current_loss,
+                                'token_segments': token_segments,
+                            }
+                            
+                            # Update min loss sample
+                            if current_loss < min_loss_sample['loss']:
+                                min_loss_sample['loss'] = current_loss
+                                min_loss_sample['attn_weights'] = attn_weights[:, sample_idx, :, :, :].float().cpu()
+                                min_loss_sample['metadata'] = metadata
+                            
+                            # Update max loss sample
+                            if current_loss > max_loss_sample['loss']:
+                                max_loss_sample['loss'] = current_loss
+                                max_loss_sample['attn_weights'] = attn_weights[:, sample_idx, :, :, :].float().cpu()
+                                max_loss_sample['metadata'] = metadata
                 
                 actual_batch_count += 1
                 
@@ -541,6 +582,10 @@ class LegendVLAInference:
         # 同步所有进程
         self.accelerator.wait_for_everyone()
         
+        # Visualize attention weights for selected samples (只在主进程)
+        if self.is_main_process:
+            self.visualize_attention_samples(min_loss_sample, max_loss_sample, output_dir)
+        
         # 保存 inference config 文件（只在主进程）
         if self.is_main_process:
             inference_config_path = output_dir / "inference_config.yaml"
@@ -562,181 +607,69 @@ class LegendVLAInference:
                 dataset_output_dir.mkdir(parents=True, exist_ok=True)
                 
                 # 计算统计信息和生成可视化
-                self.compute_and_save_metrics(zarr_path, dataset_output_dir, dataset_name)
+                compute_and_save_metrics(zarr_path, dataset_output_dir, dataset_name)
             
             print("\n统计信息和可视化计算完成！")
         
         self.accelerator.end_training()
+        
     
-    def compute_and_save_metrics(self, zarr_path, output_dir, dataset_name):
+    def visualize_attention_samples(self, min_loss_sample, max_loss_sample, output_dir):
         """
-        从 zarr 文件读取数据，计算所有统计指标并生成可视化
+        Visualize attention maps for min/max loss samples.
         
         Args:
-            zarr_path: zarr 文件路径
-            output_dir: 输出目录
-            dataset_name: 数据集名称
+            min_loss_sample: Dict containing lowest loss sample's attention weights and metadata
+            max_loss_sample: Dict containing highest loss sample's attention weights and metadata
+            output_dir: Base output directory for saving visualizations
         """
-        # 读取 zarr 文件
-        store = zarr.DirectoryStore(str(zarr_path))
-        zarr_root = zarr.group(store=store)
-        
-        # 检查是否有必要的数据
-        if 'pred_actions' not in zarr_root:
-            print(f"  警告: {dataset_name} 中没有 pred_actions，跳过")
+        if min_loss_sample['attn_weights'] is None:
+            print("No attention weights to visualize")
             return
         
-        pred_actions = zarr_root['pred_actions'][:]  # [N, H, D]
+        print(f"\nVisualizing attention weights for selected samples...")
         
-        # 保存基本信息
-        info_dict = {
-            'dataset_name': str(dataset_name),
-            'num_samples': int(pred_actions.shape[0]),
-            'horizon': int(pred_actions.shape[1]),
-            'action_dim': int(pred_actions.shape[2]),
-            'has_gt': 'gt_actions' in zarr_root,
-        }
-        info_path = output_dir / "info.json"
-        with open(info_path, 'w') as f:
-            json.dump(info_dict, f, indent=2)
-        
-        # 如果有 ground truth，计算统计信息和可视化
-        if 'gt_actions' not in zarr_root:
-            print(f"  注意: {dataset_name} 中没有 ground truth 数据，跳过统计计算")
-            return
-        
-        gt_actions = zarr_root['gt_actions'][:]  # [N, H, D]
-        
-        # 转换为 torch tensor
-        pred_tensor = torch.from_numpy(pred_actions).float()
-        gt_tensor = torch.from_numpy(gt_actions).float()
-        
-        # 计算所有指标
-        print(f"  计算统计指标...")
-        
-        # 1. 基本指标 (compute_all_metrics 包含的部分)
-        basic_metrics = compute_all_metrics(gt_tensor, pred_tensor)
-        
-        # 2. 动作准确度
-        accuracy_thresholds = [0.1, 0.2, 0.3, 0.5]
-        action_accuracy = get_action_accuracy(gt_tensor, pred_tensor, thresholds=accuracy_thresholds)
-        
-        # 3. 平滑度指标 (详细版本)
-        smoothness = compute_smoothness_metrics(gt_tensor, pred_tensor)
-        
-        # 4. 误差热图
-        error_heatmap = compute_error_heatmap(gt_tensor, pred_tensor)
-        
-        # 5. 协方差矩阵
-        covariance = compute_covariance_matrix(gt_tensor, pred_tensor)
-        
-        # 6. 每个时间步的损失
-        loss_l1_over_time = compute_loss_over_time(gt_tensor, pred_tensor, loss_type='l1')
-        loss_l2_over_time = compute_loss_over_time(gt_tensor, pred_tensor, loss_type='l2')
-        
-        # 7. 轨迹级别指标 (已在 basic_metrics 中，但保留详细版本)
-        trajectory_metrics = compute_trajectory_metrics(gt_tensor, pred_tensor)
-        
-        # 8. 每个维度指标 (已在 basic_metrics 中，但保留详细版本)
-        per_dim_metrics = compute_per_dimension_metrics(gt_tensor, pred_tensor)
-        
-        # 汇总所有指标到字典
-        metrics_dict = {
-            # 基本指标
-            'overall_mae': float(basic_metrics['overall_mae'].item()),
-            'first_diff_error': float(basic_metrics['first_diff_error'].item()),
-            'second_diff_error': float(basic_metrics['second_diff_error'].item()),
-            
-            # 动作准确度
-            'action_accuracy': {
-                f'threshold_{t}': float(action_accuracy[i].item())
-                for i, t in enumerate(accuracy_thresholds)
+        selected_samples = {
+            'lowest_loss': {
+                'attn_weights': min_loss_sample['attn_weights'],
+                'metadata': min_loss_sample['metadata']
             },
-            
-            # 平滑度详细指标
-            'smoothness': {
-                'first_diff_error': float(smoothness['first_diff_error'].item()),
-                'second_diff_error': float(smoothness['second_diff_error'].item()),
-                'first_diff_error_heatmap_mean': float(torch.mean(smoothness['first_diff_error_heatmap']).item()),
-                'second_diff_error_heatmap_mean': float(torch.mean(smoothness['second_diff_error_heatmap']).item()),
-            },
-            
-            # 误差热图统计
-            'error_heatmap': {
-                'mean': float(torch.mean(error_heatmap).item()),
-                'std': float(torch.std(error_heatmap).item()),
-                'max': float(torch.max(error_heatmap).item()),
-                'min': float(torch.min(error_heatmap).item()),
-            },
-            
-            # 协方差矩阵统计
-            'covariance': {
-                'gt_cov_trace': float(torch.trace(covariance['gt_cov']).item()),
-                'pred_cov_trace': float(torch.trace(covariance['pred_cov']).item()),
-                'error_cov_trace': float(torch.trace(covariance['error_cov']).item()),
-                'gt_cov_det': float(torch.det(covariance['gt_cov']).item()),
-                'pred_cov_det': float(torch.det(covariance['pred_cov']).item()),
-                'error_cov_det': float(torch.det(covariance['error_cov']).item()),
-            },
-            
-            # 每个时间步的损失
-            'loss_over_time': {
-                'l1_mean': float(torch.mean(loss_l1_over_time).item()),
-                'l1_std': float(torch.std(loss_l1_over_time).item()),
-                'l1_max': float(torch.max(loss_l1_over_time).item()),
-                'l1_min': float(torch.min(loss_l1_over_time).item()),
-                'l2_mean': float(torch.mean(loss_l2_over_time).item()),
-                'l2_std': float(torch.std(loss_l2_over_time).item()),
-                'l2_max': float(torch.max(loss_l2_over_time).item()),
-                'l2_min': float(torch.min(loss_l2_over_time).item()),
-            },
-            
-            # 轨迹级别指标
-            'trajectory': {
-                'endpoint_error_mean': float(torch.mean(trajectory_metrics['endpoint_error']).item()),
-                'endpoint_error_std': float(torch.std(trajectory_metrics['endpoint_error']).item()),
-                'trajectory_length_error_mean': float(torch.mean(trajectory_metrics['trajectory_length_error']).item()),
-                'trajectory_length_error_std': float(torch.std(trajectory_metrics['trajectory_length_error']).item()),
-                'mean_error_mean': float(torch.mean(trajectory_metrics['mean_error']).item()),
-                'mean_error_std': float(torch.std(trajectory_metrics['mean_error']).item()),
-                'max_error_mean': float(torch.mean(trajectory_metrics['max_error']).item()),
-                'max_error_std': float(torch.std(trajectory_metrics['max_error']).item()),
-            },
-            
-            # 每个维度指标
-            'per_dimension': {
-                'mae_per_dim': per_dim_metrics['mae_per_dim'].cpu().numpy().tolist(),
-                'mae_per_dim_mean': float(torch.mean(per_dim_metrics['mae_per_dim']).item()),
-                'mae_per_dim_std': float(torch.std(per_dim_metrics['mae_per_dim']).item()),
-                'mae_per_dim_max': float(torch.max(per_dim_metrics['mae_per_dim']).item()),
-                'mae_per_dim_min': float(torch.min(per_dim_metrics['mae_per_dim']).item()),
-            },
+            'highest_loss': {
+                'attn_weights': max_loss_sample['attn_weights'],
+                'metadata': max_loss_sample['metadata']
+            }
         }
         
-        # 保存指标到 JSON
-        metrics_path = output_dir / "metrics.json"
-        with open(metrics_path, 'w') as f:
-            json.dump(metrics_dict, f, indent=2)
-        print(f"  指标已保存至: {metrics_path}")
+        print(f"Selected samples for visualization:")
+        print(f"  Lowest loss: batch {min_loss_sample['metadata']['batch_idx']}, "
+              f"sample {min_loss_sample['metadata']['sample_idx']}, loss={min_loss_sample['loss']:.4f}")
+        print(f"  Highest loss: batch {max_loss_sample['metadata']['batch_idx']}, "
+              f"sample {max_loss_sample['metadata']['sample_idx']}, loss={max_loss_sample['loss']:.4f}")
         
-        # 打印关键指标
-        print(f"    总体 MAE: {metrics_dict['overall_mae']:.4f}")
-        print(f"    一阶差分误差: {metrics_dict['first_diff_error']:.4f}")
-        print(f"    二阶差分误差: {metrics_dict['second_diff_error']:.4f}")
-        print(f"    平均端点误差: {metrics_dict['trajectory']['endpoint_error_mean']:.4f}")
-        print(f"    动作准确度 (threshold=0.1): {metrics_dict['action_accuracy']['threshold_0.1']:.4f}")
-        print(f"    动作准确度 (threshold=0.2): {metrics_dict['action_accuracy']['threshold_0.2']:.4f}")
-        
-        # 生成所有可视化
-        print(f"  生成可视化...")
-        plot_all_visualizations(
-            gt_tensor,
-            pred_tensor,
-            str(output_dir),
-            prefix='',
-        )
-        print(f"  可视化已保存至: {output_dir}")
-        
+        # Visualize each selected sample
+        for name, sample_data in selected_samples.items():
+            if sample_data['attn_weights'] is None:
+                continue
+                
+            print(f"\nProcessing {name} sample...")
+            
+            attn_weights_sample = sample_data['attn_weights'].numpy()  # [num_layers, num_heads, seq_len, seq_len]
+            
+            # Create output directory
+            attention_output_dir = pathlib.Path(output_dir) / 'attention_visualization' / name
+            
+            token_segments = sample_data['metadata'].get('token_segments', None)
+            
+            # Visualize attention maps
+            try:
+                plot_multilayer_attention_maps(
+                    attention_maps=attn_weights_sample,
+                    output_dir=str(attention_output_dir),
+                    token_segments=token_segments
+                )
+                print(f"  Saved to: {attention_output_dir}")
+            except Exception as e:
+                print(f"  Error visualizing attention: {e}")
     
     def append_batch_to_zarr(self, root, zarr_datasets, batch_result):
         """Append a batch of results to zarr file incrementally"""

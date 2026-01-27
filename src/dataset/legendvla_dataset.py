@@ -44,7 +44,7 @@ class LegendVLADataset(BaseRatioDataset):
             normalizer_dataloader_cfg=dict(),
             use_relative_action=False,
             max_train_episodes=None,
-            train_mode=True,
+            mode = 'train',
             return_raw_sample=False,
             depth_clip_range=None,
         ):
@@ -58,6 +58,14 @@ class LegendVLADataset(BaseRatioDataset):
         self.normalizer = None
         self.return_raw_sample = return_raw_sample
         self.depth_clip_range = depth_clip_range
+        self.horizon = horizon
+        self.pad_before = pad_before
+        self.pad_after = pad_after
+        self.shape_meta = shape_meta
+        self.motion_type = shape_meta['obs']['state']['type']
+        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
+        self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
+        self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
         # Initialize storage lists
         self.replay_buffers = []
@@ -65,15 +73,15 @@ class LegendVLADataset(BaseRatioDataset):
         self.samplers = []
         self.sampler_lens = []
 
-        self.train_mode = train_mode
+        self.mode = mode
         self.aug_transform = None
-        if self.train_mode:
+        if self.mode == 'train':
             self.aug_transform = transforms.Compose([
                 # ColorJitter: random change brightness, contrast, saturation, and hue
                 transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
                 # GaussianBlur: apply gaussian blur
                 # kernel_size must be odd
-                transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 2.0))
+                transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))
             ])
         
         # Process each zarr file
@@ -99,13 +107,14 @@ class LegendVLADataset(BaseRatioDataset):
             self.train_masks.append(train_mask)
             
             # Create sampler
+            self.image_history = history + 1 if self.n_obs_image_steps > 1 else 1
             sampler = SequenceSampler(
                 replay_buffer=replay_buffer,
                 sequence_length=horizon,
                 pad_before=pad_before,
                 pad_after=pad_after,
                 episode_mask=train_mask,
-                key_first_k=dict(image=history+1))
+                key_first_k=dict(image=self.image_history, depth=self.image_history))
             self.samplers.append(sampler)
             
             # Record sampler length
@@ -116,21 +125,13 @@ class LegendVLADataset(BaseRatioDataset):
             super().__init__(weights, self.sampler_lens)
         else:
             super().__init__()
-        self.horizon = horizon
-        self.pad_before = pad_before
-        self.pad_after = pad_after
-        self.shape_meta = shape_meta
-        self.motion_type = shape_meta['obs']['state']['type']
-        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
-        self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
-        self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
-        val_set.train_mode = False
+        val_set.mode = 'val'
         val_set.aug_transform = None
         # Preserve the return_raw_sample setting
 
@@ -142,7 +143,7 @@ class LegendVLADataset(BaseRatioDataset):
                 pad_before=self.pad_before,
                 pad_after=self.pad_after,
                 episode_mask=~self.train_masks[i],
-                key_first_k=dict(image=self.history+1))
+                key_first_k=dict(image=self.image_history, depth=self.image_history))
             val_set.samplers.append(sampler)
             val_set.train_masks.append(~self.train_masks[i])
             val_set.sampler_lens.append(len(sampler))
@@ -252,7 +253,7 @@ class LegendVLADataset(BaseRatioDataset):
             intrinsic=intrinsic, 
             objective=self.objective,
             depth_images=depth_images,
-            train_mode=self.train_mode,
+            mode=self.mode,
         )
 
         data = {
@@ -377,7 +378,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         weights=[0.5, 0.5, 0.5],
         seed=42,
         val_ratio=0.0,
-        train_mode=True,
+        mode='train',
     ):
         super().__init__()
         self.dataset_paths = dataset_paths
@@ -386,15 +387,15 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         self.cache_dir = cache_dir
         self.datasets = None
         self.preprocessor = None
-        self.train_mode = train_mode
+        self.mode = mode
         self.aug_transform = None
-        if self.train_mode:
+        if self.mode == 'train':
             self.aug_transform = transforms.Compose([
                 # ColorJitter: random change brightness, contrast, saturation, and hue
                 transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
                 # GaussianBlur: apply gaussian blur
                 # kernel_size must be odd
-                transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 2.0))
+                transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))
             ])
         if isinstance(dataset_paths, str):
             data_files = f"{dataset_paths}/*.parquet"
@@ -419,7 +420,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         if self.val_datasets is None:
             return None
         val_copy = copy.copy(self)
-        val_copy.train_mode = False
+        val_copy.mode = 'val'
         val_copy.aug_transform = None
         val_copy.train_datasets = self.val_datasets
         return val_copy
@@ -449,7 +450,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
 
         augmented_images = []
         for img_pil in images:
-            if self.train_mode and self.aug_transform is not None:
+            if self.mode == 'train' and self.aug_transform is not None:
                 augmented_pil = self.aug_transform(img_pil)
             else:
                 augmented_pil = img_pil
@@ -461,7 +462,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             images=images_to_process, 
             text=question, 
             target=answer, 
-            train_mode=self.train_mode
+            mode=self.mode
         )
 
         data = {
@@ -1030,16 +1031,18 @@ def process_image(image, history, n_obs_image_steps, depth_image = None, aug_tra
     if n_obs_image_steps > 1:
         image_slice = [i for i in range(0, history + 1, history // (n_obs_image_steps - 1))]
     else:
-        image_slice = [history]
+        image_slice = [-1]
 
     images_to_process = image[image_slice]
     depth_images_to_process = None
     if depth_image is not None:
         depth_images_to_process = depth_image[image_slice]
-        depth_images_to_process = np.clip(depth_images_to_process, depth_clip_range[0], depth_clip_range[1])
-        depth_max_value = np.max(depth_images_to_process)
         # normalize the depth images to [0, 1]
-        depth_images_to_process = depth_images_to_process / (depth_max_value + 1e-6)
+        depth_images_to_process = np.clip(
+            depth_images_to_process, 
+            depth_clip_range[0], 
+            depth_clip_range[1]
+        ) / (depth_clip_range[1] + 1e-6)
     if aug_transform is not None:
         augmented_images = []
         for img_np in images_to_process:

@@ -11,7 +11,7 @@ KV caches --- There are a few different modes depending on the setting:
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -53,6 +53,8 @@ def forward_mixture_scaled_dot_product_attention(
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
         query_states.dtype
     )
+    if not training:
+        attn_weights_before_dropout = attn_weights.clone().detach()
     attn_weights = nn.functional.dropout(
         attn_weights,
         p=attention_dropout,
@@ -61,7 +63,10 @@ def forward_mixture_scaled_dot_product_attention(
     # Multiply by the values. [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len] x [Batch_Size, Num_Heads_KV, Full_Seq_Len, Head_Dim] -> [Batch_Size, Num_Heads_Q, Full_Seq_Len, Head_Dim]
     attn_output = torch.matmul(attn_weights, value_states)
     
-    return attn_output
+    if not training:
+        return attn_output, attn_weights_before_dropout
+    else:
+        return attn_output, None
 
 
 def forward_insulation_scaled_dot_product_attention(
@@ -116,6 +121,8 @@ def forward_insulation_scaled_dot_product_attention(
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
         query_states_vlm.dtype
     )
+    if not training:
+        attn_weights_before_dropout = attn_weights.clone().detach()
     attn_weights = nn.functional.dropout(
         attn_weights,
         p=attention_dropout,
@@ -128,7 +135,10 @@ def forward_insulation_scaled_dot_product_attention(
     attn_output_others = torch.matmul(attn_weights[:, :, vlm_seq_len:, :], value_states_all)
     attn_output = torch.cat((attn_output_vlm, attn_output_others), dim=-2)
 
-    return attn_output
+    if not training:
+        return attn_output, attn_weights_before_dropout
+    else:
+        return attn_output, None
 
 
 def forward_mixture_attn(
@@ -255,7 +265,7 @@ def forward_mixture_attn(
         key_states_all[name] = key_states
         value_states_all[name] = value_states
 
-    attn_output = sdpa(
+    attn_output, attn_weights = sdpa(
         query_states_all,
         key_states_all,
         value_states_all,
@@ -285,7 +295,7 @@ def forward_mixture_attn(
             attn_outputs_final[name] = mixtures[name].attn_func(
                 "forward_o_proj", layer_idx, attn_outputs[name]
             )
-    return attn_outputs_final
+    return attn_outputs_final, attn_weights
 
 
 def forward_mixture_layers(
@@ -299,6 +309,7 @@ def forward_mixture_layers(
     cache_mode: str = "append_non_active",
     time_cond: Optional[torch.FloatTensor] = None,
     sdpa: callable = forward_mixture_scaled_dot_product_attention,
+    attn_weights: Optional[List[torch.FloatTensor]] = None,
 ) -> dict[torch.FloatTensor]:
     """the usual norm + attn + res + norm + mlp + res"""
     active_mixture_names = list(embeds_all.keys())
@@ -318,7 +329,7 @@ def forward_mixture_layers(
     hidden_states_pre_attn = hidden_states_input_norm
 
     # [Batch_Size, Seq_Len, Hidden_Size]
-    hidden_states_post_attn = forward_mixture_attn(
+    hidden_states_post_attn, attn_weights_before_dropout = forward_mixture_attn(
         mixtures,
         hidden_states_all=hidden_states_pre_attn,
         attention_mask=attention_mask,
@@ -329,6 +340,8 @@ def forward_mixture_layers(
         cache_mode=cache_mode,
         sdpa=sdpa,
     )
+    if attn_weights is not None:
+        attn_weights[layer_idx] = attn_weights_before_dropout
     hidden_states_pre_res = hidden_states_post_attn
 
     # [Batch_Size, Seq_Len, Hidden_Size]
@@ -415,6 +428,7 @@ class JointModel(nn.Module):
         for mixture_name, mixture_config in config.mixture.items():
             mixture_config = OmegaConf.merge(config, mixture_config)
             self.mixtures[mixture_name] = Mixture(mixture_config)
+        self.attn_weights = [None] * self.num_hidden_layers
         self.mixture_names = list(config.mixture.keys())
 
     def build_mixture_caches(self):
@@ -469,6 +483,7 @@ class JointModel(nn.Module):
                 if is_final_layer
                 else [],
                 sdpa=self.sdpa,
+                attn_weights=self.attn_weights,
             )
 
         # [Batch_Size, Seq_Len, Hidden_Size]

@@ -27,7 +27,7 @@ from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.json_logger import JsonLogger
 from src.utils.pytorch_util import dict_apply
-from src.utils.plotting import plot_l1_loss_as_bar
+from src.utils.plotting import plot_l1_loss_as_bar, plot_multilayer_attention_maps
 from src.model.common.model_average import ModelAveraging
 from src.utils.metric import get_action_accuracy
 
@@ -296,6 +296,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # 4. now all processes have a fully identical object copy
         dataset.vla_dataset.set_normalizer(normalizer)
+        self.normalizer = normalizer
 
         # configure training dataset
         train_dataloader = DataLoader(
@@ -485,6 +486,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             eval_l1_loss = []
             eval_l1_loss_per_dim = []
             
+            # Track min/max loss batches for visualization (only store these two)
+            min_loss_sample = {'loss': float('inf'), 'attn_weights': None, 'metadata': None}
+            max_loss_sample = {'loss': float('-inf'), 'attn_weights': None, 'metadata': None}
             for batch_idx, batch in enumerate(dataloader):
                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
 
@@ -510,8 +514,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if not torch.any(eval_sample):
                         continue
                     actions_valid_mask = actions_valid_mask[eval_sample]
-                    gt_actions = gt_actions[eval_sample]
-                    pred_actions = pred_actions[eval_sample]
+                    gt_actions = self.normalizer['actions'].unnormalize(gt_actions[eval_sample])
+                    pred_actions = self.normalizer['actions'].unnormalize(pred_actions[eval_sample])
                     gt_actions = gt_actions * actions_valid_mask
                     pred_actions = pred_actions * actions_valid_mask
                     
@@ -523,14 +527,51 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     )
                     eval_accuracy.append(batch_accuracy)
                     
-                    # Compute L1 loss, num should not be 0 here since we have checked eval_sample
+                    abs_diff = torch.abs(pred_actions - gt_actions)
+                    # Compute L1 loss per sample (not batch average)
+                    # Calculate per-sample loss for finding min/max
+                    per_sample_l1_loss = torch.sum(
+                        abs_diff.flatten(dim=1), dim=1
+                    ) / torch.sum(actions_valid_mask.flatten(dim=1), dim=1)  # [B]
+                    
+                    # Compute batch-level statistics for logging
                     actions_valid_num = torch.sum(actions_valid_mask)
                     actions_valid_num_per_dim = torch.sum(actions_valid_mask.reshape(-1, D), dim=0)
-                    batch_l1_loss = torch.sum(torch.abs(pred_actions - gt_actions)) / actions_valid_num
-                    batch_l1_loss_per_dim = torch.sum(torch.abs(pred_actions - gt_actions).reshape(-1, D), dim=0) / actions_valid_num_per_dim
+                    batch_l1_loss = torch.sum(abs_diff) / actions_valid_num
+                    batch_l1_loss_per_dim = torch.sum(abs_diff.reshape(-1, D), dim=0) / actions_valid_num_per_dim
                     eval_l1_loss.append(batch_l1_loss)
                     eval_l1_loss_per_dim.append(batch_l1_loss_per_dim)
-                
+                    
+                    # Track min/max loss samples for visualization
+                    if hasattr(self.model, 'module'):
+                        model = self.model.module
+                    else:
+                        model = self.model
+                    if hasattr(model, 'attn_weights') and len(model.attn_weights) > 0:
+                        # attn_weights: list of [B, num_heads, seq_len, seq_len] for each layer
+                        # [num_layers, eval_sample, num_heads, seq_len, seq_len]
+                        attn_weights = torch.stack(model.attn_weights, dim=0)[:, eval_sample, :, :, :]  
+                        
+                        # Find min/max loss samples in this batch
+                        for sample_idx in range(per_sample_l1_loss.shape[0]):
+                            current_loss = per_sample_l1_loss[sample_idx].item()
+                            metadata = {
+                                'batch_idx': batch_idx,
+                                'sample_idx': sample_idx,
+                                'l1_loss': current_loss,
+                            }
+                            
+                            # Update min loss sample
+                            if current_loss < min_loss_sample['loss']:
+                                min_loss_sample['loss'] = current_loss
+                                min_loss_sample['attn_weights'] = attn_weights[:, sample_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
+                                min_loss_sample['metadata'] = metadata
+                            
+                            # Update max loss sample
+                            if current_loss > max_loss_sample['loss']:
+                                max_loss_sample['loss'] = current_loss
+                                max_loss_sample['attn_weights'] = attn_weights[:, sample_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
+                                max_loss_sample['metadata'] = metadata
                 if self.cfg.training.max_eval_steps and batch_idx >= (self.cfg.training.max_eval_steps-1):
                     break
             
@@ -587,6 +628,55 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 ])
                 if accelerator.is_main_process:
                     print(log_msg)
+            
+            # Visualize attention weights for selected samples
+            if accelerator.is_main_process and min_loss_sample['attn_weights'] is not None:
+                print(f"\nVisualizing attention weights for selected samples...")
+                
+                selected_samples = {
+                    'lowest_loss': {
+                        'attn_weights': min_loss_sample['attn_weights'],
+                        'metadata': min_loss_sample['metadata']
+                    },
+                    'highest_loss': {
+                        'attn_weights': max_loss_sample['attn_weights'],
+                        'metadata': max_loss_sample['metadata']
+                    }
+                }
+                
+                print(f"Selected samples for visualization:")
+                print(f"  Lowest loss: batch {min_loss_sample['metadata']['batch_idx']}, "
+                      f"sample {min_loss_sample['metadata']['sample_idx']}, loss={min_loss_sample['loss']:.4f}")
+                print(f"  Highest loss: batch {max_loss_sample['metadata']['batch_idx']}, "
+                      f"sample {max_loss_sample['metadata']['sample_idx']}, loss={max_loss_sample['loss']:.4f}")
+                
+                # Visualize each selected sample
+                for name, sample_data in selected_samples.items():
+                    if sample_data['attn_weights'] is None:
+                        continue
+                        
+                    print(f"\nProcessing {name} sample...")
+                    
+                    attn_weights_sample = sample_data['attn_weights'].numpy()  # [num_layers, num_heads, seq_len, seq_len]
+                    
+                    # Create output directory
+                    output_dir = os.path.join(
+                        self.output_dir, 
+                        'attention_visualization',
+                        f'step_{self.update_step}',
+                        name
+                    )
+                    # Visualize attention maps
+                    try:
+                        plot_multilayer_attention_maps(
+                            attention_maps=attn_weights_sample,
+                            output_dir=output_dir,
+                            step=self.update_step,
+                        )
+                        print(f"  Saved to: {output_dir}")
+                    except Exception as e:
+                        print(f"  Error visualizing attention: {e}")
+                
 
     def save_checkpoint_accelerator(self, accelerator, path=None, tag='latest'):
         if path is None:

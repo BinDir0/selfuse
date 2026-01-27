@@ -126,6 +126,13 @@ class LegendVLA(nn.Module):
         self.loss_weights = cfg.loss_weights
 
     @property
+    def attn_weights(self):
+        """
+        Get all attention weights for the joint model.
+        """
+        return self.joint_model.attn_weights
+
+    @property
     def action_expert_parameters(self):
         """
         Get all trainable parameters for the action experts.
@@ -708,6 +715,7 @@ class LegendVLA(nn.Module):
         q_len: int,
         attention_mask: torch.Tensor,
         kv_cache: Optional[KVCache] = None,
+        dtype: torch.dtype = torch.float32,
     ) -> Tuple[torch.FloatTensor, torch.LongTensor]:
         """
         Build causal mask and position IDs for text generation.
@@ -718,7 +726,7 @@ class LegendVLA(nn.Module):
         
         Args:
             q_len (int): Length of the current query sequence
-            attention_mask (torch.Tensor): [B, seq_len] Attention mask for input tokens
+            attention_mask (torch.Tensor): [B, seq_len] Attention mask for input tokens (left padding)
             kv_cache (Optional[KVCache]): Optional KV cache for generation
         
         Returns:
@@ -726,21 +734,61 @@ class LegendVLA(nn.Module):
                 - causal_mask (torch.FloatTensor): [B, 1, q_len, kv_len] Attention mask (broadcasts to all heads)
                 - position_ids (torch.LongTensor): [B, q_len] Position IDs for query tokens
         """
-        dtype, device = attention_mask.dtype, attention_mask.device
+        device = attention_mask.device
         bsz = attention_mask.size(0)
+        
+        # Assert left padding: once we see a valid token (1), all subsequent tokens must be valid
+        # Check that there are no padding tokens after the first valid token
+        has_padding = (attention_mask == 0).any(dim=-1)  # [B], True if batch has padding
+        if has_padding.any():
+            # For batches with padding, check left padding property
+            for b in range(bsz):
+                if has_padding[b]:
+                    mask = attention_mask[b]  # [seq_len]
+                    # Find first valid token
+                    first_valid_idx = (mask != 0).nonzero(as_tuple=True)[0]
+                    assert len(first_valid_idx) > 0, "Expect left padding: no valid tokens found"
+                    first_valid_idx = first_valid_idx[0].item()
+                    # All tokens before first_valid_idx should be padding (0)
+                    assert (mask[:first_valid_idx] == 0).all(), \
+                        f"Expect left padding: found valid tokens before first valid token at position {first_valid_idx}"
+                    # All tokens from first_valid_idx onwards should be valid (non-zero)
+                    assert (mask[first_valid_idx:] != 0).all(), \
+                        f"Expect left padding: found padding tokens after first valid token at position {first_valid_idx}"
 
         if kv_cache is None or kv_cache.num_items() == 0:
-            # do not mask any token, because we're in the prefill phase
-            # assume no padding
-            causal_mask = torch.full((bsz, q_len, q_len), 0, dtype=dtype, device=device)
+            # Prefill phase: create causal mask
+            # During inference, we use left padding by default
+            # Initialize all positions to minimum value (masked out by default)
+            causal_mask = torch.full(
+                (bsz, q_len, q_len),
+                torch.finfo(dtype).min,
+                dtype=dtype,
+                device=device,
+            )  # Use smallest value to avoid softmax nan issues with padding
+            
+            # For left padding: attention_mask[i] == 0 means position i is a padding token
+            # Unmask valid positions (where both query and key are not padding)
+            assert attention_mask.size(-1) == q_len, "Attention mask must have the same length as the total sequence"
+            valid_mask = (attention_mask != 0)  # True for valid (non-padding) positions
+            causal_mask = causal_mask.masked_fill(valid_mask.unsqueeze(-1) & valid_mask.unsqueeze(1), 0)
         else:
+            # Generation phase: using KV cache for incremental decoding
             assert q_len == 1, "Using KV cache so should only use one single token"
             kv_len = kv_cache.num_items() + q_len
-            # also in this case we don't need to mask anything, since each query should be able to attend all previous tokens.
-            # this only works when we have no padding
+            
+            # During inference with left padding, the KV cache contains padding tokens at the beginning
+            # Initialize all positions to minimum value (masked out by default)
             causal_mask = torch.full(
-                (bsz, q_len, kv_len), 0, dtype=dtype, device=device
-            )
+                (bsz, q_len, kv_len),
+                torch.finfo(dtype).min,
+                dtype=dtype,
+                device=device,
+            )  # Use smallest value to avoid softmax nan issues with padding
+            
+            assert attention_mask.size(-1) == kv_len, "Attention mask must have the same length as the total sequence"
+            valid_mask = (attention_mask != 0)  # True for valid (non-padding) positions
+            causal_mask = causal_mask.masked_fill(valid_mask.unsqueeze(1), 0)  # [B, 1, kv_len]
 
         # add the head dimension for broadcasting to all attention heads
         # [Batch_Size, Q_Len, KV_Len] -> [Batch_Size, 1, Q_Len, KV_Len]
@@ -765,6 +813,7 @@ class LegendVLA(nn.Module):
         pixel_values: torch.FloatTensor = None,
         depth_values: Optional[torch.FloatTensor] = None,
         depth_ids: Optional[torch.LongTensor] = None,
+        dtype: torch.dtype = torch.float32,
     ) -> torch.FloatTensor:
         """
         Forward pass through SigLIP vision encoder and text embedding, then combine them.
@@ -778,11 +827,10 @@ class LegendVLA(nn.Module):
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
         """
-        dtype, device = pixel_values.dtype, pixel_values.device
-
         # text embedding
         # [Batch_Size, Seq_Len, Hidden_Size]
         inputs_embeds = self.embed_tokens(input_ids)
+        device = inputs_embeds.device
 
         if pixel_values is not None:
             # image features from siglip and projector
@@ -898,7 +946,9 @@ class LegendVLA(nn.Module):
         else:
             depth_values = None
             depth_ids = None
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
+        inputs_embeds = self._forward_siglip_and_text_embedding(
+            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+        )
         
         # forward pass thru the vlm, cache the kv
         _, kv_caches = self.joint_model(
@@ -984,7 +1034,9 @@ class LegendVLA(nn.Module):
         else:
             depth_values = None
             depth_ids = None
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
+        inputs_embeds = self._forward_siglip_and_text_embedding(
+            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+        )
 
         # sample pure action noise
         action = torch.randn(
@@ -1028,6 +1080,7 @@ class LegendVLA(nn.Module):
         self,
         input: dict,
         kv_cache: Optional[KVCache] = None,
+        dtype: torch.dtype = torch.float32,
     ) -> dict:
         """
         Inference function for discrete action generation.
@@ -1047,19 +1100,23 @@ class LegendVLA(nn.Module):
         """
         input_ids = input["input_ids"]
         pixel_values = input.get("pixel_values", None)
+        depth_values = input.get("depth_values", None)
+        depth_ids = input.get("depth_ids", None)
         attention_mask = input["attention_mask"]
 
         q_len = input_ids.size(1)
 
         # text tokens + image tokens
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values)
+        inputs_embeds = self._forward_siglip_and_text_embedding(
+            input_ids, pixel_values, depth_values, depth_ids, dtype
+        )
 
         # build causal mask and position ids for text
         (
             causal_mask,
             position_ids,
         ) = self.build_causal_mask_and_position_ids_for_text(
-            q_len, attention_mask, kv_cache
+            q_len, attention_mask, kv_cache, dtype
         )
 
         hidden_states = self.joint_model(
@@ -1124,7 +1181,7 @@ class LegendVLA(nn.Module):
         attention_mask = input.get("attention_mask", None)
         
         batch_size = input_ids.size(0)
-        device = input_ids.device
+        device, dtype = input_ids.device, pixel_values.dtype
         
         # Create all-ones mask if attention_mask is not provided
         if attention_mask is None:
@@ -1144,7 +1201,7 @@ class LegendVLA(nn.Module):
             "attention_mask": attention_mask,
         }
         
-        prefill_output = self.infer_single_step(prefill_input, kv_cache=kv_cache)
+        prefill_output = self.infer_single_step(prefill_input, kv_cache=kv_cache, dtype=dtype)
         prefill_logits = prefill_output["logits"]  # [B, seq_len, vocab_size]
         kv_cache = prefill_output.get("kv_cache", kv_cache)
         
@@ -1185,14 +1242,17 @@ class LegendVLA(nn.Module):
             # Single-step inference (using KV cache)
             # In generation phase, only need to pass the newly generated token
             # Image tokens have already been processed in prefill phase
+            attention_mask = torch.cat([
+                attention_mask, torch.ones(
+                    (batch_size, 1), dtype=torch.long, device=device
+                ) * active_mask.unsqueeze(1),
+            ], dim=-1)
             step_input = {
                 "input_ids": step_input_ids.unsqueeze(1),  # [B, 1]
-                "attention_mask": torch.ones(
-                    (batch_size, 1), dtype=torch.long, device=device
-                ) * active_mask.unsqueeze(1),  # [B, 1]
+                "attention_mask": attention_mask,  # [B, seq_len]
             }
             
-            step_output = self.infer_single_step(step_input, kv_cache=kv_cache)
+            step_output = self.infer_single_step(step_input, kv_cache=kv_cache, dtype=dtype)
             step_logits = step_output["logits"]  # [B, 1, vocab_size]
             kv_cache = step_output.get("kv_cache", kv_cache)
             
@@ -1292,7 +1352,9 @@ class LegendVLA(nn.Module):
         else:
             depth_values = None
             depth_ids = None
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
+        inputs_embeds = self._forward_siglip_and_text_embedding(
+            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+        )
         
         output = self.joint_model(
             attention_mask=causal_mask,
@@ -1367,7 +1429,9 @@ class LegendVLA(nn.Module):
         else:
             depth_values = None
             depth_ids = None
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
+        inputs_embeds = self._forward_siglip_and_text_embedding(
+            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+        )
 
         # inference with noisy action
         # [Batch_Size, Embed_Dim]
@@ -1458,7 +1522,9 @@ class LegendVLA(nn.Module):
         else:
             depth_values = None
             depth_ids = None
-        inputs_embeds = self._forward_siglip_and_text_embedding(input_ids, pixel_values, depth_values, depth_ids)
+        inputs_embeds = self._forward_siglip_and_text_embedding(
+            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+        )
         
         # inference with noisy action
         # [Batch_Size, Embed_Dim]

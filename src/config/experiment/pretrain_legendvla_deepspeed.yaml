@@ -15,13 +15,13 @@ depth_image_shape: [224, 224]
 vla_dataset_paths:
  - name: taco 
    path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
-   weight: 2
+   weight: 1
  - name: oakink2
    path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
    weight: 2
- - name: holoassist
-   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_clean_nan.zarr
-   weight: 1
+#  - name: holoassist
+#    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_clean_nan.zarr
+#    weight: 2
  - name: egodex
    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
    weight: 5
@@ -132,7 +132,7 @@ vla_processor:
   #     pretrained_model_name_or_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024/actions
   motion_tokenizer: 
     _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
-    load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2026.01.16 # may need to change
+    load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2026.01.25 # may need to change
   num_image_tokens: ${policy.vision_tower.config.num_image_tokens}
   num_depth_image_tokens: ${depth_image_seq_len}
   max_seq_len: ${max_vlm_tokens}
@@ -282,7 +282,7 @@ pad_token_id: 0
 patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
 depth_image_seq_len: ${eval:'(${depth_image_shape[0]}//${patch_size})*(${depth_image_shape[1]}//${patch_size})'}
-state_seq_len: 192 # 
+state_seq_len: 256 # 
 text_seq_len: ${eval:'${state_seq_len}+64'}
 answer_seq_len: 256 
 # Make sure at least one tokens for VLM answer in the training, 

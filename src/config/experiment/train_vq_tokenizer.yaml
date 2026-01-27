@@ -4,11 +4,19 @@ exp_name: "vq_tokenizer"
 _target_: src.workspace.train_vq_tokenizer.TrainVQTokenizerWorkspace
 
 image_shape: [224, 224, 3]
-dataset_paths:
- - /share_data/guantianrui/datasets/taco/taco_train_presence_clean.zarr
- - /share_data/guantianrui/datasets/OakInk-v2/oakink2_train_presence_clean.zarr
-#  - /share_data/guantianrui/datasets/hoi4d_segmented/hoi4d_train.zarr
- - /share_data/yeyuyao/egodex_filter_train_presence_clean.zarr
+vla_dataset_paths:
+ - name: taco 
+   path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
+   weight: 1
+ - name: oakink2
+   path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
+   weight: 2
+#  - name: holoassist
+#    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_clean_nan.zarr
+#    weight: 2
+ - name: egodex
+   path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
+   weight: 5
 
 test_seendataset_paths: 
   # - /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
@@ -45,7 +53,7 @@ shape_meta: &shape_meta
 
 dataset:
   _target_: src.dataset.legendvla_dataset.LegendVLALowLevelDataset
-  zarr_paths: ${dataset_paths}
+  zarr_paths: ${vla_dataset_paths}
   horizon: ${eval:'${n_action_steps}+${history}'}
   pad_before: ${eval:'${history}+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}
@@ -147,8 +155,8 @@ tokenizer:
   #       output_emb_width: 512
   #     quantizer_config:
   #       <<: *base_quantizer_config
-  #       codebook_size: 4096    # partially override the base quantizer config
-  #       num_quantizers: 4
+  #       codebook_size: 2048    # partially override the base quantizer config
+  #       num_quantizers: 8
   #       num_groups: 2
   hand: 
     _target_: src.model.action.vq_model.MotionVQModel
@@ -161,8 +169,8 @@ tokenizer:
         output_emb_width: 512
       quantizer_config:
         <<: *base_quantizer_config
-        codebook_size: 4096    # partially override the base quantizer config
-        num_quantizers: 4
+        codebook_size: 2048    # partially override the base quantizer config
+        num_quantizers: 8
         num_groups: 2
 
 optimizer:
@@ -174,7 +182,7 @@ optimizer:
 
 training:
   seed: 42
-  device: cuda:7
+  device: cuda:3
   num_epochs: 10
   tqdm_interval_sec: 1.0
   max_train_steps: 
