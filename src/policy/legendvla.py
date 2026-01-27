@@ -122,7 +122,8 @@ class LegendVLA(nn.Module):
             )
             self.lm_head.weight = self.embed_tokens.weight  # tie weights
 
-        self.CELoss = nn.CrossEntropyLoss(ignore_index=cfg.ignore_index)
+        self.CELoss = nn.CrossEntropyLoss(ignore_index=cfg.ignore_index, reduction='sum')
+        self.ignore_index = cfg.ignore_index
         self.loss_weights = cfg.loss_weights
 
     @property
@@ -1374,6 +1375,8 @@ class LegendVLA(nn.Module):
         labels = labels[:, 1:].contiguous().view(-1)
 
         ce_loss = self.CELoss(logits, labels)
+        valid_num_labels = torch.sum(labels != self.ignore_index)
+        ce_loss = ce_loss / valid_num_labels.clamp(min=1)
 
         return {
             "ce_loss": ce_loss,
@@ -1465,9 +1468,7 @@ class LegendVLA(nn.Module):
         # Use element-wise multiplication to make sure the gradient can always be propagated to the action expert 
         masked_loss = actions_valid_mask * loss
         actions_valid_num = torch.sum(actions_valid_mask)
-        if actions_valid_num == 0:
-            actions_valid_num = 1
-        flow_loss = torch.sum(masked_loss) / actions_valid_num
+        flow_loss = torch.sum(masked_loss) / actions_valid_num.clamp(min=1)
         return {
             "flow_loss": flow_loss,
         }
@@ -1556,6 +1557,8 @@ class LegendVLA(nn.Module):
         labels = labels[:, 1:].contiguous().view(-1)
 
         ce_loss = self.CELoss(logits, labels)
+        valid_num_labels = torch.sum(labels != self.ignore_index)
+        ce_loss = ce_loss / valid_num_labels.clamp(min=1)
 
         # [Batch_Size, Horizon_Steps, Action_Dim]
         v_psi = self.action_decoder(action_embeds)
@@ -1567,9 +1570,7 @@ class LegendVLA(nn.Module):
         # Use element-wise multiplication to make sure the gradient can always be propagated to the action expert 
         masked_loss = actions_valid_mask * flow_loss
         actions_valid_num = torch.sum(actions_valid_mask)
-        if actions_valid_num == 0:
-            actions_valid_num = 1
-        flow_loss = torch.sum(masked_loss) / actions_valid_num
+        flow_loss = torch.sum(masked_loss) / actions_valid_num.clamp(min=1)
 
         total_loss = self.loss_weights.ce_loss_weight * ce_loss + self.loss_weights.flow_loss_weight * flow_loss
         return {

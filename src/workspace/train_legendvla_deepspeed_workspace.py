@@ -531,8 +531,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     # Compute L1 loss per sample (not batch average)
                     # Calculate per-sample loss for finding min/max
                     per_sample_l1_loss = torch.sum(
-                        abs_diff.flatten(dim=1), dim=1
-                    ) / torch.sum(actions_valid_mask.flatten(dim=1), dim=1)  # [B]
+                        abs_diff.flatten(start_dim=1), dim=1
+                    ) / torch.sum(actions_valid_mask.flatten(start_dim=1), dim=1)  # [B]
                     
                     # Compute batch-level statistics for logging
                     actions_valid_num = torch.sum(actions_valid_mask)
