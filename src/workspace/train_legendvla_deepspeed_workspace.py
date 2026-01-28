@@ -240,6 +240,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         else: 
             model.freeze_non_lora_weights_in_vlm()
 
+        diffloss_trainable_paramters = self.get_grouped_parameters(
+            model.diffloss_parameters,
+            cfg.optimizer.diffloss,
+        )
+        all_trainable_parameters.extend(diffloss_trainable_paramters)
+
         all_trainable_params_list = []
         for params_dict in all_trainable_parameters:
             all_trainable_params_list.extend(params_dict['params'])

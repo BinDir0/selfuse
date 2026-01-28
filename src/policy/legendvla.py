@@ -22,6 +22,7 @@ from src.model.common.modules import (
     SinusoidalPosEmb,
     TimeEncoder,
 )
+from src.model.action.diffloss import DiffLoss
 from src.utils.monitor import log_execution_time
 from src.utils.generation_utils import sample_token
 
@@ -38,6 +39,7 @@ class LegendVLA(nn.Module):
         vision_tower,
         multi_modal_projector,
         joint_model,
+        diffloss,
     ):
         super().__init__()
         self.cfg = cfg
@@ -49,10 +51,6 @@ class LegendVLA(nn.Module):
 
         self.max_vlm_tokens = cfg.max_vlm_tokens
         self.num_action_tokens = shape_meta["action"]["horizon"]
-        self.max_num_tokens = (
-            self.max_vlm_tokens
-            + self.num_action_tokens
-        )
 
         # Get hidden sizes from joint_model config
         self.vlm_hidden_size = joint_model.config.mixture.vlm.hidden_size
@@ -87,10 +85,13 @@ class LegendVLA(nn.Module):
         # Mixtures
         self.joint_model = joint_model
 
-        # Noised action, time encoders
+        # Diffusion loss
+        self.diffloss = diffloss
+
+        # Action, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
         if self.action_expert_adaptive_mode:  # adaLN or adaLN-Zero
-            self.noised_action_encoder = nn.Linear(
+            self.action_encoder = nn.Linear(
                 self.action_dim,
                 self.action_hidden_size,
             )
@@ -99,7 +100,7 @@ class LegendVLA(nn.Module):
                 TimeEncoder(cfg.time_hidden_size), 
             )
         else:  # matching pi0
-            self.noised_action_encoder = ActionEncoder(
+            self.action_encoder = ActionEncoder(
                 self.action_dim,
                 self.action_hidden_size,
                 time_cond=True,
@@ -113,8 +114,8 @@ class LegendVLA(nn.Module):
             self.action_dim,
         )
 
-        # Action encoder for continuous autoregressive modeling
-        self.action_encoder = nn.Linear(
+        # Action/state encoder for continuous autoregressive modeling
+        self.action_encoder_ar = nn.Linear(
             self.action_dim,
             self.vlm_hidden_size,
         )
@@ -243,6 +244,16 @@ class LegendVLA(nn.Module):
 
         gemma_parameters.extend(list(self.embed_tokens.parameters()))
         return gemma_parameters
+    
+    @property
+    def diffloss_parameters(self):
+        """
+        Get all trainable parameters for the DiffLoss module.
+        
+        Returns:
+            List[torch.nn.Parameter]: Trainable DiffLoss parameters
+        """
+        return list(self.diffloss.parameters())
 
     @torch.no_grad()
     def init_motion_token_embeddings(self, motion_token_list):
