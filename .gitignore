@@ -161,3 +161,5 @@ logs/
 _test
 
 .pylintrc
+
+training.log
