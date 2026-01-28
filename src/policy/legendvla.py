@@ -244,6 +244,16 @@ class LegendVLA(nn.Module):
 
         gemma_parameters.extend(list(self.embed_tokens.parameters()))
         return gemma_parameters
+    
+    @property
+    def diffloss_parameters(self):
+        """
+        Get all trainable parameters for the DiffLoss module.
+        
+        Returns:
+            List[torch.nn.Parameter]: Trainable DiffLoss parameters
+        """
+        return list(self.diffloss.parameters())
 
     @torch.no_grad()
     def init_motion_token_embeddings(self, motion_token_list):
