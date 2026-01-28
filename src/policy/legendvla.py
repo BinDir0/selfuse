@@ -1525,6 +1525,9 @@ class LegendVLA(nn.Module):
         actions = batch["actions"]
         actions_valid_mask = batch["actions_valid_mask"]
         t = batch["t"]
+        states = batch["states"]
+        answer_start_idx = batch["answer_start_idx"]
+        is_vla_data = batch["is_vla_data"]
 
         """flow matching loss for action prediction, no use of kv cache"""
         # noisy action

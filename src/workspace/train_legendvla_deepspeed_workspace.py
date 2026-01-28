@@ -746,6 +746,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "input_ids": input_ids,
             "pixel_values": batch["pixel_values"].to(self.dtype),
             "vlm_position_ids": vlm_position_ids,
+            "states": batch["states"].to(self.dtype),
+            "answer_start_idx": batch["answer_start_idx"],
+            "is_vla_data": batch["is_vla_data"],
         }
         # Add depth_values if available
         if "depth_values" in batch:
