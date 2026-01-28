@@ -103,14 +103,14 @@ class LegendVLADataset(BaseRatioDataset):
             self.train_masks.append(train_mask)
             
             # Create sampler
-            self.image_history = history + 1 if self.n_obs_image_steps > 1 else 1
+            self.image_history = history + 1
             sampler = SequenceSampler(
                 replay_buffer=replay_buffer,
                 sequence_length=horizon,
                 pad_before=pad_before,
                 pad_after=pad_after,
                 episode_mask=train_mask,
-                key_first_k=dict(image=self.image_history, depth=self.image_history))
+                key_first_k=dict())
             self.samplers.append(sampler)
             
             # Record sampler length
@@ -1195,6 +1195,32 @@ def test_dataset_loading():
     print("Dataset Loading Test Completed!")
     print("="*80)
 
+    # Test UnifiedDataset Dataloader
+    print("\n6. Testing UnifiedDataset Dataloader...")
+    try:
+        dataloader = DataLoader(
+            dataset=unified_dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=unified_dataset.get_collator(),
+            **cfg.dataloader.loader
+        )
+        print(f"   ✓ UnifiedDataset Dataloader created successfully")
+        print(f"   - Dataloader length: {len(dataloader)}")
+        print(f"   - Dataloader batch size: {cfg.dataloader.batch_sampler.batch_size}")
+        for idx, batch in enumerate(dataloader):
+            if idx > 100: 
+                break
+            print(f"batch {idx} pixel values range: {batch['pixel_values'].min()}, {batch['pixel_values'].max()}")
+        first_batch = next(iter(dataloader))
+        print(f"   - Dataloader batch keys : {list(first_batch.keys())}")
+        for key, value in first_batch.items():
+            if hasattr(value, 'shape'):
+                print(f"   - {key}: shape={value.shape}, dtype={value.dtype}")
+            else:
+                print(f"   - {key}: type={type(value)}")
+        print(f"pixel values range: {first_batch['pixel_values'].min()}, {first_batch['pixel_values'].max()}")
+    except Exception as e:
+        print(f"   ✗ Error creating unified dataset dataloader: {e}")
 
 if __name__ == "__main__":
     test_dataset_loading()
