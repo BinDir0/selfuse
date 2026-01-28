@@ -1,1 +1,0 @@
-nsys launch accelerate launch --num_processes=8 train.py experiment=pretrain

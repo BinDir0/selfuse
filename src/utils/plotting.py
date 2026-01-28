@@ -268,7 +268,7 @@ def _add_segment_annotations(ax, boundaries, labels, colors, seq_len):
         )
 
 
-def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_segments=None):
+def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_segments=None, layer_plot_every=4):
     """
     Plot multi-layer multi-head attention maps.
     Each layer is plotted separately, plus an averaged map across all layers.
@@ -285,21 +285,21 @@ def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_
         raise ValueError(
             f"Expected attention_maps shape [num_layers, num_heads, seq_len, seq_len], got {attention_maps.shape}"
         )
-    
+
     num_layers, num_heads, seq_len, _ = attention_maps.shape
-    
+
     print(f"\nPlotting multi-layer attention maps:")
     print(f"  Total shape: {attention_maps.shape}")
     print(f"  Num layers: {num_layers}, Num heads: {num_heads}, Sequence length: {seq_len}")
     print(f"  Value range: [{attention_maps.min():.4f}, {attention_maps.max():.4f}]")
     print()
-    
+
     # Create output directory
     output_path = pathlib.Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Plot each layer separately
-    for layer_idx in range(num_layers):
+    for layer_idx in range(0, num_layers, layer_plot_every):
         print(f"Plotting layer {layer_idx + 1}/{num_layers}...")
         layer_attention = attention_maps[layer_idx]  # [num_heads, seq_len, seq_len]
         plot_attention_maps(
@@ -309,9 +309,10 @@ def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_
             layer_idx=layer_idx,
             token_segments=token_segments
         )
-    
+
     # Plot averaged attention map across all layers
     print(f"\nPlotting average across all {num_layers} layers...")
+    print(f"\nPlotting average across all {math.ceil(num_layers / layer_plot_every)} layers...")
     avg_attention = np.mean(attention_maps, axis=0)  # [num_heads, seq_len, seq_len]
     plot_attention_maps(
         attention_maps=avg_attention,
@@ -320,7 +321,7 @@ def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_
         layer_idx="avg",
         token_segments=token_segments
     )
-    
+
     print(f"\nAll attention maps saved to {output_path}")
     print(f"  Total files: {num_layers + 1} ({num_layers} layers + 1 averaged)")
 

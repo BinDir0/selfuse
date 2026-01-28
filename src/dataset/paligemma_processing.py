@@ -233,10 +233,10 @@ class PaliGemmaProcessor:
         ]}
         tokenizer.add_special_tokens(tokens_to_add)
         EXTRA_TOKENS = [
-            f"<loc{i:04d}>" for i in range(1024)
+            f"<loc{i:04d}>" for i in range(self.LOCALIZATION_TOKEN_NUM)
         ]  # These tokens are used for object detection (bounding boxes)
         EXTRA_TOKENS += [
-            f"<seg{i:03d}>" for i in range(128)
+            f"<seg{i:03d}>" for i in range(self.SEGMENTATION_TOKEN_NUM)
         ]  # These tokens are used for object segmentation
         tokenizer.add_tokens(EXTRA_TOKENS)
         self.image_token_id = tokenizer.convert_tokens_to_ids(self.IMAGE_TOKEN)
@@ -361,8 +361,7 @@ class PaliGemmaProcessor:
         return self.localization_tokens2float(output_str)
 
 
-class PaliGemmaVLAProcessor:
-    IMAGE_TOKEN = "<image>"
+class PaliGemmaVLAProcessor(PaliGemmaProcessor):
     STATE_TOKEN = "<state>"
     ACTION_TOKEN = "<action>"
 
@@ -376,35 +375,24 @@ class PaliGemmaVLAProcessor:
         depth_image_size: int = 224, 
         tokenizer_padding: str = "longest", # longest or max_length
     ):
-        super().__init__()
-        self.image_seq_length = num_image_tokens
-        self.image_size = image_size
+        super().__init__(
+            tokenizer = tokenizer,
+            num_image_tokens = num_image_tokens,
+            max_seq_len = max_seq_len,
+            ignore_index = ignore_index,
+            image_size = image_size,
+            tokenizer_padding = tokenizer_padding,
+        )
         self.depth_image_size = depth_image_size
-        self.max_seq_len = max_seq_len
-        self.ignore_index = ignore_index
-        self.tokenizer_padding = tokenizer_padding
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
         tokens_to_add = {"additional_special_tokens": [
-            self.IMAGE_TOKEN,
             self.STATE_TOKEN,
             self.ACTION_TOKEN, 
         ]}
         tokenizer.add_special_tokens(tokens_to_add)
-        EXTRA_TOKENS = [
-            f"<loc{i:04d}>" for i in range(1024)
-        ]  # These tokens are used for object detection (bounding boxes)
-        EXTRA_TOKENS += [
-            f"<seg{i:03d}>" for i in range(128)
-        ]  # These tokens are used for object segmentation
-        tokenizer.add_tokens(EXTRA_TOKENS)
-        self.image_token_id = tokenizer.convert_tokens_to_ids(self.IMAGE_TOKEN)
         self.state_token_id = tokenizer.convert_tokens_to_ids(self.STATE_TOKEN)
         self.action_token_id = tokenizer.convert_tokens_to_ids(self.ACTION_TOKEN)
         self.eos_token_id = tokenizer.eos_token_id
-        # We will add the BOS and EOS tokens ourselves
-        tokenizer.add_bos_token = False
-        tokenizer.add_eos_token = False
-        self.tokenizer = tokenizer
     
     def __call__(
         self,
@@ -507,7 +495,9 @@ class PaliGemmaVLAProcessor:
 
         labels = np.ones_like(input_ids) * self.ignore_index # Dummy labels for continuous action prediction
         inputs['labels'] = labels
-        inputs['answer_start_idx'] = np.array(inputs['attention_mask'].sum())
+        assert np.any(input_ids == self.sep_token_id), "The separator token is not found in the input_ids"
+        sep_idx = np.argmax(input_ids == self.sep_token_id)
+        inputs['answer_start_idx'] = np.array(sep_idx+1)
 
         output = {"pixel_values": pixel_values, **inputs}
         if depth_values is not None:

@@ -7,11 +7,14 @@ from .replay_buffer import ReplayBuffer
 
 @numba.jit(nopython=True)
 def create_indices(
-    episode_ends:np.ndarray, sequence_length:int, 
+    episode_ends: np.ndarray, 
+    sequence_length: int, 
     episode_mask: np.ndarray,
-    pad_before: int=0, pad_after: int=0,
-    debug:bool=True) -> np.ndarray:
-    episode_mask.shape == episode_ends.shape        
+    pad_before: int = 0, 
+    pad_after: int = 0,
+    debug: bool = True,
+) -> np.ndarray:
+    episode_mask.shape == episode_ends.shape
     pad_before = min(max(pad_before, 0), sequence_length-1)
     pad_after = min(max(pad_after, 0), sequence_length-1)
 
@@ -48,20 +51,21 @@ def create_indices(
     return indices
 
 
-def get_val_mask(n_episodes, val_ratio, seed=0):
+def get_val_mask(n_episodes, val_ratio, seed = 0):
     val_mask = np.zeros(n_episodes, dtype=bool)
     if val_ratio <= 0:
         return val_mask
 
     # have at least 1 episode for validation, and at least 1 episode for train
     n_val = min(max(1, round(n_episodes * val_ratio)), n_episodes-1)
+    assert n_val > 0 and n_val < n_episodes, f"n_val must be in [1, n_episodes-1], got {n_val}"
     rng = np.random.default_rng(seed=seed)
     val_idxs = rng.choice(n_episodes, size=n_val, replace=False)
     val_mask[val_idxs] = True
     return val_mask
 
 
-def downsample_mask(mask, max_n, seed=0):
+def downsample_mask(mask, max_n, seed = 0):
     # subsample training data
     train_mask = mask
     if (max_n is not None) and (np.sum(train_mask) > max_n):
@@ -76,15 +80,16 @@ def downsample_mask(mask, max_n, seed=0):
     return train_mask
 
 class SequenceSampler:
-    def __init__(self, 
+    def __init__(
+        self, 
         replay_buffer: ReplayBuffer, 
-        sequence_length:int,
-        pad_before:int=0,
-        pad_after:int=0,
-        keys=None,
-        key_first_k=dict(),
-        episode_mask: Optional[np.ndarray]=None,
-        ):
+        sequence_length: int,
+        pad_before: int = 0,
+        pad_after: int = 0,
+        keys = None,
+        key_first_k = dict(),
+        episode_mask: Optional[np.ndarray] = None,
+    ):
         """
         key_first_k: dict str: int
             Only take first k data from these keys (to improve perf)
@@ -100,7 +105,8 @@ class SequenceSampler:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
 
         if np.any(episode_mask):
-            indices = create_indices(episode_ends, 
+            indices = create_indices(
+                episode_ends, 
                 sequence_length=sequence_length, 
                 pad_before=pad_before, 
                 pad_after=pad_after,

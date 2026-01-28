@@ -381,7 +381,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
                 step_log = dict()
-                train_losses = dict()
                 if accelerator.is_main_process:
                     print(f"Training epoch {self.epoch} started")
                 if epoch_idx == 0 and cfg.training.resume_checkpoint_path: 
@@ -430,18 +429,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             self.model_averaging.maybe_update(self.update_step)
 
                         # Logging
-                        raw_loss_cpu = dict_apply(raw_loss, lambda x: x.item())
-                        for key, value in raw_loss_cpu.items():
-                            if key not in train_losses:
-                                train_losses[key] = []
-                            train_losses[key].append(value)
+                        avg_loss_cpu = {}
+                        for key, value in raw_loss.items(): 
+                            avg_loss_cpu[key] = accelerator.reduce(value, reduction='mean').item()
                         step_log.update({
                             'global_step': self.global_step,
                             'update_step': self.update_step,
                             'epoch': self.epoch,
                             'lr': self.lr_scheduler.get_last_lr()[0],
                         })
-                        step_log.update(raw_loss_cpu)
+                        step_log.update(avg_loss_cpu)
 
                         # Evaluation
                         if (self.update_step % cfg.training.eval_every) == 0 and \
@@ -469,13 +466,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         if cfg.training.profile and accelerator.is_main_process:
                             prof.step()
 
-                # End of epoch processing
-                train_loss = dict_apply(train_losses, lambda x: np.mean(x))
-                step_log.update(train_loss)
-
-                # Log final step of epoch
-                accelerator.log(step_log, step=self.update_step)
-                json_logger.log(step_log)
                 self.epoch += 1
 
         accelerator.end_training()
@@ -506,6 +496,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         val_losses[key] = list()
                     val_losses[key].append(loss_)
 
+                if hasattr(self.model, 'module'):
+                    model = self.model.module
+                else:
+                    model = self.model
+                full_seq_attn_maps = None 
+                if hasattr(model, 'attn_weights') and len(model.attn_weights) > 0:
+                    full_seq_attn_maps = torch.stack(model.attn_weights, dim=0) # [num_layers, B, num_heads, seq_len, seq_len]
                 # Compute action accuracy if actions are available
                 if 'actions' in inputs and self.objective_func != "train_ar":
                     gt_actions = inputs['actions']
@@ -520,8 +517,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if not torch.any(eval_sample):
                         continue
                     actions_valid_mask = actions_valid_mask[eval_sample]
-                    gt_actions = self.normalizer['actions'].unnormalize(gt_actions[eval_sample])
-                    pred_actions = self.normalizer['actions'].unnormalize(pred_actions[eval_sample])
+                    gt_actions = self.normalizer['motions'].unnormalize(gt_actions[eval_sample])
+                    pred_actions = self.normalizer['motions'].unnormalize(pred_actions[eval_sample])
                     gt_actions = gt_actions * actions_valid_mask
                     pred_actions = pred_actions * actions_valid_mask
                     
@@ -549,14 +546,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     eval_l1_loss_per_dim.append(batch_l1_loss_per_dim)
                     
                     # Track min/max loss samples for visualization
-                    if hasattr(self.model, 'module'):
-                        model = self.model.module
-                    else:
-                        model = self.model
-                    if hasattr(model, 'attn_weights') and len(model.attn_weights) > 0:
-                        # attn_weights: list of [B, num_heads, seq_len, seq_len] for each layer
+                    if full_seq_attn_maps is not None:
                         # [num_layers, eval_sample, num_heads, seq_len, seq_len]
-                        attn_weights = torch.stack(model.attn_weights, dim=0)[:, eval_sample, :, :, :]  
+                        attn_weights = full_seq_attn_maps[:, eval_sample, :, :, :]  
                         
                         # Find min/max loss samples in this batch
                         for sample_idx in range(per_sample_l1_loss.shape[0]):
@@ -583,11 +575,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             
             # Process validation loss
             for key in val_losses.keys():
-                val_losses[key] = torch.stack(val_losses[key])
-                val_losses[key] = accelerator.gather_for_metrics(val_losses[key].mean())
-            
-            for key in val_losses.keys():
-                val_losses[key] = torch.mean(val_losses[key]).item()
+                num_samples = torch.tensor(len(val_losses[key]), device=accelerator.device)
+                if len(val_losses[key]) == 0:
+                    val_losses[key] = torch.tensor(0.0, device=accelerator.device)
+                else: 
+                    val_losses[key] = torch.stack(val_losses[key]).sum()
+                total_num_samples = accelerator.reduce(num_samples, reduction='sum')
+                val_losses[key] = accelerator.reduce(val_losses[key], reduction='sum') / total_num_samples.clamp(min=1)
+                val_losses[key] = val_losses[key].item()
                 step_log[f'val_{key}'] = val_losses[key]
 
             # fill eval_accuracy and eval_l1_loss to the same length as dataloader
@@ -678,6 +673,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             attention_maps=attn_weights_sample,
                             output_dir=output_dir,
                             step=self.update_step,
+                             layer_plot_every=4, # plot every 4 layers
                         )
                         print(f"  Saved to: {output_dir}")
                     except Exception as e:

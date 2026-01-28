@@ -195,6 +195,7 @@ class LegendVLADataset(BaseRatioDataset):
             'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
             'states': state,
+            'is_vla_data': np.array(True, dtype=np.bool), 
         }
         # Add depth_values if available
         if 'depth_values' in processed_results:
@@ -241,11 +242,9 @@ class LegendVLADataset(BaseRatioDataset):
         # Find corresponding sampler
         # For validation, we need to directly sample from the validation set
         curr_idx = idx
-        dataset_idx = 0
         for i, length in enumerate(self.sampler_lens):
             if curr_idx < length:
                 sample = self.samplers[i].sample_sequence(curr_idx)
-                dataset_idx = i
                 break
             curr_idx -= length
         
@@ -354,10 +353,11 @@ class LegendVLMDataset(torch.utils.data.Dataset):
 
         data = {
             'input_ids': processed_results['input_ids'],
-            'labels': processed_results['labels'] ,
-            'attention_mask': processed_results['attention_mask'] ,
+            'labels': processed_results['labels'],
+            'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
             'answer_start_idx': processed_results['answer_start_idx'],
+            'is_vla_data': np.array(False, dtype=np.bool), 
         }
         return data
 
@@ -573,8 +573,7 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
             action = action[:, dim_slice]
 
         data = {
-            'states': state,
-            'actions': action,
+            'motions': np.concatenate([state, action], axis=0),
         }
         return data
 
@@ -883,8 +882,8 @@ def process_state_action(
         processed_action = get_relative_action(processed_state[-1], processed_action)
 
     if normalizer is not None:
-        state = normalizer['states'](processed_state)
-        action = normalizer['actions'](processed_action)
+        state = normalizer['motions'](processed_state)
+        action = normalizer['motions'](processed_action)
     else:
         state = processed_state
         action = processed_action
@@ -950,8 +949,7 @@ def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
         normalizer.update_streaming_fit(input_data)
     normalizer.finish_streaming_fit()
     # ignore the wrist rotation
-    normalizer.ignore_dim(key='states', dim=slice(6, 18))
-    normalizer.ignore_dim(key='actions', dim=slice(6, 18))
+    normalizer.ignore_dim(key='motions', dim=slice(6, 18))
 
     def print_dict(d):
         for k, v in d.items():

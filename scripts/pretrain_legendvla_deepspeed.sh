@@ -33,5 +33,5 @@ rm -f .deepspeed_env
 accelerate launch \
     --config_file src/config/acc_config.yaml \
     train.py \
-    experiment=pretrain_legendvla_deepspeed 
-
+    experiment=pretrain_legendvla_deepspeed \
+    2>&1 | tee training.log

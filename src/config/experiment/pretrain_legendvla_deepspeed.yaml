@@ -94,11 +94,10 @@ dataset:
     objective: ${objective}
     normalizer_dataloader_cfg:
       batch_size: 4096
-      num_workers: 96
+      num_workers: 120
       shuffle: False
       pin_memory: True
       persistent_workers: True
-      use_relative_action: ${dataset.vla_dataset.use_relative_action}
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
   vlm_dataset:
@@ -180,7 +179,7 @@ optimizer:
     lr: 1e-4 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.95]
     weight_decay: 1e-5
-  vlm:
+  diffusion:
     lr: 2e-4
     betas: [0.9, 0.95]
     weight_decay: 1e-3
@@ -202,7 +201,7 @@ training:
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
-  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.16/14.12_vq_tokenizer_train_vq_tokenizer/normalizer.pkl
+  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/normalizer/2026.01.28/normalizer.pkl
   num_epochs: 2
   use_bf16: True
   clipping:
@@ -270,6 +269,8 @@ imagenet_mean: [0.485, 0.456, 0.406]
 imagenet_std: [0.229, 0.224, 0.225]
 ignore_index: -100
 image_token_index: 257152
+state_token_index: 257153
+action_token_index: 257154
 vocab_size: 257216
 pad_token_id: 0
 patch_size: 14
@@ -290,6 +291,8 @@ policy:
     pad_token_id: ${pad_token_id}
     ignore_index: ${ignore_index}
     image_token_index: ${image_token_index}
+    state_token_index: ${state_token_index}
+    action_token_index: ${action_token_index}
     use_lm_head: True
     max_vlm_tokens: ${max_vlm_tokens}
     num_inference_steps: ${flow.num_inference_steps}

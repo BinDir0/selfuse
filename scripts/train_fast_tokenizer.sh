@@ -1,1 +1,0 @@
-python train.py experiment=train_fast_tokenizer

@@ -474,7 +474,7 @@ class LegendVLAInference:
 
                         pred_actions = self._postprocess_autoregressive_results(generation_output['generated_ids'])
                 
-                pred_actions = self.normalizer['actions'].unnormalize(pred_actions)
+                pred_actions = self.normalizer['motions'].unnormalize(pred_actions)
                 # 保存结果
                 batch_result = {
                     "pred_actions": pred_actions,
@@ -490,7 +490,7 @@ class LegendVLAInference:
                 # 如果有ground truth，也保存并计算误差
                 if "actions" in inputs:
                     gt_actions = inputs["actions"]
-                    gt_actions = self.normalizer['actions'].unnormalize(gt_actions)
+                    gt_actions = self.normalizer['motions'].unnormalize(gt_actions)
                     actions_valid_mask = inputs["actions_valid_mask"]
                     
                     batch_result["gt_actions"] = gt_actions

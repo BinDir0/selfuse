@@ -29,7 +29,7 @@ class DiffLoss(nn.Module):
         loss_dict = self.train_diffusion.training_losses(self.net, target, t, model_kwargs)
         loss = loss_dict["loss"]
         if mask is not None:
-            loss = (loss * mask).sum() / mask.sum()
+            loss = (loss * mask).sum() / mask.sum().clamp(min=1)
         return loss.mean()
 
     def sample(self, z, temperature=1.0, cfg=1.0):
