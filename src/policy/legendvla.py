@@ -87,10 +87,10 @@ class LegendVLA(nn.Module):
         # Mixtures
         self.joint_model = joint_model
 
-        # Action, proprio, time encoders
+        # Noised action, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
         if self.action_expert_adaptive_mode:  # adaLN or adaLN-Zero
-            self.action_encoder = nn.Linear(
+            self.noised_action_encoder = nn.Linear(
                 self.action_dim,
                 self.action_hidden_size,
             )
@@ -99,7 +99,7 @@ class LegendVLA(nn.Module):
                 TimeEncoder(cfg.time_hidden_size), 
             )
         else:  # matching pi0
-            self.action_encoder = ActionEncoder(
+            self.noised_action_encoder = ActionEncoder(
                 self.action_dim,
                 self.action_hidden_size,
                 time_cond=True,
@@ -111,6 +111,12 @@ class LegendVLA(nn.Module):
         self.action_decoder = nn.Linear(
             self.action_hidden_size,
             self.action_dim,
+        )
+
+        # Action encoder for continuous autoregressive modeling
+        self.action_encoder = nn.Linear(
+            self.action_dim,
+            self.vlm_hidden_size,
         )
 
         # optional text output
