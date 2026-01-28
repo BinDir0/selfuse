@@ -320,7 +320,7 @@ class LegendVLAInference:
         if self.model_cfg is not None and self.model_cfg.dataset is not None: 
             vla_dataset_cfg = self.model_cfg.dataset.vla_dataset
             vla_dataset_cfg.zarr_paths = cfg.vla_dataset_paths
-            vla_dataset_cfg.mode = 'infer'
+            vla_dataset_cfg.mode = f'infer'
             self.dataset = hydra.utils.instantiate(vla_dataset_cfg)
         else:
             self.dataset = hydra.utils.instantiate(cfg.dataset)

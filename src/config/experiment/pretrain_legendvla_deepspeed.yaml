@@ -18,13 +18,13 @@ vla_dataset_paths:
    weight: 1
  - name: oakink2
    path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
-   weight: 2
-#  - name: holoassist
-#    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_clean_nan.zarr
-#    weight: 2
+   weight: 1
+ - name: holoassist
+   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
+   weight: 1
  - name: egodex
    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
-   weight: 5
+   weight: 20
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
@@ -123,18 +123,7 @@ vla_processor:
     _target_: transformers.AutoTokenizer.from_pretrained
     pretrained_model_name_or_path: ${training.pretrained_model_path}
     padding_side: right
-  # motion_tokenizer: # FAST tokenizer
-  #   states:
-  #     _target_: src.model.action.fast_tokenizer.UniversalActionProcessor.from_pretrained
-  #     pretrained_model_name_or_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024/states
-  #   actions:
-  #     _target_: src.model.action.fast_tokenizer.UniversalActionProcessor.from_pretrained
-  #     pretrained_model_name_or_path: /share_data/chenzhang/tokenizers/FAST/taco-oakink/state20-2048action10-1024/actions
-  motion_tokenizer: 
-    _target_: src.model.action.vq_tokenizer.VQActionProcessor.from_pretrained
-    load_directory: /share_data/chenzhang/tokenizers/VQ/LegendVLA/2026.01.25 # may need to change
   num_image_tokens: ${policy.vision_tower.config.num_image_tokens}
-  num_depth_image_tokens: ${depth_image_seq_len}
   max_seq_len: ${max_vlm_tokens}
   ignore_index: ${ignore_index}
   image_size: ${policy.vision_tower.config.image_size}

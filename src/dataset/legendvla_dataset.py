@@ -14,9 +14,6 @@ from PIL import Image
 import torch.nn.utils.rnn as rnn_utils
 from datasets import load_dataset
 from src.utils.pytorch_util import dict_apply
-from src.utils.streaming_replay_buffer import StreamingReplayBuffer
-from src.utils.sampler import (
-    SequenceSampler, get_val_mask, downsample_mask)
 from src.utils.geometry import (
     transform_wrist_to_target_frame, 
     homo_matrix_from_trans_6drot, 
@@ -27,7 +24,8 @@ from src.utils.geometry import (
 )
 from src.model.common.normalizer import LinearNormalizer
 from .base_dataset import BaseRatioDataset, BaseLowdimDataset, BaseDataCollator
-from .base_vl_preprocessor import BaseVLPreprocessor
+from .sampler import SequenceSampler, get_val_mask, downsample_mask
+from .streaming_replay_buffer import StreamingReplayBuffer
 
 
 class LegendVLADataset(BaseRatioDataset):
@@ -45,7 +43,6 @@ class LegendVLADataset(BaseRatioDataset):
             use_relative_action=False,
             max_train_episodes=None,
             mode = 'train',
-            return_raw_sample=False,
             depth_clip_range=None,
         ):
         self.zarr_paths = zarr_paths
@@ -56,7 +53,6 @@ class LegendVLADataset(BaseRatioDataset):
         self.use_relative_action = use_relative_action
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
-        self.return_raw_sample = return_raw_sample
         self.depth_clip_range = depth_clip_range
         self.horizon = horizon
         self.pad_before = pad_before
@@ -133,7 +129,6 @@ class LegendVLADataset(BaseRatioDataset):
         val_set.sampler_lens = []
         val_set.mode = 'val'
         val_set.aug_transform = None
-        # Preserve the return_raw_sample setting
 
         for i, replay_buffer in enumerate(self.replay_buffers):
             # Create validation set sampler
@@ -149,68 +144,6 @@ class LegendVLADataset(BaseRatioDataset):
             val_set.sampler_lens.append(len(sampler))
             
         return val_set
-
-    def sample_for_inference(self, sample):
-        wrist_state = sample['state/wrist'].astype(np.float32)
-        hand_state = sample[f'state/{self.motion_type}'].astype(np.float32)
-        wrist_action = sample['action/wrist'].astype(np.float32)
-        hand_action = sample[f'action/{self.motion_type}'].astype(np.float32)        
-        presence = sample['presence']
-        extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4)
-        step = self.history // self.n_obs_state_steps
-        state_slice = [self.history - i * step for i in range(0, self.n_obs_state_steps)]
-        state_slice = state_slice[::-1]
-        # use first self.hand_ndim components of hand state and action
-        all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims, e.g. 45 in MANO hand params
-        # processed_wrist_state = transform_wrist_to_target_frame(wrist_state[state_slice], extrinsic[self.history])
-        # processed_wrist_action = transform_wrist_to_target_frame(wrist_action[self.history:], extrinsic[self.history])
-
-        hand_state = np.concatenate([
-            hand_state[state_slice, :self.hand_ndim], 
-            hand_state[state_slice, all_hand_ndim:all_hand_ndim + self.hand_ndim]
-        ], axis=-1)
-        hand_action = np.concatenate([
-            hand_action[self.history:, :self.hand_ndim], 
-            hand_action[self.history:, all_hand_ndim:all_hand_ndim + self.hand_ndim]
-        ], axis=-1)
-
-        # use delta of wrist translation and hand mano params as action
-        state_presence = presence[state_slice]
-        action_presence = presence[self.history:]
-        processed_state = np.concatenate([wrist_state[state_slice], hand_state], axis=-1)
-        processed_action = np.concatenate([wrist_action[self.history:], hand_action], axis=-1)
-        processed_state, processed_action, action_valid_mask = get_presence_value(
-            state_presence, action_presence, processed_action, processed_state, self.hand_ndim
-        )
-
-        # image = process_image(sample['image'], self.history, self.n_obs_image_steps, self.aug_transform)
-        image = sample['image'][self.history:]
-        instruction = sample['instruction'][self.history]
-        instruction_num = sample['instruction_num'][self.history]
-        # sample a random instruction from the candidate instructions
-        idx = np.random.randint(0, instruction_num)
-        instruction = instruction[idx]
-        # Follow the same slicing pattern as process_state_action
-        # For state-related data, take the last time step (history)
-        # For action-related data, take from history onwards (history:)
-        extrinsic = sample['extrinsic'][self.history:].astype(np.float32).reshape(-1, 4, 4)
-        intrinsic = sample['intrinsic'][self.history:].astype(np.float32)
-        action_shape = sample['action/shape'][self.history:].astype(np.float32)
-        state_shape = sample['state/shape'][self.history:].astype(np.float32)
-        presence = sample['presence'][self.history:]
-
-        data = {
-            'state': processed_state,
-            'action': processed_action,
-            'action_valid_mask': action_valid_mask,
-            'image': image,
-            'extrinsic': extrinsic,
-            'intrinsic': intrinsic,
-            'action_shape': action_shape,
-            'state_shape': state_shape,
-            'presence': presence,
-        }
-        return data
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
@@ -246,8 +179,8 @@ class LegendVLADataset(BaseRatioDataset):
         
         # Process all images in batch
         processed_results = self.preprocessor(
-            images=image, 
             text=instruction, 
+            images=image, 
             states=state, 
             actions=action, 
             intrinsic=intrinsic, 
@@ -273,46 +206,11 @@ class LegendVLADataset(BaseRatioDataset):
             data['labels'] = processed_results['labels']
         return data
 
-    def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
+    def set_preprocessor(self, preprocessor):
         self.preprocessor = preprocessor
 
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer = normalizer
-
-    def set_return_raw_sample(self, return_raw_sample: bool):
-        """Set whether to return raw sample data (for testing/debugging purposes)
-        
-        When enabling raw sample mode, recreates samplers to load more image frames
-        for visualization purposes (history + horizon frames instead of just history + 1).
-        """
-        if self.return_raw_sample == return_raw_sample:
-            # No change needed
-            return
-            
-        self.return_raw_sample = return_raw_sample
-        
-        # Recreate samplers with appropriate image frame loading
-        self.samplers = []
-        self.sampler_lens = []
-        
-        for i, replay_buffer in enumerate(self.replay_buffers):
-            # Determine how many image frames to load
-            # For inference/visualization, we need history + horizon frames
-            # For training, we only need history + 1 frames
-            image_frames_to_load = self.history + 30 if return_raw_sample else self.history + 1
-            
-            sampler = SequenceSampler(
-                replay_buffer=replay_buffer,
-                sequence_length=self.horizon,
-                pad_before=self.pad_before,
-                pad_after=self.pad_after,
-                episode_mask=self.train_masks[i],
-                key_first_k=dict(image=image_frames_to_load))
-            self.samplers.append(sampler)
-            self.sampler_lens.append(len(sampler))
-        
-        print(f"Samplers recreated: {'raw mode' if return_raw_sample else 'training mode'} - loading {image_frames_to_load} image frames")
-
 
     def get_normalizer(self):
         # Merge all data
@@ -351,23 +249,12 @@ class LegendVLADataset(BaseRatioDataset):
                 break
             curr_idx -= length
         
-        # Return raw sample if requested (for testing/debugging purposes)
-        if self.return_raw_sample:
-            # Convert numpy arrays to torch tensors for consistency
-            data = self.sample_for_inference(sample)
-            torch_data = dict_apply(data, torch.from_numpy)
-            # Add dataset source information
-            torch_data['dataset_source'] = self.zarr_paths[dataset_idx]['path']
-            torch_data['dataset_idx'] = dataset_idx
-            return torch_data
-            
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
 
     def __len__(self):
         return sum(self.sampler_lens)
-
 
 class LegendVLMDataset(torch.utils.data.Dataset):
     def __init__(
@@ -481,7 +368,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             ignore_index=self.preprocessor.ignore_index,
         )
 
-    def set_preprocessor(self, preprocessor: BaseVLPreprocessor):
+    def set_preprocessor(self, preprocessor):
         self.preprocessor = preprocessor
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -493,7 +380,6 @@ class LegendVLMDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.train_datasets)
-
 
 class LegendUnifiedDataset(torch.utils.data.Dataset):
     def __init__(self,
@@ -521,7 +407,7 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
         drop_last: bool = False,
     ): 
         from torch.utils.data import BatchSampler, SequentialSampler
-        from src.utils.sampler import UnifiedRatioSampler
+        from .sampler import UnifiedRatioSampler
         if shuffle: 
             assert hasattr(self.vla_dataset, 'weights') and hasattr(self.vla_dataset, 'dataset_lengths'), \
                 "vla_dataset must have 'weights' and 'dataset_lengths' attributes"
@@ -543,10 +429,6 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
                 drop_last=drop_last,
             )
 
-    def set_return_raw_sample(self, return_raw_sample: bool):
-        """Set whether to return raw sample data for VLA dataset (for testing/debugging purposes)"""
-        self.vla_dataset.set_return_raw_sample(return_raw_sample)
-
     def get_validation_dataset(self):
         return LegendUnifiedDataset(
             vla_dataset=self.vla_dataset.get_validation_dataset(),
@@ -565,6 +447,7 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
             return self.vla_dataset[idx]
         elif self.vlm_dataset is not None:
             sample = self.vlm_dataset[idx - len(self.vla_dataset)]
+            sample['states'] = torch.zeros(self.shape_meta['states'])
             sample['actions'] = torch.zeros(self.shape_meta['actions'])
             sample['actions_valid_mask'] = torch.zeros(self.shape_meta['actions'], dtype=torch.bool)
             return sample
@@ -573,7 +456,6 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.vla_dataset) + len(self.vlm_dataset) if self.vlm_dataset is not None else len(self.vla_dataset)
-
 
 class LegendVLALowLevelDataset(BaseLowdimDataset):
     def __init__(
@@ -593,10 +475,8 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         use_relative_action=False,
         debug=False, 
     ):
-        
         super().__init__()
         self.history = history
-
         # Initialize storage lists
         self.replay_buffers = []
         self.train_masks = []
@@ -770,7 +650,7 @@ class LegendVLDataCollator(BaseDataCollator):
                 depth_ids_tensor[idx] = i
             batch['depth_ids'] = depth_ids_tensor
         for key in data_list[0].keys():
-            if key not in ['input_ids', 'attention_mask', 'labels', 'depth_values', 'states']:
+            if key not in ['input_ids', 'attention_mask', 'labels', 'depth_values']:
                 batch[key] = torch.stack([item[key] for item in data_list])
 
         return batch
@@ -797,8 +677,6 @@ class BaseDataCollator(BaseDataCollator):
             else: # list
                 batch[key] = [item[key] for item in data_list]
         return batch
-
-
 
 
 def get_presence_value(state_presence, action_presence, action, state, hand_ndim):
@@ -878,7 +756,6 @@ def get_absolute_action(state, relative_action):
     absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]
     
     return absolute_action
-
 
 def transform_hand_from_wrist_to_camera(absolute_action, extrinsic):
     '''
@@ -1088,3 +965,238 @@ def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
 
     return normalizer
 
+
+def test_dataset_loading():
+    """
+    Test function to load and test the dataset using the config file.
+    """
+    from omegaconf import OmegaConf
+    import hydra
+    from torch.utils.data import DataLoader
+    import pathlib
+    from datetime import datetime
+    
+    # Register eval resolver for config
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    
+    # Register now resolver for datetime formatting (used by Hydra)
+    def now_resolver(format_str: str) -> str:
+        """Resolver for ${now:format} interpolation."""
+        return datetime.now().strftime(format_str)
+    OmegaConf.register_new_resolver("now", now_resolver, replace=True)
+    
+    # Register hydra resolver (returns empty string for non-hydra contexts)
+    def hydra_resolver(key: str) -> str:
+        """Resolver for ${hydra:key} interpolation. Returns empty string in test context."""
+        return ""
+    OmegaConf.register_new_resolver("hydra", hydra_resolver, replace=True)
+    
+    # Load config file
+    config_path = pathlib.Path(__file__).parent.parent.parent / "src" / "config" / "experiment" / "pretrain_legendvla_deepspeed.yaml"
+    print(f"Loading config from: {config_path}")
+    cfg = OmegaConf.load(config_path)
+    
+    # Resolve config to evaluate all ${eval:}, ${now:}, and ${hydra:} expressions
+    try:
+        OmegaConf.resolve(cfg)
+    except Exception as e:
+        print(f"   Warning: Some config values could not be resolved: {e}")
+        print("   Continuing with unresolved config (this is OK for testing)...")
+    
+    print("\n" + "="*80)
+    print("Testing Dataset Loading")
+    print("="*80)
+    
+    # Test VLA Dataset
+    print("\n1. Testing LegendVLADataset...")
+    try:
+        vla_dataset = hydra.utils.instantiate(cfg.dataset.vla_dataset)
+        print(f"   ✓ VLA Dataset created successfully")
+        print(f"   - Dataset length: {len(vla_dataset)}")
+        print(f"   - Number of replay buffers: {len(vla_dataset.replay_buffers)}")
+        print(f"   - Sampler lengths: {vla_dataset.sampler_lens}")
+        
+        # Set preprocessor for VLA dataset
+        print(f"\n   Setting preprocessor for VLA dataset...")
+        try:
+            vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+            vla_dataset.set_preprocessor(vla_processor)
+            print(f"   ✓ Preprocessor set successfully")
+        except Exception as e:
+            print(f"   ✗ Error setting preprocessor: {e}")
+            print(f"   Skipping sample access test (preprocessor required)")
+            import traceback
+            traceback.print_exc()
+        
+        # Test getting a sample (with preprocessor)
+        if len(vla_dataset) > 0 and vla_dataset.preprocessor is not None:
+            print(f"\n   Testing sample access (with preprocessor)...")
+            try:
+                sample = vla_dataset[0]
+                print(f"   ✓ Sample accessed successfully")
+                print(f"   - Sample keys: {list(sample.keys())}")
+                for key, value in sample.items():
+                    if hasattr(value, 'shape'):
+                        print(f"   - {key}: shape={value.shape}, dtype={value.dtype}")
+                    else:
+                        print(f"   - {key}: type={type(value)}")
+            except Exception as e:
+                print(f"   ✗ Error accessing sample: {e}")
+                import traceback
+                traceback.print_exc()
+    except Exception as e:
+        print(f"   ✗ Error creating VLA dataset: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # Test VLM Dataset
+    print("\n2. Testing LegendVLMDataset...")
+    try:
+        vlm_dataset = hydra.utils.instantiate(cfg.dataset.vlm_dataset)
+        print(f"   ✓ VLM Dataset created successfully")
+        print(f"   - Dataset length: {len(vlm_dataset)}")
+        
+        # Set preprocessor for VLM dataset
+        print(f"\n   Setting preprocessor for VLM dataset...")
+        try:
+            vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
+            vlm_dataset.set_preprocessor(vlm_processor)
+            print(f"   ✓ Preprocessor set successfully")
+        except Exception as e:
+            print(f"   ✗ Error setting preprocessor: {e}")
+            print(f"   Skipping sample access test (preprocessor required)")
+            import traceback
+            traceback.print_exc()
+        
+        # Test getting a sample (with preprocessor)
+        if len(vlm_dataset) > 0 and vlm_dataset.preprocessor is not None:
+            print(f"\n   Testing sample access (with preprocessor)...")
+            try:
+                sample = vlm_dataset[0]
+                print(f"   ✓ Sample accessed successfully")
+                print(f"   - Sample keys: {list(sample.keys())}")
+                for key, value in sample.items():
+                    if hasattr(value, 'shape'):
+                        print(f"   - {key}: shape={value.shape}, dtype={value.dtype}")
+                    else:
+                        print(f"   - {key}: type={type(value)}")
+            except Exception as e:
+                print(f"   ✗ Error accessing sample: {e}")
+                import traceback
+                traceback.print_exc()
+    except Exception as e:
+        print(f"   ✗ Error creating VLM dataset: {e}")
+        import traceback
+        traceback.print_exc()
+        vlm_dataset = None
+    
+    # Test Unified Dataset
+    print("\n3. Testing LegendUnifiedDataset...")
+    try:
+        unified_dataset = LegendUnifiedDataset(
+            vla_dataset=vla_dataset,
+            vlm_dataset=vlm_dataset,
+        )
+        print(f"   ✓ Unified Dataset created successfully")
+        print(f"   - Total dataset length: {len(unified_dataset)}")
+        print(f"   - VLA samples: {len(vla_dataset)}")
+        if vlm_dataset is not None:
+            print(f"   - VLM samples: {len(vlm_dataset)}")
+        
+        # Test getting samples
+        if len(unified_dataset) > 0:
+            print(f"\n   Testing sample access from unified dataset...")
+            # Test VLA sample
+            if len(vla_dataset) > 0 and vla_dataset.preprocessor is not None:
+                try:
+                    sample = unified_dataset[0]
+                    print(f"   ✓ VLA sample accessed successfully")
+                    print(f"   - Sample keys: {list(sample.keys())}")
+                except Exception as e:
+                    print(f"   ✗ Error accessing VLA sample: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"   ⚠ Skipping VLA sample access (preprocessor not set)")
+            
+            # Test VLM sample
+            if vlm_dataset is not None and len(vlm_dataset) > 0 and vlm_dataset.preprocessor is not None:
+                try:
+                    vlm_idx = len(vla_dataset)
+                    sample = unified_dataset[vlm_idx]
+                    print(f"   ✓ VLM sample accessed successfully")
+                    print(f"   - Sample keys: {list(sample.keys())}")
+                except Exception as e:
+                    print(f"   ✗ Error accessing VLM sample: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"   ⚠ Skipping VLM sample access (preprocessor not set)")
+    except Exception as e:
+        print(f"   ✗ Error creating unified dataset: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # Test validation dataset
+    print("\n4. Testing Validation Dataset...")
+    try:
+        val_dataset = unified_dataset.get_validation_dataset()
+        print(f"   ✓ Validation dataset created successfully")
+        print(f"   - Validation dataset length: {len(val_dataset)}")
+        if len(val_dataset) > 0:
+            print(f"   - Testing validation sample access...")
+            # Validation dataset inherits preprocessors from parent datasets
+            if val_dataset.vla_dataset.preprocessor is not None:
+                try:
+                    sample = val_dataset[0]
+                    print(f"   ✓ Validation sample accessed successfully")
+                except Exception as e:
+                    print(f"   ✗ Error accessing validation sample: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"   ⚠ Skipping validation sample access (preprocessor not set)")
+    except Exception as e:
+        print(f"   ✗ Error creating validation dataset: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Test sampler
+    print("\n5. Testing Batch Sampler...")
+    try:
+        batch_sampler = unified_dataset.get_sampler(
+            batch_size=cfg.dataloader.batch_sampler.batch_size,
+            vla_ratio=cfg.dataloader.batch_sampler.vla_ratio,
+            shuffle=cfg.dataloader.batch_sampler.shuffle,
+            seed=cfg.dataloader.batch_sampler.seed,
+            drop_last=cfg.dataloader.batch_sampler.drop_last,
+        )
+        print(f"   ✓ Batch sampler created successfully")
+        print(f"   - Sampler length: {len(batch_sampler)}")
+        
+        # Test getting a batch
+        if len(batch_sampler) > 0:
+            print(f"\n   Testing batch sampling...")
+            try:
+                batch_indices = next(iter(batch_sampler))
+                print(f"   ✓ Batch sampled successfully")
+                print(f"   - Batch size: {len(batch_indices)}")
+                print(f"   - Batch indices (first 5): {batch_indices[:5]}")
+            except Exception as e:
+                print(f"   ✗ Error sampling batch: {e}")
+                import traceback
+                traceback.print_exc()
+    except Exception as e:
+        print(f"   ✗ Error creating batch sampler: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\n" + "="*80)
+    print("Dataset Loading Test Completed!")
+    print("="*80)
+
+
+if __name__ == "__main__":
+    test_dataset_loading()
