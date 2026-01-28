@@ -195,7 +195,7 @@ class LegendVLADataset(BaseRatioDataset):
             'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
             'states': state,
-            'is_vla_data': np.array(True, dtype=np.bool), 
+            'is_vla_data': np.array(True, dtype=bool), 
         }
         # Add depth_values if available
         if 'depth_values' in processed_results:
@@ -357,7 +357,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
             'answer_start_idx': processed_results['answer_start_idx'],
-            'is_vla_data': np.array(False, dtype=np.bool), 
+            'is_vla_data': np.array(False, dtype=bool), 
         }
         return data
 

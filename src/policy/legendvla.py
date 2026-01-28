@@ -253,7 +253,7 @@ class LegendVLA(nn.Module):
         Returns:
             List[torch.nn.Parameter]: Trainable DiffLoss parameters
         """
-        return list(self.diffloss.parameters())
+        return list(self.diffloss.parameters()) + list(self.action_encoder_ar.parameters())
 
     @torch.no_grad()
     def init_motion_token_embeddings(self, motion_token_list):

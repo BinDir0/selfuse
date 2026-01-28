@@ -379,7 +379,7 @@ policy:
     z_channels: ${mixture.vlm.hidden_size}
     depth: 3
     width: 1024
-    num_sampling_steps: 100
+    num_sampling_steps: "100"
     grad_checkpointing: False
 
 logging:
