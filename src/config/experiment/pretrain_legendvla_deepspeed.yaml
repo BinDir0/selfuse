@@ -375,6 +375,15 @@ policy:
       attention_bias: False
       attention_dropout: 0.1
       pad_token_id: ${pad_token_id}
+  
+  diffloss:
+    _target_: src.model.action.diffloss.DiffLoss
+    target_channels: 48  # TODO: set according to action dimension
+    z_channels: ${mixture.vlm.hidden_size}
+    depth: 3
+    width: 1024
+    num_sampling_steps: 100
+    grad_checkpointing: False
 
 logging:
   project: train_legendvla_deepspeed
