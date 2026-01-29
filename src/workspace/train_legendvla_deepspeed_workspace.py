@@ -480,7 +480,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             eval_thresholds = self.cfg.training.eval_thresholds
             eval_accuracy = []
             eval_l1_loss = []
-            eval_l1_loss_per_dim = []
             
             # Track min/max loss batches for visualization (only store these two)
             min_loss_sample = {'loss': float('inf'), 'attn_weights': None, 'metadata': None}
@@ -539,11 +538,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     
                     # Compute batch-level statistics for logging
                     actions_valid_num = torch.sum(actions_valid_mask)
-                    actions_valid_num_per_dim = torch.sum(actions_valid_mask.reshape(-1, D), dim=0)
                     batch_l1_loss = torch.sum(abs_diff) / actions_valid_num
-                    batch_l1_loss_per_dim = torch.sum(abs_diff.reshape(-1, D), dim=0) / actions_valid_num_per_dim
                     eval_l1_loss.append(batch_l1_loss)
-                    eval_l1_loss_per_dim.append(batch_l1_loss_per_dim)
                     
                     # Track min/max loss samples for visualization
                     if full_seq_attn_maps is not None:
@@ -587,48 +583,38 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
             # fill eval_accuracy and eval_l1_loss to the same length as dataloader
             # Note: we assume at least one action dimension is available for evaluation
-            eval_len, data_len = len(eval_accuracy), len(dataloader)
-            while eval_len < data_len: 
-                idx = random.randint(0, eval_len-1)
-                eval_accuracy.append(eval_accuracy[idx])
-                eval_l1_loss.append(eval_l1_loss[idx])
-                eval_l1_loss_per_dim.append(eval_l1_loss_per_dim[idx])
-                eval_len += 1
+            eval_len = len(eval_accuracy)
             
             # Process action accuracy metrics
-            if len(eval_accuracy) > 0:
+            if eval_len > 0:
                 # Average over batches
-                eval_accuracy = torch.stack(eval_accuracy)
-                eval_l1_loss = torch.stack(eval_l1_loss)
-                eval_l1_loss_per_dim = torch.stack(eval_l1_loss_per_dim)
-                
-                # Gather metrics across all processes
-                eval_accuracy = accelerator.gather_for_metrics(eval_accuracy)
-                eval_l1_loss = accelerator.gather_for_metrics(eval_l1_loss)
-                eval_l1_loss_per_dim = accelerator.gather_for_metrics(eval_l1_loss_per_dim)
-                
-                eval_accuracy = torch.mean(eval_accuracy, dim=0)
-                eval_l1_loss = torch.mean(eval_l1_loss)
-                eval_l1_loss_per_dim = torch.mean(eval_l1_loss_per_dim, dim=0).float().cpu().numpy()
-                
-                # plot l1 loss per dimension
-                if accelerator.is_main_process:
-                    plot_path = os.path.join(self.output_dir, 'figures')
-                    plot_l1_loss_as_bar(eval_l1_loss_per_dim, self.update_step, plot_path)
-                
-                # Log accuracy metrics
-                step_log['eval_l1_loss'] = eval_l1_loss.item()
-                for i, threshold in enumerate(eval_thresholds):
-                    step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
-                
-                # Create log message
-                log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
-                log_msg += " | ".join([
-                    f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
-                    for i, threshold in enumerate(eval_thresholds)
-                ])
-                if accelerator.is_main_process:
-                    print(log_msg)
+                sum_eval_accuracy = torch.stack(eval_accuracy).sum(dim=0)
+                sum_eval_l1_loss = torch.stack(eval_l1_loss).sum()
+            else: 
+                sum_eval_accuracy = torch.tensor(0.0, device=accelerator.device)
+                sum_eval_l1_loss = torch.tensor(0.0, device=accelerator.device)
+            eval_len_tensor = torch.tensor(eval_len, device=accelerator.device)
+            # Gather metrics across all processes
+            sum_eval_accuracy = accelerator.reduce(sum_eval_accuracy, reduction='sum')
+            sum_eval_l1_loss = accelerator.reduce(sum_eval_l1_loss, reduction='sum')
+            eval_len_tensor = accelerator.reduce(eval_len_tensor, reduction='mean')
+            
+            eval_accuracy = sum_eval_accuracy / eval_len_tensor.clamp(min=1)
+            eval_l1_loss = sum_eval_l1_loss / eval_len_tensor.clamp(min=1)
+            
+            # Log accuracy metrics
+            step_log['eval_l1_loss'] = eval_l1_loss.item()
+            for i, threshold in enumerate(eval_thresholds):
+                step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
+            
+            # Create log message
+            log_msg = f"Eval | Epoch {self.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
+            log_msg += " | ".join([
+                f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
+                for i, threshold in enumerate(eval_thresholds)
+            ])
+            if accelerator.is_main_process:
+                print(log_msg)
             
             # Visualize attention weights for selected samples
             if accelerator.is_main_process and min_loss_sample['attn_weights'] is not None:

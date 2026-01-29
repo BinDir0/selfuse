@@ -25,6 +25,18 @@ vla_dataset_paths:
  - name: egodex
    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
    weight: 20
+ - name: ssv2
+   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ssv2_train_clean.zarr
+   weight: 1
+ - name: epic
+   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_clean.zarr
+   weight: 4
+ - name: ego4d_cooking
+   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_clean_batch.zarr
+   weight: 8
+ - name: ego4d_other
+   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_clean_batch.zarr
+   weight: 8
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense

@@ -188,13 +188,14 @@ class LegendVLADataset(BaseRatioDataset):
             'attention_mask': processed_results['attention_mask'],
             'pixel_values': processed_results['pixel_values'], 
             'states': state,
+            'n_states': np.array(state.shape[0], dtype=np.int32),
+            'actions': action,
+            'n_actions': np.array(action.shape[0], dtype=np.int32),
             'is_vla_data': np.array(True, dtype=bool), 
         }
         # Add depth_values if available
         if 'depth_values' in processed_results:
             data['depth_values'] = processed_results['depth_values']
-        if self.objective != "train_ar":
-            data['actions'] = action
         if self.objective != "train_flow":
             data['labels'] = processed_results['labels']
         return data
@@ -442,6 +443,10 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
                 sample['actions'] = torch.zeros((0, *self.shape_meta['actions'][1:]))
             if 'depth_values' in self.shape_meta: 
                 sample['depth_values'] = torch.zeros((0, *self.shape_meta['depth_values'][1:]))
+            if 'n_states' in self.shape_meta: 
+                sample['n_states'] = torch.tensor(0, dtype=torch.int32)
+            if 'n_actions' in self.shape_meta: 
+                sample['n_actions'] = torch.tensor(0, dtype=torch.int32)
             return sample
         else:
             raise ValueError("No dataset to get item from")
@@ -1356,5 +1361,761 @@ def test_dataset_loading():
         import traceback
         traceback.print_exc()
 
+def visualize_state_action(
+    dataset: LegendUnifiedDataset,
+    dataset_idx: int,
+    output_dir: str = "./outputs/visualization",
+    skeleton_frame_interval: int = 5,
+    depth_overlay_alpha: float = 0.3,
+):
+    """
+    最终版可视化测试函数：可视化渲染 state 和 action，并将 depth 叠加到 image 上。
+    
+    Args:
+        dataset: LegendUnifiedDataset 实例
+        dataset_idx: Unified dataset 索引，用于随机抽查
+        output_dir: 输出目录
+        skeleton_frame_interval: 每隔多少帧渲染一个骨架
+        depth_overlay_alpha: depth 叠加的透明度
+    """
+    import os
+    import cv2
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    import matplotlib.cm as cm
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 检查索引范围
+    if dataset_idx >= len(dataset):
+        raise ValueError(f"Dataset index {dataset_idx} out of range (max: {len(dataset)-1})")
+    
+    # 直接从 unified dataset 的 __getitem__ 获取已处理的数据
+    processed_sample = dataset[dataset_idx]
+    
+    # 检查是否是 VLA 数据
+    is_vla_data = processed_sample.get('is_vla_data', None)
+    if is_vla_data is None:
+        # 如果没有 is_vla_data 字段，根据 index 判断
+        is_vla_data = dataset_idx < len(dataset.vla_dataset)
+    else:
+        # 转换为 bool（可能是 tensor）
+        if hasattr(is_vla_data, 'item'):
+            is_vla_data = is_vla_data.item()
+        else:
+            is_vla_data = bool(is_vla_data)
+    
+    if not is_vla_data:
+        print(f"Dataset index {dataset_idx} is not VLA data (is VLM data), skipping visualization.")
+        return None
+    
+    # 获取已处理的 states 和 actions（tensor 格式）
+    states = processed_sample['states']  # [N_state, state_dim]
+    actions = processed_sample['actions']  # [N_action, action_dim]
+    
+    # 转换为 numpy
+    if isinstance(states, torch.Tensor):
+        states = states.cpu().numpy()
+    if isinstance(actions, torch.Tensor):
+        actions = actions.cpu().numpy()
+    
+    # 获取处理后的图像（pixel_values）
+    pixel_values = processed_sample.get('pixel_values', None)  # [N_image, C, H, W]
+    if pixel_values is None:
+        raise ValueError("processed_sample does not contain 'pixel_values'")
+    
+    # 转换为 numpy
+    if isinstance(pixel_values, torch.Tensor):
+        pixel_values = pixel_values.cpu().numpy()
+    
+    # 获取处理后的深度图（如果有）
+    depth_values = processed_sample.get('depth_values', None)  # [N_image, 1, H, W] or None
+    if depth_values is not None and isinstance(depth_values, torch.Tensor):
+        depth_values = depth_values.cpu().numpy()
+    
+    # 获取原始样本以获取原始内参和 instruction
+    vla_dataset = dataset.vla_dataset
+    vla_idx = dataset_idx  # unified dataset 的前 len(vla_dataset) 个是 VLA 数据
+    
+    # 找到对应的 sampler 和原始索引
+    curr_idx = vla_idx
+    sampler_idx = None
+    for i, length in enumerate(vla_dataset.sampler_lens):
+        if curr_idx < length:
+            sampler_idx = i
+            break
+        curr_idx -= length
+    
+    if sampler_idx is None:
+        raise ValueError(f"VLA dataset index {vla_idx} out of range (max: {sum(vla_dataset.sampler_lens)-1})")
+    
+    # 获取原始样本（只用于获取原始内参和 instruction）
+    raw_sample = vla_dataset.samplers[sampler_idx].sample_sequence(curr_idx)
+    
+    # 获取原始内参和图像尺寸
+    raw_intrinsic = raw_sample['intrinsic'].astype(np.float32)  # [4] or [3, 3]
+    raw_images = raw_sample['image']  # [N_image, H, W, 3]
+    original_height, original_width = raw_images.shape[1], raw_images.shape[2]
+    
+    # 获取处理后的图像尺寸（从 preprocessor）
+    if vla_dataset.preprocessor is not None:
+        processed_image_size = vla_dataset.preprocessor.image_size
+    else:
+        # 如果没有 preprocessor，从 pixel_values 推断
+        processed_image_size = pixel_values.shape[2]  # H or W (assuming square)
+    
+    # 调整内参以适应 resize 后的图像
+    from src.dataset.paligemma_processing import get_resized_intrinsic
+    if raw_intrinsic.shape == (4,):
+        # [fx, fy, cx, cy] 格式
+        intrinsic = get_resized_intrinsic(raw_intrinsic, original_width, original_height, processed_image_size)
+    elif raw_intrinsic.shape == (3, 3):
+        # 转换为 [fx, fy, cx, cy] 格式
+        fx, fy = raw_intrinsic[0, 0], raw_intrinsic[1, 1]
+        cx, cy = raw_intrinsic[0, 2], raw_intrinsic[1, 2]
+        intrinsic_4d = np.array([fx, fy, cx, cy], dtype=np.float32)
+        intrinsic_4d = get_resized_intrinsic(intrinsic_4d, original_width, original_height, processed_image_size)
+        # 转换回 [3, 3] 格式
+        intrinsic = np.array([
+            [intrinsic_4d[0], 0, intrinsic_4d[2]],
+            [0, intrinsic_4d[1], intrinsic_4d[3]],
+            [0, 0, 1]
+        ], dtype=np.float32)
+    else:
+        raise ValueError(f"Unsupported intrinsic shape: {raw_intrinsic.shape}")
+    
+    # 反归一化图像：pixel_values * std + mean，然后转换回 [0, 255]
+    from src.dataset.paligemma_processing import IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD
+    # pixel_values 格式: [N_image, C, H, W]
+    # 转换为 [N_image, H, W, C] 格式
+    pixel_values_transposed = np.transpose(pixel_values, (0, 2, 3, 1))  # [N_image, H, W, C]
+    
+    # 反归一化
+    images = pixel_values_transposed * IMAGENET_STANDARD_STD + IMAGENET_STANDARD_MEAN
+    # 转换回 [0, 255] 范围
+    images = np.clip(images * 255.0, 0, 255).astype(np.uint8)
+    
+    # 处理深度图（如果有）
+    depth_images = None
+    if depth_values is not None:
+        # depth_values 格式: [N_image, 1, H, W]
+        # 转换为 [N_image, H, W] 格式
+        depth_images = depth_values[:, 0, :, :]  # [N_image, H, W]
+        # depth_values 已经是归一化的，需要反归一化
+        # 但这里我们直接使用原始深度图，因为 depth_values 的处理方式可能不同
+        # 如果需要，可以从 raw_sample 获取原始深度图并 resize
+        raw_depth_images = raw_sample.get('depth', None)
+        if raw_depth_images is not None:
+            # Resize 原始深度图到处理后的尺寸
+            import cv2
+            depth_images = []
+            for i in range(raw_depth_images.shape[0]):
+                depth = raw_depth_images[i]
+                depth_resized = cv2.resize(depth, (processed_image_size, processed_image_size), interpolation=cv2.INTER_LINEAR)
+                depth_images.append(depth_resized)
+            depth_images = np.stack(depth_images)
+    
+    # 获取 instruction（如果有）
+    instruction = None
+    if 'instruction' in raw_sample:
+        instruction_data = raw_sample['instruction']
+        if isinstance(instruction_data, np.ndarray) and len(instruction_data) > 0:
+            # 如果是数组，取第一个
+            instruction = str(instruction_data[0]) if len(instruction_data.shape) > 0 else str(instruction_data)
+        elif isinstance(instruction_data, (list, tuple)) and len(instruction_data) > 0:
+            instruction = str(instruction_data[0])
+        elif isinstance(instruction_data, str):
+            instruction = instruction_data
+    
+    # Unnormalize states 和 actions（如果有 normalizer）
+    if vla_dataset.normalizer is not None:
+        if not vla_dataset.use_relative_action:
+            states = vla_dataset.normalizer['motions'].unnormalize(states)
+            actions = vla_dataset.normalizer['motions'].unnormalize(actions)
+        else:
+            states = vla_dataset.normalizer['states'].unnormalize(states)
+            actions = vla_dataset.normalizer['actions'].unnormalize(actions)
+    
+    # 如果是 relative action，需要转换为 absolute action
+    if vla_dataset.use_relative_action:
+        # 将 relative action 转换为 absolute action
+        # action 是相对于 state[-1] 的
+        actions = get_absolute_action(states[-1], actions)
+    
+    # 现在 states 和 actions 已经是 unnormalized 的，且 hand 在 wrist 坐标系中
+    # 只需要将 hand 从 wrist 坐标系转换到相机坐标系
+    state = states
+    action = actions
+    
+    # 合并 state 和 action 用于可视化
+    # image 的最后一帧代表当前帧，所以我们需要将 state 和 action 都转换到对应的相机坐标系
+    n_state = state.shape[0]
+    n_action = action.shape[0]
+    n_image = images.shape[0]
+    
+    # 提取 wrist 和 hand
+    wrist_all = np.concatenate([state[:, :18], action[:, :18]], axis=0)  # [n_state + n_action, 18]
+    hand_all = np.concatenate([state[:, 18:], action[:, 18:]], axis=0)  # [n_state + n_action, hand_dim]
+    
+    # hand_all 现在在 wrist 坐标系中（因为 process_state_action 已经转换了）
+    # 需要将每一帧的 hand 转换到相机坐标系
+    # 注意：extrinsic 是第一帧的相机外参，我们需要为每一帧获取对应的 extrinsic
+    # 但根据代码，state 和 action 中的 wrist 已经在相机坐标系中了
+    # 所以我们需要将 hand 从 wrist 坐标系转换到相机坐标系
+    
+    # 将 hand 从 wrist 坐标系转换到相机坐标系
+    hand_all_camera = transform_hand_points_from_wrist_to_camera_frame(
+        hand_all, wrist_all
+    )
+    
+    # 解析相机内参
+    if intrinsic.shape == (4,):
+        # [fx, fy, cx, cy] 格式
+        fx, fy, cx, cy = intrinsic
+        K = np.array([
+            [fx, 0, cx],
+            [0, fy, cy],
+            [0, 0, 1]
+        ], dtype=np.float32)
+    elif intrinsic.shape == (3, 3):
+        K = intrinsic
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+    else:
+        raise ValueError(f"Unsupported intrinsic shape: {intrinsic.shape}")
+    
+    # 准备可视化
+    # image 的最后一帧代表当前帧
+    # 我们需要在每一帧图像上渲染对应的 state/action
+    
+    # 计算全局深度范围（用于 colorbar）
+    # 深度单位从 mm 转换为米
+    depth_min_global = None
+    depth_max_global = None
+    if depth_images is not None:
+        depth_min_global = float(np.min(depth_images)) / 1000.0  # mm -> m
+        depth_max_global = float(np.max(depth_images)) / 1000.0  # mm -> m
+    
+    # 保存所有输出路径
+    output_paths = []
+    
+    # 投影函数
+    def project_points(points_3d, K):
+        """投影3D点到2D图像平面"""
+        points_2d_homo = (K @ points_3d.T).T  # [N, 3]
+        points_2d = points_2d_homo[:, :2] / (points_2d_homo[:, 2:3] + 1e-6)
+        return points_2d
+    
+    # 检查点是否在图像范围内
+    def is_valid_point(pt_2d, W, H):
+        return 0 <= pt_2d[0] < W and 0 <= pt_2d[1] < H
+    
+    # 处理每个 state
+    for state_idx in range(n_state):
+        # 检查是否符合间隔要求
+        if state_idx % skeleton_frame_interval != 0:
+            continue
+        
+        # 找到对应的图像索引（image 的最后一帧代表当前帧）
+        # image[0] 对应 state[0]，image[-1] 对应 state[-1]
+        img_idx = min(state_idx, n_image - 1)
+        
+        # 获取当前帧图像
+        img = images[img_idx].copy()  # [H, W, 3]
+        H, W = img.shape[:2]
+        
+        # 获取对应的深度图
+        depth = None
+        depth_m = None  # 转换为米后的深度
+        if depth_images is not None:
+            depth = depth_images[img_idx]  # [H_depth, W_depth]
+            # 确保 depth 和 img 的尺寸一致
+            if depth.shape[:2] != img.shape[:2]:
+                depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_LINEAR)
+            # 将深度从 mm 转换为米
+            depth_m = depth / 1000.0
+        
+        # 获取当前帧的 wrist 和 hand
+        wrist_pose = wrist_all[state_idx]  # [18]
+        hand_points = hand_all_camera[state_idx]  # [hand_dim]
+        
+        # 提取左右手的 wrist 位置
+        left_wrist_trans = wrist_pose[:3]
+        right_wrist_trans = wrist_pose[3:6]
+        
+        # 提取左右手的 hand points（fingertips）
+        hand_dim = hand_points.shape[0]
+        
+        # 尝试 reshape 为左右手各 [n_points_per_hand, 3]
+        if hand_dim % 6 == 0:
+            n_points_per_hand = hand_dim // 2 // 3
+            left_hand_points = hand_points[:hand_dim//2].reshape(n_points_per_hand, 3)
+            right_hand_points = hand_points[hand_dim//2:].reshape(n_points_per_hand, 3)
+        else:
+            hand_ndim = vla_dataset.hand_ndim
+            if hand_dim == hand_ndim * 2:
+                dim_per_point = hand_ndim // 5 if hand_ndim >= 5 else 3
+                n_points_per_hand = hand_ndim // dim_per_point if dim_per_point > 0 else 5
+                left_hand_points = hand_points[:hand_ndim].reshape(n_points_per_hand, dim_per_point)[:, :3]
+                right_hand_points = hand_points[hand_ndim:].reshape(n_points_per_hand, dim_per_point)[:, :3]
+            else:
+                print(f"Warning: Cannot reshape hand_points with shape {hand_points.shape}, hand_ndim={vla_dataset.hand_ndim}, hand_dim={hand_dim}")
+                continue
+        
+        # 投影到图像平面
+        left_wrist_2d = project_points(left_wrist_trans.reshape(1, 3), K)[0]
+        right_wrist_2d = project_points(right_wrist_trans.reshape(1, 3), K)[0]
+        left_hand_2d = project_points(left_hand_points, K)
+        right_hand_2d = project_points(right_hand_points, K)
+        
+        # 创建 matplotlib 图像用于添加 colorbar
+        fig, ax = plt.subplots(figsize=(12, 9))
+        
+        # 叠加 depth（如果有）
+        if depth_m is not None:
+            # 将 depth 转换为彩色叠加（使用米为单位）
+            if depth_max_global > depth_min_global:
+                depth_normalized = (depth_m - depth_min_global) / (depth_max_global - depth_min_global + 1e-6)
+            else:
+                depth_normalized = np.zeros_like(depth_m)
+            
+            # 使用 colormap 转换为彩色（反转 colormap 使近处为红色，远处为蓝色）
+            depth_colormap = cm.jet_r(depth_normalized)[:, :, :3]  # [H, W, 3]
+            depth_colormap = (depth_colormap * 255).astype(np.uint8)
+            
+            # 确保 depth_colormap 和 img 的尺寸一致
+            if depth_colormap.shape[:2] != img.shape[:2]:
+                depth_colormap = cv2.resize(depth_colormap, (W, H), interpolation=cv2.INTER_LINEAR)
+            
+            # 叠加 depth
+            img = cv2.addWeighted(img, 1 - depth_overlay_alpha, depth_colormap, depth_overlay_alpha, 0)
+        
+        # 绘制左手骨架（减小粗细）- 改进版本，即使手腕不在范围内也绘制可见的指尖
+        left_color = (0, 255, 0)  # 绿色 (BGR)
+        left_wrist_valid = is_valid_point(left_wrist_2d, W, H)
+        if left_wrist_valid:
+            cv2.circle(img, tuple(left_wrist_2d.astype(int)), 3, left_color, -1)
+            cv2.circle(img, tuple(left_wrist_2d.astype(int)), 3, (0, 0, 0), 1)
+        
+        for i in range(left_hand_2d.shape[0]):
+            tip_2d = left_hand_2d[i]
+            tip_valid = is_valid_point(tip_2d, W, H)
+            if left_wrist_valid and tip_valid:
+                # 绘制从手腕到指尖的线
+                cv2.line(img, 
+                        tuple(left_wrist_2d.astype(int)), 
+                        tuple(tip_2d.astype(int)), 
+                        left_color, 1)
+            if tip_valid:
+                # 绘制指尖
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, left_color, -1)
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, (0, 0, 0), 1)
+        
+        # 绘制右手骨架（减小粗细）- 改进版本，即使手腕不在范围内也绘制可见的指尖
+        right_color = (255, 0, 0)  # 蓝色 (BGR)
+        right_wrist_valid = is_valid_point(right_wrist_2d, W, H)
+        if right_wrist_valid:
+            cv2.circle(img, tuple(right_wrist_2d.astype(int)), 3, right_color, -1)
+            cv2.circle(img, tuple(right_wrist_2d.astype(int)), 3, (0, 0, 0), 1)
+        
+        for i in range(right_hand_2d.shape[0]):
+            tip_2d = right_hand_2d[i]
+            tip_valid = is_valid_point(tip_2d, W, H)
+            if right_wrist_valid and tip_valid:
+                # 绘制从手腕到指尖的线
+                cv2.line(img, 
+                        tuple(right_wrist_2d.astype(int)), 
+                        tuple(tip_2d.astype(int)), 
+                        right_color, 1)
+            if tip_valid:
+                # 绘制指尖
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, right_color, -1)
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, (0, 0, 0), 1)
+        
+        # 添加文本标注
+        label = f"Frame {img_idx} (State {state_idx})"
+        cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
+        
+        # 显示图像
+        ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        ax.axis('off')
+        ax.set_title(f"State {state_idx}", fontsize=14, fontweight='bold')
+        
+        # 添加深度 colorbar（如果有深度图，使用米为单位）
+        if depth_m is not None and depth_max_global > depth_min_global:
+            # 使用 ScalarMappable 创建 colorbar，确保与深度叠加使用相同的 colormap
+            # 深度叠加使用 cm.jet_r（近处红色，远处蓝色），所以 colorbar 也要使用 jet_r
+            from matplotlib.cm import ScalarMappable
+            # 使用 cm.jet_r 而不是字符串 'jet_r'，确保完全一致
+            sm = ScalarMappable(cmap=cm.jet_r, norm=plt.Normalize(vmin=depth_min_global, vmax=depth_max_global))
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Depth (m)', rotation=270, labelpad=15, fontsize=12)
+        
+        # 添加 instruction 文本（如果有）
+        if instruction is not None:
+            # 在图像顶部添加 instruction
+            instruction_text = f"Instruction: {instruction}"
+            # 限制文本长度，避免太长，手动换行
+            max_chars_per_line = 80
+            words = instruction_text.split()
+            lines = []
+            current_line = ""
+            for word in words:
+                if len(current_line + " " + word) <= max_chars_per_line:
+                    current_line += (" " + word if current_line else word)
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            if current_line:
+                lines.append(current_line)
+            instruction_text = "\n".join(lines)
+            
+            ax.text(0.02, 0.98, instruction_text, transform=ax.transAxes,
+                   fontsize=10, verticalalignment='top', horizontalalignment='left',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='black', linewidth=1))
+        
+        # 保存图像
+        output_path = os.path.join(output_dir, f"visualization_dataset_idx_{dataset_idx:05d}_state_{state_idx:03d}.png")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        output_paths.append(output_path)
+    
+    # 处理每个 action
+    for action_idx in range(n_action):
+        # 检查是否符合间隔要求
+        if action_idx % skeleton_frame_interval != 0:
+            continue
+        
+        # 找到对应的图像索引（通常使用最后一帧）
+        img_idx = min(n_state - 1 + action_idx, n_image - 1)
+        
+        # 获取当前帧图像
+        img = images[img_idx].copy()  # [H, W, 3]
+        H, W = img.shape[:2]
+        
+        # 获取对应的深度图
+        depth = None
+        depth_m = None  # 转换为米后的深度
+        if depth_images is not None:
+            depth = depth_images[img_idx]
+            if depth.shape[:2] != img.shape[:2]:
+                depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_LINEAR)
+            # 将深度从 mm 转换为米
+            depth_m = depth / 1000.0
+        
+        # 获取当前帧的 wrist 和 hand
+        wrist_pose = wrist_all[n_state + action_idx]  # [18]
+        hand_points = hand_all_camera[n_state + action_idx]  # [hand_dim]
+        
+        # 提取左右手的 wrist 位置
+        left_wrist_trans = wrist_pose[:3]
+        right_wrist_trans = wrist_pose[3:6]
+        
+        # 提取左右手的 hand points
+        hand_dim = hand_points.shape[0]
+        
+        if hand_dim % 6 == 0:
+            n_points_per_hand = hand_dim // 2 // 3
+            left_hand_points = hand_points[:hand_dim//2].reshape(n_points_per_hand, 3)
+            right_hand_points = hand_points[hand_dim//2:].reshape(n_points_per_hand, 3)
+        else:
+            hand_ndim = vla_dataset.hand_ndim
+            if hand_dim == hand_ndim * 2:
+                dim_per_point = hand_ndim // 5 if hand_ndim >= 5 else 3
+                n_points_per_hand = hand_ndim // dim_per_point if dim_per_point > 0 else 5
+                left_hand_points = hand_points[:hand_ndim].reshape(n_points_per_hand, dim_per_point)[:, :3]
+                right_hand_points = hand_points[hand_ndim:].reshape(n_points_per_hand, dim_per_point)[:, :3]
+            else:
+                print(f"Warning: Cannot reshape hand_points with shape {hand_points.shape}, hand_ndim={vla_dataset.hand_ndim}, hand_dim={hand_dim}")
+                continue
+        
+        # 投影到图像平面
+        left_wrist_2d = project_points(left_wrist_trans.reshape(1, 3), K)[0]
+        right_wrist_2d = project_points(right_wrist_trans.reshape(1, 3), K)[0]
+        left_hand_2d = project_points(left_hand_points, K)
+        right_hand_2d = project_points(right_hand_points, K)
+        
+        # 创建 matplotlib 图像用于添加 colorbar
+        fig, ax = plt.subplots(figsize=(12, 9))
+        
+        # 叠加 depth（如果有）
+        if depth_m is not None:
+            if depth_max_global > depth_min_global:
+                depth_normalized = (depth_m - depth_min_global) / (depth_max_global - depth_min_global + 1e-6)
+            else:
+                depth_normalized = np.zeros_like(depth_m)
+            
+            depth_colormap = cm.jet(depth_normalized)[:, :, :3]
+            depth_colormap = (depth_colormap * 255).astype(np.uint8)
+            
+            if depth_colormap.shape[:2] != img.shape[:2]:
+                depth_colormap = cv2.resize(depth_colormap, (W, H), interpolation=cv2.INTER_LINEAR)
+            
+            img = cv2.addWeighted(img, 1 - depth_overlay_alpha, depth_colormap, depth_overlay_alpha, 0)
+        
+        # 绘制左手骨架（减小粗细）- 改进版本，即使手腕不在范围内也绘制可见的指尖
+        left_color = (0, 255, 0)  # 绿色 (BGR)
+        left_wrist_valid = is_valid_point(left_wrist_2d, W, H)
+        if left_wrist_valid:
+            cv2.circle(img, tuple(left_wrist_2d.astype(int)), 3, left_color, -1)
+            cv2.circle(img, tuple(left_wrist_2d.astype(int)), 3, (0, 0, 0), 1)
+        
+        for i in range(left_hand_2d.shape[0]):
+            tip_2d = left_hand_2d[i]
+            tip_valid = is_valid_point(tip_2d, W, H)
+            if left_wrist_valid and tip_valid:
+                # 绘制从手腕到指尖的线
+                cv2.line(img, 
+                        tuple(left_wrist_2d.astype(int)), 
+                        tuple(tip_2d.astype(int)), 
+                        left_color, 1)
+            if tip_valid:
+                # 绘制指尖
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, left_color, -1)
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, (0, 0, 0), 1)
+        
+        # 绘制右手骨架（减小粗细）- 改进版本，即使手腕不在范围内也绘制可见的指尖
+        right_color = (255, 0, 0)  # 蓝色 (BGR)
+        right_wrist_valid = is_valid_point(right_wrist_2d, W, H)
+        if right_wrist_valid:
+            cv2.circle(img, tuple(right_wrist_2d.astype(int)), 3, right_color, -1)
+            cv2.circle(img, tuple(right_wrist_2d.astype(int)), 3, (0, 0, 0), 1)
+        
+        for i in range(right_hand_2d.shape[0]):
+            tip_2d = right_hand_2d[i]
+            tip_valid = is_valid_point(tip_2d, W, H)
+            if right_wrist_valid and tip_valid:
+                # 绘制从手腕到指尖的线
+                cv2.line(img, 
+                        tuple(right_wrist_2d.astype(int)), 
+                        tuple(tip_2d.astype(int)), 
+                        right_color, 1)
+            if tip_valid:
+                # 绘制指尖
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, right_color, -1)
+                cv2.circle(img, tuple(tip_2d.astype(int)), 2, (0, 0, 0), 1)
+        
+        # 添加文本标注
+        label = f"Frame {img_idx} (Action {action_idx})"
+        cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
+        
+        # 显示图像
+        ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        ax.axis('off')
+        ax.set_title(f"Action {action_idx}", fontsize=14, fontweight='bold')
+        
+        # 添加深度 colorbar（如果有深度图，使用米为单位）
+        if depth_m is not None and depth_max_global > depth_min_global:
+            # 使用 ScalarMappable 创建 colorbar，而不是用 alpha=0 的 imshow
+            # 反转 colormap 使近处（小值）为红色，远处（大值）为蓝色
+            from matplotlib.cm import ScalarMappable
+            sm = ScalarMappable(cmap='jet_r', norm=plt.Normalize(vmin=depth_min_global, vmax=depth_max_global))
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Depth (m)', rotation=270, labelpad=15, fontsize=12)
+        
+        # 添加 instruction 文本（如果有）
+        if instruction is not None:
+            # 在图像顶部添加 instruction
+            instruction_text = f"Instruction: {instruction}"
+            # 限制文本长度，避免太长，手动换行
+            max_chars_per_line = 80
+            words = instruction_text.split()
+            lines = []
+            current_line = ""
+            for word in words:
+                if len(current_line + " " + word) <= max_chars_per_line:
+                    current_line += (" " + word if current_line else word)
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            if current_line:
+                lines.append(current_line)
+            instruction_text = "\n".join(lines)
+            
+            ax.text(0.02, 0.98, instruction_text, transform=ax.transAxes,
+                   fontsize=10, verticalalignment='top', horizontalalignment='left',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='black', linewidth=1))
+        
+        # 保存图像
+        output_path = os.path.join(output_dir, f"visualization_dataset_idx_{dataset_idx:05d}_action_{action_idx:03d}.png")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        output_paths.append(output_path)
+    
+    # 打印保存信息
+    print(f"可视化结果已保存到: {output_dir}")
+    print(f"  - Unified dataset 索引: {dataset_idx}")
+    print(f"  - VLA dataset 索引: {vla_idx}")
+    print(f"  - State 帧数: {n_state}")
+    print(f"  - Action 帧数: {n_action}")
+    print(f"  - Image 帧数: {n_image}")
+    print(f"  - 骨架渲染间隔: {skeleton_frame_interval} 帧")
+    print(f"  - 共保存 {len(output_paths)} 张图像")
+    if depth_images is not None:
+        print(f"  - 深度范围: [{depth_min_global:.3f}, {depth_max_global:.3f}] m")
+    
+    return output_paths[0] if output_paths else None
+
+
+def test_visualize_state_action(dataset_idx: int = 0):
+    """
+    测试可视化函数：可视化渲染 state 和 action。
+    
+    Args:
+        dataset_idx: Unified dataset 索引，用于随机抽查
+    """
+    from omegaconf import OmegaConf
+    import hydra
+    import pathlib
+    import os
+    import pickle
+    from datetime import datetime
+    
+    # Register eval resolver for config
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    
+    # Register now resolver for datetime formatting (used by Hydra)
+    def now_resolver(format_str: str) -> str:
+        """Resolver for ${now:format} interpolation."""
+        return datetime.now().strftime(format_str)
+    OmegaConf.register_new_resolver("now", now_resolver, replace=True)
+    
+    # Register hydra resolver (returns empty string for non-hydra contexts)
+    def hydra_resolver(key: str) -> str:
+        """Resolver for ${hydra:key} interpolation. Returns empty string in test context."""
+        return ""
+    OmegaConf.register_new_resolver("hydra", hydra_resolver, replace=True)
+    
+    # Load config file
+    config_path = pathlib.Path(__file__).parent.parent.parent / "src" / "config" / "experiment" / "pretrain_legendvla_deepspeed.yaml"
+    print(f"Loading config from: {config_path}")
+    cfg = OmegaConf.load(config_path)
+    
+    # Resolve config to evaluate all ${eval:}, ${now:}, and ${hydra:} expressions
+    try:
+        OmegaConf.resolve(cfg)
+    except Exception as e:
+        print(f"   Warning: Some config values could not be resolved: {e}")
+        print("   Continuing with unresolved config (this is OK for testing)...")
+    
+    print("\n" + "="*80)
+    print("Testing State and Action Visualization")
+    print("="*80)
+    
+    # Create Unified Dataset
+    print("\n1. Creating LegendUnifiedDataset...")
+    try:
+        vla_dataset = hydra.utils.instantiate(cfg.dataset.vla_dataset)
+        print(f"   ✓ VLA Dataset created successfully")
+        print(f"   - VLA Dataset length: {len(vla_dataset)}")
+        
+        # Set preprocessor for VLA dataset
+        print(f"\n   Setting preprocessor for VLA dataset...")
+        try:
+            vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+            vla_dataset.set_preprocessor(vla_processor)
+            print(f"   ✓ Preprocessor set successfully")
+        except Exception as e:
+            print(f"   ⚠ Warning: Could not set preprocessor: {e}")
+        
+        # Load normalizer from config
+        print(f"\n   Loading normalizer from config...")
+        try:
+            normalizer_path = cfg.training.normalizer_path
+            if normalizer_path is not None and os.path.exists(normalizer_path):
+                normalizer = pickle.load(open(normalizer_path, 'rb'))
+                vla_dataset.set_normalizer(normalizer)
+                print(f"   ✓ Normalizer loaded from {normalizer_path}")
+            else:
+                print(f"   ⚠ Warning: Normalizer path not found: {normalizer_path}")
+                print(f"   Computing normalizer from dataset...")
+                normalizer = vla_dataset.get_normalizer()
+                print(f"   ✓ Normalizer computed successfully")
+        except Exception as e:
+            print(f"   ⚠ Warning: Could not load normalizer: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Create VLM Dataset (if available)
+        vlm_dataset = None
+        try:
+            vlm_dataset = hydra.utils.instantiate(cfg.dataset.vlm_dataset)
+            print(f"   ✓ VLM Dataset created successfully")
+            print(f"   - VLM Dataset length: {len(vlm_dataset)}")
+            
+            # Set preprocessor for VLM dataset
+            print(f"\n   Setting preprocessor for VLM dataset...")
+            try:
+                vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
+                vlm_dataset.set_preprocessor(vlm_processor)
+                print(f"   ✓ Preprocessor set successfully")
+            except Exception as e:
+                print(f"   ⚠ Warning: Could not set preprocessor: {e}")
+        except Exception as e:
+            print(f"   ⚠ Warning: Could not create VLM dataset: {e}")
+        
+        # Create Unified Dataset
+        unified_dataset = LegendUnifiedDataset(
+            vla_dataset=vla_dataset,
+            vlm_dataset=vlm_dataset,
+        )
+        print(f"   ✓ Unified Dataset created successfully")
+        print(f"   - Unified Dataset length: {len(unified_dataset)}")
+        
+        # Test visualization
+        print(f"\n2. Visualizing unified dataset index {dataset_idx}...")
+        try:
+            output_path = visualize_state_action(
+                dataset=unified_dataset,
+                dataset_idx=dataset_idx,
+                output_dir="./outputs/visualization",
+                skeleton_frame_interval=5,
+                depth_overlay_alpha=0.3,
+            )
+            if output_path is not None:
+                print(f"   ✓ Visualization completed successfully")
+                print(f"   - Output path: {output_path}")
+            else:
+                print(f"   ⚠ Visualization skipped (not VLA data)")
+        except Exception as e:
+            print(f"   ✗ Error during visualization: {e}")
+            import traceback
+            traceback.print_exc()
+    except Exception as e:
+        print(f"   ✗ Error creating dataset: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 if __name__ == "__main__":
-    test_dataset_loading()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Test LegendVLA dataset")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["test", "visualize"],
+        default="test",
+        help="Mode: 'test' for dataset loading test, 'visualize' for visualization test"
+    )
+    parser.add_argument(
+        "--dataset_idx",
+        type=int,
+        default=0,
+        help="Dataset index for visualization (only used when mode='visualize')"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.mode == "visualize":
+        test_visualize_state_action(dataset_idx=args.dataset_idx)
+    else:
+        test_dataset_loading()
