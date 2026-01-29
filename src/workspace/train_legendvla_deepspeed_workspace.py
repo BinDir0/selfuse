@@ -724,7 +724,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # We need to move the new created tensors to the same device as the input prepared by the accelerate
         causal_mask, vlm_position_ids, action_position_ids = (
             model.build_causal_mask_and_position_ids(   
-                batch["attention_mask"], batch["answer_start_idx"], self.dtype
+                batch["attention_mask"], batch["answer_start_idx"], batch["n_actions"], self.dtype
             )
         )
 
@@ -735,6 +735,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "states": batch["states"].to(self.dtype),
             "answer_start_idx": batch["answer_start_idx"],
             "is_vla_data": batch["is_vla_data"],
+            "n_states": batch["n_states"],
+            "n_actions": batch["n_actions"],
         }
         # Add depth_values if available
         if "depth_values" in batch:
