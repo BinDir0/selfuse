@@ -307,6 +307,7 @@ policy:
     # Depth image support
     use_depth: True  # Enable depth image processing with DINOv2
     depth_dropout: 0.1
+    diffloss_micro_batch_size: 4
     loss_weights: 
       ce_loss_weight: 0.1
       diffusion_loss_weight: 1.0

@@ -87,6 +87,7 @@ class LegendVLA(nn.Module):
 
         # Diffusion loss
         self.diffloss = diffloss
+        self.diffloss_micro_batch_size = cfg.get("diffloss_micro_batch_size", 4)
 
         # Action, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
@@ -831,6 +832,9 @@ class LegendVLA(nn.Module):
         pixel_values: torch.FloatTensor = None,
         depth_values: Optional[torch.FloatTensor] = None,
         depth_ids: Optional[torch.LongTensor] = None,
+        states: Optional[torch.FloatTensor] = None,
+        actions: Optional[torch.FloatTensor] = None,
+        is_vla_data = None,
         dtype: torch.dtype = torch.float32,
     ) -> torch.FloatTensor:
         """
@@ -841,6 +845,9 @@ class LegendVLA(nn.Module):
             pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values (normalized)
             depth_values (Optional[torch.FloatTensor]): [Bd, C, H, W] or [Bd, T, C, H, W] Depth images (optional)
             depth_ids (Optional[torch.LongTensor]): [B] Depth image indices corresponding to the depth values (optional)
+            states: [B, state_len, state_dim]
+            actions: [B, action_len, action_dim]
+            is_vla_data: [B]
         
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
@@ -898,6 +905,10 @@ class LegendVLA(nn.Module):
             input_ids != self.pad_token_id
         )
         final_embedding[text_mask] = inputs_embeds[text_mask].to(final_embedding.dtype)
+        state_mask = input_ids == self.state_token_index
+        action_mask = input_ids == self.action_token_index
+        state_features = self.action_encoder_ar(states)
+        action_features = self.action_encoder_ar(actions)
         if pixel_values is not None:
             image_mask = input_ids == self.image_token_index
             # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
@@ -920,6 +931,9 @@ class LegendVLA(nn.Module):
                 paired_image_features = self.multi_modal_projector(paired_image_features)
                 scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
                 final_embedding[i, image_indices] = scaled_image_features
+                if is_vla_data[i]:
+                    final_embedding[i, state_mask[i]] = state_features[i].to(final_embedding.dtype)
+                    final_embedding[i, action_mask[i]] = action_features[i].to(final_embedding.dtype)
         return final_embedding
 
     @torch.inference_mode()
@@ -1522,7 +1536,7 @@ class LegendVLA(nn.Module):
         causal_mask = batch["causal_mask"]
         vlm_position_ids = batch["vlm_position_ids"]
         action_position_ids = batch["action_position_ids"]
-        actions = batch["actions"]
+        actions = batch["actions"]  # (B, horizon_steps, action_dim)
         actions_valid_mask = batch["actions_valid_mask"]
         t = batch["t"]
         states = batch["states"]
@@ -1544,7 +1558,7 @@ class LegendVLA(nn.Module):
             depth_values = None
             depth_ids = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+            input_ids, pixel_values, depth_values, depth_ids, states, actions, is_vla_data, pixel_values.dtype
         )
         
         # inference with noisy action
@@ -1580,6 +1594,21 @@ class LegendVLA(nn.Module):
         valid_num_labels = torch.sum(labels != self.ignore_index)
         ce_loss = ce_loss / valid_num_labels.clamp(min=1)
 
+        # diffusion loss
+        vla_hidden = hidden_states[is_vla_data]
+        vla_starts = answer_start_idx[is_vla_data]
+        N = vla_hidden.shape[0]
+        offset = torch.arange(self.num_action_tokens, device=vla_hidden.device)
+        token_indices = vla_starts.unsqueeze(1) + offset
+        batch_indices = torch.arange(N, device=vla_hidden.device).unsqueeze(1)
+        action_hidden_states = vla_hidden[batch_indices, token_indices]  # [N, num_action_tokens, hidden_dim]
+        actions_gt = actions[is_vla_data]  # [N, num_action_tokens, action_dim]
+        action_hidden_repeated = action_hidden_states.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
+        actions_gt_repeated = actions_gt.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
+        action_hidden_input = action_hidden_repeated.reshape(-1, self.vlm_hidden_size)
+        actions_gt_input = actions_gt_repeated.reshape(-1, self.action_dim)
+        diff_loss = self.diffloss(actions_gt_input, action_hidden_input) / self.diffloss_micro_batch_size
+
         # [Batch_Size, Horizon_Steps, Action_Dim]
         v_psi = self.action_decoder(action_embeds)
 
@@ -1592,10 +1621,11 @@ class LegendVLA(nn.Module):
         actions_valid_num = torch.sum(actions_valid_mask)
         flow_loss = torch.sum(masked_loss) / actions_valid_num.clamp(min=1)
 
-        total_loss = self.loss_weights.ce_loss_weight * ce_loss + self.loss_weights.flow_loss_weight * flow_loss
+        total_loss = self.loss_weights.ce_loss_weight * ce_loss + self.loss_weights.diffusion_loss_weight * diff_loss + self.loss_weights.flow_loss_weight * flow_loss
         return {
             "total_loss": total_loss,
             "ce_loss": ce_loss,
+            "diffusion_loss": diff_loss,
             "flow_loss": flow_loss,
         }
 
