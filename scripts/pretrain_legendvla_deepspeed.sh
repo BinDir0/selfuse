@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# # 清除 VS Code 注入的调试变量
+# unset VSCODE_IPC_HOOK_CLI
+# unset VSCODE_PID
+# unset VSCODE_INJECTION
+# unset DEBUGPY_PROCESS_SPAWN
+
 # Multi-node DeepSpeed training script for LegendVLA
 
 set -e
@@ -27,7 +33,13 @@ export NCCL_MIN_CTAS=4
 # Enable expandable segments for better memory utilization
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+# # 设置 NCCL 超时为 1 小时 (单位毫秒: 3600000)
+# export NCCL_TIMEOUT=3600000 
+# export NCCL_ASYNC_ERROR_HANDLING=1
+
 rm -f .deepspeed_env
+
+export TOKENIZERS_PARALLELISM=false
 
 # Launch training
 accelerate launch \

@@ -213,7 +213,7 @@ training:
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
-  normalizer_path: /home/chenzhang/projects/EgoVLA/outputs/normalizer/2026.01.28/normalizer.pkl
+  normalizer_path: /share_data/chenzhang/projects/EgoVLA/outputs/normalizer/2026.01.29/normalizer.pkl
   num_epochs: 2
   use_bf16: True
   clipping:

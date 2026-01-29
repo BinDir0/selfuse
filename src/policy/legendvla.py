@@ -46,6 +46,8 @@ class LegendVLA(nn.Module):
         self.vocab_size = cfg.vocab_size
         self.pad_token_id = cfg.pad_token_id
         self.image_token_index = cfg.image_token_index
+        self.state_token_index = cfg.state_token_index
+        self.action_token_index = cfg.action_token_index
         self.use_lm_head = cfg.get("use_lm_head", False)
 
         self.max_vlm_tokens = cfg.max_vlm_tokens
@@ -833,7 +835,7 @@ class LegendVLA(nn.Module):
         input_ids: torch.LongTensor,
         pixel_values: torch.FloatTensor = None,
         depth_values: Optional[torch.FloatTensor] = None,
-        depth_ids: Optional[torch.LongTensor] = None,
+        has_depth_values: Optional[torch.LongTensor] = None,
         states: Optional[torch.FloatTensor] = None,
         actions: Optional[torch.FloatTensor] = None,
         n_states: Optional[torch.LongTensor] = None,
@@ -848,7 +850,7 @@ class LegendVLA(nn.Module):
             input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
             pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values (normalized)
             depth_values (Optional[torch.FloatTensor]): [Bd, C, H, W] or [Bd, T, C, H, W] Depth images (optional)
-            depth_ids (Optional[torch.LongTensor]): [B] Depth image indices corresponding to the depth values (optional)
+            has_depth_values (Optional[torch.LongTensor]): [B] Bool data indicating whether this sample has valid depth (optional)
             states: [B, state_len, state_dim]
             actions: [B, action_len, action_dim]
             is_vla_data: [B]
@@ -921,10 +923,10 @@ class LegendVLA(nn.Module):
             
             for i in range(bsz):
                 image_indices = image_mask[i].nonzero(as_tuple=True)[0]
-                if depth_ids is not None and depth_ids[i] >= 0 and \
+                if has_depth_values is not None and has_depth_values[i] and \
                     not (self.training and random.random() < self.depth_dropout):
                     # Each RGB token is paired with corresponding depth token
-                    depth_image_feature = depth_image_features[depth_ids[i]]
+                    depth_image_feature = depth_image_features[i]
                 else: 
                     if T is not None:
                         depth_image_feature = self.depth_missing_embeddings.repeat(T, 1)
@@ -980,12 +982,12 @@ class LegendVLA(nn.Module):
         # merge the text tokens and the image tokens
         if 'depth_values' in input:
             depth_values = input["depth_values"]
-            depth_ids = input["depth_ids"]
+            has_depth_values = input["has_depth_values"]
         else:
             depth_values = None
-            depth_ids = None
+            has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
         )
         
         # forward pass thru the vlm, cache the kv
@@ -1068,12 +1070,12 @@ class LegendVLA(nn.Module):
         # merge the text tokens and the image tokens
         if 'depth_values' in input:
             depth_values = input["depth_values"]
-            depth_ids = input["depth_ids"]
+            has_depth_values = input["has_depth_values"]
         else:
             depth_values = None
-            depth_ids = None
+            has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
         )
 
         # sample pure action noise
@@ -1139,14 +1141,14 @@ class LegendVLA(nn.Module):
         input_ids = input["input_ids"]
         pixel_values = input.get("pixel_values", None)
         depth_values = input.get("depth_values", None)
-        depth_ids = input.get("depth_ids", None)
+        has_depth_values = input.get("has_depth_values", None)
         attention_mask = input["attention_mask"]
 
         q_len = input_ids.size(1)
 
         # text tokens + image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, depth_ids, dtype
+            input_ids, pixel_values, depth_values, has_depth_values, dtype
         )
 
         # build causal mask and position ids for text
@@ -1193,7 +1195,7 @@ class LegendVLA(nn.Module):
                 - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
                 - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
                 - depth_values (torch.FloatTensor, Optional): [Bd, T, 3, H, W] Depth image values (normalized)
-                - depth_ids (torch.LongTensor, Optional): [B] Depth image IDs
+                - has_depth_values (torch.LongTensor, Optional): [B] Depth image IDs
                 - attention_mask (torch.LongTensor): [B, seq_len] Attention mask (optional)
             max_new_tokens (int): Maximum number of new tokens to generate
             temperature (float): Temperature parameter controlling sampling randomness
@@ -1215,7 +1217,7 @@ class LegendVLA(nn.Module):
         input_ids = input["input_ids"]
         pixel_values = input["pixel_values"]
         depth_values = input.get("depth_values", None)
-        depth_ids = input.get("depth_ids", None)
+        has_depth_values = input.get("has_depth_values", None)
         attention_mask = input.get("attention_mask", None)
         
         batch_size = input_ids.size(0)
@@ -1235,7 +1237,7 @@ class LegendVLA(nn.Module):
             "input_ids": input_ids,
             "pixel_values": pixel_values,
             "depth_values": depth_values,
-            "depth_ids": depth_ids,
+            "has_depth_values": has_depth_values,
             "attention_mask": attention_mask,
         }
         
@@ -1386,12 +1388,12 @@ class LegendVLA(nn.Module):
         # text tokens + image tokens
         if 'depth_values' in batch:
             depth_values = batch["depth_values"]
-            depth_ids = batch["depth_ids"]
+            has_depth_values = batch["has_depth_values"]
         else:
             depth_values = None
-            depth_ids = None
+            has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
         )
         
         output = self.joint_model(
@@ -1465,12 +1467,12 @@ class LegendVLA(nn.Module):
         # text tokens + image tokens
         if 'depth_values' in batch:
             depth_values = batch["depth_values"]
-            depth_ids = batch["depth_ids"]
+            has_depth_values = batch["has_depth_values"]
         else:
             depth_values = None
-            depth_ids = None
+            has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, depth_ids, pixel_values.dtype
+            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
         )
 
         # inference with noisy action
@@ -1561,12 +1563,12 @@ class LegendVLA(nn.Module):
         # text tokens + image tokens
         if 'depth_values' in batch:
             depth_values = batch["depth_values"]
-            depth_ids = batch["depth_ids"]
+            has_depth_values = batch["has_depth_values"]
         else:
             depth_values = None
-            depth_ids = None
+            has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, depth_ids, states, actions, n_states, n_actions, is_vla_data, pixel_values.dtype
+            input_ids, pixel_values, depth_values, has_depth_values, states, actions, n_states, n_actions, is_vla_data, pixel_values.dtype
         )
         
         # inference with noisy action
@@ -1605,6 +1607,7 @@ class LegendVLA(nn.Module):
         # diffusion loss
         device = hidden_states.device
         vla_hidden = hidden_states[is_vla_data]
+        vla_action = actions[is_vla_data]
 
         # 1. 获取维度的基本信息
         max_vlm_tokens = hidden_states.shape[1]
@@ -1620,16 +1623,17 @@ class LegendVLA(nn.Module):
         # 3. 调整 start 和 end 的形状以支持广播 (N, 1)
         starts = answer_start_idx[is_vla_data].unsqueeze(1)
         ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1)
+        action_ends = n_actions[is_vla_data].unsqueeze(1)
 
         # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
         # 逻辑：当前索引 >= start 且 当前索引 < start + n
         mask_hidden = (range_hidden >= starts) & (range_hidden < ends)
-        mask_action = (range_action >= starts) & (range_action < ends)
+        mask_action = range_action < action_ends
 
         # 5. 使用布尔索引提取数据
         # 这会将所有 True 的位置“压扁”提取出来，直接得到 (diff_bsz, dim)
         vla_hidden_z = vla_hidden[mask_hidden]  # (diff_bsz, hidden_dim)
-        action_gt = actions[mask_action]  # (diff_bsz, action_dim)
+        action_gt = vla_action[mask_action]  # (diff_bsz, action_dim)
         vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
         action_gt_repeated = action_gt.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
         diff_loss = self.diffloss(action_gt_repeated, vla_hidden_z_repeated) / self.diffloss_micro_batch_size

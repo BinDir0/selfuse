@@ -597,7 +597,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             # Gather metrics across all processes
             sum_eval_accuracy = accelerator.reduce(sum_eval_accuracy, reduction='sum')
             sum_eval_l1_loss = accelerator.reduce(sum_eval_l1_loss, reduction='sum')
-            eval_len_tensor = accelerator.reduce(eval_len_tensor, reduction='mean')
+            eval_len_tensor = accelerator.reduce(eval_len_tensor, reduction='sum')
             
             eval_accuracy = sum_eval_accuracy / eval_len_tensor.clamp(min=1)
             eval_l1_loss = sum_eval_l1_loss / eval_len_tensor.clamp(min=1)
@@ -741,7 +741,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Add depth_values if available
         if "depth_values" in batch:
             inputs["depth_values"] = batch["depth_values"].to(self.dtype)
-            inputs["depth_ids"] = batch["depth_ids"]
+            inputs["has_depth_values"] = batch["has_depth_values"]
         if self.objective_func != "train_ar":
             inputs["action_position_ids"] = action_position_ids
             inputs["actions"] = batch["actions"].to(self.dtype)
