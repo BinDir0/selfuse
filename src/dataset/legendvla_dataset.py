@@ -29,39 +29,38 @@ from .streaming_replay_buffer import StreamingReplayBuffer
 
 
 class LegendVLADataset(BaseRatioDataset):
-    def __init__(self,
-            zarr_paths,
-            horizon=1,
-            pad_before=0,
-            pad_after=0,
-            shape_meta=None,
-            seed=42,
-            val_ratio=0.0,
-            history=30,
-            objective=None,
-            normalizer_dataloader_cfg=dict(),
-            use_relative_action=False,
-            max_train_episodes=None,
-            mode = 'train',
-            depth_clip_range=None,
-        ):
+    def __init__(
+        self,
+        zarr_paths,
+        shape_meta=None,
+        seed=42,
+        val_ratio=0.0,
+        objective=None,
+        normalizer_dataloader_cfg=dict(),
+        use_relative_action=False,
+        max_train_episodes=None,
+        mode = 'train',
+        depth_clip_range=None,
+    ):
         self.zarr_paths = zarr_paths
         self.preprocessor = None
-        self.history = history
         self.objective = objective
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.use_relative_action = use_relative_action
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
         self.depth_clip_range = depth_clip_range
-        self.horizon = horizon
-        self.pad_before = pad_before
-        self.pad_after = pad_after
         self.shape_meta = shape_meta
         self.motion_type = shape_meta['obs']['state']['type']
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
-        self.n_obs_image_steps = shape_meta['obs']['rgb']['horizon']
-        self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
+        self.sampler_cfg = {
+            'num_image_steps': shape_meta['obs']['rgb']['horizon'],
+            'num_image_stride': shape_meta['obs']['rgb']['stride'],
+            'num_state_steps': shape_meta['obs']['state']['horizon'],
+            'num_state_stride': shape_meta['obs']['state']['stride'],
+            'num_action_steps': shape_meta['action']['horizon'],
+            'num_action_stride': shape_meta['action']['stride'],
+        }
 
         # Initialize storage lists
         self.replay_buffers = []
@@ -85,7 +84,7 @@ class LegendVLADataset(BaseRatioDataset):
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
                 zarr_path['path'], 
-                keys=['image', 'depth', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'intrinsic', 'presence'], 
+                keys=['image', 'depth', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'intrinsic'], 
                 lazy_load=True
             )
             self.replay_buffers.append(replay_buffer)
@@ -103,14 +102,11 @@ class LegendVLADataset(BaseRatioDataset):
             self.train_masks.append(train_mask)
             
             # Create sampler
-            self.image_history = history + 1
             sampler = SequenceSampler(
-                replay_buffer=replay_buffer,
-                sequence_length=horizon,
-                pad_before=pad_before,
-                pad_after=pad_after,
-                episode_mask=train_mask,
-                key_first_k=dict())
+                replay_buffer=replay_buffer, 
+                episode_mask=train_mask, 
+                **self.sampler_cfg
+            )
             self.samplers.append(sampler)
             
             # Record sampler length
@@ -134,11 +130,9 @@ class LegendVLADataset(BaseRatioDataset):
             # Create validation set sampler
             sampler = SequenceSampler(
                 replay_buffer=replay_buffer,
-                sequence_length=self.horizon,
-                pad_before=self.pad_before,
-                pad_after=self.pad_after,
                 episode_mask=~self.train_masks[i],
-                key_first_k=dict(image=self.image_history, depth=self.image_history))
+                **self.sampler_cfg
+            )
             val_set.samplers.append(sampler)
             val_set.train_masks.append(~self.train_masks[i])
             val_set.sampler_lens.append(len(sampler))
@@ -147,34 +141,33 @@ class LegendVLADataset(BaseRatioDataset):
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
-        state, action, action_valid_mask, state_presence, action_presence = process_state_action(
+        state, action = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
             hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
             hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
-            extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4), # [Horizon, 16] -> [Horizon, 4, 4]
-            presence = sample['presence'], 
+            extrinsic = sample['extrinsic'].astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 
-            history = self.history, 
-            n_obs_state_steps = self.n_obs_state_steps, 
             motion_type = self.motion_type,
             use_relative_action = self.use_relative_action,
         )
         image, depth_images = process_image(
             sample['image'], 
-            self.history, 
-            self.n_obs_image_steps,
             sample.get('depth', None), 
             self.aug_transform, 
             self.depth_clip_range,
         )
 
-        intrinsic = sample['intrinsic'][self.history].astype(np.float32)
-        instruction = sample['instruction'][self.history]
-        instruction_num = sample['instruction_num'][self.history]
+        intrinsic = sample['intrinsic'].astype(np.float32)
+        instruction = sample['instruction']
+        instruction_num = sample['instruction_num']
         # sample a random instruction from the candidate instructions
-        idx = np.random.randint(0, instruction_num)
+        
+        if self.mode == 'train':
+            idx = np.random.randint(0, instruction_num)
+        else: 
+            idx = 0
         instruction = instruction[idx]
         
         # Process all images in batch
@@ -202,7 +195,6 @@ class LegendVLADataset(BaseRatioDataset):
             data['depth_values'] = processed_results['depth_values']
         if self.objective != "train_ar":
             data['actions'] = action
-            data['actions_valid_mask'] = action_valid_mask
         if self.objective != "train_flow":
             data['labels'] = processed_results['labels']
         return data
@@ -217,11 +209,7 @@ class LegendVLADataset(BaseRatioDataset):
         # Merge all data
         normalizer_dataset = LegendVLALowLevelDataset(
             zarr_paths=self.zarr_paths,
-            horizon=self.horizon,
-            pad_before=self.pad_before,
-            pad_after=self.pad_after,
             shape_meta=self.shape_meta,
-            history=self.history,
             max_train_episodes=self.max_train_episodes, 
             return_numpy=True, 
             use_relative_action=self.use_relative_action,
@@ -233,14 +221,15 @@ class LegendVLADataset(BaseRatioDataset):
 
     def get_collator(self):
         assert self.preprocessor is not None, "Preprocessor is not set"
+        padding_side = 'left' if self.mode == 'infer' else 'right'
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
+            padding_side=padding_side,
         )
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
-        # For validation, we need to directly sample from the validation set
         curr_idx = idx
         for i, length in enumerate(self.sampler_lens):
             if curr_idx < length:
@@ -447,9 +436,12 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
             return self.vla_dataset[idx]
         elif self.vlm_dataset is not None:
             sample = self.vlm_dataset[idx - len(self.vla_dataset)]
-            sample['states'] = torch.zeros(self.shape_meta['states'])
-            sample['actions'] = torch.zeros(self.shape_meta['actions'])
-            sample['actions_valid_mask'] = torch.zeros(self.shape_meta['actions'], dtype=torch.bool)
+            if 'states' in self.shape_meta: 
+                sample['states'] = torch.zeros((0, *self.shape_meta['states'][1:]))
+            if 'actions' in self.shape_meta:
+                sample['actions'] = torch.zeros((0, *self.shape_meta['actions'][1:]))
+            if 'depth_values' in self.shape_meta: 
+                sample['depth_values'] = torch.zeros((0, *self.shape_meta['depth_values'][1:]))
             return sample
         else:
             raise ValueError("No dataset to get item from")
@@ -461,22 +453,29 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
     def __init__(
         self,
         zarr_paths,
-        horizon=1,
-        pad_before=0,
-        pad_after=0,
         shape_meta=None,
-        history=30,
         seed=42,
         val_ratio=0.0,
-        dims=None, 
         max_train_episodes=None,
         return_numpy=True, # whether to return numpy arrays
         normalizer_dataloader_cfg=None,
         use_relative_action=False,
-        debug=False, 
     ):
         super().__init__()
-        self.history = history
+        self.shape_meta = shape_meta
+        self.motion_type = shape_meta['obs']['state']['type']
+        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
+        self.return_numpy = return_numpy
+        self.normalizer = None
+        self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
+        self.use_relative_action = use_relative_action
+        self.sampler_cfg = {
+            'num_state_steps': shape_meta['obs']['state']['horizon'],
+            'num_state_stride': shape_meta['obs']['state']['stride'],
+            'num_action_steps': shape_meta['action']['horizon'],
+            'num_action_stride': shape_meta['action']['stride'],
+        }
+
         # Initialize storage lists
         self.replay_buffers = []
         self.train_masks = []
@@ -487,7 +486,7 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         for zarr_path in zarr_paths:
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path['path'], keys=['state', 'action', 'extrinsic', 'presence'], lazy_load=False)
+                zarr_path['path'], keys=['state', 'action', 'extrinsic'], lazy_load=False)
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask
@@ -506,29 +505,13 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
             # Create sampler
             sampler = SequenceSampler(
                 replay_buffer=replay_buffer,
-                sequence_length=horizon,
-                pad_before=pad_before,
-                pad_after=pad_after,
                 episode_mask=train_mask,
-                key_first_k=dict())
+                **self.sampler_cfg
+            )
             self.samplers.append(sampler)
             
             # Record sampler length
             self.sampler_lens.append(len(sampler))
-
-        self.horizon = horizon
-        self.pad_before = pad_before
-        self.pad_after = pad_after
-        self.shape_meta = shape_meta
-        self.motion_type = shape_meta['obs']['state']['type']
-        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand pca ncomponents
-        self.n_obs_state_steps = shape_meta['obs']['state']['horizon']
-        self.dims = dims
-        self.return_numpy = return_numpy
-        self.normalizer = None
-        self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
-        self.debug = debug
-        self.use_relative_action = use_relative_action
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -540,11 +523,9 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
             # Create validation set sampler
             sampler = SequenceSampler(
                 replay_buffer=replay_buffer,
-                sequence_length=self.horizon,
-                pad_before=self.pad_before,
-                pad_after=self.pad_after,
                 episode_mask=~self.train_masks[i],
-                key_first_k=dict())
+                **self.sampler_cfg
+            )
             val_set.samplers.append(sampler)
             val_set.train_masks.append(~self.train_masks[i])
             val_set.sampler_lens.append(len(sampler))
@@ -553,28 +534,27 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
 
     def _sample_to_data(self, sample):
         # Select data keys based on motion_type
-        state, action, _, _, _ = process_state_action(
+        state, action = process_state_action(
             wrist_state = sample['state/wrist'].astype(np.float32), 
             hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
             wrist_action = sample['action/wrist'].astype(np.float32), 
             hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
-            extrinsic = sample['extrinsic'].astype(np.float32).reshape(-1, 4, 4), # [Horizon, 16] -> [Horizon, 4, 4]
-            presence = sample['presence'], 
+            extrinsic = sample['extrinsic'].astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 
-            history = self.history, 
-            n_obs_state_steps = self.n_obs_state_steps,
             motion_type = self.motion_type,
             use_relative_action = self.use_relative_action,
         )
-        if self.dims is not None:
-            dim_slice = slice(self.dims[0], self.dims[1])
-            state = state[:, dim_slice]
-            action = action[:, dim_slice]
 
-        data = {
-            'motions': np.concatenate([state, action], axis=0),
-        }
+        if not self.use_relative_action:
+            data = {
+                'motions': np.concatenate([state, action], axis=0),
+            }
+        else:
+            data = {
+                'states': state,
+                'actions': action,
+            }
         return data
 
     def get_normalizer(self):
@@ -585,7 +565,7 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         self.normalizer = normalizer
 
     def get_collator(self):
-        return BaseDataCollator()
+        return ConcatDataCollator()
 
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
         # Find corresponding sampler
@@ -599,8 +579,6 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         data = self._sample_to_data(sample)
         if not self.return_numpy:
             data = dict_apply(data, torch.from_numpy) 
-        if self.debug: 
-            data.update({'idx': idx})
         return data
 
     def __len__(self):
@@ -608,10 +586,11 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
 
 
 class LegendVLDataCollator(BaseDataCollator):
-    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100):
+    def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, padding_side: str = 'right'):
         super().__init__()
         self.pad_token_id = pad_token_id
         self.ignore_index = ignore_index
+        self.padding_side = padding_side
 
     def __call__(self, data_list):
         """
@@ -628,39 +607,46 @@ class LegendVLDataCollator(BaseDataCollator):
         batch["input_ids"] = rnn_utils.pad_sequence(
             input_ids_batch,
             batch_first=True,
-            padding_value=self.pad_token_id
+            padding_value=self.pad_token_id,
+            padding_side=self.padding_side
         )
         batch["labels"] = rnn_utils.pad_sequence(
             labels_batch,
             batch_first=True,
-            padding_value=self.ignore_index
+            padding_value=self.ignore_index,
+            padding_side=self.padding_side
         )
         batch["attention_mask"] = (batch["input_ids"] != self.pad_token_id).long()
-        depth_values = []
-        depth_ids = []
-        for idx, item in enumerate(data_list):
-            if 'depth_values' in item:
-                depth_values.append(item['depth_values'])
-                depth_ids.append(idx)
-        if len(depth_values) > 0:
-            batch['depth_values'] = torch.stack(depth_values, dim=0)
-            depth_ids_tensor = torch.ones(len(data_list), dtype=torch.int32) * self.ignore_index
-            for i, idx in enumerate(depth_ids): 
-                depth_ids_tensor[idx] = i
-            batch['depth_ids'] = depth_ids_tensor
+        has_depth_values = [(item['depth_values'] is not None and item['depth_values'].shape[0] > 0) for item in data_list]
+        batch['has_depth_values'] = torch.tensor(has_depth_values, dtype=torch.bool)
         for key in data_list[0].keys():
-            if key not in ['input_ids', 'attention_mask', 'labels', 'depth_values']:
+            if key in ['input_ids', 'attention_mask', 'labels']: 
+                continue 
+            if key in ['pixel_values', 'depth_values', 'states', 'actions']: 
+                original_lengths = [item[key].shape[0] for item in data_list]
+                batch[key] = rnn_utils.pad_sequence(
+                    [item[key] for item in data_list],
+                    batch_first=True,
+                    padding_value=0,
+                    padding_side=self.padding_side
+                )
+                if key == 'actions':
+                    valid_mask = torch.zeros_like(batch[key], dtype=torch.bool)
+                    for i, length in enumerate(original_lengths):
+                        valid_mask[i, :length] = True
+                    batch['actions_valid_mask'] = valid_mask
+            else:
                 batch[key] = torch.stack([item[key] for item in data_list])
 
         return batch
 
-class BaseDataCollator(BaseDataCollator):
+class ConcatDataCollator(BaseDataCollator):
     def __init__(self):
         super().__init__()
 
     def __call__(self, data_list):
         """
-        DataLoader will pass a list of samples from the Dataset to this function.
+        A Collator that concatenates a list of samples into a single batch, at the first dimension.
         Args:
             data_list: a list, where each element is the return value of the Dataset's __getitem__ method.
                e.g., [{'state/hand': np.ndarray, 'action/hand': np.ndarray}, {'state/hand': np.ndarray, 'action/hand': np.ndarray}, ...]
@@ -670,36 +656,13 @@ class BaseDataCollator(BaseDataCollator):
         batch = {}
         for key in data_list[0].keys():
             if isinstance(data_list[0][key], torch.Tensor): # tensor
-                batch[key] = torch.stack([item[key] for item in data_list], axis=0)
+                batch[key] = torch.cat([item[key] for item in data_list], dim=0)
             elif isinstance(data_list[0][key], np.ndarray): # numpy
-                batch[key] = np.stack([item[key] for item in data_list], axis=0)
+                batch[key] = np.concatenate([item[key] for item in data_list], axis=0)
             else: # list
                 batch[key] = [item[key] for item in data_list]
         return batch
 
-
-def get_presence_value(state_presence, action_presence, action, state, hand_ndim):
-    action_valid_mask = np.zeros_like(action, dtype=bool)
-
-    state_presence_left = (state_presence & 1) == True
-    action_presence_left = (action_presence & 1) == True
-    action_valid_mask[action_presence_left, :3] = True
-    action_valid_mask[action_presence_left, 6:12] = True
-    action_valid_mask[action_presence_left, 18:18+hand_ndim] = True
-    action[~action_presence_left, :3] = state[~state_presence_left, :3] = 0
-    action[~action_presence_left, 6:12] = state[~state_presence_left, 6:12] = np.array([1, 0, 0, 0, 1, 0])
-    action[~action_presence_left, 18:18+hand_ndim] = state[~state_presence_left, 18:18+hand_ndim] = 0
-
-    state_presence_right = (state_presence >> 1) == True
-    action_presence_right = (action_presence >> 1) == True
-    action_valid_mask[action_presence_right, 3:6] = True
-    action_valid_mask[action_presence_right, 12:18] = True
-    action_valid_mask[action_presence_right, 18+hand_ndim:18+hand_ndim*2] = True
-    action[~action_presence_right, 3:6] = state[~state_presence_right, 3:6] = 0
-    action[~action_presence_right, 12:18] = state[~state_presence_right, 12:18] = np.array([1, 0, 0, 0, 1, 0])
-    action[~action_presence_right, 18+hand_ndim:18+hand_ndim*2] = state[~state_presence_right, 18+hand_ndim:18+hand_ndim*2] = 0
-    
-    return state, action, action_valid_mask
 
 def get_relative_action(state, action):
     '''
@@ -809,56 +772,42 @@ def process_state_action(
     wrist_action, 
     hand_action, 
     extrinsic, 
-    presence, 
     hand_ndim, 
-    history, 
-    n_obs_state_steps, 
     normalizer : Optional[LinearNormalizer] = None, 
     motion_type = 'mano',
     use_relative_action = False,
 ):
     '''
     Args:
-        wrist_state: np.ndarray, shape: [N, wrist_dim]
-        hand_state: np.ndarray, shape: [N, all_hand_dim]
-        wrist_action: np.ndarray, shape: [N, wrist_dim]
-        hand_action: np.ndarray, shape: [N, all_hand_dim]
-        extrinsic: np.ndarray, shape: [N, 4, 4]
-        presence: np.ndarray, shape: [N]
+        wrist_state: np.ndarray, shape: [N_state, wrist_dim]
+        hand_state: np.ndarray, shape: [N_state, all_hand_dim]
+        wrist_action: np.ndarray, shape: [N_action, wrist_dim]
+        hand_action: np.ndarray, shape: [N_action, all_hand_dim]
+        extrinsic: np.ndarray, shape: [4, 4]
         hand_ndim: int
-        history: int
-        n_obs_state_steps: int
         normalizer: Optional[LinearNormalizer]
         motion_type: str, 'mano' or 'keypoint'
+        use_relative_action: bool
     Returns:
-        state: np.ndarray, shape: [T, wrist_dim + hand_dim]
-        action: np.ndarray, shape: [H, wrist_dim + hand_dim]
-        action_valid_mask: np.ndarray, shape: [H, wrist_dim + hand_dim]
-        state_presence: np.ndarray, shape: [H]
-        action_presence: np.ndarray, shape: [H]
+        state: np.ndarray, shape: [N_state, wrist_dim + hand_dim]
+        action: np.ndarray, shape: [N_action, wrist_dim + hand_dim]
     '''
-
-    step = history // n_obs_state_steps
-    state_slice = [history - i * step for i in range(0, n_obs_state_steps)]
-    state_slice = state_slice[::-1]
     # use first self.hand_ndim components of hand state and action
     all_hand_ndim = hand_state.shape[-1] // 2 # per hand dims, i.e. 45 in MANO hand params
     hand_state = np.concatenate([
-        hand_state[state_slice, :hand_ndim], 
-        hand_state[state_slice, all_hand_ndim:all_hand_ndim + hand_ndim]
+        hand_state[:, :hand_ndim], 
+        hand_state[:, all_hand_ndim:all_hand_ndim + hand_ndim]
     ], axis=-1)
     hand_action = np.concatenate([
-        hand_action[history:, :hand_ndim], 
-        hand_action[history:, all_hand_ndim:all_hand_ndim + hand_ndim]
+        hand_action[:, :hand_ndim], 
+        hand_action[:, all_hand_ndim:all_hand_ndim + hand_ndim]
     ], axis=-1)
-    processed_wrist_state = wrist_state[state_slice]
-    processed_wrist_action = wrist_action[history:]
 
     if motion_type == 'fingertips': 
         # TODO: We can try transform the fingertips to the camera coordinate system or wrist frame coordinate system
-        processed_hand_state = transform_hand_points_to_wrist_frame(hand_state, processed_wrist_state)
+        processed_hand_state = transform_hand_points_to_wrist_frame(hand_state, wrist_state)
         processed_hand_state = processed_hand_state.reshape(hand_state.shape)
-        processed_hand_action = transform_hand_points_to_wrist_frame(hand_action, processed_wrist_action)
+        processed_hand_action = transform_hand_points_to_wrist_frame(hand_action, wrist_action)
         processed_hand_action = processed_hand_action.reshape(hand_action.shape)
     elif motion_type == 'mano':
         processed_hand_state = hand_state
@@ -867,58 +816,49 @@ def process_state_action(
         raise ValueError(f"Unsupported motion type: {motion_type}")
 
     # transform the wrist state and action to the camera coordinate system
-    processed_wrist_state = transform_wrist_to_target_frame(processed_wrist_state, extrinsic[history])
-    processed_wrist_action = transform_wrist_to_target_frame(processed_wrist_action, extrinsic[history])
+    processed_wrist_state = transform_wrist_to_target_frame(wrist_state, extrinsic)
+    processed_wrist_action = transform_wrist_to_target_frame(wrist_action, extrinsic)
 
     # use delta of wrist translation and hand mano params as action
-    state_presence = presence[state_slice]
-    action_presence = presence[history:]
     processed_state = np.concatenate([processed_wrist_state, processed_hand_state], axis=-1)
     processed_action = np.concatenate([processed_wrist_action, processed_hand_action], axis=-1)
-    processed_state, processed_action, action_valid_mask = get_presence_value(
-        state_presence, action_presence, processed_action, processed_state, hand_ndim
-    )
     if use_relative_action:
         processed_action = get_relative_action(processed_state[-1], processed_action)
 
     if normalizer is not None:
-        state = normalizer['motions'](processed_state)
-        action = normalizer['motions'](processed_action)
-    else:
+        if not use_relative_action: # Use unified normalizer for both state and action
+            state = normalizer['motions'](processed_state)
+            action = normalizer['motions'](processed_action)
+        else: # Use separate normalizers for state and action
+            state = normalizer['states'](processed_state)
+            action = normalizer['actions'](processed_action)
+    else: # No normalizer
         state = processed_state
         action = processed_action
-
-    return state, action, action_valid_mask, state_presence, action_presence
+    return state, action
 
 # TODO: maybe we need to use the same augmentation for all images in the action chunk
 # TODO: we can try more advanced augmentation techniques, notably, we should care about the depth image augmentation
-def process_image(image, history, n_obs_image_steps, depth_image = None, aug_transform = None, depth_clip_range = None):
+def process_image(image, depth_image = None, aug_transform = None, depth_clip_range = None):
     '''
     Args:
         image: np.ndarray, shape: [N, H, W, 3]
-        history: int
-        n_obs_image_steps: int
         depth_image: np.ndarray, shape: [N, H, W]
         aug_transform: Optional[Callable]
     Returns:
         image: np.ndarray, shape: [N, H, W, 3]
         depth_image: np.ndarray, shape: [N, H, W]
     '''
-    if n_obs_image_steps > 1:
-        image_slice = [i for i in range(0, history + 1, history // (n_obs_image_steps - 1))]
-    else:
-        image_slice = [-1]
-
-    images_to_process = image[image_slice]
+    images_to_process = image
     depth_images_to_process = None
     if depth_image is not None:
-        depth_images_to_process = depth_image[image_slice]
+        depth_images_to_process = depth_image / 1000.0 # convert mm to m
         # normalize the depth images to [0, 1]
         depth_images_to_process = np.clip(
             depth_images_to_process, 
             depth_clip_range[0], 
             depth_clip_range[1]
-        ) / (depth_clip_range[1] + 1e-6)
+        ) / (depth_clip_range[1] - depth_clip_range[0] + 1e-6)
     if aug_transform is not None:
         augmented_images = []
         for img_np in images_to_process:
@@ -932,7 +872,6 @@ def process_image(image, history, n_obs_image_steps, depth_image = None, aug_tra
     return images_to_process, depth_images_to_process
 
 
-# TODO: consider action valid mask when calculating normalizer
 def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
     # Merge all data
     if normalizer_dataset is None:
@@ -940,7 +879,8 @@ def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
     dataloader = DataLoader(normalizer_dataset, collate_fn=normalizer_dataset.get_collator(), **dataloader_cfg)
     assert len(dataloader) > 0, "No data to calculate normalizer"
     normalizer = LinearNormalizer()
-    normalizer.start_streaming_fit(keys=next(iter(dataloader)).keys())
+    normalizer_keys = next(iter(dataloader)).keys()
+    normalizer.start_streaming_fit(keys=normalizer_keys)
     for batch in tqdm(dataloader, desc="Calculating normalizer"):
         input_data = {
             k: v.reshape(-1, v.shape[-1]) for k, v in batch.items() \
@@ -949,7 +889,11 @@ def get_normalizer(dataloader_cfg, normalizer_dataset = None, **kwargs):
         normalizer.update_streaming_fit(input_data)
     normalizer.finish_streaming_fit()
     # ignore the wrist rotation
-    normalizer.ignore_dim(key='motions', dim=slice(6, 18))
+    for key in normalizer_keys:
+        if key in ['states', 'actions', 'motions']:
+            normalizer.ignore_dim(key=key, dim=slice(6, 18))
+        else: 
+            raise ValueError(f"Unsupported key: {key}")
 
     def print_dict(d):
         for k, v in d.items():
@@ -1211,16 +1155,206 @@ def test_dataset_loading():
             if idx > 100: 
                 break
             print(f"batch {idx} pixel values range: {batch['pixel_values'].min()}, {batch['pixel_values'].max()}")
+        
+        # Get first batch and output complete contents
+        print(f"\n   Getting first batch and outputting complete contents...")
         first_batch = next(iter(dataloader))
-        print(f"   - Dataloader batch keys : {list(first_batch.keys())}")
+        
+        # Set torch and numpy print options to show all values without truncation
+        import sys
+        
+        # Set torch to show all values (PyTorch doesn't have get_printoptions, so we just set it)
+        torch.set_printoptions(
+            threshold=sys.maxsize,  # Show all elements
+            edgeitems=sys.maxsize,  # Show all edge items
+            linewidth=sys.maxsize,  # No line wrapping limit
+            precision=6,  # Keep reasonable precision
+        )
+        
+        np.set_printoptions(
+            threshold=sys.maxsize,  # Show all elements
+            edgeitems=sys.maxsize,  # Show all edge items
+            linewidth=sys.maxsize,  # No line wrapping limit
+            precision=6,  # Keep reasonable precision
+        )
+        
+        print(f"\n   {'='*80}")
+        print(f"   First Batch Complete Contents:")
+        print(f"   {'='*80}")
+        print(f"   Batch keys: {list(first_batch.keys())}")
+        print(f"   Batch size: {len(first_batch[list(first_batch.keys())[0]]) if isinstance(first_batch[list(first_batch.keys())[0]], (torch.Tensor, np.ndarray, list)) else 'N/A'}")
+        print(f"\n")
+        
         for key, value in first_batch.items():
-            if hasattr(value, 'shape'):
-                print(f"   - {key}: shape={value.shape}, dtype={value.dtype}")
+            print(f"   {'-'*80}")
+            print(f"   Key: {key}")
+            print(f"   Type: {type(value)}")
+            
+            if isinstance(value, torch.Tensor):
+                print(f"   Shape: {value.shape}")
+                print(f"   Dtype: {value.dtype}")
+                print(f"   Device: {value.device}")
+                print(f"   Requires grad: {value.requires_grad}")
+                
+                # Output statistics
+                if value.numel() > 0:
+                    print(f"   Min: {value.min().item()}")
+                    print(f"   Max: {value.max().item()}")
+                    print(f"   Mean: {value.float().mean().item()}")
+                    print(f"   Std: {value.float().std().item()}")
+                
+                # Output complete values - no size limit
+                print(f"   Complete Values:\n{value}")
+            
+            elif isinstance(value, np.ndarray):
+                print(f"   Shape: {value.shape}")
+                print(f"   Dtype: {value.dtype}")
+                
+                # Output statistics
+                if value.size > 0:
+                    print(f"   Min: {value.min()}")
+                    print(f"   Max: {value.max()}")
+                    print(f"   Mean: {value.mean()}")
+                    print(f"   Std: {value.std()}")
+                
+                # Output complete values - no size limit
+                print(f"   Complete Values:\n{value}")
+            
+            elif isinstance(value, (list, tuple)):
+                print(f"   Length: {len(value)}")
+                if len(value) > 0:
+                    print(f"   Element type: {type(value[0])}")
+                # Output complete values - no size limit
+                print(f"   Complete Values:\n{value}")
+            
+            elif isinstance(value, (int, float, bool, str)):
+                print(f"   Value: {value}")
+            
             else:
-                print(f"   - {key}: type={type(value)}")
-        print(f"pixel values range: {first_batch['pixel_values'].min()}, {first_batch['pixel_values'].max()}")
+                print(f"   Value: {value}")
+                if hasattr(value, '__dict__'):
+                    print(f"   Attributes: {list(value.__dict__.keys())}")
+            
+            print(f"")
+        
+        # Validation checks
+        print(f"\n   {'='*80}")
+        print(f"   Validation Checks:")
+        print(f"   {'='*80}")
+        
+        # Check 1: input_ids 中为 0 的部分和 attention_mask 重合
+        print(f"\n   1. Checking input_ids padding matches attention_mask...")
+        if 'input_ids' in first_batch and 'attention_mask' in first_batch:
+            input_ids = first_batch['input_ids']
+            attention_mask = first_batch['attention_mask']
+            padding_mask = (input_ids == 0)
+            attention_zero = (attention_mask == 0)
+            
+            if torch.equal(padding_mask, attention_zero):
+                print(f"      ✓ PASS: input_ids padding matches attention_mask")
+            else:
+                mismatches = (padding_mask != attention_zero).sum().item()
+                print(f"      ✗ FAIL: {mismatches} mismatches found between input_ids padding and attention_mask")
+        else:
+            print(f"      ⚠ SKIP: Missing input_ids or attention_mask")
+        
+        # Check 2 & 3: state_token_id 和 action_token_id 个数检查
+        print(f"\n   2. Checking state_token_id counts match non-zero timesteps in states...")
+        print(f"   3. Checking action_token_id counts match non-zero timesteps in actions...")
+        if 'input_ids' in first_batch and 'states' in first_batch and 'actions' in first_batch:
+            input_ids = first_batch['input_ids']
+            states = first_batch['states']
+            actions = first_batch['actions']
+            
+            # Get token IDs from processor
+            if vla_dataset.preprocessor is not None:
+                state_token_id = vla_dataset.preprocessor.state_token_id
+                action_token_id = vla_dataset.preprocessor.action_token_id
+                
+                batch_size = input_ids.shape[0]
+                state_check_passed = True
+                action_check_passed = True
+                
+                for i in range(batch_size):
+                    # Count state_token_id in input_ids
+                    state_token_count = (input_ids[i] == state_token_id).sum().item()
+                    
+                    # Count non-zero timesteps in states
+                    # states shape: [batch_size, n_obs_state_steps, state_dim]
+                    state_non_zero_timesteps = 0
+                    for t in range(states.shape[1]):
+                        if not torch.all(states[i, t] == 0):
+                            state_non_zero_timesteps += 1
+                    
+                    if state_token_count != state_non_zero_timesteps:
+                        print(f"      ✗ FAIL: Sample {i}: state_token_id count ({state_token_count}) != non-zero state timesteps ({state_non_zero_timesteps})")
+                        state_check_passed = False
+                    
+                    # Count action_token_id in input_ids
+                    action_token_count = (input_ids[i] == action_token_id).sum().item()
+                    
+                    # Count non-zero timesteps in actions
+                    # actions shape: [batch_size, horizon, action_dim]
+                    action_non_zero_timesteps = 0
+                    if 'actions_valid_mask' in first_batch:
+                        # Use actions_valid_mask if available
+                        actions_valid_mask = first_batch['actions_valid_mask']
+                        action_non_zero_timesteps = actions_valid_mask[i].any(dim=1).sum().item()
+                    else:
+                        # Fallback: check if action is non-zero
+                        for t in range(actions.shape[1]):
+                            if not torch.all(actions[i, t] == 0):
+                                action_non_zero_timesteps += 1
+                    
+                    if action_token_count != action_non_zero_timesteps:
+                        print(f"      ✗ FAIL: Sample {i}: action_token_id count ({action_token_count}) != non-zero action timesteps ({action_non_zero_timesteps})")
+                        action_check_passed = False
+                
+                if state_check_passed:
+                    print(f"      ✓ PASS: All samples have matching state_token_id counts")
+                if action_check_passed:
+                    print(f"      ✓ PASS: All samples have matching action_token_id counts")
+            else:
+                print(f"      ⚠ SKIP: Preprocessor not set, cannot get token IDs")
+        else:
+            print(f"      ⚠ SKIP: Missing input_ids, states, or actions")
+        
+        # Check 4: labels 中每一条不为 -1 的第一个位置是否等于 answer_start_idx
+        print(f"\n   4. Checking labels first non-ignore position matches answer_start_idx...")
+        if 'labels' in first_batch and 'answer_start_idx' in first_batch:
+            labels = first_batch['labels']
+            answer_start_idx = first_batch['answer_start_idx']
+            ignore_index = vla_dataset.preprocessor.ignore_index if vla_dataset.preprocessor is not None else -100
+            
+            batch_size = labels.shape[0]
+            check_passed = True
+            
+            for i in range(batch_size):
+                # Find first position where labels[i] != ignore_index
+                non_ignore_mask = (labels[i] != ignore_index)
+                if non_ignore_mask.any():
+                    first_non_ignore_pos = non_ignore_mask.nonzero(as_tuple=False)[0, 0].item()
+                    expected_start = answer_start_idx[i].item() if isinstance(answer_start_idx, torch.Tensor) else answer_start_idx[i]
+                    
+                    if first_non_ignore_pos != expected_start:
+                        print(f"      ✗ FAIL: Sample {i}: first non-ignore position ({first_non_ignore_pos}) != answer_start_idx ({expected_start})")
+                        check_passed = False
+                else:
+                    print(f"      ⚠ WARN: Sample {i}: All labels are ignore_index")
+            
+            if check_passed:
+                print(f"      ✓ PASS: All samples have matching answer_start_idx")
+        else:
+            print(f"      ⚠ SKIP: Missing labels or answer_start_idx")
+        
+        print(f"\n   {'='*80}")
+        print(f"   First Batch Output Complete")
+        print(f"   {'='*80}\n")
+        
     except Exception as e:
         print(f"   ✗ Error creating unified dataset dataloader: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     test_dataset_loading()

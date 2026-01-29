@@ -1,4 +1,4 @@
-from typing import Optional, Iterator, List
+from typing import Optional, Iterator, List, Literal
 import numpy as np
 import numba
 import torch
@@ -8,26 +8,12 @@ from .replay_buffer import ReplayBuffer
 @numba.jit(nopython=True)
 def create_indices(
     episode_ends: np.ndarray, 
-    sequence_length: int, 
     episode_mask: np.ndarray,
-    pad_before: int = 0, 
-    pad_after: int = 0,
-    debug: bool = True,
 ) -> np.ndarray:
     """
-    Pre-calculates valid sampling indices for all episodes using Numba for performance.
-    
-    Returns an array of shape (N, 4) where each row contains:
-    [buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx]
+    Returns an array of shape (N, 3) where each row contains:
+    [buffer_idx, episode_start_idx, episode_end_idx]
     """
-    # Ensure mask matches ends shape
-    # Note: In nopython mode, assert works, but logic like shape check usually done before.
-    # Here it's effectively a no-op check syntax-wise in some Numba versions unless asserted.
-    
-    # Clamp padding values to be reasonable (cannot exceed sequence length)
-    pad_before = min(max(pad_before, 0), sequence_length-1)
-    pad_after = min(max(pad_after, 0), sequence_length-1)
-
     indices = list()
     
     # Loop over every episode
@@ -41,36 +27,9 @@ def create_indices(
         if i > 0:
             start_idx = episode_ends[i-1]
         end_idx = episode_ends[i]
-        episode_length = end_idx - start_idx
         
-        # Calculate the range of valid starting positions for the sliding window relative to the episode start.
-        # min_start: allows the window to start before the episode actually begins (for padding).
-        # max_start: allows the window to end after the episode actually ends.
-        min_start = -pad_before
-        max_start = episode_length - sequence_length + pad_after
-        
-        # Iterate through the sliding window positions
-        for idx in range(min_start, max_start+1):
-            # Calculate actual data range in the buffer (clamped to episode boundaries)
-            buffer_start_idx = max(idx, 0) + start_idx
-            buffer_end_idx = min(idx+sequence_length, episode_length) + start_idx
-            
-            # Calculate how much padding is needed at the beginning and end
-            start_offset = buffer_start_idx - (idx+start_idx)
-            end_offset = (idx+sequence_length+start_idx) - buffer_end_idx
-            
-            # map the buffer data to the output sequence array indices
-            sample_start_idx = 0 + start_offset
-            sample_end_idx = sequence_length - end_offset
-            
-            if debug:
-                assert start_offset >= 0, f"start_offset must be >= 0, got {start_offset}"
-                assert end_offset >= 0, f"end_offset must be >= 0, got {end_offset}"
-                # Verify length consistency: Valid data length must match destination length
-                assert (sample_end_idx - sample_start_idx) == (buffer_end_idx - buffer_start_idx), \
-                    f"Sample length mismatch: {sample_end_idx - sample_start_idx} != {buffer_end_idx - buffer_start_idx}"
-            
-            indices.append([buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx])
+        for t in range(start_idx, end_idx):
+            indices.append((t, start_idx, end_idx))
                 
     indices = np.array(indices)
     return indices
@@ -104,115 +63,81 @@ def downsample_mask(mask, max_n, seed = 0):
         assert np.sum(train_mask) == n_train
     return train_mask
 
+
 class SequenceSampler:
     def __init__(
         self, 
-        replay_buffer, # Type: ReplayBuffer 
-        sequence_length: int,
-        pad_before: int = 0,
-        pad_after: int = 0,
+        replay_buffer, 
+        num_image_steps: int = 1, 
+        num_image_stride: int = 30, 
+        num_state_steps: int = 16, 
+        num_state_stride: int = 2, 
+        num_action_steps: int = 32,
+        num_action_stride: int = 1,
         keys = None,
-        key_first_k = dict(),
         episode_mask: Optional[np.ndarray] = None,
     ):
-        """
-        Args:
-            replay_buffer: The dataset buffer containing episodes.
-            sequence_length: The length of time steps to sample per sample.
-            pad_before: Number of steps to pad at the beginning if sampling starts before episode.
-            pad_after: Number of steps to pad at the end if sampling goes beyond episode.
-            keys: List of keys (e.g., 'obs', 'action') to extract. If None, uses all.
-            key_first_k: Dict mapping key names to integers. For these keys, only the first k steps
-                         of the sequence are loaded efficiently (useful for Obs that don't need history).
-            episode_mask: Boolean array to include/exclude specific episodes.
-        """
-
-        super().__init__()
-        assert sequence_length >= 1, f"sequence_length must be >= 1, got {sequence_length}"
+        self.replay_buffer = replay_buffer
+        self.cfg = {
+            'image':  (num_image_steps, num_image_stride, 'before'),
+            'state':  (num_state_steps, num_state_stride, 'before'),
+            'action': (num_action_steps, num_action_stride, 'after'),
+        }
+        
         if keys is None:
             keys = list(replay_buffer.keys())
-        
+        self.keys = list(keys)
+
         episode_ends = replay_buffer.episode_ends[:]
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
-
-        # Pre-calculate all valid indices mapping (buffer_idx -> sample_idx)
+            
         if np.any(episode_mask):
-            indices = create_indices(
-                episode_ends, 
-                sequence_length=sequence_length, 
-                pad_before=pad_before, 
-                pad_after=pad_after,
-                episode_mask=episode_mask
-            )
+            self.indices = create_indices(episode_ends, episode_mask)
         else:
-            indices = np.zeros((0,4), dtype=np.int64)
+            self.indices = np.zeros((0, 3), dtype=np.int64)
 
-        # Store indices: (buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx)
-        self.indices = indices 
-        self.keys = list(keys) # Convert to list to avoid OmegaConf performance issues if passed as config
-        self.sequence_length = sequence_length
-        self.replay_buffer = replay_buffer
-        self.key_first_k = key_first_k
-    
     def __len__(self):
         return len(self.indices)
-        
+
+    def _get_query_indices(self, anchor, start, end, steps, stride, side):
+        """
+        Calculate the indices of the items to sample.
+        """
+        if side == 'before':
+            offsets = np.arange((1 - steps) * stride, 1, stride)
+            idxs = anchor + offsets
+            idxs = idxs[idxs >= start]
+        else:
+            offsets = np.arange(0, steps * stride, stride)
+            idxs = anchor + offsets
+            idxs = idxs[idxs < end]
+            
+        return idxs
+
     def sample_sequence(self, idx):
-        """
-        Extracts a single sequence based on the pre-calculated index `idx`.
-        Handles reading from buffer and padding edges.
-        """
-        # Unpack the pre-calculated indices
-        buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx \
-            = self.indices[idx]
-            
+        t_now, ep_start, ep_end = self.indices[idx]
         result = dict()
+
         for key in self.keys:
-            input_arr = self.replay_buffer[key]
+            type_cfg = None
+            if any(k in key for k in ['image', 'depth']):
+                type_cfg = self.cfg['image'] 
+            elif 'state' in key:
+                type_cfg = self.cfg['state']
+            elif 'action' in key:
+                type_cfg = self.cfg['action']
             
-            # --- Performance Optimization ---
-            # If the key is not in key_first_k, read the whole slice normally.
-            if key not in self.key_first_k:
-                sample = input_arr[buffer_start_idx:buffer_end_idx]
+            if type_cfg:
+                steps, stride, side = type_cfg
+                idxs = self._get_query_indices(
+                    t_now, ep_start, ep_end, steps, stride, side
+                )
+                result[key] = self.replay_buffer[key][idxs]
+            
             else:
-                # If key is in key_first_k, we only need the first few steps (e.g., current obs).
-                # This avoids loading huge chunks of unused data (like images for future steps).
-                n_data = buffer_end_idx - buffer_start_idx
-                k_data = min(self.key_first_k[key], n_data)
+                result[key] = self.replay_buffer[key][t_now]
                 
-                # Initialize with zeros (or custom fill) to ensure shape consistency
-                sample = np.full((n_data,) + input_arr.shape[1:], 
-                    fill_value=0, dtype=input_arr.dtype)
-                try:
-                    # Only load the necessary k data
-                    sample[:k_data] = input_arr[buffer_start_idx:buffer_start_idx+k_data]
-                except Exception as e:
-                    import pdb; pdb.set_trace()
-            
-            data = sample
-            
-            # --- Padding Logic ---
-            # If the valid data read from buffer is shorter than sequence_length
-            # (due to padding at start or end), we need to fill the rest.
-            if (sample_start_idx > 0) or (sample_end_idx < self.sequence_length):
-                # Allocate full sequence array
-                data = np.zeros(
-                    shape=(self.sequence_length,) + input_arr.shape[1:],
-                    dtype=input_arr.dtype)
-                
-                # Fill edge padding: repeat first element for the beginning padding
-                if sample_start_idx > 0:
-                    data[:sample_start_idx] = sample[0]
-                
-                # Fill edge padding: repeat last element for the ending padding
-                if sample_end_idx < self.sequence_length:
-                    data[sample_end_idx:] = sample[-1]
-                
-                # Place the actual valid data in the middle
-                data[sample_start_idx:sample_end_idx] = sample
-                
-            result[key] = data
         return result
 
 

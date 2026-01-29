@@ -62,10 +62,12 @@ shape_meta: &shape_meta
       shape: ${image_shape}
       type: rgb
       horizon: ${n_obs_image_steps}
+      stride: ${n_obs_image_stride}
     depth:
       shape: ${depth_image_shape}
       type: depth
       horizon: ${n_obs_image_steps}
+      stride: ${n_obs_image_stride}
     state:
       wrist:
         shape: [18]
@@ -74,23 +76,21 @@ shape_meta: &shape_meta
       shape: [48]
       type: fingertips # fingertips or mano
       horizon: ${n_obs_state_steps}
+      stride: ${n_obs_state_stride}
   action:
     shape: [48]
     type: fingertips # fingertips or mano
     horizon: ${n_action_steps}
+    stride: ${n_action_stride}
 
 dataset:
   _target_: src.dataset.legendvla_dataset.LegendUnifiedDataset
   vla_dataset: 
     _target_: src.dataset.legendvla_dataset.LegendVLADataset
     zarr_paths: ${vla_dataset_paths}
-    horizon: ${eval:'${n_action_steps}+${history}'}
-    pad_before: ${eval:'${history}+${n_latency_steps}'}
-    pad_after: ${eval:'${n_action_steps}-1'}
     shape_meta: ${shape_meta}
     seed: 42
     val_ratio: 0.005
-    history: ${history} # frames
     objective: ${objective}
     normalizer_dataloader_cfg:
       batch_size: 4096
@@ -108,13 +108,13 @@ dataset:
     seed: 42
     weights: [0.5, 0.5, 0.5]
     val_ratio: 0.005
-
-history: 32
-n_action_steps: 32
+    
 n_obs_image_steps: 1
+n_obs_image_stride: 30
 n_obs_state_steps: 16
-n_latency_steps: 0
-# Make sure history is divisible by (n_obs_image_steps - 1) and (n_obs_state_steps - 1)
+n_obs_state_stride: 2
+n_action_steps: 32
+n_action_stride: 1
 
 vla_processor: 
   _target_: src.dataset.paligemma_processing.PaliGemmaVLAProcessor
