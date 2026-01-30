@@ -452,7 +452,7 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
                 sample['actions'] = torch.zeros(*self.shape_meta['actions'])
                 sample['actions_valid_mask'] = torch.zeros(*self.shape_meta['actions'])
             if 'depth_values' in self.shape_meta: 
-                sample['depth_values'] = torch.zeros((0, *self.shape_meta['depth_values'][1:]))
+                sample['depth_values'] = torch.zeros(*sample['pixel_values'].shape)
             if 'n_states' in self.shape_meta: 
                 sample['n_states'] = torch.tensor(0, dtype=torch.int32)
             if 'n_actions' in self.shape_meta: 
@@ -632,13 +632,12 @@ class LegendVLDataCollator(BaseDataCollator):
             padding_side=self.padding_side
         )
         batch["attention_mask"] = (batch["input_ids"] != self.pad_token_id).long()
-        has_depth_values = [(item['depth_values'] is not None and item['depth_values'].shape[0] > 0) for item in data_list]
+        has_depth_values = [(item['is_vla_data'] == True) for item in data_list]
         batch['has_depth_values'] = torch.tensor(has_depth_values, dtype=torch.bool)
         for key in data_list[0].keys():
             if key in ['input_ids', 'attention_mask', 'labels']: 
                 continue 
             if key in ['pixel_values', 'depth_values']: 
-                original_lengths = [item[key].shape[0] for item in data_list]
                 batch[key] = rnn_utils.pad_sequence(
                     [item[key] for item in data_list],
                     batch_first=True,
