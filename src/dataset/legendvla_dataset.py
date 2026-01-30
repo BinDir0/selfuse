@@ -185,7 +185,10 @@ class LegendVLADataset(BaseRatioDataset):
         state_pad = np.zeros((self.sampler_cfg['num_state_steps'], *state.shape[1:]))
         state_pad[:state.shape[0]] = state
         action_pad = np.zeros((self.sampler_cfg['num_action_steps'], *action.shape[1:]))
+        actions_valid_mask = np.zeros((self.sampler_cfg['num_action_steps'],*action.shape[1:]), dtype=bool)
+        actions_valid_mask[:action.shape[0]] = True
         action_pad[:action.shape[0]] = action
+        
 
         data = {
             'input_ids': processed_results['input_ids'],
@@ -195,6 +198,7 @@ class LegendVLADataset(BaseRatioDataset):
             'states': state_pad,
             'n_states': np.array(state.shape[0], dtype=np.int32),
             'actions': action_pad,
+            'actions_valid_mask': actions_valid_mask,
             'n_actions': np.array(action.shape[0], dtype=np.int32),
             'is_vla_data': np.array(True, dtype=bool), 
         }
