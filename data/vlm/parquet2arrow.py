@@ -11,8 +11,8 @@ local_tmp_cache_root = "/DATA/chenzhang/.cache" # 临时总目录
 
 val_ratio = 0.001
 seed = 42
-max_parallel_subsets = 4  # 同时并行转换多少个子集
-num_proc_per_subset = 16  # 每个子集内部使用的进程数
+max_parallel_subsets = 32  # 同时并行转换多少个子集
+num_proc_per_subset = 4  # 每个子集内部使用的进程数
 
 # 禁用 Hugging Face 默认的进度条，防止多进程下满屏乱跳
 disable_progress_bar()

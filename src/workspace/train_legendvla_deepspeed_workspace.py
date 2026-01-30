@@ -437,16 +437,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             self.model_averaging.maybe_update(self.update_step)
 
                         # Logging
-                        avg_loss_cpu = {}
+                        raw_loss_cpu = {}
                         for key, value in raw_loss.items(): 
-                            avg_loss_cpu[key] = accelerator.reduce(value, reduction='mean').item()
+                            raw_loss_cpu[key] = value.item()
                         step_log.update({
                             'global_step': self.global_step,
                             'update_step': self.update_step,
                             'epoch': self.epoch,
                             'lr': self.lr_scheduler.get_last_lr()[0],
                         })
-                        step_log.update(avg_loss_cpu)
+                        step_log.update(raw_loss_cpu)
 
                         # Evaluation
                         if (self.update_step % cfg.training.eval_every) == 0 and \
