@@ -18,16 +18,16 @@ import copy
 import random
 import numpy as np
 import pickle
+from datetime import timedelta
 import accelerate
 from accelerate import Accelerator
-from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs
+from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.json_logger import JsonLogger
-from src.utils.pytorch_util import dict_apply
-from src.utils.plotting import plot_l1_loss_as_bar, plot_multilayer_attention_maps
+from src.utils.plotting import plot_multilayer_attention_maps
 from src.model.common.model_average import ModelAveraging
 from src.utils.metric import get_action_accuracy
 
@@ -163,6 +163,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             
             p.export_chrome_trace(f"{self.output_dir}/trace/trace_step_{p.step_num}.json")
 
+
+
         if cfg.training.profile: 
             profile_kwargs = ProfileKwargs(
                 activities=['cpu', 'cuda'],
@@ -173,9 +175,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             )
             os.makedirs(f"{self.output_dir}/trace", exist_ok=True)
 
+        init_process_group_kwargs = InitProcessGroupKwargs(
+            timeout=timedelta(seconds=3600)
+        )
+        kwargs_handlers = [init_process_group_kwargs]
+        if cfg.training.profile:
+            kwargs_handlers.append(profile_kwargs)
         accelerator = Accelerator(
             log_with='wandb', 
-            kwargs_handlers=[profile_kwargs] if cfg.training.profile else None
+            kwargs_handlers=kwargs_handlers
         )
 
         # Initialize wandb tracking

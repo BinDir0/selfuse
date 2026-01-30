@@ -368,11 +368,8 @@ class UnifiedRatioSampler(torch.utils.data.BatchSampler):
         assert 0.0 <= self.vla_ratio <= 1.0, f"vla_ratio must be in [0, 1], got {self.vla_ratio}"
         
         # vla_ratio * batch_size must be an integer to maintain ratio within each batch
-        vla_per_batch = self.vla_ratio * batch_size
-        assert vla_per_batch == int(vla_per_batch), \
-            f"vla_ratio * batch_size must be an integer. " \
-            f"Got vla_ratio={self.vla_ratio}, batch_size={batch_size}, " \
-            f"vla_ratio * batch_size={vla_per_batch}"
+        vla_per_batch = int(self.vla_ratio * batch_size)
+        assert vla_per_batch > 0, f"vla_ratio * batch_size must be positive, got {vla_per_batch}"
         
         # Calculate samples per epoch based on ratio
         # Each epoch length = vla_size + vlm_size, sample with replacement if needed
@@ -389,14 +386,10 @@ class UnifiedRatioSampler(torch.utils.data.BatchSampler):
         # Make sure the total number of samples is a multiple of batch_size
         self.total_samples = self.num_batches * batch_size
         # Calculate how many samples from each dataset based on ratio
-        self.vla_samples_per_epoch = int(self.total_samples * vla_ratio)
-        self.vlm_samples_per_epoch = self.total_samples - self.vla_samples_per_epoch
         self.vla_samples_per_batch = int(batch_size * vla_ratio)
         self.vlm_samples_per_batch = batch_size - self.vla_samples_per_batch
-        assert self.vla_samples_per_epoch % self.vla_samples_per_batch == 0, \
-            f"vla_samples_per_epoch {self.vla_samples_per_epoch} must be a multiple of vla_samples_per_batch {self.vla_samples_per_batch}"
-        assert self.vlm_samples_per_epoch % self.vlm_samples_per_batch == 0, \
-            f"vlm_samples_per_epoch {self.vlm_samples_per_epoch} must be a multiple of vlm_samples_per_batch {self.vlm_samples_per_batch}"
+        self.vla_samples_per_epoch = self.vla_samples_per_batch * self.num_batches
+        self.vlm_samples_per_epoch = self.vlm_samples_per_batch * self.num_batches
         
         # Create VLASampler with total_length = vla_samples_per_epoch
         self.vla_sampler = VLASampler(
