@@ -987,7 +987,16 @@ class LegendVLA(nn.Module):
             depth_values = None
             has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            depth_values=depth_values,
+            has_depth_values=has_depth_values,
+            states=input["states"],
+            actions=input["actions"],
+            n_states=input["n_states"],
+            n_actions=input["n_actions"],
+            is_vla_data=input["is_vla_data"],
+            dtype=pixel_values.dtype
         )
         
         # forward pass thru the vlm, cache the kv
@@ -1075,7 +1084,16 @@ class LegendVLA(nn.Module):
             depth_values = None
             has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            depth_values=depth_values,
+            has_depth_values=has_depth_values,
+            states=input["states"],
+            actions=input["actions"],
+            n_states=input["n_states"],
+            n_actions=input["n_actions"],
+            is_vla_data=input["is_vla_data"],
+            dtype=pixel_values.dtype
         )
 
         # sample pure action noise
@@ -1148,7 +1166,16 @@ class LegendVLA(nn.Module):
 
         # text tokens + image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, has_depth_values, dtype
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            depth_values=depth_values,
+            has_depth_values=has_depth_values,
+            states=input["states"],
+            actions=input["actions"],
+            n_states=input["n_states"],
+            n_actions=input["n_actions"],
+            is_vla_data=input["is_vla_data"],
+            dtype=dtype
         )
 
         # build causal mask and position ids for text
@@ -1393,7 +1420,16 @@ class LegendVLA(nn.Module):
             depth_values = None
             has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            depth_values=depth_values,
+            has_depth_values=has_depth_values,
+            states=batch["states"],
+            actions=batch["actions"],
+            n_states=batch["n_states"],
+            n_actions=batch["n_actions"],
+            is_vla_data=batch["is_vla_data"],
+            dtype=pixel_values.dtype
         )
         
         output = self.joint_model(
@@ -1472,7 +1508,16 @@ class LegendVLA(nn.Module):
             depth_values = None
             has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, has_depth_values, pixel_values.dtype
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            depth_values=depth_values,
+            has_depth_values=has_depth_values,
+            states=batch["states"],
+            actions=batch["actions"],
+            n_states=batch["n_states"],
+            n_actions=batch["n_actions"],
+            is_vla_data=batch["is_vla_data"],
+            dtype=pixel_values.dtype
         )
 
         # inference with noisy action
@@ -1568,7 +1613,16 @@ class LegendVLA(nn.Module):
             depth_values = None
             has_depth_values = None
         inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids, pixel_values, depth_values, has_depth_values, states, actions, n_states, n_actions, is_vla_data, pixel_values.dtype
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            depth_values=depth_values,
+            has_depth_values=has_depth_values,
+            states=states,
+            actions=actions,
+            n_states=n_states,
+            n_actions=n_actions,
+            is_vla_data=is_vla_data,
+            dtype=pixel_values.dtype
         )
         
         # inference with noisy action
