@@ -155,7 +155,7 @@ vlm_processor:
 
 dataloader:
   batch_sampler: 
-    batch_size: 12
+    batch_size: 10
     vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
@@ -167,7 +167,7 @@ dataloader:
 
 val_dataloader:
   batch_sampler: 
-    batch_size: 12
+    batch_size: 10
     shuffle: False
     drop_last: False
   loader: 
@@ -289,7 +289,7 @@ patch_size: 14
 image_seq_len: ${eval:'(${image_shape[0]}//${patch_size})*(${image_shape[1]}//${patch_size})'}
 depth_image_seq_len: ${eval:'(${depth_image_shape[0]}//${patch_size})*(${depth_image_shape[1]}//${patch_size})'}
 state_seq_len: 256 # 
-text_seq_len: ${eval:'${state_seq_len}+64'}
+text_seq_len: ${eval:'${state_seq_len}+128'}
 answer_seq_len: 256 
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)

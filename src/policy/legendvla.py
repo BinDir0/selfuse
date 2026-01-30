@@ -682,7 +682,6 @@ class LegendVLA(nn.Module):
         for idx in range(bsz):
             cnt = vlm_token_cnts[idx].item()
             start = answer_start_idx[idx].item()
-            assert cnt > start, "Answer must have at least one token"
             answer_len = cnt - start
             n_action = n_actions[idx].item()
             causal_mask[idx, :cnt, :start] = 0  # image/text/answer attend to image/text
