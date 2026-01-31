@@ -101,8 +101,9 @@ class FullMemoryTracker:
         print("-" * 105)
         # 按增量排序，找出真正的显存大户
         sorted_items = sorted(self.stats.items(), key=lambda x: x[1]['peak_delta'], reverse=True)
-        for name, s in sorted_items[:100]:
+        for name, s in sorted_items[:200]:
             print(f"{name[:50]:<50} | {s['param']:>10.1f} | {s['grad']:>10.1f} | {s['output']:>12.1f} | {s['peak_delta']:>12.1f}")
+        print(f"Total memory usage: {sum(s['peak_delta'] for s in self.stats.values()):.1f} MB")
 
     def stop(self):
         for h in self.hooks: h.remove()
@@ -162,8 +163,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             '''
             
             p.export_chrome_trace(f"{self.output_dir}/trace/trace_step_{p.step_num}.json")
-
-
 
         if cfg.training.profile: 
             profile_kwargs = ProfileKwargs(
@@ -396,83 +395,83 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 else:
                     dataloader = train_dataloader
                 for batch_idx, batch in enumerate(dataloader):
-                    with accelerator.accumulate(self.model):
-                        # Preprocess batch
-                        inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
+                    # Preprocess batch
+                    inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
 
-                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
-                            self.tracker.track()
-                        # Forward pass
-                        with accelerator.autocast():
-                            raw_loss = self.model(self.objective_func, inputs)
-                        accelerator.backward(raw_loss["total_loss"])
-                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
-                            torch.cuda.empty_cache() 
-                            print(torch.cuda.memory_summary())
-                            self.tracker.report()
-                            self.tracker.stop()
+                    if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                        self.tracker.track()
+                    # Forward pass
+                    with accelerator.autocast():
+                        raw_loss = self.model(self.objective_func, inputs)
+                    accelerator.backward(raw_loss["total_loss"])
+                    if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                        torch.cuda.empty_cache() 
+                        print(torch.cuda.memory_summary())
+                        self.tracker.report()
+                        self.tracker.stop()
 
-                        # Gradient clipping
-                        if accelerator.sync_gradients and cfg.training.clipping.enabled:
-                            total_norm = accelerator.clip_grad_norm_(
-                                self.model.parameters(), 
-                                float('inf')
-                            )
-                            step_log['grad_norm'] = total_norm
+                    # Gradient clipping
+                    if accelerator.sync_gradients and cfg.training.clipping.enabled:
+                        total_norm = accelerator.clip_grad_norm_(
+                            self.model.parameters(), 
+                            float('inf')
+                        )
+                        step_log['grad_norm'] = total_norm
 
-                        # Optimizer step
-                        self.optimizer.step()
-                        self.lr_scheduler.step()
+                    # Optimizer step
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
 
-                        # Zero gradients
-                        self.optimizer.zero_grad(set_to_none=True)
-                        
-                        self.global_step += 1
+                    # Zero gradients
+                    self.optimizer.zero_grad(set_to_none=True)
+                    
+                    self.global_step += 1
 
-                        if accelerator.sync_gradients:
-                            self.update_step += 1
-                            # initialize model averaging
-                            self.model_averaging.maybe_initialize(self.update_step)
-                            # update model averaging
-                            self.model_averaging.maybe_update(self.update_step)
+                    if accelerator.sync_gradients:
+                        self.update_step += 1
+                        # initialize model averaging
+                        self.model_averaging.maybe_initialize(self.update_step)
+                        # update model averaging
+                        self.model_averaging.maybe_update(self.update_step)
 
-                        # Logging
-                        raw_loss_cpu = {}
-                        for key, value in raw_loss.items(): 
-                            raw_loss_cpu[key] = value.item()
-                        step_log.update({
-                            'global_step': self.global_step,
-                            'update_step': self.update_step,
-                            'epoch': self.epoch,
-                            'lr': self.lr_scheduler.get_last_lr()[0],
-                        })
-                        step_log.update(raw_loss_cpu)
+                    # Logging
+                    raw_loss_cpu = {}
+                    for key, value in raw_loss.items(): 
+                        raw_loss_cpu[key] = value.item()
+                    step_log.update({
+                        'global_step': self.global_step,
+                        'update_step': self.update_step,
+                        'epoch': self.epoch,
+                        'lr': self.lr_scheduler.get_last_lr()[0],
+                    })
+                    step_log.update(raw_loss_cpu)
 
-                        # Evaluation
-                        if (self.update_step % cfg.training.eval_every) == 0 and \
-                            val_dataloader is not None and accelerator.sync_gradients:
-                            self.evaluation(accelerator, val_dataloader, step_log)
+                    # Evaluation
+                    if (self.update_step % cfg.training.eval_every) == 0 and \
+                        val_dataloader is not None and accelerator.sync_gradients:
+                        self.evaluation(accelerator, val_dataloader, step_log)
 
-                        # Checkpoint saving
-                        if (self.update_step % cfg.training.checkpoint_every) == 0 and accelerator.sync_gradients:
-                            self.save_topk_ckpt(accelerator, topk_manager, step_log)
+                    # Checkpoint saving
+                    if (self.update_step % cfg.training.checkpoint_every) == 0 and accelerator.sync_gradients:
+                        self.save_topk_ckpt(accelerator, topk_manager, step_log)
 
-                        if self.update_step % cfg.training.ckpt_save_interval == 0 and accelerator.sync_gradients:
-                            self.save_interval_ckpt(accelerator)
+                    if self.update_step % cfg.training.ckpt_save_interval == 0 and accelerator.sync_gradients:
+                        self.save_interval_ckpt(accelerator)
 
-                        is_last_batch = (batch_idx == (len(dataloader)-1))
-                        if not is_last_batch and accelerator.sync_gradients:
-                            accelerator.log(step_log, step=self.update_step)
+                    is_last_batch = (batch_idx == (len(dataloader)-1))
+                    if not is_last_batch and accelerator.sync_gradients:
+                        accelerator.log(step_log, step=self.update_step)
+                        if accelerator.is_main_process:
                             json_logger.log(step_log)
 
-                        if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
-                            break
+                    if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
+                        break
 
-                        if self.global_step % 100 == 0 and accelerator.is_main_process:
-                            print(f"Global step {self.global_step} completed")
+                    if self.global_step % 100 == 0 and accelerator.is_main_process:
+                        print(f"Global step {self.global_step} completed")
 
-                        if cfg.training.profile and accelerator.is_main_process:
-                            prof.step()
+                    if cfg.training.profile and accelerator.is_main_process:
+                        prof.step()
 
                 self.epoch += 1
 

@@ -38,34 +38,34 @@ vla_dataset_paths:
    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_clean_batch.zarr
    weight: 8
 vlm_dataset_paths:
- - "/share_data/guantianrui/datasets/VLM/FineVision/objects365_qa_filtered"  # localization & grounding
- - "/share_data/guantianrui/datasets/VLM/FineVision/spatialsense_filtered"  # spatialsense
- - "/share_data/guantianrui/datasets/VLM/FineVision/alfworldgpt_filtered"  # high level subtask action
- - "/share_data/guantianrui/datasets/VLM/FineVision/indoor_qa_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision/LLaVA_Instruct_150K_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision/cocoqa_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision/cambrian(filtered)_processed_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision/lnqa_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision/lrv_normal(filtered)_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision/lvis_instruct4v_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision/vqav2_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(llava)_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision/sharegpt4v(sam)_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision/textcaps_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision/image_textualization(filtered)_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision/aguvis-stage-1"
- - "/share_data/guantianrui/datasets/VLM/FineVision/groundui"
- - "/share_data/guantianrui/datasets/VLM/FineVision/oodvqa"
- - "/share_data/guantianrui/datasets/VLM/FineVision/tallyqa"
- - "/share_data/guantianrui/datasets/VLM/FineVision/allava_laion"
- - "/share_data/guantianrui/datasets/VLM/FineVision/allava_vflan"
- - "/share_data/guantianrui/datasets/VLM/FineVision/mmevol"
- - "/share_data/guantianrui/datasets/VLM/FineVision/vision_flan(filtered)"
- - "/share_data/guantianrui/datasets/VLM/FineVision/visual7w"
- - "/share_data/guantianrui/datasets/VLM/FineVision/vizwiz(mathv360k)"
- - "/share_data/guantianrui/datasets/VLM/FineVision/vsr"
- - "/share_data/guantianrui/datasets/VLM/FineVision/wildvision"
- - "/share_data/guantianrui/datasets/VLM/FineVision/yesbut"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/alfworldgpt_filtered"  # high level subtask action
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/indoor_qa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/LLaVA_Instruct_150K_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cocoqa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cambrian(filtered)_processed_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lnqa_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lrv_normal(filtered)_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lvis_instruct4v_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vqav2_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(llava)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(sam)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/textcaps_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/image_textualization(filtered)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/aguvis-stage-1"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/groundui"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/oodvqa"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/tallyqa"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_laion"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_vflan"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/mmevol"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vision_flan(filtered)"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/visual7w"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vizwiz(mathv360k)"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vsr"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/wildvision"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/yesbut"
 
 
 shape_meta: &shape_meta
@@ -119,7 +119,6 @@ dataset:
     cache_dir: /share_data/guantianrui/datasets/VLM/FineVision/.cache
     seed: 42
     weights: [0.5, 0.5, 0.5]
-    val_ratio: 0.001
     
 n_obs_image_steps: 1
 n_obs_image_stride: 30
@@ -155,7 +154,7 @@ vlm_processor:
 
 dataloader:
   batch_sampler: 
-    batch_size: 10
+    batch_size: 16
     vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
@@ -164,16 +163,18 @@ dataloader:
     num_workers: 16
     pin_memory: True
     persistent_workers: True
+    prefetch_factor: 8
 
 val_dataloader:
   batch_sampler: 
-    batch_size: 10
+    batch_size: 16
     shuffle: False
     drop_last: False
   loader: 
     num_workers: 16
     pin_memory: True
     persistent_workers: True
+    prefetch_factor: 8
 
 flow: 
   sig_min: 0.001
@@ -236,7 +237,7 @@ training:
   # training loop control
   # in epochs
   ckpt_save_interval: 10000
-  eval_every: 1
+  eval_every: 5000
   # make sure it is divisible by eval_every
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 
@@ -294,7 +295,7 @@ answer_seq_len: 256
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
 max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'}
-tokenizer_padding: longest # longest or max_length
+tokenizer_padding: max_length # longest or max_length
 
 policy: 
   _target_: src.policy.legendvla.LegendVLA

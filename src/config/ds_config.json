@@ -6,11 +6,11 @@
         "load_universal": false
     }, 
     "optimizer": {
-        "type": "AdamW",
+        "type": "Adam",
         "params": {
             "lr": "auto",
             "weight_decay": "auto",
-            "torch_adam": true,
+            "torch_adam": false,
             "adam_w_mode": true
         }
     },
@@ -55,6 +55,6 @@
         "module_depth": -1,
         "top_modules": 10,
         "detailed": true,
-        "output_file": "outputs/flops_profiler.txt"
+        "output_file": "/share_data/chenzhang/projects/diffloss-ar/outputs/flops_profiler.txt"
     }
 }

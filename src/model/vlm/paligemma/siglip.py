@@ -299,6 +299,7 @@ class SiglipVisionModel(nn.Module):
             use_lora=use_lora,
         )
 
+    @torch.compile(mode="max-autotune")
     def forward(self, pixel_values) -> Tuple:
         # [Batch_Size, Channels, Height, Width] -> [Batch_Size, Num_Patches, Embed_Dim]
         return self.vision_model(pixel_values=pixel_values)

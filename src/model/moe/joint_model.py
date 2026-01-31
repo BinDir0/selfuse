@@ -297,7 +297,6 @@ def forward_mixture_attn(
             )
     return attn_outputs_final, attn_weights
 
-
 def forward_mixture_layers(
     mixtures: nn.ModuleDict,
     attention_mask: torch.Tensor,
@@ -309,7 +308,6 @@ def forward_mixture_layers(
     cache_mode: str = "append_non_active",
     time_cond: Optional[torch.FloatTensor] = None,
     sdpa: callable = forward_mixture_scaled_dot_product_attention,
-    attn_weights: Optional[List[torch.FloatTensor]] = None,
 ) -> dict[torch.FloatTensor]:
     """the usual norm + attn + res + norm + mlp + res"""
     active_mixture_names = list(embeds_all.keys())
@@ -340,8 +338,6 @@ def forward_mixture_layers(
         cache_mode=cache_mode,
         sdpa=sdpa,
     )
-    if attn_weights is not None:
-        attn_weights[layer_idx] = attn_weights_before_dropout
     hidden_states_pre_res = hidden_states_post_attn
 
     # [Batch_Size, Seq_Len, Hidden_Size]
@@ -406,7 +402,7 @@ def forward_mixture_layers(
             hidden_states_final[name] = (
                 residuals_pre_post_attn[name] + hidden_states_pre_final_res[name]
             )
-    return hidden_states_final
+    return hidden_states_final, attn_weights_before_dropout
 
 
 # should have named this `MoE`
@@ -433,6 +429,40 @@ class JointModel(nn.Module):
 
     def build_mixture_caches(self):
         return {name: KVCache() for name in self.cache_names}
+
+    @torch.compile(mode="max-autotune")
+    def forward_mixture_model(
+        self, 
+        attention_mask: torch.Tensor,
+        position_ids_all: dict[torch.LongTensor],
+        embeds_all: dict[torch.FloatTensor],
+        time_cond: Optional[torch.FloatTensor] = None,
+        kv_caches: dict[KVCache] = {},
+        cache_mode: str = "append_non_active",
+        final_layer_post_attn_skip_names: Tuple[str, ...] = ("vlm"),
+    ): 
+        attn_weights = None
+        if not self.training: 
+            attn_weights = []
+        for layer_idx in range(self.num_hidden_layers):
+            is_final_layer = layer_idx == self.num_hidden_layers - 1
+            embeds_all, attn_weights_before_dropout = forward_mixture_layers(
+                self.mixtures,
+                attention_mask,
+                position_ids_all,
+                embeds_all,
+                layer_idx=layer_idx,
+                time_cond=time_cond,
+                kv_caches=kv_caches,
+                cache_mode=cache_mode,
+                post_attn_skip_names=final_layer_post_attn_skip_names
+                if is_final_layer
+                else [],
+                sdpa=self.sdpa,
+            )
+            if not self.training:
+                attn_weights.append(attn_weights_before_dropout)
+        return embeds_all, attn_weights
 
     def forward(
         self,
@@ -467,24 +497,18 @@ class JointModel(nn.Module):
             )
             embeds_all[name] = embeds_all[name] * normalizer
 
-        # layers
-        for layer_idx in range(self.num_hidden_layers):
-            is_final_layer = layer_idx == self.num_hidden_layers - 1
-            embeds_all = forward_mixture_layers(
-                self.mixtures,
-                attention_mask,
-                position_ids_all,
-                embeds_all,
-                layer_idx=layer_idx,
-                time_cond=time_cond,
-                kv_caches=kv_caches,
-                cache_mode=cache_mode,
-                post_attn_skip_names=final_layer_post_attn_skip_names
-                if is_final_layer
-                else [],
-                sdpa=self.sdpa,
-                attn_weights=self.attn_weights,
-            )
+        # forward the mixture model
+        embeds_all, attn_weights_before_dropout = self.forward_mixture_model(
+            attention_mask,
+            position_ids_all,
+            embeds_all,
+            time_cond,
+            kv_caches,
+            cache_mode,
+            final_layer_post_attn_skip_names,
+        )
+        if attn_weights_before_dropout is not None:
+            self.attn_weights = attn_weights_before_dropout
 
         # [Batch_Size, Seq_Len, Hidden_Size]
         hidden_states_all = {}

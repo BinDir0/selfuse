@@ -10,9 +10,10 @@ import copy
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torchvision import transforms
+import warnings
 from PIL import Image
 import torch.nn.utils.rnn as rnn_utils
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_from_disk, DatasetDict
 from src.utils.pytorch_util import dict_apply
 from src.utils.geometry import (
     transform_wrist_to_target_frame, 
@@ -262,53 +263,85 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         cache_dir=None,
         weights=[0.5, 0.5, 0.5],
         seed=42,
-        val_ratio=0.0,
         mode='train',
     ):
         super().__init__()
-        self.dataset_paths = dataset_paths
+        self.dataset_paths = [dataset_paths] if isinstance(dataset_paths, str) else dataset_paths
         self.split = split
         self.weights = weights
         self.cache_dir = cache_dir
-        self.datasets = None
-        self.preprocessor = None
         self.mode = mode
-        self.aug_transform = None
+        self.seed = seed
+        self.preprocessor = None
+        
         if self.mode == 'train':
             self.aug_transform = transforms.Compose([
-                # ColorJitter: random change brightness, contrast, saturation, and hue
                 transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-                # GaussianBlur: apply gaussian blur
-                # kernel_size must be odd
                 transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))
             ])
-        if isinstance(dataset_paths, str):
-            data_files = f"{dataset_paths}/*.parquet"
         else:
-            data_files = [f"{p}/*.parquet" for p in dataset_paths]
+            self.aug_transform = None
 
-        self.datasets = load_dataset(
-            "parquet",
-            data_files=data_files,
-            split=self.split,
+        # --- directly load the dataset according to the split ---
+        loaded_datasets = []
+        for path in self.dataset_paths:
+            try:
+                ds = load_from_disk(path)
+                
+                # case A: if the loaded dataset is a DatasetDict (contains train/test/val)
+                if isinstance(ds, DatasetDict):
+                    if self.split in ds:
+                        ds_to_add = ds[self.split]
+                    else:
+                        # if the sub dataset is too small to have this split (e.g. no test), skip it
+                        print(f"Warning: Split '{self.split}' not found in {path}, skipping this sub-dataset.")
+                        continue
+                # case B: if the loaded dataset is a Dataset object
+                else:
+                    ds_to_add = ds
+
+                if len(ds_to_add) == 0:
+                    print(f"Warning: Dataset at {path} is empty, skipping.")
+                    continue
+
+                loaded_datasets.append(ds_to_add)
+                
+            except Exception as e:
+                warnings.warn(f"Error loading dataset from {path}: {e}")
+                continue
+
+        if not loaded_datasets:
+            # if the validation set loading fails (maybe all sub datasets don't have test), we can throw an exception or return None
+            print(f"Notice: No datasets found for split '{self.split}'.")
+            self.main_dataset = None
+        else:
+            # merge all sub datasets that meet the criteria
+            self.main_dataset = concatenate_datasets(loaded_datasets)
+            print(f"Successfully loaded split '{self.split}' with {len(self.main_dataset)} samples.")
+
+    def get_validation_dataset(self, val_split='test'):
+        """
+        directly load the dataset with split='test'
+        """
+        # instantiate a new object, set split to val_split
+        val_dataset = LegendVLMDataset(
+            dataset_paths=self.dataset_paths,
+            split=val_split,
             cache_dir=self.cache_dir,
+            weights=self.weights,
+            seed=self.seed,
+            mode='val'
         )
-        if val_ratio > 0:
-            datasets_splits = self.datasets.train_test_split(test_size=val_ratio, seed=seed)
-            self.train_datasets = datasets_splits['train']
-            self.val_datasets = datasets_splits['test']
-        else:
-            self.train_datasets = self.datasets
-            self.val_datasets = None
-
-    def get_validation_dataset(self):
-        if self.val_datasets is None:
+        
+        # inherit the current preprocessor
+        if self.preprocessor is not None:
+            val_dataset.set_preprocessor(self.preprocessor)
+        
+        # if the corresponding split has no data, return None
+        if val_dataset.main_dataset is None:
             return None
-        val_copy = copy.copy(self)
-        val_copy.mode = 'val'
-        val_copy.aug_transform = None
-        val_copy.train_datasets = self.val_datasets
-        return val_copy
+            
+        return val_dataset
     
     def _sample_to_data(self, sample, idx):
         images = sample['images'] # List[PIL.JpegImagePlugin.JpegImageFile]
@@ -372,13 +405,13 @@ class LegendVLMDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Find corresponding sampler
-        sample = self.train_datasets[idx]
+        sample = self.main_dataset[idx]
         data = self._sample_to_data(sample, idx)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
 
     def __len__(self):
-        return len(self.train_datasets)
+        return len(self.main_dataset)
 
 class LegendUnifiedDataset(torch.utils.data.Dataset):
     def __init__(self,

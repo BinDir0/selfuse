@@ -1556,6 +1556,27 @@ class LegendVLA(nn.Module):
             "flow_loss": flow_loss,
         }
 
+    @torch.compile
+    def compute_celoss(self, hidden_states: torch.FloatTensor, labels: torch.LongTensor) -> torch.FloatTensor:
+        """
+        Compute cross-entropy loss for language modeling.
+
+        Args:
+            hidden_states (torch.FloatTensor): [B, seq_len, hidden_size] Hidden states from the language model
+            labels (torch.LongTensor): [B, seq_len] Labels for language modeling loss
+
+        Returns:
+            torch.FloatTensor: Cross-entropy loss
+        """
+        logits = self.lm_head(hidden_states)
+        logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
+        labels = labels[:, 1:].contiguous().view(-1)
+
+        ce_loss = self.CELoss(logits, labels)
+        valid_num_labels = torch.sum(labels != self.ignore_index)
+        ce_loss = ce_loss / valid_num_labels.clamp(min=1)
+        return ce_loss
+
     def compute_loss(self, batch: dict) -> dict:
         """
         Compute combined VLA loss with two components: cross-entropy loss (VLM) and flow matching loss (whole VLA).
@@ -1594,6 +1615,7 @@ class LegendVLA(nn.Module):
         states = batch["states"]
         answer_start_idx = batch["answer_start_idx"]
         is_vla_data = batch["is_vla_data"]
+        is_vlm_data = (is_vla_data != True)
         n_actions = batch["n_actions"]
         n_states = batch["n_states"]
 
@@ -1649,13 +1671,10 @@ class LegendVLA(nn.Module):
         hidden_states = output["vlm"]
         action_embeds = output["action"]
 
-        logits = self.lm_head(hidden_states)
-        logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
-        labels = labels[:, 1:].contiguous().view(-1)
-
-        ce_loss = self.CELoss(logits, labels)
-        valid_num_labels = torch.sum(labels != self.ignore_index)
-        ce_loss = ce_loss / valid_num_labels.clamp(min=1)
+        if torch.any(is_vlm_data): 
+            ce_loss = self.compute_celoss(hidden_states[is_vlm_data], labels[is_vlm_data])
+        else:
+            ce_loss = self.compute_celoss(hidden_states, labels)
 
         # diffusion loss
         device = hidden_states.device
