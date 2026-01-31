@@ -1662,34 +1662,37 @@ class LegendVLA(nn.Module):
         vla_hidden = hidden_states[is_vla_data]
         vla_action = actions[is_vla_data]
 
-        # 1. 获取维度的基本信息
-        max_vlm_tokens = hidden_states.shape[1]
-        num_action_tokens = self.num_action_tokens
+        if torch.any(is_vla_data):
+            # 1. 获取维度的基本信息
+            max_vlm_tokens = hidden_states.shape[1]
+            num_action_tokens = self.num_action_tokens
 
-        # 2. 构建索引序列 (0, 1, 2, ..., max_len-1)
-        # range_hidden: (1, seq_len)
-        range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
-        # range_action: (1, action_seq_len) 
-        # 注意：如果 vla_action 的长度和 vla_hidden 不一致，需要单独生成 range
-        range_action = torch.arange(num_action_tokens, device=device).unsqueeze(0)
+            # 2. 构建索引序列 (0, 1, 2, ..., max_len-1)
+            # range_hidden: (1, seq_len)
+            range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
+            # range_action: (1, action_seq_len) 
+            # 注意：如果 vla_action 的长度和 vla_hidden 不一致，需要单独生成 range
+            range_action = torch.arange(num_action_tokens, device=device).unsqueeze(0)
 
-        # 3. 调整 start 和 end 的形状以支持广播 (N, 1)
-        starts = answer_start_idx[is_vla_data].unsqueeze(1)
-        ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1)
-        action_ends = n_actions[is_vla_data].unsqueeze(1)
+            # 3. 调整 start 和 end 的形状以支持广播 (N, 1)
+            starts = answer_start_idx[is_vla_data].unsqueeze(1)
+            ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1)
+            action_ends = n_actions[is_vla_data].unsqueeze(1)
 
-        # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
-        # 逻辑：当前索引 >= start 且 当前索引 < start + n
-        mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
-        mask_action = range_action < action_ends
+            # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
+            # 逻辑：当前索引 >= start 且 当前索引 < start + n
+            mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
+            mask_action = range_action < action_ends
 
-        # 5. 使用布尔索引提取数据
-        # 这会将所有 True 的位置“压扁”提取出来，直接得到 (diff_bsz, dim)
-        vla_hidden_z = vla_hidden[mask_hidden]  # (diff_bsz, hidden_dim)
-        action_gt = vla_action[mask_action]  # (diff_bsz, action_dim)
-        vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
-        action_gt_repeated = action_gt.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
-        diff_loss = self.diffloss(action_gt_repeated, vla_hidden_z_repeated) / self.diffloss_micro_batch_size
+            # 5. 使用布尔索引提取数据
+            # 这会将所有 True 的位置“压扁”提取出来，直接得到 (diff_bsz, dim)
+            vla_hidden_z = vla_hidden[mask_hidden]  # (diff_bsz, hidden_dim)
+            action_gt = vla_action[mask_action]  # (diff_bsz, action_dim)
+            vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
+            action_gt_repeated = action_gt.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
+            diff_loss = self.diffloss(action_gt_repeated, vla_hidden_z_repeated) / self.diffloss_micro_batch_size
+        else:
+            diff_loss = torch.tensor(0.0, device=device, dtype=ce_loss.dtype)
 
         # [Batch_Size, Horizon_Steps, Action_Dim]
         v_psi = self.action_decoder(action_embeds)
