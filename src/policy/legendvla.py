@@ -689,10 +689,10 @@ class LegendVLA(nn.Module):
             causal_mask[idx, start:cnt, start:cnt] = torch.where(
                 mask, 0, torch.finfo(dtype).min
             ) # answer tokens attend to answer tokens before them
-            causal_mask[idx, action_start:, :start] = (
+            causal_mask[idx, action_start:action_start+n_action, :start] = (
                 0  # action attend to image/text
             )
-            causal_mask[:, action_start:action_start+n_action, action_start:action_start+n_action] = (
+            causal_mask[idx, action_start:action_start+n_action, action_start:action_start+n_action] = (
                 0  # action attend to itself
             )
 
