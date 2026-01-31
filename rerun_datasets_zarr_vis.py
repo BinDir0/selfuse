@@ -16,6 +16,8 @@ from src.utils.geometry import (
     transform_wrist_to_target_frame,
     transform_hand_points_to_target_frame,
 )
+from src.utils.mano_vis import mano_forward
+import torch
 
 def get_colored_point_cloud(color_rgb, depth, width, height, K, depth_scale=0.001, min_depth=0.1, max_depth=5.0):
     X_grid, Y_grid = np.meshgrid(np.arange(width), np.arange(height))
@@ -165,8 +167,32 @@ class HandVisualizer:
         if points_2d:
             rr.log(f"{base_path_2d}/tips", rr.Points2D(points_2d, radii=10, colors=colors_2d))
 
+    def log_mesh(self, root_3d_path, hand_name, hand_data, frame_idx):
+        if frame_idx >= len(hand_data['verts']): return
+        
+        base_path_3d = f"{root_3d_path}/{hand_name}"
+        
+        verts = hand_data['verts'][frame_idx]
+        faces = hand_data['faces']
+        
+        if isinstance(verts, torch.Tensor):
+            verts = verts.cpu().numpy()
+        if isinstance(faces, torch.Tensor):
+            faces = faces.cpu().numpy()
+            
+        # Log mesh to Rerun
+        # Use structure_color for mesh
+        color = self.structure_color
+        rr.log(
+            f"{base_path_3d}/mesh",
+            rr.Mesh3D(
+                vertex_positions=verts,
+                indices=faces,
+                vertex_colors=np.tile(color, (len(verts), 1))
+            )
+        )
 
-def get_data_from_zarr(origin_zarr_path, frame_idx=None, horizon=30):
+def get_data_from_zarr(origin_zarr_path, frame_idx=None, horizon=30, motion_type='fingertips'):
     """
     Load data directly from original zarr dataset.
     
@@ -281,9 +307,22 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, horizon=30):
     fingertips_action_cam = transform_hand_points_to_target_frame(hand_action_world, extrinsic)  # (H, 30) in camera coordinate
     action_cam = np.concatenate([wrist_action_cam, fingertips_action_cam], axis=-1)  # (H, 48) in camera coordinate
     
+    # Load MANO data if available
+    mano_state = None
+    mano_action = None
+    mano_shape = None
+    if motion_type == 'mano':
+        if 'mano' in data_group['state'] and 'mano' in data_group['action']:
+            mano_state = data_group['state']['mano'][frame_indices]  # (H, 90)
+            mano_action = data_group['action']['mano'][frame_indices]  # (H, 90)
+            mano_shape = data_group['state']['shape'][frame_indices]  # (H, 20)
+        else:
+            print(f"Warning: MANO data not found in {origin_zarr_path}. Falling back to fingertips.")
+
     # Load instruction
+    # instruction shape: (H, 5) - each timestep has 5 candidate instructions
     if 'instruction' in data_group:
-        instruction = data_group['instruction'][frame_indices]  # (H,) string array
+        instruction = data_group['instruction'][frame_indices]  # (H, 5) object array
     else:
         instruction = None
 
@@ -294,35 +333,102 @@ def get_data_from_zarr(origin_zarr_path, frame_idx=None, horizon=30):
         'extrinsic': extrinsic,  # (H, 4, 4) float32 (world2cam)
         'state': state_cam,  # (H, 48) float32
         'action': action_cam,  # (H, 48) float32
+        'mano_state': mano_state,
+        'mano_action': mano_action,
+        'mano_shape': mano_shape,
         'instruction': instruction,  # (H,) string array or None
         'frame_idx': frame_idx,  # int - actual frame index used
     }
     return data
 
 
-def actions_to_hands_data(actions):
+def actions_to_hands_data(actions, motion_type='fingertips', mano_data=None):
     """
     Convert actions to hands_data format for all timesteps.
     
-    actions format (T, 48) where T is number of timesteps:
-    For each timestep:
-    - left_trans3: [0:3]
-    - right_trans3: [3:6]
-    - left_6d_rotation: [6:12]
-    - right_6d_rotation: [12:18]
-    - left_keypoints_15: [18:33] (5 fingers * 3 coords)
-    - right_keypoints_15: [33:48] (5 fingers * 3 coords)
+    actions format (T, 48) or (T, 90) depending on motion_type.
     
     Args:
-        actions: np.ndarray, shape (T, 48)
+        actions: np.ndarray, shape (T, 48) or (T, 90)
+        motion_type: 'fingertips' or 'mano'
+        mano_data: dict with 'theta' and 'beta' if motion_type is 'mano'
     
     Returns:
         dict with 'left' and 'right' keys, each containing:
         - 'wrist': array of shape (T, 4, 4) transform matrices
         - 'fingers': dict with finger names and arrays of shape (T, 4, 4) transform matrices
+        - 'verts': array of shape (T, V, 3) vertices (only for mano)
+        - 'faces': array of shape (F, 3) faces (only for mano)
     """
     T = actions.shape[0]  # Number of timesteps
     
+    if motion_type == 'mano' and mano_data is not None:
+        # actions here are wrist actions (T, 18)
+        # mano_data['theta'] is (T, 90)
+        # mano_data['beta'] is (T, 20)
+        
+        wrist_actions = actions # (T, 18)
+        theta = mano_data['theta'] # (T, 90)
+        beta = mano_data['beta'] # (T, 20)
+        
+        left_trans = torch.from_numpy(wrist_actions[:, :3]).float()
+        right_trans = torch.from_numpy(wrist_actions[:, 3:6]).float()
+        left_rot6d = torch.from_numpy(wrist_actions[:, 6:12]).float()
+        right_rot6d = torch.from_numpy(wrist_actions[:, 12:18]).float()
+        
+        left_rot = rot_matrix_from_6drot(left_rot6d)
+        right_rot = rot_matrix_from_6drot(right_rot6d)
+        
+        left_theta = torch.from_numpy(theta[:, :45]).float()
+        right_theta = torch.from_numpy(theta[:, 45:]).float()
+        
+        left_beta = torch.from_numpy(beta[:, :10]).float()
+        right_beta = torch.from_numpy(beta[:, 10:]).float()
+        
+        # MANO forward
+        mano_results = mano_forward(
+            rot={'left': left_rot, 'right': right_rot},
+            trans={'left': left_trans, 'right': right_trans},
+            theta={'left': left_theta, 'right': right_theta},
+            beta={'left': left_beta, 'right': right_beta},
+            sides=['left', 'right']
+        )
+        
+        hands_data = {
+            'left': {
+                'wrist': mano_results['left']['joints'][:, 0].numpy(), # Not actually used for mesh but kept for consistency
+                'verts': mano_results['left']['verts'],
+                'faces': mano_results['left']['faces'],
+                'fingers': {} # Can be populated if needed
+            },
+            'right': {
+                'wrist': mano_results['right']['joints'][:, 0].numpy(),
+                'verts': mano_results['right']['verts'],
+                'faces': mano_results['right']['faces'],
+                'fingers': {}
+            }
+        }
+        
+        # Also build wrist matrices for axes visualization
+        left_wrists = []
+        right_wrists = []
+        for t in range(T):
+            lw = np.eye(4, dtype=np.float32)
+            lw[:3, :3] = left_rot[t].numpy()
+            lw[:3, 3] = left_trans[t].numpy()
+            left_wrists.append(lw)
+            
+            rw = np.eye(4, dtype=np.float32)
+            rw[:3, :3] = right_rot[t].numpy()
+            rw[:3, 3] = right_trans[t].numpy()
+            right_wrists.append(rw)
+            
+        hands_data['left']['wrist'] = np.array(left_wrists)
+        hands_data['right']['wrist'] = np.array(right_wrists)
+        
+        return hands_data
+
+    # Original fingertips logic
     finger_names = ['Thumb', 'Index', 'Middle', 'Ring', 'Little']
     
     # Initialize arrays for all timesteps
@@ -389,7 +495,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file.")
     parser.add_argument("--frame_idx", type=int, nargs='*', default=None, help="Index(es) of frame(s) to visualize. Can specify multiple frames: --frame_idx 100 200 300. If None, randomly select from valid frames.")
-    parser.add_argument("--horizon", type=int, default=200, help="Number of timesteps to visualize (default: 30).")
+    parser.add_argument("--horizon", type=int, default=100, help="Number of timesteps to visualize (default: 30).")
     parser.add_argument("--target_width", type=int, default=None, help="Target image width. If None, use original width.")
     parser.add_argument("--target_height", type=int, default=None, help="Target image height. If None, use original height.")
     parser.add_argument("--depth_scale", type=float, default=1.0)
@@ -397,7 +503,8 @@ def main():
     parser.add_argument("--max_depth", type=float, default=1.5)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--save_path", type=str, default=None, help="Path to save rrd file. If None, use spawn/notebook_show.")
-    parser.add_argument("--num_samples", type=int, default=100, help="Number of samples to save (default: 100).")
+    parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to save (default: 100).")
+    parser.add_argument("--motion_type", type=str, default="fingertips", choices=['fingertips', 'mano'], help="Motion type to visualize.")
     args = parser.parse_args()
 
     if not os.path.exists(args.origin_zarr_path):
@@ -444,7 +551,7 @@ def main():
             current_frame_idx = None
         
         # Load data from zarr (randomly selects frame if current_frame_idx is None)
-        zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=current_frame_idx, horizon=args.horizon)
+        zarr_data = get_data_from_zarr(args.origin_zarr_path, frame_idx=current_frame_idx, horizon=args.horizon, motion_type=args.motion_type)
     
         # Get actual frame_idx that was used (needed for filename)
         actual_frame_idx = zarr_data['frame_idx']
@@ -480,8 +587,21 @@ def main():
         # Convert state and action to hands_data format: (T, 48) -> hands_data with T frames
         states = zarr_data['state']  # (T, 48)
         actions = zarr_data['action']  # (T, 48)
-        state_hands_data = actions_to_hands_data(states)
-        action_hands_data = actions_to_hands_data(actions)
+        
+        if args.motion_type == 'mano' and zarr_data['mano_state'] is not None:
+            state_hands_data = actions_to_hands_data(
+                states[:, :18], 
+                motion_type='mano', 
+                mano_data={'theta': zarr_data['mano_state'], 'beta': zarr_data['mano_shape']}
+            )
+            action_hands_data = actions_to_hands_data(
+                actions[:, :18], 
+                motion_type='mano', 
+                mano_data={'theta': zarr_data['mano_action'], 'beta': zarr_data['mano_shape']}
+            )
+        else:
+            state_hands_data = actions_to_hands_data(states)
+            action_hands_data = actions_to_hands_data(actions)
         
         T = len(rgb_images)  # Number of timesteps
         print(f"Loaded {T} frames (timesteps) from selected sample")
@@ -551,6 +671,22 @@ def main():
 
         for i in range(num_frames):
             rr.set_time("frame_idx", sequence=frame_idx)
+            
+            # Log instruction if available
+            # instruction shape: (H, 5) - each timestep has 5 candidate instructions
+            if zarr_data['instruction'] is not None and i < len(zarr_data['instruction']):
+                instruction_candidates = zarr_data['instruction'][i]  # shape (5,) array of strings
+                # Collect all non-empty instructions
+                valid_instructions = []
+                if isinstance(instruction_candidates, np.ndarray):
+                    for idx, candidate in enumerate(instruction_candidates):
+                        candidate_str = str(candidate).strip()
+                        if candidate_str:
+                            valid_instructions.append(f"[{idx}] {candidate_str}")
+                # Log all instructions, separated by newlines
+                if valid_instructions:
+                    instruction_text = "\n".join(valid_instructions)
+                    rr.log("/world/instruction", rr.TextLog(instruction_text))
             
             # 可视化世界坐标系原点和轴
             rr.log("/world/origin", rr.Points3D([0, 0, 0], radii=0.01, colors=[255, 255, 255]))
@@ -626,6 +762,14 @@ def main():
                         print(f"\n=== Frame {i} - State {hand_name} wrist (Camera Frame) ===")
                         print(f"Translation: {wrist_pose_camera[:3, 3]}")
                         print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
+                    
+                    if args.motion_type == 'mano' and 'verts' in state_hands_data[hand_name]:
+                        viz_state.log_mesh(
+                            root_3d_path="/world/camera_pose/hands/state",
+                            hand_name=hand_name,
+                            hand_data=state_hands_data[hand_name],
+                            frame_idx=i
+                        )
             
             # Visualize Action hands (like Pred)
             for hand_name in ['left', 'right']:
@@ -644,6 +788,14 @@ def main():
                         print(f"\n=== Frame {i} - Action {hand_name} wrist (Camera Frame) ===")
                         print(f"Translation: {wrist_pose_camera[:3, 3]}")
                         print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
+
+                    if args.motion_type == 'mano' and 'verts' in action_hands_data[hand_name]:
+                        viz_action.log_mesh(
+                            root_3d_path="/world/camera_pose/hands/action",
+                            hand_name=hand_name,
+                            hand_data=action_hands_data[hand_name],
+                            frame_idx=i
+                        )
 
             frame_idx += 1
         
