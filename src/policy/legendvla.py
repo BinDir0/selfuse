@@ -1680,7 +1680,7 @@ class LegendVLA(nn.Module):
 
         # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
         # 逻辑：当前索引 >= start 且 当前索引 < start + n
-        mask_hidden = (range_hidden >= starts) & (range_hidden < ends)
+        mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
         mask_action = range_action < action_ends
 
         # 5. 使用布尔索引提取数据
