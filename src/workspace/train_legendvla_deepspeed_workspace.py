@@ -492,6 +492,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             min_loss_sample = {'loss': float('inf'), 'attn_weights': None, 'metadata': None}
             max_loss_sample = {'loss': float('-inf'), 'attn_weights': None, 'metadata': None}
             for batch_idx, batch in enumerate(dataloader):
+                torch.compiler.cudagraph_mark_step_begin()
                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
 
                 # Compute validation loss

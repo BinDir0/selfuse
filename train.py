@@ -29,6 +29,9 @@ import hydra
 from omegaconf import OmegaConf
 import pathlib
 from src.workspace.base_workspace import BaseWorkspace
+import torch
+
+torch.set_float32_matmul_precision('high')
 
 # allows arbitrary python code execution in configs using the ${eval:''} resolver
 OmegaConf.register_new_resolver("eval", eval, replace=True)
