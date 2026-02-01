@@ -39,6 +39,7 @@ export TORCHINDUCTOR_FORCE_CUDA_CODE_CACHE=1
 # # 设置 NCCL 超时为 1 小时 (单位毫秒: 3600000)
 # export NCCL_TIMEOUT=3600000 
 # export NCCL_ASYNC_ERROR_HANDLING=1
+# export TORCH_COMPILE_DISABLE=1
 
 rm -f .deepspeed_env
 
