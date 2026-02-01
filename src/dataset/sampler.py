@@ -386,7 +386,7 @@ class UnifiedRatioSampler(torch.utils.data.BatchSampler):
         # Make sure the total number of samples is a multiple of batch_size
         self.total_samples = self.num_batches * batch_size
         # Calculate how many samples from each dataset based on ratio
-        self.vla_samples_per_batch = int(batch_size * vla_ratio)
+        self.vla_samples_per_batch = int(batch_size * self.vla_ratio)
         self.vlm_samples_per_batch = batch_size - self.vla_samples_per_batch
         self.vla_samples_per_epoch = self.vla_samples_per_batch * self.num_batches
         self.vlm_samples_per_epoch = self.vlm_samples_per_batch * self.num_batches
