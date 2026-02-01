@@ -18,7 +18,8 @@ import copy
 import random
 import numpy as np
 import pickle
-from datetime import timedelta
+import time
+from datetime import datetime, timedelta
 import accelerate
 from accelerate import Accelerator
 from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs
@@ -26,88 +27,11 @@ from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProc
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager
-from src.utils.json_logger import JsonLogger
-from src.utils.plotting import plot_multilayer_attention_maps
 from src.model.common.model_average import ModelAveraging
 from src.utils.metric import get_action_accuracy
+from src.utils.training_utils import TrainingState, capture_output_to_training_log, FullMemoryTracker
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
-
-class TrainingState:
-    """A simple class to encapsulate all scalar training states that need to be saved."""
-    def __init__(self, epoch: int = 0, update_step: int = 0, global_step: int = 0):
-        self.epoch = epoch
-        self.update_step = update_step
-        self.global_step = global_step
-
-    def state_dict(self):
-        return {
-            "epoch": self.epoch,
-            "update_step": self.update_step,
-            "global_step": self.global_step,
-        }
-
-    def load_state_dict(self, state_dict):
-        self.epoch = state_dict["epoch"]
-        self.update_step = state_dict["update_step"]
-        self.global_step = state_dict["global_step"]
-
-class FullMemoryTracker:
-    def __init__(self, model):
-        self.model = model
-        self.stats = {}
-        self.hooks = []
-
-    def _get_tensor_mem(self, tensor):
-        if torch.is_tensor(tensor):
-            return tensor.element_size() * tensor.nelement() / (1024**2)
-        return 0
-
-    def hook_before(self, module, input, name):
-        # 记录进入该层前的显存状态
-        torch.cuda.synchronize() # 强制对齐，确保测得准，但会变慢
-        module._mem_before = torch.cuda.memory_allocated()
-
-    def hook_after(self, module, input, output, name):
-        # 记录离开该层后的显存状态
-        torch.cuda.synchronize()
-        mem_after = torch.cuda.memory_allocated()
-        
-        # 计算该层运行期间增加的显存（这包含了激活值和中间变量）
-        diff = (mem_after - module._mem_before) / (1024**2)
-        
-        # 计算参数和梯度的大小
-        param_mem = sum(p.element_size() * p.nelement() for p in module.parameters(recurse=False)) / (1024**2)
-        grad_mem = sum(p.grad.element_size() * p.grad.nelement() if p.grad is not None else 0 
-                       for p in module.parameters(recurse=False)) / (1024**2)
-
-        if name not in self.stats:
-            self.stats[name] = {'param': param_mem, 'peak_delta': 0, 'grad': 0, 'output': 0}
-        
-        self.stats[name]['peak_delta'] = max(self.stats[name]['peak_delta'], diff)
-        self.stats[name]['grad'] = max(self.stats[name]['grad'], grad_mem)
-        self.stats[name]['output'] = max(self.stats[name]['output'], self._get_tensor_mem(output))
-
-    def track(self):
-        for name, module in self.model.named_modules():
-            # 过滤掉层级太深的，看主要的 Block 即可
-            if len(list(module.children())) <= 3: 
-                h_pre = module.register_forward_pre_hook(lambda m, i, n=name: self.hook_before(m, i, n))
-                h_post = module.register_forward_hook(lambda m, i, o, n=name: self.hook_after(m, i, o, n))
-                self.hooks.extend([h_pre, h_post])
-
-    def report(self):
-        print(f"\n{'Module Name':<50} | {'Param(MB)':<10} | {'Grad(MB)':<10} | {'Output(MB)':<12} | {'Net-Delta(MB)':<12}")
-        print("-" * 105)
-        # 按增量排序，找出真正的显存大户
-        sorted_items = sorted(self.stats.items(), key=lambda x: x[1]['peak_delta'], reverse=True)
-        for name, s in sorted_items[:200]:
-            print(f"{name[:50]:<50} | {s['param']:>10.1f} | {s['grad']:>10.1f} | {s['output']:>12.1f} | {s['peak_delta']:>12.1f}")
-        print(f"Total memory usage: {sum(s['peak_delta'] for s in self.stats.values()):.1f} MB")
-
-    def stop(self):
-        for h in self.hooks: h.remove()
-
 
 class TrainLegendVLAWorkspace(BaseWorkspace):
     include_keys = ['training_state', 'model_averaging']
@@ -141,6 +65,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.objective_func = "train_" + cfg.training.objective
         print(f"Training with objective function: {self.objective_func}")
 
+    @capture_output_to_training_log
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
@@ -273,6 +198,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         print("--> Configure dataset and dataloader...................")
         # Configure dataset and dataloader
         dataset = hydra.utils.instantiate(cfg.dataset)
+        self.use_relative_action = dataset.vla_dataset.use_relative_action
         print("--> dataset instantiated")
         accelerator.wait_for_everyone()
 
@@ -381,13 +307,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             profile_context = accelerator.profile()
 
         # Training loop
-        if accelerator.is_main_process:
-            print(f"Training with {len(train_dataloader)} steps per epoch")
-        log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        with JsonLogger(log_path) as json_logger, profile_context as prof:
+        run_start_time = time.time()
+        log_interval = int(getattr(cfg.training, "log_interval", 50))
+        with profile_context as prof:
+            if accelerator.is_main_process:
+                print(f"Training with {len(train_dataloader)} steps per epoch")
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
-                step_log = dict()
                 if accelerator.is_main_process:
                     print(f"Training epoch {self.epoch} started")
                 if epoch_idx == 0 and cfg.training.resume_checkpoint_path: 
@@ -395,6 +321,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 else:
                     dataloader = train_dataloader
                 for batch_idx, batch in enumerate(dataloader):
+                    step_perf_start = time.perf_counter()
+                    if cfg.training.profile and torch.cuda.is_available():
+                        torch.cuda.reset_peak_memory_stats()
+
                     # Preprocess batch
                     inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
 
@@ -411,12 +341,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         self.tracker.stop()
 
                     # Gradient clipping
+                    total_norm = None
                     if accelerator.sync_gradients and cfg.training.clipping.enabled:
                         total_norm = accelerator.clip_grad_norm_(
                             self.model.parameters(), 
                             float('inf')
                         )
-                        step_log['grad_norm'] = total_norm
 
                     # Optimizer step
                     self.optimizer.step()
@@ -434,36 +364,67 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         # update model averaging
                         self.model_averaging.maybe_update(self.update_step)
 
-                    # Logging
-                    raw_loss_cpu = {}
-                    for key, value in raw_loss.items(): 
-                        raw_loss_cpu[key] = value.item()
-                    step_log.update({
-                        'global_step': self.global_step,
-                        'update_step': self.update_step,
-                        'epoch': self.epoch,
-                        'lr': self.lr_scheduler.get_last_lr()[0],
-                    })
-                    step_log.update(raw_loss_cpu)
+                    should_record = (
+                        accelerator.sync_gradients
+                        and (self.update_step % log_interval == 0)
+                    )
+                    should_eval = (
+                        accelerator.sync_gradients
+                        and val_dataloader is not None
+                        and (self.update_step % cfg.training.eval_every == 0)
+                    )
+                    should_ckpt = (
+                        accelerator.sync_gradients
+                        and (self.update_step % cfg.training.checkpoint_every == 0)
+                    )
+                    should_interval_ckpt = (
+                        accelerator.sync_gradients
+                        and (self.update_step % cfg.training.ckpt_save_interval == 0)
+                    )
+
+                    step_log = None
+                    if should_record or should_eval or should_ckpt or should_interval_ckpt:
+                        step_log = {
+                            'global_step': self.global_step,
+                            'update_step': self.update_step,
+                            'epoch': self.epoch,
+                            'lr': self.lr_scheduler.get_last_lr()[0],
+                        }
+
+                    if should_record:
+                        # Logging
+                        raw_loss_cpu = {}
+                        for key, value in raw_loss.items(): 
+                            raw_loss_cpu[key] = value.item()
+                        step_wall_time = time.time()
+                        step_time_sec = time.perf_counter() - step_perf_start
+                        step_log.update({
+                            'timestamp_unix': step_wall_time,
+                            'timestamp_iso': datetime.fromtimestamp(step_wall_time).isoformat(),
+                            'elapsed_time_sec': step_wall_time - run_start_time,
+                            'step_time_sec': step_time_sec,
+                        })
+                        if total_norm is not None:
+                            step_log['grad_norm'] = total_norm
+                        batch_size = inputs["input_ids"].shape[0]
+                        if step_time_sec > 0:
+                            step_log['samples_per_sec'] = batch_size / step_time_sec
+                        step_log.update(raw_loss_cpu)
 
                     # Evaluation
-                    if (self.update_step % cfg.training.eval_every) == 0 and \
-                        val_dataloader is not None and accelerator.sync_gradients:
+                    if should_eval:
                         self.evaluation(accelerator, val_dataloader, step_log)
 
                     # Checkpoint saving
-                    if (self.update_step % cfg.training.checkpoint_every) == 0 and accelerator.sync_gradients:
+                    if should_ckpt:
                         self.save_topk_ckpt(accelerator, topk_manager, step_log)
 
-                    if self.update_step % cfg.training.ckpt_save_interval == 0 and accelerator.sync_gradients:
+                    if should_interval_ckpt:
                         self.save_interval_ckpt(accelerator)
 
-                    is_last_batch = (batch_idx == (len(dataloader)-1))
-                    if not is_last_batch and accelerator.sync_gradients:
+                    if not (batch_idx == (len(dataloader)-1)) and step_log is not None:
                         accelerator.log(step_log, step=self.update_step)
-                        if accelerator.is_main_process:
-                            json_logger.log(step_log)
-
+                    
                     if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
                         break
 
@@ -488,9 +449,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             eval_accuracy = []
             eval_l1_loss = []
             
-            # Track min/max loss batches for visualization (only store these two)
-            min_loss_sample = {'loss': float('inf'), 'attn_weights': None, 'metadata': None}
-            max_loss_sample = {'loss': float('-inf'), 'attn_weights': None, 'metadata': None}
+            # Track min/max loss batches for saving (only store these two)
+            min_loss_sample = {
+                'loss': float('inf'),
+                'attn_weights': None,
+                'inputs': None,
+                'metadata': None,
+            }
+            max_loss_sample = {
+                'loss': float('-inf'),
+                'attn_weights': None,
+                'inputs': None,
+                'metadata': None,
+            }
             for batch_idx, batch in enumerate(dataloader):
                 torch.compiler.cudagraph_mark_step_begin()
                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
@@ -524,8 +495,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if not torch.any(eval_sample):
                         continue
                     actions_valid_mask = actions_valid_mask[eval_sample]
-                    gt_actions = self.normalizer['motions'].unnormalize(gt_actions[eval_sample])
-                    pred_actions = self.normalizer['motions'].unnormalize(pred_actions[eval_sample])
+                    if self.use_relative_action: 
+                        gt_actions = self.normalizer['actions'].unnormalize(gt_actions[eval_sample])
+                        pred_actions = self.normalizer['actions'].unnormalize(pred_actions[eval_sample])
+                    else:
+                        gt_actions = self.normalizer['motions'].unnormalize(gt_actions[eval_sample])
+                        pred_actions = self.normalizer['motions'].unnormalize(pred_actions[eval_sample])
                     gt_actions = gt_actions * actions_valid_mask
                     pred_actions = pred_actions * actions_valid_mask
                     
@@ -549,31 +524,65 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     batch_l1_loss = torch.sum(abs_diff) / actions_valid_num
                     eval_l1_loss.append(batch_l1_loss)
                     
-                    # Track min/max loss samples for visualization
+                    # Track min/max loss samples for saving
                     if full_seq_attn_maps is not None:
                         # [num_layers, eval_sample, num_heads, seq_len, seq_len]
-                        attn_weights = full_seq_attn_maps[:, eval_sample, :, :, :]  
+                        attn_weights = full_seq_attn_maps[:, eval_sample, :, :, :]
+                        eval_indices = torch.nonzero(eval_sample, as_tuple=False).squeeze(1)
+                        batch_size = inputs["input_ids"].shape[0]
+
+                        def to_numpy(value):
+                            if torch.is_tensor(value):
+                                return value.detach().float().cpu().numpy()
+                            if isinstance(value, np.ndarray):
+                                return value
+                            return np.array(value)
+
+                        def build_sample_inputs(sample_batch_idx):
+                            sample_inputs = {}
+                            for key, value in inputs.items():
+                                if torch.is_tensor(value) and value.shape[0] == batch_size:
+                                    sample_inputs[key] = to_numpy(value[sample_batch_idx])
+                                else:
+                                    sample_inputs[key] = to_numpy(value)
+                            return sample_inputs
                         
                         # Find min/max loss samples in this batch
-                        for sample_idx in range(per_sample_l1_loss.shape[0]):
-                            current_loss = per_sample_l1_loss[sample_idx].item()
-                            metadata = {
-                                'batch_idx': batch_idx,
-                                'sample_idx': sample_idx,
-                                'l1_loss': current_loss,
-                            }
-                            
-                            # Update min loss sample
-                            if current_loss < min_loss_sample['loss']:
-                                min_loss_sample['loss'] = current_loss
-                                min_loss_sample['attn_weights'] = attn_weights[:, sample_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
-                                min_loss_sample['metadata'] = metadata
-                            
-                            # Update max loss sample
-                            if current_loss > max_loss_sample['loss']:
-                                max_loss_sample['loss'] = current_loss
-                                max_loss_sample['attn_weights'] = attn_weights[:, sample_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
-                                max_loss_sample['metadata'] = metadata
+                        min_idx = torch.argmin(per_sample_l1_loss).item()
+                        max_idx = torch.argmax(per_sample_l1_loss).item()
+
+                        min_loss = per_sample_l1_loss[min_idx].item()
+                        max_loss = per_sample_l1_loss[max_idx].item()
+
+                        min_batch_idx = eval_indices[min_idx].item()
+                        max_batch_idx = eval_indices[max_idx].item()
+
+                        min_metadata = {
+                            'batch_idx': batch_idx,
+                            'sample_idx': min_batch_idx,
+                            'eval_sample_idx': min_idx,
+                            'l1_loss': min_loss,
+                        }
+                        max_metadata = {
+                            'batch_idx': batch_idx,
+                            'sample_idx': max_batch_idx,
+                            'eval_sample_idx': max_idx,
+                            'l1_loss': max_loss,
+                        }
+
+                        # Update min loss sample
+                        if min_loss < min_loss_sample['loss']:
+                            min_loss_sample['loss'] = min_loss
+                            min_loss_sample['attn_weights'] = attn_weights[:, min_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
+                            min_loss_sample['inputs'] = build_sample_inputs(min_batch_idx)
+                            min_loss_sample['metadata'] = min_metadata
+
+                        # Update max loss sample
+                        if max_loss > max_loss_sample['loss']:
+                            max_loss_sample['loss'] = max_loss
+                            max_loss_sample['attn_weights'] = attn_weights[:, max_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
+                            max_loss_sample['inputs'] = build_sample_inputs(max_batch_idx)
+                            max_loss_sample['metadata'] = max_metadata
                 if self.cfg.training.max_eval_steps and batch_idx >= (self.cfg.training.max_eval_steps-1):
                     break
             
@@ -624,19 +633,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             if accelerator.is_main_process:
                 print(log_msg)
             
-            # Visualize attention weights for selected samples
+            # Save attention weights and inputs for selected samples
             if accelerator.is_main_process and min_loss_sample['attn_weights'] is not None:
-                print(f"\nVisualizing attention weights for selected samples...")
+                print(f"\nSaving attention weights and inputs for selected samples...")
                 
                 selected_samples = {
-                    'lowest_loss': {
-                        'attn_weights': min_loss_sample['attn_weights'],
-                        'metadata': min_loss_sample['metadata']
-                    },
-                    'highest_loss': {
-                        'attn_weights': max_loss_sample['attn_weights'],
-                        'metadata': max_loss_sample['metadata']
-                    }
+                    'lowest_loss': min_loss_sample,
+                    'highest_loss': max_loss_sample,
                 }
                 
                 print(f"Selected samples for visualization:")
@@ -652,8 +655,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         
                     print(f"\nProcessing {name} sample...")
                     
-                    attn_weights_sample = sample_data['attn_weights'].numpy()  # [num_layers, num_heads, seq_len, seq_len]
-                    
                     # Create output directory
                     output_dir = os.path.join(
                         self.output_dir, 
@@ -661,17 +662,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         f'step_{self.update_step}',
                         name
                     )
-                    # Visualize attention maps
+                    os.makedirs(output_dir, exist_ok=True)
+                    output_path = os.path.join(output_dir, 'attention_and_inputs.npz')
+                    save_payload = dict(sample_data['inputs'])
+                    save_payload['attn_weights'] = sample_data['attn_weights'].numpy()
+                    save_payload['metadata'] = np.array(sample_data['metadata'], dtype=object)
+                    save_payload['update_step'] = np.array(self.update_step)
                     try:
-                        plot_multilayer_attention_maps(
-                            attention_maps=attn_weights_sample,
-                            output_dir=output_dir,
-                            step=self.update_step,
-                             layer_plot_every=4, # plot every 4 layers
-                        )
-                        print(f"  Saved to: {output_dir}")
+                        np.savez_compressed(output_path, **save_payload)
+                        print(f"  Saved to: {output_path}")
                     except Exception as e:
-                        print(f"  Error visualizing attention: {e}")
+                        print(f"  Error saving attention data: {e}")
                 
 
     def save_checkpoint_accelerator(self, accelerator, path=None, tag='latest'):

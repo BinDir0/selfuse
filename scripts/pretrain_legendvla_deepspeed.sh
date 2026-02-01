@@ -43,10 +43,10 @@ export TORCHINDUCTOR_FORCE_CUDA_CODE_CACHE=1
 rm -f .deepspeed_env
 
 export TOKENIZERS_PARALLELISM=false
+export PYTHONUNBUFFERED=1
 
 # Launch training
 accelerate launch \
     --config_file src/config/acc_config.yaml \
     train.py \
-    experiment=pretrain_legendvla_deepspeed \
-    2>&1 | tee training.log
+    experiment=pretrain_legendvla_deepspeed 

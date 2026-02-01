@@ -247,7 +247,7 @@ training:
   # evaluation settings
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
   # misc
-  tqdm_interval_sec: 1.0
+  log_interval: 50 
 
 mixture:
   # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action
