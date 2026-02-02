@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-_FLOAT_EPS = np.finfo(np.float64).eps
+_FLOAT_EPS = np.finfo(np.float32).eps
 
 # axis sequences for Euler angles
 _NEXT_AXIS = [1, 2, 0, 1]
@@ -46,7 +46,7 @@ _AXES2TUPLE = {
 _TUPLE2AXES = dict((v, k) for k, v in _AXES2TUPLE.items())
 
 # For testing whether a number is close to zero
-_EPS4 = np.finfo(float).eps * 4.0
+_EPS4 = np.finfo(np.float32).eps * 4.0
 
 
 def mat2euler(mat, axes="sxyz"):
@@ -89,7 +89,7 @@ def mat2euler(mat, axes="sxyz"):
     j = _NEXT_AXIS[i + parity]
     k = _NEXT_AXIS[i - parity + 1]
 
-    M = np.array(mat, dtype=np.float64, copy=False)[:3, :3]
+    M = np.array(mat, dtype=np.float32, copy=False)[:3, :3]
     if repetition:
         sy = math.sqrt(M[i, j] * M[i, j] + M[i, k] * M[i, k])
         if sy > _EPS4:
@@ -144,7 +144,7 @@ def quat2mat(q):
     --------
     >>> import numpy as np
     >>> M = quat2mat([1, 0, 0, 0]) # Identity quaternion
-    >>> np.allclose(M, np.eye(3))
+    >>> np.allclose(M, np.eye(3, dtype=np.float32))
     True
     >>> M = quat2mat([0, 1, 0, 0]) # 180 degree rotn around axis 0
     >>> np.allclose(M, np.diag([1, -1, -1]))
@@ -153,7 +153,7 @@ def quat2mat(q):
     w, x, y, z = q
     Nq = w * w + x * x + y * y + z * z
     if Nq < _FLOAT_EPS:
-        return np.eye(3)
+        return np.eye(3, dtype=np.float32)
     s = 2.0 / Nq
     X = x * s
     Y = y * s
@@ -172,7 +172,8 @@ def quat2mat(q):
             [1.0 - (yY + zZ), xY - wZ, xZ + wY],
             [xY + wZ, 1.0 - (xX + zZ), yZ - wX],
             [xZ - wY, yZ + wX, 1.0 - (xX + yY)],
-        ]
+        ],
+        dtype=np.float32,
     )
 
 
@@ -237,7 +238,7 @@ def euler2mat(ai, aj, ak, axes="sxyz"):
     cc, cs = ci * ck, ci * sk
     sc, ss = si * ck, si * sk
 
-    M = np.eye(3)
+    M = np.eye(3, dtype=np.float32)
     if repetition:
         M[i, i] = cj
         M[i, j] = sj * si
@@ -416,7 +417,7 @@ def quat2axangle(quat, identity_thresh=None):
     quat = np.asarray(quat)
     Nq = np.sum(quat**2)
     if not np.isfinite(Nq):
-        return np.array([1.0, 0, 0]), float("nan")
+        return np.array([1.0, 0, 0], dtype=np.float32), np.float32(np.nan)
     if identity_thresh is None:
         try:
             identity_thresh = np.finfo(Nq.type).eps * 3

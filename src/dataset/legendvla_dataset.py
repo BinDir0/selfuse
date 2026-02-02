@@ -183,9 +183,9 @@ class LegendVLADataset(BaseRatioDataset):
             mode=self.mode,
         )
         # Pad state and action to the same length as the sampler configuration
-        state_pad = np.zeros((self.sampler_cfg['num_state_steps'], *state.shape[1:]))
+        state_pad = np.zeros((self.sampler_cfg['num_state_steps'], *state.shape[1:]), dtype=np.float32)
         state_pad[:state.shape[0]] = state
-        action_pad = np.zeros((self.sampler_cfg['num_action_steps'], *action.shape[1:]))
+        action_pad = np.zeros((self.sampler_cfg['num_action_steps'], *action.shape[1:]), dtype=np.float32)
         actions_valid_mask = np.zeros((self.sampler_cfg['num_action_steps'],*action.shape[1:]), dtype=bool)
         actions_valid_mask[:action.shape[0]] = True
         action_pad[:action.shape[0]] = action
@@ -372,9 +372,9 @@ class LegendVLMDataset(torch.utils.data.Dataset):
                 augmented_pil = self.aug_transform(img_pil)
             else:
                 augmented_pil = img_pil
-            augmented_np = np.array(augmented_pil)
+            augmented_np = np.array(augmented_pil, dtype=np.float32)
             augmented_images.append(augmented_np)
-        images_to_process = np.stack(augmented_images)
+        images_to_process = np.stack(augmented_images, dtype=np.float32)
         # Process all images in batch
         processed_results = self.preprocessor(
             images=images_to_process, 
@@ -894,22 +894,23 @@ def process_image(image, depth_image = None, aug_transform = None, depth_clip_ra
     images_to_process = image
     depth_images_to_process = None
     if depth_image is not None:
-        depth_images_to_process = depth_image / 1000.0 # convert mm to m
+        # Convert to float32 first to avoid dtype leak to float64
+        depth_images_to_process = depth_image / np.float32(1000.0) # convert mm to m
         # normalize the depth images to [0, 1]
         depth_images_to_process = np.clip(
             depth_images_to_process, 
-            depth_clip_range[0], 
-            depth_clip_range[1]
-        ) / (depth_clip_range[1] - depth_clip_range[0] + 1e-6)
+            np.float32(depth_clip_range[0]), 
+            np.float32(depth_clip_range[1])
+        ) / np.float32(depth_clip_range[1] - depth_clip_range[0] + 1e-6)
     if aug_transform is not None:
         augmented_images = []
         for img_np in images_to_process:
             # convert NumPy array (H, W, C) to PIL Image
             img_pil = Image.fromarray(img_np)
             augmented_pil = aug_transform(img_pil)
-            augmented_np = np.array(augmented_pil)
+            augmented_np = np.array(augmented_pil, dtype=np.float32)
             augmented_images.append(augmented_np)
-        images_to_process = np.stack(augmented_images)
+        images_to_process = np.stack(augmented_images, dtype=np.float32)
 
     return images_to_process, depth_images_to_process
 
