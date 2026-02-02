@@ -93,7 +93,7 @@ class DINOv2DepthEncoder(nn.Module):
             # Ensure the model is in eval mode (disables Dropout/BatchNorm updates)
             self.dinov2.eval() 
 
-    @torch.compile(mode="max-autotune")
+    @torch.compile(mode="default")
     def forward(self, depth_images: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through DINOv2 depth encoder.

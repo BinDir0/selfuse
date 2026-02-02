@@ -307,7 +307,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             profile_context = accelerator.profile()
 
         # Training loop
-        run_start_time = time.time()
+        training_start_time = None  # set at first step
+        total_samples_processed = 0
         log_interval = int(getattr(cfg.training, "log_interval", 50))
         with profile_context as prof:
             if accelerator.is_main_process:
@@ -322,6 +323,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     dataloader = train_dataloader
                 for batch_idx, batch in enumerate(dataloader):
                     step_perf_start = time.perf_counter()
+                    if training_start_time is None:
+                        training_start_time = time.time()
                     if cfg.training.profile and torch.cuda.is_available():
                         torch.cuda.reset_peak_memory_stats()
 
@@ -359,6 +362,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     if accelerator.sync_gradients:
                         self.update_step += 1
+                        total_samples_processed += inputs["input_ids"].shape[0]
                         # initialize model averaging
                         self.model_averaging.maybe_initialize(self.update_step)
                         # update model averaging
@@ -398,17 +402,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             raw_loss_cpu[key] = value.item()
                         step_wall_time = time.time()
                         step_time_sec = time.perf_counter() - step_perf_start
+                        batch_size = inputs["input_ids"].shape[0]
+                        elapsed_time_sec = step_wall_time - training_start_time
                         step_log.update({
-                            'timestamp_unix': step_wall_time,
-                            'timestamp_iso': datetime.fromtimestamp(step_wall_time).isoformat(),
-                            'elapsed_time_sec': step_wall_time - run_start_time,
+                            'elapsed_time_sec': elapsed_time_sec,
                             'step_time_sec': step_time_sec,
+                            'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
+                            'samples_per_sec': batch_size / step_time_sec if step_time_sec > 0 else 0,
                         })
                         if total_norm is not None:
                             step_log['grad_norm'] = total_norm
-                        batch_size = inputs["input_ids"].shape[0]
-                        if step_time_sec > 0:
-                            step_log['samples_per_sec'] = batch_size / step_time_sec
                         step_log.update(raw_loss_cpu)
 
                     # Evaluation
@@ -422,7 +425,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if should_interval_ckpt:
                         self.save_interval_ckpt(accelerator)
 
-                    if not (batch_idx == (len(dataloader)-1)) and step_log is not None:
+                    if step_log is not None:
                         accelerator.log(step_log, step=self.update_step)
                     
                     if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
@@ -439,6 +442,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         accelerator.end_training()
 
     # Combine validation and sampling, so we can process data only once. 
+    @torch.compiler.disable() 
     def evaluation(self, accelerator, dataloader, step_log): 
         if accelerator.is_main_process:
             print(f"Evaluation step {self.update_step} started")
@@ -463,7 +467,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 'metadata': None,
             }
             for batch_idx, batch in enumerate(dataloader):
-                torch.compiler.cudagraph_mark_step_begin()
                 inputs = self.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
 
                 # Compute validation loss
@@ -472,7 +475,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 for key, loss_ in loss.items():
                     if key not in val_losses:
                         val_losses[key] = list()
-                    val_losses[key].append(loss_)
+                    val_losses[key].append(loss_.item())
 
                 if hasattr(self.model, 'module'):
                     model = self.model.module

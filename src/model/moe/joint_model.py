@@ -430,7 +430,7 @@ class JointModel(nn.Module):
     def build_mixture_caches(self):
         return {name: KVCache() for name in self.cache_names}
 
-    @torch.compile(mode="max-autotune")
+    @torch.compile(mode="default")
     def forward_mixture_model(
         self, 
         attention_mask: torch.Tensor,
