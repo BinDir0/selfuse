@@ -323,7 +323,7 @@ class PaliGemmaProcessor:
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             suffix_target=target,
-            need_target=True,
+            need_target=(mode != 'infer'),
         )
 
         if mode == 'infer': # Use left padding for inference
