@@ -1157,9 +1157,9 @@ def process_image(image, depth_image = None, aug_transform = None, depth_clip_ra
             # convert NumPy array (H, W, C) to PIL Image
             img_pil = Image.fromarray(img_np)
             augmented_pil = aug_transform(img_pil)
-            augmented_np = np.array(augmented_pil, dtype=np.float32)
+            augmented_np = np.array(augmented_pil, dtype=np.uint8)
             augmented_images.append(augmented_np)
-        images_to_process = np.stack(augmented_images, dtype=np.float32)
+        images_to_process = np.stack(augmented_images, dtype=np.uint8)
 
     return images_to_process, depth_images_to_process
 
