@@ -478,9 +478,9 @@ class LegendVLMDataset(torch.utils.data.Dataset):
                 augmented_pil = self.aug_transform(img_pil)
             else:
                 augmented_pil = img_pil
-            augmented_np = np.array(augmented_pil, dtype=np.float32)
+            augmented_np = np.array(augmented_pil, dtype=np.uint8)
             augmented_images.append(augmented_np)
-        images_to_process = np.stack(augmented_images, dtype=np.float32)
+        images_to_process = np.stack(augmented_images, dtype=np.uint8)
         # Process all images in batch
         processed_results = self.preprocessor(
             images=images_to_process, 
