@@ -924,7 +924,7 @@ class LegendVLDataCollator(BaseDataCollator):
                     [item[key] for item in data_list],
                     batch_first=True,
                     padding_value=0,
-                    padding_side=self.padding_side
+                    padding_side='right'
                 )
             else:
                 batch[key] = torch.stack([item[key] for item in data_list])
