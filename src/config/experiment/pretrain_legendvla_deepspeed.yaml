@@ -25,17 +25,14 @@ vla_dataset_paths:
  - name: egodex
    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
    weight: 20
- - name: ssv2
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ssv2_train_clean.zarr
-   weight: 1
  - name: epic
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_clean.zarr
+   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
    weight: 4
  - name: ego4d_cooking
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_clean_batch.zarr
+   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
    weight: 8
  - name: ego4d_other
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_clean_batch.zarr
+   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
    weight: 8
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
@@ -160,10 +157,10 @@ dataloader:
     shuffle: True
     drop_last: False
   loader: 
-    num_workers: 16
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
-    prefetch_factor: 8
+    prefetch_factor: 16
 
 val_dataloader:
   batch_sampler: 
@@ -171,10 +168,10 @@ val_dataloader:
     shuffle: False
     drop_last: False
   loader: 
-    num_workers: 16
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
-    prefetch_factor: 8
+    prefetch_factor: 16
 
 flow: 
   sig_min: 0.001
@@ -185,7 +182,7 @@ flow:
 
 optimizer:
   action: 
-    lr: 1e-4
+    lr: 5e-4
     betas: [0.9, 0.95]
     weight_decay: 1e-2
   vlm:
@@ -247,7 +244,7 @@ training:
   # evaluation settings
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
   # misc
-  log_interval: 50 
+  log_interval: 20
 
 mixture:
   # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action
@@ -397,7 +394,7 @@ policy:
     grad_checkpointing: False
 
 logging:
-  project: train_legendvla_deepspeed
+  project: diffloss-compile
   entity: LegendaryVLA
   resume: False
   mode: online
