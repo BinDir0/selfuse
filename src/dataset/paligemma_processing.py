@@ -9,10 +9,10 @@ import cv2
 
 from src.utils.pytorch_util import dict_apply
 
-IMAGENET_STANDARD_MEAN = np.array([0.5, 0.5, 0.5])
-IMAGENET_STANDARD_STD = np.array([0.5, 0.5, 0.5])
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
-IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+IMAGENET_STANDARD_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+IMAGENET_STANDARD_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 def add_image_tokens_to_prompt(
@@ -196,7 +196,7 @@ def process_depth_images(
         depth_images = rescale(depth_images, scale=rescale_factor)
     
     # Resize the depth images to the desired size using PIL
-    depth_images = resize(depth_images, size=size)
+    depth_images = resize(depth_images, size=size, is_depth=True)
     
     # Normalize the depth images to have mean 0 and standard deviation 1
     depth_images = depth_images[:, np.newaxis, :, :] # [T, H, W] -> [T, 1, H, W]
@@ -517,5 +517,5 @@ def get_resized_intrinsic(intrinsic, original_width: int, original_height: int, 
     '''
     scale_x = img_size / original_width
     scale_y = img_size / original_height
-    intrinsic = intrinsic * np.array([scale_x, scale_y, scale_x, scale_y])
+    intrinsic = intrinsic * np.array([scale_x, scale_y, scale_x, scale_y], dtype=np.float32)
     return intrinsic

@@ -1,26 +1,42 @@
-# import os
-# import deepspeed
-
-# os.environ["DEBUGPY_PROCESS_SPAWN"] = "0"
-
-# # 1. 获取本地 Rank，避免所有卡都监听端口
-# local_rank = int(os.environ.get("LOCAL_RANK", -1))
-
-# if local_rank == 0:
-#     import debugpy
-#     debugpy.configure(python="python", subProcess=False) 
-#     # 2. 监听端口，等待 VS Code 连接
-#     # 0.0.0.0 允许从外部/容器外连接，5678 是常用端口
-#     debugpy.listen(("0.0.0.0", 5678))
-
-#     print(f"👻 Rank {local_rank}: 等待 VS Code 调试器连接 (端口 5678)...")
-#     print(f"👉 请确保 VS Code 打开的是真实路径 (非软链接)！")
-
-#     # 3. 程序在此暂停，直到调试器挂载
-#     debugpy.wait_for_client()
-#     print(f"✅ 调试器已连接，开始训练...")
-
+import os
 import sys
+
+# ================== debugpy 调试配置 ==================
+# 通过环境变量 ENABLE_DEBUGPY=1 来启用调试
+# 通过环境变量 DEBUGPY_PORT=5678 来指定调试端口（默认 5678）
+# 通过环境变量 DEBUGPY_WAIT=1 来控制是否等待调试器连接（默认等待）
+# =====================================================
+
+# if os.environ.get("ENABLE_DEBUGPY", "0") == "1":
+#     # 1. 获取本地 Rank，避免所有卡都监听端口
+#     local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    
+#     # 只在 rank 0 或单卡训练时启用调试
+#     if local_rank in (-1, 0):
+#         import debugpy
+        
+#         # 2. 从环境变量获取调试端口
+#         debugpy_port = int(os.environ.get("DEBUGPY_PORT", "5678"))
+#         wait_for_client = os.environ.get("DEBUGPY_WAIT", "1") == "1"
+        
+#         # 3. 监听端口
+#         # 0.0.0.0 允许从外部/容器外连接
+#         debugpy.listen(("0.0.0.0", debugpy_port))
+        
+#         print(f"🐛 [Rank {local_rank}] debugpy 已启动，监听端口: {debugpy_port}")
+#         print(f"👉 CUDA_VISIBLE_DEVICES = {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+        
+#         if wait_for_client:
+#             print(f"⏸️  等待 VS Code 调试器连接...")
+#             print(f"💡 提示: 请确保 VS Code 打开的是真实路径 (非软链接)！")
+#             # 4. 程序在此暂停，直到调试器挂载
+#             debugpy.wait_for_client()
+#             print(f"✅ 调试器已连接，开始训练...")
+#         else:
+#             print(f"🚀 不等待调试器，继续执行...")
+#     else:
+#         print(f"⏭️  [Rank {local_rank}] 跳过 debugpy 初始化（仅 rank 0 启用调试）")
+
 # use line-buffering for both stdout and stderr
 sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
