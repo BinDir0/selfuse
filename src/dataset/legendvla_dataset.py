@@ -1474,6 +1474,27 @@ def test_dataset_loading():
         print(f"\n   {'='*80}")
         print(f"   First Batch Output Complete")
         print(f"   {'='*80}\n")
+
+        # Simple speed test: load 500 batches
+        import time
+        max_batches = 500
+        print(f"\n   {'='*80}")
+        print(f"   Speed Test: Loading {max_batches} Batches")
+        print(f"   {'='*80}")
+        start_time = time.perf_counter()
+        loaded_batches = 0
+        for batch_idx, _ in enumerate(dataloader):
+            if batch_idx >= max_batches:
+                break
+            loaded_batches += 1
+        elapsed = time.perf_counter() - start_time
+        if loaded_batches > 0:
+            print(f"   Loaded batches: {loaded_batches}")
+            print(f"   Total time: {elapsed:.4f}s")
+            print(f"   Batches/sec: {loaded_batches / elapsed:.2f}")
+            print(f"   Sec/batch: {elapsed / loaded_batches:.6f}")
+        else:
+            print(f"   ⚠ No batches loaded (dataloader may be empty)")
         
     except Exception as e:
         print(f"   ✗ Error creating unified dataset dataloader: {e}")
