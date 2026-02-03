@@ -87,12 +87,21 @@ class DINOv2DepthEncoder(nn.Module):
         self.dinov2_hidden_size = self.dinov2.embed_dim
         
         # Freeze backbone
-        if config.get("freeze_backbone", True):
+        freeze_backbone = config.get("freeze_backbone", True)
+        if freeze_backbone:
             for param in self.dinov2.parameters():
                 param.requires_grad = False
             # Ensure the model is in eval mode (disables Dropout/BatchNorm updates)
-            self.dinov2.eval() 
+            self.dinov2.eval()
+        
+        # Store whether backbone is frozen (for dtype handling)
+        self._freeze_backbone = freeze_backbone 
 
+    def _convert_dtype(self, dtype: torch.dtype):
+        """Convert DINOv2 model to specified dtype for efficient training."""
+        self.dinov2 = self.dinov2.to(dtype)
+        return self
+    
     @torch.compile(mode="default")
     def forward(self, depth_images: torch.Tensor) -> torch.Tensor:
         """

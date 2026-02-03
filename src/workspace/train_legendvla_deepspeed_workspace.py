@@ -21,8 +21,8 @@ import pickle
 import time
 from datetime import datetime, timedelta
 import accelerate
-from accelerate import Accelerator
-from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs
+from accelerate import Accelerator, DeepSpeedPlugin
+from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs, DistributedType
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
@@ -105,10 +105,33 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         kwargs_handlers = [init_process_group_kwargs]
         if cfg.training.profile:
             kwargs_handlers.append(profile_kwargs)
+        
+        self.is_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
+
+        deepspeed_plugin = None
+        if self.is_deepspeed:
+            ds_config_file = os.environ.get(
+                "ACCELERATE_DEEPSPEED_CONFIG_FILE",
+                "src/config/ds_config.json"
+            )
+            deepspeed_plugin = DeepSpeedPlugin(hf_ds_config=ds_config_file)
+
         accelerator = Accelerator(
-            log_with='wandb', 
+            log_with='wandb',
+            deepspeed_plugin=deepspeed_plugin,  # None 的话不影响
             kwargs_handlers=kwargs_handlers
         )
+        
+        # Print accelerator initialization info
+        if accelerator.is_main_process:
+            print("=" * 80)
+            print("Accelerator Initialization Info:")
+            print(f"  distributed_type: {accelerator.distributed_type}")
+            print(f"  mixed_precision: {accelerator.mixed_precision}")
+            print(f"  num_processes: {accelerator.num_processes}")
+            print(f"  process_index: {accelerator.process_index}")
+            print(f"  device: {accelerator.device}")
+            print("=" * 80)
 
         # Initialize wandb tracking
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
@@ -277,6 +300,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler
         )
+        
+        if accelerator.is_main_process:
+            print(f"\nTraining with: {'DeepSpeed' if self.is_deepspeed else 'Accelerate (DDP/FSDP)'}")
+            if self.is_deepspeed:
+                print(f"  Model type: {type(self.model).__name__}")
+                print(f"  Has model.step(): {hasattr(self.model, 'step')}")
+                print(f"  Has model.backward(): {hasattr(self.model, 'backward')}")
 
         # resume training from checkpoint after accelerator prepare
         if cfg.training.resume_checkpoint_path:
@@ -336,7 +366,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     # Forward pass
                     with accelerator.autocast():
                         raw_loss = self.model(self.objective_func, inputs)
-                    accelerator.backward(raw_loss["total_loss"])
+                    
+                    # Use cached DeepSpeed status (set after prepare())
+                    if self.is_deepspeed:
+                        self.model.backward(raw_loss["total_loss"])   
+                    else:
+                        accelerator.backward(raw_loss["total_loss"])
                     if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
                         torch.cuda.empty_cache() 
                         print(torch.cuda.memory_summary())
@@ -352,11 +387,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         )
 
                     # Optimizer step
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
-
-                    # Zero gradients
-                    self.optimizer.zero_grad(set_to_none=True)
+                    if self.is_deepspeed:
+                        # DeepSpeed engine handles everything: optimizer step, lr scheduler, and zero grad
+                        self.model.step()
+                    else:
+                        # Standard training without DeepSpeed optimizer
+                        self.optimizer.step()
+                        self.lr_scheduler.step()
+                        # Zero gradients
+                        self.optimizer.zero_grad(set_to_none=True)
                     
                     self.global_step += 1
 
@@ -388,11 +427,18 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     step_log = None
                     if should_record or should_eval or should_ckpt or should_interval_ckpt:
+                        # Get learning rate from DeepSpeed engine or scheduler
+                        if self.is_deepspeed:
+                            # Get lr from DeepSpeed engine
+                            current_lr = self.model.get_lr()[0]
+                        else:
+                            current_lr = self.lr_scheduler.get_last_lr()[0]
+                        
                         step_log = {
                             'global_step': self.global_step,
                             'update_step': self.update_step,
                             'epoch': self.epoch,
-                            'lr': self.lr_scheduler.get_last_lr()[0],
+                            'lr': current_lr,
                         }
 
                     if should_record:
@@ -475,7 +521,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 for key, loss_ in loss.items():
                     if key not in val_losses:
                         val_losses[key] = list()
-                    val_losses[key].append(loss_.item())
+                    val_losses[key].append(loss_.detach())
 
                 if hasattr(self.model, 'module'):
                     model = self.model.module
@@ -593,11 +639,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             for key in val_losses.keys():
                 num_samples = torch.tensor(len(val_losses[key]), device=accelerator.device)
                 if len(val_losses[key]) == 0:
-                    val_losses[key] = torch.tensor(0.0, device=accelerator.device)
+                    local_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=accelerator.device)
                 else: 
-                    val_losses[key] = torch.stack(val_losses[key]).sum()
+                    local_loss_sum = torch.stack(val_losses[key]).sum().to(accelerator.device)
                 total_num_samples = accelerator.reduce(num_samples, reduction='sum')
-                val_losses[key] = accelerator.reduce(val_losses[key], reduction='sum') / total_num_samples.clamp(min=1)
+                total_loss_sum = accelerator.reduce(local_loss_sum, reduction='sum')
+                val_losses[key] = total_loss_sum / total_num_samples.clamp(min=1)
                 val_losses[key] = val_losses[key].item()
                 step_log[f'val_{key}'] = val_losses[key]
 
@@ -608,8 +655,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             # Process action accuracy metrics
             if eval_len > 0:
                 # Average over batches
-                sum_eval_accuracy = torch.stack(eval_accuracy).sum(dim=0)
-                sum_eval_l1_loss = torch.stack(eval_l1_loss).sum()
+                sum_eval_accuracy = torch.stack(eval_accuracy).sum(dim=0).to(accelerator.device)
+                sum_eval_l1_loss = torch.stack(eval_l1_loss).sum().to(accelerator.device)
             else: 
                 sum_eval_accuracy = torch.tensor(0.0, device=accelerator.device)
                 sum_eval_l1_loss = torch.tensor(0.0, device=accelerator.device)

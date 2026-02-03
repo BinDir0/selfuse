@@ -17,7 +17,6 @@ wandb
 outputs
 reference
 data_local
-.vscode
 _wandb
 
 **/.DS_Store
@@ -156,6 +155,7 @@ logs/
 
 # deepspeed env
 .deepspeed_env
+hostfile
 
 # test files
 _test

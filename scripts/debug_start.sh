@@ -4,7 +4,7 @@
 # ============ 1. 硬件与环境配置 ============
 PYTHON_PATH="/share_data/chenzhang/miniconda3/envs/legendvla/bin/python3.10"
 # 指定你调试想用的卡（例如 4,5,6,7）
-export CUDA_VISIBLE_DEVICES="4,5,6,7"
+export CUDA_VISIBLE_DEVICES="1,2,3"
 
 # 计算显卡数量
 IFS=',' read -ra GPU_ARRAY <<< "$CUDA_VISIBLE_DEVICES"
@@ -52,4 +52,6 @@ $PYTHON_PATH -m accelerate.commands.launch \
     --main_process_port 29501 \
     train.py \
     experiment=pretrain_legendvla_deepspeed \
+    # training.max_train_steps=10 \
+    # training.eval_every=5 \
     2>&1 | tee debug_training.log
