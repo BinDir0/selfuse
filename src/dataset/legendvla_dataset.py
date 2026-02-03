@@ -29,19 +29,6 @@ from .sampler import SequenceSampler, get_val_mask, downsample_mask
 from .streaming_replay_buffer import StreamingReplayBuffer
 
 
-def _resolve_future(value):
-    """
-    Resolve Future-like objects returned by async IO (TensorStore).
-
-    Args:
-        value (Any): Value or Future-like object with .result().
-
-    Returns:
-        Any: Resolved value.
-    """
-    return value.result() if hasattr(value, "result") else value
-
-
 class LegendVLADataset(BaseRatioDataset):
     """
     Dataset for LegendVLA training/validation with async IO support.
@@ -189,26 +176,26 @@ class LegendVLADataset(BaseRatioDataset):
         """
         # Select data keys based on motion_type
         state, action = process_state_action(
-            wrist_state = _resolve_future(sample['state/wrist']).astype(np.float32), 
-            hand_state = _resolve_future(sample[f'state/{self.motion_type}']).astype(np.float32), 
-            wrist_action = _resolve_future(sample['action/wrist']).astype(np.float32), 
-            hand_action = _resolve_future(sample[f'action/{self.motion_type}']).astype(np.float32), 
-            extrinsic = _resolve_future(sample['extrinsic']).astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
+            wrist_state = sample['state/wrist'].astype(np.float32), 
+            hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
+            wrist_action = sample['action/wrist'].astype(np.float32), 
+            hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
+            extrinsic = sample['extrinsic'].astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 
             motion_type = self.motion_type,
             use_relative_action = self.use_relative_action,
         )
         image, depth_images = process_image(
-            _resolve_future(sample['image']), 
-            _resolve_future(sample.get('depth', None)), 
+            sample['image'], 
+            sample.get('depth', None), 
             self.aug_transform, 
             self.depth_clip_range,
         )
 
-        intrinsic = _resolve_future(sample['intrinsic']).astype(np.float32)
-        instruction = _resolve_future(sample['instruction'])
-        instruction_num = _resolve_future(sample['instruction_num'])
+        intrinsic = sample['intrinsic'].astype(np.float32)
+        instruction = sample['instruction']
+        instruction_num = sample['instruction_num']
         # sample a random instruction from the candidate instructions
         
         if self.mode == 'train':
@@ -793,11 +780,11 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         """
         # Select data keys based on motion_type
         state, action = process_state_action(
-            wrist_state = _resolve_future(sample['state/wrist']).astype(np.float32), 
-            hand_state = _resolve_future(sample[f'state/{self.motion_type}']).astype(np.float32), 
-            wrist_action = _resolve_future(sample['action/wrist']).astype(np.float32), 
-            hand_action = _resolve_future(sample[f'action/{self.motion_type}']).astype(np.float32), 
-            extrinsic = _resolve_future(sample['extrinsic']).astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
+            wrist_state = sample['state/wrist'].astype(np.float32), 
+            hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
+            wrist_action = sample['action/wrist'].astype(np.float32), 
+            hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
+            extrinsic = sample['extrinsic'].astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 
             motion_type = self.motion_type,
@@ -1593,8 +1580,8 @@ def visualize_state_action(
     raw_sample = vla_dataset.samplers[sampler_idx].sample_sequence(curr_idx)
     
     # 获取原始内参和图像尺寸
-    raw_intrinsic = _resolve_future(raw_sample['intrinsic']).astype(np.float32)  # [4] or [3, 3]
-    raw_images = _resolve_future(raw_sample['image'])  # [N_image, H, W, 3]
+    raw_intrinsic = raw_sample['intrinsic'].astype(np.float32)  # [4] or [3, 3]
+    raw_images = raw_sample['image'] # [N_image, H, W, 3]
     original_height, original_width = raw_images.shape[1], raw_images.shape[2]
     
     # 获取处理后的图像尺寸（从 preprocessor）
@@ -1644,7 +1631,7 @@ def visualize_state_action(
         # depth_values 已经是归一化的，需要反归一化
         # 但这里我们直接使用原始深度图，因为 depth_values 的处理方式可能不同
         # 如果需要，可以从 raw_sample 获取原始深度图并 resize
-        raw_depth_images = _resolve_future(raw_sample.get('depth', None))
+        raw_depth_images = raw_sample.get('depth', None)
         if raw_depth_images is not None:
             # Resize 原始深度图到处理后的尺寸
             import cv2
@@ -1658,7 +1645,7 @@ def visualize_state_action(
     # 获取 instruction（如果有）
     instruction = None
     if 'instruction' in raw_sample:
-        instruction_data = _resolve_future(raw_sample['instruction'])
+        instruction_data = raw_sample['instruction']
         if isinstance(instruction_data, np.ndarray) and len(instruction_data) > 0:
             # 如果是数组，取第一个
             instruction = str(instruction_data[0]) if len(instruction_data.shape) > 0 else str(instruction_data)

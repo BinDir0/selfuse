@@ -6,6 +6,7 @@ import re
 import torch
 import numpy as np
 import cv2
+cv2.setNumThreads(0)
 
 from src.utils.pytorch_util import dict_apply
 

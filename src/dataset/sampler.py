@@ -10,15 +10,8 @@ def create_indices(
     episode_mask: np.ndarray,
 ) -> np.ndarray:
     """
-    Build per-step index records for masked episodes.
-
-    Args:
-        episode_ends (np.ndarray): 1D array of episode end indices.
-        episode_mask (np.ndarray): 1D bool mask indicating valid episodes.
-
-    Returns:
-        np.ndarray: Array of shape (N, 3) with rows
-            [buffer_idx, episode_start_idx, episode_end_idx].
+    Returns an array of shape (N, 3) where each row contains:
+    [buffer_idx, episode_start_idx, episode_end_idx]
     """
     indices = list()
     
@@ -42,17 +35,6 @@ def create_indices(
 
 
 def get_val_mask(n_episodes, val_ratio, seed = 0):
-    """
-    Create a boolean mask for validation episodes.
-
-    Args:
-        n_episodes (int): Total number of episodes.
-        val_ratio (float): Fraction of episodes to use for validation.
-        seed (int): Random seed.
-
-    Returns:
-        np.ndarray: Boolean mask with True for validation episodes.
-    """
     val_mask = np.zeros(n_episodes, dtype=bool)
     if val_ratio <= 0:
         return val_mask
@@ -67,17 +49,6 @@ def get_val_mask(n_episodes, val_ratio, seed = 0):
 
 
 def downsample_mask(mask, max_n, seed = 0):
-    """
-    Downsample a boolean mask to at most max_n True values.
-
-    Args:
-        mask (np.ndarray): Boolean mask to downsample.
-        max_n (Optional[int]): Maximum number of True values to keep.
-        seed (int): Random seed.
-
-    Returns:
-        np.ndarray: Downsampled boolean mask.
-    """
     # subsample training data
     train_mask = mask
     if (max_n is not None) and (np.sum(train_mask) > max_n):
@@ -93,12 +64,6 @@ def downsample_mask(mask, max_n, seed = 0):
 
 
 class SequenceSampler:
-    """
-    Sample fixed-length sequences around a time index from a replay buffer.
-
-    The sampler returns Future-like objects for async IO. Call .result()
-    where actual data is needed.
-    """
     def __init__(
         self, 
         replay_buffer, 
@@ -111,18 +76,6 @@ class SequenceSampler:
         keys = None,
         episode_mask: Optional[np.ndarray] = None,
     ):
-        """
-        Args:
-            replay_buffer (StreamingReplayBuffer): Data source.
-            num_image_steps (int): Number of image timesteps to sample.
-            num_image_stride (int): Stride between image timesteps.
-            num_state_steps (int): Number of state timesteps to sample.
-            num_state_stride (int): Stride between state timesteps.
-            num_action_steps (int): Number of action timesteps to sample.
-            num_action_stride (int): Stride between action timesteps.
-            keys (Optional[List[str]]): Keys to include; defaults to all.
-            episode_mask (Optional[np.ndarray]): Boolean mask over episodes.
-        """
         self.replay_buffer = replay_buffer
         self.cfg = {
             'image':  (num_image_steps, num_image_stride, 'before'),
@@ -144,28 +97,11 @@ class SequenceSampler:
             self.indices = np.zeros((0, 3), dtype=np.int64)
 
     def __len__(self):
-        """
-        Returns number of available anchors (steps).
-
-        Returns:
-            int: Number of sampleable anchors.
-        """
         return len(self.indices)
 
     def _get_query_indices(self, anchor, start, end, steps, stride, side):
         """
-        Calculate indices to sample for a given anchor.
-
-        Args:
-            anchor (int): Current step index.
-            start (int): Episode start index (inclusive).
-            end (int): Episode end index (exclusive).
-            steps (int): Number of steps to sample.
-            stride (int): Stride between steps.
-            side (Literal["before","after"]): Sampling direction.
-
-        Returns:
-            np.ndarray: 1D array of indices to read.
+        Calculate the indices of the items to sample.
         """
         if side == 'before':
             offsets = np.arange((1 - steps) * stride, 1, stride)
@@ -179,17 +115,11 @@ class SequenceSampler:
         return idxs
 
     def sample_sequence(self, idx):
-        """
-        Sample a sequence around a selected anchor.
-
-        Args:
-            idx (int): Index into sampler indices.
-
-        Returns:
-            Dict[str, Future]: Mapping of keys to Future-like objects.
-        """
         t_now, ep_start, ep_end = self.indices[idx]
         result = dict()
+
+        import time
+        from torch.utils.data import get_worker_info
 
         for key in self.keys:
             type_cfg = None
@@ -205,12 +135,10 @@ class SequenceSampler:
                 idxs = self._get_query_indices(
                     t_now, ep_start, ep_end, steps, stride, side
                 )
-                # Return Future-like objects for async IO; caller should use .result().
-                result[key] = self.replay_buffer.read_async(key, idxs)
+                result[key] = self.replay_buffer[key][idxs]
             
             else:
-                # Return Future-like objects for async IO; caller should use .result().
-                result[key] = self.replay_buffer.read_async(key, t_now)
+                result[key] = self.replay_buffer[key][t_now]
                 
         return result
 
@@ -362,23 +290,17 @@ class VLASampler(torch.utils.data.BatchSampler):
             yield batch_indices
     
     def __len__(self) -> int:
-        """
-        Return number of batches.
-
-        Returns:
-            int: Number of batches.
-        """
+        """Return number of batches."""
         return self.num_batches
     
     def set_epoch(self, epoch: int):
         """
-        Set the epoch and regenerate mappings.
-
+        Set the epoch for this sampler and regenerate mappings.
+        
+        This ensures different shuffling and mapping in each epoch when using DistributedSampler.
+        
         Args:
-            epoch (int): Epoch number.
-
-        Returns:
-            None
+            epoch: Epoch number
         """
         self.epoch = epoch
         # Regenerate mappings for this epoch
@@ -483,12 +405,7 @@ class UnifiedRatioSampler(torch.utils.data.BatchSampler):
         )
     
     def __iter__(self) -> Iterator[list]:
-        """
-        Generate batches of indices, maintaining VLA/VLM ratio.
-
-        Returns:
-            Iterator[List[int]]: Batch indices for dataset indexing.
-        """
+        """Generate batches of indices in a streaming fashion, maintaining ratio within each batch."""
         # Set epoch for VLA sampler
         self.vla_sampler.set_epoch(self.epoch)
         
@@ -530,23 +447,17 @@ class UnifiedRatioSampler(torch.utils.data.BatchSampler):
                 batch_count += 1
     
     def __len__(self) -> int:
-        """
-        Return number of batches.
-
-        Returns:
-            int: Number of batches.
-        """
+        """Return number of batches."""
         return self.num_batches
     
     def set_epoch(self, epoch: int):
         """
-        Set the epoch for this sampler.
-
+        Set the epoch for this sampler. 
+        
+        This ensures different shuffling in each epoch when using DistributedSampler.
+        
         Args:
-            epoch (int): Epoch number.
-
-        Returns:
-            None
+            epoch: Epoch number
         """
         self.epoch = epoch
         # Also update epoch for VLA sampler
