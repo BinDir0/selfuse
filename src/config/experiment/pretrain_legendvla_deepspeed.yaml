@@ -13,30 +13,27 @@ lora_dropout: 0.0
 image_shape: [224, 224, 3]
 depth_image_shape: [224, 224]
 vla_dataset_paths:
- - name: taco 
-   path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
-   weight: 1
+#  - name: taco 
+  #  path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
+  #  weight: 1
  - name: oakink2
    path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
    weight: 1
- - name: holoassist
-   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
-   weight: 1
- - name: egodex
-   path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
-   weight: 20
- - name: ssv2
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ssv2_train_clean.zarr
-   weight: 1
- - name: epic
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_clean.zarr
-   weight: 4
- - name: ego4d_cooking
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_clean_batch.zarr
-   weight: 8
- - name: ego4d_other
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_clean_batch.zarr
-   weight: 8
+#  - name: holoassist
+#    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2_rechunked.zarr
+#    weight: 1
+#  - name: egodex
+#    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
+#    weight: 20
+#  - name: epic
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
+#    weight: 4
+#  - name: ego4d_cooking
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
+#    weight: 8
+#  - name: ego4d_other
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
+#    weight: 8
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
@@ -154,7 +151,7 @@ vlm_processor:
 
 dataloader:
   batch_sampler: 
-    batch_size: 16
+    batch_size: 4
     vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
@@ -167,7 +164,7 @@ dataloader:
 
 val_dataloader:
   batch_sampler: 
-    batch_size: 16
+    batch_size: 4
     shuffle: False
     drop_last: False
   loader: 

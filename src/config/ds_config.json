@@ -10,7 +10,7 @@
         "params": {
             "lr": "auto",
             "weight_decay": "auto",
-            "torch_adam": false,
+            "torch_adam": true,
             "adam_w_mode": true
         }
     },
