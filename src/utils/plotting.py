@@ -1,8 +1,16 @@
-import matplotlib.pyplot as plt
-import matplotlib.colors as colors
-import numpy as np
-import pathlib
+import argparse
 import math
+import pathlib
+
+import matplotlib.colors as colors
+import matplotlib.pyplot as plt
+import numpy as np
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 
 def plot_l1_loss_as_bar(data, step, output_dir): 
@@ -78,7 +86,14 @@ def plot_histogram(data, key, output_dir):
     print(f"  Total samples: {len(data)}")
 
 
-def plot_attention_maps(attention_maps, output_dir, step=None, layer_idx=None, token_segments=None):
+def plot_attention_maps(
+    attention_maps,
+    output_dir,
+    step=None,
+    layer_idx=None,
+    token_segments=None,
+    filename_prefix="attention_maps",
+):
     """
     Plot multi-head attention maps with each head in a separate subplot.
     
@@ -89,7 +104,7 @@ def plot_attention_maps(attention_maps, output_dir, step=None, layer_idx=None, t
         step: Optional step number for filename
         layer_idx: Optional layer index for filename
         token_segments: Optional dict mapping token type names to their lengths.
-            Example: {'image': 256, 'prompt': 10, 'state': 5, 'answer': 3, 'action': 20}
+            Example: {'image': 256, 'text': 128, 'state': 5, 'action': 20, 'action_expert': 32, 'padding': 64}
             The segments will be drawn in the order provided (dict insertion order).
     """
     if len(attention_maps.shape) != 3:
@@ -122,18 +137,33 @@ def plot_attention_maps(attention_maps, output_dir, step=None, layer_idx=None, t
     # Calculate segment boundaries if token_segments provided
     segment_boundaries = None
     segment_labels = None
-    segment_colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow']
-    
+    segment_colors = None
+    color_map = {
+        "image": "red",
+        "text": "blue",
+        "state": "green",
+        "action": "orange",
+        "action_expert": "purple",
+        "padding": "gray",
+    }
+    default_colors = ["red", "blue", "green", "orange", "purple", "cyan", "magenta", "yellow"]
+
     if token_segments is not None:
         segment_boundaries = []
         segment_labels = []
+        segment_colors = []
         cumsum = 0
-        for segment_name, segment_len in token_segments.items():
+        if isinstance(token_segments, dict):
+            items = token_segments.items()
+        else:
+            items = token_segments
+        for segment_name, segment_len in items:
             segment_boundaries.append(cumsum)
             segment_labels.append(segment_name)
-            cumsum += segment_len
+            segment_colors.append(color_map.get(segment_name, default_colors[len(segment_colors) % len(default_colors)]))
+            cumsum += int(segment_len)
         segment_boundaries.append(cumsum)  # Add final boundary
-        
+
         # Verify total length matches seq_len
         if cumsum != seq_len:
             print(f"Warning: Total segment length ({cumsum}) doesn't match seq_len ({seq_len})")
@@ -210,7 +240,7 @@ def plot_attention_maps(attention_maps, output_dir, step=None, layer_idx=None, t
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Build filename
-    filename_parts = ['attention_maps']
+    filename_parts = [filename_prefix]
     if layer_idx is not None:
         filename_parts.append(f'layer{layer_idx}')
     if step is not None:
@@ -241,31 +271,41 @@ def _add_segment_annotations(ax, boundaries, labels, colors, seq_len):
     """
     # Draw vertical and horizontal lines at boundaries
     for i, boundary in enumerate(boundaries[1:-1], start=1):  # Skip first (0) and last (seq_len)
-        ax.axvline(x=boundary - 0.5, color='white', linewidth=1.5, linestyle='--', alpha=0.8)
-        ax.axhline(y=boundary - 0.5, color='white', linewidth=1.5, linestyle='--', alpha=0.8)
+        ax.axvline(x=boundary - 0.5, color='white', linewidth=0.3, linestyle='--', alpha=0.5)
+        ax.axhline(y=boundary - 0.5, color='white', linewidth=0.3, linestyle='--', alpha=0.5)
     
     # Add text labels for each segment
+    visible_idx = 0
     for i, label in enumerate(labels):
         start_pos = boundaries[i]
         end_pos = boundaries[i + 1]
+        segment_len = end_pos - start_pos
+        if label == "padding":
+            continue
+        if label == "text" and segment_len < 5:
+            continue
         mid_pos = (start_pos + end_pos) / 2
         color = colors[i % len(colors)]
         
-        # Add label on top (for key/column dimension)
+        # Add label on top (for key/column dimension), stagger to reduce overlap
+        stagger = (visible_idx % 3) * 0.035 * seq_len
+        top_y = -0.015 * seq_len - stagger
         ax.text(
-            mid_pos, -0.02 * seq_len, label,
-            ha='center', va='top', fontsize=7, fontweight='bold',
+            mid_pos, top_y, label,
+            ha='center', va='top', fontsize=3, fontweight='bold',
             color=color, rotation=0,
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=color, alpha=0.8)
+            bbox=dict(boxstyle='round,pad=0.12', facecolor='white', edgecolor=color, alpha=0.8)
         )
         
-        # Add label on left (for query/row dimension)
+        # Add label on left (for query/row dimension), stagger to reduce overlap
+        left_x = -0.015 * seq_len - stagger
         ax.text(
-            -0.02 * seq_len, mid_pos, label,
-            ha='right', va='center', fontsize=7, fontweight='bold',
+            left_x, mid_pos, label,
+            ha='right', va='center', fontsize=3, fontweight='bold',
             color=color, rotation=0,
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor=color, alpha=0.8)
+            bbox=dict(boxstyle='round,pad=0.12', facecolor='white', edgecolor=color, alpha=0.8)
         )
+        visible_idx += 1
 
 
 def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_segments=None, layer_plot_every=4):
@@ -279,7 +319,7 @@ def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_
         output_dir: Output directory to save the plots
         step: Optional step number for filename
         token_segments: Optional dict mapping token type names to their lengths.
-            Example: {'image': 256, 'prompt': 10, 'state': 5, 'answer': 3, 'action': 20}
+            Example: {'image': 256, 'text': 128, 'state': 5, 'action': 20, 'action_expert': 32, 'padding': 64}
     """
     if len(attention_maps.shape) != 4:
         raise ValueError(
@@ -326,237 +366,335 @@ def plot_multilayer_attention_maps(attention_maps, output_dir, step=None, token_
     print(f"  Total files: {num_layers + 1} ({num_layers} layers + 1 averaged)")
 
 
-def test_attention_visualization(output_dir, seq_len=100, num_heads=8, num_layers=4):
-    """
-    Test function to visualize typical attention patterns.
-    Creates various characteristic attention patterns for testing the visualization.
-    
-    Args:
-        output_dir: Output directory to save the test plots
-        seq_len: Sequence length for attention maps
-        num_heads: Number of attention heads
-        num_layers: Number of layers (for multilayer test)
-    """
-    print(f"\n{'='*60}")
-    print(f"Testing Attention Visualization")
-    print(f"{'='*60}")
-    print(f"Parameters:")
-    print(f"  Sequence length: {seq_len}")
-    print(f"  Number of heads: {num_heads}")
-    print(f"  Number of layers: {num_layers}")
-    print(f"  Output directory: {output_dir}")
-    print()
-    
-    # Define token segments for testing
-    token_segments = {
-        'image': seq_len // 2,
-        'prompt': seq_len // 6,
-        'state': seq_len // 10,
-        'action': seq_len - seq_len // 2 - seq_len // 6 - seq_len // 10
-    }
-    
-    print(f"Token segments: {token_segments}")
-    print()
-    
-    # Create typical attention patterns
-    attention_patterns = []
-    pattern_names = []
-    
-    # Pattern 1: Uniform attention (all positions equal weight)
-    uniform = np.ones((seq_len, seq_len)) / seq_len
-    attention_patterns.append(uniform)
-    pattern_names.append("Uniform")
-    
-    # Pattern 2: Diagonal attention (self-attention)
-    diagonal = np.eye(seq_len, dtype=np.float64)  # Use float64 for precision
-    # Each row sums to 1 already, no need to normalize
-    # Verify it's exactly 0 and 1
-    assert np.all((diagonal == 0) | (diagonal == 1)), "Diagonal should only contain 0 and 1"
-    assert diagonal.max() == 1.0, f"Diagonal max should be 1.0, got {diagonal.max()}"
-    assert diagonal.min() == 0.0, f"Diagonal min should be 0.0, got {diagonal.min()}"
-    attention_patterns.append(diagonal)
-    pattern_names.append("Diagonal")
-    
-    # Pattern 3: Local attention (attend to nearby tokens)
-    local = np.zeros((seq_len, seq_len))
-    window_size = 10
-    for i in range(seq_len):
-        start = max(0, i - window_size // 2)
-        end = min(seq_len, i + window_size // 2 + 1)
-        local[i, start:end] = 1.0
-    local = local / local.sum(axis=-1, keepdims=True)
-    attention_patterns.append(local)
-    pattern_names.append("Local")
-    
-    # Pattern 4: Global attention (first token attends to all, others attend to first)
-    global_attn = np.zeros((seq_len, seq_len))
-    global_attn[0, :] = 1.0 / seq_len  # First token attends to all
-    global_attn[1:, 0] = 0.7  # Other tokens attend strongly to first token
-    global_attn[1:, 1:] = 0.3 / (seq_len - 1)  # Weak attention to others
-    global_attn = global_attn / global_attn.sum(axis=-1, keepdims=True)
-    attention_patterns.append(global_attn)
-    pattern_names.append("Global")
-    
-    # Pattern 5: Block attention (attend within segments)
-    block = np.zeros((seq_len, seq_len))
-    cumsum = 0
-    for segment_name, segment_len in token_segments.items():
-        block[cumsum:cumsum+segment_len, cumsum:cumsum+segment_len] = 1.0 / segment_len
-        cumsum += segment_len
-    attention_patterns.append(block)
-    pattern_names.append("Block")
-    
-    # Pattern 6: Cross-segment attention (image tokens attend to action tokens)
-    cross = np.zeros((seq_len, seq_len))
-    image_len = token_segments['image']
-    action_start = sum(list(token_segments.values())[:3])  # After image, prompt, state
-    action_end = seq_len
-    # Image tokens attend to action tokens
-    cross[:image_len, action_start:action_end] = 1.0 / (action_end - action_start)
-    # Other tokens uniform
-    cross[image_len:, :] = 1.0 / seq_len
-    cross = cross / cross.sum(axis=-1, keepdims=True)
-    attention_patterns.append(cross)
-    pattern_names.append("Cross-Segment")
-    
-    # Pattern 7: Sparse attention (few strong connections)
-    sparse = np.ones((seq_len, seq_len)) * 0.01 / seq_len
-    for i in range(0, seq_len, seq_len // 10):
-        sparse[i, :] = 1.0 / seq_len
-        sparse[:, i] += 0.5 / seq_len
-    sparse = sparse / sparse.sum(axis=-1, keepdims=True)
-    attention_patterns.append(sparse)
-    pattern_names.append("Sparse")
-    
-    # Pattern 8: Causal attention (only attend to previous tokens)
-    causal = np.tril(np.ones((seq_len, seq_len)))
-    causal = causal / causal.sum(axis=-1, keepdims=True)
-    attention_patterns.append(causal)
-    pattern_names.append("Causal")
-    
-    # Ensure we have exactly num_heads patterns (repeat or truncate)
-    while len(attention_patterns) < num_heads:
-        attention_patterns.extend(attention_patterns[:num_heads - len(attention_patterns)])
-        pattern_names.extend(pattern_names[:num_heads - len(pattern_names)])
-    attention_patterns = attention_patterns[:num_heads]
-    pattern_names = pattern_names[:num_heads]
-    
-    # Stack into [num_heads, seq_len, seq_len]
-    single_layer_attention = np.stack(attention_patterns, axis=0)
-    
-    print("="*60)
-    print("Test 1: Single Layer Attention Maps")
-    print("="*60)
-    print(f"Patterns: {', '.join(pattern_names)}")
-    print(f"\nAttention data range: [{single_layer_attention.min():.4f}, {single_layer_attention.max():.4f}]")
-    for i, name in enumerate(pattern_names):
-        pattern_min = single_layer_attention[i].min()
-        pattern_max = single_layer_attention[i].max()
-        print(f"  {name}: min={pattern_min:.4f}, max={pattern_max:.4f}")
-    print()
-    
-    plot_attention_maps(
-        attention_maps=single_layer_attention,
-        output_dir=output_dir,
-        step=0,
-        layer_idx=0,
-        token_segments=token_segments
-    )
-    
-    print()
-    print("="*60)
-    print("Test 2: Multi-Layer Attention Maps")
-    print("="*60)
-    print(f"Creating {num_layers} layers with varying patterns...")
-    print()
-    
-    # Create multi-layer attention with slight variations
-    multilayer_attention = []
-    for layer_idx in range(num_layers):
-        # For multi-layer test, keep patterns clean
-        layer_patterns = []
-        for i, pattern in enumerate(attention_patterns):
-            if pattern_names[i] == "Diagonal":
-                # Keep diagonal pattern clean (no noise)
-                layer_patterns.append(pattern.copy())
+
+
+def _load_config(config_path):
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    cfg = OmegaConf.load(config_path)
+    return cfg
+
+
+def _maybe_instantiate_processor(cfg, processor_key):
+    if processor_key not in cfg:
+        return None
+    try:
+        return instantiate(cfg[processor_key])
+    except Exception as e:
+        print(f"Warning: failed to instantiate processor '{processor_key}': {e}")
+        return None
+
+
+def _compress_segments(labels):
+    if not labels:
+        return []
+    segments = []
+    current = labels[0]
+    length = 1
+    for label in labels[1:]:
+        if label == current:
+            length += 1
+        else:
+            segments.append((current, length))
+            current = label
+            length = 1
+    segments.append((current, length))
+    return segments
+
+
+def _build_token_segments(
+    input_ids,
+    total_len,
+    image_token_id,
+    state_token_id,
+    action_token_id,
+    pad_token_id,
+    n_actions,
+    attention_mask=None,
+):
+    input_ids = np.array(input_ids).astype(np.int64)
+    if attention_mask is not None:
+        attention_mask = np.array(attention_mask).astype(np.int64)
+    vlm_len = input_ids.shape[0]
+    labels = []
+    for idx, token in enumerate(input_ids):
+        if image_token_id is not None and token == image_token_id:
+            labels.append("image")
+        elif state_token_id is not None and token == state_token_id:
+            labels.append("state")
+        elif action_token_id is not None and token == action_token_id:
+            labels.append("action")
+        else:
+            if attention_mask is not None:
+                labels.append("text" if attention_mask[idx] == 1 else "padding")
+            elif pad_token_id is not None and token == pad_token_id:
+                labels.append("padding")
             else:
-                # Add small noise to other patterns for variation
-                noisy_pattern = pattern + np.random.normal(0, 0.01, pattern.shape)
-                noisy_pattern = np.clip(noisy_pattern, 0, 1)
-                noisy_pattern = noisy_pattern / noisy_pattern.sum(axis=-1, keepdims=True)
-                layer_patterns.append(noisy_pattern)
-        multilayer_attention.append(np.stack(layer_patterns, axis=0))
-    
-    multilayer_attention = np.stack(multilayer_attention, axis=0)  # [num_layers, num_heads, seq_len, seq_len]
-    
-    plot_multilayer_attention_maps(
-        attention_maps=multilayer_attention,
+                labels.append("text")
+
+    for idx in range(vlm_len, total_len):
+        if n_actions is not None and (idx - vlm_len) < n_actions:
+            labels.append("action_expert")
+        else:
+            labels.append("padding")
+    return _compress_segments(labels)
+
+
+def _load_npz(npz_path):
+    with np.load(npz_path, allow_pickle=True) as data:
+        return {key: data[key] for key in data.files}
+
+
+def _plot_causal_mask(causal_mask, output_dir, step=None, token_segments=None):
+    if causal_mask.ndim == 3:
+        causal_mask = causal_mask[0]
+    # Causal mask convention: 0 means allowed, -inf means blocked.
+    # Use absolute magnitude to detect "blocked" entries robustly.
+    mask = (np.abs(causal_mask) < 1e4).astype(np.float32)
+    plot_attention_maps(
+        attention_maps=mask[None, ...],
         output_dir=output_dir,
-        step=0,
-        token_segments=token_segments
+        step=step,
+        layer_idx="causal",
+        token_segments=token_segments,
+        filename_prefix="causal_mask",
     )
-    
-    print()
-    print("="*60)
-    print("Test Complete!")
-    print("="*60)
-    print(f"All test visualizations saved to: {output_dir}")
-    print(f"Generated files:")
-    print(f"  - Single layer: attention_maps_layer0_step0.png/pdf")
-    print(f"  - Multi-layer: attention_maps_layer{{0..{num_layers-1}}}_step0.png/pdf")
-    print(f"  - Multi-layer average: attention_maps_layeravg_step0.png/pdf")
-    print("="*60)
+
+
+def _prepare_rgb_image(pixel_values):
+    img = np.array(pixel_values)
+    if img.ndim == 4:
+        img = img[0]
+    if img.ndim == 3 and img.shape[0] in (1, 3):
+        img = np.transpose(img, (1, 2, 0))
+    img = img.astype(np.float32)
+    if img.min() < 0.0:
+        img = img * 0.5 + 0.5
+    img = np.clip(img, 0.0, 1.0)
+    if img.shape[-1] == 1:
+        img = np.repeat(img, 3, axis=-1)
+    return img
+
+
+def _resize_heatmap(heatmap, target_h, target_w):
+    if cv2 is not None:
+        return cv2.resize(heatmap, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+    if heatmap.shape[0] == 0 or heatmap.shape[1] == 0:
+        return heatmap
+    scale_h = max(1, target_h // heatmap.shape[0])
+    scale_w = max(1, target_w // heatmap.shape[1])
+    resized = np.repeat(np.repeat(heatmap, scale_h, axis=0), scale_w, axis=1)
+    return resized[:target_h, :target_w]
+
+
+def _attention_to_image(attn_avg, query_indices, image_key_indices):
+    if query_indices is None:
+        query_indices = np.arange(attn_avg.shape[0])
+    if len(query_indices) == 0 or len(image_key_indices) == 0:
+        return None
+    attn_slice = attn_avg[np.ix_(query_indices, image_key_indices)]
+    return attn_slice.sum(axis=0)
+
+
+def _image_grid_shape(num_image_tokens, pixel_values, patch_size=None):
+    side = int(round(math.sqrt(num_image_tokens)))
+    if side * side == num_image_tokens:
+        return side, side
+    if pixel_values is not None:
+        img = np.array(pixel_values)
+        if img.ndim == 4:
+            _, _, h, w = img.shape
+        elif img.ndim == 3:
+            if img.shape[0] in (1, 3):
+                h, w = img.shape[1], img.shape[2]
+            else:
+                h, w = img.shape[0], img.shape[1]
+        else:
+            h, w = None, None
+        if h is not None and w is not None and patch_size:
+            gh, gw = h // patch_size, w // patch_size
+            if gh * gw == num_image_tokens:
+                return gh, gw
+    return None, None
+
+
+def _overlay_hsv(image_rgb, heatmap, output_path):
+    heatmap = heatmap.astype(np.float32)
+    if heatmap.size == 0:
+        return
+    hmin, hmax = float(heatmap.min()), float(heatmap.max())
+    if hmax > hmin:
+        heatmap = (heatmap - hmin) / (hmax - hmin)
+    else:
+        heatmap = np.zeros_like(heatmap)
+    # Boost contrast while staying within [0, 1]
+    heatmap = np.clip(heatmap, 0.0, 1.0) ** 2.0
+    heatmap = _resize_heatmap(heatmap, image_rgb.shape[0], image_rgb.shape[1])
+    # Use attention to control throughput via HSV value channel:
+    # higher attention -> brighter (more visible), lower attention -> darker.
+    image_hsv = colors.rgb_to_hsv(np.clip(image_rgb, 0.0, 1.0))
+    value = image_hsv[..., 2] * heatmap
+    image_hsv[..., 2] = np.clip(value, 0.0, 1.0)
+    blended = colors.hsv_to_rgb(image_hsv)
+    # Show original and attention-filtered image side by side.
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    axes[0].imshow(np.clip(image_rgb, 0.0, 1.0))
+    axes[0].set_title("Original", fontsize=10)
+    axes[0].axis("off")
+    axes[1].imshow(blended)
+    axes[1].set_title("Attention", fontsize=10)
+    axes[1].axis("off")
+    plt.tight_layout(pad=0.2)
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def visualize_image_attention(
+    attn_weights,
+    input_ids,
+    attention_mask,
+    pixel_values,
+    image_token_id,
+    action_token_id,
+    n_actions,
+    output_dir,
+    step=None,
+    patch_size=None,
+):
+    if image_token_id is None or pixel_values is None:
+        return
+    input_ids = np.array(input_ids).astype(np.int64)
+    attention_mask = np.array(attention_mask).astype(np.int64) if attention_mask is not None else None
+    attn_avg = attn_weights.mean(axis=(0, 1))
+    image_key_indices = np.where(input_ids == image_token_id)[0]
+    if image_key_indices.size == 0:
+        return
+    num_frames = pixel_values.shape[0] if np.array(pixel_values).ndim == 4 else 1
+    tokens_per_image = image_key_indices.size
+    if num_frames > 1 and image_key_indices.size % num_frames == 0:
+        tokens_per_image = image_key_indices.size // num_frames
+        image_key_indices = image_key_indices[:tokens_per_image]
+
+    grid_h, grid_w = _image_grid_shape(tokens_per_image, pixel_values, patch_size=patch_size)
+    if grid_h is None or grid_w is None:
+        return
+
+    vlm_len = input_ids.shape[0]
+    valid_vlm_queries = np.where(attention_mask == 1)[0] if attention_mask is not None else np.arange(vlm_len)
+    action_query_indices = np.where(input_ids == action_token_id)[0] if action_token_id is not None else np.array([], dtype=np.int64)
+    if attention_mask is not None and action_query_indices.size > 0:
+        action_query_indices = action_query_indices[attention_mask[action_query_indices] == 1]
+
+    action_expert_query_indices = np.array([], dtype=np.int64)
+    if n_actions is not None and n_actions > 0:
+        start = vlm_len
+        end = min(vlm_len + int(n_actions), attn_avg.shape[0])
+        action_expert_query_indices = np.arange(start, end)
+
+    image_rgb = _prepare_rgb_image(pixel_values)
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    total_heat = _attention_to_image(attn_avg, valid_vlm_queries, image_key_indices)
+    if total_heat is not None:
+        heatmap = total_heat.reshape(grid_h, grid_w)
+        suffix = f"_step{step}" if step is not None else ""
+        _overlay_hsv(image_rgb, heatmap, output_dir / f"image_attention_all{suffix}.png")
+
+    if action_query_indices.size > 0:
+        action_heat = _attention_to_image(attn_avg, action_query_indices, image_key_indices)
+        if action_heat is not None:
+            heatmap = action_heat.reshape(grid_h, grid_w)
+            suffix = f"_step{step}" if step is not None else ""
+            _overlay_hsv(image_rgb, heatmap, output_dir / f"image_attention_action{suffix}.png")
+
+    if action_expert_query_indices.size > 0:
+        expert_heat = _attention_to_image(attn_avg, action_expert_query_indices, image_key_indices)
+        if expert_heat is not None:
+            heatmap = expert_heat.reshape(grid_h, grid_w)
+            suffix = f"_step{step}" if step is not None else ""
+            _overlay_hsv(image_rgb, heatmap, output_dir / f"image_attention_action_expert{suffix}.png")
 
 
 def main():
-    """Main function for testing attention visualization from command line."""
-    import argparse
-    
     parser = argparse.ArgumentParser(
-        description="Test attention map visualization with various typical patterns"
+        description="Visualize attention maps and causal masks from saved npz"
     )
+    parser.add_argument("--npz", type=str, required=True, help="Path to saved npz file")
+    parser.add_argument("--config", type=str, required=True, help="Path to experiment yaml")
     parser.add_argument(
-        "--output_dir",
+        "--processor",
         type=str,
-        default="outputs/test_attention_visualization",
-        help="Output directory for test visualizations (default: outputs/test_attention_visualization)"
+        default="vla_processor",
+        help="Processor key in config (default: vla_processor)",
     )
-    parser.add_argument(
-        "--seq_len",
-        type=int,
-        default=100,
-        help="Sequence length for attention maps (default: 100)"
-    )
-    parser.add_argument(
-        "--num_heads",
-        type=int,
-        default=8,
-        help="Number of attention heads (default: 8)"
-    )
-    parser.add_argument(
-        "--num_layers",
-        type=int,
-        default=4,
-        help="Number of layers for multi-layer test (default: 4)"
-    )
-    
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
+    parser.add_argument("--layer_plot_every", type=int, default=4, help="Plot every N layers")
     args = parser.parse_args()
-    
-    print("\n" + "="*70)
-    print("Attention Map Visualization Test")
-    print("="*70 + "\n")
-    
-    test_attention_visualization(
-        output_dir=args.output_dir,
-        seq_len=args.seq_len,
-        num_heads=args.num_heads,
-        num_layers=args.num_layers
+
+    cfg = _load_config(args.config)
+    processor = _maybe_instantiate_processor(cfg, args.processor)
+    image_token_id = getattr(processor, "image_token_id", None) if processor else cfg.get("image_token_index")
+    state_token_id = getattr(processor, "state_token_id", None) if processor else cfg.get("state_token_index")
+    action_token_id = getattr(processor, "action_token_id", None) if processor else cfg.get("action_token_index")
+    pad_token_id = cfg.get("pad_token_id")
+
+    data = _load_npz(args.npz)
+    attn_weights = data["attn_weights"]
+    input_ids = data["input_ids"]
+    attention_mask = data.get("attention_mask")
+    causal_mask = data.get("causal_mask")
+    n_actions = data.get("n_actions")
+    pixel_values = data.get("pixel_values")
+    if n_actions is not None:
+        n_actions = int(np.array(n_actions).reshape(-1)[0])
+
+    total_len = attn_weights.shape[-1]
+    if causal_mask is not None:
+        total_len = int(causal_mask.shape[-1])
+
+    token_segments = _build_token_segments(
+        input_ids=input_ids,
+        total_len=total_len,
+        image_token_id=image_token_id,
+        state_token_id=state_token_id,
+        action_token_id=action_token_id,
+        pad_token_id=pad_token_id,
+        n_actions=n_actions,
+        attention_mask=attention_mask,
     )
-    
-    print("\n" + "="*70)
-    print("Test completed successfully!")
-    print(f"Check the output directory: {args.output_dir}")
-    print("="*70 + "\n")
+    print(f"token_segments: {token_segments}")
+
+    step = data.get("update_step")
+    if step is not None:
+        step = int(np.array(step).reshape(-1)[0])
+
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = str(pathlib.Path(args.npz).parent / "attention_visualization")
+
+    plot_multilayer_attention_maps(
+        attention_maps=attn_weights,
+        output_dir=output_dir,
+        step=step,
+        token_segments=token_segments,
+        layer_plot_every=args.layer_plot_every,
+    )
+    if causal_mask is not None:
+        _plot_causal_mask(causal_mask, output_dir, step=step, token_segments=token_segments)
+    if pixel_values is not None:
+        patch_size = cfg.get("patch_size")
+        visualize_image_attention(
+            attn_weights=attn_weights,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            image_token_id=image_token_id,
+            action_token_id=action_token_id,
+            n_actions=n_actions,
+            output_dir=output_dir,
+            step=step,
+            patch_size=patch_size,
+        )
 
 
 if __name__ == "__main__":
