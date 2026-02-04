@@ -658,7 +658,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 sum_eval_accuracy = torch.stack(eval_accuracy).sum(dim=0).to(accelerator.device)
                 sum_eval_l1_loss = torch.stack(eval_l1_loss).sum().to(accelerator.device)
             else: 
-                sum_eval_accuracy = torch.tensor(0.0, device=accelerator.device)
+                num_thresholds = len(eval_thresholds)
+                sum_eval_accuracy = torch.zeros(num_thresholds, device=accelerator.device)
                 sum_eval_l1_loss = torch.tensor(0.0, device=accelerator.device)
             eval_len_tensor = torch.tensor(eval_len, device=accelerator.device)
             # Gather metrics across all processes

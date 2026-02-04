@@ -10,8 +10,16 @@ lora: False
 lora_r: 32
 lora_dropout: 0.0
 
-image_shape: [224, 224, 3]
-depth_image_shape: [224, 224]
+# Vision backbone configuration: Choose 224 or 448
+vision_resolution: 448  # Options: 224 or 448
+image_shape:
+  - ${vision_resolution}
+  - ${vision_resolution}
+  - 3
+depth_image_shape:
+  - ${vision_resolution}
+  - ${vision_resolution}
+
 vla_dataset_paths:
  - name: taco 
    path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
@@ -151,7 +159,8 @@ vlm_processor:
 
 dataloader:
   batch_sampler: 
-    batch_size: 16
+    # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
+    batch_size: 8
     vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
@@ -164,7 +173,8 @@ dataloader:
 
 val_dataloader:
   batch_sampler: 
-    batch_size: 16
+    # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
+    batch_size: 8
     shuffle: False
     drop_last: False
   loader: 
@@ -205,8 +215,9 @@ training:
   train_vlm: True
   init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
-  load_pretrained_pi05_weights: True # load pretrained weights from PI05
-  pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-224
+  load_pretrained_pi05_weights: False # load pretrained weights from PI05 (disabled for 448 resolution)
+  # Automatically select pretrained model path based on vision_resolution
+  pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-${vision_resolution}
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
@@ -328,8 +339,8 @@ policy:
     config: 
       model_name: "dinov2_vitb14_reg" # DINOv2 model: dinov2_vits14, dinov2_vitb14, dinov2_vitl14
       freeze_backbone: False  # Freeze DINOv2 backbone weights
-      image_size: 224
-      patch_size: 14
+      image_size: ${vision_resolution}
+      patch_size: ${patch_size}
       output_dim: 768
       dinov2_repo_path: ${training.dinov2_repo_path}
       dinov2_model_path: ${training.dinov2_model_path}
@@ -342,11 +353,12 @@ policy:
       num_hidden_layers: 27
       num_attention_heads: 16
       num_channels: 3
-      image_size: 224
-      patch_size: 14
+      image_size: ${vision_resolution}
+      patch_size: ${patch_size}
       layer_norm_eps: 1e-6
       attention_dropout: 0.0
-      num_image_tokens: 256
+      # Automatically calculate num_image_tokens based on resolution
+      num_image_tokens: ${image_seq_len}
       lora:
         r: ${lora_r}
         dropout: ${lora_dropout}
@@ -392,9 +404,10 @@ policy:
     width: 1024
     num_sampling_steps: "100"
     grad_checkpointing: False
+    # Note: DiffLoss uses standard DiT-style sinusoidal encoding (different from action expert)
 
 logging:
-  project: diffloss-compile
+  project: diffloss-gemma448
   entity: LegendaryVLA
   resume: False
   mode: online

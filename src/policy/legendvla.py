@@ -704,11 +704,12 @@ class LegendVLA(nn.Module):
         vlm_position_ids = torch.arange(1, max_vlm_tokens + 1, device=device).repeat(
             bsz, 1
         )
+        # action position ids start from answer_start_idx for each sample
         action_position_ids = torch.arange(
-            1,
-            self.num_action_tokens + 1,
+            0,
+            self.num_action_tokens,
             device=device,
-        ).repeat(bsz, 1)
+        ).unsqueeze(0) + answer_start_idx.unsqueeze(1)
         return causal_mask, vlm_position_ids, action_position_ids
 
     def split_full_mask_into_submasks(

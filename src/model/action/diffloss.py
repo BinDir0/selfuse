@@ -214,6 +214,7 @@ class SimpleMLPAdaLN(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+    @torch.compile(mode="default")
     def forward(self, x, t, c):
         """
         Apply the model to an input batch.
@@ -237,6 +238,7 @@ class SimpleMLPAdaLN(nn.Module):
 
         return self.final_layer(x, y)
 
+    @torch.compile(mode="default")
     def forward_with_cfg(self, x, t, c, cfg_scale):
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
