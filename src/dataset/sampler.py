@@ -118,9 +118,6 @@ class SequenceSampler:
         t_now, ep_start, ep_end = self.indices[idx]
         result = dict()
 
-        import time
-        from torch.utils.data import get_worker_info
-
         for key in self.keys:
             type_cfg = None
             if any(k in key for k in ['image', 'depth']):

@@ -19,10 +19,10 @@ import random
 import numpy as np
 import pickle
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 import accelerate
 from accelerate import Accelerator, DeepSpeedPlugin
-from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs, DistributedType
+from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA

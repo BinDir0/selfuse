@@ -1,153 +1,143 @@
 import torch
 import torch.nn as nn
-from .base_action_head import BaseActionHead
+from typing import Optional
+from src.model.common.modules import GaussianFourierFeatureTransform
 
-class ActionHead(BaseActionHead):
-    def __init__(self, shape_meta, model_config):
+class ActionEncoder(nn.Module):
+    """Matching pi0 appendix"""
+
+    def __init__(self, action_dim: int, width: int, time_cond: bool = False):
         super().__init__()
-        self.shape_meta = shape_meta
-        self.model_config = model_config
+        self.linear_1 = nn.Linear(action_dim, width)
+        if time_cond:
+            self.linear_2 = nn.Linear(2 * width, width)
+        else:
+            self.linear_2 = nn.Linear(width, width)
+        self.nonlinearity = nn.SiLU()  # swish
+        self.linear_3 = nn.Linear(width, width)
+        self.time_cond = time_cond
 
-        feature_dim = model_config["hidden_size"]
-        self.wrist_net = nn.Sequential(
-            nn.Linear(shape_meta["obs"]["wrist"]["shape"][0] * shape_meta["obs"]["wrist"]["horizon"], feature_dim),
-            nn.ReLU(),
-            nn.Linear(feature_dim, feature_dim),
-            nn.ReLU(),
-        )
-        
-        self.hand_net = nn.Sequential(
-            nn.Linear(shape_meta["obs"]["hand"]["shape"][0] * shape_meta["obs"]["hand"]["horizon"], feature_dim),
-            nn.ReLU(),
-            nn.Linear(feature_dim, feature_dim),
-            nn.ReLU(),
-        )
-        
-        self.pos_embed = nn.Parameter(torch.randn(
-            1, 
-            2 + shape_meta["action"]["horizon"], # 2 for wrist and hand
-            feature_dim) * 0.02)
+    def forward(
+        self,
+        action: torch.FloatTensor,
+        time_emb: Optional[torch.FloatTensor] = None,
+    ) -> torch.FloatTensor:
+        # [Batch_Size, Seq_Len, Width]
+        emb = self.linear_1(action)
+        if self.time_cond:
+            # repeat time embedding for seq_len
+            # [Batch_Size, Seq_Len, Width]
+            time_emb_full = time_emb.unsqueeze(1).expand(-1, action.size(1), -1)
+            emb = torch.cat([time_emb_full, emb], dim=-1)
+        emb = self.nonlinearity(self.linear_2(emb))
+        emb = self.linear_3(emb)
+        return emb
 
-        # TODO: Use TransformerEncoder with flash attention
-        self.action_head = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=feature_dim,
-                nhead=model_config["num_heads"],
-                dim_feedforward=model_config["intermediate_size"],
-                dropout=model_config["dropout"],
-                batch_first=True,
-            ),
-            num_layers=model_config["num_layers"],
+
+class FourierActionEncoder(nn.Module):
+    """
+    Action encoder with Gaussian Fourier feature embedding + MLP.
+    """
+
+    def __init__(
+        self,
+        action_dim: int,
+        width: int,
+        time_cond: bool = False,
+        mlp_depth: int = 2,
+        fourier_embed_dim: int = 1024,
+        fourier_scale: float = 10.0,
+        final_layer_norm: bool = True,
+        time_emb_dim: Optional[int] = None,
+    ):
+        super().__init__()
+        assert mlp_depth >= 0, "mlp_depth must be >= 0"
+        self.time_cond = time_cond
+        self.fourier = GaussianFourierFeatureTransform(
+            action_dim, embed_dim=fourier_embed_dim, scale=fourier_scale
         )
 
-        self.action_net = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.ReLU(),
-            nn.Linear(feature_dim, shape_meta["action"]["shape"][0]),
-        )
-        
+        if self.time_cond:
+            if time_emb_dim is None:
+                raise ValueError("time_emb_dim must be provided when time_cond=True")
+        else:
+            time_emb_dim = 0
 
-    def forward(self, state, action_query):
-        '''
+        mlp_input_dim = 2 * fourier_embed_dim + time_emb_dim
+        if mlp_depth == 0 and mlp_input_dim != width:
+            raise ValueError("mlp_depth must not be 0 if mlp_input_dim != width")
+        if mlp_depth == 0: 
+            self.mlp = nn.Identity()
+            self.final_layer_norm = None
+        else:
+            layers = []
+            for layer_idx in range(mlp_depth):
+                in_dim = mlp_input_dim if layer_idx == 0 else width
+                layers.append(nn.Linear(in_dim, width))
+                if layer_idx < mlp_depth - 1:
+                    layers.append(nn.SiLU())
+            self.mlp = nn.Sequential(*layers)
+            self.final_layer_norm = nn.LayerNorm(width) if final_layer_norm else None
+
+    def forward(
+        self,
+        action: torch.FloatTensor,
+        time_emb: Optional[torch.FloatTensor] = None,
+    ) -> torch.FloatTensor:
+        """
         Args:
-            state: dict, containing "wrist" and "hand"
-            state = {
-                "wrist": torch.Tensor, shape: [B, T, wrist_dim],
-                "hand": torch.Tensor, shape: [B, T, hand_dim]
-            } 
-            proprioception of wrist and hand within the past T steps
-            action_query: [B, H, D] action query tokens for action chunk H
+            action: [Batch_Size, Seq_Len, Action_Dim]
+            time_emb: [Batch_Size, Time_Dim]
         Returns:
-            action: dict, containing "wrist" and "hand"
-            action = {
-                "wrist": torch.Tensor, shape: [B, H, wrist_dim],
-                "hand": torch.Tensor, shape: [B, H, hand_dim]
-            }
-        '''
-        B, T, D = state["wrist"].shape
+            emb: [Batch_Size, Seq_Len, Width]
+        """
+        # Fourier features: [Batch_Size, Seq_Len, 2 * fourier_embed_dim]
+        emb = self.fourier(action)
+        if self.time_cond:
+            if time_emb is None:
+                raise ValueError("time_emb must be provided when time_cond=True")
+            if time_emb.ndim == 2:
+                time_emb_full = time_emb.unsqueeze(1).expand(-1, action.size(1), -1)
+            else:
+                time_emb_full = time_emb
+            emb = torch.cat([time_emb_full, emb], dim=-1)
+        emb = self.mlp(emb)
+        if self.final_layer_norm is not None:
+            emb = self.final_layer_norm(emb)
+        return emb
 
-        state_wrist = state["wrist"].view(B, -1)
-        state_hand = state["hand"].view(B, -1)
 
-        state_wrist = self.wrist_net(state_wrist)  # [B, feature_dim]
-        state_hand = self.hand_net(state_hand)     # [B, feature_dim]
+class LatentConditionProjector(nn.Module):
+    """
+    Latent condition projector with MLP.
+    """
 
-        # concat along sequence dimension, 2+H tokens
-        # state_wrist: [B, feature_dim] -> [B, 1, feature_dim]
-        # state_hand: [B, feature_dim] -> [B, 1, feature_dim]
-        # action_query: [B, H, feature_dim]
-        # final inputs: [B, 2+H, feature_dim]
-        state_wrist = state_wrist.unsqueeze(1)  # [B, 1, feature_dim]
-        state_hand = state_hand.unsqueeze(1)    # [B, 1, feature_dim]
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        depth: int = 3,
+        final_layer_norm: bool = True,
+    ):
+        super().__init__()
+        assert depth >= 0, "depth must be >= 0"
+        if depth == 0:
+            self.mlp = nn.Identity()
+            self.final_layer_norm = None
+        else:
+            layers = []
+            for layer_idx in range(depth):
+                in_dim = input_dim if layer_idx == 0 else output_dim
+                layers.append(nn.Linear(in_dim, output_dim))
+                if layer_idx < depth - 1:
+                    layers.append(nn.SiLU())
+            self.mlp = nn.Sequential(*layers)
+            self.final_layer_norm = nn.LayerNorm(output_dim) if final_layer_norm else None
+
+    def forward(self, latent: torch.FloatTensor) -> torch.FloatTensor:
+        emb = self.mlp(latent)
+        if self.final_layer_norm is not None:
+            emb = self.final_layer_norm(emb)
+        return emb
+
         
-        inputs = torch.cat([state_wrist, state_hand, action_query], dim=1)  # [B, 2+H, feature_dim]
-        inputs = inputs + self.pos_embed
-        outputs = self.action_head(inputs)[:, 2:, :]  # only take the output of action_query
-
-        action = self.action_net(outputs)
-        action = {
-            "wrist": action[:, :, :self.shape_meta["obs"]["wrist"]["shape"][0]],
-            "hand": action[:, :, self.shape_meta["obs"]["wrist"]["shape"][0]:],
-        }
-        return action
-
-
-def test_action_head():
-    # 设置测试参数
-    batch_size = 2
-    obs_horizon = 6
-    action_horizon = 30
-    hidden_size = 128
-    
-    shape_meta = {
-        "obs": {
-            "wrist": {"shape": [18], "horizon": obs_horizon},
-            "hand": {"shape": [30], "horizon": obs_horizon},
-        },
-        "action": {"shape": [48], "horizon": action_horizon},  # 18 + 30 = 48
-    }
-    
-    model_config = {
-        "hidden_size": hidden_size, 
-        "num_heads": 8, 
-        "intermediate_size": 256, 
-        "dropout": 0.1
-    }
-    
-    # 创建模型实例
-    action_head = ActionHead(shape_meta, model_config)
-    
-    # 创建测试输入
-    state = {
-        "wrist": torch.randn(batch_size, obs_horizon, 18),  # [B, T, wrist_dim]
-        "hand": torch.randn(batch_size, obs_horizon, 30),   # [B, T, hand_dim]
-    }
-    action_query = torch.randn(batch_size, action_horizon, hidden_size)  # [B, H, D]
-    
-    # 前向传播
-    action = action_head(state, action_query)
-    
-    # 验证输出
-    print("=== ActionHead Test Results ===")
-    print(f"Input state shapes:")
-    print(f"  - wrist: {state['wrist'].shape}")
-    print(f"  - hand: {state['hand'].shape}")
-    print(f"Input action_query shape: {action_query.shape}")
-    print(f"Output action shapes:")
-    print(f"  - wrist: {action['wrist'].shape}")
-    print(f"  - hand: {action['hand'].shape}")
-    
-    # 验证输出维度是否正确
-    expected_wrist_shape = (batch_size, action_horizon, 18)
-    expected_hand_shape = (batch_size, action_horizon, 30)
-    
-    assert action['wrist'].shape == expected_wrist_shape, f"Expected wrist shape {expected_wrist_shape}, got {action['wrist'].shape}"
-    assert action['hand'].shape == expected_hand_shape, f"Expected hand shape {expected_hand_shape}, got {action['hand'].shape}"
-    
-    print("✓ All shape assertions passed!")
-    print("✓ Test completed successfully!")
-    
-    return action
-
-if __name__ == "__main__":
-    test_action_head()

@@ -204,6 +204,60 @@ for source_host in "${HOSTS[@]}"; do
     done
 done
 
+log_step "步骤4: 为每台主机扫描并写入其他主机指纹到 known_hosts..."
+for source_host in "${HOSTS[@]}"; do
+    log_info "正在为 $source_host 更新 known_hosts..."
+
+    # 确保 known_hosts 文件存在
+    if ! ssh_with_password "$source_host" "mkdir -p ~/.ssh && touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts"; then
+        log_warn "无法在 $source_host 上创建 known_hosts，跳过"
+        continue
+    fi
+
+    for target_host in "${HOSTS[@]}"; do
+        log_info "  扫描 $target_host -> $source_host 的 known_hosts..."
+
+        # 在源主机上解析目标主机的真实地址与端口（基于其 ssh config）
+        target_hostname=$(ssh_with_password "$source_host" "ssh -G $target_host 2>/dev/null | awk '/^hostname /{print \$2; exit}'")
+        target_port=$(ssh_with_password "$source_host" "ssh -G $target_host 2>/dev/null | awk '/^port /{print \$2; exit}'")
+
+        if [ -z "$target_hostname" ]; then
+            log_warn "  ✗ 无法解析 $target_host 的 HostName，跳过"
+            continue
+        fi
+        if [ -z "$target_port" ]; then
+            target_port=22
+        fi
+
+        # 使用解析后的地址与端口进行 keyscan
+        if ssh_with_password "$source_host" "ssh-keyscan -H -T 5 -p $target_port $target_hostname 2>/dev/null >> ~/.ssh/known_hosts"; then
+            log_info "  ✓ $target_host 指纹已加入 $source_host"
+        else
+            log_warn "  ✗ $target_host 指纹加入 $source_host 失败"
+        fi
+    done
+done
+
+log_step "步骤4-本地: 更新本机 known_hosts..."
+mkdir -p ~/.ssh && touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+for target_host in "${HOSTS[@]}"; do
+    log_info "  扫描 $target_host -> 本机 known_hosts..."
+    target_hostname=$(ssh -G "$target_host" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+    target_port=$(ssh -G "$target_host" 2>/dev/null | awk '/^port /{print $2; exit}')
+    if [ -z "$target_hostname" ]; then
+        log_warn "  ✗ 无法解析 $target_host 的 HostName，跳过"
+        continue
+    fi
+    if [ -z "$target_port" ]; then
+        target_port=22
+    fi
+    if ssh-keyscan -H -T 5 -p "$target_port" "$target_hostname" 2>/dev/null >> ~/.ssh/known_hosts; then
+        log_info "  ✓ $target_host 指纹已加入本机"
+    else
+        log_warn "  ✗ $target_host 指纹加入本机失败"
+    fi
+done
+
 log_info ""
 log_info "=========================================="
 log_info "所有操作完成！"

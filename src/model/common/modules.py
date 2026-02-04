@@ -121,36 +121,6 @@ class SinusoidalPosEmb(nn.Module):
         return emb
 
 
-class ActionEncoder(nn.Module):
-    """Matching pi0 appendix"""
-
-    def __init__(self, action_dim: int, width: int, time_cond: bool = False):
-        super().__init__()
-        self.linear_1 = nn.Linear(action_dim, width)
-        if time_cond:
-            self.linear_2 = nn.Linear(2 * width, width)
-        else:
-            self.linear_2 = nn.Linear(width, width)
-        self.nonlinearity = nn.SiLU()  # swish
-        self.linear_3 = nn.Linear(width, width)
-        self.time_cond = time_cond
-
-    def forward(
-        self,
-        action: torch.FloatTensor,
-        time_emb: Optional[torch.FloatTensor] = None,
-    ) -> torch.FloatTensor:
-        # [Batch_Size, Seq_Len, Width]
-        emb = self.linear_1(action)
-        if self.time_cond:
-            # repeat time embedding for seq_len
-            # [Batch_Size, Seq_Len, Width]
-            time_emb_full = time_emb.unsqueeze(1).expand(-1, action.size(1), -1)
-            emb = torch.cat([time_emb_full, emb], dim=-1)
-        emb = self.nonlinearity(self.linear_2(emb))
-        emb = self.linear_3(emb)
-        return emb
-
 class TimeEncoder(nn.Module):
     """Matching pi0.5 appendix"""
 
@@ -184,11 +154,14 @@ class GaussianFourierFeatureTransform(torch.nn.Module):
         scale=10,
     ):
         super(GaussianFourierFeatureTransform, self).__init__()
-        self.b = torch.randn(input_dim, embed_dim) * scale
-        self.pi = 3.14159265359
+        # b is a fixed random projection matrix; keep it frozen via buffer.
+        self.register_buffer(
+            "b", torch.randn(input_dim, embed_dim) * scale, persistent=True
+        )
 
     def forward(self, v: torch.FloatTensor) -> torch.FloatTensor:
-        x_proj = torch.matmul(2 * self.pi * v, self.b.to(v.device).to(v.dtype))
+        assert not self.b.requires_grad, "GaussianFourierFeatureTransform.b must be frozen"
+        x_proj = torch.matmul(v, self.b.to(v.device).to(v.dtype)) * (2 * math.pi)
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], -1)
 
 
