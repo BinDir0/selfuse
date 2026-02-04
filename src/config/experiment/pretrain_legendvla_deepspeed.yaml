@@ -1,6 +1,6 @@
 # @package _global_
 name: legendvla
-exp_name: "pretrain_deepspeed"
+exp_name: "pretrain_legendvla_deepspeed"
 _target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
 objective:  # ar, flow, or None(None means both)
 
@@ -11,7 +11,7 @@ lora_r: 32
 lora_dropout: 0.0
 
 # Vision backbone configuration: Choose 224 or 448
-vision_resolution: 448  # Options: 224 or 448
+vision_resolution: 224  # Options: 224 or 448
 image_shape:
   - ${vision_resolution}
   - ${vision_resolution}
@@ -71,7 +71,6 @@ vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vsr"
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/wildvision"
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/yesbut"
-
 
 shape_meta: &shape_meta
   obs:
@@ -160,28 +159,28 @@ vlm_processor:
 dataloader:
   batch_sampler: 
     # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
-    batch_size: 8
+    batch_size: 16
     vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
     drop_last: False
   loader: 
-    num_workers: 4
+    num_workers: 16
     pin_memory: True
     persistent_workers: True
-    prefetch_factor: 16
+    prefetch_factor: 32
 
 val_dataloader:
   batch_sampler: 
     # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
-    batch_size: 8
+    batch_size: 16
     shuffle: False
     drop_last: False
   loader: 
-    num_workers: 4
+    num_workers: 16
     pin_memory: True
     persistent_workers: True
-    prefetch_factor: 16
+    prefetch_factor: 32
 
 flow: 
   sig_min: 0.001
@@ -200,9 +199,9 @@ optimizer:
     betas: [0.9, 0.95]
     weight_decay: 1e-5
   diffloss:
-    lr: 2e-4
+    lr: 8e-4
     betas: [0.9, 0.95]
-    weight_decay: 1e-3
+    weight_decay: 1e-2
 
 training:
   seed: 42
@@ -221,7 +220,7 @@ training:
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
-  resume_checkpoint_path: # /home/chenzhang/projects/EgoVLA/outputs/2025.10.14/13.54_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=17500-eval_l1_loss=0.0522
+  resume_checkpoint_path: # /home/chenzhang/projects/diffloss-ar/outputs/2026.02.03/00.46_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=5000-eval_l1_loss=0.0397
   normalizer_path: /share_data/chenzhang/projects/EgoVLA/outputs/normalizer/2026.01.29/normalizer.pkl
   num_epochs: 2
   use_bf16: True
@@ -316,6 +315,7 @@ policy:
     action_token_index: ${action_token_index}
     use_lm_head: True
     max_vlm_tokens: ${max_vlm_tokens}
+    use_action_position_ids_continue_from_vlm: False
     num_inference_steps: ${flow.num_inference_steps}
     action_expert_adaptive_mode: ${action_expert_adaptive_mode}
     time_hidden_size: ${time_hidden_size}
@@ -332,8 +332,36 @@ policy:
     loss_weights: 
       ce_loss_weight: 0.1
       diffusion_loss_weight: 1.0
-      flow_loss_weight: 0.5
+      flow_loss_weight: 1.0
   shape_meta: ${shape_meta}
+  action_encoder_ar: 
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: 48
+    width: 2048
+    time_cond: False
+    mlp_depth: 3 # 0 means no MLP
+    fourier_embed_dim: 1024
+    fourier_scale: 10.0
+  latent_condition_projector:
+    _target_: src.model.action.action_head.MLPProjector
+    input_dim: 2048
+    output_dim: 2048
+    depth: 0 # 0 means identity projection
+    final_layer_norm: True
+  action_encoder: 
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: 48
+    width: 1024
+    time_cond: False
+    mlp_depth: 3 # 0 means no MLP
+    fourier_embed_dim: 1024
+    fourier_scale: 10.0
+  action_decoder: 
+    _target_: src.model.action.action_head.MLPProjector
+    input_dim: 1024
+    output_dim: 48
+    depth: 3 # 0 means identity projection
+    final_layer_norm: False
   depth_encoder: 
     _target_: src.model.vlm.paligemma.depth_encoder.DINOv2DepthEncoder
     config: 
@@ -407,7 +435,7 @@ policy:
     # Note: DiffLoss uses standard DiT-style sinusoidal encoding (different from action expert)
 
 logging:
-  project: diffloss-gemma448
+  project: diffloss-compile
   entity: LegendaryVLA
   resume: False
   mode: online

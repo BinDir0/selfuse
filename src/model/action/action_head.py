@@ -107,9 +107,9 @@ class FourierActionEncoder(nn.Module):
         return emb
 
 
-class LatentConditionProjector(nn.Module):
+class MLPProjector(nn.Module):
     """
-    Latent condition projector with MLP.
+    MLP projector.
     """
 
     def __init__(

@@ -36,6 +36,8 @@ class LegendVLA(nn.Module):
         shape_meta,
         action_encoder_ar, 
         latent_condition_projector,
+        action_encoder,
+        action_decoder,
         depth_encoder, 
         vision_tower,
         multi_modal_projector,
@@ -98,28 +100,16 @@ class LegendVLA(nn.Module):
         # Action, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
         if self.action_expert_adaptive_mode:  # adaLN or adaLN-Zero
-            self.action_encoder = nn.Linear(
-                self.action_dim,
-                self.action_hidden_size,
-            )
             self.time_embedding = nn.Sequential(
                 SinusoidalPosEmb(cfg.time_hidden_size, cfg.time_min_period, cfg.time_max_period), 
                 TimeEncoder(cfg.time_hidden_size), 
             )
         else:  # matching pi0
-            self.action_encoder = ActionEncoder(
-                self.action_dim,
-                self.action_hidden_size,
-                time_cond=True,
-            )
             self.time_embedding = SinusoidalPosEmb(
                 self.action_hidden_size, cfg.time_max_period
             )
-        # Action decoder
-        self.action_decoder = nn.Linear(
-            self.action_hidden_size,
-            self.action_dim,
-        )
+        self.action_encoder = action_encoder
+        self.action_decoder = action_decoder
 
         # Action/state encoder for continuous autoregressive modeling
         self.action_encoder_ar = action_encoder_ar
@@ -715,7 +705,7 @@ class LegendVLA(nn.Module):
             0,
             self.num_action_tokens,
             device=device,
-        ).unsqueeze(0) + answer_start_idx.unsqueeze(1)
+        ).unsqueeze(0) + answer_start_idx.unsqueeze(1) + 1
         return causal_mask, vlm_position_ids, action_position_ids
 
     def split_full_mask_into_submasks(
@@ -1035,6 +1025,7 @@ class LegendVLA(nn.Module):
                 action_embeds = self.action_encoder(action)
             else:
                 action_embeds = self.action_encoder(action, time_cond)
+            action_embeds = action_embeds / (self.action_hidden_size**0.5)
             # [Batch_Size, Horizon_Steps, Embed_Dim]
             action_embeds = self.joint_model(
                 attention_mask=action_mask,
@@ -1119,6 +1110,7 @@ class LegendVLA(nn.Module):
                 action_embeds = self.action_encoder(action)
             else:
                 action_embeds = self.action_encoder(action, time_cond)
+            action_embeds = action_embeds / (self.action_hidden_size**0.5)
             action_embeds = self.joint_model(
                 attention_mask=causal_mask,
                 position_ids_all={
@@ -1535,6 +1527,7 @@ class LegendVLA(nn.Module):
             action_embeds = self.action_encoder(psi_t)
         else:
             action_embeds = self.action_encoder(psi_t, time_cond)
+        action_embeds = action_embeds / (self.action_hidden_size**0.5)
         action_embeds = self.joint_model(
             attention_mask=causal_mask,
             position_ids_all={
@@ -1662,6 +1655,7 @@ class LegendVLA(nn.Module):
             action_embeds = self.action_encoder(psi_t)
         else:
             action_embeds = self.action_encoder(psi_t, time_cond)
+        action_embeds = action_embeds / (self.action_hidden_size**0.5)
         output = self.joint_model(
             attention_mask=causal_mask,
             position_ids_all={
