@@ -21,27 +21,27 @@ depth_image_shape:
   - ${vision_resolution}
 
 vla_dataset_paths:
- - name: taco 
-   path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
-   weight: 1
+#  - name: taco 
+#    path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
+#    weight: 1
  - name: oakink2
    path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
    weight: 1
- - name: holoassist
-   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
-   weight: 1
- - name: egodex
-   path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
-   weight: 20
- - name: epic
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
-   weight: 4
- - name: ego4d_cooking
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
-   weight: 8
- - name: ego4d_other
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
-   weight: 8
+#  - name: holoassist
+#    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
+#    weight: 1
+#  - name: egodex
+#    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
+#    weight: 20
+#  - name: epic
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
+#    weight: 4
+#  - name: ego4d_cooking
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
+#    weight: 8
+#  - name: ego4d_other
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
+#    weight: 8
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
@@ -220,7 +220,7 @@ training:
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
-  resume_checkpoint_path: # /home/chenzhang/projects/diffloss-ar/outputs/2026.02.03/00.46_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=5000-eval_l1_loss=0.0397
+  resume_checkpoint_path: # /home/chenzhang/projects/diffloss-ar/outputs/2026.02.04/23.33_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=10000-eval_l1_loss=0.3653
   normalizer_path: /share_data/chenzhang/projects/EgoVLA/outputs/normalizer/2026.01.29/normalizer.pkl
   num_epochs: 2
   use_bf16: True
@@ -339,6 +339,7 @@ policy:
     action_dim: 48
     width: 2048
     time_cond: False
+    enable_fourier_embed: True
     mlp_depth: 3 # 0 means no MLP
     fourier_embed_dim: 1024
     fourier_scale: 10.0
@@ -346,21 +347,23 @@ policy:
     _target_: src.model.action.action_head.MLPProjector
     input_dim: 2048
     output_dim: 2048
-    depth: 0 # 0 means identity projection
+    depth: 3 # 0 means identity projection
     final_layer_norm: True
   action_encoder: 
     _target_: src.model.action.action_head.FourierActionEncoder
     action_dim: 48
     width: 1024
     time_cond: False
-    mlp_depth: 3 # 0 means no MLP
+    enable_fourier_embed: False
+    mlp_depth: 1 # 0 means no MLP
     fourier_embed_dim: 1024
     fourier_scale: 10.0
   action_decoder: 
     _target_: src.model.action.action_head.MLPProjector
     input_dim: 1024
+    width: 1024
     output_dim: 48
-    depth: 3 # 0 means identity projection
+    depth: 1 # 0 means identity projection
     final_layer_norm: False
   depth_encoder: 
     _target_: src.model.vlm.paligemma.depth_encoder.DINOv2DepthEncoder

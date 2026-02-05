@@ -21,7 +21,6 @@ from src.model.common.modules import (
     SinusoidalPosEmb,
     TimeEncoder,
 )
-from src.model.action.action_head import ActionEncoder
 from src.utils.monitor import log_execution_time
 from src.utils.generation_utils import sample_token
 
