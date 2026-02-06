@@ -125,9 +125,31 @@ class LegendVLA(nn.Module):
             )
             self.lm_head.weight = self.embed_tokens.weight  # tie weights
 
+        # Gemma2-specific: Final logit softcapping for numerical stability
+        self.final_logit_softcapping = cfg.get("final_logit_softcapping", None)
+
         self.CELoss = nn.CrossEntropyLoss(ignore_index=cfg.ignore_index, reduction='sum')
         self.ignore_index = cfg.ignore_index
         self.loss_weights = cfg.loss_weights
+
+    def _apply_final_logit_softcapping(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Apply final logit softcapping (Gemma2 feature).
+        
+        Limits the range of output logits to prevent extreme values that could cause
+        numerical instability during training or inference.
+        
+        Args:
+            logits (torch.Tensor): Raw logits from language model head
+        
+        Returns:
+            torch.Tensor: Softcapped logits (same shape as input)
+        """
+        if self.final_logit_softcapping is not None:
+            logits = logits / self.final_logit_softcapping
+            logits = torch.tanh(logits)
+            logits = logits * self.final_logit_softcapping
+        return logits
 
     @property
     def attn_weights(self):
@@ -1194,6 +1216,7 @@ class LegendVLA(nn.Module):
             final_layer_post_attn_skip_names=[],  # do not skip vlm last layer
         )["vlm"]
         logits = self.lm_head(hidden_states)
+        logits = self._apply_final_logit_softcapping(logits)
         output = {
             "logits": logits,
         }
@@ -1445,6 +1468,7 @@ class LegendVLA(nn.Module):
         hidden_states = output["vlm"]
 
         logits = self.lm_head(hidden_states)
+        logits = self._apply_final_logit_softcapping(logits)
         logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
         labels = labels[:, 1:].contiguous().view(-1)
 
@@ -1570,6 +1594,7 @@ class LegendVLA(nn.Module):
             torch.FloatTensor: Cross-entropy loss
         """
         logits = self.lm_head(hidden_states)
+        logits = self._apply_final_logit_softcapping(logits)
         logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
         labels = labels[:, 1:].contiguous().view(-1)
 

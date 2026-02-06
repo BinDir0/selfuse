@@ -10,7 +10,8 @@ lora: False
 lora_r: 32
 lora_dropout: 0.0
 
-# Vision backbone configuration: Choose 224 or 448
+# Vision backbone configuration
+vlm_backbone: paligemma2  # Options: paligemma, paligemma2
 vision_resolution: 224  # Options: 224 or 448
 image_shape:
   - ${vision_resolution}
@@ -215,8 +216,8 @@ training:
   init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
   load_pretrained_pi05_weights: False # load pretrained weights from PI05 (disabled for 448 resolution)
-  # Automatically select pretrained model path based on vision_resolution
-  pretrained_model_path: /share_data/chenzhang/checkpoints/paligemma-3b-pt-${vision_resolution}
+  # Automatically select pretrained model path based on vlm_backbone and vision_resolution
+  pretrained_model_path: /share_data/chenzhang/checkpoints/${vlm_backbone}-3b-pt-${vision_resolution}
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
@@ -258,15 +259,18 @@ training:
 
 mixture:
   # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action
-  vlm:   # gemma
-    hidden_size: 2048
-    intermediate_size: 16384
+  vlm:   # gemma or gemma2
+    # Conditional dimensions based on vlm_backbone
+    hidden_size: ${eval:'2304 if "${vlm_backbone}"=="paligemma2" else 2048'}
+    intermediate_size: ${eval:'9216 if "${vlm_backbone}"=="paligemma2" else 16384'}
     use_final_norm: True
     cache: True
     use_quantize: ${quantize}
     use_lora: ${lora}
     adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0  # 10000 in gemma
+    # Gemma2-specific: Query pre-attention scalar for numerical stability
+    query_pre_attn_scalar: ${eval:'256 if "${vlm_backbone}"=="paligemma2" else None'}
   action:
     hidden_size: 1024
     intermediate_size: 4096
@@ -314,6 +318,8 @@ policy:
     state_token_index: ${state_token_index}
     action_token_index: ${action_token_index}
     use_lm_head: True
+    # Gemma2-specific: Final logit softcapping for numerical stability in text generation
+    final_logit_softcapping: ${eval:'30.0 if "${vlm_backbone}"=="paligemma2" else None'}
     max_vlm_tokens: ${max_vlm_tokens}
     use_action_position_ids_continue_from_vlm: False
     num_inference_steps: ${flow.num_inference_steps}
@@ -337,15 +343,15 @@ policy:
   action_encoder_ar: 
     _target_: src.model.action.action_head.FourierActionEncoder
     action_dim: 48
-    width: 2048
+    width: ${mixture.vlm.hidden_size}  # Match VLM hidden size
     time_cond: False
     mlp_depth: 3 # 0 means no MLP
     fourier_embed_dim: 1024
     fourier_scale: 10.0
   latent_condition_projector:
     _target_: src.model.action.action_head.MLPProjector
-    input_dim: 2048
-    output_dim: 2048
+    input_dim: ${mixture.vlm.hidden_size}  # Match VLM hidden size
+    output_dim: ${mixture.vlm.hidden_size}  # Match VLM hidden size
     depth: 0 # 0 means identity projection
     final_layer_norm: True
   action_encoder: 
@@ -398,7 +404,7 @@ policy:
     config:
       vision_config:
         hidden_size: ${eval:'${policy.depth_encoder.config.output_dim}+${policy.vision_tower.config.hidden_size}'} # 1152+768=1920
-        projection_dim: 2048
+        projection_dim: ${mixture.vlm.hidden_size}  # Match VLM hidden size (2048 for paligemma, 2304 for paligemma2)
       lora:
         r: ${lora_r}
         dropout: ${lora_dropout}
@@ -415,10 +421,13 @@ policy:
       lora:
         r: ${lora_r}
         dropout: ${lora_dropout}
-      num_hidden_layers: 18
+      # Conditional layers based on vlm_backbone (paligemma: 18, paligemma2: 26)
+      num_hidden_layers: ${eval:'26 if "${vlm_backbone}"=="paligemma2" else 18'}
       num_attention_heads: 8
-      num_key_value_heads: 1
-      head_dim: 256
+      # Conditional KV heads (paligemma: 1, paligemma2: 4)
+      num_key_value_heads: ${eval:'4 if "${vlm_backbone}"=="paligemma2" else 1'}
+      # Conditional head_dim (paligemma: 2048/8=256, paligemma2: 2304/8=288)
+      head_dim: ${eval:'288 if "${vlm_backbone}"=="paligemma2" else 256'}
       rms_norm_eps: 1e-6
       attention_bias: False
       attention_dropout: 0.1
