@@ -45,6 +45,7 @@ class FourierActionEncoder(nn.Module):
         width: int,
         time_cond: bool = False,
         mlp_depth: int = 2,
+        enable_fourier_embed: bool = True, # if False, only use MLP
         fourier_embed_dim: int = 1024,
         fourier_scale: float = 10.0,
         final_layer_norm: bool = True,
@@ -53,17 +54,21 @@ class FourierActionEncoder(nn.Module):
         super().__init__()
         assert mlp_depth >= 0, "mlp_depth must be >= 0"
         self.time_cond = time_cond
-        self.fourier = GaussianFourierFeatureTransform(
-            action_dim, embed_dim=fourier_embed_dim, scale=fourier_scale
-        )
-
         if self.time_cond:
             if time_emb_dim is None:
                 raise ValueError("time_emb_dim must be provided when time_cond=True")
         else:
             time_emb_dim = 0
 
-        mlp_input_dim = 2 * fourier_embed_dim + time_emb_dim
+        if enable_fourier_embed:
+            self.fourier = GaussianFourierFeatureTransform(
+                action_dim, embed_dim=fourier_embed_dim, scale=fourier_scale
+            )
+            mlp_input_dim = 2 * fourier_embed_dim + time_emb_dim
+        else: 
+            self.fourier = nn.Identity()
+            mlp_input_dim = action_dim + time_emb_dim
+
         if mlp_depth == 0 and mlp_input_dim != width:
             raise ValueError("mlp_depth must not be 0 if mlp_input_dim != width")
         if mlp_depth == 0: 
@@ -75,6 +80,7 @@ class FourierActionEncoder(nn.Module):
                 in_dim = mlp_input_dim if layer_idx == 0 else width
                 layers.append(nn.Linear(in_dim, width))
                 if layer_idx < mlp_depth - 1:
+                    layers.append(nn.LayerNorm(width))
                     layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
             self.final_layer_norm = nn.LayerNorm(width) if final_layer_norm else None
@@ -109,13 +115,14 @@ class FourierActionEncoder(nn.Module):
 
 class MLPProjector(nn.Module):
     """
-    MLP projector.
+    MLP projector with LayerNorm and SiLU.
     """
 
     def __init__(
         self,
         input_dim: int,
         output_dim: int,
+        width: int = 1024,
         depth: int = 3,
         final_layer_norm: bool = True,
     ):
@@ -127,9 +134,11 @@ class MLPProjector(nn.Module):
         else:
             layers = []
             for layer_idx in range(depth):
-                in_dim = input_dim if layer_idx == 0 else output_dim
-                layers.append(nn.Linear(in_dim, output_dim))
+                in_dim = input_dim if layer_idx == 0 else width
+                out_dim = width if layer_idx < depth - 1 else output_dim
+                layers.append(nn.Linear(in_dim, out_dim))
                 if layer_idx < depth - 1:
+                    layers.append(nn.LayerNorm(width))
                     layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
             self.final_layer_norm = nn.LayerNorm(output_dim) if final_layer_norm else None
