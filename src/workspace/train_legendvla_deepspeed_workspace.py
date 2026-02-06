@@ -19,7 +19,9 @@ import random
 import numpy as np
 import pickle
 import time
+import math
 from datetime import timedelta
+from transformers import get_scheduler
 import accelerate
 from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs
@@ -107,6 +109,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             kwargs_handlers.append(profile_kwargs)
         
         self.is_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
+        self.is_deepspeed = False
 
         deepspeed_plugin = None
         if self.is_deepspeed:
@@ -216,7 +219,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 assert id(param) in trainable_param_ids, \
                     f"Parameter '{name}' requires grad but is NOT in the optimizer parameters list"
         
-        self.optimizer = DummyOptim(all_trainable_parameters)
+        self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
         
         print("--> Configure dataset and dataloader...................")
         # Configure dataset and dataloader
@@ -232,10 +235,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
         # According to the PaliGemma paper, we can initialize the motion token embeddings 
         # to gain better performance.
-        # if cfg.training.init_motion_token_embeddings:
-        #     self.model.init_motion_token_embeddings(self.vla_processor.total_motion_token_list)
-        # Initialize extra token embeddings.
-        # self.model.init_motion_token_embeddings([id for id in range(257152, 257216)])
 
         print("Computing normalizer...")
         if cfg.training.normalizer_path is not None:
@@ -283,11 +282,18 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         val_dataloader.__dict__["batch_size"] = cfg.val_dataloader.batch_sampler.batch_size
 
         # Configure learning rate schedulers
-        max_train_steps = len(train_dataloader) * cfg.training.num_epochs
-        self.lr_scheduler = DummyScheduler(
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / accelerator.gradient_accumulation_steps)
+        max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
+        # Accelerate prepared scheduler will step num_processes times per global step, 
+        # so we need to multiply the warmup steps by num_processes to get the correct warmup steps.
+        num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
+        if accelerator.is_main_process:
+            print(f"num_warmup_steps: {num_warmup_steps}, max_train_steps: {max_train_steps}")
+        self.lr_scheduler = get_scheduler(
+            name=cfg.training.lr_scheduler,
             optimizer=self.optimizer,
-            warmup_num_steps=cfg.training.lr_warmup_steps,
-            total_num_steps=max_train_steps,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=max_train_steps,
         )
 
         # Configure checkpoint manager (if available)
@@ -300,7 +306,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
             train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler
         )
-        
+
         if accelerator.is_main_process:
             print(f"\nTraining with: {'DeepSpeed' if self.is_deepspeed else 'Accelerate (DDP/FSDP)'}")
             if self.is_deepspeed:
@@ -344,144 +350,139 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             if accelerator.is_main_process:
                 print(f"Training with {len(train_dataloader)} steps per epoch")
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
-                self.model.train()
-                if accelerator.is_main_process:
-                    print(f"Training epoch {self.epoch} started")
-                if epoch_idx == 0 and cfg.training.resume_checkpoint_path: 
-                    dataloader = skipped_dataloader
-                else:
-                    dataloader = train_dataloader
-                for batch_idx, batch in enumerate(dataloader):
-                    step_perf_start = time.perf_counter()
-                    if training_start_time is None:
-                        training_start_time = time.time()
-                    if cfg.training.profile and torch.cuda.is_available():
-                        torch.cuda.reset_peak_memory_stats()
-
-                    # Preprocess batch
-                    inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
-
-                    if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
-                        self.tracker.track()
-                    # Forward pass
-                    with accelerator.autocast():
-                        raw_loss = self.model(self.objective_func, inputs)
-                    
-                    # Use cached DeepSpeed status (set after prepare())
-                    if self.is_deepspeed:
-                        self.model.backward(raw_loss["total_loss"])   
+                with accelerator.accumulate(self.model):
+                    self.model.train()
+                    if accelerator.is_main_process:
+                        print(f"Training epoch {self.epoch} started")
+                    if epoch_idx == 0 and cfg.training.resume_checkpoint_path: 
+                        dataloader = skipped_dataloader
                     else:
-                        accelerator.backward(raw_loss["total_loss"])
-                    if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
-                        torch.cuda.empty_cache() 
-                        print(torch.cuda.memory_summary())
-                        self.tracker.report()
-                        self.tracker.stop()
+                        dataloader = train_dataloader
+                    for batch_idx, batch in enumerate(dataloader):
+                        step_perf_start = time.perf_counter()
+                        if training_start_time is None:
+                            training_start_time = time.time()
+                        if cfg.training.profile and torch.cuda.is_available():
+                            torch.cuda.reset_peak_memory_stats()
 
-                    # Gradient clipping
-                    total_norm = None
-                    if accelerator.sync_gradients and cfg.training.clipping.enabled:
-                        total_norm = accelerator.clip_grad_norm_(
-                            self.model.parameters(), 
-                            float('inf')
-                        )
+                        # Preprocess batch
+                        inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
 
-                    # Optimizer step
-                    if self.is_deepspeed:
-                        # DeepSpeed engine handles everything: optimizer step, lr scheduler, and zero grad
-                        self.model.step()
-                    else:
+                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                            self.tracker.track()
+                        # Forward pass
+                        with accelerator.autocast():
+                            raw_loss = self.model(self.objective_func, inputs)
+                        
+                        # Use cached DeepSpeed status (set after prepare())
+                        if self.is_deepspeed:
+                            self.model.backward(raw_loss["total_loss"])   
+                        else:
+                            accelerator.backward(raw_loss["total_loss"])
+                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                            torch.cuda.empty_cache() 
+                            print(torch.cuda.memory_summary())
+                            self.tracker.report()
+                            self.tracker.stop()
+
+                        # Gradient clipping
+                        total_norm = None
+                        if accelerator.sync_gradients and cfg.training.clipping.enabled:
+                            total_norm = accelerator.clip_grad_norm_(
+                                self.model.parameters(), 
+                                float('inf')
+                            )
+
                         # Standard training without DeepSpeed optimizer
                         self.optimizer.step()
                         self.lr_scheduler.step()
                         # Zero gradients
                         self.optimizer.zero_grad(set_to_none=True)
-                    
-                    self.global_step += 1
-
-                    if accelerator.sync_gradients:
-                        self.update_step += 1
-                        total_samples_processed += inputs["input_ids"].shape[0]
-                        # initialize model averaging
-                        self.model_averaging.maybe_initialize(self.update_step)
-                        # update model averaging
-                        self.model_averaging.maybe_update(self.update_step)
-
-                    should_record = (
-                        accelerator.sync_gradients
-                        and (self.update_step % log_interval == 0)
-                    )
-                    should_eval = (
-                        accelerator.sync_gradients
-                        and val_dataloader is not None
-                        and (self.update_step % cfg.training.eval_every == 0)
-                    )
-                    should_ckpt = (
-                        accelerator.sync_gradients
-                        and (self.update_step % cfg.training.checkpoint_every == 0)
-                    )
-                    should_interval_ckpt = (
-                        accelerator.sync_gradients
-                        and (self.update_step % cfg.training.ckpt_save_interval == 0)
-                    )
-
-                    step_log = None
-                    if should_record or should_eval or should_ckpt or should_interval_ckpt:
-                        # Get learning rate from DeepSpeed engine or scheduler
-                        if self.is_deepspeed:
-                            # Get lr from DeepSpeed engine
-                            current_lr = self.model.get_lr()[0]
-                        else:
-                            current_lr = self.lr_scheduler.get_last_lr()[0]
                         
-                        step_log = {
-                            'global_step': self.global_step,
-                            'update_step': self.update_step,
-                            'epoch': self.epoch,
-                            'lr': current_lr,
-                        }
+                        self.global_step += 1
+                        if accelerator.sync_gradients:
+                            self.update_step += 1
+                            total_samples_processed += inputs["input_ids"].shape[0]
+                            # initialize model averaging
+                            self.model_averaging.maybe_initialize(self.update_step)
+                            # update model averaging
+                            self.model_averaging.maybe_update(self.update_step)
 
-                    if should_record:
-                        # Logging
-                        raw_loss_cpu = {}
-                        for key, value in raw_loss.items(): 
-                            raw_loss_cpu[key] = value.item()
-                        step_wall_time = time.time()
-                        step_time_sec = time.perf_counter() - step_perf_start
-                        batch_size = inputs["input_ids"].shape[0]
-                        elapsed_time_sec = step_wall_time - training_start_time
-                        step_log.update({
-                            'elapsed_time_sec': elapsed_time_sec,
-                            'step_time_sec': step_time_sec,
-                            'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
-                            'samples_per_sec': batch_size / step_time_sec if step_time_sec > 0 else 0,
-                        })
-                        if total_norm is not None:
-                            step_log['grad_norm'] = total_norm
-                        step_log.update(raw_loss_cpu)
+                        should_record = (
+                            accelerator.sync_gradients
+                            and (self.update_step % log_interval == 0)
+                        )
+                        should_eval = (
+                            accelerator.sync_gradients
+                            and val_dataloader is not None
+                            and (self.update_step % cfg.training.eval_every == 0)
+                        )
+                        should_ckpt = (
+                            accelerator.sync_gradients
+                            and (self.update_step % cfg.training.checkpoint_every == 0)
+                        )
+                        should_interval_ckpt = (
+                            accelerator.sync_gradients
+                            and (self.update_step % cfg.training.ckpt_save_interval == 0)
+                        )
 
-                    # Evaluation
-                    if should_eval:
-                        self.evaluation(accelerator, val_dataloader, step_log)
+                        step_log = None
+                        if should_record or should_eval or should_ckpt or should_interval_ckpt:
+                            # Get learning rate from DeepSpeed engine or scheduler
+                            if self.is_deepspeed:
+                                # Get lr from DeepSpeed engine
+                                current_lr = self.model.get_lr()[0]
+                            else:
+                                current_lr = self.lr_scheduler.get_last_lr()[0]
+                            
+                            step_log = {
+                                'global_step': self.global_step,
+                                'update_step': self.update_step,
+                                'epoch': self.epoch,
+                                'lr': current_lr,
+                            }
 
-                    # Checkpoint saving
-                    if should_ckpt:
-                        self.save_topk_ckpt(accelerator, topk_manager, step_log)
+                        if should_record:
+                            # Logging
+                            raw_loss_cpu = {}
+                            for key, value in raw_loss.items(): 
+                                raw_loss_cpu[key] = value.item()
+                            step_wall_time = time.time()
+                            step_time_sec = time.perf_counter() - step_perf_start
+                            batch_size = inputs["input_ids"].shape[0]
+                            elapsed_time_sec = step_wall_time - training_start_time
+                            step_log.update({
+                                'elapsed_time_sec': elapsed_time_sec,
+                                'step_time_sec': step_time_sec,
+                                'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
+                                'samples_per_sec': batch_size / step_time_sec if step_time_sec > 0 else 0,
+                            })
+                            if total_norm is not None:
+                                step_log['grad_norm'] = total_norm
+                            step_log.update(raw_loss_cpu)
 
-                    if should_interval_ckpt:
-                        self.save_interval_ckpt(accelerator)
+                        # Evaluation
+                        if should_eval:
+                            self.evaluation(accelerator, val_dataloader, step_log)
 
-                    if step_log is not None:
-                        accelerator.log(step_log, step=self.update_step)
-                    
-                    if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
-                        break
+                        # Checkpoint saving
+                        if should_ckpt:
+                            self.save_topk_ckpt(accelerator, topk_manager, step_log)
 
-                    if self.global_step % 100 == 0 and accelerator.is_main_process:
-                        print(f"Global step {self.global_step} completed")
+                        if should_interval_ckpt:
+                            self.save_interval_ckpt(accelerator)
 
-                    if cfg.training.profile and accelerator.is_main_process:
-                        prof.step()
+                        if step_log is not None:
+                            accelerator.log(step_log, step=self.update_step)
+                        
+                        if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
+                            break
+
+                        if self.global_step % 100 == 0 and accelerator.is_main_process:
+                            print(f"Global step {self.global_step} completed")
+
+                        if cfg.training.profile and accelerator.is_main_process:
+                            prof.step()
 
                 self.epoch += 1
 

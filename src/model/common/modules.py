@@ -161,7 +161,7 @@ class GaussianFourierFeatureTransform(torch.nn.Module):
 
     def forward(self, v: torch.FloatTensor) -> torch.FloatTensor:
         assert not self.b.requires_grad, "GaussianFourierFeatureTransform.b must be frozen"
-        x_proj = torch.matmul(v, self.b.to(v.device).to(v.dtype)) * (2 * math.pi)
+        x_proj = torch.matmul(v, self.b) * (2 * math.pi)
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], -1)
 
 
