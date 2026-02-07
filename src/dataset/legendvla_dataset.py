@@ -29,6 +29,34 @@ from .sampler import SequenceSampler, get_val_mask, downsample_mask
 from .streaming_replay_buffer import StreamingReplayBuffer
 
 
+def build_default_key_mapping(motion_type: str) -> Dict[str, str]:
+    """
+    Build the default key mapping (renamed_key -> original_key) for LegendVLA datasets.
+    """
+    return {
+        'image': 'image',
+        'depth': 'depth',
+        'wrist_state': 'state/wrist',
+        'hand_state': f'state/{motion_type}',
+        'wrist_action': 'action/wrist',
+        'hand_action': f'action/{motion_type}',
+        'extrinsic': 'extrinsic',
+        'intrinsic': 'intrinsic',
+        'instruction': 'instruction',
+        'instruction_num': 'instruction_num',
+    }
+
+
+def merge_key_mapping(custom_mapping: Optional[Dict[str, str]], motion_type: str) -> Dict[str, str]:
+    """
+    Merge a custom mapping into the default mapping.
+    """
+    mapping = build_default_key_mapping(motion_type)
+    if custom_mapping is not None:
+        mapping.update(custom_mapping)
+    return mapping
+
+
 class LegendVLADataset(BaseRatioDataset):
     """
     Dataset for LegendVLA training/validation with async IO support.
@@ -100,10 +128,11 @@ class LegendVLADataset(BaseRatioDataset):
         
         # Process each zarr file
         for zarr_path in zarr_paths:
+            key_mapping = merge_key_mapping(zarr_path.get('mapping', None), self.motion_type)
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
                 zarr_path['path'], 
-                keys=['image', 'depth', 'state', 'instruction', 'instruction_num', 'action', 'extrinsic', 'intrinsic'], 
+                key_mapping=key_mapping,
                 lazy_load=True
             )
             self.replay_buffers.append(replay_buffer)
@@ -176,10 +205,10 @@ class LegendVLADataset(BaseRatioDataset):
         """
         # Select data keys based on motion_type
         state, action = process_state_action(
-            wrist_state = sample['state/wrist'].astype(np.float32), 
-            hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
-            wrist_action = sample['action/wrist'].astype(np.float32), 
-            hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
+            wrist_state = sample['wrist_state'].astype(np.float32), 
+            hand_state = sample['hand_state'].astype(np.float32), 
+            wrist_action = sample['wrist_action'].astype(np.float32), 
+            hand_action = sample['hand_action'].astype(np.float32), 
             extrinsic = sample['extrinsic'].astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 
@@ -714,9 +743,15 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         
         # Process each zarr file
         for zarr_path in zarr_paths:
+            key_mapping = merge_key_mapping(zarr_path.get('mapping', None), self.motion_type)
+            low_level_keys = ['wrist_state', 'hand_state', 'wrist_action', 'hand_action', 'extrinsic']
+            key_mapping = {key: key_mapping[key] for key in low_level_keys if key in key_mapping}
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path['path'], keys=['state', 'action', 'extrinsic'], lazy_load=False)
+                zarr_path['path'],
+                key_mapping=key_mapping,
+                lazy_load=False
+            )
             self.replay_buffers.append(replay_buffer)
 
             # Create train mask
@@ -780,10 +815,10 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         """
         # Select data keys based on motion_type
         state, action = process_state_action(
-            wrist_state = sample['state/wrist'].astype(np.float32), 
-            hand_state = sample[f'state/{self.motion_type}'].astype(np.float32), 
-            wrist_action = sample['action/wrist'].astype(np.float32), 
-            hand_action = sample[f'action/{self.motion_type}'].astype(np.float32), 
+            wrist_state = sample['wrist_state'].astype(np.float32), 
+            hand_state = sample['hand_state'].astype(np.float32), 
+            wrist_action = sample['wrist_action'].astype(np.float32), 
+            hand_action = sample['hand_action'].astype(np.float32), 
             extrinsic = sample['extrinsic'].astype(np.float32).reshape(4, 4), # [16] -> [4, 4]
             normalizer = self.normalizer, 
             hand_ndim = self.hand_ndim, 

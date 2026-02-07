@@ -1382,7 +1382,6 @@ class LegendVLA(nn.Module):
         return result
 
     # ---------- Flow matching training ----------#
-
     def psi_t(
         self,
         x: torch.FloatTensor,

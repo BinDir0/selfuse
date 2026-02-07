@@ -26,7 +26,7 @@ class StreamingReplayBuffer:
         self.zarr_path = None
         
     @classmethod
-    def copy_from_path(cls, path, keys=None, lazy_load=True):
+    def copy_from_path(cls, path, keys=None, lazy_load=True, key_mapping=None):
         """Create StreamingReplayBuffer from zarr file"""
         buffer = cls()
         buffer.zarr_path = path
@@ -54,16 +54,30 @@ class StreamingReplayBuffer:
         else:
             src_data = src['data']
             
-        if keys is None:
-            keys = list(src_data.keys())
-            
-        for key in keys:
-            data = src_data[key]
-            # Use references for image, because image is too large to load into memory
-            # Use references for all other data according to the lazy_load flag
-            buffer._data = buffer._data | cls._load_zarr_recursive(
-                data, prefix_key=key, lazy_load=lazy_load if key != 'image' and key != 'depth' else True
-            )
+        if key_mapping is not None:
+            if not isinstance(key_mapping, dict):
+                raise ValueError("key_mapping must be a dict of {new_key: original_key}")
+            for new_key, original_key in key_mapping.items():
+                data = cls._get_node(src_data, original_key)
+                # Use references for image/depth, because they are too large to load into memory
+                buffer._data = buffer._data | cls._load_zarr_recursive(
+                    data,
+                    prefix_key=new_key,
+                    lazy_load=lazy_load if new_key not in ['image', 'depth'] else True
+                )
+        else:
+            if keys is None:
+                keys = list(src_data.keys())
+            for key in keys:
+                data = cls._get_node(src_data, key)
+                # Use references for image, because image is too large to load into memory
+                # Use references for all other data according to the lazy_load flag
+                top_key = key.split('/')[0]
+                buffer._data = buffer._data | cls._load_zarr_recursive(
+                    data,
+                    prefix_key=key,
+                    lazy_load=lazy_load if top_key not in ['image', 'depth'] else True
+                )
                 
         return buffer
     
@@ -87,6 +101,18 @@ class StreamingReplayBuffer:
             return {prefix_key: ZarrReference(node)}
         else:
             return {prefix_key: node[:]}
+
+    @staticmethod
+    def _get_node(src_data, key_path):
+        """
+        Resolve nested key paths like "state/wrist" or "intrinsic/head".
+        """
+        node = src_data
+        if key_path == "":
+            return node
+        for part in key_path.split('/'):
+            node = node[part]
+        return node
 
     @property
     def data(self):

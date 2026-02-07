@@ -11,7 +11,7 @@ lora_r: 32
 lora_dropout: 0.0
 
 # Vision backbone configuration
-vlm_backbone: paligemma2  # Options: paligemma, paligemma2
+vlm_backbone: paligemma  # Options: paligemma, paligemma2
 vision_resolution: 224  # Options: 224 or 448
 image_shape:
   - ${vision_resolution}
@@ -21,57 +21,91 @@ depth_image_shape:
   - ${vision_resolution}
   - ${vision_resolution}
 
+human_dataset_mapping: 
+  image: image
+  depth: depth
+  wrist_state: state/wrist
+  hand_state: state/fingertips
+  wrist_action: action/wrist
+  hand_action: action/fingertips
+  extrinsic: extrinsic
+  intrinsic: intrinsic
+  instruction: instruction
+  instruction_num: instruction_num
+real_world_dataset_mapping: 
+  image: image-head
+  depth: depth-head
+  wrist_state: state/wrist-head
+  hand_state: state/fingertips-head
+  wrist_action: action/wrist-head
+  hand_action: action/fingertips-head
+  extrinsic: extrinsic
+  intrinsic: intrinsic/head
+  instruction: instruction
+  instruction_num: instruction_num
+
 vla_dataset_paths:
- - name: taco 
-   path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
-   weight: 1
- - name: oakink2
-   path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
-   weight: 1
- - name: holoassist
-   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
-   weight: 1
- - name: egodex
-   path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
-   weight: 20
- - name: epic
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
-   weight: 4
- - name: ego4d_cooking
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
-   weight: 8
- - name: ego4d_other
-   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
-   weight: 8
+ - name: dexterous_grasping
+   path: /share_data/yanruilin/complete_data/Dexterous_grasping.zarr
+   mapping: ${real_world_dataset_mapping}
+   weight: 1 
+#  - name: taco 
+#    path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
+#  - name: oakink2
+#    path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
+#  - name: holoassist
+#    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
+#  - name: egodex
+#    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 20
+#  - name: epic
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 4
+#  - name: ego4d_cooking
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 8
+#  - name: ego4d_other
+#    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 8
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/alfworldgpt_filtered"  # high level subtask action
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/indoor_qa_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/LLaVA_Instruct_150K_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cocoqa_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cambrian(filtered)_processed_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lnqa_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lrv_normal(filtered)_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lvis_instruct4v_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vqav2_filtered"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(llava)_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(sam)_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/textcaps_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/image_textualization(filtered)_filtered" 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/aguvis-stage-1"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/groundui"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/oodvqa"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/tallyqa"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_laion"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_vflan"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/mmevol"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vision_flan(filtered)"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/visual7w"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vizwiz(mathv360k)"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vsr"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/wildvision"
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/yesbut"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/alfworldgpt_filtered"  # high level subtask action
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/indoor_qa_filtered" 
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/LLaVA_Instruct_150K_filtered" 
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cocoqa_filtered" 
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cambrian(filtered)_processed_filtered"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lnqa_filtered"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lrv_normal(filtered)_filtered"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lvis_instruct4v_filtered"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vqav2_filtered"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(llava)_filtered" 
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(sam)_filtered" 
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/textcaps_filtered" 
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/image_textualization(filtered)_filtered" 
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/aguvis-stage-1"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/groundui"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/oodvqa"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/tallyqa"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_laion"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_vflan"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/mmevol"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vision_flan(filtered)"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/visual7w"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vizwiz(mathv360k)"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vsr"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/wildvision"
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/yesbut"
 
 shape_meta: &shape_meta
   obs:
@@ -196,7 +230,7 @@ optimizer:
     betas: [0.9, 0.95]
     weight_decay: 1e-2
   vlm:
-    lr: 5e-5 # We can try smaller learning rate than action for VLM
+    lr: 1e-4 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.95]
     weight_decay: 1e-5
   diffloss:
@@ -222,7 +256,7 @@ training:
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: # /home/chenzhang/projects/diffloss-ar/outputs/2026.02.06/00.23_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=25000-eval_l1_loss=0.3644
-  normalizer_path: /share_data/chenzhang/projects/EgoVLA/outputs/normalizer/2026.01.29/normalizer.pkl
+  normalizer_path: /home/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07/normalizer.pkl
   num_epochs: 2
   use_bf16: True
   clipping:
