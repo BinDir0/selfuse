@@ -222,63 +222,112 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
         
         print("--> Configure dataset and dataloader...................")
-        # Configure dataset and dataloader
-        dataset = hydra.utils.instantiate(cfg.dataset)
-        self.use_relative_action = dataset.vla_dataset.use_relative_action
+        # Determine dataset type and instantiate the correct dataset
+        dataset_type = cfg.get('dataset_type', 'vla')
+        is_robot_dataset = (dataset_type == 'robot')
+        
+        if is_robot_dataset:
+            # Use robot_dataset configuration
+            dataset = hydra.utils.instantiate(cfg.robot_dataset)
+        else:
+            # Use default dataset configuration (VLA + VLM)
+            dataset = hydra.utils.instantiate(cfg.dataset)
+        
+        if is_robot_dataset:
+            print("--> Using LegendVLARobotDataset (robot data only)")
+            # Robot dataset doesn't have vla_dataset or vlm_dataset attributes
+            self.use_relative_action = dataset.use_relative_action
+            self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+            dataset.set_preprocessor(self.vla_processor)
+            # Robot dataset doesn't use normalizer
+            self.normalizer = None
+        else:
+            print("--> Using LegendUnifiedDataset (VLA + VLM)")
+            self.use_relative_action = dataset.vla_dataset.use_relative_action
+            self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
+            self.vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
+            dataset.vla_dataset.set_preprocessor(self.vla_processor)
+            if dataset.vlm_dataset is not None:
+                dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
+            
+            # Compute normalizer for VLA dataset
+            print("Computing normalizer...")
+            if cfg.training.normalizer_path is not None:
+                normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
+            else:
+                # compute normalizer on the main process and save to disk
+                if accelerator.is_main_process:
+                    # 1. main process compute/get object
+                    normalizer = dataset.vla_dataset.get_normalizer()
+                    normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
+                    pickle.dump(normalizer, open(normalizer_path, 'wb'))
+                    objects_to_broadcast = [normalizer]
+                else:
+                    # 2. other process prepare a placeholder
+                    objects_to_broadcast = [None]
+
+                # 3. broadcast object from main process (from_process=0) to all processes
+                objects_to_broadcast = accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
+                normalizer = objects_to_broadcast[0]
+
+            # 4. now all processes have a fully identical object copy
+            dataset.vla_dataset.set_normalizer(normalizer)
+            self.normalizer = normalizer
+        
         print("--> dataset instantiated")
         accelerator.wait_for_everyone()
 
-        self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
-        self.vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
-        dataset.vla_dataset.set_preprocessor(self.vla_processor)
-        if dataset.vlm_dataset is not None:
-            dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
-        # According to the PaliGemma paper, we can initialize the motion token embeddings 
-        # to gain better performance.
-
-        print("Computing normalizer...")
-        if cfg.training.normalizer_path is not None:
-            normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
-        else:
-            # compute normalizer on the main process and save to disk
-            if accelerator.is_main_process:
-                # 1. main process compute/get object
-                normalizer = dataset.vla_dataset.get_normalizer()
-                normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
-                pickle.dump(normalizer, open(normalizer_path, 'wb'))
-                objects_to_broadcast = [normalizer]
-            else:
-                # 2. other process prepare a placeholder
-                objects_to_broadcast = [None]
-
-            # 3. broadcast object from main process (from_process=0) to all processes
-            objects_to_broadcast = accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
-            normalizer = objects_to_broadcast[0]
-
-        # 4. now all processes have a fully identical object copy
-        dataset.vla_dataset.set_normalizer(normalizer)
-        self.normalizer = normalizer
-
         # configure training dataset
-        train_dataloader = DataLoader(
-            dataset=dataset, 
-            batch_sampler=dataset.get_sampler(**cfg.dataloader.batch_sampler),
-            collate_fn=dataset.get_collator(), 
-            **cfg.dataloader.loader
-        )
-        # Accelerate needs to know the batch size. 
-        # But Dataloader does not support batch_size argument, when we set batch_sampler, 
-        # so we set the batch_size here.
+        if is_robot_dataset:
+            # Robot dataset: use simple batch sampler (no VLM mixing)
+            from torch.utils.data import BatchSampler, RandomSampler, SequentialSampler
+            sampler = RandomSampler(dataset) if cfg.dataloader.batch_sampler.shuffle else SequentialSampler(dataset)
+            batch_sampler = BatchSampler(
+                sampler,
+                batch_size=cfg.dataloader.batch_sampler.batch_size,
+                drop_last=cfg.dataloader.batch_sampler.drop_last
+            )
+            train_dataloader = DataLoader(
+                dataset=dataset,
+                batch_sampler=batch_sampler,
+                collate_fn=dataset.get_collator(),
+                **cfg.dataloader.loader
+            )
+        else:
+            # Unified dataset: use custom sampler with VLA/VLM mixing
+            train_dataloader = DataLoader(
+                dataset=dataset,
+                batch_sampler=dataset.get_sampler(**cfg.dataloader.batch_sampler),
+                collate_fn=dataset.get_collator(),
+                **cfg.dataloader.loader
+            )
+        # Accelerate needs to know the batch size
         train_dataloader.__dict__["batch_size"] = cfg.dataloader.batch_sampler.batch_size
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(
-            dataset=val_dataset, 
-            batch_sampler=val_dataset.get_sampler(**cfg.val_dataloader.batch_sampler),
-            collate_fn=val_dataset.get_collator(), 
-            **cfg.val_dataloader.loader
-        )
+        if is_robot_dataset:
+            # Robot dataset: use simple batch sampler
+            sampler = SequentialSampler(val_dataset)
+            batch_sampler = BatchSampler(
+                sampler,
+                batch_size=cfg.val_dataloader.batch_sampler.batch_size,
+                drop_last=cfg.val_dataloader.batch_sampler.drop_last
+            )
+            val_dataloader = DataLoader(
+                dataset=val_dataset,
+                batch_sampler=batch_sampler,
+                collate_fn=val_dataset.get_collator(),
+                **cfg.val_dataloader.loader
+            )
+        else:
+            # Unified dataset: use custom sampler
+            val_dataloader = DataLoader(
+                dataset=val_dataset,
+                batch_sampler=val_dataset.get_sampler(**cfg.val_dataloader.batch_sampler),
+                collate_fn=val_dataset.get_collator(),
+                **cfg.val_dataloader.loader
+            )
         val_dataloader.__dict__["batch_size"] = cfg.val_dataloader.batch_sampler.batch_size
 
         # Configure learning rate schedulers
@@ -545,12 +594,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if not torch.any(eval_sample):
                         continue
                     actions_valid_mask = actions_valid_mask[eval_sample]
-                    if self.use_relative_action: 
-                        gt_actions = self.normalizer['actions'].unnormalize(gt_actions[eval_sample])
-                        pred_actions = self.normalizer['actions'].unnormalize(pred_actions[eval_sample])
+                    
+                    # Unnormalize actions if normalizer is available
+                    if self.normalizer is not None:
+                        if self.use_relative_action:
+                            gt_actions = self.normalizer['actions'].unnormalize(gt_actions[eval_sample])
+                            pred_actions = self.normalizer['actions'].unnormalize(pred_actions[eval_sample])
+                        else:
+                            gt_actions = self.normalizer['motions'].unnormalize(gt_actions[eval_sample])
+                            pred_actions = self.normalizer['motions'].unnormalize(pred_actions[eval_sample])
                     else:
-                        gt_actions = self.normalizer['motions'].unnormalize(gt_actions[eval_sample])
-                        pred_actions = self.normalizer['motions'].unnormalize(pred_actions[eval_sample])
+                        # No normalizer (robot dataset case)
+                        gt_actions = gt_actions[eval_sample]
+                        pred_actions = pred_actions[eval_sample]
+                    
                     gt_actions = gt_actions * actions_valid_mask
                     pred_actions = pred_actions * actions_valid_mask
                     

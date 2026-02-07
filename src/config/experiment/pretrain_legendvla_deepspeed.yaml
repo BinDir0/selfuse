@@ -4,6 +4,9 @@ exp_name: "pretrain_legendvla_deepspeed"
 _target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
 objective:  # ar, flow, or None(None means both)
 
+# Dataset type: "vla" (VLA + VLM) or "robot" (robot only)
+dataset_type: robot  # Options: vla, robot
+
 action_expert_adaptive_mode: adaLN-Zero # adaLN, adaLN-Zero, or None
 quantize: False
 lora: False
@@ -11,7 +14,7 @@ lora_r: 32
 lora_dropout: 0.0
 
 # Vision backbone configuration
-vlm_backbone: paligemma2  # Options: paligemma, paligemma2
+vlm_backbone: paligemma  # Options: paligemma, paligemma2
 vision_resolution: 224  # Options: 224 or 448
 image_shape:
   - ${vision_resolution}
@@ -43,6 +46,12 @@ vla_dataset_paths:
  - name: ego4d_other
    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
    weight: 8
+
+# Robot dataset paths (used when dataset_type is "robot")
+robot_dataset_paths:
+ - name: open_book
+   path: /share_data/yanruilin/complete_data/Open_book.zarr
+   weight: 1
 vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
@@ -124,6 +133,19 @@ dataset:
     cache_dir: /share_data/guantianrui/datasets/VLM/FineVision/.cache
     seed: 42
     weights: [0.5, 0.5, 0.5]
+
+# Robot dataset configuration (separate config for robot mode)
+robot_dataset:
+  _target_: src.dataset.legendvla_dataset.LegendVLARobotDataset
+  zarr_paths: ${robot_dataset_paths}
+  shape_meta: ${shape_meta}
+  seed: 42
+  val_ratio: 0.1
+  objective: ${objective}
+  use_relative_action: False
+  max_train_episodes: null
+  mode: train
+  depth_clip_range: ${depth_clip_range}
     
 n_obs_image_steps: 1
 n_obs_image_stride: 30

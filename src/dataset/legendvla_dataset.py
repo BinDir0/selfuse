@@ -862,6 +862,337 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         """
         return sum(self.sampler_lens)
 
+class LegendVLARobotDataset(BaseRatioDataset):
+    """
+    Dataset for real robot data from head-mounted camera.
+    
+    Key differences from LegendVLADataset:
+    - Only uses head camera data (image-head, depth-head)
+    - Only uses wrist-head and fingertips-head for state/action
+    - State and action are already in camera coordinate frame (no extrinsic transform needed)
+    - Data structure: each folder under base path is a task.zarr file
+    """
+    def __init__(
+        self,
+        zarr_paths,
+        shape_meta=None,
+        seed=42,
+        val_ratio=0.0,
+        objective=None,
+        use_relative_action=False,
+        max_train_episodes=None,
+        mode='train',
+        depth_clip_range=None,
+    ):
+        """
+        Args:
+            zarr_paths (List[Dict]): List of zarr dataset configs with 'path' and optional 'weight'.
+            shape_meta (Dict): Metadata describing observation/action shapes.
+            seed (int): Random seed for splitting/downsampling.
+            val_ratio (float): Validation split ratio.
+            objective (Optional[str]): Training objective name.
+            use_relative_action (bool): Use relative action representation if True.
+            max_train_episodes (Optional[int]): Cap on number of training episodes.
+            mode (str): One of "train", "val", "infer".
+            depth_clip_range (Optional[Tuple[float, float]]): Depth normalization range.
+        """
+        self.zarr_paths = zarr_paths
+        self.preprocessor = None
+        self.objective = objective
+        self.use_relative_action = use_relative_action
+        self.max_train_episodes = max_train_episodes
+        self.depth_clip_range = depth_clip_range
+        self.shape_meta = shape_meta
+        self.motion_type = shape_meta['obs']['state']['type']
+        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2  # per hand pca ncomponents
+        self.sampler_cfg = {
+            'num_image_steps': shape_meta['obs']['rgb']['horizon'],
+            'num_image_stride': shape_meta['obs']['rgb']['stride'],
+            'num_state_steps': shape_meta['obs']['state']['horizon'],
+            'num_state_stride': shape_meta['obs']['state']['stride'],
+            'num_action_steps': shape_meta['action']['horizon'],
+            'num_action_stride': shape_meta['action']['stride'],
+        }
+
+        # Initialize storage lists
+        self.replay_buffers = []
+        self.train_masks = []
+        self.samplers = []
+        self.sampler_lens = []
+
+        self.mode = mode
+        self.aug_transform = None
+        if self.mode == 'train':
+            self.aug_transform = transforms.Compose([
+                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+                transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))
+            ])
+        
+        # Process each zarr file
+        for zarr_path in zarr_paths:
+            # Create replay buffer - only load head camera data
+            replay_buffer = StreamingReplayBuffer.copy_from_path(
+                zarr_path['path'], 
+                keys=[
+                    'image-head',           # Head camera RGB
+                    'depth-head',           # Head camera depth
+                    'state/wrist-head',     # Wrist state in head camera frame
+                    'state/fingertips-head', # Fingertips state in head camera frame
+                    'action/wrist-head',    # Wrist action in head camera frame
+                    'action/fingertips-head', # Fingertips action in head camera frame
+                    'instruction',          # Task instruction
+                    'instruction_num',      # Number of instruction variations
+                    'intrinsic/head',       # Head camera intrinsics
+                ], 
+                lazy_load=True
+            )
+            self.replay_buffers.append(replay_buffer)
+
+            # Create train mask
+            val_mask = get_val_mask(
+                n_episodes=replay_buffer.n_episodes,
+                val_ratio=val_ratio,
+                seed=seed)
+            train_mask = ~val_mask
+            train_mask = downsample_mask(
+                mask=train_mask,
+                max_n=max_train_episodes,
+                seed=seed)
+            self.train_masks.append(train_mask)
+            
+            # Create sampler
+            sampler = SequenceSampler(
+                replay_buffer=replay_buffer, 
+                episode_mask=train_mask, 
+                **self.sampler_cfg
+            )
+            self.samplers.append(sampler)
+            
+            # Record sampler length
+            self.sampler_lens.append(len(sampler))
+
+        if zarr_paths is not None and zarr_paths[0].get('weight', None) is not None:
+            weights = [path['weight'] for path in zarr_paths]
+            super().__init__(weights, self.sampler_lens)
+        else:
+            super().__init__()
+
+    def get_validation_dataset(self):
+        """
+        Build a validation dataset from the held-out episodes.
+
+        Returns:
+            LegendVLARobotDataset: Validation dataset view.
+        """
+        val_set = copy.copy(self)
+        val_set.samplers = []
+        val_set.train_masks = []
+        val_set.sampler_lens = []
+        val_set.mode = 'val'
+        val_set.aug_transform = None
+
+        for i, replay_buffer in enumerate(self.replay_buffers):
+            # Create validation set sampler
+            sampler = SequenceSampler(
+                replay_buffer=replay_buffer,
+                episode_mask=~self.train_masks[i],
+                **self.sampler_cfg
+            )
+            val_set.samplers.append(sampler)
+            val_set.train_masks.append(~self.train_masks[i])
+            val_set.sampler_lens.append(len(sampler))
+            
+        return val_set
+
+    def _sample_to_data(self, sample):
+        """
+        Convert a sampled sequence into model-ready tensors/arrays.
+        
+        Key difference: No extrinsic coordinate transformation needed as 
+        data is already in camera coordinate frame.
+
+        Args:
+            sample (Dict[str, Any]): Mapping of keys to arrays or Future-like objects.
+
+        Returns:
+            Dict[str, np.ndarray]: Processed sample fields.
+        """
+        # Process state and action - simplified version without coordinate transform
+        state, action = self._process_robot_state_action(
+            wrist_state=sample['state/wrist-head'].astype(np.float32), 
+            hand_state=sample['state/fingertips-head'].astype(np.float32), 
+            wrist_action=sample['action/wrist-head'].astype(np.float32), 
+            hand_action=sample['action/fingertips-head'].astype(np.float32), 
+        )
+        
+        # Process images
+        image, depth_images = process_image(
+            sample['image-head'], 
+            sample['depth-head'], 
+            self.aug_transform, 
+            self.depth_clip_range,
+        )
+
+        intrinsic = sample['intrinsic/head'].astype(np.float32)
+        instruction = sample['instruction']
+        instruction_num = sample['instruction_num']
+        
+        # Sample a random instruction from the candidate instructions
+        if self.mode == 'train':
+            idx = np.random.randint(0, instruction_num)
+        else: 
+            idx = 0
+        instruction = instruction[idx]
+        
+        # Process all images in batch
+        processed_results = self.preprocessor(
+            text=instruction, 
+            images=image, 
+            states=state, 
+            actions=action, 
+            intrinsic=intrinsic, 
+            objective=self.objective,
+            depth_images=depth_images,
+            mode=self.mode,
+        )
+        
+        # Pad state and action to the same length as the sampler configuration
+        state_pad = np.zeros((self.sampler_cfg['num_state_steps'], *state.shape[1:]), dtype=np.float32)
+        state_pad[:state.shape[0]] = state
+        action_pad = np.zeros((self.sampler_cfg['num_action_steps'], *action.shape[1:]), dtype=np.float32)
+        actions_valid_mask = np.zeros((self.sampler_cfg['num_action_steps'], *action.shape[1:]), dtype=bool)
+        actions_valid_mask[:action.shape[0]] = True
+        action_pad[:action.shape[0]] = action
+
+        data = {
+            'input_ids': processed_results['input_ids'],
+            'answer_start_idx': processed_results['answer_start_idx'],
+            'attention_mask': processed_results['attention_mask'],
+            'pixel_values': processed_results['pixel_values'], 
+            'states': state_pad,
+            'n_states': np.array(state.shape[0], dtype=np.int32),
+            'actions': action_pad,
+            'actions_valid_mask': actions_valid_mask,
+            'n_actions': np.array(action.shape[0], dtype=np.int32),
+            'is_vla_data': np.array(True, dtype=bool), 
+        }
+        # Add depth_values if available
+        if 'depth_values' in processed_results:
+            data['depth_values'] = processed_results['depth_values']
+        if self.objective != "train_flow":
+            data['labels'] = processed_results['labels']
+        return data
+
+    def _process_robot_state_action(
+        self,
+        wrist_state, 
+        hand_state, 
+        wrist_action, 
+        hand_action, 
+    ):
+        """
+        Process state and action for real robot data.
+        
+        Key differences from process_state_action():
+        - No extrinsic coordinate transformation (data already in camera frame)
+        - Only supports fingertips motion type (real robot data format)
+        - Transform fingertips from camera frame to wrist frame for consistency
+        
+        Args:
+            wrist_state: np.ndarray, shape: [N_state, 18] (wrist pose in camera frame)
+            hand_state: np.ndarray, shape: [N_state, 30] (fingertips in camera frame)
+            wrist_action: np.ndarray, shape: [N_action, 18]
+            hand_action: np.ndarray, shape: [N_action, 30]
+        
+        Returns:
+            state: np.ndarray, shape: [N_state, wrist_dim + hand_dim]
+            action: np.ndarray, shape: [N_action, wrist_dim + hand_dim]
+        """
+        # Check motion type - only fingertips supported for real robot data
+        if self.motion_type != 'fingertips':
+            raise ValueError(f"Real robot dataset only supports 'fingertips' motion type, got '{self.motion_type}'")
+        
+        # Extract relevant hand dimensions (15 dims per hand for fingertips)
+        all_hand_ndim = hand_state.shape[-1] // 2  # per hand dims (15 for fingertips)
+        hand_state = np.concatenate([
+            hand_state[:, :self.hand_ndim], 
+            hand_state[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]
+        ], axis=-1)
+        hand_action = np.concatenate([
+            hand_action[:, :self.hand_ndim], 
+            hand_action[:, all_hand_ndim:all_hand_ndim + self.hand_ndim]
+        ], axis=-1)
+
+        # Transform fingertips from camera frame to wrist frame
+        processed_hand_state = transform_hand_points_to_wrist_frame(hand_state, wrist_state)
+        processed_hand_state = processed_hand_state.reshape(hand_state.shape)
+        processed_hand_action = transform_hand_points_to_wrist_frame(hand_action, wrist_action)
+        processed_hand_action = processed_hand_action.reshape(hand_action.shape)
+
+        # No coordinate transformation for wrist - already in camera frame
+        processed_wrist_state = wrist_state
+        processed_wrist_action = wrist_action
+
+        # Concatenate wrist and hand
+        processed_state = np.concatenate([processed_wrist_state, processed_hand_state], axis=-1)
+        processed_action = np.concatenate([processed_wrist_action, processed_hand_action], axis=-1)
+        
+        # Apply relative action if needed
+        if self.use_relative_action:
+            processed_action = get_relative_action(processed_state[-1], processed_action)
+
+        # Return processed state and action without normalization
+        state = processed_state
+        action = processed_action
+        
+        return state, action
+
+    def set_preprocessor(self, preprocessor):
+        """Set the tokenizer/vision preprocessor."""
+        self.preprocessor = preprocessor
+
+    def get_collator(self):
+        """
+        Build a data collator for batching.
+
+        Returns:
+            LegendVLDataCollator: Collator instance.
+        """
+        assert self.preprocessor is not None, "Preprocessor is not set"
+        padding_side = 'left' if self.mode == 'infer' else 'right'
+        return LegendVLDataCollator(
+            pad_token_id=self.preprocessor.tokenizer.pad_token_id,
+            ignore_index=self.preprocessor.ignore_index,
+            padding_side=padding_side,
+        )
+
+    def __len__(self) -> int:
+        """Return total number of samples across all datasets."""
+        return sum(self.sampler_lens)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Retrieve a sample by index.
+        
+        Args:
+            idx (int): Sample index (across all datasets).
+        
+        Returns:
+            Dict[str, torch.Tensor]: Processed sample data.
+        """
+        # Find corresponding sampler by iterating through sampler lengths
+        curr_idx = idx
+        for i, length in enumerate(self.sampler_lens):
+            if curr_idx < length:
+                sample = self.samplers[i].sample_sequence(curr_idx)
+                break
+            curr_idx -= length
+        
+        # Convert to data
+        data = self._sample_to_data(sample)
+        torch_data = dict_apply(data, torch.from_numpy)
+        
+        return torch_data
 
 class LegendVLDataCollator(BaseDataCollator):
     def __init__(self, pad_token_id: int = 0, ignore_index: int = -100, padding_side: str = 'right'):
