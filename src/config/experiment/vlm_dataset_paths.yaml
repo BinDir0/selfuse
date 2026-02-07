@@ -1,0 +1,30 @@
+# @package _global_
+vlm_dataset_paths:
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/alfworldgpt_filtered"  # high level subtask action
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/indoor_qa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/LLaVA_Instruct_150K_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cocoqa_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/cambrian(filtered)_processed_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lnqa_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lrv_normal(filtered)_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/lvis_instruct4v_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vqav2_filtered"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(llava)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/sharegpt4v(sam)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/textcaps_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/image_textualization(filtered)_filtered" 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/aguvis-stage-1"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/groundui"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/oodvqa"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/tallyqa"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_laion"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/allava_vflan"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/mmevol"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vision_flan(filtered)"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/visual7w"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vizwiz(mathv360k)"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vsr"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/wildvision"
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/yesbut"

@@ -4,6 +4,7 @@ Every action is the delta of the next predicted absolute state and the state at 
 '''
 
 from typing import Dict, Optional
+import pathlib
 import torch
 import numpy as np
 import copy
@@ -75,6 +76,7 @@ class LegendVLADataset(BaseRatioDataset):
         max_train_episodes=None,
         mode = 'train',
         depth_clip_range=None,
+        return_dataset_info: bool = False,
     ):
         """
         Args:
@@ -114,6 +116,8 @@ class LegendVLADataset(BaseRatioDataset):
         self.train_masks = []
         self.samplers = []
         self.sampler_lens = []
+        self.return_dataset_info = return_dataset_info
+        self.dataset_names = []
 
         self.mode = mode
         self.aug_transform = None
@@ -129,6 +133,10 @@ class LegendVLADataset(BaseRatioDataset):
         # Process each zarr file
         for zarr_path in zarr_paths:
             key_mapping = merge_key_mapping(zarr_path.get('mapping', None), self.motion_type)
+            dataset_name = zarr_path.get('name', None)
+            if dataset_name is None:
+                dataset_name = pathlib.Path(str(zarr_path['path'])).stem
+            self.dataset_names.append(dataset_name)
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
                 zarr_path['path'], 
@@ -343,6 +351,9 @@ class LegendVLADataset(BaseRatioDataset):
             curr_idx -= length
         
         data = self._sample_to_data(sample)
+        if self.return_dataset_info:
+            data['dataset_name'] = self.dataset_names[i]
+            data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
 
@@ -367,6 +378,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         weights=[0.5, 0.5, 0.5],
         seed=42,
         mode='train',
+        return_dataset_info: bool = False,
     ):
         """
         Args:
@@ -385,6 +397,10 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         self.mode = mode
         self.seed = seed
         self.preprocessor = None
+        self.return_dataset_info = return_dataset_info
+        self.dataset_names = []
+        self.dataset_lengths = []
+        self.dataset_offsets = []
         
         if self.mode == 'train':
             self.aug_transform = transforms.Compose([
@@ -417,6 +433,8 @@ class LegendVLMDataset(torch.utils.data.Dataset):
                     continue
 
                 loaded_datasets.append(ds_to_add)
+                self.dataset_names.append(pathlib.Path(str(path)).stem)
+                self.dataset_lengths.append(len(ds_to_add))
                 
             except Exception as e:
                 warnings.warn(f"Error loading dataset from {path}: {e}")
@@ -430,6 +448,10 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             # merge all sub datasets that meet the criteria
             self.main_dataset = concatenate_datasets(loaded_datasets)
             print(f"Successfully loaded split '{self.split}' with {len(self.main_dataset)} samples.")
+            offset = 0
+            for length in self.dataset_lengths:
+                self.dataset_offsets.append(offset)
+                offset += length
 
     def get_validation_dataset(self, val_split='test'):
         """
@@ -550,6 +572,17 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         # Find corresponding sampler
         sample = self.main_dataset[idx]
         data = self._sample_to_data(sample, idx)
+        if self.return_dataset_info:
+            dataset_name = "vlm"
+            dataset_local_idx = idx
+            for i, offset in enumerate(self.dataset_offsets):
+                length = self.dataset_lengths[i]
+                if idx < offset + length:
+                    dataset_name = self.dataset_names[i]
+                    dataset_local_idx = idx - offset
+                    break
+            data['dataset_name'] = dataset_name
+            data['dataset_local_idx'] = np.array(dataset_local_idx, dtype=np.int32)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
 
@@ -949,7 +982,13 @@ class LegendVLDataCollator(BaseDataCollator):
                     padding_side='right'
                 )
             else:
-                batch[key] = torch.stack([item[key] for item in data_list])
+                values = [item[key] for item in data_list]
+                if isinstance(values[0], str):
+                    batch[key] = values
+                elif isinstance(values[0], (int, float, bool, np.generic)):
+                    batch[key] = torch.tensor(values)
+                else:
+                    batch[key] = torch.stack(values)
 
         return batch
 

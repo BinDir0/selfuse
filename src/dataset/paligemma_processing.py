@@ -360,6 +360,61 @@ class PaliGemmaProcessor:
         output_str = self.tokenizer.decode(output_ids)
         return self.localization_tokens2float(output_str)
 
+    def postprocess(
+        self,
+        generated_ids,
+        pixel_values,
+        input_ids,
+        num_images: int = None,
+    ):
+        """
+        Postprocess VLM outputs: detokenize and de-normalize images.
+
+        Args:
+            generated_ids: torch.LongTensor [B, L] or list-like
+            pixel_values: torch.Tensor or np.ndarray [B, T, C, H, W] or [B, C, H, W]
+            num_images: Optional[int] - number of images to keep per sample
+
+        Returns:
+            dict:
+                - texts: List[str]
+                - images: np.ndarray uint8 [B, T, H, W, C]
+                - instructions: List[str]
+        """
+        if isinstance(generated_ids, torch.Tensor):
+            generated_ids_list = generated_ids.detach().cpu().tolist()
+        else:
+            generated_ids_list = generated_ids
+        texts = self.tokenizer.batch_decode(generated_ids_list, skip_special_tokens=True)
+
+        if isinstance(input_ids, torch.Tensor):
+            input_ids_list = input_ids.detach().cpu().tolist()
+        else:
+            input_ids_list = input_ids
+        special_ids = set(self.tokenizer.all_special_ids)
+        pad_id = self.tokenizer.pad_token_id
+        instructions = []
+        for ids in input_ids_list:
+            filtered = [i for i in ids if i != pad_id and i not in special_ids]
+            instructions.append(self.tokenizer.decode(filtered, skip_special_tokens=True).strip())
+
+        if isinstance(pixel_values, torch.Tensor):
+            pixel_values = pixel_values.detach().float().cpu().numpy()
+        if pixel_values.ndim == 4:
+            pixel_values = pixel_values[:, None, ...]
+
+        images = pixel_values * IMAGENET_STANDARD_STD + IMAGENET_STANDARD_MEAN
+        images = np.clip(images, 0.0, 1.0)
+        images = (images * 255.0).astype(np.uint8)
+        images = np.transpose(images, (0, 1, 3, 4, 2))
+        if num_images is not None:
+            images = images[:, :num_images]
+        return {
+            "texts": texts,
+            "images": images,
+            "instructions": instructions,
+        }
+
 
 class PaliGemmaVLAProcessor(PaliGemmaProcessor):
     STATE_TOKEN = "<state>"

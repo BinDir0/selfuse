@@ -16,7 +16,11 @@ from datetime import datetime
 
 import hydra
 from omegaconf import OmegaConf
+
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+OmegaConf.register_new_resolver(
+    "now", lambda fmt: datetime.now().strftime(fmt), replace=True
+)
 
 def main():
     parser = argparse.ArgumentParser(description='Compute normalizer statistics from dataset')
@@ -46,7 +50,17 @@ def main():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     
     print(f"Loading config from: {config_path}")
-    cfg = OmegaConf.load(config_path)
+    raw_cfg = OmegaConf.load(config_path)
+    if "defaults" in raw_cfg:
+        # Compose with Hydra to resolve defaults like vla_dataset_paths/vlm_dataset_paths
+        config_dir = config_path.parent.parent.resolve()  # .../src/config (absolute)
+        config_name = f"{config_path.parent.name}/{config_path.stem}"
+        with hydra.initialize_config_dir(
+            config_dir=str(config_dir), version_base=None
+        ):
+            cfg = hydra.compose(config_name=config_name)
+    else:
+        cfg = raw_cfg
     
     # Resolve config
     try:
@@ -69,6 +83,7 @@ def main():
     
     # Create VLA dataset
     print("\n1. Creating VLA dataset...")
+    print(f"   Using vla_dataset_paths: {cfg.vla_dataset_paths}")
     try:
         vla_dataset = hydra.utils.instantiate(cfg.dataset.vla_dataset)
         print(f"   ✓ VLA Dataset created successfully")
@@ -136,4 +151,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
