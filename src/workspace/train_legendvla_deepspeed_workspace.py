@@ -31,7 +31,12 @@ from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.model.common.model_average import ModelAveraging
 from src.utils.metric import get_action_accuracy
-from src.utils.training_utils import TrainingState, capture_output_to_training_log, FullMemoryTracker
+from src.utils.training_utils import (
+    TrainingState,
+    capture_output_to_training_log,
+    FullMemoryTracker,
+    params_l2_norm,
+)
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -459,6 +464,21 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             })
                             if total_norm is not None:
                                 step_log['grad_norm'] = total_norm
+                            with torch.no_grad():
+                                unwrapped_model = accelerator.unwrap_model(self.model)
+                                if cfg.training.train_vlm:
+                                    vlm_params = (
+                                        unwrapped_model.lora_trainable_vlm_parameters
+                                        if cfg.lora
+                                        else unwrapped_model.trainable_vlm_parameters
+                                    )
+                                    step_log["weight_norm/vlm"] = params_l2_norm(vlm_params)
+                                step_log["weight_norm/action"] = params_l2_norm(
+                                    unwrapped_model.action_expert_parameters
+                                )
+                                step_log["weight_norm/diffloss"] = params_l2_norm(
+                                    unwrapped_model.diffloss_parameters
+                                )
                             step_log.update(raw_loss_cpu)
 
                         # Evaluation

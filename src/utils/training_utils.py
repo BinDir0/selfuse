@@ -103,6 +103,17 @@ def capture_output_to_training_log(func):
     return wrapper
 
 
+def params_l2_norm(params):
+    params = [p for p in params if p is not None]
+    if not params:
+        return 0.0
+    device = params[0].device
+    total = torch.zeros((), device=device, dtype=torch.float32)
+    for param in params:
+        total += param.detach().float().pow(2).sum()
+    return torch.sqrt(total).item()
+
+
 class FullMemoryTracker:
     def __init__(self, model):
         self.model = model
