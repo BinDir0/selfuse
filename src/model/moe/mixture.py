@@ -157,8 +157,6 @@ class MixtureAttention(nn.Module):
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        # Gemma2-specific: Query pre-attention scalar (None for Gemma1, 256 for Gemma2)
-        self.query_pre_attn_scalar = config.get("query_pre_attn_scalar", None)
         assert config.hidden_size % self.num_heads == 0
 
         layer = get_layer(
@@ -199,11 +197,6 @@ class MixtureAttention(nn.Module):
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
-        
-        # Gemma2: Apply query pre-attention scaling for numerical stability
-        # This scales queries before attention computation: Q * sqrt(query_pre_attn_scalar)
-        if self.query_pre_attn_scalar is not None:
-            query_states = query_states * (self.query_pre_attn_scalar ** 0.5)
         
         return query_states
 

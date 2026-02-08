@@ -174,7 +174,7 @@ training:
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: # /home/chenzhang/projects/diffloss-ar/outputs/2026.02.07/16.53_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=10000-eval_l1_loss=0.0385
-  normalizer_path: /share_data/chenzhang/projects/EgoVLA/outputs/normalizer/2026.01.29/normalizer.pkl
+  normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07-mix/normalizer.pkl
   num_epochs: 2
   use_bf16: True
   clipping:
@@ -221,8 +221,6 @@ mixture:
     use_lora: ${lora}
     adaptive_mode:  # not applicable for gemma
     rope_theta: 10000.0  # 10000 in gemma
-    # Gemma2-specific: Query pre-attention scalar for numerical stability
-    query_pre_attn_scalar: ${eval:'256 if "${vlm_backbone}"=="paligemma2" else None'}
   action:
     hidden_size: 1024
     intermediate_size: 4096
@@ -303,8 +301,8 @@ policy:
     fourier_scale: 1.0
   latent_condition_projector:
     _target_: src.model.action.action_head.MLPProjector
-    input_dim: 2048
-    output_dim: 2048
+    input_dim: ${mixture.vlm.hidden_size}  # Dynamically use VLM hidden size (2048 for paligemma, 2304 for paligemma2)
+    output_dim: ${mixture.vlm.hidden_size}  # Must match diffloss z_channels
     depth: 2 # 0 means identity projection
     final_layer_norm: True
   action_encoder: 
@@ -381,8 +379,8 @@ policy:
       num_attention_heads: 8
       # Conditional KV heads (paligemma: 1, paligemma2: 4)
       num_key_value_heads: ${eval:'4 if "${vlm_backbone}"=="paligemma2" else 1'}
-      # Conditional head_dim (paligemma: 2048/8=256, paligemma2: 2304/8=288)
-      head_dim: ${eval:'288 if "${vlm_backbone}"=="paligemma2" else 256'}
+      # Conditional head_dim (both paligemma and paligemma2 use 256)
+      head_dim: 256
       rms_norm_eps: 1e-6
       attention_bias: False
       attention_dropout: 0.1
