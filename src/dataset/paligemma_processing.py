@@ -245,6 +245,7 @@ class PaliGemmaProcessor:
         tokenizer.add_eos_token = False
 
         self.tokenizer = tokenizer
+        self.eos_token_id = tokenizer.eos_token_id
         self.sep_token_id = tokenizer('\n', max_length=1, padding="max_length", truncation=True)['input_ids'][0]
 
     def float2localization_tokens(self, text: str):
@@ -324,10 +325,10 @@ class PaliGemmaProcessor:
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             suffix_target=target,
-            need_target=(mode != 'infer'),
+            need_target=('infer' not in mode),
         )
 
-        if mode == 'infer': # Use left padding for inference
+        if mode == 'infer-ar': # Use left padding for autoregressive inference
             self.tokenizer.padding_side = "left"
         else:
             self.tokenizer.padding_side = "right"
@@ -344,7 +345,7 @@ class PaliGemmaProcessor:
         labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
         condition = (labels == self.sep_token_id)
         if not np.any(condition):
-            if mode != 'infer': # Do not warn in inference mode
+            if 'infer' not in mode: # Do not warn in inference mode
                 warnings.warn("The separator token is not found in the input_ids")
             sep_idx = len(labels) - 1
         else : 
@@ -447,7 +448,6 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         tokenizer.add_special_tokens(tokens_to_add)
         self.state_token_id = tokenizer.convert_tokens_to_ids(self.STATE_TOKEN)
         self.action_token_id = tokenizer.convert_tokens_to_ids(self.ACTION_TOKEN)
-        self.eos_token_id = tokenizer.eos_token_id
     
     def __call__(
         self,
@@ -518,7 +518,7 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         prefix = (
             f"Task: {text}, Camera intrinsic: {intrinsic_str}, "
             f"States: {self.STATE_TOKEN * len(states)}"
-            f"Action: "
+            f"Actions: "
         )
         suffix = f"{self.ACTION_TOKEN * len(actions)}"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
@@ -529,10 +529,10 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             suffix_target=suffix,
-            need_target=(mode != 'infer' and objective != "train_flow"),
+            need_target=(('infer' not in mode) and objective != "train_flow"),
         )
 
-        if mode == 'infer': # Use left padding for inference
+        if mode == 'infer-ar': # Use left padding for autoregressive inference
             self.tokenizer.padding_side = "left" 
         else:
             self.tokenizer.padding_side = "right"

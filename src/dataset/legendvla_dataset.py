@@ -185,7 +185,7 @@ class LegendVLADataset(BaseRatioDataset):
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
-        val_set.mode = 'val'
+        val_set.mode = 'val' if self.mode == 'train' else self.mode
         val_set.aug_transform = None
 
         for i, replay_buffer in enumerate(self.replay_buffers):
@@ -354,7 +354,9 @@ class LegendVLADataset(BaseRatioDataset):
         if self.return_dataset_info:
             data['dataset_name'] = self.dataset_names[i]
             data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
-        torch_data = dict_apply(data, torch.from_numpy)
+        torch_data = dict_apply(
+            data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+        )
         return torch_data
 
     def __len__(self):
@@ -387,7 +389,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             cache_dir (Optional[str]): HF datasets cache directory.
             weights (List[float]): Weights for rating-based text selection.
             seed (int): Random seed.
-            mode (str): One of "train" or "val".
+            mode (str): One of "train" or "val" of "infer-ar" or "infer".
         """
         super().__init__()
         self.dataset_paths = [dataset_paths] if isinstance(dataset_paths, str) else dataset_paths
@@ -464,7 +466,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             cache_dir=self.cache_dir,
             weights=self.weights,
             seed=self.seed,
-            mode='val'
+            mode='val' if self.mode == 'train' else self.mode
         )
         
         # inherit the current preprocessor
@@ -583,7 +585,9 @@ class LegendVLMDataset(torch.utils.data.Dataset):
                     break
             data['dataset_name'] = dataset_name
             data['dataset_local_idx'] = np.array(dataset_local_idx, dtype=np.int32)
-        torch_data = dict_apply(data, torch.from_numpy)
+        torch_data = dict_apply(
+            data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+        )
         return torch_data
 
     def __len__(self):
@@ -822,6 +826,7 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
+        val_set.mode = 'val' if self.mode == 'train' else self.mode
 
         for i, replay_buffer in enumerate(self.replay_buffers):
             # Create validation set sampler
