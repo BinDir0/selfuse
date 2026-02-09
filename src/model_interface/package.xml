@@ -1,0 +1,20 @@
+<package format="3">
+  <name>model_interface</name>
+  <version>0.0.1</version>
+  <description>VLA Model Interface Node</description>
+  <maintainer email="user@todo.todo">User</maintainer>
+  <license>TODO</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-scipy</depend>
+  <!-- 注意：websockets 和 msgpack 可能需要通过 pip 安装，rosdep可能不直接支持 -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
