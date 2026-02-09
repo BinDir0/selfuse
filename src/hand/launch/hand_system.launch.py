@@ -26,6 +26,12 @@ def generate_launch_description():
         description='节点运行频率 (Hz)，默认80Hz'
     )
 
+    mjcf_path_arg = DeclareLaunchArgument(
+        'mjcf_path',
+        default_value='',
+        description='MJCF 场景文件路径 (留空使用默认路径)'
+    )
+
     # Hand IK Node
     hand_ik_node = Node(
         package='hand',
@@ -35,6 +41,7 @@ def generate_launch_description():
         parameters=[{
             'hand_side': LaunchConfiguration('hand_side'),
             'frequency': LaunchConfiguration('frequency'),
+            'mjcf_path': LaunchConfiguration('mjcf_path'),
         }],
     )
     
@@ -65,6 +72,7 @@ def generate_launch_description():
     return LaunchDescription([
         hand_side_arg,
         frequency_arg,
+        mjcf_path_arg,
         hand_ik_node,
         hand_fk_node,
         hand_control_node,
