@@ -968,7 +968,7 @@ class LegendVLA(nn.Module):
                         final_embedding[i, state_mask[i]] = state_features[i, :n_states[i]].to(final_embedding.dtype)
                     if n_actions is not None:
                         final_embedding[i, action_mask[i]] = action_features[i, :n_actions[i]].to(final_embedding.dtype)
-                return final_embedding
+        return final_embedding
 
     @torch.inference_mode()
     def infer_action(
