@@ -1,13 +1,13 @@
 # LegendVLA-Inference
 
-## Environment Setup
+## 环境配置
 
-1. **Prerequisites**: Install Docker and download the image file.
-2. **Load Image**: 
+1. **准备工作**：安装 Docker 并下载镜像文件。
+2. **导入镜像**：
 ```bash
 docker load -i teleop.tar
 ```
-3. **Create Container**: Update the host path in `create_container.sh` (line 137) to your local project directory, then execute:
+3. **创建容器**：修改 `create_container.sh` 第 137 行的宿主机路径为本地项目目录，然后执行：
 ```bash
 ./create_container.sh legendvla-inference
 ```
