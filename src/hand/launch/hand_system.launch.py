@@ -32,6 +32,25 @@ def generate_launch_description():
         description='MJCF 场景文件路径 (留空使用默认路径)'
     )
 
+    # Hand Control Node 专用参数
+    serial_port_arg = DeclareLaunchArgument(
+        'serial_port',
+        default_value='/dev/ttyACM0',
+        description='RS485 串口设备路径'
+    )
+
+    baudrate_arg = DeclareLaunchArgument(
+        'baudrate',
+        default_value='460800',
+        description='串口波特率'
+    )
+
+    enable_interpolation_arg = DeclareLaunchArgument(
+        'enable_interpolation',
+        default_value='true',
+        description='是否启用 Ruckig 平滑插值'
+    )
+
     # Hand IK Node
     hand_ik_node = Node(
         package='hand',
@@ -66,6 +85,9 @@ def generate_launch_description():
         parameters=[{
             'hand_side': LaunchConfiguration('hand_side'),
             'frequency': LaunchConfiguration('frequency'),
+            'serial_port': LaunchConfiguration('serial_port'),
+            'baudrate': LaunchConfiguration('baudrate'),
+            'enable_interpolation': LaunchConfiguration('enable_interpolation'),
         }],
     )
 
@@ -73,6 +95,9 @@ def generate_launch_description():
         hand_side_arg,
         frequency_arg,
         mjcf_path_arg,
+        serial_port_arg,
+        baudrate_arg,
+        enable_interpolation_arg,
         hand_ik_node,
         hand_fk_node,
         hand_control_node,
