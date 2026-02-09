@@ -2,9 +2,9 @@
 Sampling utility functions for token sampling during text generation.
 """
 
-from typing import Optional, Tuple
+from typing import Optional, List
 import torch
-
+import torch.nn.functional as F
 
 def sample_token(
     logits: torch.FloatTensor,
@@ -127,3 +127,39 @@ def sample_token(
     
     return sampled_indices
 
+
+def concat_attn_weights(
+    attn_weights_steps: List[torch.Tensor],
+    target_k_len: Optional[int] = None,
+    pad_value: float = 0.0,
+) -> Optional[torch.Tensor]:
+    """
+    Concatenate attention weights across steps on the query dimension.
+
+    Each step can have a different key length (k_len). This helper pads the
+    key dimension to the final KV length (default: last step) and concatenates
+    along the query dimension to build a single tensor.
+    """
+    if not attn_weights_steps:
+        return None
+
+    if target_k_len is None:
+        target_k_len = attn_weights_steps[-1].shape[-1]
+
+    padded_steps = []
+    for step_weights in attn_weights_steps:
+        if step_weights is None:
+            continue
+        pad_len = target_k_len - step_weights.shape[-1]
+        if pad_len < 0:
+            raise ValueError(
+                f"target_k_len ({target_k_len}) smaller than step k_len ({step_weights.shape[-1]})"
+            )
+        if pad_len > 0:
+            step_weights = F.pad(step_weights, (0, pad_len), value=pad_value)
+        padded_steps.append(step_weights)
+
+    if not padded_steps:
+        return None
+
+    return torch.cat(padded_steps, dim=-2)

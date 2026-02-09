@@ -46,7 +46,6 @@ def _pca_project_top3(x: torch.Tensor) -> torch.Tensor:
     proj = torch.matmul(x, components_t)  # [B, P, 3]
     return proj
 
-
 def visualize_pca_dino_style(
     image_features: Union[torch.Tensor, np.ndarray],
     grid_size: Optional[Union[int, Tuple[int, int]]] = None,
@@ -72,6 +71,7 @@ def visualize_pca_dino_style(
         feats = feats.unsqueeze(0)
     if feats.ndim != 3:
         raise ValueError(f"Expected [B, P, D] or [P, D], got shape={feats.shape}")
+    feats = feats.float()
 
     bsz, num_patches, _ = feats.shape
     if grid_size is None:
@@ -102,7 +102,7 @@ def visualize_pca_dino_style(
         return vis.cpu().numpy()
     return vis
 
-
+@torch.compiler.disable() 
 def save_pca_dino_style_images(
     pixel_values: Union[torch.Tensor, np.ndarray],
     image_features: Union[torch.Tensor, np.ndarray],
@@ -139,13 +139,11 @@ def save_pca_dino_style_images(
     assert pixels.shape[0] == vis.shape[0], ValueError(f"Batch size mismatch: pixel_values {pixels.shape[0]} vs vis {vis.shape[0]}")
 
     # Convert pixel_values to [B, H, W, 3] float in [0, 1]
-    if pixels.shape[1] == 1:
-        pixels = pixels.repeat(1, 3, 1, 1)
-    if pixels.shape[1] > 3:
-        pixels = pixels[:, :3]
     pixels = pixels.float()
-    if pixels.max() > 1.5:
+    if pixels.max() > 10:
         pixels = pixels / 255.0
+    if pixels.min() < -0.1: 
+        pixels = pixels / 2.0 + 0.5
     pixels = pixels.clamp(0.0, 1.0).permute(0, 2, 3, 1)
     pixels_np = pixels.cpu().numpy()
 
