@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""
+Camera Node Launch File
+启动单个相机节点
+"""
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    """生成启动描述 - 启动单个RealSense相机节点"""
+
+    # 声明启动参数
+    camera_name_arg = DeclareLaunchArgument(
+        'camera_name',
+        default_value='head',
+        description='相机名称 (head 或 chest)'
+    )
+    
+    serial_number_arg = DeclareLaunchArgument(
+        'serial_number',
+        default_value='',
+        description='相机序列号，留空则使用默认设备'
+    )
+    
+    frequency_arg = DeclareLaunchArgument(
+        'frequency',
+        default_value='30.0',
+        description='图像发布频率 (Hz)'
+    )
+    
+    width_arg = DeclareLaunchArgument(
+        'width',
+        default_value='640',
+        description='图像宽度'
+    )
+    
+    height_arg = DeclareLaunchArgument(
+        'height',
+        default_value='480',
+        description='图像高度'
+    )
+
+    # 相机节点
+    camera_node = Node(
+        package='camera_node',
+        executable='camera_node',
+        name='camera_node',
+        output='screen',
+        parameters=[{
+            'camera_name': LaunchConfiguration('camera_name'),
+            'serial_number': LaunchConfiguration('serial_number'),
+            'frequency': LaunchConfiguration('frequency'),
+            'width': LaunchConfiguration('width'),
+            'height': LaunchConfiguration('height'),
+        }],
+    )
+
+    return LaunchDescription([
+        camera_name_arg,
+        serial_number_arg,
+        frequency_arg,
+        width_arg,
+        height_arg,
+        camera_node,
+    ])
+
