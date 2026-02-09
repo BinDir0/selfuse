@@ -6,11 +6,61 @@ Embedding 分布分析工具
 
 import numpy as np
 import torch
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, Sequence
 from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
+
+
+def plot_embedding_l2norm_by_position(
+    embeddings: Union[torch.Tensor, np.ndarray],
+    save_dir: Optional[Union[str, Path]] = None,
+    sample_ids: Optional[Sequence[int]] = None,
+    show: bool = False,
+):
+    """
+    For each sample in [B, P, D], plot L2 norm over token position (1..P).
+
+    Args:
+        embeddings: Embedding tensor [B, P, D].
+        save_dir: Directory to save plots. If None and show=False, no files saved.
+        sample_ids: Optional subset of sample indices to plot. Defaults to all.
+        show: If True, display plots interactively.
+    """
+    if isinstance(embeddings, torch.Tensor):
+        embeddings = embeddings.detach().cpu().float().numpy()
+    if embeddings.ndim != 3:
+        raise ValueError(f"Expected embeddings [B, P, D], got shape={embeddings.shape}")
+
+    bsz, num_tokens, _ = embeddings.shape
+    if sample_ids is None:
+        sample_ids = list(range(bsz))
+
+    if save_dir is not None:
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+    positions = np.arange(1, num_tokens + 1)
+    for idx in sample_ids:
+        if idx < 0 or idx >= bsz:
+            raise ValueError(f"sample_ids contains invalid index {idx} (B={bsz})")
+        norms = np.linalg.norm(embeddings[idx], axis=-1)
+
+        plt.figure(figsize=(8, 3))
+        plt.plot(positions, norms, linewidth=1.5)
+        plt.title(f"Embedding L2 Norm by Position (sample {idx})")
+        plt.xlabel("Position (1..P)")
+        plt.ylabel("L2 Norm")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_dir is not None:
+            out_file = save_dir / f"l2norm_pos_{idx:04d}.png"
+            plt.savefig(out_file, dpi=200, bbox_inches="tight")
+        if show:
+            plt.show()
+        plt.close()
 
 
 def analyze_embedding_distribution(
