@@ -35,7 +35,7 @@ def generate_launch_description():
 
     # Head相机节点
     head_camera_node = Node(
-        package='camera_node',
+        package='camera',
         executable='camera_node',
         name='head_camera_node',
         namespace='head_camera',
@@ -51,7 +51,7 @@ def generate_launch_description():
     
     # Chest相机节点
     chest_camera_node = Node(
-        package='camera_node',
+        package='camera',
         executable='camera_node',
         name='chest_camera_node',
         namespace='chest_camera',

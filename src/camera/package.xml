@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>camera_node</name>
+  <name>camera</name>
   <version>1.0.0</version>
-  <description>Camera Node for LegendVLA Inference System - 30Hz RGB-D image publisher</description>
+  <description>Camera package for LegendVLA Inference System - 30Hz RGB-D image publisher</description>
   
   <!-- Maintainer info -->
   <maintainer email="admin@legendvla.com">LegendVLA Team</maintainer>

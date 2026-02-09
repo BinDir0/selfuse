@@ -46,7 +46,7 @@ def generate_launch_description():
 
     # 相机节点
     camera_node = Node(
-        package='camera_node',
+        package='camera',
         executable='camera_node',
         name='camera_node',
         output='screen',

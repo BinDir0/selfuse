@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from camera_node.realsense_image_module import RealSenseImage
+from camera.realsense_image_module import RealSenseImage
 
 
 class CameraNode(Node):

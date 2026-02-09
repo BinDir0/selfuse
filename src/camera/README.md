@@ -1,6 +1,6 @@
-# Camera Node
+# Camera
 
-LegendVLA Inference系统的相机节点，用于采集和发布RGB-D图像数据。
+LegendVLA Inference系统的相机包，用于采集和发布RGB-D图像数据。
 
 ## 架构说明
 
@@ -22,8 +22,8 @@ LegendVLA Inference系统的相机节点，用于采集和发布RGB-D图像数�
 ## 文件结构
 
 ```
-camera_node/
-├── camera_node/
+camera/
+├── camera/
 │   ├── __init__.py                    # 包初始化
 │   ├── camera_node.py                 # 主节点实现
 │   └── realsense_image_module.py      # RealSense相机封装
@@ -31,7 +31,7 @@ camera_node/
 │   ├── camera_node.launch.py          # 单相机启动文件
 │   └── dual_cameras.launch.py         # 双相机启动文件
 ├── resource/
-│   └── camera_node                    # 资源标记文件
+│   └── camera                         # 资源标记文件
 ├── CMakeLists.txt                     # CMake配置
 ├── package.xml                        # 包描述文件
 └── README.md                          # 本文件
@@ -67,8 +67,8 @@ pip install pyrealsense2 opencv-python numpy
 在工作空间根目录下：
 
 ```bash
-# 编译camera_node包
-colcon build --packages-select camera_node
+# 编译camera包
+colcon build --packages-select camera
 
 # 加载环境
 source install/setup.bash
@@ -80,37 +80,37 @@ source install/setup.bash
 
 ```bash
 # 使用默认参数（head相机，30Hz）
-ros2 launch camera_node camera_node.launch.py
+ros2 launch camera camera_node.launch.py
 
 # 指定相机名称
-ros2 launch camera_node camera_node.launch.py camera_name:=chest
+ros2 launch camera camera_node.launch.py camera_name:=chest
 
 # 指定序列号（用于多相机识别）
-ros2 launch camera_node camera_node.launch.py camera_name:=head serial_number:=134222070573
+ros2 launch camera camera_node.launch.py camera_name:=head serial_number:=134222070573
 
 # 自定义频率和分辨率
-ros2 launch camera_node camera_node.launch.py frequency:=15.0 width:=1280 height:=720
+ros2 launch camera camera_node.launch.py frequency:=15.0 width:=1280 height:=720
 ```
 
 ### 2. 启动双相机系统
 
 ```bash
 # 使用默认参数
-ros2 launch camera_node dual_cameras.launch.py
+ros2 launch camera dual_cameras.launch.py
 
 # 指定两个相机的序列号
-ros2 launch camera_node dual_cameras.launch.py \
+ros2 launch camera dual_cameras.launch.py \
     head_serial:=134222070573 \
     chest_serial:=836612070298
 
 # 自定义频率
-ros2 launch camera_node dual_cameras.launch.py frequency:=20.0
+ros2 launch camera dual_cameras.launch.py frequency:=20.0
 ```
 
 ### 3. 直接运行节点
 
 ```bash
-ros2 run camera_node camera_node --ros-args \
+ros2 run camera camera_node --ros-args \
     -p camera_name:=head \
     -p frequency:=30.0
 ```
@@ -236,7 +236,7 @@ ros2 bag record /camera/head/rgb /camera/head/depth
 
 如果需要支持其他类型的相机，可以：
 
-1. 在`camera_node/`目录下创建新的相机模块（如`other_camera_module.py`）
+1. 在`camera/`目录下创建新的相机模块（如`other_camera_module.py`）
 2. 实现相同的接口：
    - `__init__(SN_number, width, height, fps)`
    - `capture_rgb_depth_frames()` -> (rgb, depth)
