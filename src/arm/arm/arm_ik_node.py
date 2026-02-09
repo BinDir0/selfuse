@@ -63,7 +63,13 @@ class ArmIKNode(Node):
         self.is_env_initialized = False
 
         if self.xml_path == '':
-            self.xml_path = "assets/PsiRobot_DC_02_OnlyArm/meshes/psi_robot_scene_transformed.xml"
+            # Use absolute path to assets directory
+            # Current file is at: src/arm/arm/arm_ik_node.py
+            # Assets directory is at: assets/PsiRobot_DC_02_OnlyArm/meshes/
+            import os
+            from pathlib import Path
+            repo_root = Path(__file__).parent.parent.parent.parent
+            self.xml_path = str(repo_root / "assets" / "PsiRobot_DC_02_OnlyArm" / "meshes" / "psi_robot_scene_transformed.xml")
         
         # 创建ROS2发布器和订阅器
         self.left_arm_pub = self.create_publisher(

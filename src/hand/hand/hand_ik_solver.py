@@ -149,6 +149,7 @@ class HandIKSolver:
             1. 用户显式指定的 mjcf_path
             2. ROS2 包 share 目录下的 models/ (colcon build 后)
             3. 源码相对路径 (开发模式 / Docker 直接运行)
+            4. Repository assets 目录 (新增: /path/to/LegendVLA-Inference/assets)
         """
         if mjcf_path is not None:
             path = Path(mjcf_path)
@@ -182,10 +183,30 @@ class HandIKSolver:
         if source_path.exists():
             return source_path
 
+        # 尝试 3: Repository assets 目录
+        #   hand_ik_solver.py 位于 src/hand/hand/
+        #   assets 目录位于        assets/
+        #   路径: assets/ruiyan_hand/InspiredHand_RuiYan/0611_v1.4/Version_3.0/RuiYan_Hand_{Left|Right}_Mimic/meshes/
+        repo_root = Path(__file__).parent.parent.parent.parent  # Go up to repo root
+        assets_path = (
+            repo_root
+            / "assets"
+            / "ruiyan_hand"
+            / "InspiredHand_RuiYan"
+            / "0611_v1.4"
+            / "Version_3.0"
+            / f"RuiYan_Hand_{hand_prefix}_Mimic"
+            / "meshes"
+            / scene_filename
+        )
+        if assets_path.exists():
+            return assets_path
+
         raise FileNotFoundError(
             f"MJCF file not found in any search path:\n"
             f"  - Share dir: (ament_index lookup failed or file missing)\n"
             f"  - Source dir: {source_path}\n"
+            f"  - Assets dir: {assets_path}\n"
             "Please set the 'mjcf_path' parameter to the correct absolute path."
         )
 
