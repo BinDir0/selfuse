@@ -2,24 +2,68 @@
 name: legendvla_inference
 exp_name: "inference_pretrain"
 
+human_dataset_mapping: 
+  image: image
+  depth: depth
+  wrist_state: state/wrist
+  hand_state: state/fingertips
+  wrist_action: action/wrist
+  hand_action: action/fingertips
+  extrinsic: extrinsic
+  intrinsic: intrinsic
+  instruction: instruction
+  instruction_num: instruction_num
+real_world_dataset_mapping: 
+  image: image-head
+  depth: depth-head
+  wrist_state: state/wrist-head
+  hand_state: state/fingertips-head
+  wrist_action: action/wrist-head
+  hand_action: action/fingertips-head
+  extrinsic: extrinsic
+  intrinsic: intrinsic/head
+  instruction: instruction
+  instruction_num: instruction_num
+
 # 使用较小的数据集进行快速测试（可选）
 vla_dataset_paths:
- - name: oakink2_test_seen
-   path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen_presence_clean.zarr 
+  - name: Dexterous_grasping
+    path: /share_data/yanruilin/complete_data/Dexterous_grasping.zarr
+    mapping: ${real_world_dataset_mapping}
+    weight: 0.2
+#  - name: oakink2_test_seen
+#    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen_presence_clean.zarr 
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
 #  - name: oakink2_test_unseen_scene
 #    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene_presence_clean.zarr  
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
 #  - name: oakink2_test_unseen_task
 #    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_task_presence_clean.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
 #  - name: egodex_test
 #    path: /share_data/guantianrui/datasets/EgoDex/egodex_filter_test_presence_clean.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
 #  - name: taco_test_seen
 #    path: /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
 #  - name: taco_test_unseen_task
 #    path: /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
+#    mapping: ${human_dataset_mapping}
+#    weight: 1
+
+vlm_dataset_paths: 
+ - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
+#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/alfworldgpt_filtered"  # high level subtask action
 
 # 覆盖dataloader配置（推理时不需要shuffle）
 dataloader:
-  batch_size: 64
+  batch_size: 16
   num_workers: 16
   shuffle: False
   pin_memory: True
@@ -29,12 +73,14 @@ dataloader:
 logging:
   mode: disabled
 
+tokenizer_padding: longest # longest or max_length
+
 # 推理专用配置
 inference:
-  # 推理模式: "ar" (autoregressive) or "flow" (flow matching)
-  mode: ar
+  # 推理模式: "ar" (autoregressive) or "flow" (flow matching) or "vlm" (text)
+  mode: flow
   autoregressive_config: 
-    max_new_tokens: 30
+    max_new_tokens: 128
     temperature: 1.0
     top_k: 10
     top_p: 1.0
@@ -43,18 +89,20 @@ inference:
   # 模型配置文件路径（yaml文件，包含policy配置）
   # 如果指定，将从该文件加载模型配置并初始化模型
   # 如果不指定，将使用当前配置中的policy配置
-  model_config_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.24/13.58_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
+  model_config_path: /home/chenzhang/projects/diffloss-ar/outputs/2026.02.07/23.37_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
   
   # checkpoint路径（用于加载模型权重）
-  checkpoint_path: /home/chenzhang/projects/EgoVLA/outputs/2026.01.25/23.08_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=30000-eval_l1_loss=0.0515/pytorch_model/mp_rank_00_model_states.pt
+  checkpoint_path: /home/chenzhang/projects/diffloss-ar/outputs/2026.02.07/23.37_legendvla_pretrain_legendvla_deepspeed/step_checkpoints/update_step_50000/pytorch_model/mp_rank_00_model_states.pt
   
   # 数据配置
   # Note: If val_ratio=0.0 in dataset config, all data is used regardless of this setting
-  use_val_dataset: False  # True: 使用验证集（需要 val_ratio > 0）, False: 使用训练集或完整数据集
+  use_val_dataset: True  # True: 使用验证集（需要 val_ratio > 0）, False: 使用训练集或完整数据集
   
   # 推理控制
-  max_steps: null  # 最大推理步数，null表示推理所有数据
+  max_steps: 1  # 最大推理步数，null表示推理所有数据
   skip_first: 0  # 跳过前N个batch
+  save_zarr: False  # True: 保存zarr, False: 仅内存统计
+  attention_sample_count: 4  # 随机保存 attention_maps 的样本数
   
   # 精度配置
   use_mixed_precision: True  # True: 使用混合精度（bf16/fp16）加速推理，False: 使用全精度（fp32）获得最高精度
@@ -75,7 +123,7 @@ hydra:
     override_dirname: ${name}
   run:
     # need to change to the correct path for multi-node training
-    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}
   sweep:
-    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}_${hydra:runtime.choices.experiment}
+    dir: outputs/${now:%Y.%m.%d}/${now:%H.%M}_${name}
     subdir: ${hydra.job.num}

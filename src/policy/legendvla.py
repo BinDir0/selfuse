@@ -22,7 +22,7 @@ from src.model.common.modules import (
     TimeEncoder,
 )
 from src.utils.monitor import log_execution_time
-from src.utils.generation_utils import sample_token
+from src.utils.generation_utils import sample_token, concat_attn_weights
 
 log = logging.getLogger(__name__)
 
@@ -758,9 +758,9 @@ class LegendVLA(nn.Module):
         dtype: torch.dtype = torch.float32,
     ) -> Tuple[torch.FloatTensor, torch.LongTensor]:
         """
-        Build causal mask and position IDs for text generation.
+        Build causal mask and position IDs for autoregressive generation.
         
-        Creates attention masks for autoregressive text generation with optional KV cache.
+        Creates attention masks for autoregressive generation with optional KV cache.
         - Prefill phase: No masking (all tokens can attend to each other)
         - Generation phase: No masking (query can attend to all cached tokens)
         
@@ -776,28 +776,27 @@ class LegendVLA(nn.Module):
         """
         device = attention_mask.device
         bsz = attention_mask.size(0)
-        
-        # Assert left padding: once we see a valid token (1), all subsequent tokens must be valid
-        # Check that there are no padding tokens after the first valid token
-        has_padding = (attention_mask == 0).any(dim=-1)  # [B], True if batch has padding
-        if has_padding.any():
-            # For batches with padding, check left padding property
-            for b in range(bsz):
-                if has_padding[b]:
-                    mask = attention_mask[b]  # [seq_len]
-                    # Find first valid token
-                    first_valid_idx = (mask != 0).nonzero(as_tuple=True)[0]
-                    assert len(first_valid_idx) > 0, "Expect left padding: no valid tokens found"
-                    first_valid_idx = first_valid_idx[0].item()
-                    # All tokens before first_valid_idx should be padding (0)
-                    assert (mask[:first_valid_idx] == 0).all(), \
-                        f"Expect left padding: found valid tokens before first valid token at position {first_valid_idx}"
-                    # All tokens from first_valid_idx onwards should be valid (non-zero)
-                    assert (mask[first_valid_idx:] != 0).all(), \
-                        f"Expect left padding: found padding tokens after first valid token at position {first_valid_idx}"
 
         if kv_cache is None or kv_cache.num_items() == 0:
-            # Prefill phase: create causal mask
+            # Assert left padding: once we see a valid token (1), all subsequent tokens must be valid
+            # Check that there are no padding tokens after the first valid token
+            has_padding = (attention_mask == 0).any(dim=-1)  # [B], True if batch has padding
+            if has_padding.any():
+                # For batches with padding, check left padding property
+                for b in range(bsz):
+                    if has_padding[b]:
+                        mask = attention_mask[b]  # [seq_len]
+                        # Find first valid token
+                        first_valid_idx = (mask != 0).nonzero(as_tuple=True)[0]
+                        assert len(first_valid_idx) > 0, "Expect left padding: no valid tokens found"
+                        first_valid_idx = first_valid_idx[0].item()
+                        # All tokens before first_valid_idx should be padding (0)
+                        assert (mask[:first_valid_idx] == 0).all(), \
+                            f"Expect left padding: found valid tokens before first valid token at position {first_valid_idx}"
+                        # All tokens from first_valid_idx onwards should be valid (non-zero)
+                        assert (mask[first_valid_idx:] != 0).all(), \
+                            f"Expect left padding: found padding tokens after first valid token at position {first_valid_idx}"
+            # Prefill phase: create bidirectional mask
             # During inference, we use left padding by default
             # Initialize all positions to minimum value (masked out by default)
             causal_mask = torch.full(
@@ -870,7 +869,10 @@ class LegendVLA(nn.Module):
             has_depth_values (Optional[torch.LongTensor]): [B] Bool data indicating whether this sample has valid depth (optional)
             states: [B, state_len, state_dim]
             actions: [B, action_len, action_dim]
+            n_states: [B]
+            n_actions: [B]
             is_vla_data: [B]
+            dtype: torch.dtype
         
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
@@ -920,7 +922,7 @@ class LegendVLA(nn.Module):
 
         # put embedding together - image, text, answer, padding
         final_embedding = torch.full(
-            (bsz, seq_len, self.vlm_hidden_size), self.pad_token_id, dtype=dtype, device=device
+            (bsz, seq_len, self.vlm_hidden_size), 0, dtype=dtype, device=device
         )
 
         # [Batch_Size, Seq_Len]
@@ -930,11 +932,15 @@ class LegendVLA(nn.Module):
         final_embedding[text_mask] = inputs_embeds[text_mask].to(final_embedding.dtype)
         state_mask = input_ids == self.state_token_index
         action_mask = input_ids == self.action_token_index
-        assert torch.all(n_states == state_mask.sum(dim=1))
-        assert torch.all(n_actions == action_mask.sum(dim=1))
+        if n_states is not None:
+            assert torch.all(n_states == state_mask.sum(dim=1))
+        if n_actions is not None: 
+            assert torch.all(n_actions == action_mask.sum(dim=1))
         # The features will be scaled internally in the joint model
-        state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size**0.5)
-        action_features = self.action_encoder_ar(actions) / (self.vlm_hidden_size**0.5)
+        if states is not None:
+            state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size**0.5)
+        if actions is not None:
+            action_features = self.action_encoder_ar(actions) / (self.vlm_hidden_size**0.5)
         if pixel_values is not None:
             image_mask = input_ids == self.image_token_index
             # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
@@ -957,15 +963,18 @@ class LegendVLA(nn.Module):
                 paired_image_features = self.multi_modal_projector(paired_image_features)
                 scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
                 final_embedding[i, image_indices] = scaled_image_features
-                if is_vla_data[i]:
-                    final_embedding[i, state_mask[i]] = state_features[i, :n_states[i]].to(final_embedding.dtype)
-                    final_embedding[i, action_mask[i]] = action_features[i, :n_actions[i]].to(final_embedding.dtype)
-        return final_embedding
+                if is_vla_data is not None and is_vla_data[i]:
+                    if n_states is not None:
+                        final_embedding[i, state_mask[i]] = state_features[i, :n_states[i]].to(final_embedding.dtype)
+                    if n_actions is not None:
+                        final_embedding[i, action_mask[i]] = action_features[i, :n_actions[i]].to(final_embedding.dtype)
+                return final_embedding
 
     @torch.inference_mode()
     def infer_action(
         self,
         input: dict,
+        return_attn_weights: bool = False
     ) -> torch.FloatTensor:
         """
         Inference function for action generation using flow matching.
@@ -980,6 +989,7 @@ class LegendVLA(nn.Module):
                   Attention mask for action tokens (broadcasts to all heads)
                 - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
                 - action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
+            return_attn_weights (bool): Whether to return attention weights
         
         Returns:
             torch.FloatTensor: [B, horizon_steps, action_dim] Generated action sequence
@@ -1010,9 +1020,7 @@ class LegendVLA(nn.Module):
             depth_values=depth_values,
             has_depth_values=has_depth_values,
             states=input["states"],
-            actions=input["actions"],
             n_states=input["n_states"],
-            n_actions=input["n_actions"],
             is_vla_data=input["is_vla_data"],
             dtype=pixel_values.dtype
         )
@@ -1029,6 +1037,9 @@ class LegendVLA(nn.Module):
             kv_caches=kv_caches,
             return_caches=True,
         )
+        # [num_layers, B, num_heads, seq_len, seq_len]
+        vlm_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
+        action_expert_attn_weights = None
 
         # sample pure action noise
         action = torch.randn(
@@ -1038,7 +1049,7 @@ class LegendVLA(nn.Module):
         # forward euler integration --- using kv caches of vlm
         delta_t = 1.0 / self.num_inference_steps
         t = torch.zeros(bsz, device=device, dtype=dtype)
-        for _ in range(self.num_inference_steps):
+        for step_idx in range(self.num_inference_steps):
             # encode action and time into embedding
             time_cond = self.time_embedding(t)
             # [Batch_Size, Horizon_Steps, Embed_Dim]
@@ -1056,101 +1067,16 @@ class LegendVLA(nn.Module):
                 kv_caches=kv_caches,
                 cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
             )["action"]
+            if step_idx == 0:
+                action_expert_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
+            
             # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
             action_vel = self.action_decoder(action_embeds)
             action += delta_t * action_vel
             t += delta_t
 
-        return action
-
-    @torch.inference_mode()
-    def infer_action_naive(
-        self,
-        input: dict,
-    ) -> torch.FloatTensor:
-        """
-        Naive inference function for action generation (runs VLM at each step).
-        
-        Args:
-            input (dict): Input dictionary containing:
-                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
-                - causal_mask (torch.FloatTensor): [B, 1, total_len, total_len] 
-                  Full causal attention mask for all tokens (broadcasts to all heads)
-                - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
-        
-        Returns:
-            torch.FloatTensor: [B, horizon_steps, action_dim] Generated action sequence
-        """
-        # Extract inputs from dict
-        input_ids = input["input_ids"]
-        pixel_values = input["pixel_values"]
-        causal_mask = input["causal_mask"]
-        vlm_position_ids = input["vlm_position_ids"]
-        action_position_ids = input["action_position_ids"]
-
-        dtype, device = pixel_values.dtype, pixel_values.device
-        bsz = pixel_values.size(0)
-
-        kv_caches = self.joint_model.build_mixture_caches()
-
-        # merge the text tokens and the image tokens
-        if 'depth_values' in input:
-            depth_values = input["depth_values"]
-            has_depth_values = input["has_depth_values"]
-        else:
-            depth_values = None
-            has_depth_values = None
-        inputs_embeds = self._forward_siglip_and_text_embedding(
-            input_ids=input_ids,
-            pixel_values=pixel_values,
-            depth_values=depth_values,
-            has_depth_values=has_depth_values,
-            states=input["states"],
-            actions=input["actions"],
-            n_states=input["n_states"],
-            n_actions=input["n_actions"],
-            is_vla_data=input["is_vla_data"],
-            dtype=pixel_values.dtype
-        )
-
-        # sample pure action noise
-        action = torch.randn(
-            (bsz, self.horizon_steps, self.action_dim), device=device, dtype=dtype
-        )
-
-        # forward euler integration --- run vlm in each step, which is unnecessary
-        delta_t = 1.0 / self.num_inference_steps
-        t = torch.zeros(bsz, device=device, dtype=dtype)
-        for _ in range(self.num_inference_steps):
-            # encode action and time into embedding
-            time_cond = self.time_embedding(t)
-            # [Batch_Size, Horizon_Steps, Embed_Dim]
-            if self.action_expert_adaptive_mode:
-                action_embeds = self.action_encoder(action)
-            else:
-                action_embeds = self.action_encoder(action, time_cond)
-            action_embeds = action_embeds / (self.action_hidden_size**0.5)
-            action_embeds = self.joint_model(
-                attention_mask=causal_mask,
-                position_ids_all={
-                    "vlm": vlm_position_ids,
-                    "action": action_position_ids,
-                },
-                embeds_all={
-                    "vlm": inputs_embeds.clone(),  # clone needed due to modified in-place
-                    "action": action_embeds,
-                },
-                time_cond=time_cond,
-                kv_caches=kv_caches,
-                cache_mode="no_append",  # no new tokens
-            )["action"]
-            # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
-            action_vel = self.action_decoder(action_embeds)
-            action += delta_t * action_vel
-            t += delta_t
-
+        if return_attn_weights:
+            return action, vlm_attn_weights, action_expert_attn_weights
         return action
 
     @torch.inference_mode()
@@ -1159,6 +1085,7 @@ class LegendVLA(nn.Module):
         input: dict,
         kv_cache: Optional[KVCache] = None,
         dtype: torch.dtype = torch.float32,
+        return_attn_weights: bool = False,
     ) -> dict:
         """
         Inference function for discrete action generation.
@@ -1170,31 +1097,30 @@ class LegendVLA(nn.Module):
                   If None, only text tokens are processed
                 - attention_mask (torch.LongTensor): [B, seq_len] Attention mask
             kv_cache (Optional[KVCache]): Key-value cache for the generated tokens
+            dtype (torch.dtype): Data type for the input and output
+            return_attn_weights (bool): Whether to return attention weights
 
         Returns:
             dict: Dictionary containing:
                 - logits (torch.FloatTensor): [B, seq_len, vocab_size] Logits for the generated tokens
                 - kv_cache (KVCache): Key-value cache for the generated tokens
+                - attn_weights (torch.FloatTensor, optional): [num_layers, B, num_heads, q_len, k_len]
         """
         input_ids = input["input_ids"]
-        pixel_values = input.get("pixel_values", None)
-        depth_values = input.get("depth_values", None)
-        has_depth_values = input.get("has_depth_values", None)
         attention_mask = input["attention_mask"]
-
         q_len = input_ids.size(1)
 
         # text tokens + image tokens
         inputs_embeds = self._forward_siglip_and_text_embedding(
             input_ids=input_ids,
-            pixel_values=pixel_values,
-            depth_values=depth_values,
-            has_depth_values=has_depth_values,
-            states=input["states"],
-            actions=input["actions"],
-            n_states=input["n_states"],
-            n_actions=input["n_actions"],
-            is_vla_data=input["is_vla_data"],
+            pixel_values=input.get("pixel_values"),
+            depth_values=input.get("depth_values"),
+            has_depth_values=input.get("has_depth_values"),
+            states=input.get("states"),
+            actions=input.get("actions"),
+            n_states=input.get("n_states"),
+            n_actions=input.get("n_actions"),
+            is_vla_data=input.get("is_vla_data"),
             dtype=dtype
         )
 
@@ -1219,12 +1145,14 @@ class LegendVLA(nn.Module):
         output = {
             "logits": logits,
         }
+        if return_attn_weights:
+            output["attn_weights"] = torch.stack(self.attn_weights, dim=0).detach().clone()
         if kv_cache is not None:
             output["kv_cache"] = kv_cache
         return output
 
     @torch.inference_mode()
-    def infer_autoregressive(
+    def infer_vlm(
         self,
         input: dict,
         max_new_tokens: int,
@@ -1234,9 +1162,10 @@ class LegendVLA(nn.Module):
         allowed_token_ids: Optional[Union[torch.LongTensor, List[int], Tuple[int, int]]] = None,
         eos_token_id: Optional[int] = None,
         return_kv_cache: bool = False,
+        return_attn_weights: bool = False,
     ) -> dict:
         """
-        Multi-step autoregressive generation function, divided into prefill and incremental prediction phases.
+        Multi-step autoregressive generation function for VLM, divided into prefill and incremental prediction phases.
         
         Args:
             input (dict): Input dictionary containing:
@@ -1256,17 +1185,17 @@ class LegendVLA(nn.Module):
                 - Tuple (min_id, max_id) representing a range
             eos_token_id (Optional[int]): End-of-sequence token ID, early stopping if this token is generated
             return_kv_cache (bool): Whether to return KV cache
+            return_attn_weights (bool): Whether to return attention weights
         
         Returns:
             dict: Dictionary containing:
                 - generated_ids (torch.LongTensor): [B, prefill_len + num_generated] Generated token IDs
                 - kv_cache (KVCache, optional): KV cache (if return_kv_cache=True)
+                - attn_weights (torch.FloatTensor, optional): [num_layers, B, num_heads, total_q_len, total_k_len]
         """
         input_ids = input["input_ids"]
         pixel_values = input["pixel_values"]
-        depth_values = input.get("depth_values", None)
-        has_depth_values = input.get("has_depth_values", None)
-        attention_mask = input.get("attention_mask", None)
+        attention_mask = input.get("attention_mask")
         
         batch_size = input_ids.size(0)
         device, dtype = input_ids.device, pixel_values.dtype
@@ -1284,14 +1213,22 @@ class LegendVLA(nn.Module):
         prefill_input = {
             "input_ids": input_ids,
             "pixel_values": pixel_values,
-            "depth_values": depth_values,
-            "has_depth_values": has_depth_values,
+            "depth_values": input.get("depth_values"),
+            "has_depth_values": input.get("has_depth_values"),
             "attention_mask": attention_mask,
         }
         
-        prefill_output = self.infer_single_step(prefill_input, kv_cache=kv_cache, dtype=dtype)
+        attn_weights_steps = [] if return_attn_weights else None
+        prefill_output = self.infer_single_step(
+            prefill_input,
+            kv_cache=kv_cache,
+            dtype=dtype,
+            return_attn_weights=return_attn_weights,
+        )
         prefill_logits = prefill_output["logits"]  # [B, seq_len, vocab_size]
         kv_cache = prefill_output.get("kv_cache", kv_cache)
+        if return_attn_weights:
+            attn_weights_steps.append(prefill_output.get("attn_weights"))
         
         # Sample first new token from the last position of prefill
         next_token_logits = prefill_logits[:, -1, :]  # [B, vocab_size]
@@ -1340,9 +1277,16 @@ class LegendVLA(nn.Module):
                 "attention_mask": attention_mask,  # [B, seq_len]
             }
             
-            step_output = self.infer_single_step(step_input, kv_cache=kv_cache, dtype=dtype)
+            step_output = self.infer_single_step(
+                step_input,
+                kv_cache=kv_cache,
+                dtype=dtype,
+                return_attn_weights=return_attn_weights,
+            )
             step_logits = step_output["logits"]  # [B, 1, vocab_size]
             kv_cache = step_output.get("kv_cache", kv_cache)
+            if return_attn_weights:
+                attn_weights_steps.append(step_output.get("attn_weights"))
             
             # Initialize next_token_ids with pad_token_id for all batches
             next_token_ids = torch.full(
@@ -1350,17 +1294,16 @@ class LegendVLA(nn.Module):
             )
             
             # Sample next token only for active batches
-            if active_mask.any():
-                next_token_logits = step_logits[:, -1, :]  # [B, vocab_size]
-                next_token_ids_active = sample_token(
-                    next_token_logits,
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
-                    allowed_token_ids=allowed_token_ids,
-                )  # [B]
-                # Update active batches with sampled tokens
-                next_token_ids[active_mask] = next_token_ids_active[active_mask]
+            next_token_logits = step_logits[:, -1, :]  # [B, vocab_size]
+            next_token_ids_active = sample_token(
+                next_token_logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                allowed_token_ids=allowed_token_ids,
+            )  # [B]
+            # Update active batches with sampled tokens
+            next_token_ids[active_mask] = next_token_ids_active[active_mask]
             
             # Update finish status
             if eos_token_id is not None:
@@ -1378,6 +1321,8 @@ class LegendVLA(nn.Module):
         
         if return_kv_cache:
             result["kv_cache"] = kv_cache
+        if return_attn_weights:
+            result["attn_weights"] = concat_attn_weights(attn_weights_steps)
         
         return result
 
@@ -1767,11 +1712,11 @@ class LegendVLA(nn.Module):
         elif mode == "train_flow":
             return self.compute_flow_loss(batch)
         elif mode == "infer_action":
-            return self.infer_action(batch)
-        elif mode == "infer_action_naive":
-            return self.infer_action_naive(batch)
+            return self.infer_action(batch, **kwargs)
         elif mode == "infer_autoregressive":
             return self.infer_autoregressive(batch, **kwargs)
+        elif mode == "infer_vlm":
+            return self.infer_vlm(batch, **kwargs)
         else:
             raise ValueError(f"Invalid mode: {mode}")
         

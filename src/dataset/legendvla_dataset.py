@@ -325,7 +325,7 @@ class LegendVLADataset(BaseRatioDataset):
             LegendVLDataCollator: Collator instance.
         """
         assert self.preprocessor is not None, "Preprocessor is not set"
-        padding_side = 'left' if self.mode == 'infer' else 'right'
+        padding_side = 'left' if self.mode == 'infer-ar' else 'right'
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
@@ -466,7 +466,8 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             cache_dir=self.cache_dir,
             weights=self.weights,
             seed=self.seed,
-            mode='val' if self.mode == 'train' else self.mode
+            mode='val' if self.mode == 'train' else self.mode,
+            return_dataset_info=self.return_dataset_info,
         )
         
         # inherit the current preprocessor
@@ -547,9 +548,11 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             LegendVLDataCollator: Collator instance.
         """
         assert self.preprocessor is not None, "Preprocessor is not set"
+        padding_side = 'left' if self.mode == 'infer-ar' else 'right'
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
+            padding_side=padding_side,
         )
 
     def set_preprocessor(self, preprocessor):
@@ -575,8 +578,6 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         sample = self.main_dataset[idx]
         data = self._sample_to_data(sample, idx)
         if self.return_dataset_info:
-            dataset_name = "vlm"
-            dataset_local_idx = idx
             for i, offset in enumerate(self.dataset_offsets):
                 length = self.dataset_lengths[i]
                 if idx < offset + length:
