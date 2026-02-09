@@ -69,21 +69,32 @@ class FourierActionEncoder(nn.Module):
             self.fourier = nn.Identity()
             mlp_input_dim = action_dim + time_emb_dim
 
-        if mlp_depth == 0 and mlp_input_dim != width:
-            raise ValueError("mlp_depth must not be 0 if mlp_input_dim != width")
-        if mlp_depth == 0: 
+        assert mlp_depth > 0, "mlp_depth must be > 0"
+        if mlp_depth == 1: 
             self.mlp = nn.Identity()
-            self.final_layer_norm = None
+            self.projector = nn.Linear(mlp_input_dim, width)
         else:
             layers = []
-            for layer_idx in range(mlp_depth):
+            for layer_idx in range(mlp_depth - 1):
                 in_dim = mlp_input_dim if layer_idx == 0 else width
                 layers.append(nn.Linear(in_dim, width))
-                if layer_idx < mlp_depth - 1:
-                    layers.append(nn.LayerNorm(width))
-                    layers.append(nn.SiLU())
+                layers.append(nn.LayerNorm(width))
+                layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
-            self.final_layer_norm = nn.LayerNorm(width) if final_layer_norm else None
+            self.projector = nn.Linear(width, width)
+            
+        self.final_layer_norm = nn.LayerNorm(width) if final_layer_norm else None
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.kaiming_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
+        self.projector.weight.data.normal_(mean=0.0, std=0.02)
+        self.projector.bias.data.zero_()
 
     def forward(
         self,
@@ -108,6 +119,7 @@ class FourierActionEncoder(nn.Module):
                 time_emb_full = time_emb
             emb = torch.cat([time_emb_full, emb], dim=-1)
         emb = self.mlp(emb)
+        emb = self.projector(emb)
         if self.final_layer_norm is not None:
             emb = self.final_layer_norm(emb)
         return emb
