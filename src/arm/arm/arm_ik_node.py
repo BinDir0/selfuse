@@ -14,7 +14,7 @@ Arm IK Node - 机械臂逆运动学节点
 import time
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, PoseArray
+from geometry_msgs.msg import PoseStamped, PoseArray, String
 from sensor_msgs.msg import JointState
 import numpy as np
 import mujoco
@@ -24,6 +24,15 @@ import threading
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 import mink  # Mink IK求解器
+
+# Import connector configuration parameters
+from connector_config import (
+    LEFT_CONNECTOR_OFFSET_1_1, LEFT_CONNECTOR_RPY_1_1,
+    LEFT_CONNECTOR_OFFSET_1_2, LEFT_CONNECTOR_RPY_1_2,
+    RIGHT_CONNECTOR_OFFSET_2_1, RIGHT_CONNECTOR_RPY_2_1,
+    RIGHT_CONNECTOR_OFFSET_2_2, RIGHT_CONNECTOR_RPY_2_2,
+    CONNECTOR_HEIGHT, TCP_ROTATION
+)
 
 
 class ArmIKNode(Node):
@@ -43,6 +52,7 @@ class ArmIKNode(Node):
         # ROS2 parallel callback groups
         self.both_arms_sub_group = ReentrantCallbackGroup()
         self.publisher_group = ReentrantCallbackGroup()
+        self.mode_sub_group = ReentrantCallbackGroup()
         
         # 声明和获取ROS2参数
         self.declare_parameter('enable_viewer', True)
@@ -94,6 +104,16 @@ class ArmIKNode(Node):
             10,
             callback_group=self.both_arms_sub_group
         )
+
+        # 订阅器：接收复位命令
+        self.reset_sub = self.create_subscription(
+            String,
+            '/system/mode',
+            self._reset_command_callback,
+            10,
+            callback_group=self.mode_sub_group
+        )
+
         
         # 初始化MuJoCo模型和配置
         self.model = self._load_robot_model(self.xml_path)
@@ -342,6 +362,62 @@ class ArmIKNode(Node):
                 show_right_ui=True
             )
         mujoco.mjv_defaultFreeCamera(self.model, self.viewer.cam)
+
+    def _reset_command_callback(self, msg: String):
+        pass
+
+    def _hand_base_to_tcp(self, hand_base_pos, hand_base_mat, arm='left'):
+        """
+        将hand_base位姿经过连接件转换为TCP位姿
+        
+        :param pos: hand_base位置
+        :param mat: hand_base姿态
+        :param arm: left 或 right
+        """
+
+        if arm == 'left':
+            offset1 = LEFT_CONNECTOR_OFFSET_1_1
+            offset2 = LEFT_CONNECTOR_OFFSET_1_2
+            rot1 = LEFT_CONNECTOR_RPY_1_1
+            rot2 = LEFT_CONNECTOR_RPY_1_2
+        elif arm == 'right':
+            offset1 = RIGHT_CONNECTOR_OFFSET_2_1
+            offset2 = RIGHT_CONNECTOR_OFFSET_2_2
+            rot1 = RIGHT_CONNECTOR_RPY_2_1
+            rot2 = RIGHT_CONNECTOR_RPY_2_2
+        else:
+            raise ValueError(f"无效的arm参数: '{arm}'。必须是 'left' 或 'right'")
+        height = CONNECTOR_HEIGHT
+        rotation = TCP_ROTATION
+
+        # 先计算旋转矩阵
+        rot1_mat = R.from_euler('xyz', rot1).as_matrix()
+        rot2_mat = R.from_euler('xyz', rot2).as_matrix()
+        
+        # 方法A：假设TCP_ROTATION已经包含了所有旋转
+        # 那么手腕旋转矩阵 = TCP旋转矩阵 × TCP_ROTATION的逆
+        wrist_mat = hand_base_mat @ np.linalg.inv(rotation)
+
+        # 正向: mat_1_2 = left_wrist_mat @ rot_1_1 @ rot_1_2
+        # 所以反向: mat_1_2 = left_wrist_mat @ rot_1_1 @ rot_1_2
+        mat2 = wrist_mat @ rot1_mat @ rot2_mat
+        
+        # 2. 从TCP位置反向计算connector_1_2的位置
+        # 正向: left_hand_base_pos = pos_1_2 + mat_1_2[:, 2] * CONNECTOR_HEIGHT
+        # 所以: pos_1_2 = left_hand_base_pos - mat_1_2[:, 2] * CONNECTOR_HEIGHT
+        pos2 = hand_base_pos - mat2[:, 2] * height
+        
+        # 3. 从connector_1_2反向到connector_1_1
+        # 正向: pos_1_2 = pos_1_1 + mat_1_1 @ LEFT_CONNECTOR_OFFSET_1_2
+        # 正向: mat_1_1 = left_wrist_mat @ rot_1_1
+        mat1 = wrist_mat @ rot1_mat
+        pos1 = pos2 - mat1 @ offset2
+        
+        # 4. 从connector_1_1反向到wrist
+        # 正向: pos_1_1 = left_wrist_pos + left_wrist_mat @ LEFT_CONNECTOR_OFFSET_1_1
+        wrist_pos = pos1 - wrist_mat @ offset1
+        
+        return wrist_pos, wrist_mat
     
     def _arm_base_to_world(self, position, quaternion_xyzw, arm='left'):
         """
@@ -384,31 +460,41 @@ class ArmIKNode(Node):
         return world_position, world_quaternion_wxyz
 
     def action_callback(self, msg: PoseArray):
-        """接收双臂手腕目标位姿的回调函数（armbase坐标系） - 转换为世界坐标后设置为IK目标
+        """接收双臂hand_base目标位姿的回调函数（armbase坐标系） - 逆变换为TCP位姿后转换为世界坐标并设置为IK目标
         
         Args:
             msg: PoseArray消息，包含2个Pose（相对于arm base坐标系）：
-                 poses[0] - 左臂手腕位姿（相对于左臂base）
-                 poses[1] - 右臂手腕位姿（相对于右臂base）
+                 poses[0] - 左臂hand_base位姿（相对于左臂base）
+                 poses[1] - 右臂hand_base位姿（相对于右臂base）
         """
         if len(msg.poses) < 2:
             self.get_logger().warn(f"⚠️ PoseArray消息包含的poses数量不足: {len(msg.poses)}, 需要至少2个")
             return
         
-        # 处理左臂 (poses[0]) - 从armbase坐标转换为世界坐标
-        left_pose = msg.poses[0]
-        left_position_armbase = np.array([left_pose.position.x, left_pose.position.y, left_pose.position.z])
-        left_orientation_xyzw = np.array([
-            left_pose.orientation.x,
-            left_pose.orientation.y,
-            left_pose.orientation.z,
-            left_pose.orientation.w
+        # 处理左臂 (poses[0]) - hand_base位姿 -> TCP位姿 -> 世界坐标
+        left_hand_base_pose = msg.poses[0]
+        left_hand_base_pos_armbase = np.array([left_hand_base_pose.position.x, left_hand_base_pose.position.y, left_hand_base_pose.position.z])
+        left_hand_base_quat_xyzw = np.array([
+            left_hand_base_pose.orientation.x,
+            left_hand_base_pose.orientation.y,
+            left_hand_base_pose.orientation.z,
+            left_hand_base_pose.orientation.w
         ])
+        left_hand_base_mat_armbase = R.from_quat(left_hand_base_quat_xyzw).as_matrix()
+        
+        left_tcp_pos_armbase, left_tcp_mat_armbase = self._hand_base_to_tcp(
+            left_hand_base_pos_armbase, 
+            left_hand_base_mat_armbase, 
+            'left'
+        )
+        
+        # 转换TCP姿态矩阵为四元数
+        left_tcp_quat_xyzw = R.from_matrix(left_tcp_mat_armbase).as_quat()
         
         # 坐标转换: armbase -> world
         left_position_world, left_quat_mujoco = self._arm_base_to_world(
-            left_position_armbase, 
-            left_orientation_xyzw, 
+            left_tcp_pos_armbase, 
+            left_tcp_quat_xyzw, 
             arm='left'
         )
 
@@ -420,20 +506,30 @@ class ArmIKNode(Node):
             self.configuration.data.mocap_pos[left_target_mocap_id] = left_position_world
             self.configuration.data.mocap_quat[left_target_mocap_id] = left_quat_mujoco
         
-        # 处理右臂 (poses[1]) - 从armbase坐标转换为世界坐标
-        right_pose = msg.poses[1]
-        right_position_armbase = np.array([right_pose.position.x, right_pose.position.y, right_pose.position.z])
-        right_orientation_xyzw = np.array([
-            right_pose.orientation.x,
-            right_pose.orientation.y,
-            right_pose.orientation.z,
-            right_pose.orientation.w
+        # 处理右臂 (poses[1]) - hand_base位姿 -> TCP位姿 -> 世界坐标
+        right_hand_base_pose = msg.poses[1]
+        right_hand_base_pos_armbase = np.array([right_hand_base_pose.position.x, right_hand_base_pose.position.y, right_hand_base_pose.position.z])
+        right_hand_base_quat_xyzw = np.array([
+            right_hand_base_pose.orientation.x,
+            right_hand_base_pose.orientation.y,
+            right_hand_base_pose.orientation.z,
+            right_hand_base_pose.orientation.w
         ])
+        right_hand_base_mat_armbase = R.from_quat(right_hand_base_quat_xyzw).as_matrix()
+        
+        right_tcp_pos_armbase, right_tcp_mat_armbase = self._hand_base_to_tcp(
+            right_hand_base_pos_armbase, 
+            right_hand_base_mat_armbase, 
+            'right'
+        )
+        
+        # 转换TCP姿态矩阵为四元数
+        right_tcp_quat_xyzw = R.from_matrix(right_tcp_mat_armbase).as_quat()
         
         # 坐标转换: armbase -> world
         right_position_world, right_quat_mujoco = self._arm_base_to_world(
-            right_position_armbase, 
-            right_orientation_xyzw, 
+            right_tcp_pos_armbase, 
+            right_tcp_quat_xyzw, 
             arm='right'
         )
 
