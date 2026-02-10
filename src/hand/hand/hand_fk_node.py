@@ -4,7 +4,7 @@ Hand FK Node - 手部正运动学节点
 根据架构图：
 - 频率: 80Hz
 - 输入: /state/{left,right}_hand/joints (JointState) - hand states (joints)
-- 输出: /state/{left,right}_hand/keypoints (自定义消息, in wrist frame)
+- 输出: /state/{left,right}_hand/keypoints (PoseArray, in wrist frame)
 
 实现说明：
 - 内部实现HandFK类（方法与hand_fk.py相同）
@@ -15,6 +15,7 @@ Hand FK Node - 手部正运动学节点
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from geometry_msgs.msg import Pose, PoseArray
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import threading
@@ -303,10 +304,9 @@ class HandFKNode(Node):
             10
         )
         
-        # 发布：指尖关键点 (使用JointState作为临时消息格式)
-        # TODO: 未来可以定义自定义消息类型 (FingertipPoses)
+        # 发布：指尖关键点 (PoseArray, 5 个指尖在 wrist frame 下的 3D 位姿)
         self.keypoints_pub = self.create_publisher(
-            JointState,
+            PoseArray,
             f'/state/{self.hand_side}_hand/keypoints',
             10
         )
@@ -324,7 +324,7 @@ class HandFKNode(Node):
         self.get_logger().info(f'   Hand: {self.hand_side}')
         self.get_logger().info(f'   Frequency: {self.frequency} Hz')
         self.get_logger().info(f'   Input: /state/{self.hand_side}_hand/joints (JointState)')
-        self.get_logger().info(f'   Output: /state/{self.hand_side}_hand/keypoints (JointState)')
+        self.get_logger().info(f'   Output: /state/{self.hand_side}_hand/keypoints (PoseArray)')
         self.get_logger().info(f'   Output Frame: {self.hand_side}_wrist')
         self.get_logger().info('='*60)
     
@@ -388,40 +388,42 @@ class HandFKNode(Node):
     
     def _publish_fingertip_keypoints(self, fingertip_poses):
         """
-        发布指尖关键点
+        发布指尖关键点 (PoseArray)
         
-        临时使用JointState消息格式：
-        - name: 指尖名称 ['thumb', 'index', 'middle', 'ring', 'pinky']
-        - position: [x, y, z, qx, qy, qz, qw] × 5 (35维)
+        格式:
+        - header.frame_id: "{side}_wrist"
+        - poses: 5 个 Pose，按 thumb, index, middle, ring, pinky 顺序
+          - Pose.position: Point(x, y, z) 指尖 3D 坐标
+          - Pose.orientation: Quaternion(x, y, z, w) 指尖朝向
         
         Args:
             fingertip_poses: dict，包含5个指尖的位姿
         """
-        msg = JointState()
+        msg = PoseArray()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = f"{self.hand_side}_wrist"
         
         # 按固定顺序排列指尖
         finger_order = ['thumb', 'index', 'middle', 'ring', 'pinky']
         
-        # 将位姿展平为position数组
-        positions = []
         for finger_name in finger_order:
+            pose = Pose()
             if finger_name in fingertip_poses:
                 pos = fingertip_poses[finger_name]['pos']
                 quat = fingertip_poses[finger_name]['quat']
-                # 展平为 [x, y, z, qx, qy, qz, qw]
-                positions.extend([
-                    float(pos[0]), float(pos[1]), float(pos[2]),
-                    float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
-                ])
-                msg.name.append(finger_name)
+                # Position: 指尖 3D 坐标
+                pose.position.x = float(pos[0])
+                pose.position.y = float(pos[1])
+                pose.position.z = float(pos[2])
+                # Orientation: 指尖朝向 (scipy 输出 [x,y,z,w])
+                pose.orientation.x = float(quat[0])
+                pose.orientation.y = float(quat[1])
+                pose.orientation.z = float(quat[2])
+                pose.orientation.w = float(quat[3])
             else:
-                # 如果某个指尖缺失，填充零
-                positions.extend([0.0] * 7)
-                msg.name.append(f"{finger_name}_missing")
-        
-        msg.position = positions
+                # 缺失的指尖: 零位置 + identity quaternion
+                pose.orientation.w = 1.0
+            msg.poses.append(pose)
         
         self.keypoints_pub.publish(msg)
 

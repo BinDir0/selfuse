@@ -4,14 +4,12 @@ Hand IK Node - 手部逆运动学 ROS2 节点
 
 根据架构图:
 - 频率: 80Hz
-- 输入: /action/{left,right}_hand/keypoints (JointState)
-        含义: 5 个指尖在手腕坐标系 (wrist frame) 下的 3D 位置
-        格式: position 字段包含 15 个 float，按以下顺序排列:
-              [thumb_x, thumb_y, thumb_z,
-               index_x, index_y, index_z,
-               middle_x, middle_y, middle_z,
-               ring_x, ring_y, ring_z,
-               pinky_x, pinky_y, pinky_z]
+- 输入: /action/{left,right}_hand/keypoints (PoseArray)
+        含义: 5 个指尖在手腕坐标系 (wrist frame) 下的 3D 位姿
+        格式: header.frame_id = "{side}_wrist"
+              poses = [Pose × 5]，按 thumb, index, middle, ring, pinky 顺序
+              每个 Pose.position = Point(x, y, z) 为指尖 3D 坐标 (米)
+              每个 Pose.orientation = Quaternion (预留，IK 仅使用 position)
 
 - 输出: /action/{left,right}_hand/joints (JointState)
         含义: 6 个归一化关节角度 (0-1)
@@ -32,12 +30,13 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import PoseArray
 from sensor_msgs.msg import JointState
 
 from hand.hand_ik_solver import FINGER_NAMES, JOINT_NAMES, HandIKSolver
 
-# keypoints 消息中期望的 position 长度 (5 fingers x 3 coords)
-_EXPECTED_KEYPOINT_DIM = len(FINGER_NAMES) * 3
+# keypoints 消息中期望的 Pose 数量 (5 fingers)
+_EXPECTED_NUM_FINGERS = len(FINGER_NAMES)
 
 
 class HandIKNode(Node):
@@ -112,9 +111,9 @@ class HandIKNode(Node):
         # ----------------------------------------------------------
         # ROS2 接口
         # ----------------------------------------------------------
-        # 订阅: 指尖关键点，这里的datatype存疑，先用jointstate填了一下
+        # 订阅: 指尖关键点 (PoseArray, 5 个指尖在 wrist frame 下的 3D 位姿)
         self.keypoints_sub = self.create_subscription(
-            JointState,
+            PoseArray,
             f"/action/{self.hand_side}_hand/keypoints",
             self._keypoints_callback,
             10,
@@ -150,22 +149,18 @@ class HandIKNode(Node):
     # 回调函数
     # ------------------------------------------------------------------
 
-    def _keypoints_callback(self, msg: JointState):
+    def _keypoints_callback(self, msg: PoseArray):
         """
-        处理接收到的指尖关键点消息
+        处理接收到的指尖关键点消息 (PoseArray)
 
-        期望 msg.position 包含 15 个 float:
-            [thumb_x, thumb_y, thumb_z,
-             index_x, index_y, index_z,
-             middle_x, middle_y, middle_z,
-             ring_x, ring_y, ring_z,
-             pinky_x, pinky_y, pinky_z]
+        期望 msg.poses 包含 5 个 Pose，按以下顺序:
+            [thumb, index, middle, ring, pinky]
+        每个 Pose.position 包含指尖在 wrist frame 下的 3D 坐标 (x, y, z)
         """
-        positions = msg.position
-        if len(positions) != _EXPECTED_KEYPOINT_DIM:
+        if len(msg.poses) != _EXPECTED_NUM_FINGERS:
             self.get_logger().warn(
-                f"Invalid keypoints length: {len(positions)}, "
-                f"expected {_EXPECTED_KEYPOINT_DIM}. Message ignored.",
+                f"Invalid keypoints count: {len(msg.poses)}, "
+                f"expected {_EXPECTED_NUM_FINGERS}. Message ignored.",
                 throttle_duration_sec=2.0,
             )
             return
@@ -173,12 +168,8 @@ class HandIKNode(Node):
         # 解析为 {finger_name: [x, y, z]} 字典
         keypoints = {}
         for i, finger_name in enumerate(FINGER_NAMES):
-            offset = i * 3
-            keypoints[finger_name] = [
-                positions[offset],
-                positions[offset + 1],
-                positions[offset + 2],
-            ]
+            p = msg.poses[i].position
+            keypoints[finger_name] = [p.x, p.y, p.z]
 
         self._latest_keypoints = keypoints
         self._has_new_keypoints = True
