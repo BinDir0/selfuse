@@ -9,10 +9,7 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('model_interface')
     
     # 修改默认路径为你给出的路径结构
-    default_calib_path = os.path.join(
-        os.environ.get('HOME', '/root'), 
-        'Documents/projects/LegendaryVLA/LegendVLA-Inference/examples/calibration_outputs'
-    )
+    default_calib_path = "/root/workspace/legendvla-inference/examples/calibration_outputs"
 
     # Arguments
     freq_arg = DeclareLaunchArgument('frequency', default_value='100.0')

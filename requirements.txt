@@ -1,43 +1,5 @@
-# LegendVLA Inference System - Python Dependencies
-
-# Core dependencies
-numpy>=1.21.0
-opencv-python>=4.5.0
-
-# RealSense camera
-pyrealsense2>=2.50.0
-
-# WebSocket
-websockets>=10.0
-
-# Deep Learning (根据实际使用的框架选择)
-torch>=2.0.0
-torchvision>=0.15.0
-
-# Optional: Transformers for VLM
-# transformers>=4.30.0
-# accelerate>=0.20.0
-
-# Optional: 图像处理
-# Pillow>=9.0.0
-# scikit-image>=0.19.0
-
-# Optional: 运动学和规划
-# scipy>=1.7.0
-# python-fcl>=0.7.0
-
-# Optional: 可视化
-# matplotlib>=3.5.0
-
-# Optional: 配置文件
-pyyaml>=6.0
-
-# Optional: 日志和监控
-# tqdm>=4.60.0
-# tensorboard>=2.10.0
-
-# Development dependencies
-# pytest>=7.0.0
-# black>=22.0.0
-# flake8>=4.0.0
-
+numpy
+opencv-python
+pyrealsense2
+websockets
+pynput
