@@ -8,9 +8,13 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 """
 
 import logging
-from typing import Optional, Tuple, List, Union
+import pathlib
+import pickle
+from typing import Any, Optional, Tuple, List, Union
 
 import hydra
+import numpy as np
+from omegaconf import OmegaConf
 import torch
 from torch import nn
 from torch._dynamo import disable
@@ -1849,27 +1853,284 @@ class LegendVLA(nn.Module):
             raise ValueError(f"Invalid mode: {mode}")
         
 
-class LegendVLAInference(LegendVLA):
-    def forward(
+class LegendVLAInference:
+    def __init__(
         self,
-        input: dict,
-    ) -> torch.FloatTensor:
-        """
-        Inference wrapper for LegendVLA that calls infer_action.
-        
-        Args:
-            input (dict): Input dictionary containing:
-                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-                - pixel_values (torch.FloatTensor): [B, 3, H, W] Image pixel values (normalized)
-                - vlm_mask (torch.FloatTensor): [B, 1, seq_len, seq_len] 
-                  Attention mask for image/text/answer tokens (broadcasts to all heads)
-                - action_mask (torch.FloatTensor): [B, 1, action_len, total_len] 
-                  Attention mask for action tokens (broadcasts to all heads)
-                - vlm_position_ids (torch.LongTensor): [B, seq_len] Position IDs for VLM tokens
-                - action_position_ids (torch.LongTensor): [B, num_actions] Position IDs for action tokens
-        
-        Returns:
-            torch.FloatTensor: [B, horizon_steps, action_dim] Generated action sequence
-        """
-        return super().infer_action(input)
+        model_config_path: str,
+        checkpoint_path: str | None = None,
+        mode: str = "flow",
+        use_mixed_precision: bool = True,
+        diffusion_sampling_steps: int | None = None,
+        diffusion_use_ddim_sampling: bool | None = None,
+        flow_sampling_steps: int | None = None,
+        tokenizer_padding: str = "longest",
+        default_instruction: str | None = None,
+        ar_max_new_tokens: int | None = None,
+        ar_temperature: float = 1.0,
+        ar_cfg: float = 1.0,
+    ) -> None:
+        if mode not in {"flow", "ar"}:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'flow' or 'ar'.")
+
+        model_config_path = pathlib.Path(model_config_path)
+        if not model_config_path.exists():
+            raise FileNotFoundError(f"Model config not found: {model_config_path}")
+
+        model_cfg = OmegaConf.load(model_config_path)
+        if "policy" not in model_cfg:
+            raise ValueError(f"'policy' not found in config: {model_config_path}")
+        policy_cfg = model_cfg.policy
+        self._maybe_update_policy_cfg(
+            policy_cfg,
+            type(
+                "Args",
+                (),
+                {
+                    "diffusion_sampling_steps": diffusion_sampling_steps,
+                    "diffusion_use_ddim_sampling": diffusion_use_ddim_sampling,
+                    "flow_sampling_steps": flow_sampling_steps,
+                },
+            )(),
+        )
+
+        model: LegendVLA = hydra.utils.instantiate(policy_cfg)
+
+        if checkpoint_path:
+            self._load_checkpoint(model, checkpoint_path)
+        model.eval()
+
+        processor = hydra.utils.instantiate(model_cfg.vla_processor)
+        if hasattr(processor, "tokenizer_padding"):
+            processor.tokenizer_padding = tokenizer_padding
+
+        normalizer, use_relative_action = self._load_normalizer(model_cfg)
+
+        dtype = torch.bfloat16 if use_mixed_precision else torch.float32
+
+        self.model = model
+        self.processor = processor
+        self.dtype = dtype
+        self.mode = mode
+        self.normalizer = normalizer
+        self.use_relative_action = use_relative_action
+        self.action_horizon = int(model.shape_meta["action"]["horizon"])
+        self.action_dim = int(model.shape_meta["action"]["shape"][0])
+        self.default_instruction = default_instruction
+        self.ar_max_new_tokens = ar_max_new_tokens or self.action_horizon
+        self.ar_temperature = ar_temperature
+        self.ar_cfg = ar_cfg
+        self.metadata = {
+            "mode": mode,
+            "action_horizon": self.action_horizon,
+            "action_dim": self.action_dim,
+        }
+
+    @staticmethod
+    def _load_checkpoint(model: LegendVLA, checkpoint_path: str) -> None:
+        checkpoint_path = pathlib.Path(checkpoint_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        if "model" in state_dict:
+            state_dict = state_dict["model"]
+        elif "module" in state_dict:
+            state_dict = state_dict["module"]
+        elif "model_state_dict" in state_dict:
+            state_dict = state_dict["model_state_dict"]
+        model.load_state_dict(state_dict)
+
+    @staticmethod
+    def _load_normalizer(model_cfg: Any) -> tuple[Any | None, bool]:
+        normalizer_path = None
+        use_relative_action = False
+        if hasattr(model_cfg, "training") and model_cfg.training.get("normalizer_path") is not None:
+            normalizer_path = pathlib.Path(model_cfg.training.normalizer_path)
+        if hasattr(model_cfg, "dataset"):
+            use_relative_action = bool(
+                OmegaConf.select(model_cfg, "dataset.vla_dataset.use_relative_action", default=False)
+            )
+        if normalizer_path is None or not normalizer_path.exists():
+            return None, use_relative_action
+        with open(normalizer_path, "rb") as f:
+            return pickle.load(f), use_relative_action
+
+    @staticmethod
+    def _maybe_update_policy_cfg(policy_cfg: Any, args: Any) -> None:
+        if getattr(args, "diffusion_sampling_steps", None) is not None:
+            policy_cfg.diffloss.num_sampling_steps = f"{args.diffusion_sampling_steps}"
+        if getattr(args, "diffusion_use_ddim_sampling", None) is not None:
+            policy_cfg.diffloss.use_ddim_sampling = args.diffusion_use_ddim_sampling
+        if getattr(args, "flow_sampling_steps", None) is not None and hasattr(policy_cfg, "cfg"):
+            if "num_inference_steps" in policy_cfg.cfg:
+                policy_cfg.cfg.num_inference_steps = args.flow_sampling_steps
+
+    def _as_numpy(self, value: Any, dtype: np.dtype | None = None) -> np.ndarray:
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy()
+        else:
+            value = np.asarray(value)
+        if dtype is not None:
+            value = value.astype(dtype)
+        return value
+
+    def _ensure_batch_dim(self, value: Any, unbatched_ndims: tuple[int, ...]) -> Any:
+        # If the input matches a known unbatched rank, add a leading batch dim.
+        if isinstance(value, np.ndarray):
+            if value.ndim in unbatched_ndims:
+                return value[None, ...]
+            return value
+        if torch.is_tensor(value):
+            if value.ndim in unbatched_ndims:
+                return value.unsqueeze(0)
+            return value
+        return value
+
+    def _normalize_intrinsic(self, intrinsic: np.ndarray) -> np.ndarray:
+        intrinsic = self._as_numpy(intrinsic, dtype=np.float32)
+        if intrinsic.shape == (3, 3):
+            intrinsic = np.array(
+                [intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]],
+                dtype=np.float32,
+            )
+        return intrinsic.reshape(-1)
+
+    def _prepare_processor_inputs(self, obs: dict) -> dict:
+        instruction = obs.get("instruction") or self.default_instruction
+        if instruction is None:
+            raise ValueError("Missing 'instruction' in observation and no default provided.")
+
+        images = obs.get("image") if "image" in obs else obs.get("images")
+        if images is None:
+            raise ValueError("Missing 'image'/'images' in observation.")
+        images = self._as_numpy(images)
+        if images.ndim == 3:
+            images = images[None, ...]
+
+        depth = obs.get("depth")
+        if depth is not None:
+            depth = self._as_numpy(depth)
+            if depth.ndim == 2:
+                depth = depth[None, ...]
+            if depth.ndim == 4 and depth.shape[-1] in (1, 3):
+                depth = depth[..., 0]
+
+        states = obs.get("states")
+        if states is None:
+            raise ValueError("Missing 'states' in observation.")
+        states = self._as_numpy(states, dtype=np.float32)
+        if states.ndim == 1:
+            states = states[None, ...]
+
+        intrinsic = obs.get("intrinsic")
+        if intrinsic is None:
+            raise ValueError("Missing 'intrinsic' in observation.")
+        intrinsic = self._normalize_intrinsic(intrinsic)
+
+        dummy_actions = np.zeros((self.action_horizon, self.action_dim), dtype=np.float32)
+        processor_mode = "infer" if self.mode == "flow" else "infer-ar"
+        processed = self.processor(
+            text=instruction,
+            images=images,
+            states=states,
+            actions=dummy_actions,
+            intrinsic=intrinsic,
+            depth_images=depth,
+            mode=processor_mode,
+        )
+        return {
+            "processed": processed,
+            "states": states,
+        }
+
+    def _build_model_inputs(self, prepared: dict) -> dict:
+        processed = prepared["processed"]
+        processed["input_ids"] = self._ensure_batch_dim(processed["input_ids"], (1,))
+        processed["attention_mask"] = self._ensure_batch_dim(processed["attention_mask"], (1,))
+        processed["pixel_values"] = self._ensure_batch_dim(processed["pixel_values"], (4,))
+        if "depth_values" in processed:
+            processed["depth_values"] = self._ensure_batch_dim(processed["depth_values"], (4,))
+        if "answer_start_idx" in processed:
+            processed["answer_start_idx"] = self._ensure_batch_dim(processed["answer_start_idx"], (0,))
+
+        states = self._ensure_batch_dim(prepared["states"], (2,))
+
+        input_ids = torch.from_numpy(processed["input_ids"])
+        attention_mask = torch.from_numpy(processed["attention_mask"])
+        pixel_values = torch.from_numpy(processed["pixel_values"])
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
+
+        inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "pixel_values": pixel_values.to(self.dtype),
+            "is_vla_data": torch.ones(1, dtype=torch.bool, device=device),
+        }
+
+        if "depth_values" in processed:
+            depth_values = torch.from_numpy(processed["depth_values"])
+            inputs["depth_values"] = depth_values.to(self.dtype)
+            inputs["has_depth_values"] = torch.ones(1, dtype=torch.bool, device=device)
+        else:
+            inputs["has_depth_values"] = torch.zeros(1, dtype=torch.bool, device=device)
+
+        if self.mode == "flow":
+            inputs["states"] = torch.from_numpy(states).to(self.dtype)
+            inputs["n_states"] = torch.full((batch_size,), states.shape[1], device=device)
+            inputs["n_actions"] = torch.full((batch_size,), self.action_horizon, device=device)
+            inputs["answer_start_idx"] = (
+                torch.from_numpy(np.array(processed["answer_start_idx"]))
+                .to(device)
+            )
+
+            model = self.model.module if hasattr(self.model, "module") else self.model
+            causal_mask, vlm_position_ids, action_position_ids = (
+                model.build_causal_mask_and_position_ids(
+                    attention_mask,
+                    inputs["answer_start_idx"],
+                    inputs["n_actions"],
+                    self.dtype,
+                )
+            )
+            max_vlm_tokens = input_ids.shape[-1]
+            vlm_mask, action_mask = model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
+            inputs["causal_mask"] = causal_mask
+            inputs["vlm_mask"] = vlm_mask
+            inputs["action_mask"] = action_mask
+            inputs["vlm_position_ids"] = vlm_position_ids
+            inputs["action_position_ids"] = action_position_ids
+        else:
+            inputs["states"] = torch.from_numpy(states).to(self.dtype)
+            inputs["n_states"] = torch.full((batch_size,), states.shape[1], device=device)
+
+        return inputs
+
+    def _unnormalize_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        if self.normalizer is None:
+            return actions
+        if self.use_relative_action:
+            return self.normalizer["actions"].unnormalize(actions)
+        return self.normalizer["motions"].unnormalize(actions)
+
+    @torch.inference_mode()
+    def infer(self, obs: dict) -> dict:
+        prepared = self._prepare_processor_inputs(obs)
+        inputs = self._build_model_inputs(prepared)
+        if self.mode == "flow":
+            pred_actions = self.model("infer_action", inputs)
+        elif self.mode == "ar":
+            pred_actions = self.model(
+                "infer_vla",
+                inputs,
+                max_new_tokens=self.ar_max_new_tokens,
+                temperature=self.ar_temperature,
+                cfg=self.ar_cfg,
+            )
+        else:
+            raise ValueError(f"Unsupported inference mode: {self.mode}")
+
+        pred_actions = self._unnormalize_actions(pred_actions)
+        return {
+            "pred_actions": pred_actions,
+        }
 

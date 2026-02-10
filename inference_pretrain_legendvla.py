@@ -121,13 +121,7 @@ class LegendVLAInference:
     
     def preprocess_batch(self, batch):
         """预处理batch用于推理"""
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                print(f"{key}: {value.shape}\n{value[0].cpu().tolist()}")
-            else: 
-                print(f"{key}: {value[0]}")
-        print("-"*100)
-        input_ids = batch["input_ids"].to(self.device)
+        input_ids = batch["input_ids"]
         
         # Get unwrapped model for mask building
         model = self.model
