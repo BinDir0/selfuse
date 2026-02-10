@@ -154,6 +154,15 @@ class MLPProjector(nn.Module):
                     layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
             self.final_layer_norm = nn.LayerNorm(output_dim) if final_layer_norm else None
+        self.initialize_weights()
+        
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.kaiming_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
 
     def forward(self, latent: torch.FloatTensor) -> torch.FloatTensor:
         emb = self.mlp(latent)
