@@ -45,7 +45,7 @@ class AudioPlayHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8080)
-    parser.add_argument('--audio-dir', default='./assets') # 指向包含那4个mp3的目录
+    parser.add_argument('--audio-dir', default='.') # 指向包含那4个mp3的目录
     args = parser.parse_args()
 
     audio_dir = Path(args.audio_dir).absolute()
