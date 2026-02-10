@@ -945,7 +945,8 @@ class LegendVLA(nn.Module):
             image_mask = input_ids == self.image_token_index
             # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
             
-            for i in range(bsz):
+        for i in range(bsz):
+            if pixel_values is not None: 
                 image_indices = image_mask[i].nonzero(as_tuple=True)[0]
                 if has_depth_values is not None and has_depth_values[i] and \
                     not (self.training and random.random() < self.depth_dropout):
@@ -963,11 +964,11 @@ class LegendVLA(nn.Module):
                 paired_image_features = self.multi_modal_projector(paired_image_features)
                 scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
                 final_embedding[i, image_indices] = scaled_image_features
-                if is_vla_data is not None and is_vla_data[i]:
-                    if n_states is not None:
-                        final_embedding[i, state_mask[i]] = state_features[i, :n_states[i]].to(final_embedding.dtype)
-                    if n_actions is not None:
-                        final_embedding[i, action_mask[i]] = action_features[i, :n_actions[i]].to(final_embedding.dtype)
+            if is_vla_data is not None and is_vla_data[i]:
+                if n_states is not None:
+                    final_embedding[i, state_mask[i]] = state_features[i, :n_states[i]].to(final_embedding.dtype)
+                if n_actions is not None:
+                    final_embedding[i, action_mask[i]] = action_features[i, :n_actions[i]].to(final_embedding.dtype)
         return final_embedding
 
     @torch.inference_mode()
@@ -1096,6 +1097,10 @@ class LegendVLA(nn.Module):
                 - pixel_values (torch.FloatTensor, Optional): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
                   If None, only text tokens are processed
                 - attention_mask (torch.LongTensor): [B, seq_len] Attention mask
+                - states (torch.FloatTensor, Optional): [B, state_dim] State features
+                - actions (torch.FloatTensor, Optional): [B, action_dim] Action features
+                - n_states (torch.LongTensor, Optional): [B] Number of state features
+                - n_actions (torch.LongTensor, Optional): [B] Number of action features
             kv_cache (Optional[KVCache]): Key-value cache for the generated tokens
             dtype (torch.dtype): Data type for the input and output
             return_attn_weights (bool): Whether to return attention weights
@@ -1140,10 +1145,8 @@ class LegendVLA(nn.Module):
             cache_mode="append",  # new tokens for the active mixture
             final_layer_post_attn_skip_names=[],  # do not skip vlm last layer
         )["vlm"]
-        logits = self.lm_head(hidden_states)
-        logits = self._apply_final_logit_softcapping(logits)
         output = {
-            "logits": logits,
+            "hidden_states": hidden_states,
         }
         if return_attn_weights:
             output["attn_weights"] = torch.stack(self.attn_weights, dim=0).detach().clone()
@@ -1225,7 +1228,9 @@ class LegendVLA(nn.Module):
             dtype=dtype,
             return_attn_weights=return_attn_weights,
         )
-        prefill_logits = prefill_output["logits"]  # [B, seq_len, vocab_size]
+        prefill_hidden_states = prefill_output["hidden_states"]
+        prefill_logits = self.lm_head(prefill_hidden_states)
+        prefill_logits = self._apply_final_logit_softcapping(prefill_logits) # [B, seq_len, vocab_size]
         kv_cache = prefill_output.get("kv_cache", kv_cache)
         if return_attn_weights:
             attn_weights_steps.append(prefill_output.get("attn_weights"))
@@ -1283,7 +1288,9 @@ class LegendVLA(nn.Module):
                 dtype=dtype,
                 return_attn_weights=return_attn_weights,
             )
-            step_logits = step_output["logits"]  # [B, 1, vocab_size]
+            step_hidden_states = step_output["hidden_states"]
+            step_logits = self.lm_head(step_hidden_states)
+            step_logits = self._apply_final_logit_softcapping(step_logits) # [B, 1, vocab_size]
             kv_cache = step_output.get("kv_cache", kv_cache)
             if return_attn_weights:
                 attn_weights_steps.append(step_output.get("attn_weights"))
@@ -1326,6 +1333,124 @@ class LegendVLA(nn.Module):
         
         return result
 
+    @torch.inference_mode()
+    def infer_vla(
+        self,
+        input: dict,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        return_attn_weights: bool = False,
+        cfg: float = 1.0,
+        **kwargs,
+    ) -> Union[torch.FloatTensor, Tuple[torch.FloatTensor, torch.FloatTensor]]:
+        """
+        Autoregressive action inference for VLA using DiffLoss sampling.
+        
+        Args:
+            input (dict): Input dictionary containing:
+                - input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
+                - pixel_values (torch.FloatTensor): [B, 3, H, W] or [B, T, 3, H, W] Image pixel values (normalized)
+                - attention_mask (torch.LongTensor): [B, seq_len] Attention mask (optional)
+                - states (torch.FloatTensor, optional): [B, state_len, state_dim]
+                - n_states (torch.LongTensor, optional): [B]
+                - is_vla_data (torch.BoolTensor, optional): [B]
+            max_new_tokens (int): Number of action tokens to generate
+            temperature (float): Sampling temperature for diffusion
+            return_attn_weights (bool): Whether to return attention weights
+            cfg (float): Classifier-free guidance scale for diffusion sampling
+        
+        Returns:
+            torch.FloatTensor: [B, max_new_tokens, action_dim] Generated action sequence
+            (optional) torch.FloatTensor: Attention weights if return_attn_weights=True
+        """
+        input_ids = input["input_ids"]
+        pixel_values = input.get("pixel_values")
+        attention_mask = input.get("attention_mask")
+        
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+        
+        batch_size = input_ids.size(0)
+        device = input_ids.device
+        dtype = pixel_values.dtype if pixel_values is not None else torch.float32
+        
+        is_vla_data = input.get("is_vla_data")
+        if is_vla_data is None:
+            is_vla_data = torch.ones(batch_size, dtype=torch.bool, device=device)
+        
+        # Initialize KV cache
+        kv_cache = KVCache()
+        
+        # ========== Prefill Phase ==========
+        prefill_input = {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "depth_values": input.get("depth_values"),
+            "has_depth_values": input.get("has_depth_values"),
+            "attention_mask": attention_mask,
+            "states": input.get("states"),
+            "n_states": input.get("n_states"),
+            "is_vla_data": is_vla_data,
+        }
+        
+        attn_weights_steps = [] if return_attn_weights else None
+        prefill_output = self.infer_single_step(
+            prefill_input,
+            kv_cache=kv_cache,
+            dtype=dtype,
+            return_attn_weights=return_attn_weights,
+        )
+        prefill_hidden_states = prefill_output["hidden_states"]
+        kv_cache = prefill_output.get("kv_cache", kv_cache)
+        if return_attn_weights:
+            attn_weights_steps.append(prefill_output.get("attn_weights"))
+        
+        # Sample the first action from the last token
+        next_condition_states = prefill_hidden_states[:, -1, :]
+        latent_condition = self.latent_condition_projector(next_condition_states)
+        next_action = self.diffloss.sample(latent_condition, temperature=temperature, cfg=cfg)
+        generated_actions = [next_action.unsqueeze(1)]
+        
+        # ========== Generation Phase ==========
+        for _ in range(max_new_tokens - 1):
+            # Append one action token to the attention mask
+            attention_mask = torch.cat(
+                [attention_mask, torch.ones((batch_size, 1), dtype=attention_mask.dtype, device=device)],
+                dim=-1,
+            )
+            step_input = {
+                "input_ids": torch.full(
+                    (batch_size, 1),
+                    self.action_token_index,
+                    dtype=input_ids.dtype,
+                    device=device,
+                ),
+                "attention_mask": attention_mask,
+                "actions": next_action.unsqueeze(1),
+                "n_actions": torch.ones(batch_size, dtype=torch.long, device=device),
+                "is_vla_data": is_vla_data,
+            }
+            
+            step_output = self.infer_single_step(
+                step_input,
+                kv_cache=kv_cache,
+                dtype=dtype,
+                return_attn_weights=return_attn_weights,
+            )
+            step_hidden_states = step_output["hidden_states"]
+            kv_cache = step_output.get("kv_cache", kv_cache)
+            if return_attn_weights:
+                attn_weights_steps.append(step_output.get("attn_weights"))
+            
+            latent_condition = self.latent_condition_projector(step_hidden_states[:, -1, :])
+            next_action = self.diffloss.sample(latent_condition, temperature=temperature, cfg=cfg)
+            generated_actions.append(next_action.unsqueeze(1))
+        
+        generated_actions_tensor = torch.cat(generated_actions, dim=1)
+        if return_attn_weights:
+            return generated_actions_tensor, concat_attn_weights(attn_weights_steps)
+        return generated_actions_tensor
+
     # ---------- Flow matching training ----------#
     def psi_t(
         self,
@@ -1349,6 +1474,7 @@ class LegendVLA(nn.Module):
         t = t[:, None, None]  # (B, 1, 1)
         return (1 - (1 - self.flow_sig_min) * t) * x + t * x1
 
+    # TODO: Deprecated method, to be updated
     def compute_ar_loss(
         self,
         batch: dict,
@@ -1423,6 +1549,7 @@ class LegendVLA(nn.Module):
             "ce_loss": ce_loss,
         }
 
+    # TODO: Deprecated method, to be updated
     def compute_flow_loss(
         self,
         batch: dict,
@@ -1705,6 +1832,7 @@ class LegendVLA(nn.Module):
         }
 
     def forward(self, mode: str, batch: dict, **kwargs) -> dict:
+        # Helper functions for distributed training
         if mode == "train":
             return self.compute_loss(batch)
         elif mode == "train_ar": 
@@ -1713,8 +1841,8 @@ class LegendVLA(nn.Module):
             return self.compute_flow_loss(batch)
         elif mode == "infer_action":
             return self.infer_action(batch, **kwargs)
-        elif mode == "infer_autoregressive":
-            return self.infer_autoregressive(batch, **kwargs)
+        elif mode == "infer_vla":
+            return self.infer_vla(batch, **kwargs)
         elif mode == "infer_vlm":
             return self.infer_vlm(batch, **kwargs)
         else:

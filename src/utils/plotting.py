@@ -639,7 +639,6 @@ def visualize_image_attention(
     total_heat = _attention_to_image(attn_avg, valid_vlm_queries, image_key_indices)
     if total_heat is not None:
         heatmap = total_heat.reshape(grid_h, grid_w)
-        print(heatmap.tolist())
         suffix = f"_step{step}" if step is not None else ""
         _overlay_heatmap(image_rgb, heatmap, output_dir / f"image_attention_all{suffix}.png")
 

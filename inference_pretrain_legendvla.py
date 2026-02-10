@@ -51,6 +51,9 @@ class LegendVLAInference:
             if 'policy' not in model_cfg:
                 raise ValueError(f"模型配置文件中未找到 'policy' 配置: {model_config_path}")
             policy_cfg = model_cfg.policy
+            policy_cfg.diffloss.num_sampling_steps = f"{cfg.diffusion_sampling_steps}"
+            policy_cfg.diffloss.use_ddim_sampling = cfg.diffusion_use_ddim_sampling
+            policy_cfg.cfg.num_inference_steps = cfg.flow_sampling_steps
         else:
             # 如果没有指定 model_config_path，使用当前配置中的 policy
             if self.is_main_process:
@@ -433,7 +436,7 @@ class LegendVLAInference:
                         # Autoregressive action inference (normalized actions)
                         generation_params = self._preprocess_for_autoregressive(inputs)
                         pred_actions, vlm_attn_maps = self.model(
-                            "infer_autoregressive", inputs, **generation_params, return_attn_weights=True
+                            "infer_vla", inputs, **generation_params, return_attn_weights=True
                         )
                     else:  # self.mode == "vlm"
                         generation_params = self._preprocess_for_autoregressive(inputs)
