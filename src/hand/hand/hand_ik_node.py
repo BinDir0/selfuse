@@ -19,9 +19,9 @@ Hand IK Node - 手部逆运动学 ROS2 节点
 
 数据流:
     Model Interface Node
-        -> /action/{side}_hand/keypoints (keypoints in wrist frame)
+        -> /action/{side}_hand/keypoints (PoseArray: keypoints in wrist frame)
     Hand IK Node  [本节点]
-        -> /action/{side}_hand/joints (normalized joint angles)
+        -> /action/{side}_hand/joints (JointState: normalized joint angles)
     Hand Control Node
         -> 硬件控制
 """
@@ -139,10 +139,10 @@ class HandIKNode(Node):
         self.get_logger().info(f"  IK solver : {ik_solver_type}")
         self.get_logger().info(f"  IK iters  : {self.ik_max_iterations}")
         self.get_logger().info(
-            f"  Subscribe : /action/{self.hand_side}_hand/keypoints"
+            f"  Subscribe : /action/{self.hand_side}_hand/keypoints (PoseArray)"
         )
         self.get_logger().info(
-            f"  Publish   : /action/{self.hand_side}_hand/joints"
+            f"  Publish   : /action/{self.hand_side}_hand/joints (JointState)"
         )
 
     # ------------------------------------------------------------------
