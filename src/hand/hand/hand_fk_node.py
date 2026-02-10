@@ -4,18 +4,19 @@ Hand FK Node - 手部正运动学节点
 根据架构图：
 - 频率: 80Hz
 - 输入: /state/{left,right}_hand/joints (JointState) - hand states (joints)
-- 输出: /state/{left,right}_hand/keypoints (PoseArray, in wrist frame)
+- 输出: /state/{left,right}_hand/keypoints (PoseArray) - hand keypoints (keypoints in wrist frame)
 
 实现说明：
 - 内部实现HandFK类（方法与hand_fk.py相同）
 - 应用手部安装变换 (wrist → hand_base)
 - 输出坐标系：wrist frame
+- 功能：接收手指关节角度，计算并输出指尖关键点3D位姿
 """
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Pose, PoseArray
+from geometry_msgs.msg import PoseArray, Pose, Point, Quaternion
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import threading
@@ -304,7 +305,7 @@ class HandFKNode(Node):
             10
         )
         
-        # 发布：指尖关键点 (PoseArray, 5 个指尖在 wrist frame 下的 3D 位姿)
+        # 发布：指尖关键点 (PoseArray格式，包含5个指尖的3D位姿)
         self.keypoints_pub = self.create_publisher(
             PoseArray,
             f'/state/{self.hand_side}_hand/keypoints',
@@ -341,14 +342,14 @@ class HandFKNode(Node):
     def timer_callback(self):
         """
         80Hz FK计算和发布
-        核心实现100%复用hand_fk.py
+        功能：接收关节角度，计算指尖关键点3D坐标
         """
         if self.current_joints is None:
             return
         
         try:
-            # ========== Hand FK计算 (100%复用hand_fk.py) ==========
-            # 调用hand_fk.py的compute_fk方法
+            # ========== Hand FK计算 (内部HandFKSolver) ==========
+            # 调用内部HandFKSolver的compute_fk方法
             fingertip_results = self.hand_fk.compute_fk(
                 self.current_joints,
                 use_normalized=True  # 假设输入是归一化的 [0-1]
@@ -370,7 +371,7 @@ class HandFKNode(Node):
                 # 应用手部安装变换：wrist → hand_base → fingertip
                 T_wrist_fingertip = self.T_wrist_hand_base @ T_hand_fingertip
                 
-                # 提取位姿
+                # 提取位姿（位置和姿态）
                 pos_wrist = T_wrist_fingertip[:3, 3]
                 mat_wrist = T_wrist_fingertip[:3, :3]
                 quat_wrist = R.from_matrix(mat_wrist).as_quat()  # [x,y,z,w]
@@ -380,7 +381,7 @@ class HandFKNode(Node):
                     'quat': quat_wrist
                 }
             
-            # ========== 发布指尖位姿 ==========
+            # ========== 发布指尖关键点 (JointState格式) ==========
             self._publish_fingertip_keypoints(fingertip_poses_wrist)
             
         except Exception as e:
@@ -388,16 +389,17 @@ class HandFKNode(Node):
     
     def _publish_fingertip_keypoints(self, fingertip_poses):
         """
-        发布指尖关键点 (PoseArray)
+        发布指尖关键点 (PoseArray格式)
         
         格式:
         - header.frame_id: "{side}_wrist"
-        - poses: 5 个 Pose，按 thumb, index, middle, ring, pinky 顺序
-          - Pose.position: Point(x, y, z) 指尖 3D 坐标
+        - poses: 5个Pose对象，按 thumb, index, middle, ring, pinky 顺序
+          - Pose.position: Point(x, y, z) 指尖3D坐标
           - Pose.orientation: Quaternion(x, y, z, w) 指尖朝向
         
         Args:
             fingertip_poses: dict，包含5个指尖的位姿
+                {'thumb': {'pos': [x,y,z], 'quat': [x,y,z,w]}, ...}
         """
         msg = PoseArray()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -408,23 +410,33 @@ class HandFKNode(Node):
         
         for finger_name in finger_order:
             pose = Pose()
+            
             if finger_name in fingertip_poses:
                 pos = fingertip_poses[finger_name]['pos']
                 quat = fingertip_poses[finger_name]['quat']
-                # Position: 指尖 3D 坐标
-                pose.position.x = float(pos[0])
-                pose.position.y = float(pos[1])
-                pose.position.z = float(pos[2])
-                # Orientation: 指尖朝向 (scipy 输出 [x,y,z,w])
-                pose.orientation.x = float(quat[0])
-                pose.orientation.y = float(quat[1])
-                pose.orientation.z = float(quat[2])
-                pose.orientation.w = float(quat[3])
+                
+                # 设置位置
+                pose.position = Point(
+                    x=float(pos[0]),
+                    y=float(pos[1]),
+                    z=float(pos[2])
+                )
+                
+                # 设置姿态 (scipy输出格式: [x, y, z, w])
+                pose.orientation = Quaternion(
+                    x=float(quat[0]),
+                    y=float(quat[1]),
+                    z=float(quat[2]),
+                    w=float(quat[3])
+                )
             else:
                 # 缺失的指尖: 零位置 + identity quaternion
-                pose.orientation.w = 1.0
+                pose.position = Point(x=0.0, y=0.0, z=0.0)
+                pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+            
             msg.poses.append(pose)
         
+        # 发布
         self.keypoints_pub.publish(msg)
 
 
