@@ -121,6 +121,12 @@ class LegendVLAInference:
     
     def preprocess_batch(self, batch):
         """预处理batch用于推理"""
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                print(f"{key}: {value.shape}\n{value[0].cpu().tolist()}")
+            else: 
+                print(f"{key}: {value[0]}")
+        print("-"*100)
         input_ids = batch["input_ids"].to(self.device)
         
         # Get unwrapped model for mask building
@@ -136,7 +142,7 @@ class LegendVLAInference:
             "is_vla_data": batch["is_vla_data"],
         }
 
-        if self.mode != 'vlm': 
+        if self.mode == 'flow': 
             # 构建causal mask和position ids
             causal_mask, vlm_position_ids, action_position_ids = (
                 model.build_causal_mask_and_position_ids(
@@ -167,7 +173,6 @@ class LegendVLAInference:
         if "actions" in batch:
             inputs["actions"] = batch["actions"].to(self.dtype)
             inputs["actions_valid_mask"] = batch["actions_valid_mask"]
-            inputs["action_position_ids"] = action_position_ids
         
         return inputs
 
