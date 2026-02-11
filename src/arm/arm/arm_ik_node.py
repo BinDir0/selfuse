@@ -49,13 +49,16 @@ class ArmIKNode(Node):
         """初始化ArmIKNode"""
         super().__init__('arm_ik_node')
 
+        # ik节点模式：inference接收位姿信息，发送ik求解关节角，reset发送复位信息
+        self.mode = "inference"   # or "reset"
+
         # ROS2 parallel callback groups
         self.both_arms_sub_group = ReentrantCallbackGroup()
         self.publisher_group = ReentrantCallbackGroup()
         self.mode_sub_group = ReentrantCallbackGroup()
         
         # 声明和获取ROS2参数
-        self.declare_parameter('enable_viewer', True)
+        self.declare_parameter('enable_viewer', False)
         self.declare_parameter('frequency', 100.0)
         self.declare_parameter('solver', 'daqp')
         self.declare_parameter('ik_xml_path', '')
@@ -132,6 +135,12 @@ class ArmIKNode(Node):
         # 获取左右臂base的body ID（用于坐标转换）
         self.left_arm_base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'arm1_link0')
         self.right_arm_base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'arm2_link0')
+
+        # 获取home_key_id用于复位
+        self.home_key_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_KEY, "home"
+        )
+        assert self.home_key_id >= 0, "❌ MuJoCo XML does not contain a keyframe named 'home'"
 
         # 初始化IK任务
         self._setup_tasks()
@@ -364,7 +373,36 @@ class ArmIKNode(Node):
         mujoco.mjv_defaultFreeCamera(self.model, self.viewer.cam)
 
     def _reset_command_callback(self, msg: String):
-        pass
+        """
+        接收 reset / inference 模式切换
+        """
+        cmd = msg.data.strip().lower()
+
+        if cmd == "reset":
+            self.get_logger().info("🔄 收到 RESET 指令，切换到 reset 模式")
+
+            with self.data_lock:
+                # 重置 MuJoCo 到 home keyframe
+                mujoco.mj_resetDataKeyframe(
+                    self.model,
+                    self.configuration.data,
+                    self.home_key_id
+                )
+                mujoco.mj_forward(self.model, self.configuration.data)
+
+                # 清空 velocity/增量残差
+                self.configuration.integrate_inplace(np.zeros_like(self.configuration.data.qvel), self.dt)
+
+                # 切换模式
+                self.mode = "reset"
+
+        elif cmd == "inference":
+            self.get_logger().info("▶️ 切换到 inference 模式")
+            with self.data_lock:
+                self.mode = "inference"
+
+        else:
+            self.get_logger().warn(f"⚠️ 未识别的 system mode: {cmd}")
 
     def _hand_base_to_tcp(self, hand_base_pos, hand_base_mat, arm='left'):
         """
@@ -467,6 +505,10 @@ class ArmIKNode(Node):
                  poses[0] - 左臂hand_base位姿（相对于左臂base）
                  poses[1] - 右臂hand_base位姿（相对于右臂base）
         """
+
+        if self.mode == "reset":
+            return # reset状态不再接收PoseArray
+
         if len(msg.poses) < 2:
             self.get_logger().warn(f"⚠️ PoseArray消息包含的poses数量不足: {len(msg.poses)}, 需要至少2个")
             return
@@ -503,8 +545,9 @@ class ArmIKNode(Node):
         
         # 设置左臂世界坐标目标
         with self.data_lock:
-            self.configuration.data.mocap_pos[left_target_mocap_id] = left_position_world
-            self.configuration.data.mocap_quat[left_target_mocap_id] = left_quat_mujoco
+            if self.mode == "inference": # 线程锁，只在inference模式下更新目标
+                self.configuration.data.mocap_pos[left_target_mocap_id] = left_position_world
+                self.configuration.data.mocap_quat[left_target_mocap_id] = left_quat_mujoco
         
         # 处理右臂 (poses[1]) - hand_base位姿 -> TCP位姿 -> 世界坐标
         right_hand_base_pose = msg.poses[1]
@@ -538,13 +581,21 @@ class ArmIKNode(Node):
         
         # 设置右臂世界坐标目标
         with self.data_lock:
-            self.configuration.data.mocap_pos[right_target_mocap_id] = right_position_world
-            self.configuration.data.mocap_quat[right_target_mocap_id] = right_quat_mujoco  
+            if self.mode == "inference": # 线程锁，只在inference模式下更新目标
+                self.configuration.data.mocap_pos[right_target_mocap_id] = right_position_world
+                self.configuration.data.mocap_quat[right_target_mocap_id] = right_quat_mujoco  
     
     def timer_callback(self):
         """定时器回调函数，用于求解IK并发布关节状态"""
 
         t0 = time.time()
+
+        if self.mode == "reset":
+            # 直接发布 home qpos
+            with self.data_lock:
+                home_joints = self.configuration.data.qpos.copy()
+            self._publish_arms_joints_cmd(home_joints)
+            return
 
         # MuJoCo更新
         with self.data_lock:
@@ -569,7 +620,10 @@ class ArmIKNode(Node):
             safety_break=False,
             limits=self.limits,
         )
-        self.configuration.integrate_inplace(vel, self.dt)
+
+        with self.data_lock:
+            if self.mode == "inference": # 线程锁：只在inference状态更新关节角
+                self.configuration.integrate_inplace(vel, self.dt)
         
         with self.data_lock:
             _solved_joints = self.configuration.data.qpos.copy()  # PsiRobot: [arm1_joints, arm2_joints]

@@ -10,6 +10,8 @@ Arm FK Node - 机械臂正运动学节点
 - 核心FK计算100%遵循mj-controller (xiaozi_mink_fk_node.py)
 - 坐标变换参考visualize_psirobot_with_rgbd_calib.py
 - 输出坐标系：arm_base frame (arm1_link0 或 arm2_link0)
+- 输出位置：connector顶端（手部安装点）
+- 输出姿态：wrist TCP原始姿态（保持不变）
 """
 
 import rclpy
@@ -21,6 +23,15 @@ import mujoco
 from scipy.spatial.transform import Rotation as R
 import threading
 from pathlib import Path
+
+# Import connector configuration
+from arm.connector_config import (
+    LEFT_CONNECTOR_OFFSET_1_1, LEFT_CONNECTOR_RPY_1_1,
+    LEFT_CONNECTOR_OFFSET_1_2, LEFT_CONNECTOR_RPY_1_2,
+    RIGHT_CONNECTOR_OFFSET_2_1, RIGHT_CONNECTOR_RPY_2_1,
+    RIGHT_CONNECTOR_OFFSET_2_2, RIGHT_CONNECTOR_RPY_2_2,
+    CONNECTOR_HEIGHT
+)
 
 
 class ArmFKNode(Node):
@@ -119,6 +130,22 @@ class ArmFKNode(Node):
         timer_period = 1.0 / self.frequency
         self.timer = self.create_timer(timer_period, self.timer_callback)
         
+        # ========== 加载Connector参数 ==========
+        if self.arm_side == 'left':
+            self.connector_offset_1 = LEFT_CONNECTOR_OFFSET_1_1
+            self.connector_rpy_1 = LEFT_CONNECTOR_RPY_1_1
+            self.connector_offset_2 = LEFT_CONNECTOR_OFFSET_1_2
+            self.connector_rpy_2 = LEFT_CONNECTOR_RPY_1_2
+        else:
+            self.connector_offset_1 = RIGHT_CONNECTOR_OFFSET_2_1
+            self.connector_rpy_1 = RIGHT_CONNECTOR_RPY_2_1
+            self.connector_offset_2 = RIGHT_CONNECTOR_OFFSET_2_2
+            self.connector_rpy_2 = RIGHT_CONNECTOR_RPY_2_2
+        
+        self.hand_z_offset = CONNECTOR_HEIGHT  # 0.011m (hand_z_offset from visualizer)
+        
+        self.get_logger().info(f'✅ Connector parameters loaded for {self.arm_side} arm')
+        
         # ========== 日志输出 ==========
         self.get_logger().info('='*60)
         self.get_logger().info('✅ Arm FK Node initialized')
@@ -126,6 +153,8 @@ class ArmFKNode(Node):
         self.get_logger().info(f'   Frequency: {self.frequency} Hz')
         self.get_logger().info(f'   Input: /state/{self.arm_side}_arm/joints (JointState)')
         self.get_logger().info(f'   Output: /state/{self.arm_side}_arm/wrist_pose (PoseStamped)')
+        self.get_logger().info(f'   Output Position: Connector top (hand base connection point)')
+        self.get_logger().info(f'   Output Rotation: Wrist TCP orientation (unchanged)')
         self.get_logger().info(f'   Output Frame: {base_body_name} (Arm Base)')
         self.get_logger().info('='*60)
     
@@ -171,8 +200,15 @@ class ArmFKNode(Node):
             # Step 4: 旋转矩阵 → 四元数 (遵循mj-controller)
             wrist_quat_base = R.from_matrix(wrist_mat_base).as_quat()  # [x,y,z,w]
             
-            # ========== 发布位姿 (frame_id = arm_base) ==========
-            self._publish_wrist_pose(wrist_pos_base, wrist_quat_base)
+            # ========== 计算Connector顶端位置 (新增) ==========
+            connector_top_pos = self._compute_connector_top_position(
+                wrist_pos_base, wrist_mat_base
+            )
+            
+            # ========== 发布位姿 ==========
+            # Position: connector顶端（手部安装点）
+            # Rotation: wrist TCP姿态（保持不变）
+            self._publish_wrist_pose(connector_top_pos, wrist_quat_base)
             
         except Exception as e:
             self.get_logger().error(f'FK computation error: {e}')
@@ -215,13 +251,49 @@ class ArmFKNode(Node):
         
         return pos_base, mat_base
     
-    def _publish_wrist_pose(self, position, quaternion):
+    def _compute_connector_top_position(self, wrist_pos, wrist_mat):
         """
-        发布wrist位姿 (遵循mj-controller的发布模式)
+        计算connector顶端位置（手部安装点）
+        参考：visualize_psirobot_with_rgbd_calib.py的connector计算逻辑
+        
+        核心思想：
+        1. 从wrist TCP开始，依次应用两个connector的变换
+        2. 最后沿Z轴偏移得到手部安装点
+        3. 姿态使用wrist原始姿态（不改变）
         
         Args:
-            position: [x, y, z] in arm_base frame
-            quaternion: [x, y, z, w]
+            wrist_pos: wrist在arm_base中的位置
+            wrist_mat: wrist在arm_base中的旋转矩阵
+        
+        Returns:
+            connector_top_pos: connector顶端位置（手部安装点）
+        """
+        # Connector 1 变换
+        rot_1 = R.from_euler('xyz', self.connector_rpy_1).as_matrix()
+        pos_1 = wrist_pos + wrist_mat @ self.connector_offset_1
+        mat_1 = wrist_mat @ rot_1
+        
+        # Connector 2 变换
+        rot_2 = R.from_euler('xyz', self.connector_rpy_2).as_matrix()
+        pos_2 = pos_1 + mat_1 @ self.connector_offset_2
+        mat_2 = mat_1 @ rot_2
+        
+        # Hand Base位置（沿connector 2的Z轴偏移）
+        connector_top_pos = pos_2 + mat_2[:, 2] * self.hand_z_offset
+        
+        return connector_top_pos
+    
+    def _publish_wrist_pose(self, position, quaternion):
+        """
+        发布wrist位姿
+        
+        注意：
+        - position: connector顶端位置（手部安装点）
+        - quaternion: wrist TCP原始姿态（保持不变）
+        
+        Args:
+            position: [x, y, z] connector顶端在arm_base frame
+            quaternion: [x, y, z, w] wrist TCP姿态
         """
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.get_clock().now().to_msg()
