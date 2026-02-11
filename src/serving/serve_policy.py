@@ -4,7 +4,12 @@ import socket
 
 from omegaconf import OmegaConf
 
-from src.serving import websocket_policy_server
+from src.serving.websocket_policy_server import (
+    create_engine, 
+    create_env_wrapper,
+    EnvWrapper,
+    WebsocketPolicyServer,
+)
 
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -14,22 +19,24 @@ def _load_config() -> OmegaConf:
     config_path = pathlib.Path(__file__).resolve().parents[1] / "config" / "experiment" / "inference.yaml"
     cfg = OmegaConf.load(config_path)
     OmegaConf.resolve(cfg)
-    if "serving" not in cfg or "policy" not in cfg or "inference" not in cfg:
-        raise ValueError(f"Missing policy/inference/serving config in: {config_path}")
+    assert "serving" in cfg and "policy" in cfg and "env_wrapper" in cfg, \
+        f"Missing policy/serving/env_wrapper config in: {config_path}"
     return cfg
 
 
 def main() -> None:
     cfg = _load_config()
-    policy_cfg = OmegaConf.merge(cfg.policy, cfg.inference)
-    policy = websocket_policy_server.create_policy(policy_cfg, cfg.serving)
+    policy = create_engine(cfg.policy, cfg.serving)
+    if getattr(cfg, "env_wrapper", None) and cfg.env_wrapper.enabled:
+        wrapper_cfg = cfg.env_wrapper
+        policy = create_env_wrapper(policy, wrapper_cfg)
     policy_metadata = policy.metadata
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
-    server = websocket_policy_server.WebsocketPolicyServer(
+    server = WebsocketPolicyServer(
         policy=policy,
         host=cfg.serving.host,
         port=cfg.serving.port,

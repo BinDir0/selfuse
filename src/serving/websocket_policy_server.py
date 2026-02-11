@@ -5,64 +5,88 @@ import http
 import logging
 import time
 import traceback
-from typing import Any
+from typing import Any, Dict
 
-import hydra
-import torch
-from src.serving.msgpack_numpy import msgpack_numpy
 import websockets.asyncio.server as _server
 import websockets.frames
+import hydra
+import torch
+import torch.nn as nn
+
+from . import msgpack_numpy
+
 
 logger = logging.getLogger(__name__)
 
 
-class DevicePolicyWrapper:
+class RuntimeEngine:
+    """
+    The Runtime Engine. 
+    It manages the execution context (Device, Autocast) for a Policy.
+    """
     def __init__(self, policy: Any, device: torch.device, use_autocast: bool = True) -> None:
-        self._policy = policy
-        self._device = device
-        self._use_autocast = use_autocast
-        self._autocast_dtype = getattr(policy, "dtype", torch.float32)
-        self.metadata = getattr(policy, "metadata", {})
-        self._move_model_to_device()
+        self.policy = policy
+        self.device = device
+        self.use_autocast = use_autocast
+        self.metadata = policy.metadata
+        
+        self.policy.to(device)
 
-    def _move_model_to_device(self) -> None:
-        if hasattr(self._policy, "model") and isinstance(self._policy.model, torch.nn.Module):
-            self._policy.model.to(self._device)
-        elif isinstance(self._policy, torch.nn.Module):
-            self._policy.to(self._device)
-
-    def _move_inputs_to_device(self, inputs: dict) -> dict:
-        for key, value in inputs.items():
-            if torch.is_tensor(value):
-                inputs[key] = value.to(self._device)
-        return inputs
-
-    def _run_infer(self, inputs: dict) -> dict:
-        if self._policy.mode == "flow":
-            pred_actions = self._policy.model("infer_action", inputs)
-        elif self._policy.mode == "ar":
-            pred_actions = self._policy.model(
-                "infer_vla",
-                inputs,
-                max_new_tokens=self._policy.ar_max_new_tokens,
-                temperature=self._policy.ar_temperature,
-                cfg=self._policy.ar_cfg,
-            )
-        else:
-            raise ValueError(f"Unsupported inference mode: {self._policy.mode}")
-        pred_actions = self._policy._unnormalize_actions(pred_actions)
-        return {"pred_actions": pred_actions}
+    def _move_to_device(self, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {k: self._move_to_device(v) for k, v in data.items()}
+        return data.to(self.device) if torch.is_tensor(data) else data
 
     @torch.inference_mode()
-    def infer(self, obs: dict) -> dict:
-        prepared = self._policy._prepare_processor_inputs(obs)
-        inputs = self._policy._build_model_inputs(prepared)
-        inputs = self._move_inputs_to_device(inputs)
+    def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        """The high-level entry point for inference."""
+        prepared = self.policy.prepare_process(obs)
+        inputs = self.policy.build_model_inputs(prepared)
+        
+        inputs = self._move_to_device(inputs)
+        
+        with torch.autocast(device_type=self.device.type, dtype=self.policy.dtype):
+            pred_actions = self.policy(inputs)
 
-        if self._use_autocast and self._device.type == "cuda":
-            with torch.autocast(device_type="cuda", dtype=self._autocast_dtype):
-                return self._run_infer(inputs)
-        return self._run_infer(inputs)
+        pred_actions = self.policy.post_process(pred_actions.cpu())
+        
+        return {"pred_actions": pred_actions}
+
+
+class EnvWrapper:
+    def __init__(
+        self,
+        policy: Any,
+        image_key: str = "image",
+        depth_key: str = "depth_image",
+        intrinsic_key: str = "camera_intrinsics",
+        instruction_key: str = "instruction",
+        states_key: str = "states",
+    ) -> None:
+        self._policy = policy
+        self._image_key = image_key
+        self._depth_key = depth_key
+        self._intrinsic_key = intrinsic_key
+        self._instruction_key = instruction_key
+        self._states_key = states_key
+        self.metadata = getattr(policy, "metadata", {})
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate unknown attributes/methods to the wrapped policy.
+        return getattr(self._policy, name)
+
+    def __dir__(self) -> list[str]:
+        return sorted(set(dir(self._policy)) | set(super().__dir__()))
+
+    def infer(self, obs: dict) -> dict:
+        mapped_obs = {
+            "image": obs.get(self._image_key),
+            "depth": obs.get(self._depth_key),
+            "intrinsic": obs.get(self._intrinsic_key),
+            "instruction": obs.get(self._instruction_key),
+            "states": obs.get(self._states_key),
+        }
+        return self._policy.infer(mapped_obs)
 
 
 def _resolve_device(device: str | None) -> torch.device:
@@ -71,12 +95,22 @@ def _resolve_device(device: str | None) -> torch.device:
     return torch.device(device)
 
 
-def create_policy(policy_cfg: Any, serving_cfg: Any) -> Any:
+def create_engine(policy_cfg: Any, serving_cfg: Any) -> Any:
     policy = hydra.utils.instantiate(policy_cfg)
     device = _resolve_device(getattr(serving_cfg, "device", "auto"))
     use_autocast = bool(getattr(serving_cfg, "autocast", True))
-    return DevicePolicyWrapper(policy, device=device, use_autocast=use_autocast)
+    return RuntimeEngine(policy, device=device, use_autocast=use_autocast)
 
+
+def create_env_wrapper(policy: Any, wrapper_cfg: Any) -> Any:
+    return EnvWrapper(
+        policy=policy,
+        image_key=wrapper_cfg.image_key,
+        depth_key=wrapper_cfg.depth_key,
+        intrinsic_key=wrapper_cfg.intrinsic_key,
+        instruction_key=wrapper_cfg.instruction_key,
+        states_key=wrapper_cfg.states_key,
+    )
 
 class WebsocketPolicyServer:
     """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
