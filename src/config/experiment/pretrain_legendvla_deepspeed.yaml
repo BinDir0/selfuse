@@ -299,6 +299,7 @@ policy:
     mlp_depth: 2 # 0 means no MLP
     fourier_embed_dim: 1024
     fourier_scale: 1.0
+    final_layer_norm: False
   latent_condition_projector:
     _target_: src.model.action.action_head.MLPProjector
     input_dim: ${mixture.vlm.hidden_size}  # Dynamically use VLM hidden size (2048 for paligemma, 2304 for paligemma2)
@@ -314,6 +315,7 @@ policy:
     mlp_depth: 2 # 0 means no MLP
     fourier_embed_dim: 1024
     fourier_scale: 1.0
+    final_layer_norm: False
   action_decoder: 
     _target_: src.model.action.action_head.MLPProjector
     input_dim: 1024
