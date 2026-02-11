@@ -13,8 +13,8 @@ def generate_launch_description():
             name='model_interface_node',
             output='screen',
             parameters=[{
-                'arm_frequency': '100.0',
-                'hand_frequency': '80.0',
+                'arm_frequency': '30.0',
+                'hand_frequency': '30.0',
                 'model_server_host': '81.68.132.224',
                 'model_server_port': '18020',
                 'camera_name': 'head',

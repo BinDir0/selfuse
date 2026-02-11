@@ -61,8 +61,8 @@ class ModelInterfaceNode(Node):
         self.queue_lock = threading.Lock()  # 保护动作队列
 
         # 2. 获取参数
-        self.declare_parameter('arm_frequency', 100.0)
-        self.declare_parameter('hand_frequency', 80.0)
+        self.declare_parameter('arm_frequency', 30.0)
+        self.declare_parameter('hand_frequency', 30.0)
         self.declare_parameter('model_server_host', '0.0.0.0')
         self.declare_parameter('model_server_port', 8000)
         self.declare_parameter('calibration_path', '')
@@ -161,7 +161,8 @@ class ModelInterfaceNode(Node):
                 print("\n" + "="*40)
                 instr = input("[Input] Instruction: ").strip()
                 mode_in = input("[Input] Mode (deploy/debug) [deploy]: ").strip().lower()
-                if not instr: continue
+                if not instr:
+                    continue
                 with self.state_lock:
                     self.current_instruction = instr
                     self.mode = 'debug' if mode_in == 'debug' else 'deploy'
@@ -170,8 +171,10 @@ class ModelInterfaceNode(Node):
             time.sleep(0.2)
 
     def on_key_press(self, key):
-        try: k = key.char
-        except: k = None
+        try:
+            k = key.char
+        except:
+            k = None
         if k == '1':
             with self.state_lock:
                 if self.state == SystemState.READY:
@@ -195,9 +198,11 @@ class ModelInterfaceNode(Node):
                     self.play_sound("stop_and_reset")
                     self.pub_system_mode.publish(String(data="reset"))
             with self.queue_lock:
-                self.arm_queue.clear(); self.hand_queue.clear()
-            time.sleep(3.0) 
-            with self.state_lock: self.state = SystemState.IDLE
+                self.arm_queue.clear()
+                self.hand_queue.clear()
+            time.sleep(3.0)
+            with self.state_lock:
+                self.state = SystemState.IDLE
 
     # --- 推理生产者：多锁流水线 ---
     def inference_worker(self):
@@ -290,20 +295,32 @@ class ModelInterfaceNode(Node):
     # --- 传感器回调：只占 obs_lock ---
     def rgb_cb(self, msg):
         img = self.cv_bridge.imgmsg_to_cv2(msg, 'rgb8')
-        with self.obs_lock: self.latest_obs['image'] = img
+        with self.obs_lock:
+            self.latest_obs['image'] = img
+
     def depth_cb(self, msg):
         img = self.cv_bridge.imgmsg_to_cv2(msg, 'passthrough')
-        with self.obs_lock: self.latest_obs['depth_image'] = img
+        with self.obs_lock:
+            self.latest_obs['depth_image'] = img
+
     def l_pose_cb(self, msg):
-        with self.obs_lock: self.latest_obs['l_wrist_pose'] = msg
+        with self.obs_lock:
+            self.latest_obs['l_wrist_pose'] = msg
+
     def r_pose_cb(self, msg):
-        with self.obs_lock: self.latest_obs['r_wrist_pose'] = msg
+        with self.obs_lock:
+            self.latest_obs['r_wrist_pose'] = msg
+
     def l_kp_cb(self, msg):
         arr = np.array([[p.position.x, p.position.y, p.position.z] for p in msg.poses])
-        with self.obs_lock: self.latest_obs['l_kps'] = arr
+        with self.obs_lock:
+            self.latest_obs['l_kps'] = arr
+
     def r_kp_cb(self, msg):
         arr = np.array([[p.position.x, p.position.y, p.position.z] for p in msg.poses])
-        with self.obs_lock: self.latest_obs['r_kps'] = arr
+        with self.obs_lock:
+            self.latest_obs['r_kps'] = arr
+
 
 def main(args=None):
     rclpy.init(args=args)
