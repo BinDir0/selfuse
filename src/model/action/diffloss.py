@@ -8,9 +8,19 @@ from src.utils import create_diffusion
 
 class DiffLoss(nn.Module):
     """Diffusion Loss"""
-    def __init__(self, target_channels, z_channels, depth, width, num_sampling_steps, grad_checkpointing=False):
+    def __init__(
+        self,
+        target_channels,
+        z_channels,
+        depth,
+        width,
+        num_sampling_steps,
+        grad_checkpointing=False,
+        use_ddim_sampling=False,
+    ):
         super(DiffLoss, self).__init__()
         self.in_channels = target_channels
+        self.use_ddim_sampling = use_ddim_sampling
         self.net = SimpleMLPAdaLN(
             in_channels=target_channels,
             model_channels=width,
@@ -21,7 +31,14 @@ class DiffLoss(nn.Module):
         )
 
         self.train_diffusion = create_diffusion(timestep_respacing="", noise_schedule="cosine")
-        self.gen_diffusion = create_diffusion(timestep_respacing=num_sampling_steps, noise_schedule="cosine")
+        if self.use_ddim_sampling:
+            if isinstance(num_sampling_steps, str) and num_sampling_steps.startswith("ddim"):
+                timestep_respacing = num_sampling_steps
+            else:
+                timestep_respacing = f"ddim{num_sampling_steps}"
+        else:
+            timestep_respacing = num_sampling_steps
+        self.gen_diffusion = create_diffusion(timestep_respacing=timestep_respacing, noise_schedule="cosine")
 
     def forward(self, target, z, mask=None):
         t = torch.randint(0, self.train_diffusion.num_timesteps, (target.shape[0],), device=target.device)
@@ -33,6 +50,15 @@ class DiffLoss(nn.Module):
         return loss.mean()
 
     def sample(self, z, temperature=1.0, cfg=1.0):
+        """
+        Args:
+            z: [B, D]
+            temperature: float
+            cfg: float
+
+        Returns:
+            sampled_token_latent: [B, D]
+        """
         # diffusion loss sampling
         if not cfg == 1.0:
             noise = torch.randn(z.shape[0] // 2, self.in_channels).cuda()
@@ -44,10 +70,16 @@ class DiffLoss(nn.Module):
             model_kwargs = dict(c=z)
             sample_fn = self.net.forward
 
-        sampled_token_latent = self.gen_diffusion.p_sample_loop(
-            sample_fn, noise.shape, noise, clip_denoised=False, model_kwargs=model_kwargs, progress=False,
-            temperature=temperature
-        )
+        if self.use_ddim_sampling:
+            sampled_token_latent = self.gen_diffusion.ddim_sample_loop(
+                sample_fn, noise.shape, noise, clip_denoised=False, model_kwargs=model_kwargs, progress=False,
+                eta=0.0
+            )
+        else:
+            sampled_token_latent = self.gen_diffusion.p_sample_loop(
+                sample_fn, noise.shape, noise, clip_denoised=False, model_kwargs=model_kwargs, progress=False,
+                temperature=temperature
+            )
 
         return sampled_token_latent
 

@@ -27,6 +27,7 @@ scipy
 matplotlib
 seaborn
 xformers
+websockets
 # chumpy
 #manotorch
 #manopth

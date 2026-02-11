@@ -185,7 +185,7 @@ class LegendVLADataset(BaseRatioDataset):
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
-        val_set.mode = 'val'
+        val_set.mode = 'val' if self.mode == 'train' else self.mode
         val_set.aug_transform = None
 
         for i, replay_buffer in enumerate(self.replay_buffers):
@@ -325,7 +325,7 @@ class LegendVLADataset(BaseRatioDataset):
             LegendVLDataCollator: Collator instance.
         """
         assert self.preprocessor is not None, "Preprocessor is not set"
-        padding_side = 'left' if self.mode == 'infer' else 'right'
+        padding_side = 'left' if self.mode == 'infer-ar' else 'right'
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
@@ -354,7 +354,9 @@ class LegendVLADataset(BaseRatioDataset):
         if self.return_dataset_info:
             data['dataset_name'] = self.dataset_names[i]
             data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
-        torch_data = dict_apply(data, torch.from_numpy)
+        torch_data = dict_apply(
+            data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+        )
         return torch_data
 
     def __len__(self):
@@ -387,7 +389,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             cache_dir (Optional[str]): HF datasets cache directory.
             weights (List[float]): Weights for rating-based text selection.
             seed (int): Random seed.
-            mode (str): One of "train" or "val".
+            mode (str): One of "train" or "val" of "infer-ar" or "infer".
         """
         super().__init__()
         self.dataset_paths = [dataset_paths] if isinstance(dataset_paths, str) else dataset_paths
@@ -464,7 +466,8 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             cache_dir=self.cache_dir,
             weights=self.weights,
             seed=self.seed,
-            mode='val'
+            mode='val' if self.mode == 'train' else self.mode,
+            return_dataset_info=self.return_dataset_info,
         )
         
         # inherit the current preprocessor
@@ -545,9 +548,11 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             LegendVLDataCollator: Collator instance.
         """
         assert self.preprocessor is not None, "Preprocessor is not set"
+        padding_side = 'left' if self.mode == 'infer-ar' else 'right'
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
+            padding_side=padding_side,
         )
 
     def set_preprocessor(self, preprocessor):
@@ -573,8 +578,6 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         sample = self.main_dataset[idx]
         data = self._sample_to_data(sample, idx)
         if self.return_dataset_info:
-            dataset_name = "vlm"
-            dataset_local_idx = idx
             for i, offset in enumerate(self.dataset_offsets):
                 length = self.dataset_lengths[i]
                 if idx < offset + length:
@@ -583,7 +586,9 @@ class LegendVLMDataset(torch.utils.data.Dataset):
                     break
             data['dataset_name'] = dataset_name
             data['dataset_local_idx'] = np.array(dataset_local_idx, dtype=np.int32)
-        torch_data = dict_apply(data, torch.from_numpy)
+        torch_data = dict_apply(
+            data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+        )
         return torch_data
 
     def __len__(self):
@@ -822,6 +827,7 @@ class LegendVLALowLevelDataset(BaseLowdimDataset):
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
+        val_set.mode = 'val' if self.mode == 'train' else self.mode
 
         for i, replay_buffer in enumerate(self.replay_buffers):
             # Create validation set sampler

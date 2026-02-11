@@ -706,49 +706,65 @@ def plot_all_visualizations(
     )
 
 
-def compute_and_save_metrics(zarr_path, output_dir, dataset_name):
-    """
-    Read data from zarr file, compute all metrics and save visualizations.
-    
-    Args:
-        zarr_path: zarr file path
-        output_dir: output directory
-        dataset_name: dataset name
-    """
-    # Read zarr file
+def _prepare_metrics_data_from_zarr(zarr_path, dataset_name):
     store = zarr.DirectoryStore(str(zarr_path))
     zarr_root = zarr.group(store=store)
-    
-    # Check if there is necessary data
+
     if 'pred_actions' not in zarr_root:
         print(f"  Warning: {dataset_name} has no pred_actions, skipping")
-        return
-    
+        return None
+
     pred_actions = zarr_root['pred_actions'][:]  # [N, H, D]
-    
+    gt_actions = zarr_root['gt_actions'][:] if 'gt_actions' in zarr_root else None
+    return {
+        'pred_actions': pred_actions,
+        'gt_actions': gt_actions,
+        'has_gt': gt_actions is not None,
+    }
+
+
+def _prepare_metrics_data_from_memory(data, dataset_name):
+    pred_actions = data.get('pred_actions')
+    gt_actions = data.get('gt_actions')
+    if pred_actions is None:
+        print(f"  Warning: {dataset_name} has no pred_actions, skipping")
+        return None
+    if torch.is_tensor(pred_actions):
+        pred_actions = pred_actions.detach().cpu().numpy()
+    if gt_actions is not None and torch.is_tensor(gt_actions):
+        gt_actions = gt_actions.detach().cpu().numpy()
+    return {
+        'pred_actions': pred_actions,
+        'gt_actions': gt_actions,
+        'has_gt': gt_actions is not None,
+    }
+
+
+def _compute_and_save_metrics_from_data(metrics_data, output_dir, dataset_name):
+    pred_actions = metrics_data['pred_actions']
+    gt_actions = metrics_data['gt_actions']
+
     # Save basic information
     info_dict = {
         'dataset_name': str(dataset_name),
         'num_samples': int(pred_actions.shape[0]),
         'horizon': int(pred_actions.shape[1]),
         'action_dim': int(pred_actions.shape[2]),
-        'has_gt': 'gt_actions' in zarr_root,
+        'has_gt': bool(metrics_data['has_gt']),
     }
     info_path = output_dir / "info.json"
     with open(info_path, 'w') as f:
         json.dump(info_dict, f, indent=2)
-    
+
     # If there is ground truth, compute metrics and save visualizations
-    if 'gt_actions' not in zarr_root:
+    if gt_actions is None:
         print(f"  Warning: {dataset_name} has no ground truth data, skipping metrics computation")
         return
-    
-    gt_actions = zarr_root['gt_actions'][:]  # [N, H, D]
-    
+
     # Convert to torch tensor
     pred_tensor = torch.from_numpy(pred_actions).float()
     gt_tensor = torch.from_numpy(gt_actions).float()
-    
+
     # Compute all metrics
     print(f"  计算统计指标...")
     
@@ -874,6 +890,26 @@ def compute_and_save_metrics(zarr_path, output_dir, dataset_name):
         prefix='',
     )
     print(f"  Visualizations saved to: {output_dir}")
+
+
+def compute_and_save_metrics_from_zarr(zarr_path, output_dir, dataset_name):
+    """
+    Read data from zarr file, compute all metrics and save visualizations.
+    """
+    metrics_data = _prepare_metrics_data_from_zarr(zarr_path, dataset_name)
+    if metrics_data is None:
+        return
+    _compute_and_save_metrics_from_data(metrics_data, output_dir, dataset_name)
+
+
+def compute_and_save_metrics_from_data(data, output_dir, dataset_name):
+    """
+    Read data from in-memory dict, compute all metrics and save visualizations.
+    """
+    metrics_data = _prepare_metrics_data_from_memory(data, dataset_name)
+    if metrics_data is None:
+        return
+    _compute_and_save_metrics_from_data(metrics_data, output_dir, dataset_name)
 
 
 def main():

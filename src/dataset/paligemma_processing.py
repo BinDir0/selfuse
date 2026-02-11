@@ -245,6 +245,7 @@ class PaliGemmaProcessor:
         tokenizer.add_eos_token = False
 
         self.tokenizer = tokenizer
+        self.eos_token_id = tokenizer.eos_token_id
         self.sep_token_id = tokenizer('\n', max_length=1, padding="max_length", truncation=True)['input_ids'][0]
 
     def float2localization_tokens(self, text: str):
@@ -324,10 +325,10 @@ class PaliGemmaProcessor:
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             suffix_target=target,
-            need_target=(mode != 'infer'),
+            need_target=('infer' not in mode),
         )
 
-        if mode == 'infer': # Use left padding for inference
+        if mode == 'infer-ar': # Use left padding for autoregressive inference
             self.tokenizer.padding_side = "left"
         else:
             self.tokenizer.padding_side = "right"
@@ -344,7 +345,7 @@ class PaliGemmaProcessor:
         labels[labels == self.tokenizer.pad_token_id] = self.ignore_index
         condition = (labels == self.sep_token_id)
         if not np.any(condition):
-            if mode != 'infer': # Do not warn in inference mode
+            if 'infer' not in mode: # Do not warn in inference mode
                 warnings.warn("The separator token is not found in the input_ids")
             sep_idx = len(labels) - 1
         else : 
@@ -356,9 +357,22 @@ class PaliGemmaProcessor:
         output = {"pixel_values": pixel_values, **inputs}
         return output
 
-    def decode(self, output_ids):
-        output_str = self.tokenizer.decode(output_ids)
-        return self.localization_tokens2float(output_str)
+    def decode(self, output_ids, skip_special_tokens=True):
+        if isinstance(output_ids, torch.Tensor):
+            output_ids = output_ids.detach().cpu().tolist()
+        else:
+            output_ids = output_ids
+        if isinstance(output_ids, list):
+            outputs = []
+            for ids in output_ids:
+                output_str = self.tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+                output_str = self.localization_tokens2float(output_str)
+                outputs.append(output_str)
+            return outputs
+        else:
+            output_str = self.tokenizer.decode(output_ids, skip_special_tokens=skip_special_tokens)
+            output_str = self.localization_tokens2float(output_str)
+            return output_str
 
     def postprocess(
         self,
@@ -381,36 +395,23 @@ class PaliGemmaProcessor:
                 - images: np.ndarray uint8 [B, T, H, W, C]
                 - instructions: List[str]
         """
-        if isinstance(generated_ids, torch.Tensor):
-            generated_ids_list = generated_ids.detach().cpu().tolist()
-        else:
-            generated_ids_list = generated_ids
-        texts = self.tokenizer.batch_decode(generated_ids_list, skip_special_tokens=True)
-
-        if isinstance(input_ids, torch.Tensor):
-            input_ids_list = input_ids.detach().cpu().tolist()
-        else:
-            input_ids_list = input_ids
-        special_ids = set(self.tokenizer.all_special_ids)
-        pad_id = self.tokenizer.pad_token_id
-        instructions = []
-        for ids in input_ids_list:
-            filtered = [i for i in ids if i != pad_id and i not in special_ids]
-            instructions.append(self.tokenizer.decode(filtered, skip_special_tokens=True).strip())
+        pred_texts = self.decode(generated_ids, True)
+        instructions = self.decode(input_ids, True)
 
         if isinstance(pixel_values, torch.Tensor):
             pixel_values = pixel_values.detach().float().cpu().numpy()
         if pixel_values.ndim == 4:
             pixel_values = pixel_values[:, None, ...]
 
-        images = pixel_values * IMAGENET_STANDARD_STD + IMAGENET_STANDARD_MEAN
+        images = pixel_values * IMAGENET_STANDARD_STD[None, :, None, None] \
+            + IMAGENET_STANDARD_MEAN[None, :, None, None]
         images = np.clip(images, 0.0, 1.0)
         images = (images * 255.0).astype(np.uint8)
         images = np.transpose(images, (0, 1, 3, 4, 2))
         if num_images is not None:
             images = images[:, :num_images]
         return {
-            "texts": texts,
+            "pred_texts": pred_texts,
             "images": images,
             "instructions": instructions,
         }
@@ -447,7 +448,6 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         tokenizer.add_special_tokens(tokens_to_add)
         self.state_token_id = tokenizer.convert_tokens_to_ids(self.STATE_TOKEN)
         self.action_token_id = tokenizer.convert_tokens_to_ids(self.ACTION_TOKEN)
-        self.eos_token_id = tokenizer.eos_token_id
     
     def __call__(
         self,
@@ -518,7 +518,7 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         prefix = (
             f"Task: {text}, Camera intrinsic: {intrinsic_str}, "
             f"States: {self.STATE_TOKEN * len(states)}"
-            f"Action: "
+            f"Actions: "
         )
         suffix = f"{self.ACTION_TOKEN * len(actions)}"
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
@@ -529,10 +529,10 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
             image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             suffix_target=suffix,
-            need_target=(mode != 'infer' and objective != "train_flow"),
+            need_target=(('infer' not in mode) and objective != "train_flow"),
         )
 
-        if mode == 'infer': # Use left padding for inference
+        if mode == 'infer-ar': # Use left padding for autoregressive inference
             self.tokenizer.padding_side = "left" 
         else:
             self.tokenizer.padding_side = "right"

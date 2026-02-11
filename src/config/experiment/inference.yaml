@@ -1,143 +1,24 @@
 # @package _global_
 
-_target_: src.workspace.train_egovla_workspace.TrainEgoVLAWorkspace
-
-image_shape: [384, 384, 3]
-
-shape_meta: &shape_meta
-  obs:
-    rgb:
-      shape: ${image_shape}
-      type: rgb
-      horizon: ${n_obs_steps}
-    wrist:
-      shape: [18]
-      type: low_dim
-      horizon: ${n_obs_steps}
-    hand: 
-      shape: [30]
-      type: low_dim
-      horizon: ${n_obs_steps}
-    state:
-      shape: [48]
-      type: low_dim
-      horizon: ${n_obs_steps}
-  action:
-    shape: [48]
-    horizon: ${n_action_steps}
-
-hand_meta: 
-  thumb: 
-    joints: [fy11, fy12, fy13, fy14]
-    primary_joints: [fy11, fy12, fy14]
-    site: fingertip_thumb
-    target: target_thumb
-  index: 
-    joints: [fy21, fy22, fy23]
-    primary_joints: [fy21, fy23]
-    site: fingertip_index
-    target: target_index
-  middle: 
-    joints: [fy31, fy32, fy33]
-    primary_joints: [fy31, fy33]
-    site: fingertip_middle
-    target: target_middle
-  ring: 
-    joints: [fy41, fy42, fy43]
-    primary_joints: [fy41, fy43]
-    site: fingertip_ring
-    target: target_ring
-  little: 
-    joints: [fy51, fy52, fy53]
-    primary_joints: [fy51, fy53]
-    site: fingertip_little
-    target: target_little
-
-# keypoints' config for opt retargeting
-keypoints_dict:
-  thumb: 
-    origin_link_name: base_link
-    link_name: fy14_Link
-    mano_id: 4
-  index: 
-    origin_link_name: base_link
-    link_name: fy23_Link
-    mano_id: 8
-  middle: 
-    origin_link_name: base_link
-    link_name: fy33_Link
-    mano_id: 12
-  ring: 
-    origin_link_name: base_link
-    link_name: fy43_Link
-    mano_id: 16
-  little: 
-    origin_link_name: base_link
-    link_name: fy53_Link
-    mano_id: 20
-
-dataset:
-  _target_: src.dataset.egovla_dataset.EgoVLADataset
-  zarr_paths: ${dataset_paths}
-  horizon: ${eval:'${n_action_steps}+${dataset.frequency}'}
-  n_obs_steps: ${n_obs_steps}
-  pad_before: ${eval:'${dataset.frequency}+${n_latency_steps}'}
-  pad_after: ${eval:'${n_action_steps}-1'}
-  seed: 42
-  val_ratio: 0.05
-  frequency: 30 # fps
-
-n_execution_steps: 15
-n_action_steps: 30
-n_obs_steps: 6  
-n_latency_steps: 0
-dataset_obs_steps: ${n_obs_steps}
-
 policy:
-  _target_: src.policy.egovla.EgoVLA
+  _target_: src.policy.legendvla.LegendVLAInference
+  model_config_path: /home/chenzhang/projects/LegendVLA-train/outputs/2026.02.09/21.04_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
+  checkpoint_path: /home/chenzhang/projects/LegendVLA-train/outputs/2026.02.09/21.04_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=35000-eval_l1_loss=0.0251/pytorch_model/mp_rank_00_model_states.pt
 
-  shape_meta: ${shape_meta}
+inference:
+  mode: flow
+  use_mixed_precision: true
+  diffusion_sampling_steps: null
+  diffusion_use_ddim_sampling: false
+  flow_sampling_steps: null
+  tokenizer_padding: longest
+  default_instruction: null
+  ar_temperature: 1.0
+  ar_cfg: 1.0
 
-  vlm:
-    _target_: src.model.vlm.nvila.NVILA
-    shape_meta: ${shape_meta}
-    model_name_or_path: /share_data/checkpoints/NVILA-Lite-2B
-
-  action_head: 
-    _target_: src.model.action.action_head.ActionHead
-    shape_meta: ${shape_meta}
-    model_config:
-      hidden_size: 1536
-      intermediate_size: ${eval:'${policy.action_head.model_config.hidden_size}*8'}
-      num_layers: 6
-      num_heads: 12
-      dropout: 0.1
-      local_weights_path: null
-
-  loss_config:
-    wrist_trans_loss_weight: 20.0
-    wrist_rot_loss_weight: 5.0
-    hand_loss_weight: 5.0
-
-  execution_steps: ${n_execution_steps}
-
-  retargeting_head:
-    - _target_: src.model.retargeting.opt_retargeting.OptRetargeting
-      retargeting_type: vector 
-      model_config: 
-        model_path: /home/chenzhang/project/EgoVLA/assets/ruiyan_6a_L/mjmodel/ruihand6y.xml
-        urdf_path: /home/chenzhang/project/EgoVLA/assets/ruiyan_6a_L/urdf/ruihand6y.urdf
-        hand_meta: ${hand_meta}
-        keypoints_dict: ${keypoints_dict}
-        scaling_factor: 1.0
-
-    - _target_: src.model.retargeting.opt_retargeting.OptRetargeting
-      retargeting_type: vector
-      model_config: 
-        model_path: /home/chenzhang/project/EgoVLA/assets/ruiyan_6a_R/mjmodel/ruihand6y.xml
-        urdf_path: /home/chenzhang/project/EgoVLA/assets/ruiyan_6a_R/urdf/ruihand6y.urdf
-        hand_meta: ${hand_meta}
-        keypoints_dict: ${keypoints_dict}
-        scaling_factor: 1.0  
-  start_ckpt_path: null
+serving:
+  host: 0.0.0.0
+  port: 8000
+  device: auto
+  autocast: true
 
