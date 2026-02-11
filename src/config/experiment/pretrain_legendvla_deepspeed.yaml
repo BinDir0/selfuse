@@ -284,7 +284,7 @@ policy:
     # Depth image support
     use_depth: True  # Enable depth image processing with DINOv2
     depth_dropout: 0.1
-    diffloss_micro_batch_size: 4
+    diffloss_micro_batch_size: 16
     loss_weights: 
       ce_loss_weight: 0.1
       diffusion_loss_weight: 1.0
@@ -392,8 +392,8 @@ policy:
     _target_: src.model.action.diffloss.DiffLoss
     target_channels: 48  # TODO: set according to action dimension
     z_channels: ${mixture.vlm.hidden_size}
-    depth: 3
-    width: 1024
+    depth: 8
+    width: 1536
     num_sampling_steps: "100"
     grad_checkpointing: False
     # Note: DiffLoss uses standard DiT-style sinusoidal encoding (different from action expert)
