@@ -17,9 +17,15 @@ def generate_launch_description():
                 'hand_frequency': '30.0',
                 'model_server_host': '81.68.132.224',
                 'model_server_port': '18020',
-                'camera_name': 'head',
                 'calibration_path': '/root/workspace/legendvla-inference/examples/calibration_outputs',
-                'assets_folder': '/root/workspace/legendvla-inference/assets'
+                'camera_name': 'head',
+                'audio_service_host': 'localhost',
+                'audio_service_port': '8080',
+                'state_history_len': '10',
+                'state_history_step': '3',
+                'image_history_len': '1',
+                'image_history_step': '30',
+                'buffer_size': '200',
             }]
         )
     ])
