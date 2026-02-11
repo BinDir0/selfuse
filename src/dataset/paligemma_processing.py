@@ -161,13 +161,10 @@ def process_images(
     
     # Rescale the pixel values to be in the range [0, 1]
     images = rescale(images, scale=rescale_factor)
-    
     # Resize the images to the desired size using PIL for high quality
     images = resize(images, size=size)
-    
     # Normalize the images to have mean 0 and standard deviation 1
     images = normalize(images, mean=image_mean, std=image_std)
-    
     return images
 
 
@@ -181,7 +178,7 @@ def process_depth_images(
     """Process depth images using numpy operations for CPU-based preprocessing.
     
     Args:
-        depth_images: np.ndarray [T, H, W]
+        depth_images: np.ndarray [T, H, W] or [T, C, H, W] or [T, H, W, C]
         size: Tuple[int, int] - target size (height, width)
         rescale_factor: float - scaling factor for pixel values (default 1.0)
         
@@ -191,6 +188,13 @@ def process_depth_images(
     # Convert to numpy if input is torch tensor
     if isinstance(depth_images, torch.Tensor):
         depth_images = depth_images.cpu().numpy()
+        
+    # Ensure images are in [B, H, W] format
+    if depth_images.ndim == 4: 
+        if depth_images.shape[-1] <= 3: 
+            depth_images = depth_images[..., 0]
+        elif depth_images.shape[1] <= 3: 
+            depth_images = depth_images[:, 0, ...]
     
     # Rescale the pixel values if needed
     if rescale_factor != 1.0:
@@ -470,12 +474,12 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
             intrinsic: np.ndarray [4]
             objective: str, 'ar' or 'flow' or None, None means both
             truncation: bool
-            depth_images: np.ndarray [T_image, 3, H, W]
+            depth_images: np.ndarray [T_image, H, W] or [T_image, C, H, W] or [T_image, H, W, C]
             mode: str
         Returns:
             dict:
                 - pixel_values: torch.FloatTensor [T_image, C, H, W]
-                - depth_values: torch.FloatTensor [T_image, 1, H, W] (if depth_images provided)
+                - depth_values: torch.FloatTensor [T_image, 3, H, W] (if depth_images provided)
                 - input_ids: torch.LongTensor [L]
                 - labels: torch.LongTensor [L]
                 - attention_mask: torch.LongTensor [L]

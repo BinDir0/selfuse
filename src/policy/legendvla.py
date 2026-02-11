@@ -1927,6 +1927,7 @@ class LegendVLAInference(nn.Module):
                 state_dict = state_dict[key]
                 break
         self.model.load_state_dict(state_dict)
+        print(f"Successfully load model checkpoint from {path}")
 
     def _load_normalizer(self, model_cfg: Any) -> Tuple[Optional[Dict], bool]:
         """Load normalization stats for actions."""
@@ -1945,14 +1946,15 @@ class LegendVLAInference(nn.Module):
     def prepare_process(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """Convert raw data (numpy/strings, after geometry transformation) into standard processor inputs."""
         instruction = obs.get("instruction") or self.default_instruction
-        images = obs.get("image") if "image" in obs else obs.get("images")
-        states = np.asarray(obs["states"], dtype=np.float32)
+        images = obs["image"]
+        states = obs["states"]
+        n_states = torch.full((1, ), states.shape[0], dtype=torch.int32)
         intrinsic = self._extract_intrinsic(obs["intrinsic"])
         
         processor_mode = "infer" if self.mode == "flow" else "infer-ar"
         processed = self.processor(
             text=instruction,
-            images=np.asarray(images),
+            images=images,
             states=states,
             actions=np.zeros((self.action_horizon, self.action_dim), dtype=np.float32),
             intrinsic=intrinsic,
@@ -1969,17 +1971,19 @@ class LegendVLAInference(nn.Module):
             else:
                 states = self.normalizer["motions"](states)
         states = torch.from_numpy(states)[None, ...]
-        return {"processed": processed, "states": states}
+        return {"processed": processed, "states": states, "n_states": n_states}
 
     def build_model_inputs(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
         """Construct tensors required by the model forward pass (Masks, Position ids)."""
         processed = prepared["processed"]
-        batch_size = processed["input_ids"].shape[0]
+        input_ids = processed["input_ids"]
+        batch_size = input_ids.shape[0]
 
         inputs = {
-            "input_ids": processed["input_ids"],
+            "input_ids": input_ids,
             "attention_mask": processed["attention_mask"],
             "pixel_values": processed["pixel_values"].to(self.dtype),
+            "n_states": prepared["n_states"], 
             "states": prepared["states"].to(self.dtype),
             "is_vla_data": torch.ones(batch_size, dtype=torch.bool),
         }
@@ -1993,7 +1997,15 @@ class LegendVLAInference(nn.Module):
             causal_mask, vlm_pos, act_pos = m.build_causal_mask_and_position_ids(
                 inputs["attention_mask"], inputs["answer_start_idx"], inputs["n_actions"], self.dtype
             )
-            inputs.update({"causal_mask": causal_mask, "vlm_position_ids": vlm_pos, "action_position_ids": act_pos})
+            max_vlm_tokens = input_ids.shape[-1]
+            vlm_mask, action_mask = m.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
+            inputs.update({
+                "causal_mask": causal_mask, 
+                "vlm_position_ids": vlm_pos, 
+                "action_position_ids": act_pos,
+                "vlm_mask": vlm_mask,
+                "action_mask": action_mask,
+            })
 
         return inputs
 
@@ -2011,7 +2023,7 @@ class LegendVLAInference(nn.Module):
         return intrinsic.reshape(-1)
 
     @torch.inference_mode()
-    def forward_logic(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Step 3: Actual model forward pass."""
         if self.mode == "flow":
             return self.model("infer_action", inputs)

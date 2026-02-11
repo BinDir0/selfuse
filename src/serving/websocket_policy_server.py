@@ -50,7 +50,7 @@ class RuntimeEngine:
 
         pred_actions = self.policy.post_process(pred_actions.cpu())
         
-        return {"pred_actions": pred_actions}
+        return {"pred_actions": pred_actions.cpu().float().numpy()}
 
 
 class EnvWrapper:
