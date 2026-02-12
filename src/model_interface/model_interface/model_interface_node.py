@@ -122,7 +122,7 @@ class ModelInterfaceNode(Node):
         self.max_buffer = self.get_parameter('buffer_size').value
 
         # --- 3. 虚拟时间轴管理变量 ---
-        self.first_ts_ns = 0            #Episode 起始时间
+        self.first_ts_ns = 0            # Episode 起始时间
         self.total_inactive_ns = 0      # 累计非记录状态时长
         self.inactive_start_ns = None   # 停表起始点
 
@@ -241,12 +241,10 @@ class ModelInterfaceNode(Node):
     def l_pose_cb(self, m): self._update_buf(self.buf_l_wrist, m.header, m.pose)
     def r_pose_cb(self, m): self._update_buf(self.buf_r_wrist, m.header, m.pose)
     def l_kp_cb(self, m):
-        pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses[:5]])
-        if len(pts) < 5: pts = np.pad(pts, ((0, 5 - len(pts)), (0, 0)))
+        pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
         self._update_buf(self.buf_l_kps, m.header, pts.flatten())
     def r_kp_cb(self, m):
-        pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses[:5]])
-        if len(pts) < 5: pts = np.pad(pts, ((0, 5 - len(pts)), (0, 0)))
+        pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
         self._update_buf(self.buf_r_kps, m.header, pts.flatten())
 
     # --- 采样工具 ---
@@ -368,7 +366,6 @@ class ModelInterfaceNode(Node):
             return
         
         data = self.action_queue.popleft()
-        is_chunk_done = (len(self.action_queue) == 0)
 
         # 发布 臂 + 手
         try:
@@ -398,12 +395,7 @@ class ModelInterfaceNode(Node):
 
         # Debug 模式单步处理
         if st == SystemState.STEP_ONCE:
-            # 如果动作块还有剩余，回到等待按键状态；如果块空了，切回 INFERENCE
-            if is_chunk_done:
-                self._switch_state(SystemState.INFERENCE)
-            else:
-                self._switch_state(SystemState.STEP_WAIT)
-            self.infer_event.set()
+            self._switch_state(SystemState.STEP_WAIT)
 
     # --- 交互线程 ---
     def user_input_loop(self):
