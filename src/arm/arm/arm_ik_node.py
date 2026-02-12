@@ -9,7 +9,7 @@ Arm IK Node - 机械臂逆运动学节点
 5. 可选择启用MuJoCo viewer进行可视化
 """
 
-# TODO: xml-path, PoseStamp or PoseArray
+# TODO: reset 多少状态？要不要清空ik_solver？要不要重置ik目标as home?
 
 import time
 import rclpy
@@ -51,6 +51,7 @@ class ArmIKNode(Node):
 
         # ik节点模式：inference接收位姿信息，发送ik求解关节角，reset发送复位信息
         self.mode = "inference"   # or "reset"
+        self.mode_lock = threading.Lock()
 
         # ROS2 parallel callback groups
         self.both_arms_sub_group = ReentrantCallbackGroup()
@@ -393,12 +394,13 @@ class ArmIKNode(Node):
                 # 清空 velocity/增量残差
                 self.configuration.integrate_inplace(np.zeros_like(self.configuration.data.qvel), self.dt)
 
-                # 切换模式
-                self.mode = "reset"
+                with self.mode_lock:
+                    # 切换模式
+                    self.mode = "reset"
 
         elif cmd == "inference":
             self.get_logger().info("▶️ 切换到 inference 模式")
-            with self.data_lock:
+            with self.mode_lock:
                 self.mode = "inference"
 
         else:
@@ -476,8 +478,9 @@ class ArmIKNode(Node):
         else:
             base_id = self.right_arm_base_id
         
-        base_pos = self.configuration.data.body(base_id).xpos.copy()
-        base_mat = self.configuration.data.body(base_id).xmat.copy().reshape(3, 3)
+        with self.data_lock:
+            base_pos = self.configuration.data.body(base_id).xpos.copy()
+            base_mat = self.configuration.data.body(base_id).xmat.copy().reshape(3, 3)
         
         # 位置变换: world_pos = base_pos + base_mat @ relative_pos
         world_position = base_pos + base_mat @ position
@@ -506,8 +509,9 @@ class ArmIKNode(Node):
                  poses[1] - 右臂hand_base位姿（相对于右臂base）
         """
 
-        if self.mode == "reset":
-            return # reset状态不再接收PoseArray
+        with self.mode_lock:
+            if self.mode == "reset":
+                return # reset状态不再接收PoseArray
 
         if len(msg.poses) < 2:
             self.get_logger().warn(f"⚠️ PoseArray消息包含的poses数量不足: {len(msg.poses)}, 需要至少2个")
@@ -545,9 +549,10 @@ class ArmIKNode(Node):
         
         # 设置左臂世界坐标目标
         with self.data_lock:
-            if self.mode == "inference": # 线程锁，只在inference模式下更新目标
-                self.configuration.data.mocap_pos[left_target_mocap_id] = left_position_world
-                self.configuration.data.mocap_quat[left_target_mocap_id] = left_quat_mujoco
+            with self.mode_lock:
+                if self.mode == "inference": # 线程锁，只在inference模式下更新目标
+                    self.configuration.data.mocap_pos[left_target_mocap_id] = left_position_world
+                    self.configuration.data.mocap_quat[left_target_mocap_id] = left_quat_mujoco
         
         # 处理右臂 (poses[1]) - hand_base位姿 -> TCP位姿 -> 世界坐标
         right_hand_base_pose = msg.poses[1]
@@ -581,31 +586,31 @@ class ArmIKNode(Node):
         
         # 设置右臂世界坐标目标
         with self.data_lock:
-            if self.mode == "inference": # 线程锁，只在inference模式下更新目标
-                self.configuration.data.mocap_pos[right_target_mocap_id] = right_position_world
-                self.configuration.data.mocap_quat[right_target_mocap_id] = right_quat_mujoco  
+            with self.mode_lock:
+                if self.mode == "inference": # 线程锁，只在inference模式下更新目标
+                    self.configuration.data.mocap_pos[right_target_mocap_id] = right_position_world
+                    self.configuration.data.mocap_quat[right_target_mocap_id] = right_quat_mujoco  
     
     def timer_callback(self):
         """定时器回调函数，用于求解IK并发布关节状态"""
 
         t0 = time.time()
 
-        if self.mode == "reset":
-            # 直接发布 home qpos
-            with self.data_lock:
-                home_joints = self.configuration.data.qpos.copy()
-            self._publish_arms_joints_cmd(home_joints)
-            return
-
-        # MuJoCo更新
         with self.data_lock:
+            with self.mode_lock:
+                if self.mode == "reset":
+                    # 直接发布 home qpos
+                    home_joints = self.configuration.data.qpos.copy()
+                    self._publish_arms_joints_cmd(home_joints)
+                    return
+
+            # MuJoCo更新
             mujoco.mj_forward(self.model, self.configuration.data)
             if self.enable_viewer:
                 self.viewer.sync()
         
-        # 更新任务目标
-        for i, hand_task in enumerate(self.hand_tasks):
-            with self.data_lock:
+            # 更新任务目标
+            for i, hand_task in enumerate(self.hand_tasks):
                 target_names = ["left_wrist_target", "right_wrist_target"]
                 _hand_target = mink.SE3.from_mocap_name(self.model, self.configuration.data, target_names[i])
                 hand_task.set_target(_hand_target)
@@ -622,10 +627,10 @@ class ArmIKNode(Node):
         )
 
         with self.data_lock:
-            if self.mode == "inference": # 线程锁：只在inference状态更新关节角
-                self.configuration.integrate_inplace(vel, self.dt)
+            with self.mode_lock:
+                if self.mode == "inference": # 线程锁：只在inference状态更新关节角
+                    self.configuration.integrate_inplace(vel, self.dt)
         
-        with self.data_lock:
             _solved_joints = self.configuration.data.qpos.copy()  # PsiRobot: [arm1_joints, arm2_joints]
         
         self.get_logger().debug(f'Solved joints: {_solved_joints}')
