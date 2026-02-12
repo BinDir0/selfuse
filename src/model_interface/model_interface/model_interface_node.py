@@ -24,19 +24,19 @@ try:
 except ImportError:
     from utils.websocket_client import WebsocketClientPolicy
 
-# --- 系统状态机定义 ---
+# --- 系统状态枚举 ---
 class SystemState(Enum):
-    IDLE = 0        # 初始待机：等待用户输入指令
-    READY = 1       # 指令就绪：等待按下脚踏板 1
+    IDLE = 0        # 待机：等待终端输入指令
+    READY = 1       # 就绪：指令已输入
     FIRST_OBS = 2   # 冷启动：等待传感器各 Topic 接收第一帧
-    INFERENCE = 3   # 推理中：正在请求模型服务器（此时冻结观测更新）
-    RUNNING = 4     # 执行中：Deploy 模式下持续下发动作块
-    PAUSED = 5      # 暂停：Deploy 模式手动暂停
-    STEP_WAIT = 6   # 等待按键：Debug 模式下等待按键触发下一步
-    STEP_ONCE = 7   # 单步执行：Debug 模式下发一帧动作
-    RESETTING = 8   # 系统重置中
+    INFERENCE = 3   # 推理：正在请求服务器（此时冻结观测更新）
+    RUNNING = 4     # 执行：Deploy 模式连续下发动作块
+    PAUSED = 5      # 暂停：手动暂停
+    STEP_WAIT = 6   # 等待：Debug 模式等待按键触发（计入不活跃时间）
+    STEP_ONCE = 7   # 步进：Debug 模式下发一帧动作
+    RESETTING = 8   # 归位：系统重置中
 
-# --- 坐标转换与 6D 旋转工具 ---
+# --- 坐标转换与 6D 旋转恢复工具 ---
 def matrix_from_pose_msg(pose):
     """geometry_msgs/Pose -> 4x4 Matrix"""
     t = [pose.position.x, pose.position.y, pose.position.z]
@@ -61,23 +61,18 @@ def pose_from_matrix(T):
     return msg
 
 def get_6d_rot_from_matrix(T):
-    """提取旋转矩阵前两列作为 6D 旋转表示 (6维向量)"""
+    """提取旋转矩阵前两列拼接成 6D 旋转向量"""
     rot_mat = T[:3, :3]
-    col1 = rot_mat[:, 0]
-    col2 = rot_mat[:, 1]
-    return np.concatenate([col1, col2])
+    return np.concatenate([rot_mat[:, 0], rot_mat[:, 1]])
 
 def matrix_from_6d_rot(trans, rot6d):
-    """从 6D 旋转恢复 4x4 矩阵 (使用 Gram-Schmidt 正交化)"""
+    """从 6D 旋转恢复 4x4 矩阵 (Gram-Schmidt 正交化)"""
     v1 = rot6d[:3]
     v2 = rot6d[3:]
     
-    # 归一化第一列
     e1 = v1 / (np.linalg.norm(v1) + 1e-6)
-    # 正交化并归一化第二列
     e2 = v2 - np.dot(e1, v2) * e1
     e2 = e2 / (np.linalg.norm(e2) + 1e-6)
-    # 计算第三列
     e3 = np.cross(e1, e2)
     
     rot_mat = np.stack([e1, e2, e3], axis=1)
@@ -91,13 +86,12 @@ class ModelInterfaceNode(Node):
     def __init__(self):
         super().__init__('model_interface_node')
 
-        # --- 1. 锁与同步机制 ---
-        self.state_lock = threading.Lock()  
+        # --- 1. 锁与事件机制 ---
+        self.state_lock = threading.Lock()
         self.infer_event = threading.Event()
 
-        # --- 2. 声明与获取 ROS 参数 ---
-        self.declare_parameter('arm_frequency', 30.0)      
-        self.declare_parameter('hand_frequency', 30.0)     
+        # --- 2. 参数获取 ---
+        self.declare_parameter('control_frequency', 30.0)      
         self.declare_parameter('model_server_host', '0.0.0.0')
         self.declare_parameter('model_server_port', 8000)
         self.declare_parameter('calibration_path', '')
@@ -105,22 +99,21 @@ class ModelInterfaceNode(Node):
         self.declare_parameter('audio_service_host', 'localhost')
         self.declare_parameter('audio_service_port', 8080)
         
-        self.declare_parameter('data_frequency', 30.0)     # 基准对齐频率
-        self.declare_parameter('state_horizon', 10)        # 状态序列长度
-        self.declare_parameter('state_stride', 1)          # 状态采样步长
-        self.declare_parameter('image_horizon', 1)         # 图像序列长度
-        self.declare_parameter('image_stride', 1)          # 图像采样步长
-        self.declare_parameter('action_execution_len', 6)  # 执行步数
+        self.declare_parameter('data_frequency', 30.0)     # 对齐频率
+        self.declare_parameter('state_horizon', 10)        
+        self.declare_parameter('state_stride', 1)          
+        self.declare_parameter('image_horizon', 1)         
+        self.declare_parameter('image_stride', 1)          
+        self.declare_parameter('action_execution_len', 6)  
         self.declare_parameter('buffer_size', 300)
 
-        # 参数本地化
-        self.data_freq = self.get_parameter('data_frequency').value
-        self.arm_freq = self.get_parameter('arm_frequency').value
-        self.hand_freq = self.get_parameter('hand_frequency').value
+        # 参数提取
+        self.ctrl_freq = self.get_parameter('control_frequency').value
         self.calib_root = self.get_parameter('calibration_path').value
         self.cam_name = self.get_parameter('camera_name').value
         self.audio_host = self.get_parameter('audio_service_host').value
         self.audio_port = self.get_parameter('audio_service_port').value
+        self.data_freq = self.get_parameter('data_frequency').value
         self.s_horizon = self.get_parameter('state_horizon').value
         self.s_stride = self.get_parameter('state_stride').value
         self.i_horizon = self.get_parameter('image_horizon').value
@@ -129,11 +122,11 @@ class ModelInterfaceNode(Node):
         self.max_buffer = self.get_parameter('buffer_size').value
 
         # --- 3. 虚拟时间轴管理变量 ---
-        self.first_ts_ns = 0            # Episode 启动绝对基准
+        self.first_ts_ns = 0            #Episode 起始时间
         self.total_inactive_ns = 0      # 累计非记录状态时长
-        self.inactive_start_ns = None   # 记录“停表”起始点
+        self.inactive_start_ns = None   # 停表起始点
 
-        # --- 4. 标定参数加载 ---
+        # --- 4. 标定参数 ---
         self.T_cam2base_l, self.K_mat = self.find_and_load_calibration(self.cam_name, 'left')
         self.T_cam2base_r, _ = self.find_and_load_calibration(self.cam_name, 'right')
         self.T_base2cam_l = np.linalg.inv(self.T_cam2base_l)
@@ -144,9 +137,8 @@ class ModelInterfaceNode(Node):
         self.mode = 'deploy'
         self.current_instruction = ""
         
-        # 动作执行队列 (deque 是线程安全的)
-        self.arm_queue = deque(maxlen=200)
-        self.hand_queue = deque(maxlen=200)
+        # 统一动作队列
+        self.action_queue = deque(maxlen=200)
         
         # 传感器历史缓冲区 (virtual_timestamp_ns, data)
         self.buf_rgb = deque(maxlen=self.max_buffer)
@@ -159,7 +151,7 @@ class ModelInterfaceNode(Node):
         self.cv_bridge = CvBridge()
         self.audio_session = requests.Session()
 
-        # --- 6. ROS 通信接口 ---
+        # --- 6. ROS 通信 ---
         self.pub_system_mode = self.create_publisher(String, '/system/mode', 10)
         self.pub_action_poses = self.create_publisher(PoseArray, '/action/both_arms/wrist_poses', 1)
         self.pub_action_hand_l = self.create_publisher(PoseArray, '/action/left_hand/keypoints', 1)
@@ -178,75 +170,65 @@ class ModelInterfaceNode(Node):
                 host=self.get_parameter('model_server_host').value,
                 port=self.get_parameter('model_server_port').value
             )
-            self.get_logger().info("✅ WebSocket 推理服务器已连接")
+            self.get_logger().info("✅ 成功连接推理服务器")
         except Exception as e:
             self.get_logger().error(f"❌ 无法连接服务器: {e}")
 
-        # --- 8. 启动线程与定时器 ---
+        # --- 8. 启动子线程 ---
         self.kbd_listener = keyboard.Listener(on_press=self.on_key_press)
         self.kbd_listener.start()
-        
         threading.Thread(target=self.user_input_loop, daemon=True).start()
         threading.Thread(target=self.inference_worker, daemon=True).start()
 
-        self.arm_cmd_timer = self.create_timer(1.0 / self.arm_freq, self.arm_command_timer_cb)
-        self.hand_cmd_timer = self.create_timer(1.0 / self.hand_freq, self.hand_command_timer_cb)
+        # 统一 30Hz 控制定时器
+        self.control_timer = self.create_timer(1.0 / self.ctrl_freq, self.control_timer_cb)
 
-        self.get_logger().info("🚀 Model Interface 节点已就绪（虚拟时轴对齐架构）")
+        self.get_logger().info(f"🚀 Model Interface 节点已启动。控制/采样频率: {self.ctrl_freq}Hz")
 
-    # --- 核心：状态与时间管理逻辑 ---
+    # --- 逻辑控制：状态与时间补偿 ---
     def _is_recording_state(self, state):
-        """
-        判断当前状态是否需要将传感器数据写入缓冲区。
-        按要求：FIRST_OBS, RUNNING, STEP_ONCE 需要记录。
-        INFERENCE, STEP_WAIT, PAUSED, IDLE 等属于非活跃状态，需要累计 Gap。
-        """
+        """判断是否需要记录观测数据"""
         return state in [SystemState.FIRST_OBS, SystemState.RUNNING, SystemState.STEP_ONCE]
 
     def _switch_state(self, new_state):
-        """统一管理状态切换：计算并补偿非记录状态产生的耗时"""
+        """统一管理状态切换：计算并扣除非活跃时长 (包含 INFERENCE, STEP_WAIT, PAUSED)"""
         with self.state_lock:
             old_state = self.state
-            if old_state == new_state:
-                return
+            if old_state == new_state: return
 
             now_ns = self.get_clock().now().nanoseconds
             
-            # 记录 -> 停止记录：开始计时非活跃时长（开启停表）
+            # 记录 -> 停止：开启停表
             if self._is_recording_state(old_state) and not self._is_recording_state(new_state):
                 self.inactive_start_ns = now_ns
             
-            # 停止记录 -> 恢复记录：结算非活跃时长并累加（按下停表）
+            # 停止 -> 记录：结算并累加 Gap 时长
             if not self._is_recording_state(old_state) and self._is_recording_state(new_state):
                 if self.inactive_start_ns is not None:
                     self.total_inactive_ns += (now_ns - self.inactive_start_ns)
                     self.inactive_start_ns = None
 
             self.state = new_state
-            self.get_logger().info(f"状态切换: {old_state.name} -> {new_state.name}")
+            self.get_logger().info(f"状态流转: {old_state.name} -> {new_state.name}")
 
-    def _get_msg_ns(self, header):
+    def _get_msg_ts(self, header):
         return header.stamp.sec * 10**9 + header.stamp.nanosec
 
-    def _update_buffer(self, buf, header, data):
-        """高性能无锁写入缓冲区"""
-        # 原子读取当前状态，如果不符合记录条件则直接抛弃
+    def _update_buf(self, buf, header, data):
+        # 仅在活跃状态下记录
         if not self._is_recording_state(self.state):
             return
 
-        raw_ns = self._get_msg_ns(header)
-        
-        # 核心逻辑：虚拟连续时间戳 = 原始时间 - 任务启动基准 - 累积不活跃时长
+        raw_ns = self._get_msg_ts(header)
+        # 计算虚拟连续时间戳
         virtual_ts = raw_ns - self.first_ts_ns - self.total_inactive_ns
-        
         buf.append((virtual_ts, data))
         
-        # 如果是冷启动，检查数据是否到齐
+        # 冷启动检查
         if self.state == SystemState.FIRST_OBS:
-            self._check_first_obs_readiness()
+            self._check_first_obs_complete()
 
-    def _check_first_obs_readiness(self):
-        """检查冷启动时各 Topic 是否都收到了至少一帧"""
+    def _check_first_obs_complete(self):
         bufs = [self.buf_rgb, self.buf_depth, self.buf_l_wrist, 
                 self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]
         if all(len(b) > 0 for b in bufs):
@@ -254,31 +236,20 @@ class ModelInterfaceNode(Node):
             self.infer_event.set()
 
     # --- 传感器回调 ---
-    def rgb_cb(self, m):
-        self._update_buffer(self.buf_rgb, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'rgb8'))
-
-    def depth_cb(self, m):
-        self._update_buffer(self.buf_depth, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'passthrough'))
-
-    def l_pose_cb(self, m):
-        self._update_buffer(self.buf_l_wrist, m.header, m.pose)
-
-    def r_pose_cb(self, m):
-        self._update_buffer(self.buf_r_wrist, m.header, m.pose)
-
+    def rgb_cb(self, m): self._update_buf(self.buf_rgb, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'rgb8'))
+    def depth_cb(self, m): self._update_buf(self.buf_depth, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'passthrough'))
+    def l_pose_cb(self, m): self._update_buf(self.buf_l_wrist, m.header, m.pose)
+    def r_pose_cb(self, m): self._update_buf(self.buf_r_wrist, m.header, m.pose)
     def l_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses[:5]])
-        if len(pts) < 5:
-            pts = np.pad(pts, ((0, 5 - len(pts)), (0, 0)))
-        self._update_buffer(self.buf_l_kps, m.header, pts.flatten())
-
+        if len(pts) < 5: pts = np.pad(pts, ((0, 5 - len(pts)), (0, 0)))
+        self._update_buf(self.buf_l_kps, m.header, pts.flatten())
     def r_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses[:5]])
-        if len(pts) < 5:
-            pts = np.pad(pts, ((0, 5 - len(pts)), (0, 0)))
-        self._update_buffer(self.buf_r_kps, m.header, pts.flatten())
+        if len(pts) < 5: pts = np.pad(pts, ((0, 5 - len(pts)), (0, 0)))
+        self._update_buf(self.buf_r_kps, m.header, pts.flatten())
 
-    # --- 重采样与对齐工具 ---
+    # --- 采样工具 ---
     def _find_nearest(self, buf, target_ns):
         if not buf: return None
         times = [x[0] for x in buf]
@@ -287,53 +258,50 @@ class ModelInterfaceNode(Node):
         if idx == len(times): return buf[-1][1]
         return buf[idx-1][1] if (target_ns - times[idx-1]) < (times[idx] - target_ns) else buf[idx][1]
 
-    def _is_in_range(self, buf, target_ts):
-        """允许在缓冲区边缘向外扩展一个 dt 的范围内采样最近邻"""
+    def _is_in_range(self, buf, t):
         if not buf: return False
         dt_ns = int(1e9 / self.data_freq)
-        return (buf[0][0] - dt_ns) <= target_ts <= (buf[-1][0] + dt_ns)
+        # 允许前后扩展一个 dt 的容错采样
+        return (buf[0][0] - dt_ns) <= t <= (buf[-1][0] + dt_ns)
 
-    # --- 推理逻辑：准备 Payload ---
+    # --- 推理 Payload 准备 (在 INFERENCE 状态下执行，此时观测数据静止，安全读) ---
     def prepare_inference_payload(self):
         all_bufs = [self.buf_rgb, self.buf_depth, self.buf_l_wrist, 
                     self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]
         
-        # 强制性断言：进入推理状态前数据必须是齐的
-        assert all(len(b) > 0 for b in all_bufs), "采样缓冲区数据不全，无法执行推理！"
+        # 强制性齐备断言
+        assert all(len(b) > 0 for b in all_bufs), "数据缓冲区不全，无法推理"
 
-        # 确定共同采样基准：最新帧中的最早虚拟时间戳
+        # 确定共同采样基准点
         t_ref = min(b[-1][0] for b in all_bufs)
-        grid_ns = int(1e9 / self.data_freq)
+        dt_ns = int(1e9 / self.data_freq)
 
-        # 1. Image 历史采样
+        # 1. Image 采样
         rgb_seq, depth_seq = [], []
         for h in range(self.i_horizon):
-            target_t = t_ref - (h * self.i_stride * grid_ns)
-            # 有多少取多少
+            target_t = t_ref - (h * self.i_stride * dt_ns)
             if not self._is_in_range(self.buf_rgb, target_t): break
             rgb_seq.append(self._find_nearest(self.buf_rgb, target_t))
             depth_seq.append(self._find_nearest(self.buf_depth, target_t))
         
-        # 翻转顺序：早的在前
         rgb_in = np.stack(rgb_seq)[::-1]
         depth_in = np.stack(depth_seq)[::-1]
         if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
 
-        # 2. State 历史采样 (48维)
+        # 2. State 采样 (48维向量)
         states_list = []
         for h in range(self.s_horizon):
-            target_t = t_ref - (h * self.s_stride * grid_ns)
+            target_t = t_ref - (h * self.s_stride * dt_ns)
             state_bufs = [self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]
             if not all(self._is_in_range(b, target_t) for b in state_bufs): break
 
-            # 采样数据并转换 Base -> Camera 系
+            # 采样并转换
             tl_m = self.T_base2cam_l @ matrix_from_pose_msg(self._find_nearest(self.buf_l_wrist, target_t))
             tr_m = self.T_base2cam_r @ matrix_from_pose_msg(self._find_nearest(self.buf_r_wrist, target_t))
-            
             lk = self._find_nearest(self.buf_l_kps, target_t)
             rk = self._find_nearest(self.buf_r_kps, target_t)
 
-            # 拼装向量: Trans(3+3), Rot6D(6+6), KPs(15+15) = 48
+            # 拼装顺序: [L_Trans(3), R_Trans(3), L_Rot6D(6), R_Rot6D(6), L_KPs(15), R_KPs(15)]
             vec = np.concatenate([
                 tl_m[:3, 3], tr_m[:3, 3],
                 get_6d_rot_from_matrix(tl_m), get_6d_rot_from_matrix(tr_m),
@@ -353,10 +321,9 @@ class ModelInterfaceNode(Node):
             "states": states_in
         }
 
-    # --- 推理 Worker：生产者逻辑 ---
+    # --- 推理生产者：仅在 INFERENCE 状态下请求模型 ---
     def inference_worker(self):
         while rclpy.ok():
-            # 严格控制：仅在 INFERENCE 状态下执行请求
             if self.state != SystemState.INFERENCE:
                 self.infer_event.wait(timeout=0.1)
                 self.infer_event.clear()
@@ -364,98 +331,94 @@ class ModelInterfaceNode(Node):
 
             payload = self.prepare_inference_payload()
             try:
-                # 阻塞式远程请求
+                # 远程推理调用 (不占锁)
                 response = self.policy_client.infer(payload)
-                pred_actions = response["pred_actions"]
+                pred_actions = response["pred_actions"] # (Tp, 48)
                 
-                # 处理执行切片
+                # 动作序列切分
                 steps = min(self.act_exec_len, pred_actions.shape[0])
                 for i in range(steps):
                     v = pred_actions[i]
-                    step_data = {
+                    # 48维解析并入队
+                    self.action_queue.append({
                         'l': matrix_from_6d_rot(v[0:3], v[6:12]),
                         'r': matrix_from_6d_rot(v[3:6], v[12:18]),
                         'lk': v[18:33], 'rk': v[33:48]
-                    }
-                    self.arm_queue.append(step_data)
-                    self.hand_queue.append(step_data)
+                    })
 
-                # 推理结束，流转到执行或等待状态（自动补偿 Gap 时间）
+                # 推理结束，切回执行/等待状态（计算时间轴 Gap）
                 self._switch_state(SystemState.RUNNING if self.mode == 'deploy' else SystemState.STEP_WAIT)
 
             except Exception as e:
                 self.get_logger().error(f"推理故障: {e}")
                 time.sleep(0.1)
 
-    # --- 动作播放定时器：消费者逻辑 ---
-    def arm_command_timer_cb(self):
+    # --- 动作下发定时器：消费者逻辑 ---
+    def control_timer_cb(self):
+        # 原子状态读
         st = self.state
         if st not in [SystemState.RUNNING, SystemState.STEP_ONCE]:
             return
 
-        if not self.arm_queue:
-            # Chunk 执行完毕，切换回 INFERENCE 以获取下一块
-            if st == SystemState.RUNNING:
-                self._switch_state(SystemState.INFERENCE)
-                self.infer_event.set()
+        # 核心逻辑：队列为空再触发推理
+        if not self.action_queue:
+            # 仅在 RUNNING 或步进完成后的 STEP_WAIT 状态触发下一轮推理
+            self._switch_state(SystemState.INFERENCE)
+            self.infer_event.set()
             return
         
-        data = self.arm_queue.popleft()
-        is_chunk_finished = (len(self.arm_queue) == 0)
+        data = self.action_queue.popleft()
+        is_chunk_done = (len(self.action_queue) == 0)
 
-        # 发布 臂部 PoseArray (Camera -> Base)
+        # 发布 臂 + 手
         try:
+            now = self.get_clock().now().to_msg()
+            
+            # 1. 臂 PoseArray
             pa = PoseArray()
-            pa.header.stamp = self.get_clock().now().to_msg()
-            pa.header.frame_id = "base_link"
+            pa.header.stamp, pa.header.frame_id = now, "base_link"
             pa.poses.append(pose_from_matrix(self.T_cam2base_l @ data['l']))
             pa.poses.append(pose_from_matrix(self.T_cam2base_r @ data['r']))
             self.pub_action_poses.publish(pa)
-        except:
-            pass
 
-        # Debug 模式单步结束处理：只有 Chunk 完结才请求下一次推理
+            # 2. 手 PoseArray
+            def _pub_kps(topic, kps, frame):
+                p_arr = PoseArray()
+                p_arr.header.stamp, p_arr.header.frame_id = now, frame
+                for pt in kps.reshape(-1, 3):
+                    p = Pose(); p.position.x, p.position.y, p.position.z = map(float, pt)
+                    p_arr.poses.append(p)
+                topic.publish(p_arr)
+
+            _pub_kps(self.pub_action_hand_l, data['lk'], "left_wrist_link")
+            _pub_kps(self.pub_action_hand_r, data['rk'], "right_wrist_link")
+
+        except Exception as e:
+            self.get_logger().error(f"下发定时器发布异常: {e}")
+
+        # Debug 模式单步处理
         if st == SystemState.STEP_ONCE:
-            if is_chunk_finished:
+            # 如果动作块还有剩余，回到等待按键状态；如果块空了，切回 INFERENCE
+            if is_chunk_done:
                 self._switch_state(SystemState.INFERENCE)
             else:
                 self._switch_state(SystemState.STEP_WAIT)
             self.infer_event.set()
 
-    def hand_command_timer_cb(self):
-        if self.state not in [SystemState.RUNNING, SystemState.STEP_ONCE] or not self.hand_queue:
-            return
-        data = self.hand_queue.popleft()
-
-        def _pub_pa(topic, kps, frame):
-            pa = PoseArray()
-            pa.header.stamp = self.get_clock().now().to_msg()
-            pa.header.frame_id = frame
-            for p3 in kps.reshape(-1, 3):
-                p = Pose()
-                p.position.x, p.position.y, p.position.z = map(float, p3)
-                pa.poses.append(p)
-            topic.publish(pa)
-
-        try:
-            _pub_pa(self.pub_action_hand_l, data['lk'], "left_wrist_link")
-            _pub_pa(self.pub_action_hand_r, data['rk'], "right_wrist_link")
-        except:
-            pass
-
-    # --- 交互线程与工具 ---
+    # --- 交互线程 ---
     def user_input_loop(self):
         while rclpy.ok():
             if self.state == SystemState.IDLE:
                 print("\n" + "="*40)
                 instr = input("[Input] 指令: ").strip()
-                mode = input("[Input] 模式 (deploy/debug): ").strip().lower()
-                if instr:
-                    with self.state_lock:
-                        self.current_instruction, self.mode = instr, ('debug' if 'debug' in mode else 'deploy')
-                        self.state = SystemState.READY
-                        # 初始化任务变量
-                        self.first_ts_ns, self.total_inactive_ns, self.inactive_start_ns = 0, 0, None
+                mode_in = input("[Input] 模式 (deploy/debug) [deploy]: ").strip().lower()
+                if not instr: continue
+                with self.state_lock:
+                    self.current_instruction, self.mode = instr, ('debug' if mode_in == 'debug' else 'deploy')
+                    self.state = SystemState.READY
+                    # 彻底重置时间轴状态
+                    self.first_ts_ns, self.total_inactive_ns, self.inactive_start_ns = 0, 0, None
+                print(f"✅ Ready. Mode: {self.mode.upper()}. 按下脚踏板 1 启动。")
             time.sleep(0.1)
 
     def on_key_press(self, key):
@@ -465,7 +428,7 @@ class ModelInterfaceNode(Node):
         if k == '1' and self.state == SystemState.READY:
             self.play_sound("start")
             self.pub_system_mode.publish(String(data="inference"))
-            # 按下时刻确认为时间原点
+            # 按下那一刻作为 Episode 的时间原点
             self.first_ts_ns = self.get_clock().now().nanoseconds
             self.total_inactive_ns, self.inactive_start_ns = 0, None
             # 清理缓冲区
@@ -474,31 +437,24 @@ class ModelInterfaceNode(Node):
             self._switch_state(SystemState.FIRST_OBS)
 
         elif (k == '2' or key == keyboard.Key.space):
-            # Deploy 暂停逻辑 或 Debug 步进触发
-            if self.mode == 'deploy' and self.state in [SystemState.RUNNING, SystemState.INFERENCE, SystemState.PAUSED]:
-                if self.state != SystemState.PAUSED:
-                    self._pre_pause = self.state
-                    self._switch_state(SystemState.PAUSED)
-                    self.play_sound("pause")
+            if self.mode == 'deploy' and self.state in [SystemState.RUNNING, SystemState.PAUSED]:
+                if self.state == SystemState.RUNNING:
+                    self._switch_state(SystemState.PAUSED); self.play_sound("pause")
                 else:
-                    self._switch_state(getattr(self, '_pre_pause', SystemState.INFERENCE))
-                    self.play_sound("continue")
-                    self.infer_event.set()
+                    self._switch_state(SystemState.RUNNING); self.play_sound("continue")
             elif self.mode == 'debug' and self.state == SystemState.STEP_WAIT:
-                self._switch_state(SystemState.STEP_ONCE)
-                self.play_sound("continue")
+                self._switch_state(SystemState.STEP_ONCE); self.play_sound("continue")
 
         elif k == '3' and self.state != SystemState.IDLE:
-            self._switch_state(SystemState.RESETTING)
-            self.play_sound("stop_and_reset")
-            self.pub_system_mode.publish(String(data="reset"))
-            self.arm_queue.clear(); self.hand_queue.clear()
+            self._switch_state(SystemState.RESETTING); self.play_sound("stop_and_reset"); self.pub_system_mode.publish(String(data="reset"))
+            self.action_queue.clear()
             time.sleep(3.0)
             self._switch_state(SystemState.IDLE)
 
     def find_and_load_calibration(self, cam, arm):
         subdirs = [d for d in os.listdir(self.calib_root) if os.path.isdir(os.path.join(self.calib_root, d))]
         matches = [d for d in subdirs if cam in d and arm in d]
+        assert len(matches) == 1
         path = os.path.join(self.calib_root, sorted(matches)[-1], 'calibration_results', 'result.npz')
         d = np.load(path)
         return d['T_cam2base'], d['camera_matrix']
