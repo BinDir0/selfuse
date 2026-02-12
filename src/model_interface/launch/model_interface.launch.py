@@ -1,8 +1,5 @@
 import os
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 def generate_launch_description():
@@ -13,19 +10,20 @@ def generate_launch_description():
             name='model_interface_node',
             output='screen',
             parameters=[{
-                'arm_frequency': '30.0',
-                'hand_frequency': '30.0',
+                'control_frequency': 30.0,
                 'model_server_host': '81.68.132.224',
-                'model_server_port': '18020',
+                'model_server_port': 18020,
                 'calibration_path': '/root/workspace/legendvla-inference/examples/calibration_outputs',
                 'camera_name': 'head',
                 'audio_service_host': 'localhost',
-                'audio_service_port': '8080',
-                'state_history_len': '10',
-                'state_history_step': '3',
-                'image_history_len': '1',
-                'image_history_step': '30',
-                'buffer_size': '200',
+                'audio_service_port': 8080,
+                'data_frequency': 30.0,
+                'state_horizon': 16,
+                'state_stride': 2,
+                'image_horizon': 1,
+                'image_stride': 1,
+                'action_execution_len': 6,
+                'buffer_size': 200,
             }]
         )
     ])
