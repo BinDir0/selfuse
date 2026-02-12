@@ -28,13 +28,13 @@ except ImportError:
 class SystemState(Enum):
     IDLE = 0
     READY = 1
-    FIRST_OBS = 2   # 收集初始数据 (Write)
-    INFERENCE = 3   # 推理 (Read Only, Write Stopped)
-    RUNNING = 4     # 执行 (Write)
-    PAUSED = 5      # 暂停 (No Write)
-    STEP_WAIT = 6   # Debug 等待 (No Write)
-    STEP_ONCE = 7   # Debug 执行 (Write)
-    RESETTING = 8   # 重置
+    FIRST_OBS = 2
+    INFERENCE = 3
+    RUNNING = 4
+    PAUSED = 5
+    STEP_WAIT = 6
+    STEP_ONCE = 7
+    RESETTING = 8
 
 # --- 数学工具 ---
 def matrix_from_pose_msg(pose):
@@ -71,13 +71,14 @@ class ModelInterfaceNode(Node):
         super().__init__('model_interface_node')
 
         # --- 1. 锁和信号 ---
-        self.action_timer_lock = threading.Lock()
         self.rgb_cb_lock = threading.Lock()
         self.depth_cb_lock = threading.Lock()
         self.l_pose_cb_lock = threading.Lock()
         self.r_pose_cb_lock = threading.Lock()
         self.l_kp_cb_lock = threading.Lock()
         self.r_kp_cb_lock = threading.Lock()
+        self.action_timer_lock = threading.Lock()
+        self.inference_lock = threading.Lock()
         self.infer_event = threading.Event()
 
         # --- 2. 参数加载 ---
@@ -179,9 +180,8 @@ class ModelInterfaceNode(Node):
         """原子读取: 仅在这些状态下记录数据"""
         return state in [SystemState.FIRST_OBS, SystemState.RUNNING, SystemState.STEP_ONCE]
 
-    def _switch_state(self, new_state):
+    def _execute_switch_state(self, new_state):
         old_state = self.state
-        if old_state == new_state: return
 
         now_ns = self.get_clock().now().nanoseconds
         
@@ -197,6 +197,31 @@ class ModelInterfaceNode(Node):
 
         self.state = new_state
         self.get_logger().info(f"State: {old_state.name} -> {new_state.name}")
+
+    def _switch_state(self, new_state):
+        old_state = self.state
+        if old_state == new_state: return
+        if new_state == SystemState.INFERENCE:
+            assert not self.action_queue, "推理状态时，动作队列应该没有数据"
+            with self.rgb_cb_lock, self.depth_cb_lock, self.l_pose_cb_lock, self.r_pose_cb_lock, self.l_kp_cb_lock, self.r_kp_cb_lock:
+                self._execute_switch_state(new_state)
+        elif new_state == SystemState.RESETTING:
+            with self.rgb_cb_lock, self.depth_cb_lock, self.l_pose_cb_lock, self.r_pose_cb_lock, self.l_kp_cb_lock, self.r_kp_cb_lock, self.action_timer_lock, self.inference_lock:
+                self._execute_switch_state(new_state)
+            self.action_queue.clear()
+            self.buf_rgb.clear(); self.buf_depth.clear(); self.buf_l_wrist.clear()
+            self.buf_r_wrist.clear(); self.buf_l_kps.clear(); self.buf_r_kps.clear()
+        elif new_state == SystemState.FIRST_OBS:
+            assert not self.action_queue, "第一次观测状态时，动作队列应该没有数据"
+            assert not self.buf_rgb, "第一次观测状态时，RGB缓冲区应该没有数据"
+            assert not self.buf_depth, "第一次观测状态时，深度缓冲区应该没有数据"
+            assert not self.buf_l_wrist, "第一次观测状态时，左腕部缓冲区应该没有数据"
+            assert not self.buf_r_wrist, "第一次观测状态时，右腕部缓冲区应该没有数据"
+            assert not self.buf_l_kps, "第一次观测状态时，左手关键点缓冲区应该没有数据"
+            assert not self.buf_r_kps, "第一次观测状态时，右手关键点缓冲区应该没有数据"
+            self._execute_switch_state(new_state)
+        else:
+            self._execute_switch_state(new_state)
 
     def _get_msg_ns(self, header):
         return header.stamp.sec * 10**9 + header.stamp.nanosec
@@ -221,9 +246,8 @@ class ModelInterfaceNode(Node):
     def _check_first_obs_complete(self):
         # 检查是否所有缓冲区都有数据
         if all(len(b) > 0 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
-            if self.state == SystemState.FIRST_OBS:
-                self._switch_state(SystemState.INFERENCE)
-                self.infer_event.set()
+            self._switch_state(SystemState.INFERENCE)
+            self.infer_event.set()
 
     # --- 传感器回调 (完全无锁，依赖 Executor 并行) ---
     def rgb_cb(self, m): 
@@ -274,7 +298,6 @@ class ModelInterfaceNode(Node):
 
     def prepare_inference_payload(self):
         # 1. 创建快照 & 排序
-        with 
         all_snaps = [
             sorted(list(self.buf_rgb), key=lambda x: x[0]),
             sorted(list(self.buf_depth), key=lambda x: x[0]),
@@ -335,22 +358,22 @@ class ModelInterfaceNode(Node):
     # --- 推理 Worker ---
     def inference_worker(self):
         while rclpy.ok():
-            if self.state != SystemState.INFERENCE:
-                self.infer_event.wait(timeout=0.1)
-                self.infer_event.clear()
-                continue
+            with self.inference_lock:
+                if self.state != SystemState.INFERENCE:
+                    self.infer_event.wait(timeout=0.1)
+                    self.infer_event.clear()
+                    continue
 
-            try:
-                payload = self.prepare_inference_payload()
-            except AssertionError:
-                time.sleep(0.02); continue
+                try:
+                    payload = self.prepare_inference_payload()
+                except AssertionError:
+                    time.sleep(0.02); continue
 
-            try:
-                res = self.policy_client.infer(payload)
-                pred = res["pred_actions"]
-                steps = min(self.act_len, pred.shape[0])
+                try:
+                    res = self.policy_client.infer(payload)
+                    pred = res["pred_actions"]
+                    steps = min(self.act_len, pred.shape[0])
 
-                with self.queue_lock:
                     for i in range(steps):
                         v = pred[i]
                         self.action_queue.append({
@@ -359,60 +382,58 @@ class ModelInterfaceNode(Node):
                             'lk': v[18:33], 'rk': v[33:48]
                         })
 
-                # 推理结束，切回执行/等待状态
-                self._switch_state(SystemState.RUNNING if self.mode == 'deploy' else SystemState.STEP_WAIT)
-            except Exception as e:
-                self.get_logger().error(f"Infer Error: {e}")
-                time.sleep(0.1)
+                    # 推理结束，切回执行/等待状态
+                    self._switch_state(SystemState.RUNNING if self.mode == 'deploy' else SystemState.STEP_WAIT)
+                except Exception as e:
+                    self.get_logger().error(f"Infer Error: {e}")
+                    time.sleep(0.1)
 
     # --- 控制定时器 ---
     def control_timer_cb(self):
-        st = self.state
-        if st not in [SystemState.RUNNING, SystemState.STEP_ONCE]: return
+        with self.action_timer_lock:
+            st = self.state
+            if st not in [SystemState.RUNNING, SystemState.STEP_ONCE]: return
 
-        if not self.action_queue:
-            # 队列空，触发推理
-            self._switch_state(SystemState.INFERENCE)
-            self.infer_event.set()
-            return
-        
-        with self.queue_lock:
-            data = self.action_queue.popleft()
-        
-        now = self.get_clock().now().to_msg()
-        try:
-            # 1. Arm
-            pa = PoseArray(); pa.header.stamp, pa.header.frame_id = now, "base_link"
-            pa.poses.append(pose_from_matrix(self.T_cam2base_l @ data['l']))
-            pa.poses.append(pose_from_matrix(self.T_cam2base_r @ data['r']))
-            self.pub_action_poses.publish(pa)
-
-            # 2. Hand
-            def _pub(topic, kps, frame):
-                p_arr = PoseArray(); p_arr.header.stamp, p_arr.header.frame_id = now, frame
-                for pt in kps.reshape(-1, 3):
-                    p = Pose(); p.position.x, p.position.y, p.position.z = map(float, pt)
-                    p_arr.poses.append(p)
-                topic.publish(p_arr)
+            if not self.action_queue:
+                # 队列空，触发推理
+                self._switch_state(SystemState.INFERENCE)
+                self.infer_event.set()
+                return
             
-            _pub(self.pub_action_hand_l, data['lk'], "left_wrist_link")
-            _pub(self.pub_action_hand_r, data['rk'], "right_wrist_link")
-        except: pass
+            data = self.action_queue.popleft()
+            
+            now = self.get_clock().now().to_msg()
+            try:
+                # 1. Arm
+                pa = PoseArray(); pa.header.stamp, pa.header.frame_id = now, "base_link"
+                pa.poses.append(pose_from_matrix(self.T_cam2base_l @ data['l']))
+                pa.poses.append(pose_from_matrix(self.T_cam2base_r @ data['r']))
+                self.pub_action_poses.publish(pa)
 
-        if st == SystemState.STEP_ONCE:
-            self._switch_state(SystemState.STEP_WAIT)
+                # 2. Hand
+                def _pub(topic, kps, frame):
+                    p_arr = PoseArray(); p_arr.header.stamp, p_arr.header.frame_id = now, frame
+                    for pt in kps.reshape(-1, 3):
+                        p = Pose(); p.position.x, p.position.y, p.position.z = map(float, pt)
+                        p_arr.poses.append(p)
+                    topic.publish(p_arr)
+                
+                _pub(self.pub_action_hand_l, data['lk'], "left_wrist_link")
+                _pub(self.pub_action_hand_r, data['rk'], "right_wrist_link")
+            except: pass
+
+            if st == SystemState.STEP_ONCE:
+                self._switch_state(SystemState.STEP_WAIT)
 
     # --- 交互 ---
     def user_input_loop(self):
         while rclpy.ok():
             if self.state == SystemState.IDLE:
                 print("\n" + "="*30)
-                instr = input("[Input] 指令: ").strip()
+                self.current_instr = input("[Input] 指令: ").strip()
                 mode = input("[Input] 模式: ").strip().lower()
-                if instr:
-                    with self.state_lock:
-                        self.current_instr, self.mode, self.state = instr, ('debug' if 'debug' in mode else 'deploy'), SystemState.READY
-                        self.first_ts_ns, self.total_inactive_ns, self.inactive_start_ns = 0, 0, None
+                self.mode = 'debug' if 'debug' in mode else 'deploy'
+                self._switch_state(SystemState.READY)
             time.sleep(0.1)
 
     def on_key_press(self, key):
@@ -422,10 +443,6 @@ class ModelInterfaceNode(Node):
             self.play_sound("start"); self.pub_system_mode.publish(String(data="inference"))
             self.first_ts_ns = self.get_clock().now().nanoseconds
             self.total_inactive_ns = 0; self.inactive_start_ns = None
-            # 清空无需锁，因为此时状态不是 Recording
-            self.buf_rgb.clear(); self.buf_depth.clear(); self.buf_l_wrist.clear()
-            self.buf_r_wrist.clear(); self.buf_l_kps.clear(); self.buf_r_kps.clear()
-            self.action_queue.clear()
             self._switch_state(SystemState.FIRST_OBS)
         elif (k == '2' or key == keyboard.Key.space):
             if self.mode == 'deploy' and self.state in [SystemState.RUNNING, SystemState.PAUSED]:
