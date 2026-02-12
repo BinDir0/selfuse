@@ -11,6 +11,10 @@ Hand IK Node - 手部逆运动学 ROS2 节点
               每个 Pose.position = Point(x, y, z) 为指尖 3D 坐标 (米)
               每个 Pose.orientation = Quaternion (预留，IK 仅使用 position)
 
+- 输入: /system/mode (String)
+        含义: 系统模式切换命令
+        支持: "reset" (复位模式), "inference" (推理模式)
+
 - 输出: /action/{left,right}_hand/joints (JointState)
         含义: 6 个归一化关节角度 (0-1)
         格式: name  = ["thumb_rotation", "thumb_bend", "index", "middle", "ring", "pinky"]
@@ -20,6 +24,7 @@ Hand IK Node - 手部逆运动学 ROS2 节点
 数据流:
     Model Interface Node
         -> /action/{side}_hand/keypoints (PoseArray: keypoints in wrist frame)
+        -> /system/mode (String: mode switch command)
     Hand IK Node  [本节点]
         -> /action/{side}_hand/joints (JointState: normalized joint angles)
     Hand Control Node
@@ -30,8 +35,10 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
 from geometry_msgs.msg import PoseArray
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
 
 from hand.hand_ik_solver import FINGER_NAMES, JOINT_NAMES, HandIKSolver
 
@@ -51,6 +58,18 @@ class HandIKNode(Node):
 
     def __init__(self):
         super().__init__("hand_ik_node")
+
+        # ----------------------------------------------------------
+        # 系统模式：inference 接收 keypoints 并求解 IK，reset 发送复位关节角
+        # ----------------------------------------------------------
+        self.mode = "inference"  # or "reset"
+
+        # ----------------------------------------------------------
+        # ROS2 并发回调组
+        # ----------------------------------------------------------
+        self.keypoints_sub_group = ReentrantCallbackGroup()
+        self.publisher_group = ReentrantCallbackGroup()
+        self.mode_sub_group = ReentrantCallbackGroup()
 
         # ----------------------------------------------------------
         # 参数声明
@@ -100,6 +119,13 @@ class HandIKNode(Node):
         self.get_logger().info("IK solver initialized successfully")
 
         # ----------------------------------------------------------
+        # Home 姿态配置 (reset 模式发布的关节角度)
+        # ----------------------------------------------------------
+        # 全伸直姿态：所有关节归一化值为 0.0 (完全伸展)
+        self.home_joints = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.get_logger().info(f"Home joints configuration: {self.home_joints}")
+
+        # ----------------------------------------------------------
         # 状态变量
         # ----------------------------------------------------------
         self._latest_keypoints: dict = {}  # {finger_name: np.array([x,y,z])}
@@ -111,12 +137,22 @@ class HandIKNode(Node):
         # ----------------------------------------------------------
         # ROS2 接口
         # ----------------------------------------------------------
-        # 订阅: 指尖关键点 (PoseArray, 5 个指尖在 wrist frame 下的 3D 位姿)
+        # 订阅1: 指尖关键点 (PoseArray, 5 个指尖在 wrist frame 下的 3D 位姿)
         self.keypoints_sub = self.create_subscription(
             PoseArray,
             f"/action/{self.hand_side}_hand/keypoints",
             self._keypoints_callback,
             10,
+            callback_group=self.keypoints_sub_group,
+        )
+
+        # 订阅2: 系统模式切换
+        self.mode_sub = self.create_subscription(
+            String,
+            "/system/mode",
+            self._mode_callback,
+            10,
+            callback_group=self.mode_sub_group,
         )
 
         # 发布: 归一化关节角度
@@ -124,6 +160,7 @@ class HandIKNode(Node):
             JointState,
             f"/action/{self.hand_side}_hand/joints",
             10,
+            callback_group=self.publisher_group,
         )
 
         # 定时器: 按指定频率运行 IK 并发布
@@ -138,8 +175,12 @@ class HandIKNode(Node):
         self.get_logger().info(f"  Frequency : {self.frequency} Hz")
         self.get_logger().info(f"  IK solver : {ik_solver_type}")
         self.get_logger().info(f"  IK iters  : {self.ik_max_iterations}")
+        self.get_logger().info(f"  Mode      : {self.mode}")
         self.get_logger().info(
             f"  Subscribe : /action/{self.hand_side}_hand/keypoints (PoseArray)"
+        )
+        self.get_logger().info(
+            f"  Subscribe : /system/mode (String)"
         )
         self.get_logger().info(
             f"  Publish   : /action/{self.hand_side}_hand/joints (JointState)"
@@ -149,6 +190,30 @@ class HandIKNode(Node):
     # 回调函数
     # ------------------------------------------------------------------
 
+    def _mode_callback(self, msg: String):
+        """
+        处理 /system/mode 消息的回调函数
+        
+        支持的模式：
+        - "reset": 复位模式，手部伸直，停止接收 keypoints
+        - "inference": 推理模式，正常 IK 求解
+        """
+        cmd = msg.data.strip().lower()
+        
+        if cmd == "reset":
+            self.get_logger().info("🔄 切换到 reset 模式 (手部复位)")
+            self.mode = "reset"
+            # 清空缓存的 keypoints，停止 IK 求解
+            self._has_new_keypoints = False
+            self._latest_keypoints = {}
+            
+        elif cmd == "inference":
+            self.get_logger().info("▶️ 切换到 inference 模式")
+            self.mode = "inference"
+            
+        else:
+            self.get_logger().warn(f"⚠️ 未识别的 system mode: {cmd}")
+
     def _keypoints_callback(self, msg: PoseArray):
         """
         处理接收到的指尖关键点消息 (PoseArray)
@@ -157,6 +222,10 @@ class HandIKNode(Node):
             [thumb, index, middle, ring, pinky]
         每个 Pose.position 包含指尖在 wrist frame 下的 3D 坐标 (x, y, z)
         """
+        # 模式检查：reset 模式下不接收 keypoints
+        if self.mode == "reset":
+            return
+        
         if len(msg.poses) != _EXPECTED_NUM_FINGERS:
             self.get_logger().warn(
                 f"Invalid keypoints count: {len(msg.poses)}, "
@@ -180,10 +249,20 @@ class HandIKNode(Node):
         """
         定时回调: 运行 IK 求解并发布关节角度
 
+        模式处理:
+        - reset 模式: 直接发布 home 关节角度（全伸直）
+        - inference 模式: 正常 IK 求解
+        
         保护机制:
         - 没有收到过 keypoints 时不发布
         - keypoints 数据超时后停止发布（避免上游断开后手一直维持旧姿态）
         """
+        # ========== Reset 模式：直接发布 home 关节角度 ==========
+        if self.mode == "reset":
+            self._publish_home_joints()
+            return
+        
+        # ========== Inference 模式：正常 IK 求解 ==========
         if not self._has_new_keypoints:
             return
 
@@ -249,6 +328,25 @@ class HandIKNode(Node):
             f"converged={info['converged']}, "
             f"pos_err={info['position_error']*1000:.3f}mm, "
             f"joints=[{', '.join(f'{j:.3f}' for j in joint_positions)}]"
+        )
+
+    def _publish_home_joints(self):
+        """
+        发布 home 姿态的关节角度（reset 模式）
+        
+        Home 姿态：所有关节归一化值为 0.0（完全伸展）
+        """
+        # 构建 JointState 消息
+        joint_msg = JointState()
+        joint_msg.header.stamp = self.get_clock().now().to_msg()
+        joint_msg.header.frame_id = f"{self.hand_side}_hand_base_link"
+        joint_msg.name = list(JOINT_NAMES)
+        joint_msg.position = self.home_joints
+        self.joints_pub.publish(joint_msg)
+        
+        # 调试日志（节流输出）
+        self.get_logger().debug(
+            f"Reset mode: publishing home joints {self.home_joints}"
         )
 
     # ------------------------------------------------------------------
