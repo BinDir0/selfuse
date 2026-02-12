@@ -11,6 +11,193 @@ from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import zarr
+
+
+def plot_embedding_tsne_by_class(
+    embeddings_by_class: Dict[str, Union[torch.Tensor, np.ndarray]],
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    pca_dim: int = 50,  # 推荐 50
+    tsne_perplexity: float = 30.0,
+    tsne_lr: Union[str, float] = "auto",
+    tsne_iter: int = 1000,
+    random_state: int = 42,
+):
+    """
+    Visualize embeddings from multiple classes on a single t-SNE plot.
+    """
+    if not embeddings_by_class:
+        raise ValueError("embeddings_by_class is empty.")
+
+    class_names = []
+    class_sizes = []
+    all_embeddings = []
+
+    # 1. 数据收集与转换
+    for class_name, emb in embeddings_by_class.items():
+        if isinstance(emb, torch.Tensor):
+            emb = emb.detach().cpu().float().numpy()
+        elif isinstance(emb, np.ndarray):
+            emb = emb.astype(np.float32)
+            
+        if emb.ndim != 2:
+            # 兼容处理：如果是 (D,) 的一维向量，自动升维到 (1, D)
+            if emb.ndim == 1:
+                emb = emb.reshape(1, -1)
+            else:
+                raise ValueError(
+                    f"Expected embeddings [N, D] for class '{class_name}', got shape={emb.shape}"
+                )
+        
+        class_names.append(str(class_name))
+        class_sizes.append(emb.shape[0])
+        all_embeddings.append(emb)
+
+    embeddings = np.concatenate(all_embeddings, axis=0)
+    n_samples, n_features = embeddings.shape
+
+    if n_samples < 2:
+        raise ValueError("Need at least 2 total embeddings for t-SNE.")
+
+    print(f"Running t-SNE on {n_samples} samples with {n_features} dimensions...")
+
+    # 2. PCA 降维 (Robust Check)
+    # PCA 组件数不能超过 min(n_samples, n_features)
+    # 修正逻辑：取三者最小值 (target_dim, n_samples, n_features)
+    real_pca_dim = min(pca_dim, n_samples, n_features)
+    
+    # 如果维度本身就很低，甚至不需要 PCA，或者 PCA 维度太接近原始维度
+    if n_features > 50 and n_samples > 50:
+        print(f"  - Pre-processing: PCA reducing to {real_pca_dim} dims")
+        pca = PCA(n_components=real_pca_dim, random_state=random_state)
+        embeddings_processed = pca.fit_transform(embeddings)
+    else:
+        print("  - Skipping PCA (dimensions or samples too small)")
+        embeddings_processed = embeddings
+
+    # 3. t-SNE (Robust Perplexity)
+    # Perplexity 必须小于 n_samples
+    real_perplexity = tsne_perplexity
+    if n_samples < tsne_perplexity + 1:
+        real_perplexity = max(1.0, float(n_samples - 1))  # 动态调整
+        print(f"  - Warning: n_samples={n_samples} is small. Adjusting perplexity to {real_perplexity}")
+
+    tsne = TSNE(
+        n_components=2,
+        perplexity=real_perplexity,
+        learning_rate=tsne_lr,
+        max_iter=tsne_iter,
+        init="pca", # 初始化建议用 PCA，比 random 更稳定
+        random_state=random_state,
+        n_jobs=-1   # 使用所有 CPU 核加速
+    )
+    embeddings_tsne = tsne.fit_transform(embeddings_processed)
+
+    # 4. 绘图
+    plt.figure(figsize=(10, 8)) # 稍微大一点
+    
+    # 颜色映射 (如果类别很多，可以用 tab20)
+    cmap = plt.get_cmap("tab10") if len(class_names) <= 10 else plt.get_cmap("tab20")
+    
+    start = 0
+    for i, (class_name, size) in enumerate(zip(class_names, class_sizes)):
+        end = start + size
+        coords = embeddings_tsne[start:end]
+        plt.scatter(
+            coords[:, 0], 
+            coords[:, 1], 
+            s=10, # 点的大小
+            alpha=0.7, 
+            label=f"{class_name} ({size})", # 图例显示样本数
+            color=cmap(i % 20)
+        )
+        start = end
+
+    plt.title("t-SNE Visualization of Latent Space")
+    plt.legend(loc="best", fontsize=10, framealpha=0.9)
+    
+    # t-SNE 的坐标轴数字没有物理意义，通常建议隐藏，更美观
+    plt.xticks([])
+    plt.yticks([])
+    # 如果想保留网格，可以把下面两行注释掉
+    plt.axis('off') 
+    
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight") # 300 dpi 适合论文
+        print(f"Saved t-SNE plot to {save_path}")
+        
+    if show:
+        plt.show()
+    plt.close()
+
+
+def plot_tsne_from_zarrs(
+    zarr_paths: Sequence[Union[str, Path]],
+    keys: Sequence[str],
+    sample_per_zarr: int = 200,
+    seed: int = 42,
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = False,
+    pca_dim: int = 50,
+    tsne_perplexity: float = 30.0,
+    tsne_lr: Union[str, float] = "auto",
+    tsne_iter: int = 1000,
+):
+    """
+    Read multiple zarr stores, sample embeddings per key, and plot t-SNE by key.
+    Each key is treated as a class label; samples from all zarrs are merged.
+    """
+    if not zarr_paths:
+        raise ValueError("zarr_paths is empty.")
+    if not keys:
+        raise ValueError("keys is empty.")
+
+    rng = np.random.default_rng(seed)
+
+    def _short_key(name: str) -> str:
+        name = name.split("/")[-1]
+        name = name.replace("prefill_vlm_hidden_states", "prefill")
+        name = name.replace("generated_hidden_states", "gen")
+        name = name.replace("hidden_states", "hs")
+        return name
+
+    embeddings_by_class: Dict[str, np.ndarray] = {}
+    for key in keys:
+        key_samples = []
+        for zarr_path in zarr_paths:
+            root = zarr.open_group(str(zarr_path), mode="r")
+            if key not in root:
+                continue
+            arr = root[key][:]
+            if arr.ndim > 2:
+                arr = arr.reshape(-1, arr.shape[-1])
+            if arr.ndim != 2 or arr.shape[0] == 0:
+                continue
+            take = min(sample_per_zarr, arr.shape[0])
+            indices = rng.choice(arr.shape[0], size=take, replace=False)
+            key_samples.append(arr[indices])
+        if key_samples:
+            embeddings_by_class[_short_key(key)] = np.concatenate(key_samples, axis=0)
+
+    if not embeddings_by_class:
+        raise ValueError("No samples collected from zarrs for the given keys.")
+
+    plot_embedding_tsne_by_class(
+        embeddings_by_class=embeddings_by_class,
+        save_path=save_path,
+        show=show,
+        pca_dim=pca_dim,
+        tsne_perplexity=tsne_perplexity,
+        tsne_lr=tsne_lr,
+        tsne_iter=tsne_iter,
+    )
 
 
 def plot_embedding_l2norm_by_position(
@@ -530,33 +717,20 @@ def print_analysis_report(analysis_results: Dict[str, Any]):
     print("\n" + "=" * 80 + "\n")
 
 
-# Usage examples
 if __name__ == "__main__":
-    # Generate test data
-    print("Generating test data...")
-    
-    # Test 1: Normal distribution
-    vocab_size, embedding_dim = 1000, 512
-    embeddings_normal = np.random.randn(vocab_size, embedding_dim) * 0.02
-    
-    print("\nTest 1: Normal Distribution Embedding")
-    results_normal = analyze_embedding_distribution(
-        embeddings_normal,
-        sample_size=1000,
-        plot=True,
-        save_path="embedding_analysis_normal.png"
+    zarr_paths = [
+        "/home/chenzhang/projects/diffloss-ar/outputs/2026.02.12/18.27_legendvla_inference/inference_results.zarr",
+    ]
+    keys = [
+        "prefill_image_hidden_states", 
+        "prefill_state_hidden_states", 
+        "prefill_text_hidden_states", 
+        "generated_hidden_states"
+    ]
+    plot_tsne_from_zarrs(
+        zarr_paths=zarr_paths,
+        keys=keys,
+        sample_per_zarr=2000,
+        save_path="outputs/tsne_by_key.png",
     )
-    print_analysis_report(results_normal)
-    
-    # Test 2: Uniform distribution
-    embeddings_uniform = np.random.uniform(-0.1, 0.1, (vocab_size, embedding_dim))
-    
-    print("\nTest 2: Uniform Distribution Embedding")
-    results_uniform = analyze_embedding_distribution(
-        embeddings_uniform,
-        sample_size=1000,
-        plot=True,
-        save_path="embedding_analysis_uniform.png"
-    )
-    print_analysis_report(results_uniform)
 

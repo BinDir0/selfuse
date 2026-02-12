@@ -505,9 +505,9 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         # Process depth images if provided
         depth_values = None
         if depth_images is not None:
-            # Determine scale factor for depth (typically depth is in meters, normalize to [0, 1])
-            # Adjust this based on your depth data range
             depth_scale_factor = 1.0  # No rescaling by default, adjust if needed
+            if depth_images.dtype == np.uint16: 
+                depth_scale_factor = 1 / 1000.0 # convert mm to m
             depth_values = process_depth_images(
                 depth_images=depth_images,
                 size=(self.depth_image_size, self.depth_image_size),

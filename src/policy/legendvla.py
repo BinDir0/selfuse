@@ -26,7 +26,7 @@ from src.model.common.modules import (
     SinusoidalPosEmb,
     TimeEncoder,
 )
-from src.utils.monitor import log_execution_time
+from src.utils.monitor import log_execution_time, log_elapsed_time
 from src.utils.generation_utils import sample_token, concat_attn_weights
 
 log = logging.getLogger(__name__)
@@ -652,7 +652,6 @@ class LegendVLA(nn.Module):
         return KVCache()
 
     # ---------- Input preparation ---------- #
-
     def build_causal_mask_and_position_ids(
         self, attention_mask: torch.Tensor, answer_start_idx: torch.Tensor, n_actions: torch.Tensor, dtype: torch.dtype
     ) -> Tuple[torch.FloatTensor, torch.LongTensor, torch.LongTensor]:
@@ -1031,18 +1030,19 @@ class LegendVLA(nn.Module):
             dtype=pixel_values.dtype
         )
         
-        # forward pass thru the vlm, cache the kv
-        _, kv_caches = self.joint_model(
-            attention_mask=vlm_mask,
-            position_ids_all={
-                "vlm": vlm_position_ids,
-            },
-            embeds_all={
-                "vlm": inputs_embeds,
-            },
-            kv_caches=kv_caches,
-            return_caches=True,
-        )
+        with log_elapsed_time(label="forward pass thru the vlm", logger=log):
+            # forward pass thru the vlm, cache the kv
+            _, kv_caches = self.joint_model(
+                attention_mask=vlm_mask,
+                position_ids_all={
+                    "vlm": vlm_position_ids,
+                },
+                embeds_all={
+                    "vlm": inputs_embeds,
+                },
+                kv_caches=kv_caches,
+                return_caches=True,
+            )
         # [num_layers, B, num_heads, seq_len, seq_len]
         vlm_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
         action_expert_attn_weights = None
@@ -1052,34 +1052,35 @@ class LegendVLA(nn.Module):
             (bsz, self.horizon_steps, self.action_dim), device=device, dtype=dtype
         )
 
-        # forward euler integration --- using kv caches of vlm
-        delta_t = 1.0 / self.num_inference_steps
-        t = torch.zeros(bsz, device=device, dtype=dtype)
-        for step_idx in range(self.num_inference_steps):
-            # encode action and time into embedding
-            time_cond = self.time_embedding(t)
-            # [Batch_Size, Horizon_Steps, Embed_Dim]
-            if self.action_expert_adaptive_mode:
-                action_embeds = self.action_encoder(action)
-            else:
-                action_embeds = self.action_encoder(action, time_cond)
-            action_embeds = action_embeds / (self.action_hidden_size**0.5)
-            # [Batch_Size, Horizon_Steps, Embed_Dim]
-            action_embeds = self.joint_model(
-                attention_mask=action_mask,
-                position_ids_all={"action": action_position_ids},
-                embeds_all={"action": action_embeds},
-                time_cond=time_cond,
-                kv_caches=kv_caches,
-                cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
-            )["action"]
-            if step_idx == 0:
-                action_expert_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
-            
-            # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
-            action_vel = self.action_decoder(action_embeds)
-            action += delta_t * action_vel
-            t += delta_t
+        with log_elapsed_time(label="forward euler integration", logger=log):
+            # forward euler integration --- using kv caches of vlm
+            delta_t = 1.0 / self.num_inference_steps
+            t = torch.zeros(bsz, device=device, dtype=dtype)
+            for step_idx in range(self.num_inference_steps):
+                # encode action and time into embedding
+                time_cond = self.time_embedding(t)
+                # [Batch_Size, Horizon_Steps, Embed_Dim]
+                if self.action_expert_adaptive_mode:
+                    action_embeds = self.action_encoder(action)
+                else:
+                    action_embeds = self.action_encoder(action, time_cond)
+                action_embeds = action_embeds / (self.action_hidden_size**0.5)
+                # [Batch_Size, Horizon_Steps, Embed_Dim]
+                action_embeds = self.joint_model(
+                    attention_mask=action_mask,
+                    position_ids_all={"action": action_position_ids},
+                    embeds_all={"action": action_embeds},
+                    time_cond=time_cond,
+                    kv_caches=kv_caches,
+                    cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
+                )["action"]
+                if step_idx == 0:
+                    action_expert_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
+                
+                # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
+                action_vel = self.action_decoder(action_embeds)
+                action += delta_t * action_vel
+                t += delta_t
 
         if return_attn_weights:
             return action, vlm_attn_weights, action_expert_attn_weights
@@ -1347,7 +1348,7 @@ class LegendVLA(nn.Module):
         return_attn_weights: bool = False,
         cfg: float = 1.0,
         **kwargs,
-    ) -> Union[torch.FloatTensor, Tuple[torch.FloatTensor, torch.FloatTensor]]:
+    ) -> Dict[str, torch.FloatTensor]:
         """
         Autoregressive action inference for VLA using DiffLoss sampling.
         
@@ -1365,8 +1366,11 @@ class LegendVLA(nn.Module):
             cfg (float): Classifier-free guidance scale for diffusion sampling
         
         Returns:
-            torch.FloatTensor: [B, max_new_tokens, action_dim] Generated action sequence
-            (optional) torch.FloatTensor: Attention weights if return_attn_weights=True
+            dict:
+                - generated_actions: [B, max_new_tokens, action_dim]
+                - prefill_vlm_hidden_states: [N, hidden_dim] (mask=1, excluding last)
+                - generated_hidden_states: [N, hidden_dim] (all generated steps)
+                - attn_weights (optional)
         """
         input_ids = input["input_ids"]
         pixel_values = input.get("pixel_values")
@@ -1374,6 +1378,7 @@ class LegendVLA(nn.Module):
         
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+        prefill_attention_mask = attention_mask
         
         batch_size = input_ids.size(0)
         device = input_ids.device
@@ -1406,9 +1411,30 @@ class LegendVLA(nn.Module):
             return_attn_weights=return_attn_weights,
         )
         prefill_hidden_states = prefill_output["hidden_states"]
+        hidden_dim = prefill_hidden_states.shape[-1]
         kv_cache = prefill_output.get("kv_cache", kv_cache)
         if return_attn_weights:
             attn_weights_steps.append(prefill_output.get("attn_weights"))
+
+        # Prefill VLM hidden states: keep mask==1, exclude last token
+        prefill_mask = prefill_attention_mask.to(torch.bool)
+        if prefill_mask.numel() > 0:
+            prefill_mask[:, -1] = False
+        prefill_vlm_hidden_flat = prefill_hidden_states[prefill_mask]
+
+        # Split prefill by token type using input_ids
+        image_mask = (input_ids == self.image_token_index) & prefill_mask
+        state_mask = (input_ids == self.state_token_index) & prefill_mask
+        text_mask = (
+            (input_ids != self.image_token_index)
+            & (input_ids != self.state_token_index)
+            & (input_ids != self.action_token_index)
+            & (input_ids != self.pad_token_id)
+            & prefill_mask
+        )
+        prefill_image_hidden_flat = prefill_hidden_states[image_mask]
+        prefill_state_hidden_flat = prefill_hidden_states[state_mask]
+        prefill_text_hidden_flat = prefill_hidden_states[text_mask]
         
         # Sample the first action from the last token
         next_condition_states = prefill_hidden_states[:, -1, :]
@@ -1417,6 +1443,7 @@ class LegendVLA(nn.Module):
         generated_actions = [next_action.unsqueeze(1)]
         
         # ========== Generation Phase ==========
+        generated_hidden_steps = []
         for _ in range(max_new_tokens - 1):
             # Append one action token to the attention mask
             attention_mask = torch.cat(
@@ -1446,15 +1473,30 @@ class LegendVLA(nn.Module):
             kv_cache = step_output.get("kv_cache", kv_cache)
             if return_attn_weights:
                 attn_weights_steps.append(step_output.get("attn_weights"))
+
+            # Store generated token hidden state (last token)
+            generated_hidden_steps.append(step_hidden_states[:, -1, :])
             
             latent_condition = self.latent_condition_projector(step_hidden_states[:, -1, :])
             next_action = self.diffloss.sample(latent_condition, temperature=temperature, cfg=cfg)
             generated_actions.append(next_action.unsqueeze(1))
         
         generated_actions_tensor = torch.cat(generated_actions, dim=1)
+        if generated_hidden_steps:
+            generated_hidden_flat = torch.cat(generated_hidden_steps, dim=0)
+        else:
+            generated_hidden_flat = prefill_hidden_states.new_empty((0, hidden_dim))
+        result = {
+            "generated_actions": generated_actions_tensor,
+            "prefill_vlm_hidden_states": prefill_vlm_hidden_flat,
+            "prefill_image_hidden_states": prefill_image_hidden_flat,
+            "prefill_state_hidden_states": prefill_state_hidden_flat,
+            "prefill_text_hidden_states": prefill_text_hidden_flat,
+            "generated_hidden_states": generated_hidden_flat,
+        }
         if return_attn_weights:
-            return generated_actions_tensor, concat_attn_weights(attn_weights_steps)
-        return generated_actions_tensor
+            result["attn_weights"] = concat_attn_weights(attn_weights_steps)
+        return result
 
     # ---------- Flow matching training ----------#
     def psi_t(
@@ -1678,67 +1720,6 @@ class LegendVLA(nn.Module):
         ce_loss = ce_loss / valid_num_labels.clamp(min=1)
         return ce_loss
 
-    @torch.compile
-    def compute_diffloss(
-        self,
-        hidden_states: torch.FloatTensor,
-        actions: torch.FloatTensor,
-        answer_start_idx: torch.LongTensor,
-        is_vla_data: torch.BoolTensor,
-        n_actions: torch.LongTensor,
-    ) -> torch.FloatTensor:
-        """
-        Compute diffusion loss for VLA data samples.
-
-        Args:
-            hidden_states (torch.FloatTensor): [B, seq_len, hidden_size] Hidden states from the language model
-            actions (torch.FloatTensor): [B, horizon_steps, action_dim] Ground truth actions
-            answer_start_idx (torch.LongTensor): [B] Start index of the answer span
-            is_vla_data (torch.BoolTensor): [B] Mask for VLA samples
-            n_actions (torch.LongTensor): [B] Number of action tokens per sample
-
-        Returns:
-            torch.FloatTensor: Diffusion loss
-        """
-        device = hidden_states.device
-        if not torch.any(is_vla_data):
-            return torch.tensor(0.0, device=device, dtype=hidden_states.dtype)
-
-        vla_hidden = hidden_states[is_vla_data]
-        vla_action = actions[is_vla_data]
-
-        # 1. 获取维度的基本信息
-        max_vlm_tokens = hidden_states.shape[1]
-        num_action_tokens = self.num_action_tokens
-
-        # 2. 构建索引序列 (0, 1, 2, ..., max_len-1)
-        # range_hidden: (1, seq_len)
-        range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
-        # range_action: (1, action_seq_len)
-        # 注意：如果 vla_action 的长度和 vla_hidden 不一致，需要单独生成 range
-        range_action = torch.arange(num_action_tokens, device=device).unsqueeze(0)
-
-        # 3. 调整 start 和 end 的形状以支持广播 (N, 1)
-        starts = answer_start_idx[is_vla_data].unsqueeze(1)
-        ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1)
-        action_ends = n_actions[is_vla_data].unsqueeze(1)
-
-        # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
-        # 逻辑：当前索引 >= start 且 当前索引 < start + n
-        mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
-        mask_action = range_action < action_ends
-
-        # 5. 使用布尔索引提取数据
-        # 这会将所有 True 的位置“压扁”提取出来，直接得到 (diff_bsz, dim)
-        vla_hidden_z = vla_hidden[mask_hidden]  # (diff_bsz, hidden_dim)
-        action_gt = vla_action[mask_action]  # (diff_bsz, action_dim)
-        vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
-        action_gt_repeated = action_gt.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
-        latent_condition_embeds = self.latent_condition_projector(vla_hidden_z_repeated)
-        diff_loss = self.diffloss(action_gt_repeated, latent_condition_embeds) / self.diffloss_micro_batch_size
-        return diff_loss
-
-
     def compute_loss(self, batch: dict) -> dict:
         """
         Compute combined VLA loss with two components: cross-entropy loss (VLM) and flow matching loss (whole VLA).
@@ -1840,13 +1821,42 @@ class LegendVLA(nn.Module):
             ce_loss = self.compute_celoss(hidden_states, labels)
 
         # diffusion loss
-        diff_loss = self.compute_diffloss(
-            hidden_states=hidden_states,
-            actions=actions,
-            answer_start_idx=answer_start_idx,
-            is_vla_data=is_vla_data,
-            n_actions=n_actions,
-        )
+        device = hidden_states.device
+        vla_hidden = hidden_states[is_vla_data]
+        vla_action = actions[is_vla_data]
+
+        if torch.any(is_vla_data):
+            # 1. 获取维度的基本信息
+            max_vlm_tokens = hidden_states.shape[1]
+            num_action_tokens = self.num_action_tokens
+
+            # 2. 构建索引序列 (0, 1, 2, ..., max_len-1)
+            # range_hidden: (1, seq_len)
+            range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
+            # range_action: (1, action_seq_len) 
+            # 注意：如果 vla_action 的长度和 vla_hidden 不一致，需要单独生成 range
+            range_action = torch.arange(num_action_tokens, device=device).unsqueeze(0)
+
+            # 3. 调整 start 和 end 的形状以支持广播 (N, 1)
+            starts = answer_start_idx[is_vla_data].unsqueeze(1)
+            ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1)
+            action_ends = n_actions[is_vla_data].unsqueeze(1)
+
+            # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
+            # 逻辑：当前索引 >= start 且 当前索引 < start + n
+            mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
+            mask_action = range_action < action_ends
+
+            # 5. 使用布尔索引提取数据
+            # 这会将所有 True 的位置“压扁”提取出来，直接得到 (diff_bsz, dim)
+            vla_hidden_z = vla_hidden[mask_hidden]  # (diff_bsz, hidden_dim)
+            action_gt = vla_action[mask_action]  # (diff_bsz, action_dim)
+            vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
+            action_gt_repeated = action_gt.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
+            latent_condition_embeds = self.latent_condition_projector(vla_hidden_z_repeated)
+            diff_loss = self.diffloss(action_gt_repeated, latent_condition_embeds) / self.diffloss_micro_batch_size
+        else:
+            diff_loss = torch.tensor(0.0, device=device, dtype=ce_loss.dtype)
 
         # [Batch_Size, Horizon_Steps, Action_Dim]
         v_psi = self.action_decoder(action_embeds)
@@ -2061,4 +2071,4 @@ class LegendVLAInference(nn.Module):
             return self.model("infer_action", inputs)
         else:
             return self.model("infer_vla", inputs, max_new_tokens=self.ar_max_new_tokens,
-                              temperature=self.ar_temperature, cfg=self.ar_cfg)
+                              temperature=self.ar_temperature, cfg=self.ar_cfg)["generated_actions"]
