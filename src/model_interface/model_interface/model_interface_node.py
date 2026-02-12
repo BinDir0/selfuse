@@ -71,8 +71,13 @@ class ModelInterfaceNode(Node):
         super().__init__('model_interface_node')
 
         # --- 1. 锁和信号 ---
-        self.state_lock = threading.Lock()
-        self.queue_lock = threading.Lock()
+        self.action_timer_lock = threading.Lock()
+        self.rgb_cb_lock = threading.Lock()
+        self.depth_cb_lock = threading.Lock()
+        self.l_pose_cb_lock = threading.Lock()
+        self.r_pose_cb_lock = threading.Lock()
+        self.l_kp_cb_lock = threading.Lock()
+        self.r_kp_cb_lock = threading.Lock()
         self.infer_event = threading.Event()
 
         # --- 2. 参数加载 ---
@@ -175,24 +180,23 @@ class ModelInterfaceNode(Node):
         return state in [SystemState.FIRST_OBS, SystemState.RUNNING, SystemState.STEP_ONCE]
 
     def _switch_state(self, new_state):
-        with self.state_lock:
-            old_state = self.state
-            if old_state == new_state: return
+        old_state = self.state
+        if old_state == new_state: return
 
-            now_ns = self.get_clock().now().nanoseconds
-            
-            # 记录 -> 停止：开始计时 Gap
-            if self._is_active_recording(old_state) and not self._is_active_recording(new_state):
-                self.inactive_start_ns = now_ns
-            
-            # 停止 -> 记录：结算 Gap
-            if not self._is_active_recording(old_state) and self._is_active_recording(new_state):
-                if self.inactive_start_ns is not None:
-                    self.total_inactive_ns += (now_ns - self.inactive_start_ns)
-                    self.inactive_start_ns = None
+        now_ns = self.get_clock().now().nanoseconds
+        
+        # 记录 -> 停止：开始计时 Gap
+        if self._is_active_recording(old_state) and not self._is_active_recording(new_state):
+            self.inactive_start_ns = now_ns
+        
+        # 停止 -> 记录：结算 Gap
+        if not self._is_active_recording(old_state) and self._is_active_recording(new_state):
+            if self.inactive_start_ns is not None:
+                self.total_inactive_ns += (now_ns - self.inactive_start_ns)
+                self.inactive_start_ns = None
 
-            self.state = new_state
-            self.get_logger().info(f"State: {old_state.name} -> {new_state.name}")
+        self.state = new_state
+        self.get_logger().info(f"State: {old_state.name} -> {new_state.name}")
 
     def _get_msg_ns(self, header):
         return header.stamp.sec * 10**9 + header.stamp.nanosec
@@ -217,23 +221,36 @@ class ModelInterfaceNode(Node):
     def _check_first_obs_complete(self):
         # 检查是否所有缓冲区都有数据
         if all(len(b) > 0 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
-            # 进入临界区修改状态
-            with self.state_lock:
-                if self.state == SystemState.FIRST_OBS:
-                    self._switch_state(SystemState.INFERENCE)
-                    self.infer_event.set()
+            if self.state == SystemState.FIRST_OBS:
+                self._switch_state(SystemState.INFERENCE)
+                self.infer_event.set()
 
     # --- 传感器回调 (完全无锁，依赖 Executor 并行) ---
-    def rgb_cb(self, m): self._update_buffer(self.buf_rgb, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'rgb8'))
-    def depth_cb(self, m): self._update_buffer(self.buf_depth, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'passthrough'))
-    def l_pose_cb(self, m): self._update_buffer(self.buf_l_wrist, m.header, m.pose)
-    def r_pose_cb(self, m): self._update_buffer(self.buf_r_wrist, m.header, m.pose)
+    def rgb_cb(self, m): 
+        with self.rgb_cb_lock:
+            self._update_buffer(self.buf_rgb, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'rgb8'))
+
+    def depth_cb(self, m): 
+        with self.depth_cb_lock:
+            self._update_buffer(self.buf_depth, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'passthrough'))
+
+    def l_pose_cb(self, m): 
+        with self.l_pose_cb_lock:
+            self._update_buffer(self.buf_l_wrist, m.header, m.pose)
+
+    def r_pose_cb(self, m): 
+        with self.r_pose_cb_lock:
+            self._update_buffer(self.buf_r_wrist, m.header, m.pose)
+
     def l_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
-        self._update_buffer(self.buf_l_kps, m.header, pts.flatten())
+        with self.l_kp_cb_lock:
+            self._update_buffer(self.buf_l_kps, m.header, pts.flatten())
+
     def r_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
-        self._update_buffer(self.buf_r_kps, m.header, pts.flatten())
+        with self.r_kp_cb_lock:
+            self._update_buffer(self.buf_r_kps, m.header, pts.flatten())
 
     # --- 采样与推理 ---
     def _find_nearest(self, sorted_buf, target_ns):
@@ -256,12 +273,8 @@ class ModelInterfaceNode(Node):
         return (sorted_buf[0][0] - dt_ns) <= target_ts <= (sorted_buf[-1][0] + dt_ns)
 
     def prepare_inference_payload(self):
-        """
-        在 INFERENCE 状态执行。此时传感器回调已被逻辑拦截，
-        缓冲区处于静止状态，读取是绝对安全的。
-        """
-        # 1. 创建快照 & 排序 (解决多线程轻微乱序问题)
-        # deque -> list 转换是迭代过程，虽然状态机保证了无新写入，但做一次 snapshot 是好习惯
+        # 1. 创建快照 & 排序
+        with 
         all_snaps = [
             sorted(list(self.buf_rgb), key=lambda x: x[0]),
             sorted(list(self.buf_depth), key=lambda x: x[0]),
@@ -271,12 +284,11 @@ class ModelInterfaceNode(Node):
             sorted(list(self.buf_r_kps), key=lambda x: x[0])
         ]
         
-        # 强制检查
         assert all(len(s) > 0 for s in all_snaps), "缓冲区数据不全"
 
         snap_rgb, snap_depth, snap_lw, snap_rw, snap_lk, snap_rk = all_snaps
 
-        # 2. 对齐采样 (操作的是本地有序 List，无锁)
+        # 2. 对齐采样
         t_ref = min(s[-1][0] for s in all_snaps)
         grid_ns = int(1e9 / self.data_freq)
 
@@ -313,7 +325,7 @@ class ModelInterfaceNode(Node):
 
         states_in = np.array(states_list)[::-1].astype(np.float32)
 
-        with self.state_lock: instr = self.current_instr
+        instr = self.current_instr
 
         return {
             "image": rgb_in, "depth_image": depth_in, "camera_intrinsics": self.K_mat,
@@ -360,9 +372,8 @@ class ModelInterfaceNode(Node):
 
         if not self.action_queue:
             # 队列空，触发推理
-            if st == SystemState.RUNNING:
-                self._switch_state(SystemState.INFERENCE)
-                self.infer_event.set()
+            self._switch_state(SystemState.INFERENCE)
+            self.infer_event.set()
             return
         
         with self.queue_lock:
@@ -414,6 +425,7 @@ class ModelInterfaceNode(Node):
             # 清空无需锁，因为此时状态不是 Recording
             self.buf_rgb.clear(); self.buf_depth.clear(); self.buf_l_wrist.clear()
             self.buf_r_wrist.clear(); self.buf_l_kps.clear(); self.buf_r_kps.clear()
+            self.action_queue.clear()
             self._switch_state(SystemState.FIRST_OBS)
         elif (k == '2' or key == keyboard.Key.space):
             if self.mode == 'deploy' and self.state in [SystemState.RUNNING, SystemState.PAUSED]:
@@ -425,7 +437,6 @@ class ModelInterfaceNode(Node):
                 self._switch_state(SystemState.STEP_ONCE); self.play_sound("continue")
         elif k == '3' and self.state != SystemState.IDLE:
             self._switch_state(SystemState.RESETTING); self.play_sound("stop_and_reset"); self.pub_system_mode.publish(String(data="reset"))
-            with self.queue_lock: self.action_queue.clear()
             time.sleep(3.0); self._switch_state(SystemState.IDLE)
 
     def find_and_load_calibration(self, cam, arm):
