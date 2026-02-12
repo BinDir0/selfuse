@@ -155,9 +155,10 @@ class LegendVLAInference:
             inputs["action_mask"] = action_mask
             inputs["vlm_position_ids"] = vlm_position_ids
             inputs["action_position_ids"] = action_position_ids
+
+        if "states" in batch:
             inputs["states"] = batch["states"].to(self.dtype)
             inputs["n_states"] = batch["n_states"]
-            inputs["n_actions"] = batch["n_actions"]
         
         if "depth_values" in batch:
             inputs["depth_values"] = batch["depth_values"].to(self.dtype)
@@ -166,6 +167,7 @@ class LegendVLAInference:
         # 添加ground truth actions用于对比（如果有）
         if "actions" in batch:
             inputs["actions"] = batch["actions"].to(self.dtype)
+            inputs["n_actions"] = batch["n_actions"]
             inputs["actions_valid_mask"] = batch["actions_valid_mask"]
         
         return inputs
