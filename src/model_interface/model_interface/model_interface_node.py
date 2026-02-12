@@ -251,12 +251,14 @@ class ModelInterfaceNode(Node):
 
     # --- 传感器回调 (完全无锁，依赖 Executor 并行) ---
     def rgb_cb(self, m): 
+        data = self.cv_bridge.imgmsg_to_cv2(m, 'rgb8')
         with self.rgb_cb_lock:
-            self._update_buffer(self.buf_rgb, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'rgb8'))
+            self._update_buffer(self.buf_rgb, m.header, data)
 
     def depth_cb(self, m): 
+        data = self.cv_bridge.imgmsg_to_cv2(m, 'passthrough')
         with self.depth_cb_lock:
-            self._update_buffer(self.buf_depth, m.header, self.cv_bridge.imgmsg_to_cv2(m, 'passthrough'))
+            self._update_buffer(self.buf_depth, m.header, data)
 
     def l_pose_cb(self, m): 
         with self.l_pose_cb_lock:
