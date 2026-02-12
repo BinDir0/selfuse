@@ -100,6 +100,8 @@ class LegendVLA(nn.Module):
         # Diffusion loss
         self.diffloss = diffloss
         self.diffloss_micro_batch_size = cfg.get("diffloss_micro_batch_size", 4)
+        self.ar_action_noise_std = cfg.get("ar_action_noise_std", 0.02)
+        self.ar_action_chunk_size = cfg.get("ar_action_chunk_size", 4)
 
         # Action, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
@@ -944,7 +946,10 @@ class LegendVLA(nn.Module):
         if states is not None:
             state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size**0.5)
         if actions is not None:
-            action_features = self.action_encoder_ar(actions) / (self.vlm_hidden_size**0.5)
+            actions_input = actions
+            noise = torch.randn_like(actions_input) * self.ar_action_noise_std
+            actions_input = actions_input + noise
+            action_features = self.action_encoder_ar(actions_input) / (self.vlm_hidden_size**0.5)
         if pixel_values is not None:
             image_mask = input_ids == self.image_token_index
             # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
