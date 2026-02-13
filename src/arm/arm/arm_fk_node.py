@@ -11,7 +11,8 @@ Arm FK Node - 机械臂正运动学节点
 - 坐标变换参考visualize_psirobot_with_rgbd_calib.py
 - 输出坐标系：arm_base frame (arm1_link0 或 arm2_link0)
 - 输出位置：connector顶端（手部安装点）
-- 输出姿态：wrist TCP原始姿态（保持不变）
+- 输出姿态：hand_base姿态（应用了 TCP Z轴180°旋转）
+- TCP旋转：wrist_mat @ TCP_ROTATION (与 visualize 完全一致)
 """
 
 import rclpy
@@ -197,8 +198,14 @@ class ArmFKNode(Node):
                 wrist_pos_xml, wrist_mat_xml
             )
             
-            # Step 4: 旋转矩阵 → 四元数 (遵循mj-controller)
-            wrist_quat_base = R.from_matrix(wrist_mat_base).as_quat()  # [x,y,z,w]
+            # ========== 应用 TCP Z轴180°旋转 (与 visualizer 对齐) ==========
+            # 参考 visualize_psirobot_with_rgbd_calib.py line 881, 899
+            # hand_base_mat = wrist_mat @ tcp_rotation_left/right
+            from arm.connector_config import TCP_ROTATION
+            hand_base_mat = wrist_mat_base @ TCP_ROTATION
+            
+            # Step 4: 旋转矩阵 → 四元数
+            hand_base_quat = R.from_matrix(hand_base_mat).as_quat()  # [x,y,z,w]
             
             # ========== 计算Connector顶端位置 (新增) ==========
             connector_top_pos = self._compute_connector_top_position(
@@ -207,8 +214,8 @@ class ArmFKNode(Node):
             
             # ========== 发布位姿 ==========
             # Position: connector顶端（手部安装点）
-            # Rotation: wrist TCP姿态（保持不变）
-            self._publish_wrist_pose(connector_top_pos, wrist_quat_base)
+            # Rotation: hand_base 姿态（应用了 TCP_ROTATION 的 Z 轴 180° 旋转）
+            self._publish_wrist_pose(connector_top_pos, hand_base_quat)
             
         except Exception as e:
             self.get_logger().error(f'FK computation error: {e}')
@@ -289,11 +296,11 @@ class ArmFKNode(Node):
         
         注意：
         - position: connector顶端位置（手部安装点）
-        - quaternion: wrist TCP原始姿态（保持不变）
+        - quaternion: hand_base姿态（应用了 TCP Z轴180°旋转）
         
         Args:
             position: [x, y, z] connector顶端在arm_base frame
-            quaternion: [x, y, z, w] wrist TCP姿态
+            quaternion: [x, y, z, w] hand_base姿态（wrist_mat @ TCP_ROTATION）
         """
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.get_clock().now().to_msg()
