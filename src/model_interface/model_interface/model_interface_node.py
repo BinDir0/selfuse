@@ -119,6 +119,7 @@ class ModelInterfaceNode(Node):
         self.first_ts_ns = 0
         self.total_inactive_ns = 0
         self.inactive_start_ns = None
+        self.first_inference = True
 
         # --- 4. 标定 ---
         self.get_logger().info(f"📐 加载标定数据: 相机={self.cam_name}, 路径={self.calib_root}")
@@ -223,6 +224,7 @@ class ModelInterfaceNode(Node):
             self.action_queue.clear()
             self.buf_rgb.clear(); self.buf_depth.clear(); self.buf_l_wrist.clear()
             self.buf_r_wrist.clear(); self.buf_l_kps.clear(); self.buf_r_kps.clear()
+            self.first_inference = True
             self.get_logger().info(f"🧹 重置完成: 清空动作队列({queue_size}个动作), 清空缓冲区({buf_sizes})")
         elif new_state == SystemState.FIRST_OBS:
             assert not self.action_queue, "第一次观测状态时，动作队列应该没有数据"
@@ -270,7 +272,7 @@ class ModelInterfaceNode(Node):
             '左手关键点': len(self.buf_l_kps),
             '右手关键点': len(self.buf_r_kps)
         }
-        if all(len(b) > 1 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
+        if all(len(b) > 5 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
             self.get_logger().info(f"✅ 首次观测完成: 缓冲区大小={buf_sizes}")
             threading.Thread(target=self._do_switch_to_inference, daemon=True).start()
         else:
@@ -342,7 +344,7 @@ class ModelInterfaceNode(Node):
             sorted(list(self.buf_l_kps), key=lambda x: x[0]),
             sorted(list(self.buf_r_kps), key=lambda x: x[0])
         ]
-        
+
         assert all(len(s) > 0 for s in all_snaps), "缓冲区数据不全"
         
         buf_sizes = [len(s) for s in all_snaps]
@@ -350,48 +352,81 @@ class ModelInterfaceNode(Node):
 
         snap_rgb, snap_depth, snap_lw, snap_rw, snap_lk, snap_rk = all_snaps
 
-        # 2. 对齐采样
-        t_ref = min(s[-1][0] for s in all_snaps)
-        grid_ns = int(1e9 / self.data_freq)
-        self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={grid_ns/1e6:.1f}ms")
+        # check the timestamp of all_snaps
+        self._print_buffer_info("RGB", snap_rgb)
+        self._print_buffer_info("Depth", snap_depth)
+        self._print_buffer_info("Left Wrist", snap_lw)
+        self._print_buffer_info("Right Wrist", snap_rw)
+        self._print_buffer_info("Left Kps", snap_lk)
+        self._print_buffer_info("Right Kps", snap_rk)
 
-        # Image
-        rgb_seq, depth_seq = [], []
-        for h in range(self.i_hor):
-            t = t_ref - (h * self.i_str * grid_ns)
-            if not self._is_in_range(snap_rgb, t): break
-            rgb_seq.append(self._find_nearest(snap_rgb, t))
-            depth_seq.append(self._find_nearest(snap_depth, t))
-        
-        rgb_in = np.stack(rgb_seq)[::-1]
-        depth_in = np.stack(depth_seq)[::-1]
-        if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
-
-        # State
-        states_list = []
-        for h in range(self.s_hor):
-            t = t_ref - (h * self.s_str * grid_ns)
-            state_snaps = [snap_lw, snap_rw, snap_lk, snap_rk]
-            if not all(self._is_in_range(b, t) for b in state_snaps): break
-
-            tl = self.T_base2cam_l @ matrix_from_pose_msg(self._find_nearest(snap_lw, t))
-            tr = self.T_base2cam_r @ matrix_from_pose_msg(self._find_nearest(snap_rw, t))
-            lk = self._find_nearest(snap_lk, t)
-            rk = self._find_nearest(snap_rk, t)
-
+        if self.first_inference:
+            rgb_seq = [np.array(snap_rgb[-1][1])]
+            depth_seq = [np.array(snap_depth[-1][1])]
+            rgb_in = np.stack(rgb_seq)
+            depth_in = np.stack(depth_seq)
+            if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
+            tl = self.T_base2cam_l @ matrix_from_pose_msg(snap_lw[-1][1])
+            tr = self.T_base2cam_r @ matrix_from_pose_msg(snap_rw[-1][1])
+            lk = snap_lk[-1][1]
+            rk = snap_rk[-1][1]
             vec = np.concatenate([
                 tl[:3, 3], tr[:3, 3],
                 get_6d_rot(tl), get_6d_rot(tr),
-                lk, rk
-            ])
-            states_list.append(vec)
+                lk, rk])
+            states_in = vec[None, :].astype(np.float32)
+            def clear_repeated_data(buf, retained_data):
+                buf.clear()
+                buf.append(retained_data)
+            clear_repeated_data(self.buf_rgb, snap_rgb[-1])
+            clear_repeated_data(self.buf_depth, snap_depth[-1])
+            clear_repeated_data(self.buf_l_wrist, snap_lw[-1])
+            clear_repeated_data(self.buf_r_wrist, snap_rw[-1])
+            clear_repeated_data(self.buf_l_kps, snap_lk[-1])
+            clear_repeated_data(self.buf_r_kps, snap_rk[-1])
+            self.first_inference = False
+        else:
+            # 2. 对齐采样
+            t_ref = min(s[-1][0] for s in all_snaps)
+            grid_ns = int(1e9 / self.data_freq)
+            self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={grid_ns/1e6:.1f}ms")
 
-        states_in = np.array(states_list)[::-1].astype(np.float32)
+            # Image
+            rgb_seq, depth_seq = [], []
+            for h in range(self.i_hor):
+                t = t_ref - (h * self.i_str * grid_ns)
+                if not self._is_in_range(snap_rgb, t): break
+                rgb_seq.append(self._find_nearest(snap_rgb, t))
+                depth_seq.append(self._find_nearest(snap_depth, t))
+            
+            rgb_in = np.stack(rgb_seq)[::-1]
+            depth_in = np.stack(depth_seq)[::-1]
+            if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
+
+            # State
+            states_list = []
+            for h in range(self.s_hor):
+                t = t_ref - (h * self.s_str * grid_ns)
+                state_snaps = [snap_lw, snap_rw, snap_lk, snap_rk]
+                if not all(self._is_in_range(b, t) for b in state_snaps): break
+
+                tl = self.T_base2cam_l @ matrix_from_pose_msg(self._find_nearest(snap_lw, t))
+                tr = self.T_base2cam_r @ matrix_from_pose_msg(self._find_nearest(snap_rw, t))
+                lk = self._find_nearest(snap_lk, t)
+                rk = self._find_nearest(snap_rk, t)
+
+                vec = np.concatenate([
+                    tl[:3, 3], tr[:3, 3],
+                    get_6d_rot(tl), get_6d_rot(tr),
+                    lk, rk
+                ])
+                states_list.append(vec)
+
+            states_in = np.array(states_list)[::-1].astype(np.float32)
 
         instr = self.current_instr
         
-        self.get_logger().info(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, "
-                               f"状态形状={states_in.shape}, 图像序列长度={len(rgb_seq)}, 状态序列长度={len(states_list)}")
+        self.get_logger().info(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, 状态形状={states_in.shape}")
 
         return {
             "image": rgb_in, "depth_image": depth_in, "camera_intrinsics": self.K_mat,
@@ -541,6 +576,12 @@ class ModelInterfaceNode(Node):
     def play_sound(self, name):
         url = f"http://{self.ui_host}:{self.ui_port}/play/{name}"
         threading.Thread(target=lambda: self.ui_session.post(url, timeout=0.5), daemon=True).start()
+
+    def _print_buffer_info(self, buf_name, buf):
+        self.get_logger().info(f"Buffer Name: {buf_name}")
+        self.get_logger().info(f"Buffer Size: {len(buf)}")
+        self.get_logger().info(f"Buffer Timestamp: {', '.join([f'{x[0] / 1e6: .2f}ms' for x in buf])}")
+
 
 def main(args=None):
     rclpy.init(args=args)
