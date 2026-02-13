@@ -270,7 +270,7 @@ class ModelInterfaceNode(Node):
             '左手关键点': len(self.buf_l_kps),
             '右手关键点': len(self.buf_r_kps)
         }
-        if all(len(b) > 0 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
+        if all(len(b) > 1 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
             self.get_logger().info(f"✅ 首次观测完成: 缓冲区大小={buf_sizes}")
             threading.Thread(target=self._do_switch_to_inference, daemon=True).start()
         else:
