@@ -87,8 +87,8 @@ class ModelInterfaceNode(Node):
         self.declare_parameter('model_server_port', 8000)
         self.declare_parameter('calibration_path', '')
         self.declare_parameter('camera_name', 'head')
-        self.declare_parameter('audio_service_host', 'localhost')
-        self.declare_parameter('audio_service_port', 8080)
+        self.declare_parameter('ui_service_host', 'localhost')
+        self.declare_parameter('ui_service_port', 8080)
         
         self.declare_parameter('data_frequency', 30.0)
         self.declare_parameter('state_horizon', 10)
@@ -102,8 +102,8 @@ class ModelInterfaceNode(Node):
         self.ctrl_freq = self.get_parameter('control_frequency').value
         self.calib_root = self.get_parameter('calibration_path').value
         self.cam_name = self.get_parameter('camera_name').value
-        self.audio_host = self.get_parameter('audio_service_host').value
-        self.audio_port = self.get_parameter('audio_service_port').value
+        self.ui_host = self.get_parameter('ui_service_host').value
+        self.ui_port = self.get_parameter('ui_service_port').value
         self.data_freq = self.get_parameter('data_frequency').value
         self.s_hor = self.get_parameter('state_horizon').value
         self.s_str = self.get_parameter('state_stride').value
@@ -139,7 +139,7 @@ class ModelInterfaceNode(Node):
         self.buf_r_kps = deque(maxlen=self.max_buf)
         
         self.cv_bridge = CvBridge()
-        self.audio_session = requests.Session()
+        self.ui_session = requests.Session()
 
         # --- 6. 通信接口 (分配 Callback Group) ---
         self.pub_system_mode = self.create_publisher(String, '/system/mode', 10)
@@ -427,16 +427,26 @@ class ModelInterfaceNode(Node):
             if st == SystemState.STEP_ONCE:
                 self._switch_state(SystemState.STEP_WAIT)
 
-    # --- 交互 ---
-    def user_input_loop(self):
+    def remote_input_loop(self):
+        """通过 HTTP GET 宿主机服务获取阻塞式的指令输入"""
         while rclpy.ok():
             if self.state == SystemState.IDLE:
-                print("\n" + "="*30)
-                self.current_instr = input("[Input] 指令: ").strip()
-                mode = input("[Input] 模式: ").strip().lower()
-                self.mode = 'debug' if 'debug' in mode else 'deploy'
-                self._switch_state(SystemState.READY)
-            time.sleep(0.1)
+                try:
+                    url = f"http://{self.ui_host}:{self.ui_port}/get_input"
+                    # 发起阻塞式请求
+                    resp = self.ui_session.get(url, timeout=None).json()
+                    
+                    with self.state_lock:
+                        self.current_instr = resp["instruction"]
+                        self.mode = resp["mode"]
+                        self._switch_state(SystemState.READY)
+                    
+                    self.get_logger().info(f"✅ 指令已接收: '{self.current_instr}' | 模式: {self.mode}")
+                except Exception as e:
+                    self.get_logger().warn(f"无法获取远程输入: {e}")
+                    time.sleep(1.0)
+            else:
+                time.sleep(0.5)
 
     def on_key_press(self, key):
         try: k = key.char
@@ -465,8 +475,8 @@ class ModelInterfaceNode(Node):
         return d['T_cam2base'], d['camera_matrix']
 
     def play_sound(self, name):
-        url = f"http://{self.audio_host}:{self.audio_port}/play/{name}"
-        threading.Thread(target=lambda: self.audio_session.post(url, timeout=0.5), daemon=True).start()
+        url = f"http://{self.ui_host}:{self.ui_port}/play/{name}"
+        threading.Thread(target=lambda: self.ui_session.post(url, timeout=0.5), daemon=True).start()
 
 def main(args=None):
     rclpy.init(args=args)

@@ -2,6 +2,7 @@ build/
 install/
 log/
 examples/
+mock_robot_data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

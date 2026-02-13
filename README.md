@@ -11,6 +11,11 @@ docker load -i teleop.tar
 ```bash
 ./create_container.sh legendvla-inference
 ```
+4. **安装依赖**：在container中执行：
+```bash
+pip install -r requirements.txt
+sudo apt install vim
+```
 
 ## 推理流程
 

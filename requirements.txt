@@ -4,3 +4,4 @@ pyrealsense2
 websockets
 pynput
 requests
+msgpack
