@@ -276,7 +276,7 @@ class ModelInterfaceNode(Node):
         else:
             missing = [k for k, v in buf_sizes.items() if v == 0]
             if len(missing) <= 2:  # 只记录接近完成的情况，避免日志过多
-                self.get_logger().debug(f"⏳ 等待数据: 缺失={missing}, 当前={buf_sizes}")
+                self.get_logger().info(f"⏳ 等待数据: 缺失={missing}, 当前={buf_sizes}")
 
     def _do_switch_to_inference(self):
         """在独立线程中执行状态转换，避免死锁"""
@@ -346,14 +346,14 @@ class ModelInterfaceNode(Node):
         assert all(len(s) > 0 for s in all_snaps), "缓冲区数据不全"
         
         buf_sizes = [len(s) for s in all_snaps]
-        self.get_logger().debug(f"📊 准备推理数据: 缓冲区大小={buf_sizes}")
+        self.get_logger().info(f"📊 准备推理数据: 缓冲区大小={buf_sizes}")
 
         snap_rgb, snap_depth, snap_lw, snap_rw, snap_lk, snap_rk = all_snaps
 
         # 2. 对齐采样
         t_ref = min(s[-1][0] for s in all_snaps)
         grid_ns = int(1e9 / self.data_freq)
-        self.get_logger().debug(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={grid_ns/1e6:.1f}ms")
+        self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={grid_ns/1e6:.1f}ms")
 
         # Image
         rgb_seq, depth_seq = [], []
@@ -390,7 +390,7 @@ class ModelInterfaceNode(Node):
 
         instr = self.current_instr
         
-        self.get_logger().debug(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, "
+        self.get_logger().info(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, "
                                f"状态形状={states_in.shape}, 图像序列长度={len(rgb_seq)}, 状态序列长度={len(states_list)}")
 
         return {
@@ -487,7 +487,7 @@ class ModelInterfaceNode(Node):
             if self.state == SystemState.IDLE:
                 try:
                     url = f"http://{self.ui_host}:{self.ui_port}/get_input"
-                    self.get_logger().debug(f"📡 正在请求远程输入: {url}")
+                    self.get_logger().info(f"📡 正在请求远程输入: {url}")
                     # 发起阻塞式请求
                     resp = self.ui_session.get(url, timeout=None).json()
                     
