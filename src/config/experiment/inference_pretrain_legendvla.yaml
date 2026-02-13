@@ -27,14 +27,14 @@ real_world_dataset_mapping:
 
 # 使用较小的数据集进行快速测试（可选）
 vla_dataset_paths:
-  - name: Dexterous_grasping
-    path: /share_data/yanruilin/complete_data/Dexterous_grasping.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.2
-#  - name: oakink2_test_seen
-#    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen_presence_clean.zarr 
-#    mapping: ${human_dataset_mapping}
-#    weight: 1
+  # - name: Dexterous_grasping
+  #   path: /share_data/yanruilin/complete_data/Dexterous_grasping.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.2
+ - name: oakink2_test_seen
+   path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen_presence_clean.zarr 
+   mapping: ${human_dataset_mapping}
+   weight: 1
 #  - name: oakink2_test_unseen_scene
 #    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene_presence_clean.zarr  
 #    mapping: ${human_dataset_mapping}
@@ -65,7 +65,7 @@ vlm_dataset_paths:
 dataloader:
   batch_size: 16
   num_workers: 16
-  shuffle: False
+  shuffle: True
   pin_memory: True
   persistent_workers: False
 
@@ -74,7 +74,7 @@ logging:
   mode: disabled
 
 tokenizer_padding: longest # longest or max_length
-diffusion_sampling_steps: 50
+diffusion_sampling_steps: 100
 diffusion_use_ddim_sampling: True
 flow_sampling_steps: 10
 
@@ -92,10 +92,10 @@ inference:
   # 模型配置文件路径（yaml文件，包含policy配置）
   # 如果指定，将从该文件加载模型配置并初始化模型
   # 如果不指定，将使用当前配置中的policy配置
-  model_config_path: /home/chenzhang/projects/LegendVLA-train/outputs/2026.02.09/21.04_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
+  model_config_path: /home/chenzhang/projects/LegendVLA-train/outputs/2026.02.11/20.35_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
   
   # checkpoint路径（用于加载模型权重）
-  checkpoint_path: /home/chenzhang/projects/LegendVLA-train/outputs/2026.02.09/21.04_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=35000-eval_l1_loss=0.0251/pytorch_model/mp_rank_00_model_states.pt
+  checkpoint_path: /home/chenzhang/projects/LegendVLA-train/outputs/2026.02.11/20.35_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=20000-eval_l1_loss=0.0286/pytorch_model/mp_rank_00_model_states.pt
   
   # 数据配置
   # Note: If val_ratio=0.0 in dataset config, all data is used regardless of this setting
@@ -104,7 +104,7 @@ inference:
   # 推理控制
   max_steps: 1  # 最大推理步数，null表示推理所有数据
   skip_first: 0  # 跳过前N个batch
-  save_zarr: False  # True: 保存zarr, False: 仅内存统计
+  save_zarr: True  # True: 保存zarr, False: 仅内存统计
   attention_sample_count: 4  # 随机保存 attention_maps 的样本数
   
   # 精度配置

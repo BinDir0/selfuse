@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import logging
 import time
@@ -33,6 +34,18 @@ def log_execution_time(logger=None):
         return wrapper
 
     return decorator
+
+
+@contextlib.contextmanager
+def log_elapsed_time(label="block", logger=None):
+    """Context manager to log the execution time of a code block."""
+    start_time = time.time()
+    try:
+        yield
+    finally:
+        elapsed_time = time.time() - start_time
+        msg = f"{label} took {elapsed_time:.4f} seconds to execute."
+        print(msg) if logger is None else logger.info(msg)
 
 
 class Timer:

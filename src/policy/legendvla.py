@@ -10,7 +10,7 @@ Potentially customized to add/remove mixtures, e.g., remove proprio or add anoth
 import logging
 import pathlib
 import pickle
-from typing import Any, Optional, Tuple, List, Union
+from typing import Any, Optional, Tuple, List, Union, Dict
 
 import hydra
 import numpy as np
@@ -20,12 +20,13 @@ from torch import nn
 from torch._dynamo import disable
 import random
 
+from src.utils.pytorch_util import dict_apply
 from src.model.common.kv_cache import KVCache
 from src.model.common.modules import (
     SinusoidalPosEmb,
     TimeEncoder,
 )
-from src.utils.monitor import log_execution_time
+from src.utils.monitor import log_execution_time, log_elapsed_time
 from src.utils.generation_utils import sample_token, concat_attn_weights
 
 log = logging.getLogger(__name__)
@@ -99,6 +100,8 @@ class LegendVLA(nn.Module):
         # Diffusion loss
         self.diffloss = diffloss
         self.diffloss_micro_batch_size = cfg.get("diffloss_micro_batch_size", 4)
+        self.ar_action_noise_std = cfg.get("ar_action_noise_std", 0.02)
+        self.ar_action_chunk_size = cfg.get("ar_action_chunk_size", 4)
 
         # Action, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
@@ -651,7 +654,6 @@ class LegendVLA(nn.Module):
         return KVCache()
 
     # ---------- Input preparation ---------- #
-
     def build_causal_mask_and_position_ids(
         self, attention_mask: torch.Tensor, answer_start_idx: torch.Tensor, n_actions: torch.Tensor, dtype: torch.dtype
     ) -> Tuple[torch.FloatTensor, torch.LongTensor, torch.LongTensor]:
@@ -944,7 +946,10 @@ class LegendVLA(nn.Module):
         if states is not None:
             state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size**0.5)
         if actions is not None:
-            action_features = self.action_encoder_ar(actions) / (self.vlm_hidden_size**0.5)
+            actions_input = actions
+            noise = torch.randn_like(actions_input) * self.ar_action_noise_std
+            actions_input = actions_input + noise
+            action_features = self.action_encoder_ar(actions_input) / (self.vlm_hidden_size**0.5)
         if pixel_values is not None:
             image_mask = input_ids == self.image_token_index
             # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
@@ -1030,18 +1035,19 @@ class LegendVLA(nn.Module):
             dtype=pixel_values.dtype
         )
         
-        # forward pass thru the vlm, cache the kv
-        _, kv_caches = self.joint_model(
-            attention_mask=vlm_mask,
-            position_ids_all={
-                "vlm": vlm_position_ids,
-            },
-            embeds_all={
-                "vlm": inputs_embeds,
-            },
-            kv_caches=kv_caches,
-            return_caches=True,
-        )
+        with log_elapsed_time(label="forward pass thru the vlm", logger=log):
+            # forward pass thru the vlm, cache the kv
+            _, kv_caches = self.joint_model(
+                attention_mask=vlm_mask,
+                position_ids_all={
+                    "vlm": vlm_position_ids,
+                },
+                embeds_all={
+                    "vlm": inputs_embeds,
+                },
+                kv_caches=kv_caches,
+                return_caches=True,
+            )
         # [num_layers, B, num_heads, seq_len, seq_len]
         vlm_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
         action_expert_attn_weights = None
@@ -1051,34 +1057,35 @@ class LegendVLA(nn.Module):
             (bsz, self.horizon_steps, self.action_dim), device=device, dtype=dtype
         )
 
-        # forward euler integration --- using kv caches of vlm
-        delta_t = 1.0 / self.num_inference_steps
-        t = torch.zeros(bsz, device=device, dtype=dtype)
-        for step_idx in range(self.num_inference_steps):
-            # encode action and time into embedding
-            time_cond = self.time_embedding(t)
-            # [Batch_Size, Horizon_Steps, Embed_Dim]
-            if self.action_expert_adaptive_mode:
-                action_embeds = self.action_encoder(action)
-            else:
-                action_embeds = self.action_encoder(action, time_cond)
-            action_embeds = action_embeds / (self.action_hidden_size**0.5)
-            # [Batch_Size, Horizon_Steps, Embed_Dim]
-            action_embeds = self.joint_model(
-                attention_mask=action_mask,
-                position_ids_all={"action": action_position_ids},
-                embeds_all={"action": action_embeds},
-                time_cond=time_cond,
-                kv_caches=kv_caches,
-                cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
-            )["action"]
-            if step_idx == 0:
-                action_expert_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
-            
-            # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
-            action_vel = self.action_decoder(action_embeds)
-            action += delta_t * action_vel
-            t += delta_t
+        with log_elapsed_time(label="forward euler integration", logger=log):
+            # forward euler integration --- using kv caches of vlm
+            delta_t = 1.0 / self.num_inference_steps
+            t = torch.zeros(bsz, device=device, dtype=dtype)
+            for step_idx in range(self.num_inference_steps):
+                # encode action and time into embedding
+                time_cond = self.time_embedding(t)
+                # [Batch_Size, Horizon_Steps, Embed_Dim]
+                if self.action_expert_adaptive_mode:
+                    action_embeds = self.action_encoder(action)
+                else:
+                    action_embeds = self.action_encoder(action, time_cond)
+                action_embeds = action_embeds / (self.action_hidden_size**0.5)
+                # [Batch_Size, Horizon_Steps, Embed_Dim]
+                action_embeds = self.joint_model(
+                    attention_mask=action_mask,
+                    position_ids_all={"action": action_position_ids},
+                    embeds_all={"action": action_embeds},
+                    time_cond=time_cond,
+                    kv_caches=kv_caches,
+                    cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
+                )["action"]
+                if step_idx == 0:
+                    action_expert_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
+                
+                # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
+                action_vel = self.action_decoder(action_embeds)
+                action += delta_t * action_vel
+                t += delta_t
 
         if return_attn_weights:
             return action, vlm_attn_weights, action_expert_attn_weights
@@ -1346,7 +1353,7 @@ class LegendVLA(nn.Module):
         return_attn_weights: bool = False,
         cfg: float = 1.0,
         **kwargs,
-    ) -> Union[torch.FloatTensor, Tuple[torch.FloatTensor, torch.FloatTensor]]:
+    ) -> Dict[str, torch.FloatTensor]:
         """
         Autoregressive action inference for VLA using DiffLoss sampling.
         
@@ -1364,8 +1371,11 @@ class LegendVLA(nn.Module):
             cfg (float): Classifier-free guidance scale for diffusion sampling
         
         Returns:
-            torch.FloatTensor: [B, max_new_tokens, action_dim] Generated action sequence
-            (optional) torch.FloatTensor: Attention weights if return_attn_weights=True
+            dict:
+                - generated_actions: [B, max_new_tokens, action_dim]
+                - prefill_vlm_hidden_states: [N, hidden_dim] (mask=1, excluding last)
+                - generated_hidden_states: [N, hidden_dim] (all generated steps)
+                - attn_weights (optional)
         """
         input_ids = input["input_ids"]
         pixel_values = input.get("pixel_values")
@@ -1373,6 +1383,7 @@ class LegendVLA(nn.Module):
         
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+        prefill_attention_mask = attention_mask
         
         batch_size = input_ids.size(0)
         device = input_ids.device
@@ -1405,9 +1416,30 @@ class LegendVLA(nn.Module):
             return_attn_weights=return_attn_weights,
         )
         prefill_hidden_states = prefill_output["hidden_states"]
+        hidden_dim = prefill_hidden_states.shape[-1]
         kv_cache = prefill_output.get("kv_cache", kv_cache)
         if return_attn_weights:
             attn_weights_steps.append(prefill_output.get("attn_weights"))
+
+        # Prefill VLM hidden states: keep mask==1, exclude last token
+        prefill_mask = prefill_attention_mask.to(torch.bool)
+        if prefill_mask.numel() > 0:
+            prefill_mask[:, -1] = False
+        prefill_vlm_hidden_flat = prefill_hidden_states[prefill_mask]
+
+        # Split prefill by token type using input_ids
+        image_mask = (input_ids == self.image_token_index) & prefill_mask
+        state_mask = (input_ids == self.state_token_index) & prefill_mask
+        text_mask = (
+            (input_ids != self.image_token_index)
+            & (input_ids != self.state_token_index)
+            & (input_ids != self.action_token_index)
+            & (input_ids != self.pad_token_id)
+            & prefill_mask
+        )
+        prefill_image_hidden_flat = prefill_hidden_states[image_mask]
+        prefill_state_hidden_flat = prefill_hidden_states[state_mask]
+        prefill_text_hidden_flat = prefill_hidden_states[text_mask]
         
         # Sample the first action from the last token
         next_condition_states = prefill_hidden_states[:, -1, :]
@@ -1416,6 +1448,7 @@ class LegendVLA(nn.Module):
         generated_actions = [next_action.unsqueeze(1)]
         
         # ========== Generation Phase ==========
+        generated_hidden_steps = []
         for _ in range(max_new_tokens - 1):
             # Append one action token to the attention mask
             attention_mask = torch.cat(
@@ -1445,15 +1478,30 @@ class LegendVLA(nn.Module):
             kv_cache = step_output.get("kv_cache", kv_cache)
             if return_attn_weights:
                 attn_weights_steps.append(step_output.get("attn_weights"))
+
+            # Store generated token hidden state (last token)
+            generated_hidden_steps.append(step_hidden_states[:, -1, :])
             
             latent_condition = self.latent_condition_projector(step_hidden_states[:, -1, :])
             next_action = self.diffloss.sample(latent_condition, temperature=temperature, cfg=cfg)
             generated_actions.append(next_action.unsqueeze(1))
         
         generated_actions_tensor = torch.cat(generated_actions, dim=1)
+        if generated_hidden_steps:
+            generated_hidden_flat = torch.cat(generated_hidden_steps, dim=0)
+        else:
+            generated_hidden_flat = prefill_hidden_states.new_empty((0, hidden_dim))
+        result = {
+            "generated_actions": generated_actions_tensor,
+            "prefill_vlm_hidden_states": prefill_vlm_hidden_flat,
+            "prefill_image_hidden_states": prefill_image_hidden_flat,
+            "prefill_state_hidden_states": prefill_state_hidden_flat,
+            "prefill_text_hidden_states": prefill_text_hidden_flat,
+            "generated_hidden_states": generated_hidden_flat,
+        }
         if return_attn_weights:
-            return generated_actions_tensor, concat_attn_weights(attn_weights_steps)
-        return generated_actions_tensor
+            result["attn_weights"] = concat_attn_weights(attn_weights_steps)
+        return result
 
     # ---------- Flow matching training ----------#
     def psi_t(
@@ -1779,41 +1827,48 @@ class LegendVLA(nn.Module):
 
         # diffusion loss
         device = hidden_states.device
-        vla_hidden = hidden_states[is_vla_data]
-        vla_action = actions[is_vla_data]
+        # 1. 获取维度的基本信息
+        max_vlm_tokens = hidden_states.shape[1]
+        num_action_tokens = self.num_action_tokens
+        ar_action_chunk_size = self.ar_action_chunk_size
+        vla_hidden = hidden_states[is_vla_data] 
+        vla_action = actions[is_vla_data] # (B, H, D)
+        ar_action_chunks = vla_action.unfold(dimension=1, size=ar_action_chunk_size, step=1) # (B, H-chunk_size+1, D, chunk_size)
+        ar_action_chunks_flat = ar_action_chunks.flatten(start_dim=2) # (B, H-chunk_size+1, D*chunk_size)
 
-        if torch.any(is_vla_data):
-            # 1. 获取维度的基本信息
-            max_vlm_tokens = hidden_states.shape[1]
-            num_action_tokens = self.num_action_tokens
+        # 2. 构建索引序列 (0, 1, 2, ..., max_len-1)
+        # range_hidden: (1, seq_len)
+        range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
+        # range_action: (1, action_seq_len-chunk_size+1) 
+        range_action = torch.arange(num_action_tokens - ar_action_chunk_size + 1, device=device).unsqueeze(0)
 
-            # 2. 构建索引序列 (0, 1, 2, ..., max_len-1)
-            # range_hidden: (1, seq_len)
-            range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
-            # range_action: (1, action_seq_len) 
-            # 注意：如果 vla_action 的长度和 vla_hidden 不一致，需要单独生成 range
-            range_action = torch.arange(num_action_tokens, device=device).unsqueeze(0)
+        # 3. 调整 start 和 end 的形状以支持广播 (N, 1)
+        starts = answer_start_idx[is_vla_data].unsqueeze(1)
+        ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1) - ar_action_chunk_size + 1
+        action_ends = n_actions[is_vla_data].unsqueeze(1) - ar_action_chunk_size + 1
 
-            # 3. 调整 start 和 end 的形状以支持广播 (N, 1)
-            starts = answer_start_idx[is_vla_data].unsqueeze(1)
-            ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1)
-            action_ends = n_actions[is_vla_data].unsqueeze(1)
+        # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
+        # 逻辑：当前索引 >= start 且 当前索引 < start + n
+        mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
+        mask_action = range_action < action_ends
 
-            # 4. 生成掩码 (N, seq_len) 和 (N, action_seq_len)
-            # 逻辑：当前索引 >= start 且 当前索引 < start + n
-            mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
-            mask_action = range_action < action_ends
-
-            # 5. 使用布尔索引提取数据
-            # 这会将所有 True 的位置“压扁”提取出来，直接得到 (diff_bsz, dim)
-            vla_hidden_z = vla_hidden[mask_hidden]  # (diff_bsz, hidden_dim)
-            action_gt = vla_action[mask_action]  # (diff_bsz, action_dim)
+        # 5. 使用布尔索引提取数据
+        # 这会将所有 True 的位置“压扁”提取出来，直接得到 (diff_bsz, dim)
+        vla_hidden_z = vla_hidden[mask_hidden]  # (diff_bsz, hidden_dim)
+        action_gt = ar_action_chunks_flat[mask_action]  # (diff_bsz, action_dim)
+        assert vla_hidden_z.shape[0] == action_gt.shape[0], \
+            f"The number of vla hidden and action gt should be the same, but got {vla_hidden_z.shape[0]} and {action_gt.shape[0]}"
+        if action_gt.numel() == 0:
+            dummy_vla_hidden_z = hidden_states[0:1, 0, :] # (1, hidden_dim)
+            dummy_action_gt = action_gt.new_zeros(1, action_gt.shape[-1])
+            dummy_latent_condition_embeds = self.latent_condition_projector(dummy_vla_hidden_z)
+            dummy_diff_loss = self.diffloss(dummy_action_gt, dummy_latent_condition_embeds)
+            diff_loss = dummy_diff_loss * 0
+        else: 
             vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
             action_gt_repeated = action_gt.repeat_interleave(self.diffloss_micro_batch_size, dim=0)
             latent_condition_embeds = self.latent_condition_projector(vla_hidden_z_repeated)
             diff_loss = self.diffloss(action_gt_repeated, latent_condition_embeds) / self.diffloss_micro_batch_size
-        else:
-            diff_loss = torch.tensor(0.0, device=device, dtype=ce_loss.dtype)
 
         # [Batch_Size, Horizon_Steps, Action_Dim]
         v_psi = self.action_decoder(action_embeds)
@@ -1853,284 +1908,179 @@ class LegendVLA(nn.Module):
             raise ValueError(f"Invalid mode: {mode}")
         
 
-class LegendVLAInference:
+class LegendVLAInference(nn.Module):
+    """
+    Implementation of the VLA inference logic.
+    This class is 'Device-Agnostic' - it focuses on the sequence of operations:
+    Observation -> Preprocessing -> State Normalization -> Model Forward -> Action Unnormalization.
+    """
     def __init__(
         self,
         model_config_path: str,
-        checkpoint_path: str | None = None,
+        checkpoint_path: str = None, 
         mode: str = "flow",
         use_mixed_precision: bool = True,
-        diffusion_sampling_steps: int | None = None,
-        diffusion_use_ddim_sampling: bool | None = None,
-        flow_sampling_steps: int | None = None,
         tokenizer_padding: str = "longest",
         default_instruction: str | None = None,
+        diffusion_sampling_steps: int = None,
+        diffusion_use_ddim_sampling: bool = False,
+        flow_sampling_steps: int = None,
         ar_max_new_tokens: int | None = None,
         ar_temperature: float = 1.0,
         ar_cfg: float = 1.0,
     ) -> None:
-        if mode not in {"flow", "ar"}:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'flow' or 'ar'.")
-
+        super().__init__()
         model_config_path = pathlib.Path(model_config_path)
-        if not model_config_path.exists():
-            raise FileNotFoundError(f"Model config not found: {model_config_path}")
-
         model_cfg = OmegaConf.load(model_config_path)
-        if "policy" not in model_cfg:
-            raise ValueError(f"'policy' not found in config: {model_config_path}")
-        policy_cfg = model_cfg.policy
-        self._maybe_update_policy_cfg(
-            policy_cfg,
-            type(
-                "Args",
-                (),
-                {
-                    "diffusion_sampling_steps": diffusion_sampling_steps,
-                    "diffusion_use_ddim_sampling": diffusion_use_ddim_sampling,
-                    "flow_sampling_steps": flow_sampling_steps,
-                },
-            )(),
-        )
-
-        model: LegendVLA = hydra.utils.instantiate(policy_cfg)
-
+        self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
-            self._load_checkpoint(model, checkpoint_path)
-        model.eval()
+            self._load_checkpoint(checkpoint_path)
+        self.model.eval()
 
-        processor = hydra.utils.instantiate(model_cfg.vla_processor)
-        if hasattr(processor, "tokenizer_padding"):
-            processor.tokenizer_padding = tokenizer_padding
+        # Setup sampling config.
+        if diffusion_sampling_steps:
+            self.model.diffloss.num_sampling_steps = diffusion_sampling_steps
+        if diffusion_use_ddim_sampling:
+            self.model.diffloss.use_ddim_sampling = diffusion_use_ddim_sampling
+        if flow_sampling_steps:
+            self.model.num_inference_steps = flow_sampling_steps
 
-        normalizer, use_relative_action = self._load_normalizer(model_cfg)
+        # Setup Data Processor (Vision/Language)
+        self.processor = hydra.utils.instantiate(model_cfg.vla_processor)
+        if hasattr(self.processor, "tokenizer_padding"):
+            self.processor.tokenizer_padding = tokenizer_padding
 
-        dtype = torch.bfloat16 if use_mixed_precision else torch.float32
+        self.normalizer, self.use_relative_action = self._load_normalizer(model_cfg)
 
-        self.model = model
-        self.processor = processor
-        self.dtype = dtype
+        # Hyperparameters & Meta
         self.mode = mode
-        self.normalizer = normalizer
-        self.use_relative_action = use_relative_action
-        self.action_horizon = int(model.shape_meta["action"]["horizon"])
-        self.action_dim = int(model.shape_meta["action"]["shape"][0])
+        self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
         self.default_instruction = default_instruction
+        self.action_horizon = int(self.model.shape_meta["action"]["horizon"])
+        self.action_dim = int(self.model.shape_meta["action"]["shape"][0])
         self.ar_max_new_tokens = ar_max_new_tokens or self.action_horizon
         self.ar_temperature = ar_temperature
         self.ar_cfg = ar_cfg
+        
         self.metadata = {
             "mode": mode,
             "action_horizon": self.action_horizon,
             "action_dim": self.action_dim,
         }
 
-    @staticmethod
-    def _load_checkpoint(model: LegendVLA, checkpoint_path: str) -> None:
-        checkpoint_path = pathlib.Path(checkpoint_path)
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
-        if "model" in state_dict:
-            state_dict = state_dict["model"]
-        elif "module" in state_dict:
-            state_dict = state_dict["module"]
-        elif "model_state_dict" in state_dict:
-            state_dict = state_dict["model_state_dict"]
-        model.load_state_dict(state_dict)
+    def _load_checkpoint(self, path: str) -> None:
+        """Load model weights from a given path."""
+        path = pathlib.Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+        
+        state_dict = torch.load(path, map_location="cpu")
+        # Handle various state_dict keys
+        for key in ["model", "module", "model_state_dict"]:
+            if key in state_dict:
+                state_dict = state_dict[key]
+                break
+        self.model.load_state_dict(state_dict)
+        print(f"Successfully load model checkpoint from {path}")
 
-    @staticmethod
-    def _load_normalizer(model_cfg: Any) -> tuple[Any | None, bool]:
+    def _load_normalizer(self, model_cfg: Any) -> Tuple[Optional[Dict], bool]:
+        """Load normalization stats for actions."""
         normalizer_path = None
         use_relative_action = False
-        if hasattr(model_cfg, "training") and model_cfg.training.get("normalizer_path") is not None:
+        if hasattr(model_cfg, "training") and model_cfg.training.get("normalizer_path"):
             normalizer_path = pathlib.Path(model_cfg.training.normalizer_path)
         if hasattr(model_cfg, "dataset"):
-            use_relative_action = bool(
-                OmegaConf.select(model_cfg, "dataset.vla_dataset.use_relative_action", default=False)
-            )
-        if normalizer_path is None or not normalizer_path.exists():
-            return None, use_relative_action
-        with open(normalizer_path, "rb") as f:
-            return pickle.load(f), use_relative_action
+            use_relative_action = bool(OmegaConf.select(model_cfg, "dataset.vla_dataset.use_relative_action", default=False))
+            
+        if normalizer_path and normalizer_path.exists():
+            with open(normalizer_path, "rb") as f:
+                return pickle.load(f), use_relative_action
+        return None, use_relative_action
 
-    @staticmethod
-    def _maybe_update_policy_cfg(policy_cfg: Any, args: Any) -> None:
-        if getattr(args, "diffusion_sampling_steps", None) is not None:
-            policy_cfg.diffloss.num_sampling_steps = f"{args.diffusion_sampling_steps}"
-        if getattr(args, "diffusion_use_ddim_sampling", None) is not None:
-            policy_cfg.diffloss.use_ddim_sampling = args.diffusion_use_ddim_sampling
-        if getattr(args, "flow_sampling_steps", None) is not None and hasattr(policy_cfg, "cfg"):
-            if "num_inference_steps" in policy_cfg.cfg:
-                policy_cfg.cfg.num_inference_steps = args.flow_sampling_steps
-
-    def _as_numpy(self, value: Any, dtype: np.dtype | None = None) -> np.ndarray:
-        if isinstance(value, torch.Tensor):
-            value = value.detach().cpu().numpy()
-        else:
-            value = np.asarray(value)
-        if dtype is not None:
-            value = value.astype(dtype)
-        return value
-
-    def _ensure_batch_dim(self, value: Any, unbatched_ndims: tuple[int, ...]) -> Any:
-        # If the input matches a known unbatched rank, add a leading batch dim.
-        if isinstance(value, np.ndarray):
-            if value.ndim in unbatched_ndims:
-                return value[None, ...]
-            return value
-        if torch.is_tensor(value):
-            if value.ndim in unbatched_ndims:
-                return value.unsqueeze(0)
-            return value
-        return value
-
-    def _normalize_intrinsic(self, intrinsic: np.ndarray) -> np.ndarray:
-        intrinsic = self._as_numpy(intrinsic, dtype=np.float32)
-        if intrinsic.shape == (3, 3):
-            intrinsic = np.array(
-                [intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]],
-                dtype=np.float32,
-            )
-        return intrinsic.reshape(-1)
-
-    def _prepare_processor_inputs(self, obs: dict) -> dict:
+    def prepare_process(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert raw data (numpy/strings, after geometry transformation) into standard processor inputs."""
         instruction = obs.get("instruction") or self.default_instruction
-        if instruction is None:
-            raise ValueError("Missing 'instruction' in observation and no default provided.")
-
-        images = obs.get("image") if "image" in obs else obs.get("images")
-        if images is None:
-            raise ValueError("Missing 'image'/'images' in observation.")
-        images = self._as_numpy(images)
-        if images.ndim == 3:
-            images = images[None, ...]
-
-        depth = obs.get("depth")
-        if depth is not None:
-            depth = self._as_numpy(depth)
-            if depth.ndim == 2:
-                depth = depth[None, ...]
-            if depth.ndim == 4 and depth.shape[-1] in (1, 3):
-                depth = depth[..., 0]
-
-        states = obs.get("states")
-        if states is None:
-            raise ValueError("Missing 'states' in observation.")
-        states = self._as_numpy(states, dtype=np.float32)
-        if states.ndim == 1:
-            states = states[None, ...]
-
-        intrinsic = obs.get("intrinsic")
-        if intrinsic is None:
-            raise ValueError("Missing 'intrinsic' in observation.")
-        intrinsic = self._normalize_intrinsic(intrinsic)
-
-        dummy_actions = np.zeros((self.action_horizon, self.action_dim), dtype=np.float32)
+        images = obs["image"]
+        states = obs["states"]
+        n_states = torch.full((1, ), states.shape[0], dtype=torch.int32)
+        intrinsic = self._extract_intrinsic(obs["intrinsic"])
+        
         processor_mode = "infer" if self.mode == "flow" else "infer-ar"
         processed = self.processor(
             text=instruction,
             images=images,
             states=states,
-            actions=dummy_actions,
+            actions=np.zeros((self.action_horizon, self.action_dim), dtype=np.float32),
             intrinsic=intrinsic,
-            depth_images=depth,
+            depth_images=obs.get("depth"),
             mode=processor_mode,
         )
-        return {
-            "processed": processed,
-            "states": states,
-        }
+        
+        # Batching: Add [None, ...] dimension and convert to Torch
+        from src.utils.pytorch_util import dict_apply
+        processed = dict_apply(processed, lambda x: torch.from_numpy(x)[None, ...])
+        if self.normalizer is not None: 
+            if self.use_relative_action:
+                states = self.normalizer["states"](states)
+            else:
+                states = self.normalizer["motions"](states)
+        states = torch.from_numpy(states)[None, ...]
+        return {"processed": processed, "states": states, "n_states": n_states}
 
-    def _build_model_inputs(self, prepared: dict) -> dict:
+    def build_model_inputs(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
+        """Construct tensors required by the model forward pass (Masks, Position ids)."""
         processed = prepared["processed"]
-        processed["input_ids"] = self._ensure_batch_dim(processed["input_ids"], (1,))
-        processed["attention_mask"] = self._ensure_batch_dim(processed["attention_mask"], (1,))
-        processed["pixel_values"] = self._ensure_batch_dim(processed["pixel_values"], (4,))
-        if "depth_values" in processed:
-            processed["depth_values"] = self._ensure_batch_dim(processed["depth_values"], (4,))
-        if "answer_start_idx" in processed:
-            processed["answer_start_idx"] = self._ensure_batch_dim(processed["answer_start_idx"], (0,))
-
-        states = self._ensure_batch_dim(prepared["states"], (2,))
-
-        input_ids = torch.from_numpy(processed["input_ids"])
-        attention_mask = torch.from_numpy(processed["attention_mask"])
-        pixel_values = torch.from_numpy(processed["pixel_values"])
+        input_ids = processed["input_ids"]
         batch_size = input_ids.shape[0]
-        device = input_ids.device
 
-        inputs: dict[str, Any] = {
+        inputs = {
             "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "pixel_values": pixel_values.to(self.dtype),
-            "is_vla_data": torch.ones(1, dtype=torch.bool, device=device),
+            "attention_mask": processed["attention_mask"],
+            "pixel_values": processed["pixel_values"].to(self.dtype),
+            "n_states": prepared["n_states"], 
+            "states": prepared["states"].to(self.dtype),
+            "is_vla_data": torch.ones(batch_size, dtype=torch.bool),
         }
 
-        if "depth_values" in processed:
-            depth_values = torch.from_numpy(processed["depth_values"])
-            inputs["depth_values"] = depth_values.to(self.dtype)
-            inputs["has_depth_values"] = torch.ones(1, dtype=torch.bool, device=device)
-        else:
-            inputs["has_depth_values"] = torch.zeros(1, dtype=torch.bool, device=device)
-
+        # Flow-matching specific logic (Causal Masks)
         if self.mode == "flow":
-            inputs["states"] = torch.from_numpy(states).to(self.dtype)
-            inputs["n_states"] = torch.full((batch_size,), states.shape[1], device=device)
-            inputs["n_actions"] = torch.full((batch_size,), self.action_horizon, device=device)
-            inputs["answer_start_idx"] = (
-                torch.from_numpy(np.array(processed["answer_start_idx"]))
-                .to(device)
-            )
-
-            model = self.model.module if hasattr(self.model, "module") else self.model
-            causal_mask, vlm_position_ids, action_position_ids = (
-                model.build_causal_mask_and_position_ids(
-                    attention_mask,
-                    inputs["answer_start_idx"],
-                    inputs["n_actions"],
-                    self.dtype,
-                )
+            inputs["n_actions"] = torch.zeros(batch_size, dtype=torch.long)
+            inputs["answer_start_idx"] = processed["answer_start_idx"]
+            
+            m = self.model.module if hasattr(self.model, "module") else self.model
+            causal_mask, vlm_pos, act_pos = m.build_causal_mask_and_position_ids(
+                inputs["attention_mask"], inputs["answer_start_idx"], inputs["n_actions"], self.dtype
             )
             max_vlm_tokens = input_ids.shape[-1]
-            vlm_mask, action_mask = model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
-            inputs["causal_mask"] = causal_mask
-            inputs["vlm_mask"] = vlm_mask
-            inputs["action_mask"] = action_mask
-            inputs["vlm_position_ids"] = vlm_position_ids
-            inputs["action_position_ids"] = action_position_ids
-        else:
-            inputs["states"] = torch.from_numpy(states).to(self.dtype)
-            inputs["n_states"] = torch.full((batch_size,), states.shape[1], device=device)
+            vlm_mask, action_mask = m.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
+            inputs.update({
+                "causal_mask": causal_mask, 
+                "vlm_position_ids": vlm_pos, 
+                "action_position_ids": act_pos,
+                "vlm_mask": vlm_mask,
+                "action_mask": action_mask,
+            })
 
         return inputs
 
-    def _unnormalize_actions(self, actions: torch.Tensor) -> torch.Tensor:
+    def post_process(self, actions: torch.Tensor) -> torch.Tensor:
+        """Convert model output [-1, 1] back to physical world units."""
         if self.normalizer is None:
             return actions
-        if self.use_relative_action:
-            return self.normalizer["actions"].unnormalize(actions)
-        return self.normalizer["motions"].unnormalize(actions)
+        key = "actions" if self.use_relative_action else "motions"
+        return self.normalizer[key].unnormalize(actions)
+
+    def _extract_intrinsic(self, intrinsic: np.ndarray) -> np.ndarray:
+        intrinsic = np.asarray(intrinsic, dtype=np.float32)
+        if intrinsic.shape == (3, 3):
+            intrinsic = np.array([intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]])
+        return intrinsic.reshape(-1)
 
     @torch.inference_mode()
-    def infer(self, obs: dict) -> dict:
-        prepared = self._prepare_processor_inputs(obs)
-        inputs = self._build_model_inputs(prepared)
+    def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Step 3: Actual model forward pass."""
         if self.mode == "flow":
-            pred_actions = self.model("infer_action", inputs)
-        elif self.mode == "ar":
-            pred_actions = self.model(
-                "infer_vla",
-                inputs,
-                max_new_tokens=self.ar_max_new_tokens,
-                temperature=self.ar_temperature,
-                cfg=self.ar_cfg,
-            )
+            return self.model("infer_action", inputs)
         else:
-            raise ValueError(f"Unsupported inference mode: {self.mode}")
-
-        pred_actions = self._unnormalize_actions(pred_actions)
-        return {
-            "pred_actions": pred_actions,
-        }
-
+            return self.model("infer_vla", inputs, max_new_tokens=self.ar_max_new_tokens,
+                              temperature=self.ar_temperature, cfg=self.ar_cfg)["generated_actions"]

@@ -28,6 +28,7 @@ matplotlib
 seaborn
 xformers
 websockets
+scikit-learn
 # chumpy
 #manotorch
 #manopth

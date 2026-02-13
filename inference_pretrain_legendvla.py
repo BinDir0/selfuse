@@ -155,9 +155,10 @@ class LegendVLAInference:
             inputs["action_mask"] = action_mask
             inputs["vlm_position_ids"] = vlm_position_ids
             inputs["action_position_ids"] = action_position_ids
+
+        if "states" in batch:
             inputs["states"] = batch["states"].to(self.dtype)
             inputs["n_states"] = batch["n_states"]
-            inputs["n_actions"] = batch["n_actions"]
         
         if "depth_values" in batch:
             inputs["depth_values"] = batch["depth_values"].to(self.dtype)
@@ -166,6 +167,7 @@ class LegendVLAInference:
         # 添加ground truth actions用于对比（如果有）
         if "actions" in batch:
             inputs["actions"] = batch["actions"].to(self.dtype)
+            inputs["n_actions"] = batch["n_actions"]
             inputs["actions_valid_mask"] = batch["actions_valid_mask"]
         
         return inputs
@@ -367,7 +369,7 @@ class LegendVLAInference:
             collate_fn=inference_dataset.get_collator(),
             batch_size=cfg.dataloader.batch_size,
             num_workers=cfg.dataloader.num_workers,
-            shuffle=False,
+            shuffle=cfg.dataloader.shuffle,
             pin_memory=True
         )
         
@@ -424,6 +426,11 @@ class LegendVLAInference:
                 pred_actions = None
                 vlm_attn_maps = None
                 action_expert_attn_maps = None
+                prefill_vlm_hidden_states = None
+                prefill_image_hidden_states = None
+                prefill_state_hidden_states = None
+                prefill_text_hidden_states = None
+                generated_hidden_states = None
                 # Inference (different for each mode)
                 with torch.autocast(device_type=self.device.type, dtype=self.dtype):
                     if self.mode == "flow":
@@ -434,9 +441,16 @@ class LegendVLAInference:
                     elif self.mode == "ar":
                         # Autoregressive action inference (normalized actions)
                         generation_params = self._preprocess_for_autoregressive(inputs)
-                        pred_actions, vlm_attn_maps = self.model(
+                        generation_output = self.model(
                             "infer_vla", inputs, **generation_params, return_attn_weights=True
                         )
+                        pred_actions = generation_output["generated_actions"]
+                        vlm_attn_maps = generation_output.get("attn_weights")
+                        prefill_vlm_hidden_states = generation_output["prefill_vlm_hidden_states"]
+                        prefill_image_hidden_states = generation_output["prefill_image_hidden_states"]
+                        prefill_state_hidden_states = generation_output["prefill_state_hidden_states"]
+                        prefill_text_hidden_states = generation_output["prefill_text_hidden_states"]
+                        generated_hidden_states = generation_output["generated_hidden_states"]
                     else:  # self.mode == "vlm"
                         generation_params = self._preprocess_for_autoregressive(inputs)
                         generation_output = self.model(
@@ -456,6 +470,18 @@ class LegendVLAInference:
                 batch_result = {}
                 if self.mode in ["ar", "flow"]:
                     batch_result["pred_actions"] = pred_actions
+                if self.mode == "ar":
+                    hidden_dim = None
+                    for candidate in (
+                        prefill_vlm_hidden_states,
+                        prefill_image_hidden_states,
+                        prefill_state_hidden_states,
+                        prefill_text_hidden_states,
+                        generated_hidden_states,
+                    ):
+                        if candidate is not None:
+                            hidden_dim = candidate.shape[-1]
+                            break
                 
                 dataset_name_list = batch["dataset_name"]
                 dataset_local_idx = batch["dataset_local_idx"]
@@ -502,6 +528,104 @@ class LegendVLAInference:
                 gathered_batch_results_np = dict_apply(
                     gathered_batch_results, lambda x: x.cpu().float().numpy()
                 )
+                if self.mode == "ar":
+                    hidden_states_payload = {
+                        "prefill_vlm_hidden_states": (
+                            prefill_vlm_hidden_states.detach().cpu()
+                            if prefill_vlm_hidden_states is not None
+                            else None
+                        ),
+                        "prefill_image_hidden_states": (
+                            prefill_image_hidden_states.detach().cpu()
+                            if prefill_image_hidden_states is not None
+                            else None
+                        ),
+                        "prefill_state_hidden_states": (
+                            prefill_state_hidden_states.detach().cpu()
+                            if prefill_state_hidden_states is not None
+                            else None
+                        ),
+                        "prefill_text_hidden_states": (
+                            prefill_text_hidden_states.detach().cpu()
+                            if prefill_text_hidden_states is not None
+                            else None
+                        ),
+                        "generated_hidden_states": (
+                            generated_hidden_states.detach().cpu()
+                            if generated_hidden_states is not None
+                            else None
+                        ),
+                    }
+                    gathered_hidden_states = accelerate.utils.gather_object([hidden_states_payload])
+                    if self.is_main_process:
+                        prefill_list = []
+                        prefill_image_list = []
+                        prefill_state_list = []
+                        prefill_text_list = []
+                        generated_list = []
+                        for item in gathered_hidden_states:
+                            if item is None:
+                                continue
+                            if item.get("prefill_vlm_hidden_states") is not None:
+                                prefill_list.append(
+                                    item["prefill_vlm_hidden_states"].float().numpy()
+                                )
+                            if item.get("prefill_image_hidden_states") is not None:
+                                prefill_image_list.append(
+                                    item["prefill_image_hidden_states"].float().numpy()
+                                )
+                            if item.get("prefill_state_hidden_states") is not None:
+                                prefill_state_list.append(
+                                    item["prefill_state_hidden_states"].float().numpy()
+                                )
+                            if item.get("prefill_text_hidden_states") is not None:
+                                prefill_text_list.append(
+                                    item["prefill_text_hidden_states"].float().numpy()
+                                )
+                            if item.get("generated_hidden_states") is not None:
+                                generated_list.append(
+                                    item["generated_hidden_states"].float().numpy()
+                                )
+                        if prefill_list:
+                            gathered_batch_results_np["prefill_vlm_hidden_states"] = np.concatenate(
+                                prefill_list, axis=0
+                            )
+                        elif hidden_dim is not None:
+                            gathered_batch_results_np["prefill_vlm_hidden_states"] = np.empty(
+                                (0, hidden_dim), dtype=np.float32
+                            )
+                        if prefill_image_list:
+                            gathered_batch_results_np["prefill_image_hidden_states"] = np.concatenate(
+                                prefill_image_list, axis=0
+                            )
+                        elif hidden_dim is not None:
+                            gathered_batch_results_np["prefill_image_hidden_states"] = np.empty(
+                                (0, hidden_dim), dtype=np.float32
+                            )
+                        if prefill_state_list:
+                            gathered_batch_results_np["prefill_state_hidden_states"] = np.concatenate(
+                                prefill_state_list, axis=0
+                            )
+                        elif hidden_dim is not None:
+                            gathered_batch_results_np["prefill_state_hidden_states"] = np.empty(
+                                (0, hidden_dim), dtype=np.float32
+                            )
+                        if prefill_text_list:
+                            gathered_batch_results_np["prefill_text_hidden_states"] = np.concatenate(
+                                prefill_text_list, axis=0
+                            )
+                        elif hidden_dim is not None:
+                            gathered_batch_results_np["prefill_text_hidden_states"] = np.empty(
+                                (0, hidden_dim), dtype=np.float32
+                            )
+                        if generated_list:
+                            gathered_batch_results_np["generated_hidden_states"] = np.concatenate(
+                                generated_list, axis=0
+                            )
+                        elif hidden_dim is not None:
+                            gathered_batch_results_np["generated_hidden_states"] = np.empty(
+                                (0, hidden_dim), dtype=np.float32
+                            )
                 if self.mode == "vlm":
                     gathered_records = accelerate.utils.gather_object(vlm_local_records)
                     if self.is_main_process and vlm_records is not None:
@@ -666,6 +790,11 @@ class LegendVLAInference:
             'actions_valid_mask',
             'dataset_local_idx',
             'dataset_name',
+            'prefill_vlm_hidden_states',
+            'prefill_image_hidden_states',
+            'prefill_state_hidden_states',
+            'prefill_text_hidden_states',
+            'generated_hidden_states',
         ]
         
         for key in keys_to_save:
