@@ -272,12 +272,16 @@ class ModelInterfaceNode(Node):
         }
         if all(len(b) > 0 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
             self.get_logger().info(f"✅ 首次观测完成: 缓冲区大小={buf_sizes}")
-            self._switch_state(SystemState.INFERENCE)
-            self.infer_event.set()
+            threading.Thread(target=self._do_switch_to_inference, daemon=True).start()
         else:
             missing = [k for k, v in buf_sizes.items() if v == 0]
             if len(missing) <= 2:  # 只记录接近完成的情况，避免日志过多
                 self.get_logger().debug(f"⏳ 等待数据: 缺失={missing}, 当前={buf_sizes}")
+
+    def _do_switch_to_inference(self):
+        """在独立线程中执行状态转换，避免死锁"""
+        self._switch_state(SystemState.INFERENCE)
+        self.infer_event.set()
 
     # --- 传感器回调 (完全无锁，依赖 Executor 并行) ---
     def rgb_cb(self, m): 

@@ -12,7 +12,7 @@ def generate_launch_description():
             parameters=[{
                 'control_frequency': 30.0,
                 'model_server_host': '81.68.132.224',
-                'model_server_port': 18020,
+                'model_server_port': 18025,
                 'calibration_path': '/root/workspace/legendvla-inference/examples/calibration_outputs',
                 'camera_name': 'head',
                 'ui_service_host': 'localhost',
