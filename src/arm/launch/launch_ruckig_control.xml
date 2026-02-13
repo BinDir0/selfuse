@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- <set_env name="VENVPYTHONPATH" value="/root/workspace/psi-policy/.venv/bin/python3" /> -->
+  <set_env name="VENVPYTHONPATH" value="/usr/bin/python3" />
+
+  <arg name="control_arm_side" default="left" />
+
+  <!-- Robot Control Interface Node -->
+  <node pkg="arm" 
+        exec="arm_control_node" 
+        name="arm_control_node" 
+        output="screen">
+    <!-- Robot Control Interface Parameters -->
+    <param name="arm_side" value="$(var control_arm_side)" />
+  </node>
+</launch> 
