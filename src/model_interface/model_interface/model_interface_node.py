@@ -111,6 +111,9 @@ class ModelInterfaceNode(Node):
         self.i_str = self.get_parameter('image_stride').value
         self.act_len = self.get_parameter('action_execution_len').value
         self.max_buf = self.get_parameter('buffer_size').value
+        
+        self.get_logger().info(f"📋 参数配置: 控制频率={self.ctrl_freq}Hz, 数据频率={self.data_freq}Hz, "
+                              f"状态窗口={self.s_hor}, 图像窗口={self.i_hor}, 动作长度={self.act_len}, 缓冲区大小={self.max_buf}")
 
         # --- 3. 虚拟时间轴 ---
         self.first_ts_ns = 0
@@ -118,10 +121,12 @@ class ModelInterfaceNode(Node):
         self.inactive_start_ns = None
 
         # --- 4. 标定 ---
+        self.get_logger().info(f"📐 加载标定数据: 相机={self.cam_name}, 路径={self.calib_root}")
         self.T_cam2base_l, self.K_mat = self.find_and_load_calibration(self.cam_name, 'left')
         self.T_cam2base_r, _ = self.find_and_load_calibration(self.cam_name, 'right')
         self.T_base2cam_l = np.linalg.inv(self.T_cam2base_l)
         self.T_base2cam_r = np.linalg.inv(self.T_cam2base_r)
+        self.get_logger().info(f"✅ 标定数据加载完成: 内参矩阵形状={self.K_mat.shape}")
 
         # --- 5. 数据结构 ---
         self.state = SystemState.IDLE
@@ -153,6 +158,8 @@ class ModelInterfaceNode(Node):
         self.create_subscription(PoseStamped, '/state/right_arm/wrist_pose', self.r_pose_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseArray, '/state/left_hand/keypoints', self.l_kp_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseArray, '/state/right_hand/keypoints', self.r_kp_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
+        self.get_logger().info(f"📡 订阅话题: RGB={f'/camera/{self.cam_name}/rgb'}, Depth={f'/camera/{self.cam_name}/depth'}, "
+                              f"左腕={'/state/left_arm/wrist_pose'}, 右腕={'/state/right_arm/wrist_pose'}")
 
         # --- 7. 启动 ---
         try:
@@ -167,8 +174,9 @@ class ModelInterfaceNode(Node):
         self.kbd_listener = keyboard.Listener(on_press=self.on_key_press)
         self.kbd_listener.start()
         
-        threading.Thread(target=self.user_input_loop, daemon=True).start()
+        threading.Thread(target=self.remote_input_loop, daemon=True).start()
         threading.Thread(target=self.inference_worker, daemon=True).start()
+        self.get_logger().info("🔄 后台线程已启动: 用户输入循环、推理工作线程")
 
         # 控制定时器
         self.control_timer = self.create_timer(1.0 / self.ctrl_freq, self.control_timer_cb, callback_group=MutuallyExclusiveCallbackGroup())
@@ -196,7 +204,8 @@ class ModelInterfaceNode(Node):
                 self.inactive_start_ns = None
 
         self.state = new_state
-        self.get_logger().info(f"State: {old_state.name} -> {new_state.name}")
+        self.get_logger().info(f"🔄 状态转换: {old_state.name} -> {new_state.name} "
+                              f"(总非活跃时间={self.total_inactive_ns/1e9:.3f}s)")
 
     def _switch_state(self, new_state):
         old_state = self.state
@@ -208,9 +217,13 @@ class ModelInterfaceNode(Node):
         elif new_state == SystemState.RESETTING:
             with self.rgb_cb_lock, self.depth_cb_lock, self.l_pose_cb_lock, self.r_pose_cb_lock, self.l_kp_cb_lock, self.r_kp_cb_lock, self.action_timer_lock, self.inference_lock:
                 self._execute_switch_state(new_state)
+            queue_size = len(self.action_queue)
+            buf_sizes = [len(self.buf_rgb), len(self.buf_depth), len(self.buf_l_wrist), 
+                        len(self.buf_r_wrist), len(self.buf_l_kps), len(self.buf_r_kps)]
             self.action_queue.clear()
             self.buf_rgb.clear(); self.buf_depth.clear(); self.buf_l_wrist.clear()
             self.buf_r_wrist.clear(); self.buf_l_kps.clear(); self.buf_r_kps.clear()
+            self.get_logger().info(f"🧹 重置完成: 清空动作队列({queue_size}个动作), 清空缓冲区({buf_sizes})")
         elif new_state == SystemState.FIRST_OBS:
             assert not self.action_queue, "第一次观测状态时，动作队列应该没有数据"
             assert not self.buf_rgb, "第一次观测状态时，RGB缓冲区应该没有数据"
@@ -226,7 +239,7 @@ class ModelInterfaceNode(Node):
     def _get_msg_ns(self, header):
         return header.stamp.sec * 10**9 + header.stamp.nanosec
 
-    def _update_buffer(self, buf, header, data):
+    def _update_buffer(self, buf, header, data, buf_name=""):
         """无锁写入，依赖 deque 的线程安全性和状态隔离"""
         # 1. 原子读取状态
         if not self._is_active_recording(self.state):
@@ -239,44 +252,61 @@ class ModelInterfaceNode(Node):
         # 3. 原子写入
         buf.append((virtual_ts, data))
         
+        # 记录首次数据接收
+        if len(buf) == 1 and buf_name:
+            self.get_logger().info(f"📥 首次接收 {buf_name} 数据: 虚拟时间={virtual_ts/1e9:.3f}s")
+        
         # 4. 冷启动检查 (简单长度判断无需加锁，只有状态切换需要)
         if self.state == SystemState.FIRST_OBS:
             self._check_first_obs_complete()
 
     def _check_first_obs_complete(self):
         # 检查是否所有缓冲区都有数据
+        buf_sizes = {
+            'RGB': len(self.buf_rgb),
+            'Depth': len(self.buf_depth),
+            '左腕': len(self.buf_l_wrist),
+            '右腕': len(self.buf_r_wrist),
+            '左手关键点': len(self.buf_l_kps),
+            '右手关键点': len(self.buf_r_kps)
+        }
         if all(len(b) > 0 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
+            self.get_logger().info(f"✅ 首次观测完成: 缓冲区大小={buf_sizes}")
             self._switch_state(SystemState.INFERENCE)
             self.infer_event.set()
+        else:
+            missing = [k for k, v in buf_sizes.items() if v == 0]
+            if len(missing) <= 2:  # 只记录接近完成的情况，避免日志过多
+                self.get_logger().debug(f"⏳ 等待数据: 缺失={missing}, 当前={buf_sizes}")
 
     # --- 传感器回调 (完全无锁，依赖 Executor 并行) ---
     def rgb_cb(self, m): 
         data = self.cv_bridge.imgmsg_to_cv2(m, 'rgb8')
         with self.rgb_cb_lock:
-            self._update_buffer(self.buf_rgb, m.header, data)
+            self._update_buffer(self.buf_rgb, m.header, data, "RGB")
 
     def depth_cb(self, m): 
         data = self.cv_bridge.imgmsg_to_cv2(m, 'passthrough')
         with self.depth_cb_lock:
-            self._update_buffer(self.buf_depth, m.header, data)
+            self._update_buffer(self.buf_depth, m.header, data, "Depth")
 
     def l_pose_cb(self, m): 
         with self.l_pose_cb_lock:
-            self._update_buffer(self.buf_l_wrist, m.header, m.pose)
+            self._update_buffer(self.buf_l_wrist, m.header, m.pose, "左腕部姿态")
 
     def r_pose_cb(self, m): 
         with self.r_pose_cb_lock:
-            self._update_buffer(self.buf_r_wrist, m.header, m.pose)
+            self._update_buffer(self.buf_r_wrist, m.header, m.pose, "右腕部姿态")
 
     def l_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
         with self.l_kp_cb_lock:
-            self._update_buffer(self.buf_l_kps, m.header, pts.flatten())
+            self._update_buffer(self.buf_l_kps, m.header, pts.flatten(), "左手关键点")
 
     def r_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
         with self.r_kp_cb_lock:
-            self._update_buffer(self.buf_r_kps, m.header, pts.flatten())
+            self._update_buffer(self.buf_r_kps, m.header, pts.flatten(), "右手关键点")
 
     # --- 采样与推理 ---
     def _find_nearest(self, sorted_buf, target_ns):
@@ -310,12 +340,16 @@ class ModelInterfaceNode(Node):
         ]
         
         assert all(len(s) > 0 for s in all_snaps), "缓冲区数据不全"
+        
+        buf_sizes = [len(s) for s in all_snaps]
+        self.get_logger().debug(f"📊 准备推理数据: 缓冲区大小={buf_sizes}")
 
         snap_rgb, snap_depth, snap_lw, snap_rw, snap_lk, snap_rk = all_snaps
 
         # 2. 对齐采样
         t_ref = min(s[-1][0] for s in all_snaps)
         grid_ns = int(1e9 / self.data_freq)
+        self.get_logger().debug(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={grid_ns/1e6:.1f}ms")
 
         # Image
         rgb_seq, depth_seq = [], []
@@ -351,6 +385,9 @@ class ModelInterfaceNode(Node):
         states_in = np.array(states_list)[::-1].astype(np.float32)
 
         instr = self.current_instr
+        
+        self.get_logger().debug(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, "
+                               f"状态形状={states_in.shape}, 图像序列长度={len(rgb_seq)}, 状态序列长度={len(states_list)}")
 
         return {
             "image": rgb_in, "depth_image": depth_in, "camera_intrinsics": self.K_mat,
@@ -366,15 +403,22 @@ class ModelInterfaceNode(Node):
                     self.infer_event.clear()
                     continue
 
+                self.get_logger().info(f"🧠 开始推理: 指令='{self.current_instr}', 模式={self.mode}")
+                start_time = time.time()
+                
                 try:
                     payload = self.prepare_inference_payload()
-                except AssertionError:
+                except AssertionError as e:
+                    self.get_logger().warn(f"⚠️  数据准备失败: {e}, 等待更多数据...")
                     time.sleep(0.02); continue
 
                 try:
                     res = self.policy_client.infer(payload)
                     pred = res["pred_actions"]
                     steps = min(self.act_len, pred.shape[0])
+                    
+                    inference_time = time.time() - start_time
+                    self.get_logger().info(f"✅ 推理完成: 耗时={inference_time:.3f}s, 预测动作数={pred.shape[0]}, 执行步数={steps}")
 
                     for i in range(steps):
                         v = pred[i]
@@ -384,10 +428,12 @@ class ModelInterfaceNode(Node):
                             'lk': v[18:33], 'rk': v[33:48]
                         })
 
+                    self.get_logger().info(f"📥 动作队列更新: 当前队列长度={len(self.action_queue)}")
+                    
                     # 推理结束，切回执行/等待状态
                     self._switch_state(SystemState.RUNNING if self.mode == 'deploy' else SystemState.STEP_WAIT)
                 except Exception as e:
-                    self.get_logger().error(f"Infer Error: {e}")
+                    self.get_logger().error(f"❌ 推理错误: {e}", exc_info=True)
                     time.sleep(0.1)
 
     # --- 控制定时器 ---
@@ -398,6 +444,7 @@ class ModelInterfaceNode(Node):
 
             if not self.action_queue:
                 # 队列空，触发推理
+                self.get_logger().info(f"⚠️  动作队列为空，触发推理 (当前状态={st.name})")
                 self._switch_state(SystemState.INFERENCE)
                 self.infer_event.set()
                 return
@@ -422,28 +469,31 @@ class ModelInterfaceNode(Node):
                 
                 _pub(self.pub_action_hand_l, data['lk'], "left_wrist_link")
                 _pub(self.pub_action_hand_r, data['rk'], "right_wrist_link")
-            except: pass
+            except Exception as e:
+                self.get_logger().warn(f"⚠️  动作发布失败: {e}")
 
             if st == SystemState.STEP_ONCE:
+                self.get_logger().info(f"⏸️  单步执行完成，切换到等待状态")
                 self._switch_state(SystemState.STEP_WAIT)
 
     def remote_input_loop(self):
         """通过 HTTP GET 宿主机服务获取阻塞式的指令输入"""
+        self.get_logger().info(f"🌐 远程输入循环启动: 等待连接 {self.ui_host}:{self.ui_port}")
         while rclpy.ok():
             if self.state == SystemState.IDLE:
                 try:
                     url = f"http://{self.ui_host}:{self.ui_port}/get_input"
+                    self.get_logger().debug(f"📡 正在请求远程输入: {url}")
                     # 发起阻塞式请求
                     resp = self.ui_session.get(url, timeout=None).json()
                     
-                    with self.state_lock:
-                        self.current_instr = resp["instruction"]
-                        self.mode = resp["mode"]
-                        self._switch_state(SystemState.READY)
+                    self.current_instr = resp["instruction"]
+                    self.mode = resp["mode"]
+                    self._switch_state(SystemState.READY)
                     
                     self.get_logger().info(f"✅ 指令已接收: '{self.current_instr}' | 模式: {self.mode}")
                 except Exception as e:
-                    self.get_logger().warn(f"无法获取远程输入: {e}")
+                    self.get_logger().warn(f"⚠️  无法获取远程输入: {e}")
                     time.sleep(1.0)
             else:
                 time.sleep(0.5)
@@ -452,6 +502,7 @@ class ModelInterfaceNode(Node):
         try: k = key.char
         except: k = None
         if k == '1' and self.state == SystemState.READY:
+            self.get_logger().info(f"▶️  用户按下 '1': 开始首次观测 (指令='{self.current_instr}')")
             self.play_sound("start"); self.pub_system_mode.publish(String(data="inference"))
             self.first_ts_ns = self.get_clock().now().nanoseconds
             self.total_inactive_ns = 0; self.inactive_start_ns = None
@@ -459,19 +510,28 @@ class ModelInterfaceNode(Node):
         elif (k == '2' or key == keyboard.Key.space):
             if self.mode == 'deploy' and self.state in [SystemState.RUNNING, SystemState.PAUSED]:
                 if self.state != SystemState.PAUSED:
+                    self.get_logger().info(f"⏸️  用户按下 '2'/'Space': 暂停执行")
                     self._switch_state(SystemState.PAUSED); self.play_sound("pause")
                 else:
+                    self.get_logger().info(f"▶️  用户按下 '2'/'Space': 继续执行")
                     self._switch_state(SystemState.RUNNING); self.play_sound("continue")
             elif self.mode == 'debug' and self.state == SystemState.STEP_WAIT:
+                self.get_logger().info(f"⏭️  用户按下 '2'/'Space': 单步执行")
                 self._switch_state(SystemState.STEP_ONCE); self.play_sound("continue")
         elif k == '3' and self.state != SystemState.IDLE:
+            self.get_logger().info(f"🛑 用户按下 '3': 重置系统")
             self._switch_state(SystemState.RESETTING); self.play_sound("stop_and_reset"); self.pub_system_mode.publish(String(data="reset"))
             time.sleep(3.0); self._switch_state(SystemState.IDLE)
 
     def find_and_load_calibration(self, cam, arm):
         subdirs = [d for d in os.listdir(self.calib_root) if os.path.isdir(os.path.join(self.calib_root, d))]
         matches = [d for d in subdirs if cam in d and arm in d]
-        d = np.load(os.path.join(self.calib_root, sorted(matches)[-1], 'calibration_results', 'result.npz'))
+        if not matches:
+            self.get_logger().error(f"❌ 未找到标定数据: 相机={cam}, 手臂={arm}, 路径={self.calib_root}")
+            raise FileNotFoundError(f"标定数据未找到: {cam}/{arm}")
+        calib_path = os.path.join(self.calib_root, sorted(matches)[-1], 'calibration_results', 'result.npz')
+        self.get_logger().info(f"📂 加载标定文件: {calib_path}")
+        d = np.load(calib_path)
         return d['T_cam2base'], d['camera_matrix']
 
     def play_sound(self, name):
