@@ -14,8 +14,9 @@ Arm IK Node - 机械臂逆运动学节点
 import time
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, PoseArray, String
+from geometry_msgs.msg import PoseArray
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
 import numpy as np
 import mujoco
 import mujoco.viewer
