@@ -15,7 +15,7 @@ lora_r: 32
 lora_dropout: 0.0
 
 # Vision backbone configuration
-vlm_backbone: paligemma  # Options: paligemma, paligemma2
+vlm_backbone: paligemma2  # Options: paligemma, paligemma2
 vision_resolution: 224  # Options: 224 or 448
 image_shape:
   - ${vision_resolution}
@@ -167,7 +167,7 @@ training:
   train_vlm: True
   init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
-  load_pretrained_pi05_weights: True # load pretrained weights from PI05 (disabled for 448 resolution)
+  load_pretrained_pi05_weights: False # load pretrained weights from PI05 (disabled for 448 resolution)
   # Automatically select pretrained model path based on vlm_backbone and vision_resolution
   pretrained_model_path: /share_data/chenzhang/checkpoints/${vlm_backbone}-3b-pt-${vision_resolution}
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
@@ -269,7 +269,7 @@ policy:
     action_token_index: ${action_token_index}
     use_lm_head: True
     # Gemma2-specific: Final logit softcapping for numerical stability in text generation
-    final_logit_softcapping: ${eval:'30.0 if "${vlm_backbone}"=="paligemma2" else None'}
+    final_logit_softcapping:  #${eval:'30.0 if "${vlm_backbone}"=="paligemma2" else None'}
     max_vlm_tokens: ${max_vlm_tokens}
     use_action_position_ids_continue_from_vlm: False
     num_inference_steps: ${flow.num_inference_steps}
