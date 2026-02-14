@@ -15,7 +15,7 @@ lora_r: 32
 lora_dropout: 0.0
 
 # Vision backbone configuration
-vlm_backbone: paligemma2  # Options: paligemma, paligemma2
+vlm_backbone: paligemma  # Options: paligemma, paligemma2
 vision_resolution: 224  # Options: 224 or 448
 image_shape:
   - ${vision_resolution}
@@ -112,13 +112,13 @@ vlm_processor:
 dataloader:
   batch_sampler: 
     # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
-    batch_size: 16
+    batch_size: 20
     vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
     drop_last: False
   loader: 
-    num_workers: 16
+    num_workers: 20
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32
@@ -144,15 +144,15 @@ flow:
 
 optimizer:
   action: 
-    lr: 5e-4
+    lr: 3e-4
     betas: [0.9, 0.95]
     weight_decay: 1e-2
   vlm:
-    lr: 2e-4 # We can try smaller learning rate than action for VLM
+    lr: 1e-4 # We can try smaller learning rate than action for VLM
     betas: [0.9, 0.95]
     weight_decay: 1e-2
   diffloss:
-    lr: 8e-4
+    lr: 4e-4
     betas: [0.9, 0.95]
     weight_decay: 1e-2
 
@@ -167,13 +167,13 @@ training:
   train_vlm: True
   init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
-  load_pretrained_pi05_weights: False # load pretrained weights from PI05 (disabled for 448 resolution)
+  load_pretrained_pi05_weights: True # load pretrained weights from PI05 (disabled for 448 resolution)
   # Automatically select pretrained model path based on vlm_backbone and vision_resolution
   pretrained_model_path: /share_data/chenzhang/checkpoints/${vlm_backbone}-3b-pt-${vision_resolution}
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
-  resume_checkpoint_path: # /home/chenzhang/projects/diffloss-ar/outputs/2026.02.07/16.53_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=10000-eval_l1_loss=0.0385
+  resume_checkpoint_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.14/04.44_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=5000-eval_l1_loss=0.0346
   normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07-mix/normalizer.pkl
   num_epochs: 2
   use_bf16: True
@@ -398,7 +398,13 @@ policy:
     width: 2048
     num_sampling_steps: "100"
     grad_checkpointing: False
+    use_ddim_sampling: False  # Use DDIM sampling for diffusion (ignored for flow matching)
+    # Flow Matching options
+    use_flow_matching: False  # Set to True to use Flow Matching instead of traditional Diffusion
+    flow_sigma_min: 0.001     # Minimum noise level for Flow Matching (only used when use_flow_matching=True)
     # Note: DiffLoss uses standard DiT-style sinusoidal encoding (different from action expert)
+    # When use_flow_matching=True, uses FlowMatchingMLP (single output for velocity)
+    # When use_flow_matching=False, uses SimpleMLPAdaLN (double output for noise+variance)
 
 logging:
   project: diffloss-multistep

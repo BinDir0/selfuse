@@ -38,6 +38,10 @@ IMAGE_HEIGHT = 480
 # Test mode: Set to a number to only process first N samples (None = process all)
 MAX_SAMPLES = None  # Set to None to process all samples, or a number like 100 for testing
 
+# Dataset split configuration
+VAL_RATIO = 0.001  # 0.1% for validation (same as other datasets)
+SEED = 42
+
 # ================================================
 
 
@@ -218,14 +222,15 @@ def main():
     
     print(f"✓ Converted {len(converted_ds)} samples")
     
-    # Create a simple train split (all data)
-    # Note: Original dataset doesn't have official test split
-    ds_dict = DatasetDict({
-        "train": converted_ds
-    })
-    
+    # Split into train/test
     print("\n" + "=" * 80)
-    print(f"Final dataset: train={len(converted_ds)}")
+    print(f"Splitting dataset (val_ratio={VAL_RATIO})...")
+    print("=" * 80)
+    
+    ds_dict = converted_ds.train_test_split(test_size=VAL_RATIO, seed=SEED)
+    
+    print(f"Train samples: {len(ds_dict['train'])}")
+    print(f"Test samples: {len(ds_dict['test'])}")
     print("=" * 80)
     
     # Save to disk
@@ -238,8 +243,18 @@ def main():
         shutil.rmtree(OUTPUT_DIR)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # Use single process for small dataset
-    ds_dict.save_to_disk(OUTPUT_DIR, num_proc=1)
+    # Calculate optimal sharding for saving
+    train_size = len(ds_dict['train'])
+    target_samples_per_shard = 10000  # ~1GB per shard (same as other datasets)
+    num_shards = max(1, train_size // target_samples_per_shard)
+    num_proc = min(num_shards, 16)  # Max 16 processes
+    
+    print(f"Train size: {train_size} samples")
+    print(f"Target: ~{target_samples_per_shard} samples per shard (~1GB)")
+    print(f"Will create ~{num_shards} shards")
+    print(f"Using num_proc={num_proc} for saving")
+    
+    ds_dict.save_to_disk(OUTPUT_DIR, num_proc=num_proc)
     
     print(f"\n✅ Saved successfully to {OUTPUT_DIR}")
     
@@ -265,6 +280,7 @@ def main():
     print("\n" + "=" * 80)
     print("✅ Conversion completed successfully!")
     print(f"Train samples: {len(loaded_ds['train'])}")
+    print(f"Test samples: {len(loaded_ds['test'])}")
     print("=" * 80)
 
 
