@@ -161,6 +161,7 @@ class HandIKNode(Node):
         self._last_keypoints_time: float = 0.0  # 最近一次收到 keypoints 的时间 (monotonic)
         self._keypoints_stamp = None  # 最近一次 keypoints 消息的 header.stamp
         self._first_solve_logged: bool = False  # 是否已记录首次求解日志
+        self._last_solved_joints: list = None  # 缓存上次 IK 求解的关节角 (80Hz 一直发)
 
         # ----------------------------------------------------------
         # ROS2 接口
@@ -231,9 +232,10 @@ class HandIKNode(Node):
         if cmd == "reset":
             self.get_logger().info("🔄 切换到 reset 模式 (手部复位)")
             self.mode = "reset"
-            # 清空缓存的 keypoints，停止 IK 求解
+            # 清空缓存的 keypoints 和 IK 结果
             self._has_new_keypoints = False
             self._latest_keypoints = {}
+            self._last_solved_joints = None
             
         elif cmd == "inference":
             self.get_logger().info("▶️ 切换到 inference 模式")
@@ -279,88 +281,79 @@ class HandIKNode(Node):
 
     def _timer_callback(self):
         """
-        定时回调: 运行 IK 求解并发布关节角度
+        定时回调: 80Hz 一直发布关节角度
 
-        模式处理:
-        - reset 模式: 直接发布 home 关节角度（全伸直）
-        - inference 模式: 正常 IK 求解
-        
-        保护机制:
-        - 没有收到过 keypoints 时不发布
-        - keypoints 数据超时后停止发布（避免上游断开后手一直维持旧姿态）
+        逻辑 (与架构图一致):
+        - reset 模式: 直接发布 home 关节角度（全伸直），80Hz 一直发
+        - inference 模式:
+            - 有新 keypoints 时: IK 求解 → 更新缓存 → 发布
+            - 无新 keypoints 时: 重发上次缓存的结果 → 保持 80Hz 持续输出
+            - 首次 IK 求解前: 不发布（尚无有效数据）
         """
         # ========== Reset 模式：直接发布 home 关节角度 ==========
         if self.mode == "reset":
             self._publish_home_joints()
             return
-        
-        # ========== Inference 模式：正常 IK 求解 ==========
-        if not self._has_new_keypoints:
-            return
 
-        # 数据过时检测: 如果 keypoints 消息超时，停止发布
-        elapsed = time.monotonic() - self._last_keypoints_time
-        if elapsed > self.data_timeout_sec:
-            self.get_logger().warn(
-                f"Keypoints data expired ({elapsed:.2f}s > {self.data_timeout_sec}s), "
-                "skipping IK publish.",
-                throttle_duration_sec=2.0,
-            )
-            return
+        # ========== Inference 模式 ==========
+        # 有新 keypoints 到达时：运行 IK 求解，更新缓存
+        if self._has_new_keypoints:
+            target_positions = self._latest_keypoints
+            self._has_new_keypoints = False
 
-        # 取出最新 keypoints 并重置标志
-        target_positions = self._latest_keypoints
-        self._has_new_keypoints = False
-
-        # IK 求解
-        try:
-            normalized_joints, info = self.ik_solver.compute_ik(
-                target_positions=target_positions,
-                max_iterations=self.ik_max_iterations,
-            )
-        except Exception as e:
-            self.get_logger().error(
-                f"IK solve failed: {e}", throttle_duration_sec=2.0
-            )
-            return
-
-        # 输出范围验证（与 ry_hand_node.joint_command_callback 的 0-1 clip 对齐）
-        joint_positions = normalized_joints.tolist()
-        for i, val in enumerate(joint_positions):
-            if not (0.0 <= val <= 1.0):
-                self.get_logger().warn(
-                    f"Joint {JOINT_NAMES[i]} out of range [0,1]: {val:.4f}, clipping.",
-                    throttle_duration_sec=2.0,
+            try:
+                normalized_joints, info = self.ik_solver.compute_ik(
+                    target_positions=target_positions,
+                    max_iterations=self.ik_max_iterations,
                 )
-                joint_positions[i] = max(0.0, min(1.0, val))
+            except Exception as e:
+                self.get_logger().error(
+                    f"IK solve failed: {e}", throttle_duration_sec=2.0
+                )
+                # 求解失败不更新缓存，下面会重发上次结果
+            else:
+                # 输出范围验证（与 ry_hand_node.joint_command_callback 的 0-1 clip 对齐）
+                joint_positions = normalized_joints.tolist()
+                for i, val in enumerate(joint_positions):
+                    if not (0.0 <= val <= 1.0):
+                        self.get_logger().warn(
+                            f"Joint {JOINT_NAMES[i]} out of range [0,1]: {val:.4f}, clipping.",
+                            throttle_duration_sec=2.0,
+                        )
+                        joint_positions[i] = max(0.0, min(1.0, val))
 
-        # 构建 JointState 消息并发布
-        # 格式与 ry_hand_485_node._status_list_to_joint_state 保持一致:
-        #   header.frame_id, name, position
+                # 更新缓存
+                self._last_solved_joints = joint_positions
+
+                # 首次求解成功日志
+                if not self._first_solve_logged:
+                    self._first_solve_logged = True
+                    self.get_logger().info(
+                        f"First IK solve completed: "
+                        f"joints=[{', '.join(f'{j:.3f}' for j in joint_positions)}], "
+                        f"converged={info['converged']}, "
+                        f"pos_err={info['position_error']*1000:.3f}mm"
+                    )
+
+                # 调试日志（节流输出，避免刷屏）
+                self.get_logger().debug(
+                    f"IK solved: iters={info['iterations']}, "
+                    f"converged={info['converged']}, "
+                    f"pos_err={info['position_error']*1000:.3f}mm, "
+                    f"joints=[{', '.join(f'{j:.3f}' for j in joint_positions)}]"
+                )
+
+        # ========== 80Hz 一直发：发布缓存的关节角度 ==========
+        # 首次 IK 求解前无缓存，不发布
+        if self._last_solved_joints is None:
+            return
+
         joint_msg = JointState()
         joint_msg.header.stamp = self.get_clock().now().to_msg()
         joint_msg.header.frame_id = f"{self.hand_side}_hand_base_link"
         joint_msg.name = list(JOINT_NAMES)
-        joint_msg.position = joint_positions
+        joint_msg.position = self._last_solved_joints
         self.joints_pub.publish(joint_msg)
-
-        # 首次求解成功日志（与 haptic_glove_node 的 once=True 模式一致）
-        if not self._first_solve_logged:
-            self._first_solve_logged = True
-            self.get_logger().info(
-                f"First IK solve completed: "
-                f"joints=[{', '.join(f'{j:.3f}' for j in joint_positions)}], "
-                f"converged={info['converged']}, "
-                f"pos_err={info['position_error']*1000:.3f}mm"
-            )
-
-        # 调试日志（节流输出，避免刷屏）
-        self.get_logger().debug(
-            f"IK solved: iters={info['iterations']}, "
-            f"converged={info['converged']}, "
-            f"pos_err={info['position_error']*1000:.3f}mm, "
-            f"joints=[{', '.join(f'{j:.3f}' for j in joint_positions)}]"
-        )
 
     def _publish_home_joints(self):
         """
