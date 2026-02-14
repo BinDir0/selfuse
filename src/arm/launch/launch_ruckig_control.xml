@@ -8,7 +8,7 @@
   <!-- Robot Control Interface Node -->
   <node pkg="arm" 
         exec="arm_control_node" 
-        name="arm_control_node" 
+        name="arm_control_node_$(var control_arm_side)" 
         output="screen">
     <!-- Robot Control Interface Parameters -->
     <param name="arm_side" value="$(var control_arm_side)" />

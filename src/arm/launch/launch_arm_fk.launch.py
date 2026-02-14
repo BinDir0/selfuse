@@ -51,7 +51,7 @@ def generate_launch_description():
     arm_fk_node = Node(
         package='arm',
         executable='arm_fk_node',
-        name='arm_fk_node',
+        name=['arm_fk_node_', LaunchConfiguration('fk_arm_side')],
         output='screen',
         prefix=f'{venv_python_path}',
         parameters=[
