@@ -55,6 +55,7 @@ try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     possible_paths = [
         os.path.join(current_dir, '..', '..', '..', '..', 'resource', 'Robotic_Arm'),
+        os.path.join(current_dir, '..', 'resource', 'Robotic_Arm'),
         os.path.join(current_dir, 'resource', 'Robotic_Arm'),
     ]
     
