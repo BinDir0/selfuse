@@ -407,57 +407,69 @@ class ArmIKNode(Node):
         else:
             self.get_logger().warn(f"⚠️ 未识别的 system mode: {cmd}")
 
-    def _hand_base_to_tcp(self, hand_base_pos, hand_base_mat, arm='left'):
+    def _hand_to_tcp(self, hand_pos, hand_mat, arm='left'):
         """
-        将hand_base位姿经过连接件转换为TCP位姿
-        
-        :param pos: hand_base位置
-        :param mat: hand_base姿态
-        :param arm: left 或 right
-        """
+        将hand位姿经过连接件转换为TCP位姿（即手腕位姿）
 
+        :param hand_pos: hand位置 (3,) numpy array
+        :param hand_mat: hand旋转矩阵 (3,3) numpy array
+        :param arm: 'left' 或 'right'
+        :return: (wrist_pos, wrist_mat) TCP位置和旋转矩阵
+        所有坐标为相对base计算
+        """
+        # 固定变换矩阵
+        T_conn2tcp = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0.0345],
+            [0, 0, 0, 1]
+        ])
+
+        T_hand2conn_left = np.array([
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [1, 0, 0, 0],
+            [0, 0, 0, 1]
+        ])
+
+        T_hand2conn_right = np.array([
+            [0, 1, 0, 0],
+            [0, 0, -1, 0],
+            [-1, 0, 0, 0],
+            [0, 0, 0, 1]
+        ])
+
+        # 选择手臂对应的 hand2conn
         if arm == 'left':
-            offset1 = LEFT_CONNECTOR_OFFSET_1_1
-            offset2 = LEFT_CONNECTOR_OFFSET_1_2
-            rot1 = LEFT_CONNECTOR_RPY_1_1
-            rot2 = LEFT_CONNECTOR_RPY_1_2
+            T_hand2conn = T_hand2conn_left
         elif arm == 'right':
-            offset1 = RIGHT_CONNECTOR_OFFSET_2_1
-            offset2 = RIGHT_CONNECTOR_OFFSET_2_2
-            rot1 = RIGHT_CONNECTOR_RPY_2_1
-            rot2 = RIGHT_CONNECTOR_RPY_2_2
+            T_hand2conn = T_hand2conn_right
         else:
             raise ValueError(f"无效的arm参数: '{arm}'。必须是 'left' 或 'right'")
-        height = CONNECTOR_HEIGHT
-        rotation = TCP_ROTATION
 
-        # 先计算旋转矩阵
-        rot1_mat = R.from_euler('xyz', rot1).as_matrix()
-        rot2_mat = R.from_euler('xyz', rot2).as_matrix()
-        
-        # 方法A：假设TCP_ROTATION已经包含了所有旋转
-        # 那么手腕旋转矩阵 = TCP旋转矩阵 × TCP_ROTATION的逆
-        wrist_mat = hand_base_mat @ np.linalg.inv(rotation)
+        # 复合变换：hand -> TCP
+        T_hand2tcp = T_conn2tcp @ T_hand2conn   # 4x4
 
-        # 正向: mat_1_2 = left_wrist_mat @ rot_1_1 @ rot_1_2
-        # 所以反向: mat_1_2 = left_wrist_mat @ rot_1_1 @ rot_1_2
-        mat2 = wrist_mat @ rot1_mat @ rot2_mat
-        
-        # 2. 从TCP位置反向计算connector_1_2的位置
-        # 正向: left_hand_base_pos = pos_1_2 + mat_1_2[:, 2] * CONNECTOR_HEIGHT
-        # 所以: pos_1_2 = left_hand_base_pos - mat_1_2[:, 2] * CONNECTOR_HEIGHT
-        pos2 = hand_base_pos - mat2[:, 2] * height
-        
-        # 3. 从connector_1_2反向到connector_1_1
-        # 正向: pos_1_2 = pos_1_1 + mat_1_1 @ LEFT_CONNECTOR_OFFSET_1_2
-        # 正向: mat_1_1 = left_wrist_mat @ rot_1_1
-        mat1 = wrist_mat @ rot1_mat
-        pos1 = pos2 - mat1 @ offset2
-        
-        # 4. 从connector_1_1反向到wrist
-        # 正向: pos_1_1 = left_wrist_pos + left_wrist_mat @ LEFT_CONNECTOR_OFFSET_1_1
-        wrist_pos = pos1 - wrist_mat @ offset1
-        
+        # 求逆：TCP -> hand
+        # 对于刚体变换，逆可以直接计算：[R^T, -R^T * t; 0 0 0 1]
+        R_ht = T_hand2tcp[:3, :3]
+        t_ht = T_hand2tcp[:3, 3]
+        T_tcp2hand = np.eye(4)
+        T_tcp2hand[:3, :3] = R_ht.T
+        T_tcp2hand[:3, 3] = -R_ht.T @ t_ht
+
+        # 构造 hand 在参考系中的变换矩阵
+        T_ref_hand = np.eye(4)
+        T_ref_hand[:3, :3] = hand_mat
+        T_ref_hand[:3, 3] = hand_pos
+
+        # 计算 TCP 在参考系中的变换矩阵
+        T_ref_tcp = T_ref_hand @ T_tcp2hand
+
+        # 提取位置和旋转矩阵
+        wrist_pos = T_ref_tcp[:3, 3]
+        wrist_mat = T_ref_tcp[:3, :3]
+
         return wrist_pos, wrist_mat
     
     def _arm_base_to_world(self, position, quaternion_xyzw, arm='left'):
@@ -529,7 +541,7 @@ class ArmIKNode(Node):
         ])
         left_hand_base_mat_armbase = R.from_quat(left_hand_base_quat_xyzw).as_matrix()
         
-        left_tcp_pos_armbase, left_tcp_mat_armbase = self._hand_base_to_tcp(
+        left_tcp_pos_armbase, left_tcp_mat_armbase = self._hand_to_tcp(
             left_hand_base_pos_armbase, 
             left_hand_base_mat_armbase, 
             'left'
@@ -566,7 +578,7 @@ class ArmIKNode(Node):
         ])
         right_hand_base_mat_armbase = R.from_quat(right_hand_base_quat_xyzw).as_matrix()
         
-        right_tcp_pos_armbase, right_tcp_mat_armbase = self._hand_base_to_tcp(
+        right_tcp_pos_armbase, right_tcp_mat_armbase = self._hand_to_tcp(
             right_hand_base_pos_armbase, 
             right_hand_base_mat_armbase, 
             'right'
