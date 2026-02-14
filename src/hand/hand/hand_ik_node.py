@@ -33,6 +33,7 @@ Hand IK Node - 手部逆运动学 ROS2 节点
 
 import time
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -117,6 +118,33 @@ class HandIKNode(Node):
             frequency=self.frequency,
         )
         self.get_logger().info("IK solver initialized successfully")
+
+        # ----------------------------------------------------------
+        # 手部安装变换: wrist frame <-> hand_base frame (MuJoCo 模型坐标系)
+        # ----------------------------------------------------------
+        # 重要: 必须与 Hand FK Node 中的 T_wrist_hand_base 完全一致!
+        # FK 使用 T_wrist_hand_base 将 hand_base → wrist (输出给 Model Interface)
+        # IK 使用其逆矩阵 T_hand_base_wrist 将 wrist → hand_base (输入给 IK solver)
+        #
+        # 当前配置: Z 轴 180° 旋转 (与 hand_fk_node.py 一致)
+        # 即 hand_base 相对于 wrist 绕 Z 轴旋转了 180°
+        self._T_wrist_hand_base = np.eye(4)
+        self._T_wrist_hand_base[:3, :3] = np.array([
+            [-1.0,  0.0,  0.0],
+            [ 0.0, -1.0,  0.0],
+            [ 0.0,  0.0,  1.0],
+        ])  # = R.from_euler('z', 180, degrees=True).as_matrix()
+
+        # 逆变换: wrist → hand_base
+        self._T_hand_base_wrist = np.linalg.inv(self._T_wrist_hand_base)
+        # 预缓存旋转矩阵和平移 (仅对位置做变换时直接使用，避免每帧齐次运算)
+        self._R_hand_base_wrist = self._T_hand_base_wrist[:3, :3]
+        self._t_hand_base_wrist = self._T_hand_base_wrist[:3, 3]
+
+        self.get_logger().info(
+            f"Wrist→hand_base transform: Z-180° rotation "
+            f"(consistent with Hand FK Node)"
+        )
 
         # ----------------------------------------------------------
         # Home 姿态配置 (reset 模式发布的关节角度)
@@ -235,10 +263,14 @@ class HandIKNode(Node):
             return
 
         # 解析为 {finger_name: [x, y, z]} 字典
+        # 坐标变换: wrist frame → hand_base frame (MuJoCo 模型坐标系)
+        # IK solver 在 hand_base frame 中工作，输入必须转换到该坐标系
         keypoints = {}
         for i, finger_name in enumerate(FINGER_NAMES):
             p = msg.poses[i].position
-            keypoints[finger_name] = [p.x, p.y, p.z]
+            pos_wrist = np.array([p.x, p.y, p.z])
+            pos_hand_base = self._R_hand_base_wrist @ pos_wrist + self._t_hand_base_wrist
+            keypoints[finger_name] = pos_hand_base.tolist()
 
         self._latest_keypoints = keypoints
         self._has_new_keypoints = True

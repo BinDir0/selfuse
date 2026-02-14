@@ -88,8 +88,9 @@ class HandIKSolver:
     )
 
     # Mimic 关系: (leader_suffix, follower_suffix, multiplier, offset)
+    # 从 URDF 提取，与 psirobot_visualizer/ruiyan_hand/hand_ik.py 保持一致
     _MIMIC_RELATIONS = (
-        ("_joint_link_1_2", "_joint_link_1_3", 1.675, 0.0),  # thumb
+        ("_joint_link_1_2", "_joint_link_1_3", 0.325, 0.0),  # thumb
         ("_joint_link_2_1", "_joint_link_2_2", 1.0, 0.0),    # index
         ("_joint_link_3_1", "_joint_link_3_2", 1.0, 0.0),    # middle
         ("_joint_link_4_1", "_joint_link_4_2", 1.0, 0.0),    # ring

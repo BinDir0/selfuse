@@ -370,7 +370,10 @@ class HandControlNode(Node):
                     else:
                         smoothed_angles = self._target_angles.tolist()
 
-                    # 转换为电机位置 (0-4095) (与 ry_hand_485_node 一致)
+                    # 转换为电机位置 (0-4095)
+                    # 注意: 遥操代码 ry_hand_485_node 用 int(p * 4096)，
+                    # p=1.0 时会溢出到 4096 (超出 12-bit)。
+                    # 这里使用 int(p * 4095) 更安全: p=1.0 -> 4095 (0xFFF)。
                     self.hand.position_list = [
                         int(p * MOTOR_POSITION_MAX) for p in smoothed_angles
                     ]

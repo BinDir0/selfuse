@@ -159,8 +159,9 @@ class HandFKSolver:
         hand_prefix = 'hand1' if self.hand_type == 'left' else 'hand2'
         
         # Mimic relations extracted from URDF
+        # 与 hand_ik_solver.py / psirobot_visualizer/hand_ik.py 保持一致
         mimic_relations = [
-            (f'{hand_prefix}_joint_link_1_2', f'{hand_prefix}_joint_link_1_3', 1.675, 0.0),  # Thumb
+            (f'{hand_prefix}_joint_link_1_2', f'{hand_prefix}_joint_link_1_3', 0.325, 0.0),  # Thumb
             (f'{hand_prefix}_joint_link_2_1', f'{hand_prefix}_joint_link_2_2', 1.0, 0.0),    # Index
             (f'{hand_prefix}_joint_link_3_1', f'{hand_prefix}_joint_link_3_2', 1.0, 0.0),    # Middle
             (f'{hand_prefix}_joint_link_4_1', f'{hand_prefix}_joint_link_4_2', 1.0, 0.0),    # Ring
@@ -173,8 +174,13 @@ class HandFKSolver:
                     leader_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, leader_name)
                     follower_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, follower_name)
                     
+                    # 使用 jnt_qposadr 获取正确的 qpos 地址
+                    # (与 hand_ik_solver.py 保持一致，不能直接用 joint_id 作为 qpos 索引)
+                    leader_addr = self.model.jnt_qposadr[leader_id]
+                    follower_addr = self.model.jnt_qposadr[follower_id]
+                    
                     # Apply constraint: follower = offset + multiplier * leader
-                    self.data.qpos[follower_id] = offset + multiplier * self.data.qpos[leader_id]
+                    self.data.qpos[follower_addr] = offset + multiplier * self.data.qpos[leader_addr]
                 except:
                     pass  # Some joints might not exist
     
@@ -287,12 +293,15 @@ class HandFKNode(Node):
             self.get_logger().error(f'❌ Failed to initialize Hand FK Solver: {e}')
             raise
         
-        # ========== 手部安装变换 (wrist → hand_base) ==========
-        # 常见配置：Z轴180度旋转
+        # ========== 手部安装变换 (hand_base → wrist) ==========
+        # 重要: 此变换必须与 Hand IK Node 中的 _T_wrist_hand_base 完全一致!
+        # FK: T_wrist_hand_base 将 hand_base frame → wrist frame (输出给 Model Interface)
+        # IK: inv(T_wrist_hand_base) 将 wrist frame → hand_base frame (输入给 IK solver)
+        # 当前配置: Z 轴 180° 旋转
         self.T_wrist_hand_base = np.eye(4)
         self.T_wrist_hand_base[:3, :3] = R.from_euler('z', 180, degrees=True).as_matrix()
-        # 如果有偏移，可以设置：
-        # self.T_wrist_hand_base[:3, 3] = np.array([0, 0, 0.05])  # 示例
+        # 如果有偏移，可以设置 (同时需修改 hand_ik_node.py 中的对应变换!):
+        # self.T_wrist_hand_base[:3, 3] = np.array([0, 0, 0.05])
         
         self.get_logger().info(f'Hand installation transform: Z-axis 180° rotation')
         
