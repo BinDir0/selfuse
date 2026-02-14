@@ -2,26 +2,33 @@
 
 LegendVLA Inference系统的机械臂控制包，包含IK、FK和控制节点。
 
+## 当前进度
+### 待编辑：
+- `package.xml`
+- debug `launch` 目录
+### 已验证：
+- `arm_ik_node`
+- `arm_fk_node`
+- `arm_control_node`无插值，无sdk
+
 ## 架构说明
 
 按照系统架构图：
 
 ### Arm IK Node
 - **频率**: 100Hz
-- **输入**: `/action/{left,right}_arm/joints` (JointState)
+- **输入**: `/action/both_arms/wrist_poses` (PoseArray)
 - **输出**: `/state/{left,right}_arm/joints` (JointState)
 
 ### Arm FK Node
 - **频率**: 100Hz
 - **输入**: `/state/{left,right}_arm/joints` (JointState)
 - **输出**: 发送到Arm Control Node
+> 注：目前考虑去除该节点，用直接读control结果的位置代替
 
 ### Arm Control Node
 - **频率**: 100Hz
-- **输入**: 
-  - `/state/{left,right}_arm/wrist_pose` (JointState) - arm states (wrist poses in camera frame)
-  - `/camera/{head,chest}/rgb` (Image) - camera RGB-D images
-  - `/camera/{head,chest}/depth` (Image) - camera RGB-D images
+- **输入**: `/state/{left,right}_arm/joints` (JointState)
 - **输出**: `/action/{left,right}_arm/joints` (JointState)
 
 ## 文件结构
@@ -33,11 +40,18 @@ arm/
 │   ├── arm_ik_node.py         # 逆运动学节点
 │   ├── arm_fk_node.py         # 正运动学节点
 │   └── arm_control_node.py   # 控制节点
+│   └── Ruckig_Interpolator.py   # 插值
+│   └── connector_config.py   # 连接件相关参数（已弃用）
 ├── launch/
-│   ├── arm_system.launch.py  # 单臂系统启动
-│   └── dual_arms.launch.py   # 双臂系统启动
+│   ├── arm_system.launch.py  # 单臂系统启动（已弃用）
+│   └── dual_arms.launch.py   # 双臂系统启动（已弃用）
+│   └── launch.xml   # 双臂系统启动
+│   └── launch_arm_ik.launch.py   # arm_ik_node启动
+│   └── launch_arm_fk.launch.py   # arm_fk_node启动
+│   └── launch_ruckig_control.xml   # arm_control_node启动
 ├── resource/
 │   └── arm
+│   └── Robotic_arm  # sdk
 ├── CMakeLists.txt
 ├── package.xml
 └── README.md
@@ -52,30 +66,13 @@ source install/setup.bash
 
 ## 使用方法
 
-### 1. 启动单臂系统
-
+### 最新使用方法
 ```bash
-# 启动左臂
-ros2 launch arm arm_system.launch.py arm_side:=left
-
-# 启动右臂
-ros2 launch arm arm_system.launch.py arm_side:=right
-
-# 自定义频率
-ros2 launch arm arm_system.launch.py arm_side:=left frequency:=50.0
+# 启动双臂
+ros2 launch arm launch.xml
 ```
 
-### 2. 启动双臂系统
-
-```bash
-# 同时启动左右臂
-ros2 launch arm dual_arms.launch.py
-
-# 自定义频率
-ros2 launch arm dual_arms.launch.py frequency:=80.0
-```
-
-### 3. 单独运行节点
+### 单独运行节点
 
 ```bash
 # 运行IK节点
@@ -95,54 +92,15 @@ ros2 run arm arm_control_node.py --ros-args -p arm_side:=left
 | arm_side | string | 'left' | 机械臂侧别：left 或 right |
 | frequency | double | 100.0 | 节点运行频率 (Hz) |
 
-## Topic说明
-
-### Arm IK Node
-- **订阅**: `/action/{left,right}_arm/joints` (JointState)
-- **发布**: `/state/{left,right}_arm/joints` (JointState)
-
-### Arm FK Node
-- **订阅**: `/state/{left,right}_arm/joints` (JointState)
-- **发布**: 待定义
-
-### Arm Control Node
-- **订阅**: 
-  - `/state/{left,right}_arm/wrist_pose` (JointState)
-  - `/camera/head/rgb` (Image)
-  - `/camera/head/depth` (Image)
-  - `/camera/chest/rgb` (Image)
-  - `/camera/chest/depth` (Image)
-- **发布**: `/action/{left,right}_arm/joints` (JointState)
-
-## 开发说明
-
-### TODO 列表
-
-1. **Arm IK Node**:
-   - [ ] 实现IK solver（考虑使用KDL、MoveIt或自定义solver）
-   - [ ] 实现动作回调逻辑
-   - [ ] 实现状态发布逻辑
-
-2. **Arm FK Node**:
-   - [ ] 实现FK solver
-   - [ ] 实现状态回调逻辑
-   - [ ] 定义输出消息类型和发布者
-
-3. **Arm Control Node**:
-   - [ ] 实现控制算法（轨迹规划、碰撞检测等）
-   - [ ] 实现图像数据融合
-   - [ ] 实现腕部位姿处理逻辑
-   - [ ] 优化100Hz控制频率性能
-
 ### 依赖库
 
 可能需要的依赖：
-- `python3-kdl-parser` - 用于机器人运动学
-- `moveit2` - 用于高级运动规划（可选）
 - `scipy` - 用于数值优化
 - `numpy` - 数值计算
+- `mujoco`
+- `mink`
 
-## 与架构图的对应关系
+## 与架构图的对应关系（已弃用）
 
 ```
 ┌─────────────────────┐
