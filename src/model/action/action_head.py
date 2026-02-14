@@ -78,7 +78,6 @@ class FourierActionEncoder(nn.Module):
             for layer_idx in range(mlp_depth - 1):
                 in_dim = mlp_input_dim if layer_idx == 0 else width
                 layers.append(nn.Linear(in_dim, width))
-                layers.append(nn.LayerNorm(width))
                 layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
             self.projector = nn.Linear(width, width)
@@ -89,7 +88,7 @@ class FourierActionEncoder(nn.Module):
     def initialize_weights(self):
         def _basic_init(module):
             if isinstance(module, nn.Linear):
-                torch.nn.init.kaiming_uniform_(module.weight)
+                torch.nn.init.kaiming_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
@@ -150,7 +149,6 @@ class MLPProjector(nn.Module):
                 out_dim = width if layer_idx < depth - 1 else output_dim
                 layers.append(nn.Linear(in_dim, out_dim))
                 if layer_idx < depth - 1:
-                    layers.append(nn.LayerNorm(width))
                     layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
             self.final_layer_norm = nn.LayerNorm(output_dim) if final_layer_norm else None
@@ -159,7 +157,7 @@ class MLPProjector(nn.Module):
     def initialize_weights(self):
         def _basic_init(module):
             if isinstance(module, nn.Linear):
-                torch.nn.init.kaiming_uniform_(module.weight)
+                torch.nn.init.kaiming_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
