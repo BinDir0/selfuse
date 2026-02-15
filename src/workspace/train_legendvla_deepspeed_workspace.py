@@ -203,6 +203,18 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         else: 
             model.freeze_non_lora_weights_in_vlm()
 
+        self.grad_stats = {}
+        def get_grad_hook(param):
+            def hook(grad):
+                # 这里的 grad 是当前 rank 上的梯度分片
+                # 我们计算它的 norm（或者 mean）
+                if grad is not None:
+                    # 注意：ZeRO-2 下这是局部梯度的 norm，足以监控“是否有梯度产生”
+                    self.grad_stats[id(param)] = grad.detach()
+                return grad
+            return hook
+        for _, param in model.named_parameters(): 
+            param.register_hook(get_grad_hook(param))
         diffloss_trainable_paramters = self.get_grouped_parameters(
             model.diffloss_parameters,
             cfg.optimizer.diffloss,
@@ -375,6 +387,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                         if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
                             self.tracker.track()
+                        # Clear hook-captured grad stats for this step
+                        self.grad_stats.clear()
                         # Forward pass
                         with accelerator.autocast():
                             raw_loss = self.model(self.objective_func, inputs)
@@ -390,8 +404,35 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             self.tracker.report()
                             self.tracker.stop()
 
+                        should_record = (
+                            accelerator.sync_gradients
+                            and (self.update_step % log_interval == 0)
+                        )
                         # Gradient clipping
                         total_norm = None
+                        part_grad_norms = None
+                        if accelerator.sync_gradients and should_record:
+                            part_grad_norms = {}
+                            unwrapped_model = accelerator.unwrap_model(self.model)
+                            part_params = {
+                                "action_expert": unwrapped_model.action_expert_parameters,
+                                "vlm": unwrapped_model.lora_trainable_vlm_parameters if cfg.lora else unwrapped_model.trainable_vlm_parameters,
+                                "diffloss": unwrapped_model.diffloss_parameters,
+                            }
+                            def grad_stats_l2_norm(params):
+                                total_sq = None
+                                for param in params:
+                                    grad = self.grad_stats.get(id(param))
+                                    if grad is None:
+                                        continue
+                                    grad = grad.float()
+                                    sq = torch.sum(grad * grad)
+                                    total_sq = sq if total_sq is None else total_sq + sq
+                                if total_sq is None:
+                                    return None
+                                return torch.sqrt(total_sq)
+                            for name, params in part_params.items(): 
+                                part_grad_norms[name] = grad_stats_l2_norm(params)
                         if accelerator.sync_gradients and cfg.training.clipping.enabled:
                             total_norm = accelerator.clip_grad_norm_(
                                 self.model.parameters(), 
@@ -413,10 +454,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             # update model averaging
                             self.model_averaging.maybe_update(self.update_step)
 
-                        should_record = (
-                            accelerator.sync_gradients
-                            and (self.update_step % log_interval == 0)
-                        )
                         should_eval = (
                             accelerator.sync_gradients
                             and val_dataloader is not None
@@ -464,6 +501,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             })
                             if total_norm is not None:
                                 step_log['grad_norm'] = total_norm
+                            if part_grad_norms is not None:
+                                step_log.update({
+                                    'grad_norm_action_expert': part_grad_norms["action_expert"],
+                                    'grad_norm_vlm': part_grad_norms["vlm"],
+                                    'grad_norm_diffloss': part_grad_norms["diffloss"],
+                                })
                             with torch.no_grad():
                                 unwrapped_model = accelerator.unwrap_model(self.model)
                                 if cfg.training.train_vlm:
