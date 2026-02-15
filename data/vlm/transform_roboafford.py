@@ -18,6 +18,7 @@ import json
 import shutil
 import re
 import time
+import io
 from PIL import Image
 from tqdm import tqdm
 
@@ -61,6 +62,34 @@ SEED = 42
 # ================================================
 
 
+def clean_image_metadata(img):
+    """
+    Remove all PNG metadata by re-encoding the image.
+    This prevents MAX_TEXT_CHUNK errors during training.
+    
+    Args:
+        img: PIL Image object
+        
+    Returns:
+        PIL Image object without metadata
+    """
+    if img is None:
+        return None
+    
+    # Convert to RGB if needed
+    if img.mode not in ('RGB', 'L'):
+        img = img.convert('RGB')
+    
+    # Re-encode to remove all metadata
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG', optimize=True)
+    buffer.seek(0)
+    clean_img = Image.open(buffer)
+    clean_img.load()  # Force load the image data
+    
+    return clean_img
+
+
 def normalize_coordinates_in_text(text, img_width, img_height):
     """Normalize absolute pixel coordinates to [0, 1] range."""
     def normalize_match(match):
@@ -90,7 +119,8 @@ def load_image(image_path):
         return None
     
     if os.path.exists(full_path):
-        return Image.open(full_path).convert('RGB')
+        img = Image.open(full_path).convert('RGB')
+        return clean_image_metadata(img)  # Clean PNG metadata
     return None
 
 

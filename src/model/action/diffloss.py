@@ -4,6 +4,7 @@ from torch.utils.checkpoint import checkpoint
 import math
 
 from src.utils import create_diffusion
+from src.model.common.modules import SinusoidalPosEmb, TimeEncoder
 
 
 def modulate(x, shift, scale):
@@ -101,10 +102,6 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
-
-# -----------------------------------------------------------------------------
-# Original MLP for Diffusion (predicts noise + variance)
-# -----------------------------------------------------------------------------
 class SimpleMLPAdaLN(nn.Module):
     """
     The MLP for Diffusion Loss.
@@ -206,10 +203,6 @@ class SimpleMLPAdaLN(nn.Module):
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
 
-
-# -----------------------------------------------------------------------------
-# New: Flow Matching MLP (predicts velocity only)
-# -----------------------------------------------------------------------------
 class FlowMatchingMLP(nn.Module):
     """
     Specialized MLP for Flow Matching.
@@ -222,13 +215,19 @@ class FlowMatchingMLP(nn.Module):
         model_channels,
         z_channels,
         num_res_blocks,
-        grad_checkpointing=False
+        grad_checkpointing=False,
+        time_min_period=0.0003,
+        time_max_period=10000.0
     ):
         super().__init__()
         self.in_channels = in_channels
         self.grad_checkpointing = grad_checkpointing
 
-        self.time_embed = TimestepEmbedder(model_channels)
+        # Use Flow Matching time embedding (matching legendvla.py)
+        self.time_embed = nn.Sequential(
+            SinusoidalPosEmb(model_channels, time_min_period, time_max_period),
+            TimeEncoder(model_channels),
+        )
         self.cond_embed = nn.Linear(z_channels, model_channels)
         self.input_proj = nn.Linear(in_channels, model_channels)
 
@@ -250,9 +249,9 @@ class FlowMatchingMLP(nn.Module):
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
         
-        # Initialize timestep embedding
-        nn.init.normal_(self.time_embed.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.time_embed.mlp[2].weight, std=0.02)
+        # Initialize time embedding (TimeEncoder's linear layers)
+        nn.init.normal_(self.time_embed[1].linear_1.weight, std=0.02)
+        nn.init.normal_(self.time_embed[1].linear_2.weight, std=0.02)
 
         # Zero-out adaLN modulation
         for block in self.res_blocks:
@@ -273,12 +272,15 @@ class FlowMatchingMLP(nn.Module):
             t: [B] float, continuous time in [0, 1]
             c: [B, Z] conditioning
         """
+        # Ensure all inputs have the same dtype as model weights (handles mixed precision)
+        model_dtype = self.input_proj.weight.dtype
+        x = x.to(dtype=model_dtype)
+        t = t.to(dtype=model_dtype)
+        c = c.to(dtype=model_dtype)
+        
         x = self.input_proj(x)
         
-        # Key: Scale continuous time [0, 1] to [0, 1000] for better embedding
-        # TimestepEmbedder uses sin/cos, so if t only ranges [0, 1], 
-        # frequency variation is too small for good discrimination
-        t_emb = self.time_embed(t * 1000.0)
+        t_emb = self.time_embed(t)
         
         c_emb = self.cond_embed(c)
         y = t_emb + c_emb
@@ -326,13 +328,24 @@ class DiffLoss(nn.Module):
         grad_checkpointing=False,
         use_ddim_sampling=False,
         use_flow_matching=False,
-        flow_sigma_min=0.001,
+        flow_sig_min=0.001,
+        time_min_period=0.0003,  # Min period for Flow Matching time embedding
+        time_max_period=10000.0,  # Max period for Flow Matching time embedding
+        flow_sampling="beta",  # Time sampling strategy: "uniform" or "beta"
+        flow_alpha=1.5,  # Beta distribution alpha parameter
+        flow_beta=1.0,  # Beta distribution beta parameter
     ):
         super(DiffLoss, self).__init__()
         self.in_channels = target_channels
         self.use_ddim_sampling = use_ddim_sampling
         self.use_flow_matching = use_flow_matching
-        self.flow_sigma_min = flow_sigma_min
+        self.flow_sig_min = flow_sig_min
+        
+        # Flow matching time sampling
+        self.flow_sampling = flow_sampling
+        if self.flow_sampling == "beta":
+            self.flow_t_max = 1.0 - flow_sig_min
+            self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
         
         # Choose network architecture based on configuration
         if self.use_flow_matching:
@@ -341,7 +354,9 @@ class DiffLoss(nn.Module):
                 model_channels=width,
                 z_channels=z_channels,
                 num_res_blocks=depth,
-                grad_checkpointing=grad_checkpointing
+                grad_checkpointing=grad_checkpointing,
+                time_min_period=time_min_period,
+                time_max_period=time_max_period
             )
             # FM doesn't need train_diffusion
             self.train_diffusion = None
@@ -367,7 +382,30 @@ class DiffLoss(nn.Module):
             
         self.gen_diffusion = create_diffusion(timestep_respacing=timestep_respacing, noise_schedule="cosine")
 
-    def forward(self, target, z, mask=None):
+    def sample_time(self, bsz: int, device: torch.device) -> torch.FloatTensor:
+        """
+        Sample time steps for flow matching training.
+        Uses configurable sampling strategy (uniform or beta distribution).
+        
+        Args:
+            bsz: Batch size
+            device: Target device
+            
+        Returns:
+            torch.FloatTensor: [bsz] Time steps in [0, 1]
+        """
+        if self.flow_sampling == "uniform":
+            eps = 1e-5
+            t = (torch.rand(1, device=device) + torch.arange(bsz, device=device) / bsz) % (1 - eps)
+        elif self.flow_sampling == "beta":
+            z = self.flow_beta_dist.sample((bsz,)).to(device)
+            t = self.flow_t_max * (1 - z)  # flip and shift
+        else:
+            # Fallback to uniform
+            t = torch.rand(bsz, device=device)
+        return t
+
+    def forward(self, target, z, mask=None, t=None):
         """
         Compute loss based on configuration.
         
@@ -375,12 +413,13 @@ class DiffLoss(nn.Module):
             target: [B, C] Ground truth action
             z: [B, D] Condition embedding
             mask: Optional mask for valid elements
+            t: Optional [B] timesteps for flow matching (if None, will sample internally)
             
         Returns:
             Loss value
         """
         if self.use_flow_matching:
-            return self.flow_matching_loss(target, z, mask)
+            return self.flow_matching_loss(target, z, mask, t)
         else:
             return self.diffusion_loss(target, z, mask)
     
@@ -394,14 +433,25 @@ class DiffLoss(nn.Module):
             loss = (loss * mask).sum() / mask.sum().clamp(min=1)
         return loss.mean()
     
-    def flow_matching_loss(self, target, z, mask=None):
+    def flow_matching_loss(self, target, z, mask=None, t=None):
         """
         Flow Matching Loss (Pure Continuous Time).
         
+        Args:
+            target: [B, C] Ground truth action
+            z: [B, D] Condition embedding
+            mask: Optional mask for valid elements
+            t: Optional [B] timesteps (if None, samples uniformly)
+        
         Predicts velocity field: v_target = x1 - (1 - sigma_min) * x0
         """
-        # 1. Sample continuous time t ∈ [0, 1]
-        t = torch.rand(target.shape[0], device=target.device)
+        # 1. Sample continuous time t ∈ [0, 1] (if not provided)
+        if t is None:
+            # Sample using configured strategy (beta or uniform)
+            t = self.sample_time(target.shape[0], target.device)
+        
+        # Ensure t matches target dtype (handles mixed precision training)
+        t = t.to(dtype=target.dtype)
         
         # 2. Sample noise and construct interpolation
         x0 = torch.randn_like(target)  # Noise
@@ -409,13 +459,13 @@ class DiffLoss(nn.Module):
         
         # OT path interpolation: x_t = (1 - (1 - sigma_min) * t) * x0 + t * x1
         t_expanded = t.view(-1, 1)
-        a_t = 1 - (1 - self.flow_sigma_min) * t_expanded
+        a_t = 1 - (1 - self.flow_sig_min) * t_expanded
         b_t = t_expanded
         x_t = a_t * x0 + b_t * x1
         
         # 3. Compute target velocity
         # v_target = x1 - (1 - sigma_min) * x0
-        v_target = x1 - (1 - self.flow_sigma_min) * x0
+        v_target = x1 - (1 - self.flow_sig_min) * x0
         
         # 4. Model prediction (pass float t, network handles embedding scaling)
         v_pred = self.net(x_t, t, c=z)
@@ -476,12 +526,6 @@ class DiffLoss(nn.Module):
     def flow_matching_sample(self, z, temperature=1.0, cfg=1.0, num_steps=None):
         """
         Flow Matching Euler ODE Solver.
-        
-        Args:
-            z: [B, D] Condition embedding
-            temperature: Controls initial noise magnitude
-            cfg: Classifier-free guidance scale
-            num_steps: Number of Euler integration steps
         """
         batch_size = z.shape[0]
         device = z.device
@@ -489,24 +533,25 @@ class DiffLoss(nn.Module):
         if num_steps is None:
             num_steps = self.gen_diffusion.num_timesteps
         
-        # 1. Initial noise
+        # Initial noise
         x = torch.randn(batch_size, self.in_channels, device=device) * temperature
         
-        # 2. CFG setup
+        # CFG setup
         if cfg != 1.0:
             x = torch.cat([x, x], dim=0)
-            z_in = torch.cat([z, z], dim=0)
+            
+            z_uncond = torch.zeros_like(z) 
+            z_in = torch.cat([z, z_uncond], dim=0) 
         else:
             z_in = z
 
-        # 3. Euler integration loop (t from 0 to 1)
+        # Euler integration loop (t from 0 to 1)
         dt = 1.0 / num_steps
         t_curr = torch.zeros(x.shape[0], device=device)
         
         for step in range(num_steps):
             # Model predicts velocity
             if cfg != 1.0:
-                # forward_with_cfg internally does split and combine
                 v_pred = self.net.forward_with_cfg(x, t_curr, z_in, cfg_scale=cfg)
             else:
                 v_pred = self.net(x, t_curr, c=z_in)
@@ -515,7 +560,7 @@ class DiffLoss(nn.Module):
             x = x + v_pred * dt
             t_curr = t_curr + dt
             
-        # 4. If using CFG, extract first half
+        # If using CFG, extract first half (Conditional result)
         if cfg != 1.0:
             x, _ = x.chunk(2, dim=0)
             

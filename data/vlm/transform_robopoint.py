@@ -1,5 +1,6 @@
 import os
 import json
+import io
 from PIL import Image
 from datasets import Dataset, Features, Sequence, Value, Image as HFImage, concatenate_datasets
 from datasets.features import List
@@ -30,6 +31,34 @@ MAX_SAMPLES = None  # Set to None to process all samples, or a number like 100 f
 BATCH_SIZE = 50000  # Process 50k samples at a time to avoid memory issues
 
 # =========================================================
+
+def clean_image_metadata(img):
+    """
+    Remove all PNG metadata by re-encoding the image.
+    This prevents MAX_TEXT_CHUNK errors during training.
+    
+    Args:
+        img: PIL Image object
+        
+    Returns:
+        PIL Image object without metadata
+    """
+    if img is None:
+        return None
+    
+    # Convert to RGB if needed
+    if img.mode not in ('RGB', 'L'):
+        img = img.convert('RGB')
+    
+    # Re-encode to remove all metadata
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG', optimize=True)
+    buffer.seek(0)
+    clean_img = Image.open(buffer)
+    clean_img.load()  # Force load the image data
+    
+    return clean_img
+
 
 def load_robopoint_json():
     """Load RoboPoint JSON data into memory, filtering out samples without 'image' field."""
@@ -112,8 +141,9 @@ def convert_robopoint_batch(batch):
         full_img_path = os.path.join(IMAGE_ROOT_DIR, rel_path)
         
         try:
-            # Load image
+            # Load image and remove metadata
             img_obj = Image.open(full_img_path).convert("RGB")
+            img_obj = clean_image_metadata(img_obj)  # Clean PNG metadata
             
             # Extract conversation
             human_text = conversations[0].get('value', '')

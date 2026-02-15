@@ -173,7 +173,7 @@ training:
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
-  resume_checkpoint_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.14/04.44_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=5000-eval_l1_loss=0.0346
+  resume_checkpoint_path: #/share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.14/04.44_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=5000-eval_l1_loss=0.0346
   normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07-mix/normalizer.pkl
   num_epochs: 2
   use_bf16: True
@@ -400,11 +400,16 @@ policy:
     grad_checkpointing: False
     use_ddim_sampling: False  # Use DDIM sampling for diffusion (ignored for flow matching)
     # Flow Matching options
-    use_flow_matching: False  # Set to True to use Flow Matching instead of traditional Diffusion
-    flow_sigma_min: 0.001     # Minimum noise level for Flow Matching (only used when use_flow_matching=True)
-    # Note: DiffLoss uses standard DiT-style sinusoidal encoding (different from action expert)
-    # When use_flow_matching=True, uses FlowMatchingMLP (single output for velocity)
-    # When use_flow_matching=False, uses SimpleMLPAdaLN (double output for noise+variance)
+    use_flow_matching: True  # Set to True to use Flow Matching instead of traditional Diffusion
+    flow_sig_min: ${flow.sig_min}  # Minimum noise level for Flow Matching
+    # Time embedding for Flow Matching (only used when use_flow_matching=True)
+    time_min_period: ${time_min_period}   
+    time_max_period: ${time_max_period}
+    # Flow matching time sampling strategy (matches main flow matching)
+    flow_sampling: ${flow.sampling}  # "uniform" or "beta"
+    flow_alpha: ${flow.alpha}        # Beta distribution alpha parameter (1.5)
+    flow_beta: ${flow.beta}          # Beta distribution beta parameter (1.0)  
+
 
 logging:
   project: diffloss-multistep
