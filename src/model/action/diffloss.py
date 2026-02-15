@@ -272,17 +272,14 @@ class FlowMatchingMLP(nn.Module):
             t: [B] float, continuous time in [0, 1]
             c: [B, Z] conditioning
         """
-        # Ensure all inputs have the same dtype as model weights (handles mixed precision)
+        # Cast inputs to model weight dtype (beta sampling produces float32 t,
+        # which promotes x_t to float32 via interpolation, mismatching bf16 weights)
         model_dtype = self.input_proj.weight.dtype
-        x = x.to(dtype=model_dtype)
-        t = t.to(dtype=model_dtype)
-        c = c.to(dtype=model_dtype)
+        x = self.input_proj(x.to(dtype=model_dtype))
         
-        x = self.input_proj(x)
+        t_emb = self.time_embed(t.to(dtype=model_dtype))
         
-        t_emb = self.time_embed(t)
-        
-        c_emb = self.cond_embed(c)
+        c_emb = self.cond_embed(c.to(dtype=model_dtype))
         y = t_emb + c_emb
 
         if self.grad_checkpointing and not torch.jit.is_scripting():
@@ -334,6 +331,7 @@ class DiffLoss(nn.Module):
         flow_sampling="beta",  # Time sampling strategy: "uniform" or "beta"
         flow_alpha=1.5,  # Beta distribution alpha parameter
         flow_beta=1.0,  # Beta distribution beta parameter
+        num_inference_steps=10,  # Euler ODE steps for Flow Matching sampling
     ):
         super(DiffLoss, self).__init__()
         self.in_channels = target_channels
@@ -358,8 +356,9 @@ class DiffLoss(nn.Module):
                 time_min_period=time_min_period,
                 time_max_period=time_max_period
             )
-            # FM doesn't need train_diffusion
             self.train_diffusion = None
+            self.gen_diffusion = None
+            self.num_inference_steps = num_inference_steps
         else:
             self.net = SimpleMLPAdaLN(
                 in_channels=target_channels,
@@ -371,16 +370,15 @@ class DiffLoss(nn.Module):
             )
             self.train_diffusion = create_diffusion(timestep_respacing="", noise_schedule="cosine")
 
-        # Generation diffusion scheduler (for FM, mainly use its num_steps parameter)
-        if self.use_ddim_sampling:
-            if isinstance(num_sampling_steps, str) and num_sampling_steps.startswith("ddim"):
-                timestep_respacing = num_sampling_steps
+            # Diffusion sampling scheduler
+            if self.use_ddim_sampling:
+                if isinstance(num_sampling_steps, str) and num_sampling_steps.startswith("ddim"):
+                    timestep_respacing = num_sampling_steps
+                else:
+                    timestep_respacing = f"ddim{num_sampling_steps}"
             else:
-                timestep_respacing = f"ddim{num_sampling_steps}"
-        else:
-            timestep_respacing = num_sampling_steps
-            
-        self.gen_diffusion = create_diffusion(timestep_respacing=timestep_respacing, noise_schedule="cosine")
+                timestep_respacing = num_sampling_steps
+            self.gen_diffusion = create_diffusion(timestep_respacing=timestep_respacing, noise_schedule="cosine")
 
     def sample_time(self, bsz: int, device: torch.device) -> torch.FloatTensor:
         """
@@ -449,9 +447,6 @@ class DiffLoss(nn.Module):
         if t is None:
             # Sample using configured strategy (beta or uniform)
             t = self.sample_time(target.shape[0], target.device)
-        
-        # Ensure t matches target dtype (handles mixed precision training)
-        t = t.to(dtype=target.dtype)
         
         # 2. Sample noise and construct interpolation
         x0 = torch.randn_like(target)  # Noise
@@ -531,7 +526,7 @@ class DiffLoss(nn.Module):
         device = z.device
         
         if num_steps is None:
-            num_steps = self.gen_diffusion.num_timesteps
+            num_steps = self.num_inference_steps
         
         # Initial noise
         x = torch.randn(batch_size, self.in_channels, device=device) * temperature

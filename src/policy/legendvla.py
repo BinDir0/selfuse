@@ -1944,6 +1944,7 @@ class LegendVLAInference(nn.Module):
             self.model.diffloss.use_ddim_sampling = diffusion_use_ddim_sampling
         if flow_sampling_steps:
             self.model.num_inference_steps = flow_sampling_steps
+            self.model.diffloss.num_inference_steps = flow_sampling_steps
 
         # Setup Data Processor (Vision/Language)
         self.processor = hydra.utils.instantiate(model_cfg.vla_processor)

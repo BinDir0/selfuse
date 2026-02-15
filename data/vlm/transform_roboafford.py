@@ -19,8 +19,11 @@ import shutil
 import re
 import time
 import io
-from PIL import Image
+from PIL import Image, PngImagePlugin
 from tqdm import tqdm
+
+# CRITICAL: Increase PIL's limit for large PNG iCCP chunks BEFORE loading any images
+PngImagePlugin.MAX_TEXT_CHUNK = 100 * (1024**2)  # 100MB (default is 1MB)
 
 # CRITICAL: Set HuggingFace cache BEFORE importing datasets
 HF_CACHE_DIR = "/share_data/zengfanlian/.cache/huggingface"

@@ -408,7 +408,8 @@ policy:
     # Flow matching time sampling strategy (matches main flow matching)
     flow_sampling: ${flow.sampling}  # "uniform" or "beta"
     flow_alpha: ${flow.alpha}        # Beta distribution alpha parameter (1.5)
-    flow_beta: ${flow.beta}          # Beta distribution beta parameter (1.0)  
+    flow_beta: ${flow.beta}          # Beta distribution beta parameter (1.0)
+    num_inference_steps: ${flow.num_inference_steps}  # Euler ODE steps for FM sampling
 
 
 logging:
