@@ -27,7 +27,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 import mink  # Mink IK求解器
 
 # Import connector configuration parameters
-from connector_config import (
+from arm.connector_config import (
     LEFT_CONNECTOR_OFFSET_1_1, LEFT_CONNECTOR_RPY_1_1,
     LEFT_CONNECTOR_OFFSET_1_2, LEFT_CONNECTOR_RPY_1_2,
     RIGHT_CONNECTOR_OFFSET_2_1, RIGHT_CONNECTOR_RPY_2_1,
@@ -398,6 +398,9 @@ class ArmIKNode(Node):
                 with self.mode_lock:
                     # 切换模式
                     self.mode = "reset"
+            
+            if self.enable_viewer:
+                self.viewer.sync()
 
         elif cmd == "inference":
             self.get_logger().info("▶️ 切换到 inference 模式")
