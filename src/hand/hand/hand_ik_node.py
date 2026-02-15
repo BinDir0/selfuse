@@ -40,11 +40,111 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from geometry_msgs.msg import PoseArray
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
+from scipy.spatial.transform import Rotation as R
 
 from hand.hand_ik_solver import FINGER_NAMES, JOINT_NAMES, HandIKSolver
 
 # keypoints 消息中期望的 Pose 数量 (5 fingers)
 _EXPECTED_NUM_FINGERS = len(FINGER_NAMES)
+
+
+def _compute_wrist_to_hand_base_transform(arm='left'):
+    """
+    Compute the fixed 4x4 homogeneous transform: hand_base pose in wrist frame.
+
+    Combines two sub-transforms derived from hardware geometry:
+      1. wrist → TCP   (from arm connector, see arm_ik_node.py _hand_to_tcp)
+      2. TCP → hand_base (from hand connector, see visualize_psirobot_with_rgbd_calib.py)
+
+    Naming conventions (across different code files):
+      - wrist     : actual wrist joint  ("hand" in arm_ik_node.py)
+      - tcp       : tool center point   ("wrist" in visualize code, "tcp" in arm_ik_node.py)
+      - hand_base : dexterous hand base ("hand_base" in visualize code)
+
+    IMPORTANT: This function must be kept in sync with hand_fk_node.py.
+
+    Args:
+        arm: 'left' or 'right'
+
+    Returns:
+        T_wrist_hand_base: 4x4 numpy array
+    """
+    # ---- Part 1: wrist → TCP (arm_ik_node.py: _hand_to_tcp) ----
+    # connector → tcp: z-axis translation 0.0345m
+    T_conn2tcp = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0.0345],
+        [0, 0, 0, 1]
+    ])
+
+    # wrist(hand) → connector: pure rotation (left/right differ)
+    if arm == 'left':
+        T_wrist2conn = np.array([
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [1, 0, 0, 0],
+            [0, 0, 0, 1]
+        ])
+    elif arm == 'right':
+        T_wrist2conn = np.array([
+            [0,  1,  0, 0],
+            [0,  0, -1, 0],
+            [-1, 0,  0, 0],
+            [0,  0,  0, 1]
+        ])
+    else:
+        raise ValueError(f"Invalid arm: '{arm}'. Must be 'left' or 'right'.")
+
+    # T_wrist2tcp maps wrist-frame coords to tcp-frame coords
+    T_wrist2tcp = T_conn2tcp @ T_wrist2conn
+
+    # T_wrist_tcp = pose of TCP in wrist frame = inv(T_wrist2tcp)
+    R_wt = T_wrist2tcp[:3, :3]
+    t_wt = T_wrist2tcp[:3, 3]
+    T_wrist_tcp = np.eye(4)
+    T_wrist_tcp[:3, :3] = R_wt.T
+    T_wrist_tcp[:3, 3] = -R_wt.T @ t_wt
+
+    # ---- Part 2: TCP → hand_base (visualize_psirobot_with_rgbd_calib.py) ----
+    # Connector geometry parameters (left/right differ)
+    if arm == 'left':
+        offset_1 = np.array([-0.0004094, 0.0000127, 0.0036907])
+        rpy_1 = np.array([0.0, 0.0000038, 1.5707998])
+        offset_2 = np.array([0.0, 0.0, 0.0036596])
+        rpy_2 = np.array([0.0, 0.0, 0.0])
+    else:  # right
+        offset_1 = np.array([-0.0004101, -0.0000127, 0.0036911])
+        rpy_1 = np.array([0.0, -0.0000037, -1.5707928])
+        offset_2 = np.array([0.0, -0.0000002, 0.0036597])
+        rpy_2 = np.array([0.0000001, -0.0000001, 3.1415925])
+
+    rot_1 = R.from_euler('xyz', rpy_1).as_matrix()
+    rot_2 = R.from_euler('xyz', rpy_2).as_matrix()
+    hand_z_offset = 0.0105
+
+    # Translation of hand_base in TCP frame
+    # Derived by expanding the stepwise position computation in visualize code:
+    #   hand_base_pos = tcp_pos + R_tcp @ (offset_1 + rot_1 @ offset_2
+    #                                      + rot_1 @ rot_2 @ [0,0,h])
+    t_tcp_hb = (offset_1
+                + rot_1 @ offset_2
+                + rot_1 @ rot_2 @ np.array([0.0, 0.0, hand_z_offset]))
+
+    # Rotation of hand_base relative to TCP: R_z(180°)
+    # From visualize code: hand_base_mat = tcp_mat @ R_z_180
+    R_z_180 = np.array([
+        [-1.0,  0.0, 0.0],
+        [ 0.0, -1.0, 0.0],
+        [ 0.0,  0.0, 1.0]
+    ])
+
+    T_tcp_hb = np.eye(4)
+    T_tcp_hb[:3, :3] = R_z_180
+    T_tcp_hb[:3, 3] = t_tcp_hb
+
+    # ---- Compose: wrist → TCP → hand_base ----
+    return T_wrist_tcp @ T_tcp_hb
 
 
 class HandIKNode(Node):
@@ -122,18 +222,11 @@ class HandIKNode(Node):
         # ----------------------------------------------------------
         # 手部安装变换: wrist frame <-> hand_base frame (MuJoCo 模型坐标系)
         # ----------------------------------------------------------
-        # 重要: 必须与 Hand FK Node 中的 T_wrist_hand_base 完全一致!
+        # 综合 arm_ik_node.py (wrist→TCP) 和 visualize (TCP→hand_base) 的完整变换
         # FK 使用 T_wrist_hand_base 将 hand_base → wrist (输出给 Model Interface)
         # IK 使用其逆矩阵 T_hand_base_wrist 将 wrist → hand_base (输入给 IK solver)
-        #
-        # 当前配置: Z 轴 180° 旋转 (与 hand_fk_node.py 一致)
-        # 即 hand_base 相对于 wrist 绕 Z 轴旋转了 180°
-        self._T_wrist_hand_base = np.eye(4)
-        self._T_wrist_hand_base[:3, :3] = np.array([
-            [-1.0,  0.0,  0.0],
-            [ 0.0, -1.0,  0.0],
-            [ 0.0,  0.0,  1.0],
-        ])  # = R.from_euler('z', 180, degrees=True).as_matrix()
+        # 重要: 必须与 Hand FK Node 中的 T_wrist_hand_base 完全一致!
+        self._T_wrist_hand_base = _compute_wrist_to_hand_base_transform(self.hand_side)
 
         # 逆变换: wrist → hand_base
         self._T_hand_base_wrist = np.linalg.inv(self._T_wrist_hand_base)
@@ -142,8 +235,8 @@ class HandIKNode(Node):
         self._t_hand_base_wrist = self._T_hand_base_wrist[:3, 3]
 
         self.get_logger().info(
-            f"Wrist→hand_base transform: Z-180° rotation "
-            f"(consistent with Hand FK Node)"
+            f"Wrist→hand_base transform: "
+            f"translation={np.array2string(self._T_wrist_hand_base[:3, 3], precision=6)}"
         )
 
         # ----------------------------------------------------------
