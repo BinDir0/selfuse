@@ -175,7 +175,6 @@ python rerun_inference_vis.py  \
   --min_depth   defualt 0.1\
   --max_depth   defualt 1.5\
   --save_path \
-  --use_relative_action default True
 ```
 Note:如果没有指定frame_id的话，将会随机自动选择（会确保所取的位置距离episode结束有足够30帧）
 ### 输出示例

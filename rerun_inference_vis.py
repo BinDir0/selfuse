@@ -6,6 +6,7 @@ import rerun as rr
 import numpy as np
 import collections
 import zarr
+from omegaconf import OmegaConf
 
 from src.utils.geometry import (
     homo_matrix_from_trans_6drot,
@@ -626,10 +627,46 @@ def calculate_position_errors(gt_hands_data, pred_hands_data, frame_idx):
     return errors
 
 
+INFERENCE_CONFIG_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "src", "config", "experiment", "inference_pretrain_legendvla.yaml",
+)
+
+
+def load_config_from_inference_config():
+    """Load use_relative_action and motion_type from the fixed inference config.
+
+    Reads ``inference_pretrain_legendvla.yaml``, follows
+    ``inference.model_config_path`` to the training config, and extracts
+    dataset / shape_meta parameters.
+    """
+    if not os.path.exists(INFERENCE_CONFIG_PATH):
+        print(f"Warning: inference config not found: {INFERENCE_CONFIG_PATH}")
+        return {}
+
+    inference_cfg = OmegaConf.load(INFERENCE_CONFIG_PATH)
+    result = {}
+
+    model_config_path = OmegaConf.select(inference_cfg, "inference.model_config_path")
+    if model_config_path and os.path.exists(model_config_path):
+        model_cfg = OmegaConf.load(model_config_path)
+        result["use_relative_action"] = OmegaConf.select(
+            model_cfg, "dataset.vla_dataset.use_relative_action", default=None
+        )
+        result["motion_type"] = OmegaConf.select(
+            model_cfg, "shape_meta.obs.state.type", default=None
+        )
+    else:
+        if model_config_path:
+            print(f"Warning: model_config_path not found: {model_config_path}")
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--inference_zarr_path", type=str, required=True, help="Path to inference results zarr file (contains pred_actions, gt_actions, etc.).")
-    parser.add_argument("--origin_zarr_path", type=str, required=True, help="Path to original dataset zarr file (which contains gt_action and pred_action).")
+    parser.add_argument("--origin_zarr_path", type=str, default=None, help="Path to original dataset zarr file. If None, read from zarr attrs.")
     parser.add_argument("--sample_idx", type=int, default=None, help="Index of sample to load from inference results. If None, randomly select one.")
     parser.add_argument("--target_width", type=int, default=1920, help="Target image width. If None, use original width.")
     parser.add_argument("--target_height", type=int, default=1080, help="Target image height. If None, use original height.")
@@ -638,12 +675,15 @@ def main():
     parser.add_argument("--max_depth", type=float, default=1.5)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--save_path", type=str, default=None, help="Path to save rrd file. If None, use spawn/notebook_show.")
-    parser.add_argument("--use_relative_action", type=lambda x: (str(x).lower() == 'true'), default=None, help="Whether actions are relative. If None, default to True.")
-    parser.add_argument("--motion_type", type=str, default="fingertips", choices=['fingertips', 'mano'], help="Motion type to visualize.")
     args = parser.parse_args()
 
     if not os.path.exists(args.inference_zarr_path):
         raise FileNotFoundError(f"Inference zarr file not found: {args.inference_zarr_path}")
+
+    config_defaults = load_config_from_inference_config()
+    use_relative_action = config_defaults.get("use_relative_action")
+    motion_type = config_defaults.get("motion_type")
+    print(f"Loaded from config: use_relative_action={use_relative_action}, motion_type={motion_type}")
 
     print(f"Loading data from inference zarr: {args.inference_zarr_path}")
     zarr_data = get_data_from_zarr(
@@ -668,7 +708,7 @@ def main():
     gt_actions = zarr_data['gt_actions']  # (T, 48)
     pred_actions = zarr_data['pred_actions']  # (T, 48)
     
-    if args.motion_type == 'mano' and zarr_data['mano_gt'] is not None:
+    if motion_type == 'mano' and zarr_data['mano_gt'] is not None:
         gt_hands_data = gt_actions_to_hands_data(
             gt_actions[:, :18], 
             motion_type='mano', 
@@ -852,7 +892,7 @@ def main():
                         print(f"Translation: {wrist_pose_camera[:3, 3]}")
                         print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
                     
-                    if args.motion_type == 'mano' and 'verts' in gt_hands_data[hand_name]:
+                    if motion_type == 'mano' and 'verts' in gt_hands_data[hand_name]:
                         viz_gt.log_mesh(
                             root_3d_path="/world/camera_pose/hands/gt",
                             hand_name=hand_name,
@@ -878,7 +918,7 @@ def main():
                     print(f"Translation: {wrist_pose_camera[:3, 3]}")
                     print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
                 
-                if args.motion_type == 'mano' and 'verts' in pred_hands_data[hand_name]:
+                if motion_type == 'mano' and 'verts' in pred_hands_data[hand_name]:
                     viz_pred.log_mesh(
                         root_3d_path="/world/camera_pose/hands/pred",
                         hand_name=hand_name,
