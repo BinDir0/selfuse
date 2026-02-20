@@ -1035,19 +1035,19 @@ class LegendVLA(nn.Module):
             dtype=pixel_values.dtype
         )
         
-        with log_elapsed_time(label="forward pass thru the vlm", logger=log):
-            # forward pass thru the vlm, cache the kv
-            _, kv_caches = self.joint_model(
-                attention_mask=vlm_mask,
-                position_ids_all={
-                    "vlm": vlm_position_ids,
-                },
-                embeds_all={
-                    "vlm": inputs_embeds,
-                },
-                kv_caches=kv_caches,
-                return_caches=True,
-            )
+        # with log_elapsed_time(label="forward pass thru the vlm", logger=log):
+        # forward pass thru the vlm, cache the kv
+        _, kv_caches = self.joint_model(
+            attention_mask=vlm_mask,
+            position_ids_all={
+                "vlm": vlm_position_ids,
+            },
+            embeds_all={
+                "vlm": inputs_embeds,
+            },
+            kv_caches=kv_caches,
+            return_caches=True,
+        )
         # [num_layers, B, num_heads, seq_len, seq_len]
         vlm_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
         action_expert_attn_weights = None
@@ -1057,35 +1057,35 @@ class LegendVLA(nn.Module):
             (bsz, self.horizon_steps, self.action_dim), device=device, dtype=dtype
         )
 
-        with log_elapsed_time(label="forward euler integration", logger=log):
-            # forward euler integration --- using kv caches of vlm
-            delta_t = 1.0 / self.num_inference_steps
-            t = torch.zeros(bsz, device=device, dtype=dtype)
-            for step_idx in range(self.num_inference_steps):
-                # encode action and time into embedding
-                time_cond = self.time_embedding(t)
-                # [Batch_Size, Horizon_Steps, Embed_Dim]
-                if self.action_expert_adaptive_mode:
-                    action_embeds = self.action_encoder(action)
-                else:
-                    action_embeds = self.action_encoder(action, time_cond)
-                action_embeds = action_embeds / (self.action_hidden_size**0.5)
-                # [Batch_Size, Horizon_Steps, Embed_Dim]
-                action_embeds = self.joint_model(
-                    attention_mask=action_mask,
-                    position_ids_all={"action": action_position_ids},
-                    embeds_all={"action": action_embeds},
-                    time_cond=time_cond,
-                    kv_caches=kv_caches,
-                    cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
-                )["action"]
-                if step_idx == 0:
-                    action_expert_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
-                
-                # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
-                action_vel = self.action_decoder(action_embeds)
-                action += delta_t * action_vel
-                t += delta_t
+        # with log_elapsed_time(label="forward euler integration", logger=log):
+        # forward euler integration --- using kv caches of vlm
+        delta_t = 1.0 / self.num_inference_steps
+        t = torch.zeros(bsz, device=device, dtype=dtype)
+        for step_idx in range(self.num_inference_steps):
+            # encode action and time into embedding
+            time_cond = self.time_embedding(t)
+            # [Batch_Size, Horizon_Steps, Embed_Dim]
+            if self.action_expert_adaptive_mode:
+                action_embeds = self.action_encoder(action)
+            else:
+                action_embeds = self.action_encoder(action, time_cond)
+            action_embeds = action_embeds / (self.action_hidden_size**0.5)
+            # [Batch_Size, Horizon_Steps, Embed_Dim]
+            action_embeds = self.joint_model(
+                attention_mask=action_mask,
+                position_ids_all={"action": action_position_ids},
+                embeds_all={"action": action_embeds},
+                time_cond=time_cond,
+                kv_caches=kv_caches,
+                cache_mode="append_non_active",  # use caches from other mixtures, i.e., vlm
+            )["action"]
+            if step_idx == 0:
+                action_expert_attn_weights = torch.stack(self.attn_weights, dim=0).detach().clone()
+            
+            # decode action: [Batch_Size, Horizon_Steps, Action_Dim]
+            action_vel = self.action_decoder(action_embeds)
+            action += delta_t * action_vel
+            t += delta_t
 
         if return_attn_weights:
             return action, vlm_attn_weights, action_expert_attn_weights
