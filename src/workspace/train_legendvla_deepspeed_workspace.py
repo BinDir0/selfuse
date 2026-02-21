@@ -696,11 +696,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             max_loss_sample['attn_weights'] = attn_weights[:, max_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
                             max_loss_sample['inputs'] = build_sample_inputs(max_batch_idx)
                             max_loss_sample['metadata'] = max_metadata
-                # Periodic barrier to prevent inter-rank timing drift during slow
-                # evaluation (infer_action runs Euler integration each batch).
-                # Without this, the cumulative drift may exceed NCCL timeout.
-                if (batch_idx + 1) % 10 == 0:
-                    accelerator.wait_for_everyone()
 
                 if self.cfg.training.max_eval_steps and batch_idx >= (self.cfg.training.max_eval_steps-1):
                     break
