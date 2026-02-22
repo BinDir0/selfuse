@@ -12,7 +12,7 @@ import shutil
 REFSPATIAL_ROOT = "/share_data/guantianrui/datasets/VLM/RefSpatial"
 
 # 2. Output directory for Arrow format
-OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/refspatial"
+OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/refspatial_cleaned"
 TEMP_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/refspatial_temp"
 
 # 3. Train/test split ratio
@@ -76,7 +76,43 @@ DATASET_CONFIGS = [
     },
 ]
 
+# 7. Text quality filtering
+MAX_TURN_CHARS = 500          # drop turns where user+assistant combined > this
+SLASH_REPEAT_THRESHOLD = 5    # flag if any token repeats this many times consecutively in '/' splits
+
 # =========================================================
+
+
+def has_abnormal_slash_repeat(text, threshold=SLASH_REPEAT_THRESHOLD):
+    """
+    Detect corrupted object names like 'yellow matte/yellow matte/yellow matte/...'.
+    Splits by '/' and checks for consecutive identical tokens repeating >= threshold times.
+    Short or normal patterns like 'left/right' won't trigger this.
+    """
+    parts = text.split("/")
+    if len(parts) < threshold:
+        return False
+    streak = 1
+    for i in range(1, len(parts)):
+        cur = parts[i].strip().lower()
+        prev = parts[i - 1].strip().lower()
+        if cur and cur == prev:
+            streak += 1
+            if streak >= threshold:
+                return True
+        else:
+            streak = 1
+    return False
+
+
+def is_turn_clean(user_text, assistant_text):
+    """Return True if a single QA turn passes quality filters."""
+    combined_len = len(user_text) + len(assistant_text)
+    if combined_len > MAX_TURN_CHARS:
+        return False
+    if has_abnormal_slash_repeat(user_text) or has_abnormal_slash_repeat(assistant_text):
+        return False
+    return True
 
 
 def clean_image_metadata(img):
@@ -98,7 +134,8 @@ def conversations_to_texts(conversations):
     Convert a list of {'from': 'human'/'gpt', 'value': str} pairs
     into a list of {'user': str, 'assistant': str} dicts (one per turn).
 
-    Returns None if the conversation is malformed (odd length, missing roles).
+    Turns that are too long or contain corrupted repetitive text are dropped.
+    Returns None if no valid turns remain.
     """
     if not conversations or len(conversations) < 2 or len(conversations) % 2 != 0:
         return None
@@ -112,6 +149,8 @@ def conversations_to_texts(conversations):
         user_text = human_turn.get('value', '').strip()
         assistant_text = gpt_turn.get('value', '').strip()
         if not user_text or not assistant_text:
+            continue
+        if not is_turn_clean(user_text, assistant_text):
             continue
         texts.append({"user": user_text, "assistant": assistant_text})
 
@@ -257,8 +296,17 @@ def process_sub_dataset(cfg, global_batch_idx, finevision_features):
     for batch_idx in range(num_batches):
         start_idx = batch_idx * BATCH_SIZE
         end_idx = min((batch_idx + 1) * BATCH_SIZE, total_samples)
-        batch_data = data[start_idx:end_idx]
 
+        batch_path = os.path.join(TEMP_DIR, f"batch_{global_batch_idx:06d}")
+
+        # Resume: skip if this batch was already saved
+        if os.path.exists(batch_path) and os.path.exists(os.path.join(batch_path, "dataset_info.json")):
+            print(f"\n  [Sub-batch {batch_idx + 1}/{num_batches}] SKIP (already exists: {batch_path})")
+            saved_paths.append(batch_path)
+            global_batch_idx += 1
+            continue
+
+        batch_data = data[start_idx:end_idx]
         print(f"\n  [Sub-batch {batch_idx + 1}/{num_batches}] samples {start_idx}–{end_idx}...")
 
         initial_ds = Dataset.from_list(batch_data)
@@ -266,7 +314,7 @@ def process_sub_dataset(cfg, global_batch_idx, finevision_features):
             convert_refspatial_batch,
             batched=True,
             batch_size=500,
-            num_proc=64,
+            num_proc=32,
             fn_kwargs={
                 "image_dir": image_dir,
                 "depth_dir": cfg["depth_dir"],
@@ -279,7 +327,6 @@ def process_sub_dataset(cfg, global_batch_idx, finevision_features):
 
         print(f"  Converted {len(ds)} samples (from {len(batch_data)})")
 
-        batch_path = os.path.join(TEMP_DIR, f"batch_{global_batch_idx:06d}")
         ds.save_to_disk(batch_path, num_proc=4)
         print(f"  Saved to {batch_path}")
 
@@ -294,6 +341,8 @@ def process_sub_dataset(cfg, global_batch_idx, finevision_features):
 def main():
     print("=" * 80)
     print("RefSpatial to FineVision Arrow Format Conversion")
+    print(f"  Filtering: drop turns with combined length > {MAX_TURN_CHARS} chars")
+    print(f"  Filtering: drop turns with slash-repeat >= {SLASH_REPEAT_THRESHOLD}")
     print("=" * 80)
 
     finevision_features = Features({
@@ -314,10 +363,7 @@ def main():
         "relevance_min": Value("int64"),
     })
 
-    # Clean up temp directory
-    if os.path.exists(TEMP_DIR):
-        print(f"Removing existing temp directory: {TEMP_DIR}")
-        shutil.rmtree(TEMP_DIR)
+    # Resume support: keep existing temp batches, only recreate missing ones
     os.makedirs(TEMP_DIR, exist_ok=True)
 
     # Process each sub-dataset
