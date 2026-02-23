@@ -957,7 +957,9 @@ class LegendVLA(nn.Module):
         for i in range(bsz):
             if pixel_values is not None: 
                 image_indices = image_mask[i].nonzero(as_tuple=True)[0]
-                if has_depth_values is not None and has_depth_values[i] and \
+                if depth_image_features is None:
+                    depth_image_feature = None
+                elif has_depth_values is not None and has_depth_values[i] and \
                     not (self.training and random.random() < self.depth_dropout):
                     # Each RGB token is paired with corresponding depth token
                     depth_image_feature = depth_image_features[i]
@@ -966,9 +968,12 @@ class LegendVLA(nn.Module):
                         depth_image_feature = self.depth_missing_embeddings.repeat(T, 1)
                     else:
                         depth_image_feature = self.depth_missing_embeddings
-                paired_image_features = torch.cat([
-                    rgb_image_features[i], depth_image_feature
-                ], dim=-1) # [num_patches, rgb_embed_dim+depth_embed_dim] 
+                if depth_image_feature is not None:
+                    paired_image_features = torch.cat([
+                        rgb_image_features[i], depth_image_feature
+                    ], dim=-1) # [num_patches, rgb_embed_dim+depth_embed_dim]
+                else:  
+                    paired_image_features = rgb_image_features[i]
                 paired_image_features = paired_image_features.view(-1, paired_image_features.shape[-1])
                 paired_image_features = self.multi_modal_projector(paired_image_features)
                 scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)

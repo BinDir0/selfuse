@@ -100,7 +100,7 @@ class GemmaMLP(nn.Module):
 
 
 class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim: int, min_period: float = 0.0003, max_period: float = 10000.0):
+    def __init__(self, dim: int, min_period: float = 0.004, max_period: float = 4.0):
         super().__init__()
         assert dim % 2 == 0, "dim must be even"
         self.half_dim = dim // 2
