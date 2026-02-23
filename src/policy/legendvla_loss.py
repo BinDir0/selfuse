@@ -305,7 +305,7 @@ def compute_loss(model, batch: dict) -> dict:
     ar_action_chunks = vla_action.unfold(dimension=1, size=ar_action_chunk_size, step=1)  # (B, H-chunk_size+1, D, chunk_size)
     ar_action_chunks_flat = ar_action_chunks.flatten(start_dim=2)  # (B, H-chunk_size+1, D*chunk_size)
 
-    # 构建索引序列
+    # Build index sequences
     range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
     range_action = torch.arange(num_action_tokens - ar_action_chunk_size + 1, device=device).unsqueeze(0)
 

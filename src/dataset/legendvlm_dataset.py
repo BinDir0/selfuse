@@ -127,7 +127,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
 
         return val_dataset
 
-    def _sample_to_data(self, sample, idx):
+    def sample_to_data(self, sample, idx):
         """
         Convert a raw dataset row into model-ready fields.
 
@@ -232,7 +232,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
                     dataset_local_idx = idx - offset
                     break
             sample = self.main_dataset[idx]
-            data = self._sample_to_data(sample, idx)
+            data = self.sample_to_data(sample, idx)
             if self.return_dataset_info:
                 data['dataset_name'] = dataset_name
                 data['dataset_local_idx'] = np.array(dataset_local_idx, dtype=np.int32)

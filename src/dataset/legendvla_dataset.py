@@ -55,7 +55,7 @@ class LegendVLADataset(BaseLegendZarrDataset):
     """
     Dataset for LegendVLA training/validation with async IO support.
 
-    The sampler returns Future-like objects; data is resolved in _sample_to_data.
+    The sampler returns Future-like objects; data is resolved in sample_to_data.
     """
     def __init__(
         self,
@@ -84,7 +84,7 @@ class LegendVLADataset(BaseLegendZarrDataset):
             mode (str): One of "train", "val", "infer".
             depth_clip_range (Optional[Tuple[float, float]]): Depth normalization range.
         """
-        # VLA-specific fields (must be set before super().__init__ which calls _build_sampler_cfg etc.)
+        # VLA-specific fields (must be set before super().__init__ which calls build_sampler_cfg etc.)
         self.zarr_paths = zarr_paths
         self.preprocessor = None
         self.objective = objective
@@ -105,7 +105,7 @@ class LegendVLADataset(BaseLegendZarrDataset):
                 transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))
             ])
 
-        # Call base class __init__ (triggers _build_sampler_cfg, _build_key_mapping, _on_zarr_loaded)
+        # Call base class __init__ (triggers build_sampler_cfg, build_key_mapping, on_zarr_loaded)
         super().__init__(zarr_paths, shape_meta, seed, val_ratio, max_train_episodes)
 
         # Initialize weights (BaseRatioDataset logic)
@@ -117,7 +117,7 @@ class LegendVLADataset(BaseLegendZarrDataset):
             self.weights = None
             self.dataset_lengths = None
 
-    def _build_sampler_cfg(self):
+    def build_sampler_cfg(self):
         s = self.shape_meta
         return {
             'num_image_steps': s['obs']['rgb']['horizon'],
@@ -128,10 +128,10 @@ class LegendVLADataset(BaseLegendZarrDataset):
             'num_action_stride': s['action']['stride'],
         }
 
-    def _build_key_mapping(self, zarr_path):
+    def build_key_mapping(self, zarr_path):
         return merge_key_mapping(zarr_path.get('mapping', None), self.motion_type)
 
-    def _on_zarr_loaded(self, zarr_path, replay_buffer):
+    def on_zarr_loaded(self, zarr_path, replay_buffer):
         weight = zarr_path.get('weight', None)
         if weight is not None:
             self._weights_list.append(weight)
@@ -140,11 +140,11 @@ class LegendVLADataset(BaseLegendZarrDataset):
             dataset_name = pathlib.Path(str(zarr_path['path'])).stem
         self.dataset_names.append(dataset_name)
 
-    def _on_validation_copy(self, val_set):
+    def on_validation_copy(self, val_set):
         val_set.mode = 'val' if self.mode == 'train' else self.mode
         val_set.aug_transform = None
 
-    def _sample_to_data(self, sample):
+    def sample_to_data(self, sample):
         """
         Convert a sampled sequence into model-ready tensors/arrays.
 
@@ -293,7 +293,7 @@ class LegendVLADataset(BaseLegendZarrDataset):
                 dataset_idx += 1
             sample = self.samplers[dataset_idx].sample_sequence(curr_idx)
             
-            data = self._sample_to_data(sample)
+            data = self.sample_to_data(sample)
             if self.return_dataset_info:
                 data['dataset_name'] = self.dataset_names[dataset_idx]
                 data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
@@ -479,7 +479,7 @@ class LegendVLALowLevelDataset(BaseLegendZarrDataset):
         self.use_relative_action = use_relative_action
         super().__init__(zarr_paths, shape_meta, seed, val_ratio, max_train_episodes)
 
-    def _build_sampler_cfg(self):
+    def build_sampler_cfg(self):
         s = self.shape_meta
         return {
             'num_state_steps': s['obs']['state']['horizon'],
@@ -488,15 +488,15 @@ class LegendVLALowLevelDataset(BaseLegendZarrDataset):
             'num_action_stride': s['action']['stride'],
         }
 
-    def _build_key_mapping(self, zarr_path):
+    def build_key_mapping(self, zarr_path):
         full_mapping = merge_key_mapping(zarr_path.get('mapping', None), self.motion_type)
         low_level_keys = ['wrist_state', 'hand_state', 'wrist_action', 'hand_action', 'extrinsic']
         return {k: full_mapping[k] for k in low_level_keys if k in full_mapping}
 
-    def _lazy_load(self):
-        return False  # normalizer 需要全量加载
+    def lazy_load(self):
+        return False  # normalizer needs full data loading
 
-    def _sample_to_data(self, sample):
+    def sample_to_data(self, sample):
         """
         Convert a sampled sequence into state/action arrays.
 

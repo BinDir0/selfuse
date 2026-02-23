@@ -87,12 +87,14 @@ class BaseDataCollator:
 
 class BaseLegendZarrDataset(torch.utils.data.Dataset):
     """
-    Zarr 数据集基类，封装通用的 zarr 加载、采样、验证集创建逻辑。
-    子类只需实现：
-      - _build_sampler_cfg()  → 返回 sampler 配置 dict
-      - _build_key_mapping(zarr_path) → 返回该 zarr 的 key mapping
-      - _sample_to_data(sample) → 将采样结果转为模型输入
-      - get_collator() → 返回 collator
+    Base class for zarr-backed datasets. Encapsulates common zarr loading,
+    sampling, and validation dataset creation logic.
+
+    Subclasses must implement:
+      - build_sampler_cfg()   -> sampler config dict
+      - build_key_mapping(zarr_path) -> key mapping for this zarr
+      - sample_to_data(sample) -> convert sampled result to model input
+      - get_collator()        -> return collator
     """
 
     def __init__(
@@ -108,10 +110,10 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
         self.motion_type = shape_meta['obs']['state']['type']
         self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2
 
-        # 子类实现
-        self.sampler_cfg = self._build_sampler_cfg()
+        # Subclass-provided sampler config
+        self.sampler_cfg = self.build_sampler_cfg()
 
-        # 通用存储
+        # Common storage
         self.replay_buffers = []
         self.train_masks = []
         self.samplers = []
@@ -121,14 +123,14 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
         from .streaming_replay_buffer import StreamingReplayBuffer
 
         for zarr_path in zarr_paths:
-            key_mapping = self._build_key_mapping(zarr_path)
+            key_mapping = self.build_key_mapping(zarr_path)
             dataset_path = zarr_path['path']
             if not os.path.exists(dataset_path):
                 print(f"Warning: Dataset path {dataset_path} does not exist, skipping.")
                 continue
 
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                dataset_path, key_mapping=key_mapping, lazy_load=self._lazy_load()
+                dataset_path, key_mapping=key_mapping, lazy_load=self.lazy_load()
             )
             if len(replay_buffer) <= 1:
                 print(f"Warning: Dataset has only {len(replay_buffer)} episodes, skipping.")
@@ -150,43 +152,43 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
             self.samplers.append(sampler)
             self.sampler_lens.append(len(sampler))
 
-            # 子类钩子：处理额外的 per-zarr 数据（如 weights, dataset_names）
-            self._on_zarr_loaded(zarr_path, replay_buffer)
+            # Subclass hook: handle extra per-zarr data (e.g. weights, dataset_names)
+            self.on_zarr_loaded(zarr_path, replay_buffer)
 
-    # ---------- 子类必须实现 ---------- #
-    def _build_sampler_cfg(self) -> dict:
+    # ---------- Subclass must implement ---------- #
+    def build_sampler_cfg(self) -> dict:
         raise NotImplementedError
 
-    def _build_key_mapping(self, zarr_path: dict) -> dict:
+    def build_key_mapping(self, zarr_path: dict) -> dict:
         raise NotImplementedError
 
-    def _sample_to_data(self, sample):
+    def sample_to_data(self, sample):
         raise NotImplementedError
 
     def get_collator(self):
         raise NotImplementedError
 
-    # ---------- 子类可选覆盖 ---------- #
-    def _lazy_load(self) -> bool:
-        """是否懒加载 zarr 数据。默认 True。"""
+    # ---------- Subclass may override ---------- #
+    def lazy_load(self) -> bool:
+        """Whether to lazy-load zarr data. Default True."""
         return True
 
-    def _on_zarr_loaded(self, zarr_path: dict, replay_buffer):
-        """每个 zarr 加载完成后的钩子。默认空操作。"""
+    def on_zarr_loaded(self, zarr_path: dict, replay_buffer):
+        """Hook called after each zarr is loaded. Default no-op."""
         pass
 
-    def _on_validation_copy(self, val_set):
-        """get_validation_dataset 中对 val_set 的额外处理。默认空操作。"""
+    def on_validation_copy(self, val_set):
+        """Hook for extra processing in get_validation_dataset. Default no-op."""
         pass
 
-    # ---------- 通用实现 ---------- #
+    # ---------- Common implementation ---------- #
     def get_validation_dataset(self):
         from .sampler import SequenceSampler
         val_set = copy.copy(self)
         val_set.samplers = []
         val_set.train_masks = []
         val_set.sampler_lens = []
-        self._on_validation_copy(val_set)
+        self.on_validation_copy(val_set)
 
         for i, replay_buffer in enumerate(self.replay_buffers):
             sampler = SequenceSampler(
@@ -206,7 +208,7 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
                 curr_idx -= self.sampler_lens[dataset_idx]
                 dataset_idx += 1
             sample = self.samplers[dataset_idx].sample_sequence(curr_idx)
-            data = self._sample_to_data(sample)
+            data = self.sample_to_data(sample)
             torch_data = dict_apply(
                 data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
             )
