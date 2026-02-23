@@ -28,8 +28,9 @@ vlm_dataset_paths:
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/vsr"
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/wildvision"
  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/yesbut"
- - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robo2vlm"
- - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robopoint"
+ - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robo2vlm_cleaned"
+ - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robopoint_cleaned"
  - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/roborefit"
- - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/roboafford"
+ - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/roboafford_cleaned"
  - "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/sharerobot"
+ 

@@ -41,7 +41,7 @@ def get_val_mask(n_episodes, val_ratio, seed = 0):
 
     # have at least 1 episode for validation, and at least 1 episode for train
     n_val = min(max(1, round(n_episodes * val_ratio)), n_episodes-1)
-    assert n_val > 0 and n_val < n_episodes, f"n_val must be in [1, n_episodes-1], got {n_val}"
+    assert n_val > 0 and n_val < n_episodes, f"n_val must be in [1, {n_episodes}-1], got {n_val}"
     rng = np.random.default_rng(seed=seed)
     val_idxs = rng.choice(n_episodes, size=n_val, replace=False)
     val_mask[val_idxs] = True

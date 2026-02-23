@@ -3,6 +3,7 @@ Propise dataset for LegendVLA
 Every action is the delta of the next predicted absolute state and the state at the beginning of the action chunk.
 '''
 
+import os
 from typing import Dict, Optional
 import pathlib
 import torch
@@ -118,6 +119,7 @@ class LegendVLADataset(BaseRatioDataset):
         self.sampler_lens = []
         self.return_dataset_info = return_dataset_info
         self.dataset_names = []
+        weights = []
 
         self.mode = mode
         self.aug_transform = None
@@ -133,43 +135,52 @@ class LegendVLADataset(BaseRatioDataset):
         # Process each zarr file
         for zarr_path in zarr_paths:
             key_mapping = merge_key_mapping(zarr_path.get('mapping', None), self.motion_type)
+            weight = zarr_path.get('weight', None)
             dataset_name = zarr_path.get('name', None)
+            dataset_path = zarr_path['path']
+            if not os.path.exists(dataset_path):
+                print(f"Warning: Dataset path {dataset_path} does not exist, skipping this dataset.")
+                continue
             if dataset_name is None:
-                dataset_name = pathlib.Path(str(zarr_path['path'])).stem
-            self.dataset_names.append(dataset_name)
+                dataset_name = pathlib.Path(str(dataset_path)).stem
             # Create replay buffer
             replay_buffer = StreamingReplayBuffer.copy_from_path(
-                zarr_path['path'], 
+                dataset_path, 
                 key_mapping=key_mapping,
                 lazy_load=True
             )
-            self.replay_buffers.append(replay_buffer)
-
+            if len(replay_buffer) <= 1: 
+                print(f"Warning: Dataset {dataset_name} has only {len(replay_buffer)} episodes, skipping this dataset.")
+                continue
             # Create train mask
-            val_mask = get_val_mask(
-                n_episodes=replay_buffer.n_episodes,
-                val_ratio=val_ratio,
-                seed=seed)
-            train_mask = ~val_mask
-            train_mask = downsample_mask(
-                mask=train_mask,
-                max_n=max_train_episodes,
-                seed=seed)
+            try: 
+                val_mask = get_val_mask(
+                    n_episodes=replay_buffer.n_episodes,
+                    val_ratio=val_ratio,
+                    seed=seed)
+                train_mask = ~val_mask
+                train_mask = downsample_mask(
+                    mask=train_mask,
+                    max_n=max_train_episodes,
+                    seed=seed)
+                 # Create sampler
+                sampler = SequenceSampler(
+                    replay_buffer=replay_buffer, 
+                    episode_mask=train_mask, 
+                    **self.sampler_cfg
+                )
+            except Exception as e:
+                print(f"Error creating train mask for {dataset_name}: {e}")
+            if weight is not None:
+                weights.append(weight)
+            self.dataset_names.append(dataset_name)
+            self.replay_buffers.append(replay_buffer)
             self.train_masks.append(train_mask)
-            
-            # Create sampler
-            sampler = SequenceSampler(
-                replay_buffer=replay_buffer, 
-                episode_mask=train_mask, 
-                **self.sampler_cfg
-            )
             self.samplers.append(sampler)
-            
             # Record sampler length
             self.sampler_lens.append(len(sampler))
-
-        if zarr_paths is not None and zarr_paths[0].get('weight', None) is not None:
-            weights = [path['weight'] for path in zarr_paths]
+            
+        if len(weights) > 0:
             super().__init__(weights, self.sampler_lens)
         else:
             super().__init__()
@@ -342,22 +353,26 @@ class LegendVLADataset(BaseRatioDataset):
         Returns:
             Dict[str, torch.Tensor]: Sample tensors.
         """
-        # Find corresponding sampler
-        curr_idx = idx
-        for i, length in enumerate(self.sampler_lens):
-            if curr_idx < length:
-                sample = self.samplers[i].sample_sequence(curr_idx)
-                break
-            curr_idx -= length
-        
-        data = self._sample_to_data(sample)
-        if self.return_dataset_info:
-            data['dataset_name'] = self.dataset_names[i]
-            data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
-        torch_data = dict_apply(
-            data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
-        )
-        return torch_data
+        try: 
+            # Find corresponding sampler
+            curr_idx, dataset_idx = idx, 0
+            while curr_idx >= self.sampler_lens[dataset_idx]:
+                curr_idx -= self.sampler_lens[dataset_idx]
+                dataset_idx += 1
+            sample = self.samplers[dataset_idx].sample_sequence(curr_idx)
+            
+            data = self._sample_to_data(sample)
+            if self.return_dataset_info:
+                data['dataset_name'] = self.dataset_names[dataset_idx]
+                data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
+            torch_data = dict_apply(
+                data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+            )
+            return torch_data
+        except Exception as e:
+            warnings.warn(f"Error getting item {idx} from dataset {self.dataset_names[dataset_idx]}: {e}")
+            # backup solution: return the next item
+            return self.__getitem__((idx + 1) % len(self))
 
     def __len__(self):
         """
@@ -575,21 +590,28 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             Dict[str, torch.Tensor]: Sample tensors.
         """
         # Find corresponding sampler
-        sample = self.main_dataset[idx]
-        data = self._sample_to_data(sample, idx)
-        if self.return_dataset_info:
+        try: 
+            dataset_name = None
+            dataset_local_idx = None
             for i, offset in enumerate(self.dataset_offsets):
                 length = self.dataset_lengths[i]
                 if idx < offset + length:
                     dataset_name = self.dataset_names[i]
                     dataset_local_idx = idx - offset
                     break
-            data['dataset_name'] = dataset_name
-            data['dataset_local_idx'] = np.array(dataset_local_idx, dtype=np.int32)
-        torch_data = dict_apply(
-            data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
-        )
-        return torch_data
+            sample = self.main_dataset[idx]
+            data = self._sample_to_data(sample, idx)
+            if self.return_dataset_info:
+                data['dataset_name'] = dataset_name
+                data['dataset_local_idx'] = np.array(dataset_local_idx, dtype=np.int32)
+            torch_data = dict_apply(
+                data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+            )
+            return torch_data
+        except Exception as e:
+            warnings.warn(f"Error getting item {dataset_local_idx} from dataset {dataset_name}: {e}")
+            # backup solution: return the next item
+            return self.__getitem__((idx + 1) % len(self))
 
     def __len__(self):
         """
