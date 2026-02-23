@@ -17,7 +17,7 @@ ROBOPOINT_JSON_PATH = "/share_data/guantianrui/datasets/VLM/robopoint-data/robop
 IMAGE_ROOT_DIR = "/share_data/guantianrui/datasets/VLM/robopoint-data/images"
 
 # 3. Output directory for Arrow format
-OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robopoint"
+OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robopoint_cleaned"
 TEMP_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robopoint_temp"
 
 # 4. Train/test split ratio
@@ -29,6 +29,9 @@ MAX_SAMPLES = None  # Set to None to process all samples, or a number like 100 f
 
 # 6. Batch size for incremental processing (process and save this many samples at a time)
 BATCH_SIZE = 50000  # Process 50k samples at a time to avoid memory issues
+
+# 7. Text quality filtering
+MAX_TURN_CHARS = 500  # drop samples where user+assistant combined > this
 
 # =========================================================
 
@@ -149,6 +152,9 @@ def convert_robopoint_batch(batch):
             human_text = conversations[0].get('value', '')
             human_text = human_text.replace("<image>\n", "").replace("<image>", "").strip()
             gpt_text = conversations[1].get('value', '')
+            
+            if len(human_text) + len(gpt_text) > MAX_TURN_CHARS:
+                continue
             
             # Append to output
             images_out.append([img_obj])

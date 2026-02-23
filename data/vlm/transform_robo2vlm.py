@@ -29,7 +29,7 @@ from tqdm import tqdm
 
 # ================= Configuration =================
 ROBO2VLM_ROOT = "/share_data/guantianrui/datasets/VLM/Robo2VLM-1/data"
-OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robo2vlm"
+OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robo2vlm_cleaned"
 TEMP_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/robo2vlm_temp"
 
 # Test mode: Set to a number to only process first N files (None = process all)
@@ -38,6 +38,9 @@ MAX_TEST_FILES = None   # Set to None to process all test files
 
 # Batch size for incremental processing (process and save this many samples at a time)
 BATCH_SIZE = 50000  # Process 50k samples at a time to avoid memory issues
+
+# Text quality filtering
+MAX_TURN_CHARS = 500  # drop samples where user+assistant combined > this
 
 # ================================================
 
@@ -160,6 +163,9 @@ def convert_batch(batch):
         
         # Format answer
         assistant_text = format_answer(batch['correct_answer'][i], choices)
+        
+        if len(user_text) + len(assistant_text) > MAX_TURN_CHARS:
+            continue
         
         # Append to lists
         images_list.append([batch['image'][i]])

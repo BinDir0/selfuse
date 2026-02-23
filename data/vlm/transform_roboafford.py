@@ -37,7 +37,7 @@ from datasets import Dataset, DatasetDict, load_from_disk, concatenate_datasets,
 
 # ================= Configuration =================
 ROBOAFFORD_ROOT = "/share_data/guantianrui/datasets/VLM/RoboAfford"
-OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/roboafford"
+OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/roboafford_cleaned"
 TEMP_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/roboafford_temp"
 
 # Image root directories
@@ -57,6 +57,9 @@ JSON_FILES = [
 
 # Batch size for processing (process this many original samples at a time)
 BATCH_SIZE = 50000
+
+# Text quality filtering
+MAX_TURN_CHARS = 500  # drop turns where user+assistant combined > this
 
 # Train/test split ratio
 VAL_RATIO = 0.001  # 0.1% for validation
@@ -190,6 +193,9 @@ def convert_batch(batch, source):
         
         user_text_normalized = normalize_coordinates_in_text(user_text, img_width, img_height)
         assistant_text_normalized = normalize_coordinates_in_text(assistant_text, img_width, img_height)
+        
+        if len(user_text_normalized) + len(assistant_text_normalized) > MAX_TURN_CHARS:
+            continue
         
         # Append to lists
         images_list.append([img])
