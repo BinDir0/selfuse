@@ -35,6 +35,8 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 # Enable graph cache and CUDA code cache for torch.compile
 export TORCHINDUCTOR_FX_GRAPH_CACHE=1
 export TORCHINDUCTOR_FORCE_CUDA_CODE_CACHE=1
+# Enable NCCL trace buffer for debugging
+export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 
 # # 设置 NCCL 超时为 1 小时 (单位毫秒: 3600000)
 # export NCCL_TIMEOUT=3600000 
