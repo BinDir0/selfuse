@@ -610,19 +610,20 @@ class LegendVLA(nn.Module):
         return _compute_loss(self, batch)
 
     def forward(self, mode: str, batch: dict, **kwargs) -> dict:
-        # Helper functions for distributed training
+        from src.policy.legendvla_loss import compute_loss, compute_ar_loss, compute_flow_loss
+        from src.policy.legendvla_inference import infer_action, infer_vlm, infer_vla
         if mode == "train":
-            return self.compute_loss(batch)
-        elif mode == "train_ar": 
-            return self.compute_ar_loss(batch)
+            return compute_loss(self, batch)
+        elif mode == "train_ar":
+            return compute_ar_loss(self, batch)
         elif mode == "train_flow":
-            return self.compute_flow_loss(batch)
+            return compute_flow_loss(self, batch)
         elif mode == "infer_action":
-            return self.infer_action(batch, **kwargs)
+            return infer_action(self, batch, **kwargs)
         elif mode == "infer_vla":
-            return self.infer_vla(batch, **kwargs)
+            return infer_vla(self, batch, **kwargs)
         elif mode == "infer_vlm":
-            return self.infer_vlm(batch, **kwargs)
+            return infer_vlm(self, batch, **kwargs)
         else:
             raise ValueError(f"Invalid mode: {mode}")
         
