@@ -11,68 +11,102 @@ class StreamingStats:
     """
     class for streaming statistics calculation, supporting dynamic data addition and updating statistics
     """
-    
-    def __init__(self, last_n_dims=1):
+
+    def __init__(self, last_n_dims=1, reservoir_size=1000000):
         self.last_n_dims = last_n_dims
+        self.reservoir_size = reservoir_size
         self.n_samples = 0
         self.sum = None
         self.sum_sq = None
         self.min_vals = None
         self.max_vals = None
         self.dim = None
-        
+        self.reservoir = None
+        self.reservoir_count = 0
+
     def update(self, data: Union[torch.Tensor, np.ndarray]):
         """
         add new data and update statistics
         """
-        if isinstance(data, torch.Tensor):
-            data = data.cpu().numpy()
-        
+        if isinstance(data, np.ndarray):
+            data = torch.from_numpy(data)
+
         if self.dim is None:
             if self.last_n_dims > 0:
-                self.dim = np.prod(data.shape[-self.last_n_dims:])
+                self.dim = int(torch.tensor(data.shape[-self.last_n_dims:]).prod().item())
             else:
                 self.dim = 1
             data = data.reshape(-1, self.dim)
-            
-            self.sum = np.zeros(self.dim, dtype=np.float64)
-            self.sum_sq = np.zeros(self.dim, dtype=np.float64)
-            self.min_vals = np.full(self.dim, np.inf)
-            self.max_vals = np.full(self.dim, -np.inf)
+
+            self.sum = torch.zeros(self.dim, dtype=torch.float64)
+            self.sum_sq = torch.zeros(self.dim, dtype=torch.float64)
+            self.min_vals = torch.full((self.dim,), float('inf'), dtype=torch.float64)
+            self.max_vals = torch.full((self.dim,), float('-inf'), dtype=torch.float64)
+            self.reservoir = torch.empty(self.reservoir_size, self.dim, dtype=torch.float64)
         else:
             data = data.reshape(-1, self.dim)
-        
+
+        data = data.to(torch.float64)
         n_new = data.shape[0]
+
+        # reservoir sampling (batch version)
+        if self.reservoir_count < self.reservoir_size:
+            space = self.reservoir_size - self.reservoir_count
+            direct = min(space, n_new)
+            self.reservoir[self.reservoir_count:self.reservoir_count + direct] = data[:direct]
+            self.reservoir_count += direct
+            remaining = data[direct:]
+        else:
+            remaining = data
+
+        if remaining.shape[0] > 0:
+            n_remaining = remaining.shape[0]
+            base = self.n_samples + (n_new - n_remaining)
+            # generate random indices for the entire batch
+            sample_indices = base + torch.arange(n_remaining)
+            rand_j = (torch.rand(n_remaining) * (sample_indices + 1).float()).long()
+            # only keep samples that map into the reservoir
+            mask = rand_j < self.reservoir_size
+            if mask.any():
+                self.reservoir[rand_j[mask]] = remaining[mask]
+
         self.n_samples += n_new
-        
-        self.sum += np.sum(data, axis=0)
-        self.sum_sq += np.sum(data ** 2, axis=0)
-        
-        self.min_vals = np.minimum(self.min_vals, np.min(data, axis=0))
-        self.max_vals = np.maximum(self.max_vals, np.max(data, axis=0))
-    
+
+        self.sum += data.sum(dim=0)
+        self.sum_sq += (data ** 2).sum(dim=0)
+
+        self.min_vals = torch.minimum(self.min_vals, data.min(dim=0).values)
+        self.max_vals = torch.maximum(self.max_vals, data.max(dim=0).values)
+
     def get_stats(self):
         """
-        get current statistics
+        get current statistics including quantiles from reservoir
         """
         if self.n_samples == 0:
             return None
-            
+
         mean = self.sum / self.n_samples
         if self.n_samples > 1:
             variance = (self.sum_sq - self.n_samples * mean ** 2) / (self.n_samples - 1)
-            std = np.sqrt(np.maximum(variance, 0))
+            std = torch.sqrt(torch.clamp(variance, min=0))
         else:
-            std = np.zeros_like(mean)
-            
+            std = torch.zeros_like(mean)
+
+        # compute quantiles from reservoir
+        valid_reservoir = self.reservoir[:self.reservoir_count]
+        q01 = torch.quantile(valid_reservoir, 0.01, dim=0)
+        q99 = torch.quantile(valid_reservoir, 0.99, dim=0)
+
         return {
-            'min': self.min_vals.copy(),
-            'max': self.max_vals.copy(),
+            'min': self.min_vals.clone(),
+            'max': self.max_vals.clone(),
             'mean': mean,
             'std': std,
+            'q01': q01,
+            'q99': q99,
             'n_samples': self.n_samples
         }
-    
+
     def reset(self):
         """
         reset statistics
@@ -83,6 +117,8 @@ class StreamingStats:
         self.min_vals = None
         self.max_vals = None
         self.dim = None
+        self.reservoir = None
+        self.reservoir_count = 0
 
 
 class LinearNormalizer(DictOfTensorMixin):
@@ -122,7 +158,7 @@ class LinearNormalizer(DictOfTensorMixin):
                     range_eps=range_eps,
                     fit_offset=fit_offset)
     
-    def start_streaming_fit(self, 
+    def start_streaming_fit(self,
                            keys: Optional[list] = None,
                            last_n_dims=1,
                            dtype=torch.float32,
@@ -130,7 +166,8 @@ class LinearNormalizer(DictOfTensorMixin):
                            output_max=1.,
                            output_min=-1.,
                            range_eps=1e-4,
-                           fit_offset=True):
+                           fit_offset=True,
+                           reservoir_size=1000000):
         """
         start streaming fit, initialize streaming statistics
         """
@@ -148,7 +185,9 @@ class LinearNormalizer(DictOfTensorMixin):
             keys = ['_default']
         
         for key in keys:
-            self.streaming_stats[key] = StreamingStats(last_n_dims=last_n_dims)
+            self.streaming_stats[key] = StreamingStats(
+                last_n_dims=last_n_dims, reservoir_size=reservoir_size
+            )
     
     def update_streaming_fit(self, data: Union[Dict, torch.Tensor, np.ndarray]):
         """
@@ -362,25 +401,27 @@ def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
     # convert shape
     dim = 1
     if last_n_dims > 0:
-        dim = np.prod(data.shape[-last_n_dims:])
+        dim = int(torch.tensor(data.shape[-last_n_dims:]).prod().item())
     data = data.reshape(-1, dim)
 
-    # compute input stats min max mean std
+    # compute input stats min max mean std q01 q99
     input_min, _ = data.min(axis=0)
     input_max, _ = data.max(axis=0)
     input_mean = data.mean(axis=0)
     input_std = data.std(axis=0)
+    input_q01 = torch.quantile(data, 0.01, dim=0)
+    input_q99 = torch.quantile(data, 0.99, dim=0)
 
     # compute scale and offset
     if mode == 'limits':
         if fit_offset:
-            # unit scale
-            input_range = input_max - input_min
+            # unit scale based on q01/q99 to be robust to outliers
+            input_range = input_q99 - input_q01
             ignore_dim = input_range < range_eps
             input_range[ignore_dim] = output_max - output_min
             scale = (output_max - output_min) / input_range
-            offset = output_min - scale * input_min
-            offset[ignore_dim] = (output_max + output_min) / 2 - input_min[ignore_dim]
+            offset = output_min - scale * input_q01
+            offset[ignore_dim] = (output_max + output_min) / 2 - input_q01[ignore_dim]
             # ignore dims scaled to mean of output max and min
         else:
             # use this when data is pre-zero-centered.
@@ -388,10 +429,10 @@ def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
             assert output_min < 0
             # unit abs
             output_abs = min(abs(output_min), abs(output_max))
-            input_abs = torch.maximum(torch.abs(input_min), torch.abs(input_max))
+            input_abs = torch.maximum(torch.abs(input_q01), torch.abs(input_q99))
             ignore_dim = input_abs < range_eps
             input_abs[ignore_dim] = output_abs
-            # don't scale constant channels 
+            # don't scale constant channels
             scale = output_abs / input_abs
             offset = torch.zeros_like(input_mean)
     elif mode == 'gaussian':
@@ -413,7 +454,9 @@ def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
             'min': input_min,
             'max': input_max,
             'mean': input_mean,
-            'std': input_std
+            'std': input_std,
+            'q01': input_q01,
+            'q99': input_q99
         })
     })
     for p in this_params.parameters():
@@ -437,21 +480,36 @@ def _fit_from_stats(stats_dict: Dict,
     assert output_max > output_min
 
     # extract data from statistics dictionary and convert to torch
-    input_min = torch.from_numpy(stats_dict['min'].astype(np.float32))
-    input_max = torch.from_numpy(stats_dict['max'].astype(np.float32))
-    input_mean = torch.from_numpy(stats_dict['mean'].astype(np.float32))
-    input_std = torch.from_numpy(stats_dict['std'].astype(np.float32))
+    def to_float32(x):
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x).to(torch.float32)
+        return x.to(torch.float32)
+
+    input_min = to_float32(stats_dict['min'])
+    input_max = to_float32(stats_dict['max'])
+    input_mean = to_float32(stats_dict['mean'])
+    input_std = to_float32(stats_dict['std'])
+
+    # quantiles for clipping (optional, from reservoir sampling)
+    has_quantiles = 'q01' in stats_dict and 'q99' in stats_dict
+    if has_quantiles:
+        input_q01 = to_float32(stats_dict['q01'])
+        input_q99 = to_float32(stats_dict['q99'])
 
     # compute scale and offset
+    # use q01/q99 when available for robustness to outliers, fallback to min/max
+    lo = input_q01 if has_quantiles else input_min
+    hi = input_q99 if has_quantiles else input_max
+
     if mode == 'limits':
         if fit_offset:
-            # unit scale
-            input_range = input_max - input_min
+            # unit scale based on q01/q99
+            input_range = hi - lo
             ignore_dim = input_range < range_eps
             input_range[ignore_dim] = output_max - output_min
             scale = (output_max - output_min) / input_range
-            offset = output_min - scale * input_min
-            offset[ignore_dim] = (output_max + output_min) / 2 - input_min[ignore_dim]
+            offset = output_min - scale * lo
+            offset[ignore_dim] = (output_max + output_min) / 2 - lo[ignore_dim]
             # ignore dims scaled to mean of output max and min
         else:
             # use this when data is pre-zero-centered.
@@ -459,10 +517,10 @@ def _fit_from_stats(stats_dict: Dict,
             assert output_min < 0
             # unit abs
             output_abs = min(abs(output_min), abs(output_max))
-            input_abs = torch.maximum(torch.abs(input_min), torch.abs(input_max))
+            input_abs = torch.maximum(torch.abs(lo), torch.abs(hi))
             ignore_dim = input_abs < range_eps
             input_abs[ignore_dim] = output_abs
-            # don't scale constant channels 
+            # don't scale constant channels
             scale = output_abs / input_abs
             offset = torch.zeros_like(input_mean)
     elif mode == 'gaussian':
@@ -477,15 +535,20 @@ def _fit_from_stats(stats_dict: Dict,
             offset = torch.zeros_like(input_mean)
     
     # save
+    input_stats_dict = {
+        'min': input_min,
+        'max': input_max,
+        'mean': input_mean,
+        'std': input_std
+    }
+    if has_quantiles:
+        input_stats_dict['q01'] = input_q01
+        input_stats_dict['q99'] = input_q99
+
     this_params = nn.ParameterDict({
         'scale': scale,
         'offset': offset,
-        'input_stats': nn.ParameterDict({
-            'min': input_min,
-            'max': input_max,
-            'mean': input_mean,
-            'std': input_std
-        })
+        'input_stats': nn.ParameterDict(input_stats_dict)
     })
     for p in this_params.parameters():
         p.requires_grad_(False)
@@ -494,12 +557,34 @@ def _fit_from_stats(stats_dict: Dict,
 
 def _normalize(x, params, forward=True):
     assert 'scale' in params
+    is_numpy = isinstance(x, np.ndarray)
     scale = params['scale']
     offset = params['offset']
-    if isinstance(x, np.ndarray):
+
+    # clip outliers using quantiles before forward normalization
+    if forward and 'input_stats' in params:
+        input_stats = params['input_stats']
+        if 'q01' in input_stats and 'q99' in input_stats:
+            q01 = input_stats['q01']
+            q99 = input_stats['q99']
+            if is_numpy:
+                q01 = q01.cpu().numpy()
+                q99 = q99.cpu().numpy()
+            else:
+                q01 = q01.to(x.device)
+                q99 = q99.to(x.device)
+            src_shape = x.shape
+            x = x.reshape(-1, q01.shape[0])
+            if is_numpy:
+                x = np.clip(x, q01, q99)
+            else:
+                x = torch.clamp(x, q01, q99)
+            x = x.reshape(src_shape)
+
+    if is_numpy:
         scale = scale.cpu().numpy()
         offset = offset.cpu().numpy()
-    else: 
+    else:
         scale = scale.to(x.device)
         offset = offset.to(x.device)
     src_shape = x.shape
