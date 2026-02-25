@@ -8,6 +8,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -22,7 +23,7 @@ def generate_launch_description():
     
     serial_number_arg = DeclareLaunchArgument(
         'serial_number',
-        default_value='',
+        default_value='135122078851',
         description='相机序列号，留空则使用默认设备'
     )
     
@@ -52,7 +53,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'camera_name': LaunchConfiguration('camera_name'),
-            'serial_number': LaunchConfiguration('serial_number'),
+            'serial_number': ParameterValue(LaunchConfiguration('serial_number'), value_type=str),
             'frequency': LaunchConfiguration('frequency'),
             'width': LaunchConfiguration('width'),
             'height': LaunchConfiguration('height'),

@@ -128,35 +128,6 @@ class RealSenseImage:
             print(f"捕获深度图像时出错: {e}")
             return None
     
-    def get_camera_intrinsics(self):
-        """
-        获取相机内参
-        
-        Returns:
-            dict: 包含相机内参的字典
-        """
-        try:
-            frames = self.pipeline.wait_for_frames()
-            color_frame = frames.get_color_frame()
-            
-            if color_frame:
-                intrinsics = color_frame.profile.as_video_stream_profile().intrinsics
-                return {
-                    'width': intrinsics.width,
-                    'height': intrinsics.height,
-                    'fx': intrinsics.fx,
-                    'fy': intrinsics.fy,
-                    'ppx': intrinsics.ppx,
-                    'ppy': intrinsics.ppy,
-                    'model': intrinsics.model,
-                    'coeffs': intrinsics.coeffs
-                }
-            return None
-            
-        except Exception as e:
-            print(f"获取相机内参时出错: {e}")
-            return None
-    
     def close(self):
         """关闭相机并释放资源"""
         try:
