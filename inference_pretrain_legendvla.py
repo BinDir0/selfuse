@@ -642,7 +642,10 @@ class LegendVLAInference:
                     for names in gathered_dataset_names:
                         if names is None:
                             continue
-                        dataset_names_all.extend(names)
+                        if isinstance(names, str):
+                            dataset_names_all.append(names)
+                        else:
+                            dataset_names_all.extend(names)
                     gathered_batch_results_np["dataset_name"] = np.array(dataset_names_all, dtype=object)
                 batch_result = gathered_batch_results_np
                 

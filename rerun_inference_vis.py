@@ -21,6 +21,80 @@ from src.dataset.legendvla_dataset import get_absolute_action, get_relative_acti
 from src.utils.mano_vis import mano_forward
 import torch
 
+
+# ── helpers for resolving dataset name → zarr path ──────────────────────────
+
+def _load_default_mapping():
+    """Load ``human_dataset_mapping`` from the inference config."""
+    cfg = OmegaConf.load(INFERENCE_CONFIG_PATH)
+    raw = OmegaConf.select(cfg, "human_dataset_mapping")
+    if raw is None:
+        raise RuntimeError(
+            f"human_dataset_mapping not found in {INFERENCE_CONFIG_PATH}"
+        )
+    return OmegaConf.to_container(raw, resolve=True)
+
+
+def _navigate_zarr(data_group, key_path, indices=None):
+    """Navigate a zarr group using ``/``-separated *key_path*."""
+    parts = key_path.split('/')
+    cur = data_group
+    for p in parts:
+        cur = cur[p]
+    return cur[indices] if indices is not None else cur
+
+
+def build_dataset_registry(inference_zarr_path):
+    """Return ``{name: {'path': str, 'mapping': dict}}`` from the inference config.
+
+    Reads ``vla_dataset_paths`` from the saved ``inference_config.yaml``
+    next to the zarr, falling back to ``INFERENCE_CONFIG_PATH``.
+    """
+    inference_dir = os.path.dirname(os.path.abspath(inference_zarr_path))
+    saved_cfg_path = os.path.join(inference_dir, "inference_config.yaml")
+    cfg_path = saved_cfg_path if os.path.exists(saved_cfg_path) else INFERENCE_CONFIG_PATH
+
+    cfg = OmegaConf.load(cfg_path)
+    items = OmegaConf.select(cfg, "vla_dataset_paths", default=[])
+    if not items:
+        raise RuntimeError(f"vla_dataset_paths not found in {cfg_path}")
+
+    registry: dict = {}
+    for item in items:
+        mapping_raw = OmegaConf.to_container(item.get('mapping', {}), resolve=True)
+        if not isinstance(mapping_raw, dict) or not mapping_raw:
+            mapping_raw = _load_default_mapping()
+        registry[item['name']] = {'path': item['path'], 'mapping': mapping_raw}
+    return registry
+
+
+def select_sample_indices(inference_zarr_path, dataset_names=None,
+                          num_samples=1, sample_idx=None):
+    """Pick sample indices, optionally filtering by *dataset_names*."""
+    inf_z = zarr.open(inference_zarr_path, mode='r')
+
+    if sample_idx is not None:
+        return [sample_idx]
+
+    num_total = inf_z['pred_actions'].shape[0]
+
+    if dataset_names and 'dataset_name' in inf_z:
+        all_names = [str(x) for x in inf_z['dataset_name'][:]]
+        name_set = set(dataset_names)
+        valid = np.array([i for i, n in enumerate(all_names) if n in name_set])
+        if len(valid) == 0:
+            avail = sorted(set(all_names))
+            raise ValueError(
+                f"No samples found for {dataset_names}. Available: {avail}"
+            )
+    else:
+        valid = np.arange(num_total)
+
+    n = min(num_samples, len(valid))
+    sel = np.random.choice(valid, n, replace=False)
+    return sorted(sel.tolist())
+
+
 def get_colored_point_cloud(color_rgb, depth, width, height, K, depth_scale=0.001, min_depth=0.1, max_depth=5.0):
     X_grid, Y_grid = np.meshgrid(np.arange(width), np.arange(height))
     depth_raw = depth.reshape(-1).astype(np.float32) * depth_scale
@@ -192,64 +266,85 @@ class HandVisualizer:
             )
         )
 
-def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=None, use_relative_action=None, motion_type='fingertips'):
+def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=None,
+                       use_relative_action=None, motion_type='fingertips',
+                       dataset_registry=None):
     """
     Load data from inference results zarr file and corresponding original dataset.
     
     Args:
-        inference_zarr_path: Path to inference results zarr file (contains pred_actions, gt_actions, etc.)
-        origin_zarr_path: Path to original dataset zarr file (for loading image, depth, etc.). 
-                         If None, try to infer from inference zarr metadata.
-        sample_idx: Index of sample to load from inference results. If None, randomly select one.
+        inference_zarr_path: Path to inference results zarr file.
+        origin_zarr_path: Explicit path to original dataset zarr (takes precedence).
+        sample_idx: Index of sample in inference results. If None, randomly select.
         use_relative_action: Whether actions are relative. If None, default to True.
+        motion_type: 'fingertips' or 'mano'.
+        dataset_registry: ``{name: {'path', 'mapping'}}`` built by
+            :func:`build_dataset_registry`.  Used to auto-resolve *origin_zarr_path*
+            and field-key mapping from the sample's ``dataset_name``.
     
     Returns:
-        dict with keys: 'image', 'depth', 'intrinsic', 'extrinsic', 'gt_actions', 'pred_actions', 'frame_idx'
-        All arrays have shape (T,) where T=30 is the number of timesteps for the selected sample
-        'frame_idx' is the actual frame index in original dataset (from origin_frame_indices)
+        dict with image, depth, intrinsic, extrinsic, gt/pred_actions, frame_idx, dataset_name …
     """
     if not os.path.exists(inference_zarr_path):
         raise FileNotFoundError(f"Inference results zarr file not found: {inference_zarr_path}")
     
-    # Load inference results
     inference_z = zarr.open(inference_zarr_path, mode='r')
     
-    # Check required keys
-    required_keys = ['pred_actions', 'gt_actions', 'actions_valid_mask', 'origin_frame_indices']
+    required_keys = ['pred_actions', 'gt_actions', 'actions_valid_mask', 'dataset_local_idx']
     for key in required_keys:
         if key not in inference_z:
-            raise ValueError(f"{key} not found in inference results. Please ensure inference has been completed.")
+            raise ValueError(f"{key} not found in inference results.")
     
-    pred_actions_all = inference_z['pred_actions']  # (N, H, D)
-    gt_actions_all = inference_z['gt_actions']  # (N, H, D)
-    actions_valid_mask_all = inference_z['actions_valid_mask']  # (N, H, D)
-    origin_frame_indices_all = inference_z['origin_frame_indices']  # (N,)
+    pred_actions_all = inference_z['pred_actions']
+    gt_actions_all = inference_z['gt_actions']
+    actions_valid_mask_all = inference_z['actions_valid_mask']
+    origin_frame_indices_all = inference_z['dataset_local_idx']
     
-    num_samples = pred_actions_all.shape[0]
-    horizon = pred_actions_all.shape[1]  # Typically 30
+    num_total = pred_actions_all.shape[0]
+    horizon = pred_actions_all.shape[1]
     
-    print(f"Inference results: {num_samples} samples, Horizon: {horizon}")
+    print(f"Inference results: {num_total} samples, Horizon: {horizon}")
     
-    # Randomly select a sample if not specified
     if sample_idx is None:
-        sample_idx = np.random.randint(0, num_samples)
-    else:
-        if sample_idx >= num_samples:
-            raise ValueError(f"sample_idx {sample_idx} is out of range (num_samples: {num_samples})")
+        sample_idx = np.random.randint(0, num_total)
+    elif sample_idx >= num_total:
+        raise ValueError(f"sample_idx {sample_idx} out of range ({num_total})")
     
-    # Get data for selected sample
-    pred_actions = pred_actions_all[sample_idx]  # (H, D)
-    gt_actions = gt_actions_all[sample_idx]  # (H, D)
-    actions_valid_mask = actions_valid_mask_all[sample_idx]  # (H, D)
-    origin_frame_idx = int(origin_frame_indices_all[sample_idx])  # int - observation frame index in original dataset
-    
-    print(f"Selected sample {sample_idx}, origin frame index: {origin_frame_idx}")
-    # Get origin_zarr_path from metadata if not provided
+    pred_actions = pred_actions_all[sample_idx]
+    gt_actions = gt_actions_all[sample_idx]
+    actions_valid_mask = actions_valid_mask_all[sample_idx]
+    origin_frame_idx = int(origin_frame_indices_all[sample_idx])
+
+    # Resolve dataset_name and field mapping for this sample
+    sample_dataset_name = None
+    field_mapping = _load_default_mapping()
+
+    if 'dataset_name' in inference_z:
+        ds_arr = inference_z['dataset_name']
+        # Guard against corrupted char-level storage
+        if ds_arr.shape[0] == num_total:
+            sample_dataset_name = str(ds_arr[sample_idx])
+        else:
+            print(f"Warning: dataset_name corrupted, cannot resolve for sample {sample_idx}")
+
     if origin_zarr_path is None:
-        if 'origin_zarr_path' in inference_z.attrs:
+        if sample_dataset_name and dataset_registry and sample_dataset_name in dataset_registry:
+            entry = dataset_registry[sample_dataset_name]
+            origin_zarr_path = entry['path']
+            field_mapping = entry.get('mapping', field_mapping)
+        elif 'origin_zarr_path' in inference_z.attrs:
             origin_zarr_path = inference_z.attrs['origin_zarr_path']
         else:
-            raise ValueError("origin_zarr_path not provided and not found in inference zarr metadata")
+            raise ValueError(
+                f"Cannot resolve origin zarr for sample {sample_idx} "
+                f"(dataset_name={sample_dataset_name!r}). "
+                "Provide --origin_zarr_path or ensure config is accessible."
+            )
+    elif sample_dataset_name and dataset_registry and sample_dataset_name in dataset_registry:
+        field_mapping = dataset_registry[sample_dataset_name].get('mapping', field_mapping)
+
+    print(f"Selected sample {sample_idx}, dataset={sample_dataset_name}, "
+          f"origin_frame={origin_frame_idx}, zarr={origin_zarr_path}")
     
     if not os.path.exists(origin_zarr_path):
         raise FileNotFoundError(f"Original dataset zarr file not found: {origin_zarr_path}")
@@ -264,7 +359,7 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
     frame_indices = np.arange(origin_frame_idx, origin_frame_idx + horizon) + 1
     
     # Get dataset size
-    dataset_size = data_group['image'].shape[0]
+    dataset_size = _navigate_zarr(data_group, field_mapping['image']).shape[0]
     
     # Final check: ensure frame_indices don't exceed dataset size or episode end
     if frame_indices[-1] >= dataset_size:
@@ -330,49 +425,36 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
     if use_relative_action is None:
         use_relative_action = True
     
-    # Load image, depth, intrinsic, extrinsic from original dataset
-    image = data_group['image'][frame_indices]  # (H, H_img, W_img, 3) uint8
-    depth = data_group['depth'][frame_indices]  # (H, H_img, W_img) uint16
-    intrinsic = data_group['intrinsic'][frame_indices]  # (H, 4) float32 [fx, fy, cx, cy]
-    extrinsic_flat = data_group['extrinsic'][frame_indices]  # (H, 16) float32 (world2cam, 4x4 flattened)
-    presence = data_group['presence'][frame_indices]  # (H, 2) int32 (presence of left and right hand)
-    print(f"presence: {presence[0]}")
-    # Reshape extrinsic from (H, 16) to (H, 4, 4)
-    extrinsic = extrinsic_flat.reshape(-1, 4, 4)  # (H, 4, 4)
+    # Load image, depth, intrinsic, extrinsic from original dataset using field_mapping
+    fm = field_mapping
+    image = _navigate_zarr(data_group, fm['image'], frame_indices)
+    depth = _navigate_zarr(data_group, fm['depth'], frame_indices)
+    intrinsic = _navigate_zarr(data_group, fm['intrinsic'], frame_indices)
+    extrinsic_flat = _navigate_zarr(data_group, fm['extrinsic'], frame_indices)
+    extrinsic = extrinsic_flat.reshape(-1, 4, 4)
     
     if use_relative_action:
-        # history is typically 30, the initial state is at origin_frame_idx
         state_frame_idx = origin_frame_idx
         
-        # Load wrist and hand state from original dataset
-        # Note: state is in WORLD coordinate system
-        # Format: [left_trans3, right_trans3, left_6drot, right_6drot, left_hand, right_hand]
-        wrist_state_world = data_group['state']['wrist'][state_frame_idx]  # (18,) = 2*9 (trans3 + 6drot for each hand)
-        hand_state_world = data_group['state']['fingertips'][state_frame_idx]  # (30,) = 2*15 (15 keypoints for each hand)
+        wrist_state_world = _navigate_zarr(data_group, fm['wrist_state'], state_frame_idx)
+        hand_state_world = _navigate_zarr(data_group, fm['hand_state'], state_frame_idx)
         
-        # Get camera extrinsic (world2cam) for the state frame
-        # Note: extrinsic is already loaded above, but we need the one at state_frame_idx
-        state_extrinsic_flat = data_group['extrinsic'][state_frame_idx]  # (16,) float32 (world2cam, 4x4 flattened)
-        world2cam = state_extrinsic_flat.reshape(4, 4)  # (4, 4) world2cam
+        state_extrinsic_flat = _navigate_zarr(data_group, fm['extrinsic'], state_frame_idx)
+        world2cam = state_extrinsic_flat.reshape(4, 4)
         
-        # Convert fingertip keypoints from world to wrist frame using transform_hand_points_to_wrist_frame
-        # hand_state_world format: [left_keypoints_15, right_keypoints_15] = (30,) = 2*15
-        # wrist_state_world format: [left_trans3, right_trans3, left_6drot, right_6drot] = (18,)
-        # Reshape to (1, D) for function compatibility
-        hand_state_world_reshaped = hand_state_world.reshape(1, -1)  # (1, 30)
-        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)  # (1, 18)
+        hand_state_world_reshaped = hand_state_world.reshape(1, -1)
+        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)
         hand_state_wrist_reshaped = transform_hand_points_to_wrist_frame(hand_state_world_reshaped, wrist_state_world_reshaped)
-        hand_state_wrist = hand_state_wrist_reshaped.reshape(-1)  # (30,)
+        hand_state_wrist = hand_state_wrist_reshaped.reshape(-1)
         
-        # Convert wrist state from world to camera coordinate system using transform_wrist_to_target_frame
-        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)  # (1, 18)
+        wrist_state_world_reshaped = wrist_state_world.reshape(1, -1)
         wrist_state_cam_reshaped = transform_wrist_to_target_frame(wrist_state_world_reshaped, world2cam)
-        wrist_state_cam = wrist_state_cam_reshaped.reshape(-1)  # (18,)
+        wrist_state_cam = wrist_state_cam_reshaped.reshape(-1)
         
-        initial_state = np.concatenate([wrist_state_cam, hand_state_wrist])  # (48,)
+        initial_state = np.concatenate([wrist_state_cam, hand_state_wrist])
 
-        wrist_action_world = data_group['action']['wrist'][frame_indices]  # (H, 18) = 2*9 (trans3 + 6drot for each hand)
-        hand_action_world = data_group['action']['fingertips'][frame_indices]  # (H, 30) = 2*15 (15 keypoints for each hand)     
+        wrist_action_world = _navigate_zarr(data_group, fm['wrist_action'], frame_indices)
+        hand_action_world = _navigate_zarr(data_group, fm['hand_action'], frame_indices)
         
         # Transform wrist from world to camera
         wrist_action_cam = transform_wrist_to_target_frame(wrist_action_world, extrinsic)  # (H, 18) in camera coordinate
@@ -413,33 +495,41 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
             mano_gt = inference_z['gt_mano'][sample_idx]  # (H, 90)
             
             if use_relative_action:
-                # Load initial MANO state for absolute recovery
-                initial_mano_state = data_group['state']['mano'][origin_frame_idx] # (90,)
+                mano_state_key = fm.get('mano_state', 'state/mano')
+                initial_mano_state = _navigate_zarr(data_group, mano_state_key, origin_frame_idx)
                 mano_pred = get_absolute_action(initial_mano_state, mano_pred)
                 mano_gt = get_absolute_action(initial_mano_state, mano_gt)
                 print("Converted relative MANO actions to absolute MANO actions")
             
-            # Shape is usually in original dataset
-            mano_shape = data_group['state']['shape'][origin_frame_idx:origin_frame_idx+horizon]
+            shape_key = fm.get('shape_state', 'state/shape')
+            mano_shape = _navigate_zarr(data_group, shape_key)[origin_frame_idx:origin_frame_idx+horizon]
         else:
-            # Try to load from original dataset if not in inference results
-            mano_gt = data_group['action']['mano'][frame_indices]
-            # For pred, we might not have it if it's not in inference_z
+            mano_action_key = fm.get('mano_action', 'action/mano')
+            mano_gt = _navigate_zarr(data_group, mano_action_key, frame_indices)
             print("Warning: pred_mano not found in inference results.")
-            mano_shape = data_group['state']['shape'][frame_indices]
+            shape_key = fm.get('shape_state', 'state/shape')
+            mano_shape = _navigate_zarr(data_group, shape_key, frame_indices)
+
+    # Try to load instruction
+    instr_key = fm.get('instruction', 'instruction')
+    try:
+        instruction = _navigate_zarr(data_group, instr_key, origin_frame_idx)
+    except (KeyError, IndexError):
+        instruction = None
 
     data = {
-        'image': image,  # (H, H_img, W_img, 3) uint8
-        'depth': depth,  # (H, H_img, W_img) uint16
-        'intrinsic': intrinsic,  # (H, 4) float32 [fx, fy, cx, cy]
-        'extrinsic': extrinsic,  # (H, 4, 4) float32 (world2cam)
-        'gt_actions': gt_actions_cam,  # (H, 48) float32
-        'pred_actions': pred_actions_cam,  # (H, 48) float32
+        'image': image,
+        'depth': depth,
+        'intrinsic': intrinsic,
+        'extrinsic': extrinsic,
+        'gt_actions': gt_actions_cam,
+        'pred_actions': pred_actions_cam,
         'mano_gt': mano_gt,
         'mano_pred': mano_pred,
         'mano_shape': mano_shape,
-        'instruction': data_group['instruction'][origin_frame_idx] if 'instruction' in data_group else None,
-        'frame_idx': origin_frame_idx,  # int - observation frame index in original dataset
+        'instruction': instruction,
+        'frame_idx': origin_frame_idx,
+        'dataset_name': sample_dataset_name,
     }
     return data
 
@@ -663,304 +753,242 @@ def load_config_from_inference_config():
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--inference_zarr_path", type=str, required=True, help="Path to inference results zarr file (contains pred_actions, gt_actions, etc.).")
-    parser.add_argument("--origin_zarr_path", type=str, default=None, help="Path to original dataset zarr file. If None, read from zarr attrs.")
-    parser.add_argument("--sample_idx", type=int, default=None, help="Index of sample to load from inference results. If None, randomly select one.")
-    parser.add_argument("--target_width", type=int, default=1920, help="Target image width. If None, use original width.")
-    parser.add_argument("--target_height", type=int, default=1080, help="Target image height. If None, use original height.")
-    parser.add_argument("--depth_scale", type=float, default=1.0)
-    parser.add_argument("--min_depth", type=float, default=0.1)
-    parser.add_argument("--max_depth", type=float, default=1.5)
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--save_path", type=str, default=None, help="Path to save rrd file. If None, use spawn/notebook_show.")
-    args = parser.parse_args()
+def visualize_one_sample(zarr_data, motion_type, save_path=None,
+                         target_width=1920, target_height=1080,
+                         depth_scale=1.0, min_depth=0.1, max_depth=1.5,
+                         debug=False):
+    """Run the Rerun visualization for a single sample loaded by *get_data_from_zarr*."""
+    rgb_images = np.array(zarr_data['image'])
+    depth_images = np.array(zarr_data['depth']).astype(np.float32) / 1000.0
+    intrinsics_flat = zarr_data['intrinsic']
+    camera_transforms_raw = zarr_data['extrinsic']
+    gt_actions = zarr_data['gt_actions']
+    pred_actions = zarr_data['pred_actions']
+    ds_name = zarr_data.get('dataset_name') or 'unknown'
 
-    if not os.path.exists(args.inference_zarr_path):
-        raise FileNotFoundError(f"Inference zarr file not found: {args.inference_zarr_path}")
-
-    config_defaults = load_config_from_inference_config()
-    use_relative_action = config_defaults.get("use_relative_action")
-    motion_type = config_defaults.get("motion_type")
-    print(f"Loaded from config: use_relative_action={use_relative_action}, motion_type={motion_type}")
-
-    print(f"Loading data from inference zarr: {args.inference_zarr_path}")
-    zarr_data = get_data_from_zarr(
-        args.inference_zarr_path, 
-        origin_zarr_path=args.origin_zarr_path,
-        sample_idx=args.sample_idx, 
-        use_relative_action=args.use_relative_action,
-        motion_type=args.motion_type
-    )
-    
-    # Extract images and depth: (T, H, W, 3) and (T, H, W)
-    rgb_images = np.array(zarr_data['image'])  # (T, H, W, 3) uint8
-    depth_images = np.array(zarr_data['depth']).astype(np.float32) / 1000.0  # (T, H, W) uint16 -> float32 meters
-    
-    # Extract intrinsics: (T, 4) [fx, fy, cx, cy]
-    intrinsics_flat = zarr_data['intrinsic']  # (T, 4)
-    
-    # Extract extrinsics: (T, 4, 4) world2cam
-    camera_transforms_raw = zarr_data['extrinsic']  # (T, 4, 4) world2cam
-    
-    # Convert gt_actions and pred_actions to hands_data format: (T, 48) -> hands_data with T frames
-    gt_actions = zarr_data['gt_actions']  # (T, 48)
-    pred_actions = zarr_data['pred_actions']  # (T, 48)
-    
     if motion_type == 'mano' and zarr_data['mano_gt'] is not None:
         gt_hands_data = gt_actions_to_hands_data(
-            gt_actions[:, :18], 
-            motion_type='mano', 
-            mano_data={'theta': zarr_data['mano_gt'], 'beta': zarr_data['mano_shape']}
+            gt_actions[:, :18], motion_type='mano',
+            mano_data={'theta': zarr_data['mano_gt'], 'beta': zarr_data['mano_shape']},
         )
         if zarr_data['mano_pred'] is not None:
             pred_hands_data = gt_actions_to_hands_data(
-                pred_actions[:, :18], 
-                motion_type='mano', 
-                mano_data={'theta': zarr_data['mano_pred'], 'beta': zarr_data['mano_shape']}
+                pred_actions[:, :18], motion_type='mano',
+                mano_data={'theta': zarr_data['mano_pred'], 'beta': zarr_data['mano_shape']},
             )
         else:
             pred_hands_data = gt_actions_to_hands_data(pred_actions)
     else:
         gt_hands_data = gt_actions_to_hands_data(gt_actions)
         pred_hands_data = gt_actions_to_hands_data(pred_actions)
-    
-    T = len(rgb_images)  # Number of timesteps (30)
-    print(f"Loaded {T} frames (timesteps) from selected sample")
-    print(f"GT hands data: left={len(gt_hands_data['left']['wrist'])}, right={len(gt_hands_data['right']['wrist'])}")
-    print(f"Pred hands data: left={len(pred_hands_data['left']['wrist'])}, right={len(pred_hands_data['right']['wrist'])}")
-    
-    # Resize images, depth, and adjust intrinsics if target dimensions are specified
+
+    T = len(rgb_images)
+    print(f"Loaded {T} frames from sample (dataset={ds_name})")
+
+    # Resize ------------------------------------------------------------------
     orig_h, orig_w = rgb_images[0].shape[:2]
-    target_w = args.target_width if args.target_width is not None else orig_w
-    target_h = args.target_height if args.target_height is not None else orig_h
-    
-    if args.target_width is not None or args.target_height is not None:
-        scale_x = target_w / orig_w
-        scale_y = target_h / orig_h
-        
-        print(f"Resizing from ({orig_w}, {orig_h}) to ({target_w}, {target_h})")
-        print(f"Scale factors: x={scale_x:.4f}, y={scale_y:.4f}")
-        
-        # Resize RGB images for all timesteps
-        rgb_images_resized = []
-        for img in rgb_images:
-            rgb_images_resized.append(cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LINEAR))
-        rgb_images = np.array(rgb_images_resized)
-        
-        # Resize depth images for all timesteps
-        depth_images_resized = []
-        for d in depth_images:
-            depth_images_resized.append(cv2.resize(d, (target_w, target_h), interpolation=cv2.INTER_NEAREST))
-        depth_images = np.array(depth_images_resized)
-        
-        # Adjust intrinsics: scale fx, fy, cx, cy for all timesteps
+    tw = target_width if target_width is not None else orig_w
+    th = target_height if target_height is not None else orig_h
+
+    if tw != orig_w or th != orig_h:
+        sx, sy = tw / orig_w, th / orig_h
+        rgb_images = np.array([cv2.resize(im, (tw, th), interpolation=cv2.INTER_LINEAR) for im in rgb_images])
+        depth_images = np.array([cv2.resize(d, (tw, th), interpolation=cv2.INTER_NEAREST) for d in depth_images])
         intrinsics_flat = intrinsics_flat.copy()
-        intrinsics_flat[:, 0] *= scale_x  # fx
-        intrinsics_flat[:, 1] *= scale_y  # fy
-        intrinsics_flat[:, 2] *= scale_x  # cx
-        intrinsics_flat[:, 3] *= scale_y  # cy
-    
-    # Get actual frame_idx that was used
+        intrinsics_flat[:, 0] *= sx
+        intrinsics_flat[:, 1] *= sy
+        intrinsics_flat[:, 2] *= sx
+        intrinsics_flat[:, 3] *= sy
+
     actual_frame_idx = zarr_data['frame_idx']
-    
-    # Initialize Rerun with unique app name based on frame_idx
-    app_name = f"rgbd_hand_action_vis_frame_{actual_frame_idx}"
+
+    # Rerun session ------------------------------------------------------------
+    app_name = f"vis_{ds_name}_frame_{actual_frame_idx}"
     rr.init(app_name)
-    
-    # Save to rrd file if save_path is provided, otherwise use spawn
-    if args.save_path:
-        # If save_path is a directory, create unique filename with frame_idx
-        if os.path.isdir(args.save_path):
-            save_filename = f"visualization_frame_{actual_frame_idx}.rrd"
-            save_path = os.path.join(args.save_path, save_filename)
+
+    if save_path:
+        os.makedirs(save_path, exist_ok=True) if os.path.isdir(save_path) else None
+        if os.path.isdir(save_path):
+            rrd_file = os.path.join(save_path, f"{ds_name}_frame_{actual_frame_idx}.rrd")
         else:
-            # If it's a file, add frame_idx to filename
-            base_path = os.path.splitext(args.save_path)[0]
-            ext = os.path.splitext(args.save_path)[1] or '.rrd'
-            save_path = f"{base_path}_frame_{actual_frame_idx}{ext}"
-        rr.save(save_path)
-        print(f"Saving visualization to: {save_path}")
+            base, ext = os.path.splitext(save_path)
+            rrd_file = f"{base}_{ds_name}_frame_{actual_frame_idx}{ext or '.rrd'}"
+        rr.save(rrd_file)
+        print(f"Saving visualization to: {rrd_file}")
     else:
         rr.spawn(port=9878)
-    
-    # 设置世界坐标系 Y-UP
+
     rr.log("/world", rr.ViewCoordinates.RIGHT_HAND_Y_UP)
-    # Create two visualizers with different color schemes
     viz_gt = HandVisualizer(history_len=10, color_scheme='gt')
     viz_pred = HandVisualizer(history_len=10, color_scheme='pred')
 
-    frame_idx = 0
-    num_frames = T  # All timesteps for the selected sample
-    
-    # Store errors for statistics
     all_errors = {
-        'left': {'wrist': [], 'Thumb': [], 'Index': [], 'Middle': [], 'Ring': [], 'Little': []},
-        'right': {'wrist': [], 'Thumb': [], 'Index': [], 'Middle': [], 'Ring': [], 'Little': []}
+        side: {'wrist': [], 'Thumb': [], 'Index': [], 'Middle': [], 'Ring': [], 'Little': []}
+        for side in ('left', 'right')
     }
 
-    for i in range(num_frames):
-        rr.set_time("frame_idx", sequence=frame_idx)
-        
-        # Log instruction if available
-        if zarr_data.get('instruction') is not None:
-            instruction_candidates = zarr_data['instruction']  # shape (5,) array of strings
-            valid_instructions = []
-            if isinstance(instruction_candidates, (np.ndarray, list)):
-                for idx, candidate in enumerate(instruction_candidates):
-                    candidate_str = str(candidate).strip()
-                    if candidate_str:
-                        valid_instructions.append(f"[{idx}] {candidate_str}")
-            
-            if valid_instructions:
-                instruction_text = "\n".join(valid_instructions)
-                rr.log("/world/instruction", rr.TextLog(instruction_text))
+    for i in range(T):
+        rr.set_time("frame_idx", sequence=i)
 
-        # 可视化世界坐标系原点和轴
+        if zarr_data.get('instruction') is not None:
+            instr = zarr_data['instruction']
+            lines = []
+            if isinstance(instr, (np.ndarray, list)):
+                for idx, c in enumerate(instr):
+                    s = str(c).strip()
+                    if s:
+                        lines.append(f"[{idx}] {s}")
+            if lines:
+                rr.log("/world/instruction", rr.TextLog("\n".join(lines)))
+
         rr.log("/world/origin", rr.Points3D([0, 0, 0], radii=0.01, colors=[255, 255, 255]))
         rr.log("/world/x", rr.Arrows3D(origins=[0, 0, 0], vectors=[0.1, 0, 0], radii=0.005, colors=[255, 0, 0]))
         rr.log("/world/y", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0.1, 0], radii=0.005, colors=[0, 255, 0]))
         rr.log("/world/z", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0, 0.1], radii=0.005, colors=[0, 0, 255]))
-        
+
         color_rgb = rgb_images[i]
         depth = depth_images[i]
-        
-        # zarr stores world2cam, need to invert for visualization
-        world2cam = camera_transforms_raw[i]  # (4, 4)
-        cam_pose_world = np.linalg.inv(world2cam)  # cam2world
-        
-        # Get intrinsic for this frame
-        K_flat = intrinsics_flat[i]  # [fx, fy, cx, cy]
-        K = np.array([
-            [K_flat[0], 0, K_flat[2]],
-            [0, K_flat[1], K_flat[3]],
-            [0, 0, 1]
-        ], dtype=np.float32)
+        world2cam = camera_transforms_raw[i]
+        cam_pose_world = np.linalg.inv(world2cam)
 
-        # Log Camera Pose (World Frame)
+        K_flat = intrinsics_flat[i]
+        K = np.array([[K_flat[0], 0, K_flat[2]],
+                       [0, K_flat[1], K_flat[3]],
+                       [0, 0, 1]], dtype=np.float32)
+
         rr.log("/world/camera_pose", rr.Transform3D(
-            translation=cam_pose_world[:3, 3], 
-            mat3x3=cam_pose_world[:3, :3]
-        ))
-        
-        if args.debug:
+            translation=cam_pose_world[:3, 3], mat3x3=cam_pose_world[:3, :3]))
+
+        if debug:
             rr.log("/world/camera_pose/debug_axes/x", rr.Arrows3D(origins=[0, 0, 0], vectors=[0.1, 0, 0], radii=0.005, colors=[255, 0, 0]))
             rr.log("/world/camera_pose/debug_axes/y", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0.1, 0], radii=0.005, colors=[0, 255, 0]))
             rr.log("/world/camera_pose/debug_axes/z", rr.Arrows3D(origins=[0, 0, 0], vectors=[0, 0, 0.1], radii=0.005, colors=[0, 0, 255]))
-        
-        # Camera Intrinsics & Image
+
         rr.log("/world/camera_pose/camera", rr.Pinhole(
-            image_from_camera=K, 
-            width=color_rgb.shape[1], 
-            height=color_rgb.shape[0], 
-            camera_xyz=rr.ViewCoordinates.RDF 
-        ))
+            image_from_camera=K, width=color_rgb.shape[1],
+            height=color_rgb.shape[0], camera_xyz=rr.ViewCoordinates.RDF))
         rr.log("/world/camera_pose/camera", rr.Image(color_rgb))
-        
-        # Resize depth to match image size if needed
+
         if depth.shape[:2] != color_rgb.shape[:2]:
-            depth_resized = cv2.resize(depth, (color_rgb.shape[1], color_rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
+            depth_resized = cv2.resize(depth, (color_rgb.shape[1], color_rgb.shape[0]),
+                                       interpolation=cv2.INTER_NEAREST)
         else:
             depth_resized = depth
-        
-        # Point Cloud
-        points, colors = get_colored_point_cloud(
-            color_rgb, depth_resized, color_rgb.shape[1], color_rgb.shape[0], K, 
-            depth_scale=args.depth_scale, min_depth=args.min_depth, max_depth=args.max_depth
-        )
-        rr.log("/world/camera_pose/point_cloud", rr.Points3D(points, colors=colors))
 
-        # Hands Visualization - GT and Pred
+        pts, cols = get_colored_point_cloud(
+            color_rgb, depth_resized, color_rgb.shape[1], color_rgb.shape[0], K,
+            depth_scale=depth_scale, min_depth=min_depth, max_depth=max_depth)
+        rr.log("/world/camera_pose/point_cloud", rr.Points3D(pts, colors=cols))
+
         identity_transform = np.eye(4, dtype=np.float32)
-        
-        # Visualize GT hands
+
         for hand_name in ['left', 'right']:
-                if hand_name in gt_hands_data and i < len(gt_hands_data[hand_name]['wrist']):
-                    viz_gt.log(
-                        root_3d_path="/world/camera_pose/hands/gt", # 3D 
-                        image_root_path="/world/camera_pose/camera", # 2D 
-                        hand_name=hand_name,
-                        hand_data=gt_hands_data[hand_name],
-                        frame_idx=i,
-                        world_to_camera=identity_transform,  
-                        K=K
-                    )
-                    if i == 0 and args.debug:
-                        wrist_pose_camera = gt_hands_data[hand_name]['wrist'][i]
-                        print(f"\n=== Frame {i} - GT {hand_name} wrist (Camera Frame) ===")
-                        print(f"Translation: {wrist_pose_camera[:3, 3]}")
-                        print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
-                    
-                    if motion_type == 'mano' and 'verts' in gt_hands_data[hand_name]:
-                        viz_gt.log_mesh(
-                            root_3d_path="/world/camera_pose/hands/gt",
-                            hand_name=hand_name,
-                            hand_data=gt_hands_data[hand_name],
-                            frame_idx=i
-                        )
-        
-        # Visualize Pred hands
+            if hand_name in gt_hands_data and i < len(gt_hands_data[hand_name]['wrist']):
+                viz_gt.log("/world/camera_pose/hands/gt", "/world/camera_pose/camera",
+                           hand_name, gt_hands_data[hand_name], i, identity_transform, K)
+                if i == 0 and debug:
+                    wp = gt_hands_data[hand_name]['wrist'][i]
+                    print(f"\n=== Frame {i} - GT {hand_name} wrist ===\nTranslation: {wp[:3, 3]}")
+                if motion_type == 'mano' and 'verts' in gt_hands_data[hand_name]:
+                    viz_gt.log_mesh("/world/camera_pose/hands/gt", hand_name, gt_hands_data[hand_name], i)
+
         for hand_name in ['left', 'right']:
             if hand_name in pred_hands_data and i < len(pred_hands_data[hand_name]['wrist']):
-                viz_pred.log(
-                    root_3d_path="/world/camera_pose/hands/pred", # 3D 
-                    image_root_path="/world/camera_pose/camera", # 2D 
-                    hand_name=hand_name,
-                    hand_data=pred_hands_data[hand_name],
-                    frame_idx=i,
-                    world_to_camera=identity_transform,  
-                    K=K
-                )
-                if i == 0 and args.debug:
-                    wrist_pose_camera = pred_hands_data[hand_name]['wrist'][i]
-                    print(f"\n=== Frame {i} - Pred {hand_name} wrist (Camera Frame) ===")
-                    print(f"Translation: {wrist_pose_camera[:3, 3]}")
-                    print(f"Rotation matrix shape: {wrist_pose_camera[:3, :3].shape}")
-                
+                viz_pred.log("/world/camera_pose/hands/pred", "/world/camera_pose/camera",
+                             hand_name, pred_hands_data[hand_name], i, identity_transform, K)
+                if i == 0 and debug:
+                    wp = pred_hands_data[hand_name]['wrist'][i]
+                    print(f"\n=== Frame {i} - Pred {hand_name} wrist ===\nTranslation: {wp[:3, 3]}")
                 if motion_type == 'mano' and 'verts' in pred_hands_data[hand_name]:
-                    viz_pred.log_mesh(
-                        root_3d_path="/world/camera_pose/hands/pred",
-                        hand_name=hand_name,
-                        hand_data=pred_hands_data[hand_name],
-                        frame_idx=i
-                    )
+                    viz_pred.log_mesh("/world/camera_pose/hands/pred", hand_name, pred_hands_data[hand_name], i)
 
-        # Calculate and log position errors
         errors = calculate_position_errors(gt_hands_data, pred_hands_data, i)
-        
-        # Store errors for statistics
-        for hand_name in ['left', 'right']:
-            all_errors[hand_name]['wrist'].append(errors[hand_name]['wrist'])
-            for finger in ['Thumb', 'Index', 'Middle', 'Ring', 'Little']:
-                all_errors[hand_name][finger].append(errors[hand_name][finger])
-        
-        # Format errors as text for display
-        error_text = f"Frame {i} Position Errors (meters)\n"
-        error_text += "=" * 50 + "\n\n"
-        
-        # Left hand
-        error_text += "LEFT Hand:\n"
-        error_text += f"  Wrist:  {errors['left']['wrist']:.6f} m\n"
-        error_text += f"  Thumb:  {errors['left']['Thumb']:.6f} m\n"
-        error_text += f"  Index:  {errors['left']['Index']:.6f} m\n"
-        error_text += f"  Middle: {errors['left']['Middle']:.6f} m\n"
-        error_text += f"  Ring:   {errors['left']['Ring']:.6f} m\n"
-        error_text += f"  Little: {errors['left']['Little']:.6f} m\n"
-        
-        
-        # Right hand
-        error_text += "RIGHT Hand:\n"
-        error_text += f"  Wrist:  {errors['right']['wrist']:.6f} m\n"
-        error_text += f"  Thumb:  {errors['right']['Thumb']:.6f} m\n"
-        error_text += f"  Index:  {errors['right']['Index']:.6f} m\n"
-        error_text += f"  Middle: {errors['right']['Middle']:.6f} m\n"
-        error_text += f"  Ring:   {errors['right']['Ring']:.6f} m\n"
-        error_text += f"  Little: {errors['right']['Little']:.6f} m\n"
-        # Log as text document
-        rr.log("/position_errors", rr.TextDocument(error_text, media_type=rr.MediaType.TEXT))
+        for hn in ('left', 'right'):
+            all_errors[hn]['wrist'].append(errors[hn]['wrist'])
+            for fn in ('Thumb', 'Index', 'Middle', 'Ring', 'Little'):
+                all_errors[hn][fn].append(errors[hn][fn])
 
-        frame_idx += 1
+        lines = [f"Frame {i} Position Errors (meters)", "=" * 50, ""]
+        for hn in ('LEFT', 'RIGHT'):
+            hn_key = hn.lower()
+            lines.append(f"{hn} Hand:")
+            lines.append(f"  Wrist:  {errors[hn_key]['wrist']:.6f} m")
+            for fn in ('Thumb', 'Index', 'Middle', 'Ring', 'Little'):
+                lines.append(f"  {fn:7s} {errors[hn_key][fn]:.6f} m")
+        rr.log("/position_errors", rr.TextDocument("\n".join(lines), media_type=rr.MediaType.TEXT))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Visualize inference results with Rerun")
+    parser.add_argument("--inference_zarr_path", type=str, required=True,
+                        help="Path to inference results zarr file.")
+    parser.add_argument("--origin_zarr_path", type=str, default=None,
+                        help="(Optional) Explicit origin dataset zarr path. "
+                             "If omitted, resolved automatically from dataset_name.")
+    parser.add_argument("--dataset_names", type=str, nargs='+', default=None,
+                        help="Filter samples by dataset name(s). "
+                             "E.g. --dataset_names taco oakink2")
+    parser.add_argument("--num_samples", type=int, default=1,
+                        help="Number of samples to visualize (default 1).")
+    parser.add_argument("--sample_idx", type=int, default=None,
+                        help="Specific sample index (overrides --num_samples / --dataset_names).")
+    parser.add_argument("--target_width", type=int, default=1920)
+    parser.add_argument("--target_height", type=int, default=1080)
+    parser.add_argument("--depth_scale", type=float, default=1.0)
+    parser.add_argument("--min_depth", type=float, default=0.1)
+    parser.add_argument("--max_depth", type=float, default=1.5)
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--save_path", type=str, default=None,
+                        help="Directory or file path to save .rrd files.")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.inference_zarr_path):
+        raise FileNotFoundError(f"Inference zarr not found: {args.inference_zarr_path}")
+
+    # Load model config defaults
+    config_defaults = load_config_from_inference_config()
+    use_relative_action = config_defaults.get("use_relative_action")
+    motion_type = config_defaults.get("motion_type")
+    print(f"Config: use_relative_action={use_relative_action}, motion_type={motion_type}")
+
+    # Build dataset name → zarr path registry
+    dataset_registry = build_dataset_registry(args.inference_zarr_path)
+    if dataset_registry:
+        print(f"Dataset registry: {list(dataset_registry.keys())}")
+
+    # Select sample indices
+    selected = select_sample_indices(
+        args.inference_zarr_path,
+        dataset_names=args.dataset_names,
+        num_samples=args.num_samples,
+        sample_idx=args.sample_idx,
+    )
+    print(f"Will visualize {len(selected)} sample(s): {selected}")
+
+    for seq, sidx in enumerate(selected):
+        print(f"\n{'='*60}\n[{seq+1}/{len(selected)}] Loading sample index {sidx}...")
+        zarr_data = get_data_from_zarr(
+            args.inference_zarr_path,
+            origin_zarr_path=args.origin_zarr_path,
+            sample_idx=sidx,
+            use_relative_action=use_relative_action,
+            motion_type=motion_type,
+            dataset_registry=dataset_registry,
+        )
+
+        visualize_one_sample(
+            zarr_data, motion_type=motion_type,
+            save_path=args.save_path,
+            target_width=args.target_width,
+            target_height=args.target_height,
+            depth_scale=args.depth_scale,
+            min_depth=args.min_depth,
+            max_depth=args.max_depth,
+            debug=args.debug,
+        )
+
+    print(f"\nDone. Visualized {len(selected)} sample(s).")
+
 
 if __name__ == "__main__":
     main()

@@ -364,7 +364,8 @@ class LegendVLADataset(BaseRatioDataset):
             data = self._sample_to_data(sample)
             if self.return_dataset_info:
                 data['dataset_name'] = self.dataset_names[dataset_idx]
-                data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
+                t_now = int(self.samplers[dataset_idx].indices[curr_idx][0])
+                data['dataset_local_idx'] = np.array(t_now, dtype=np.int32)
             torch_data = dict_apply(
                 data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
             )
