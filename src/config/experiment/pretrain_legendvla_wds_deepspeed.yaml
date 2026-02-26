@@ -1,0 +1,48 @@
+# @package _global_
+#
+# WebDataset-based training config for LegendVLA.
+# Inherits from pretrain_legendvla_deepspeed and overrides dataset/dataloader
+# to use WebDataset shards instead of Zarr files.
+defaults:
+  - pretrain_legendvla_deepspeed
+  - vla_wds_dataset_paths
+  - _self_
+
+exp_name: "pretrain_legendvla_wds_deepspeed"
+
+# Use WebDataset workspace
+_target_: src.workspace.train_legendvla_wds_workspace.TrainLegendVLAWdsWorkspace
+
+# Override dataset to use WebDataset-backed VLA dataset
+dataset:
+  _target_: src.dataset.legendvla_wds_dataset.LegendUnifiedWdsDataset
+  vla_dataset:
+    _target_: src.dataset.legendvla_wds_dataset.LegendVLAWdsDataset
+    wds_datasets: ${vla_wds_datasets}
+    shape_meta: ${shape_meta}
+    objective: ${objective}
+    use_relative_action: False
+    depth_clip_range: ${depth_clip_range}
+    shuffle_buffer: 8192
+  vlm_dataset:
+    _target_: src.dataset.legendvlm_dataset.LegendVLMDataset
+    dataset_paths: ${vlm_dataset_paths}
+    split: train
+    cache_dir: /share_data/guantianrui/datasets/VLM/FineVision/.cache
+    seed: 42
+    weights: [0.5, 0.5, 0.5]
+  vla_ratio: ${eval:'5/6'}
+  batch_size: ${dataloader.loader.batch_size}
+
+# Override dataloader: no batch_sampler needed for IterableDataset
+dataloader:
+  loader:
+    batch_size: 20
+    num_workers: 20
+    pin_memory: True
+    persistent_workers: True
+    prefetch_factor: 32
+
+# Steps per epoch for WebDataset (streaming, no len())
+training:
+  steps_per_epoch: 100000
