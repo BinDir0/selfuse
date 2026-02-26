@@ -94,7 +94,7 @@ def build_sample_from_window(buf, action_horizon, state_horizon, state_stride,
     hand_state = np.tile(ld[18:48], (state_horizon, 1))    # (state_horizon, 30)
 
     # --- Image: current frame only (image_horizon=1 in default config) ---
-    image = np.array(current["image.png"])  # (H, W, 3) uint8
+    image = np.array(current["image.jpg"])  # (H, W, 3) uint8
     if image.ndim == 2:
         # grayscale edge case
         image = np.stack([image] * 3, axis=-1)

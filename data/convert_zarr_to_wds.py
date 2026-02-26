@@ -60,7 +60,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
     frames_done = 0
     t0 = time.time()
 
-    with wds.ShardWriter(output_pattern, maxcount=2000, maxsize=int(1e9)) as sink:
+    with wds.ShardWriter(output_pattern, maxcount=20000, maxsize=int(1e9)) as sink:
         for ep_i, (ep_start, ep_end, ep_idx) in enumerate(episode_batch):
             T = ep_end - ep_start
 
@@ -92,9 +92,9 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
             ], axis=1).astype(np.float32)
 
             for t in range(T):
-                # PNG lossless encode
+                # JPEG encode
                 buf = io.BytesIO()
-                Image.fromarray(images[t]).save(buf, format='PNG')
+                Image.fromarray(images[t]).save(buf, format='JPEG', quality=95)
 
                 # Instruction
                 instr = instructions[t]
@@ -114,7 +114,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
 
                 sink.write({
                     "__key__": f"{dataset_name}_ep{ep_idx:06d}_f{t:05d}",
-                    "image.png": buf.getvalue(),
+                    "image.jpg": buf.getvalue(),
                     "depth.npy": depths[t].astype(np.uint16),
                     "lowdim.npy": lowdim_all[t],
                     "meta.json": meta_dict,
