@@ -17,7 +17,7 @@ from src.utils.geometry import (
     transform_wrist_to_target_frame,
     transform_hand_points_to_target_frame,
 )
-from src.dataset.legendvla_dataset import get_absolute_action, get_relative_action, transform_hand_from_wrist_to_camera
+from src.dataset.data_transforms import get_absolute_action, get_relative_action, transform_hand_from_wrist_to_camera
 from src.utils.mano_vis import mano_forward
 import torch
 

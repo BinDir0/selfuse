@@ -47,8 +47,7 @@ import cv2
 from src.utils.mano_vis import vis_hand_plot, vis_hand_plot_comparison
 from src.utils.mano_utils import rot6d_to_rotmat, sample_to_manovis
 from visualize import HandVisualizer, sample_for_vis
-from src.dataset.legendvla_dataset import transform_wrist_to_target_frame
-from src.utils.geometry import transform_hand_points_to_target_frame
+from src.utils.geometry import transform_wrist_to_target_frame, transform_hand_points_to_target_frame
 from src.utils.mano_utils import invert_extrinsics
 
 
