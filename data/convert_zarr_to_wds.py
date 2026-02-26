@@ -43,8 +43,13 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
             node = node[part]
         return node
 
+    # presence is per-timestep in data group, shape (total_frames, 2)
+    # Only human datasets have presence; real_world datasets do not.
+    has_presence = 'presence' in key_mapping
+    presence_array = get_array(key_mapping['presence']) if has_presence else None
+
     with wds.ShardWriter(output_pattern, maxcount=20000, maxsize=int(1e9)) as sink:
-        for ep_start, ep_end, ep_idx, ep_presence in episode_batch:
+        for ep_start, ep_end, ep_idx in episode_batch:
             T = ep_end - ep_start
 
             # Preload episode low-dim data (fits in memory)
@@ -56,6 +61,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
             intr = get_array(key_mapping['intrinsic'])[ep_start:ep_end]
             instructions = get_array(key_mapping['instruction'])[ep_start:ep_end]
             instruction_nums = get_array(key_mapping['instruction_num'])[ep_start:ep_end]
+            presence = presence_array[ep_start:ep_end] if has_presence else None
 
             # Image array (lazy-loaded per frame to save memory)
             image_array = get_array(key_mapping['image'])
@@ -86,17 +92,20 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
                     instr = instr.decode('utf-8')
                 instr_num = int(instruction_nums[t])
 
-                sink.write({
-                    "__key__": f"{dataset_name}_ep{ep_idx:06d}_f{t:05d}",
-                    "image.jpg": buf.getvalue(),
-                    "lowdim.npy": lowdim,
-                    "meta.json": {
+                meta_dict = {
                         "dataset_name": dataset_name,
                         "episode_index": int(ep_idx),
                         "instruction": instr,
                         "instruction_num": instr_num,
-                        "presence": int(ep_presence),
-                    },
+                    }
+                if has_presence:
+                    meta_dict["presence"] = presence[t].tolist()
+
+                sink.write({
+                    "__key__": f"{dataset_name}_ep{ep_idx:06d}_f{t:05d}",
+                    "image.jpg": buf.getvalue(),
+                    "lowdim.npy": lowdim,
+                    "meta.json": meta_dict,
                 })
 
 
@@ -114,13 +123,12 @@ def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
         return
 
     episode_ends = meta['episode_ends'][:]
-    presence = meta['presence'][:] if 'presence' in meta else np.ones(len(episode_ends), dtype=np.int8)
 
-    # Build episode list: (start, end, index, presence)
+    # Build episode list: (start, end, index)
     episodes = []
     for i, end in enumerate(episode_ends):
         start = 0 if i == 0 else int(episode_ends[i - 1])
-        episodes.append((int(start), int(end), i, int(presence[i])))
+        episodes.append((int(start), int(end), i))
 
     # Split episodes into chunks for workers
     actual_workers = min(num_workers, len(episodes))
@@ -163,6 +171,7 @@ HUMAN_KEY_MAPPING = {
     'intrinsic': 'intrinsic',
     'instruction': 'instruction',
     'instruction_num': 'instruction_num',
+    'presence': 'presence',
 }
 
 REAL_WORLD_KEY_MAPPING = {

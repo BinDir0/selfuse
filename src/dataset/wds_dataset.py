@@ -108,6 +108,9 @@ def build_sample_from_window(buf, action_horizon, state_horizon, state_stride,
     instruction = meta["instruction"]
     instruction_num = meta["instruction_num"]
 
+    # --- Presence: per-frame [left, right] ---
+    presence = meta.get("presence", [1, 1])
+
     return {
         "wrist_state":    wrist_state.astype(np.float32),
         "hand_state":     hand_state.astype(np.float32),
@@ -118,6 +121,7 @@ def build_sample_from_window(buf, action_horizon, state_horizon, state_stride,
         "intrinsic":      intrinsic.astype(np.float32),
         "instruction":    instruction,
         "instruction_num": instruction_num,
+        "presence":       np.array(presence, dtype=np.int32),
     }
 
 

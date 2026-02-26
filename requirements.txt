@@ -29,6 +29,7 @@ seaborn
 xformers
 websockets
 scikit-learn
+webdataset
 # chumpy
 #manotorch
 #manopth
