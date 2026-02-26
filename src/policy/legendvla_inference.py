@@ -579,10 +579,13 @@ class LegendVLAInference(nn.Module):
             "input_ids": input_ids,
             "attention_mask": processed["attention_mask"],
             "pixel_values": processed["pixel_values"].to(self.dtype),
+            "has_depth_values": processed.get("has_depth_values", torch.zeros(batch_size, dtype=torch.bool)),
             "n_states": prepared["n_states"],
             "states": prepared["states"].to(self.dtype),
             "is_vla_data": torch.ones(batch_size, dtype=torch.bool),
         }
+        if "depth_values" in processed:
+            inputs["depth_values"] = processed["depth_values"].to(self.dtype)
 
         if self.mode == "flow":
             inputs["n_actions"] = torch.zeros(batch_size, dtype=torch.long)

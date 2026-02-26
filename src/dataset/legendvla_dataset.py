@@ -193,6 +193,9 @@ class LegendVLADataset(BaseZarrDataset):
         # Add depth_values if available
         if 'depth_values' in processed_results:
             data['depth_values'] = processed_results['depth_values']
+            data['has_depth_values'] = np.array(True, dtype=bool)
+        else: 
+            data['has_depth_values'] = np.array(False, dtype=bool)
         if self.objective != "train_flow":
             data['labels'] = processed_results['labels']
         return data

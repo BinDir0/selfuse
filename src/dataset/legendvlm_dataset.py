@@ -184,6 +184,7 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             'pixel_values': processed_results['pixel_values'],
             'answer_start_idx': processed_results['answer_start_idx'],
             'is_vla_data': np.array(False, dtype=bool),
+            'has_depth_values': np.array(False, dtype=bool),
         }
         return data
 

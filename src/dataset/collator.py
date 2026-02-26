@@ -49,8 +49,6 @@ class LegendVLDataCollator(BaseDataCollator):
             padding_side=self.padding_side
         )
         batch["attention_mask"] = (batch["input_ids"] != self.pad_token_id).long()
-        has_depth_values = [(item['is_vla_data'] == True) for item in data_list]
-        batch['has_depth_values'] = torch.tensor(has_depth_values, dtype=torch.bool)
         for key in data_list[0].keys():
             if key in ['input_ids', 'attention_mask', 'labels']:
                 continue
