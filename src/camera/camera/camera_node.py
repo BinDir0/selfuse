@@ -9,6 +9,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from camera.realsense_image_module import RealSenseImage
+from rclpy.qos import qos_profile_sensor_data
 
 
 class CameraNode(Node):
@@ -47,14 +48,14 @@ class CameraNode(Node):
         self.rgb_publisher = self.create_publisher(
             Image, 
             f'/camera/{self.camera_name}/rgb', 
-            10
+            qos_profile_sensor_data
         )
         
         # Topic: /camera/{head,chest}/depth
         self.depth_publisher = self.create_publisher(
             Image,
             f'/camera/{self.camera_name}/depth',
-            10
+            qos_profile_sensor_data
         )
         
         # 图像转换桥

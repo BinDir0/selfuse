@@ -114,8 +114,10 @@ docker run -d \
   ${GPU_OPTIONS[@]} \
   --privileged \
   --network=host \
+  --ipc=host \
   --name "${CONTAINER_NAME}" \
   -w /root/workspace/legendvla-inference \
+  -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e DISPLAY="${DISPLAY}" \
   -e XAUTHORITY=/root/.Xauthority \
   -e QT_X11_NO_MITSHM=1 \

@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import qos_profile_sensor_data
 import numpy as np
 import os
 import threading
@@ -153,8 +154,8 @@ class ModelInterfaceNode(Node):
         self.pub_action_hand_l = self.create_publisher(PoseArray, '/action/left_hand/keypoints', 1)
         self.pub_action_hand_r = self.create_publisher(PoseArray, '/action/right_hand/keypoints', 1)
 
-        self.create_subscription(Image, f'/camera/{self.cam_name}/rgb', self.rgb_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
-        self.create_subscription(Image, f'/camera/{self.cam_name}/depth', self.depth_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
+        self.create_subscription(Image, f'/camera/{self.cam_name}/rgb', self.rgb_cb, qos_profile_sensor_data, callback_group=MutuallyExclusiveCallbackGroup())
+        self.create_subscription(Image, f'/camera/{self.cam_name}/depth', self.depth_cb, qos_profile_sensor_data, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseStamped, '/state/left_arm/wrist_pose', self.l_pose_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseStamped, '/state/right_arm/wrist_pose', self.r_pose_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseArray, '/state/left_hand/keypoints', self.l_kp_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())

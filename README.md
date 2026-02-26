@@ -7,15 +7,33 @@
 ```bash
 docker load -i teleop.tar
 ```
-3. **创建容器**：修改 `create_container.sh` 第 137 行的宿主机路径为本地项目目录，然后执行：
+3. **修改宿主机的UDP缓冲区参数**：
+```bash
+# 创建独立的 ROS 2 优化配置文件
+sudo sh -c 'cat > /etc/sysctl.d/60-ros2-realsense.conf <<EOF
+net.core.rmem_max=2147483647
+net.core.wmem_max=2147483647
+net.core.rmem_default=2147483647
+net.core.wmem_default=2147483647
+EOF'
+
+# 立即应用
+sudo sysctl --system
+```
+4. **创建容器**：修改 `create_container.sh` 第 138 行的宿主机路径为本地项目目录，然后执行：
 ```bash
 ./create_container.sh legendvla-inference
 ```
-4. **安装依赖**：在container中执行：
+5. **安装依赖**：在container中执行：
 ```bash
 pip install -r requirements.txt
 sudo apt install vim
+sudo apt install tree
+sudo apt-get update && sudo apt-get install ros-$ROS_DISTRO-rmw-cyclonedds-cpp -y
+echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc && source ~/.bashrc
 ```
+
+
 
 ## 推理流程
 
