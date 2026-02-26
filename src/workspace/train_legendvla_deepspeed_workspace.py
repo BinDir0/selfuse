@@ -12,7 +12,7 @@ import hydra
 import torch
 from omegaconf import OmegaConf
 import pathlib
-from contextlib import nullcontext, contextmanager
+from contextlib import nullcontext
 from torch.utils.data import DataLoader
 import copy
 import random
@@ -24,13 +24,12 @@ from datetime import timedelta
 from transformers import get_scheduler
 import accelerate
 from accelerate import Accelerator, DeepSpeedPlugin
-from accelerate.utils import DummyOptim, DummyScheduler, ProfileKwargs, InitProcessGroupKwargs
+from accelerate.utils import ProfileKwargs, InitProcessGroupKwargs
 
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager
 from src.model.common.model_average import ModelAveraging
-from src.utils.metric import get_action_accuracy
 from src.utils.training_utils import (
     TrainingState,
     capture_output_to_training_log,

@@ -2,64 +2,13 @@ from typing import Dict, List, Any
 import os
 import copy
 import warnings
+import pathlib
 
 import numpy as np
 import torch
 
 from src.model.common.normalizer import LinearNormalizer
 from src.utils.pytorch_util import dict_apply
-
-class BaseLowdimDataset(torch.utils.data.Dataset):
-    def get_validation_dataset(self) -> 'BaseLowdimDataset':
-        # return an empty dataset by default
-        return BaseLowdimDataset()
-
-    def get_normalizer(self, **kwargs) -> LinearNormalizer:
-        raise NotImplementedError()
-    
-    def __len__(self) -> int:
-        return 0
-    
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        output:
-            obs: T, Do
-            action: T, Da
-        """
-        raise NotImplementedError()
-
-
-class BaseRatioDataset(torch.utils.data.Dataset):
-    def __init__(
-        self, 
-        weights: List[float] = None, 
-        dataset_lengths: List[int] = None, 
-    ):
-        self.weights = weights
-        if weights is not None:
-            weights_sum = sum(weights)
-            assert weights_sum > 0, "Weights must be non-zero"
-            self.weights = [weight / weights_sum for weight in weights]
-        self.dataset_lengths = dataset_lengths
-
-    def get_validation_dataset(self) -> 'BaseRatioDataset':
-        # return an empty dataset by default
-        return BaseRatioDataset()
-
-    def get_normalizer(self, **kwargs) -> LinearNormalizer:
-        raise NotImplementedError()
-    
-    def __len__(self) -> int:
-        return 0
-    
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        output:
-            obs: 
-                key: T, *
-            action: T, Da
-        """
-        raise NotImplementedError()
 
 
 class BaseDataCollator:
@@ -85,7 +34,7 @@ class BaseDataCollator:
 
         return batch
 
-class BaseLegendZarrDataset(torch.utils.data.Dataset):
+class BaseZarrDataset(torch.utils.data.Dataset):
     """
     Base class for zarr-backed datasets. Encapsulates common zarr loading,
     sampling, and validation dataset creation logic.
@@ -96,7 +45,6 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
       - sample_to_data(sample) -> convert sampled result to model input
       - get_collator()        -> return collator
     """
-
     def __init__(
         self,
         zarr_paths,
@@ -104,11 +52,14 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
         seed=42,
         val_ratio=0.0,
         max_train_episodes=None,
+        return_dataset_info=False
     ):
         super().__init__()
         self.shape_meta = shape_meta
         self.motion_type = shape_meta['obs']['state']['type']
-        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2
+        self.hand_ndim = shape_meta['obs']['state']['hand']['shape'][-1] // 2 # per hand dims
+        self.zarr_paths = zarr_paths
+        self.return_dataset_info = return_dataset_info
 
         # Subclass-provided sampler config
         self.sampler_cfg = self.build_sampler_cfg()
@@ -118,6 +69,8 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
         self.train_masks = []
         self.samplers = []
         self.sampler_lens = []
+        self.dataset_names = []
+        self._weights_list = []
 
         from .sampler import SequenceSampler, get_val_mask, downsample_mask
         from .streaming_replay_buffer import StreamingReplayBuffer
@@ -152,8 +105,22 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
             self.samplers.append(sampler)
             self.sampler_lens.append(len(sampler))
 
-            # Subclass hook: handle extra per-zarr data (e.g. weights, dataset_names)
-            self.on_zarr_loaded(zarr_path, replay_buffer)
+            weight = zarr_path.get('weight', None)
+            if weight is not None:
+                self._weights_list.append(weight)
+            dataset_name = zarr_path.get('name', None)
+            if dataset_name is None:
+                dataset_name = pathlib.Path(str(zarr_path['path'])).stem
+            self.dataset_names.append(dataset_name)
+
+        # Initialize weights
+        if self._weights_list:
+            weights_sum = sum(self._weights_list)
+            self.weights = [w / weights_sum for w in self._weights_list]
+            self.dataset_lengths = self.sampler_lens
+        else:
+            self.weights = None
+            self.dataset_lengths = None
 
     # ---------- Subclass must implement ---------- #
     def build_sampler_cfg(self) -> dict:
@@ -173,15 +140,20 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
         """Whether to lazy-load zarr data. Default True."""
         return True
 
-    def on_zarr_loaded(self, zarr_path: dict, replay_buffer):
-        """Hook called after each zarr is loaded. Default no-op."""
-        pass
-
     def on_validation_copy(self, val_set):
         """Hook for extra processing in get_validation_dataset. Default no-op."""
         pass
 
     # ---------- Common implementation ---------- #
+    def set_normalizer(self, normalizer: LinearNormalizer):
+        """
+        Set the normalizer for state/action.
+
+        Args:
+            normalizer (LinearNormalizer): Normalizer instance.
+        """
+        self.normalizer = normalizer
+        
     def get_validation_dataset(self):
         from .sampler import SequenceSampler
         val_set = copy.copy(self)
@@ -202,19 +174,25 @@ class BaseLegendZarrDataset(torch.utils.data.Dataset):
         return val_set
 
     def __getitem__(self, idx):
-        try:
+        try: 
+            # Find corresponding sampler
             curr_idx, dataset_idx = idx, 0
             while curr_idx >= self.sampler_lens[dataset_idx]:
                 curr_idx -= self.sampler_lens[dataset_idx]
                 dataset_idx += 1
             sample = self.samplers[dataset_idx].sample_sequence(curr_idx)
+            
             data = self.sample_to_data(sample)
+            if self.return_dataset_info:
+                data['dataset_name'] = self.dataset_names[dataset_idx]
+                data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
             torch_data = dict_apply(
                 data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
             )
             return torch_data
         except Exception as e:
-            warnings.warn(f"Error getting item {idx}: {e}")
+            warnings.warn(f"Error getting item {idx} from dataset {self.dataset_names[dataset_idx]}: {e}")
+            # backup solution: return the next item
             return self.__getitem__((idx + 1) % len(self))
 
     def __len__(self):

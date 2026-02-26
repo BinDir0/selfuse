@@ -13,14 +13,11 @@ from torchvision import transforms
 import warnings
 from src.utils.pytorch_util import dict_apply
 from src.model.common.normalizer import LinearNormalizer
-from .base_dataset import BaseRatioDataset, BaseLegendZarrDataset
-from .sampler import SequenceSampler, get_val_mask, downsample_mask
-from .streaming_replay_buffer import StreamingReplayBuffer
+from .base_dataset import BaseZarrDataset
 from .data_transforms import process_state_action, process_image
 from .collator import LegendVLDataCollator, ConcatDataCollator
 from .normalizer_utils import get_normalizer
-# Backward-compatible import: LegendVLMDataset was moved to legendvlm_dataset.py
-from .legendvlm_dataset import LegendVLMDataset  # noqa: F401
+from .legendvlm_dataset import LegendVLMDataset
 
 
 def build_default_key_mapping(motion_type: str) -> Dict[str, str]:
@@ -51,7 +48,7 @@ def merge_key_mapping(custom_mapping: Optional[Dict[str, str]], motion_type: str
     return mapping
 
 
-class LegendVLADataset(BaseLegendZarrDataset):
+class LegendVLADataset(BaseZarrDataset):
     """
     Dataset for LegendVLA training/validation with async IO support.
 
@@ -85,7 +82,6 @@ class LegendVLADataset(BaseLegendZarrDataset):
             depth_clip_range (Optional[Tuple[float, float]]): Depth normalization range.
         """
         # VLA-specific fields (must be set before super().__init__ which calls build_sampler_cfg etc.)
-        self.zarr_paths = zarr_paths
         self.preprocessor = None
         self.objective = objective
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
@@ -93,9 +89,6 @@ class LegendVLADataset(BaseLegendZarrDataset):
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
         self.depth_clip_range = depth_clip_range
-        self.return_dataset_info = return_dataset_info
-        self.dataset_names = []
-        self._weights_list = []
 
         self.mode = mode
         self.aug_transform = None
@@ -106,16 +99,7 @@ class LegendVLADataset(BaseLegendZarrDataset):
             ])
 
         # Call base class __init__ (triggers build_sampler_cfg, build_key_mapping, on_zarr_loaded)
-        super().__init__(zarr_paths, shape_meta, seed, val_ratio, max_train_episodes)
-
-        # Initialize weights (BaseRatioDataset logic)
-        if self._weights_list:
-            weights_sum = sum(self._weights_list)
-            self.weights = [w / weights_sum for w in self._weights_list]
-            self.dataset_lengths = self.sampler_lens
-        else:
-            self.weights = None
-            self.dataset_lengths = None
+        super().__init__(zarr_paths, shape_meta, seed, val_ratio, max_train_episodes, return_dataset_info)
 
     def build_sampler_cfg(self):
         s = self.shape_meta
@@ -130,15 +114,6 @@ class LegendVLADataset(BaseLegendZarrDataset):
 
     def build_key_mapping(self, zarr_path):
         return merge_key_mapping(zarr_path.get('mapping', None), self.motion_type)
-
-    def on_zarr_loaded(self, zarr_path, replay_buffer):
-        weight = zarr_path.get('weight', None)
-        if weight is not None:
-            self._weights_list.append(weight)
-        dataset_name = zarr_path.get('name', None)
-        if dataset_name is None:
-            dataset_name = pathlib.Path(str(zarr_path['path'])).stem
-        self.dataset_names.append(dataset_name)
 
     def on_validation_copy(self, val_set):
         val_set.mode = 'val' if self.mode == 'train' else self.mode
@@ -231,15 +206,6 @@ class LegendVLADataset(BaseLegendZarrDataset):
         """
         self.preprocessor = preprocessor
 
-    def set_normalizer(self, normalizer: LinearNormalizer):
-        """
-        Set the normalizer for state/action.
-
-        Args:
-            normalizer (LinearNormalizer): Normalizer instance.
-        """
-        self.normalizer = normalizer
-
     def get_normalizer(self):
         """
         Compute and store a normalizer from the dataset.
@@ -252,7 +218,6 @@ class LegendVLADataset(BaseLegendZarrDataset):
             zarr_paths=self.zarr_paths,
             shape_meta=self.shape_meta,
             max_train_episodes=self.max_train_episodes, 
-            return_numpy=True, 
             use_relative_action=self.use_relative_action,
         )
         normalizer = get_normalizer(self.normalizer_dataloader_cfg, normalizer_dataset)
@@ -275,45 +240,6 @@ class LegendVLADataset(BaseLegendZarrDataset):
             padding_side=padding_side,
         )
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Get a processed sample by global index.
-
-        Args:
-            idx (int): Global dataset index.
-
-        Returns:
-            Dict[str, torch.Tensor]: Sample tensors.
-        """
-        try: 
-            # Find corresponding sampler
-            curr_idx, dataset_idx = idx, 0
-            while curr_idx >= self.sampler_lens[dataset_idx]:
-                curr_idx -= self.sampler_lens[dataset_idx]
-                dataset_idx += 1
-            sample = self.samplers[dataset_idx].sample_sequence(curr_idx)
-            
-            data = self.sample_to_data(sample)
-            if self.return_dataset_info:
-                data['dataset_name'] = self.dataset_names[dataset_idx]
-                data['dataset_local_idx'] = np.array(curr_idx, dtype=np.int32)
-            torch_data = dict_apply(
-                data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
-            )
-            return torch_data
-        except Exception as e:
-            warnings.warn(f"Error getting item {idx} from dataset {self.dataset_names[dataset_idx]}: {e}")
-            # backup solution: return the next item
-            return self.__getitem__((idx + 1) % len(self))
-
-    def __len__(self):
-        """
-        Total number of samples across all buffers.
-
-        Returns:
-            int: Dataset length.
-        """
-        return sum(self.sampler_lens)
 
 class LegendUnifiedDataset(torch.utils.data.Dataset):
     """
@@ -447,7 +373,8 @@ class LegendUnifiedDataset(torch.utils.data.Dataset):
         """
         return len(self.vla_dataset) + len(self.vlm_dataset) if self.vlm_dataset is not None else len(self.vla_dataset)
 
-class LegendVLALowLevelDataset(BaseLegendZarrDataset):
+
+class LegendVLALowLevelDataset(BaseZarrDataset):
     """
     Low-level dataset for normalizer fitting (state/action only).
     """
@@ -458,9 +385,9 @@ class LegendVLALowLevelDataset(BaseLegendZarrDataset):
         seed=42,
         val_ratio=0.0,
         max_train_episodes=None,
-        return_numpy=True, # whether to return numpy arrays
         normalizer_dataloader_cfg=None,
         use_relative_action=False,
+        return_dataset_info=False,
     ):
         """
         Args:
@@ -469,15 +396,13 @@ class LegendVLALowLevelDataset(BaseLegendZarrDataset):
             seed (int): Random seed for splitting/downsampling.
             val_ratio (float): Validation split ratio.
             max_train_episodes (Optional[int]): Cap on number of training episodes.
-            return_numpy (bool): Return numpy arrays if True.
             normalizer_dataloader_cfg (Optional[Dict]): DataLoader config for normalizer fit.
             use_relative_action (bool): Use relative action representation if True.
         """
-        self.return_numpy = return_numpy
         self.normalizer = None
         self.normalizer_dataloader_cfg = normalizer_dataloader_cfg
         self.use_relative_action = use_relative_action
-        super().__init__(zarr_paths, shape_meta, seed, val_ratio, max_train_episodes)
+        super().__init__(zarr_paths, shape_meta, seed, val_ratio, max_train_episodes, return_dataset_info)
 
     def build_sampler_cfg(self):
         s = self.shape_meta
@@ -540,15 +465,6 @@ class LegendVLALowLevelDataset(BaseLegendZarrDataset):
         self.normalizer = get_normalizer(self.normalizer_dataloader_cfg, self)
         return self.normalizer
 
-    def set_normalizer(self, normalizer: LinearNormalizer):
-        """
-        Set the normalizer for state/action.
-
-        Args:
-            normalizer (LinearNormalizer): Normalizer instance.
-        """
-        self.normalizer = normalizer
-
     def get_collator(self):
         """
         Build a data collator for batching.
@@ -557,28 +473,3 @@ class LegendVLALowLevelDataset(BaseLegendZarrDataset):
             ConcatDataCollator: Collator instance.
         """
         return ConcatDataCollator()
-
-    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
-        """
-        Get a processed sample by global index.
-
-        Args:
-            idx (int): Global dataset index.
-
-        Returns:
-            Dict[str, np.ndarray]: Sample arrays (or tensors if return_numpy is False).
-        """
-        # Find corresponding sampler
-        curr_idx = idx
-        for i, length in enumerate(self.sampler_lens):
-            if curr_idx < length:
-                sample = self.samplers[i].sample_sequence(curr_idx)
-                break
-            curr_idx -= length
-
-        data = self._sample_to_data(sample)
-        if not self.return_numpy:
-            data = dict_apply(data, torch.from_numpy)
-        return data
-
-
