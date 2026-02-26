@@ -39,6 +39,18 @@ echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc && source ~/.ba
 
 ### 1. 初始启动
 1. **启动服务器**：首先在GPU服务器上启动模型推理服务器端。
+
+在训练目录下，修改 `src/config/experiment/inference.yaml` 中如下字段：
+- `model_config_path` 为期望的模型 config 路径（可以直接在 checkpoint 文件夹下找到）
+- `checkpoint_path` 为期望的模型 checkpoint 路径
+- `serving` 为服务器 ip、端口等。
+
+在训练代码主目录下，执行：
+
+```
+./scripts/run_server.sh
+```
+   
 2. **一键启动客户端**：在本文件夹执行启动命令，启动相机、机械臂、机械手及推理客户端节点。
 ### 2. 任务循环 (Loop)
 系统按以下流程循环执行任务：
