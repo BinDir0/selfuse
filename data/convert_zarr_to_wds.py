@@ -12,6 +12,8 @@ Usage:
 """
 
 import io
+import sys
+import time
 import json
 import argparse
 import multiprocessing as mp
@@ -24,7 +26,7 @@ from PIL import Image
 
 
 def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
-                     key_mapping):
+                     key_mapping, worker_id=0):
     """Process a batch of episodes from a single zarr dataset.
 
     Each sample stores per-frame raw data identical to zarr structure.
@@ -48,11 +50,22 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
     has_presence = 'presence' in key_mapping
     presence_array = get_array(key_mapping['presence']) if has_presence else None
 
+    # Get array references once (no data loaded yet)
+    image_array = get_array(key_mapping['image'])
+
+    total_eps = len(episode_batch)
+    # Report ~10 times per worker, at least every episode
+    report_interval = max(1, total_eps // 10)
+    frames_done = 0
+    t0 = time.time()
+
     with wds.ShardWriter(output_pattern, maxcount=20000, maxsize=int(1e9)) as sink:
-        for ep_start, ep_end, ep_idx in episode_batch:
+        for ep_i, (ep_start, ep_end, ep_idx) in enumerate(episode_batch):
             T = ep_end - ep_start
 
-            # Preload episode low-dim data (fits in memory)
+            # Batch-load all episode data in single contiguous reads.
+            # This turns N per-frame random reads into one sequential read
+            # per array, which is critical for CFS performance.
             wrist_s = get_array(key_mapping['wrist_state'])[ep_start:ep_end]
             hand_s = get_array(key_mapping['hand_state'])[ep_start:ep_end]
             wrist_a = get_array(key_mapping['wrist_action'])[ep_start:ep_end]
@@ -63,50 +76,57 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
             instruction_nums = get_array(key_mapping['instruction_num'])[ep_start:ep_end]
             presence = presence_array[ep_start:ep_end] if has_presence else None
 
-            # Image array (lazy-loaded per frame to save memory)
-            image_array = get_array(key_mapping['image'])
+            # Batch-load images for the entire episode (one sequential read)
+            images = image_array[ep_start:ep_end]  # (T, H, W, C) uint8
+
+            # Vectorized lowdim: concatenate once for all frames -> (T, 116)
+            lowdim_all = np.concatenate([
+                wrist_s.reshape(T, -1),
+                hand_s.reshape(T, -1),
+                wrist_a.reshape(T, -1),
+                hand_a.reshape(T, -1),
+                ext.reshape(T, -1),
+                intr.reshape(T, -1),
+            ], axis=1).astype(np.float32)
 
             for t in range(T):
-                # Pack all low-dim into a single array (116,) float32
-                # Layout: state/wrist[0:18] | state/hand[18:48] | action/wrist[48:66]
-                #         | action/hand[66:96] | extrinsic[96:112] | intrinsic[112:116]
-                lowdim = np.concatenate([
-                    wrist_s[t].flatten().astype(np.float32),
-                    hand_s[t].flatten().astype(np.float32),
-                    wrist_a[t].flatten().astype(np.float32),
-                    hand_a[t].flatten().astype(np.float32),
-                    ext[t].flatten().astype(np.float32),
-                    intr[t].flatten().astype(np.float32),
-                ]).astype(np.float32)
-
-                # Image: JPEG encode
-                img = Image.fromarray(image_array[ep_start + t])
+                # JPEG encode
                 buf = io.BytesIO()
-                img.save(buf, format='JPEG', quality=95)
+                Image.fromarray(images[t]).save(buf, format='JPEG', quality=95)
 
-                # Instruction: handle per-frame string or array
+                # Instruction
                 instr = instructions[t]
                 if isinstance(instr, np.ndarray):
                     instr = instr.tolist()
                 if isinstance(instr, bytes):
                     instr = instr.decode('utf-8')
-                instr_num = int(instruction_nums[t])
 
                 meta_dict = {
-                        "dataset_name": dataset_name,
-                        "episode_index": int(ep_idx),
-                        "instruction": instr,
-                        "instruction_num": instr_num,
-                    }
+                    "dataset_name": dataset_name,
+                    "episode_index": int(ep_idx),
+                    "instruction": instr,
+                    "instruction_num": int(instruction_nums[t]),
+                }
                 if has_presence:
                     meta_dict["presence"] = presence[t].tolist()
 
                 sink.write({
                     "__key__": f"{dataset_name}_ep{ep_idx:06d}_f{t:05d}",
                     "image.jpg": buf.getvalue(),
-                    "lowdim.npy": lowdim,
+                    "lowdim.npy": lowdim_all[t],
                     "meta.json": meta_dict,
                 })
+
+            frames_done += T
+            ep_done = ep_i + 1
+            if ep_done % report_interval == 0 or ep_done == total_eps:
+                elapsed = time.time() - t0
+                fps = frames_done / elapsed if elapsed > 0 else 0
+                print(f"  [w{worker_id:03d}] {dataset_name}: "
+                      f"{ep_done}/{total_eps} eps, "
+                      f"{frames_done} frames, "
+                      f"{elapsed:.1f}s ({fps:.0f} frames/s)",
+                      flush=True)
 
 
 def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
@@ -146,7 +166,8 @@ def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
     args_list = []
     for worker_id, chunk in enumerate(chunks):
         pattern = str(ds_output_dir / f"shard-w{worker_id:04d}-%06d.tar")
-        args_list.append((zarr_path, chunk, pattern, dataset_name, key_mapping))
+        args_list.append((zarr_path, chunk, pattern, dataset_name, key_mapping,
+                          worker_id))
 
     if actual_workers <= 1:
         # Single process for small datasets
