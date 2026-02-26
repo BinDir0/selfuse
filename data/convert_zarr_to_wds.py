@@ -52,6 +52,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
 
     # Get array references once (no data loaded yet)
     image_array = get_array(key_mapping['image'])
+    depth_array = get_array(key_mapping['depth'])
 
     total_eps = len(episode_batch)
     # Report ~10 times per worker, at least every episode
@@ -59,7 +60,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
     frames_done = 0
     t0 = time.time()
 
-    with wds.ShardWriter(output_pattern, maxcount=20000, maxsize=int(1e9)) as sink:
+    with wds.ShardWriter(output_pattern, maxcount=2000, maxsize=int(1e9)) as sink:
         for ep_i, (ep_start, ep_end, ep_idx) in enumerate(episode_batch):
             T = ep_end - ep_start
 
@@ -76,8 +77,9 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
             instruction_nums = get_array(key_mapping['instruction_num'])[ep_start:ep_end]
             presence = presence_array[ep_start:ep_end] if has_presence else None
 
-            # Batch-load images for the entire episode (one sequential read)
+            # Batch-load images and depth for the entire episode (one sequential read)
             images = image_array[ep_start:ep_end]  # (T, H, W, C) uint8
+            depths = depth_array[ep_start:ep_end]  # (T, H, W) uint16
 
             # Vectorized lowdim: concatenate once for all frames -> (T, 116)
             lowdim_all = np.concatenate([
@@ -90,9 +92,9 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
             ], axis=1).astype(np.float32)
 
             for t in range(T):
-                # JPEG encode
+                # PNG lossless encode
                 buf = io.BytesIO()
-                Image.fromarray(images[t]).save(buf, format='JPEG', quality=95)
+                Image.fromarray(images[t]).save(buf, format='PNG')
 
                 # Instruction
                 instr = instructions[t]
@@ -112,7 +114,8 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
 
                 sink.write({
                     "__key__": f"{dataset_name}_ep{ep_idx:06d}_f{t:05d}",
-                    "image.jpg": buf.getvalue(),
+                    "image.png": buf.getvalue(),
+                    "depth.npy": depths[t].astype(np.uint16),
                     "lowdim.npy": lowdim_all[t],
                     "meta.json": meta_dict,
                 })
@@ -184,6 +187,7 @@ def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
 # Default key mappings matching vla_dataset_paths.yaml
 HUMAN_KEY_MAPPING = {
     'image': 'image',
+    'depth': 'depth',
     'wrist_state': 'state/wrist',
     'hand_state': 'state/fingertips',
     'wrist_action': 'action/wrist',
@@ -197,6 +201,7 @@ HUMAN_KEY_MAPPING = {
 
 REAL_WORLD_KEY_MAPPING = {
     'image': 'image-head',
+    'depth': 'depth-head',
     'wrist_state': 'state/wrist-head',
     'hand_state': 'state/fingertips-head',
     'wrist_action': 'action/wrist-head',

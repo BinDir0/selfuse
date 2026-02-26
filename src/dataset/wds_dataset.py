@@ -94,11 +94,14 @@ def build_sample_from_window(buf, action_horizon, state_horizon, state_stride,
     hand_state = np.tile(ld[18:48], (state_horizon, 1))    # (state_horizon, 30)
 
     # --- Image: current frame only (image_horizon=1 in default config) ---
-    image = np.array(current["image.jpg"])  # (H, W, 3) uint8
+    image = np.array(current["image.png"])  # (H, W, 3) uint8
     if image.ndim == 2:
         # grayscale edge case
         image = np.stack([image] * 3, axis=-1)
     image = image[np.newaxis, ...]  # (1, H, W, 3)
+
+    # --- Depth: current frame ---
+    depth = current.get("depth.npy")  # (H, W) uint16 or None
 
     # --- Extrinsic / Intrinsic ---
     extrinsic = ld[96:112]    # (16,)
@@ -111,7 +114,7 @@ def build_sample_from_window(buf, action_horizon, state_horizon, state_stride,
     # --- Presence: per-frame [left, right] ---
     presence = meta.get("presence", [1, 1])
 
-    return {
+    result = {
         "wrist_state":    wrist_state.astype(np.float32),
         "hand_state":     hand_state.astype(np.float32),
         "wrist_action":   wrist_action.astype(np.float32),
@@ -123,6 +126,9 @@ def build_sample_from_window(buf, action_horizon, state_horizon, state_stride,
         "instruction_num": instruction_num,
         "presence":       np.array(presence, dtype=np.int32),
     }
+    if depth is not None:
+        result["depth"] = depth
+    return result
 
 
 def sliding_window_compose(src, action_horizon=32, state_horizon=16,
