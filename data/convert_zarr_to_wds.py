@@ -60,76 +60,103 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
     frames_done = 0
     t0 = time.time()
 
-    with wds.ShardWriter(output_pattern, maxcount=20000, maxsize=int(1e9)) as sink:
-        for ep_i, (ep_start, ep_end, ep_idx) in enumerate(episode_batch):
-            T = ep_end - ep_start
+    maxcount = 20000
+    maxsize = int(1e9)
+    shard_idx = 0
+    shard_count = 0
+    shard_size = 0
+    writer = wds.TarWriter(output_pattern % shard_idx)
 
-            # Batch-load all episode data in single contiguous reads.
-            # This turns N per-frame random reads into one sequential read
-            # per array, which is critical for CFS performance.
-            wrist_s = get_array(key_mapping['wrist_state'])[ep_start:ep_end]
-            hand_s = get_array(key_mapping['hand_state'])[ep_start:ep_end]
-            wrist_a = get_array(key_mapping['wrist_action'])[ep_start:ep_end]
-            hand_a = get_array(key_mapping['hand_action'])[ep_start:ep_end]
-            ext = get_array(key_mapping['extrinsic'])[ep_start:ep_end]
-            intr = get_array(key_mapping['intrinsic'])[ep_start:ep_end]
-            instructions = get_array(key_mapping['instruction'])[ep_start:ep_end]
-            instruction_nums = get_array(key_mapping['instruction_num'])[ep_start:ep_end]
-            presence = presence_array[ep_start:ep_end] if has_presence else None
+    for ep_i, (ep_start, ep_end, ep_idx) in enumerate(episode_batch):
+        T = ep_end - ep_start
 
-            # Batch-load images and depth for the entire episode (one sequential read)
-            images = image_array[ep_start:ep_end]  # (T, H, W, C) uint8
-            depths = depth_array[ep_start:ep_end]  # (T, H, W) uint16
+        # Start a new shard BEFORE this episode if current shard is near limits.
+        # This guarantees no episode is split across shards.
+        # When shard_count == 0 the condition short-circuits, so an episode
+        # that alone exceeds maxcount/maxsize still gets written to one shard.
+        if shard_count > 0 and (shard_count + T > maxcount or shard_size > maxsize):
+            writer.close()
+            shard_idx += 1
+            writer = wds.TarWriter(output_pattern % shard_idx)
+            shard_count = 0
+            shard_size = 0
 
-            # Vectorized lowdim: concatenate once for all frames -> (T, 116)
-            lowdim_all = np.concatenate([
-                wrist_s.reshape(T, -1),
-                hand_s.reshape(T, -1),
-                wrist_a.reshape(T, -1),
-                hand_a.reshape(T, -1),
-                ext.reshape(T, -1),
-                intr.reshape(T, -1),
-            ], axis=1).astype(np.float32)
+        if T > maxcount:
+            print(f"  [w{worker_id:03d}] WARNING: episode {ep_idx} has {T} frames "
+                  f"(> maxcount={maxcount}), shard will exceed limit",
+                  flush=True)
 
-            for t in range(T):
-                # JPEG encode
-                buf = io.BytesIO()
-                Image.fromarray(images[t]).save(buf, format='JPEG', quality=95)
+        # Batch-load all episode data in single contiguous reads.
+        # This turns N per-frame random reads into one sequential read
+        # per array, which is critical for CFS performance.
+        wrist_s = get_array(key_mapping['wrist_state'])[ep_start:ep_end]
+        hand_s = get_array(key_mapping['hand_state'])[ep_start:ep_end]
+        wrist_a = get_array(key_mapping['wrist_action'])[ep_start:ep_end]
+        hand_a = get_array(key_mapping['hand_action'])[ep_start:ep_end]
+        ext = get_array(key_mapping['extrinsic'])[ep_start:ep_end]
+        intr = get_array(key_mapping['intrinsic'])[ep_start:ep_end]
+        instructions = get_array(key_mapping['instruction'])[ep_start:ep_end]
+        instruction_nums = get_array(key_mapping['instruction_num'])[ep_start:ep_end]
+        presence = presence_array[ep_start:ep_end] if has_presence else None
 
-                # Instruction
-                instr = instructions[t]
-                if isinstance(instr, np.ndarray):
-                    instr = instr.tolist()
-                if isinstance(instr, bytes):
-                    instr = instr.decode('utf-8')
+        # Batch-load images and depth for the entire episode (one sequential read)
+        images = image_array[ep_start:ep_end]  # (T, H, W, C) uint8
+        depths = depth_array[ep_start:ep_end]  # (T, H, W) uint16
 
-                meta_dict = {
-                    "dataset_name": dataset_name,
-                    "episode_index": int(ep_idx),
-                    "instruction": instr,
-                    "instruction_num": int(instruction_nums[t]),
-                }
-                if has_presence:
-                    meta_dict["presence"] = presence[t].tolist()
+        # Vectorized lowdim: concatenate once for all frames -> (T, 116)
+        lowdim_all = np.concatenate([
+            wrist_s.reshape(T, -1),
+            hand_s.reshape(T, -1),
+            wrist_a.reshape(T, -1),
+            hand_a.reshape(T, -1),
+            ext.reshape(T, -1),
+            intr.reshape(T, -1),
+        ], axis=1).astype(np.float32)
 
-                sink.write({
-                    "__key__": f"{dataset_name}_ep{ep_idx:06d}_f{t:05d}",
-                    "image.jpg": buf.getvalue(),
-                    "depth.npy": depths[t].astype(np.uint16),
-                    "lowdim.npy": lowdim_all[t],
-                    "meta.json": meta_dict,
-                })
+        for t in range(T):
+            # JPEG encode
+            buf = io.BytesIO()
+            Image.fromarray(images[t]).save(buf, format='JPEG', quality=95)
 
-            frames_done += T
-            ep_done = ep_i + 1
-            if ep_done % report_interval == 0 or ep_done == total_eps:
-                elapsed = time.time() - t0
-                fps = frames_done / elapsed if elapsed > 0 else 0
-                print(f"  [w{worker_id:03d}] {dataset_name}: "
-                      f"{ep_done}/{total_eps} eps, "
-                      f"{frames_done} frames, "
-                      f"{elapsed:.1f}s ({fps:.0f} frames/s)",
-                      flush=True)
+            # Instruction
+            instr = instructions[t]
+            if isinstance(instr, np.ndarray):
+                instr = instr.tolist()
+            if isinstance(instr, bytes):
+                instr = instr.decode('utf-8')
+
+            meta_dict = {
+                "dataset_name": dataset_name,
+                "episode_index": int(ep_idx),
+                "instruction": instr,
+                "instruction_num": int(instruction_nums[t]),
+            }
+            if has_presence:
+                meta_dict["presence"] = presence[t].tolist()
+
+            sample = {
+                "__key__": f"{dataset_name}_ep{ep_idx:06d}_f{t:05d}",
+                "image.jpg": buf.getvalue(),
+                "depth.npy": depths[t].astype(np.uint16),
+                "lowdim.npy": lowdim_all[t],
+                "meta.json": meta_dict,
+            }
+            writer.write(sample)
+            shard_count += 1
+            shard_size += len(sample["image.jpg"]) + depths[t].nbytes + lowdim_all[t].nbytes + 512 * 4
+
+        frames_done += T
+        ep_done = ep_i + 1
+        if ep_done % report_interval == 0 or ep_done == total_eps:
+            elapsed = time.time() - t0
+            fps = frames_done / elapsed if elapsed > 0 else 0
+            print(f"  [w{worker_id:03d}] {dataset_name}: "
+                  f"{ep_done}/{total_eps} eps, "
+                  f"{frames_done} frames, "
+                  f"{elapsed:.1f}s ({fps:.0f} frames/s)",
+                  flush=True)
+
+    writer.close()
 
 
 def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
