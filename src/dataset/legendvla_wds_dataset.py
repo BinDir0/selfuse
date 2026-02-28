@@ -206,6 +206,8 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
         def filter_none(src):
             for sample in src:
                 if sample is not None:
+                    # wds .map() auto-injects __key__; strip it before collation
+                    sample.pop("__key__", None)
                     yield sample
 
         pipeline = build_blended_dataset(
@@ -383,3 +385,7 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
             vlm_sample["n_states"] = torch.tensor(0, dtype=torch.int32)
         if "n_actions" in shape_meta:
             vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
+        if "depth_values" in shape_meta:
+            vlm_sample["depth_values"] = torch.zeros(*shape_meta["depth_values"])
+        if "has_depth_values" in shape_meta:
+            vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)

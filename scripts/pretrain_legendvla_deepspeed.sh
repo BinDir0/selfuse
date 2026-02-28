@@ -52,4 +52,4 @@ export PYTHONUNBUFFERED=1
 accelerate launch \
     --config_file src/config/acc_config.yaml \
     train.py \
-    experiment=pretrain_legendvla_deepspeed 
+    experiment=pretrain_legendvla_wds_deepspeed 

@@ -32,7 +32,7 @@ vla_dataset_paths:
     mapping: ${human_dataset_mapping}
     weight: 1
   - name: holoassist
-    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
+    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2_rechunked.zarr
     mapping: ${human_dataset_mapping}
     weight: 1
   - name: egodex

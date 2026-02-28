@@ -278,10 +278,12 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     assert shard_urls, f"No shards found: {shard_urls}"
 
     is_train = (mode == 'train')
+    # resampled mode shuffles shards internally, but newer webdataset
+    # versions still require an explicit shardshuffle value.
     pipeline = (
         wds.WebDataset(
             shard_urls,
-            shardshuffle=is_train,
+            shardshuffle=False,
             nodesplitter=wds.split_by_node,
             resampled=is_train,
         )
@@ -295,7 +297,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         pipeline = pipeline.map(preprocess_fn)
 
     if is_train:
-        pipeline = pipeline.shuffle(shuffle_buffer, initial=shuffle_buffer)
+        pipeline = pipeline.shuffle(shuffle_buffer)
 
     return pipeline
 

@@ -10,16 +10,16 @@
 #   bash scripts/convert_zarr_to_wds.sh \
 #       --zarr_list  data/zarr_paths.txt \
 #       --output_dir /cfs/data/wds \
-#       --nodes      "pro-10 pro-01" \
+#       --nodes      "pro-10 pro-01" \.0
 #       --workers    120
 #
 set -euo pipefail
 
 # ─── defaults ───────────────────────────────────────────────────
-ZARR_LIST=""
-OUTPUT_DIR=""
-NODES="pro-10 pro-01"
-WORKERS_PER_NODE=120
+ZARR_LIST="zarr_list.txt"
+OUTPUT_DIR="/share_data/guantianrui/datasets/Webdataset_val"
+NODES="pro-10"
+WORKERS_PER_NODE=160
 PYTHON_PATH="/share_data/chenzhang/miniconda3/envs/legendvla/bin/python3.10"
 PROJECT_DIR="/home/chenzhang/projects/diffloss-ar"
 LOG_DIR="outputs/convert_wds"

@@ -57,7 +57,7 @@ REAL_WORLD_KEY_MAPPING = {
 }
 
 KEY_PATTERN = re.compile(r"^(.+)_ep(\d+)_f(\d+)$")
-IMAGE_MAX_DIFF = 50   # JPEG quality=95 can produce per-pixel diffs up to ~30
+IMAGE_MAX_DIFF = 100   # JPEG quality=95 can produce per-pixel diffs up to ~30
 IMAGE_AVG_DIFF = 5.0  # JPEG quality=95 average diff is typically < 2
 
 

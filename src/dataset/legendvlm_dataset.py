@@ -5,6 +5,7 @@ Extracted from legendvla_dataset.py for modularity.
 '''
 
 from typing import Dict, List, Optional, Union
+import glob
 import pathlib
 import torch
 import numpy as np
@@ -312,73 +313,66 @@ class LegendVLMStreamingDataset(torch.utils.data.IterableDataset):
     def build_stream(self):
         """Build the streaming dataset from all paths.
 
-        Training mode: interleave_datasets for cross-dataset mixing with
-        probability-based sampling, plus buffer shuffle.
-        Eval mode: concatenate_datasets for exact single-pass traversal,
-        no shuffle.
+        Collects all data files (arrow/parquet) across sub-dataset paths and
+        loads them as a single HF IterableDataset. This avoids the
+        interleave_datasets min(num_shards) bottleneck that kills workers
+        when any sub-dataset has fewer shards than num_workers.
+
+        Training mode: single merged stream with buffer shuffle.
+        Eval mode: single merged stream, no shuffle.
         """
-        streams = []
-        for path in self.dataset_paths:
-            try:
-                ds = load_dataset(path, split=self.split, streaming=True)
+        all_files = self.collect_data_files()
 
-                # Add episode_index to each sample if return_dataset_info is enabled
-                if self.return_dataset_info:
-                    ds = ds.map(
-                        lambda x, idx: {**x, 'episode_index': idx},
-                        with_indices=True
-                    )
-
-                streams.append(ds)
-            except Exception as e:
-                warnings.warn(f"Error loading streaming dataset from {path}: {e}")
-                continue
-
-        if not streams:
-            warnings.warn(f"No datasets found for split '{self.split}'.")
+        if not all_files:
+            warnings.warn(f"No data files found for split '{self.split}'.")
             return None
 
-        if len(streams) == 1:
-            stream = streams[0]
-        elif self.mode == 'train':
-            # Training: interleave for better mixing
-            probs = self.dataset_probs
-            if probs is not None:
-                if len(probs) != len(streams):
-                    warnings.warn(
-                        f"dataset_probs length ({len(probs)}) != loaded streams ({len(streams)}), "
-                        "falling back to proportional-to-size sampling."
-                    )
-                    probs = None
+        # Detect format from file extension
+        ext = pathlib.Path(all_files[0]).suffix.lstrip(".")
+        if ext not in ("arrow", "parquet"):
+            warnings.warn(f"Unsupported file format '{ext}', trying arrow.")
+            ext = "arrow"
 
-            # Auto-compute proportional-to-size probabilities from metadata
-            if probs is None:
-                probs = self.infer_proportional_probs(streams)
-                if probs is None: 
-                    warnings.warn(
-                        "Failed to infer proportional-to-size sampling probabilities, "
-                        "falling back to uniform sampling."
-                    )
-
-            if probs is not None:
-                total = sum(probs)
-                probs = [p / total for p in probs]
-
-            stream = interleave_datasets(
-                streams,
-                probabilities=probs,
-                seed=self.seed,
-                stopping_strategy="all_exhausted",
+        try:
+            stream = load_dataset(
+                ext, data_files=all_files, split="train", streaming=True
             )
-        else:
-            # Eval: concatenate for exact single-pass traversal
-            stream = concatenate_datasets(streams)
+        except Exception as e:
+            warnings.warn(f"Error loading merged stream: {e}")
+            return None
 
-        # Shard-level shuffle + buffer shuffle for training only
+        if self.return_dataset_info:
+            stream = stream.map(
+                lambda x, idx: {**x, 'episode_index': idx},
+                with_indices=True
+            )
+
         if self.mode == 'train':
             stream = stream.shuffle(seed=self.seed, buffer_size=self.shuffle_buffer)
 
         return stream
+
+    def collect_data_files(self):
+        """Discover all arrow/parquet data files under each dataset path.
+
+        Searches for files matching the HF datasets layout:
+            {path}/{split}/data-*.arrow  (or .parquet)
+            {path}/data/data-*.arrow
+            {path}/data-*.arrow
+            {path}/*.parquet
+        """
+        all_files = []
+        for path in self.dataset_paths:
+            found = []
+            # HF arrow layout: {path}/{split}/data-*.arrow
+            found.extend(sorted(glob.glob(f"{path}/{self.split}/*.arrow")))
+            # Parquet fallback
+            if not found:
+                found.extend(sorted(glob.glob(f"{path}/{self.split}/*.parquet")))
+            if not found:
+                warnings.warn(f"No data files found in {path}, skipping.")
+            all_files.extend(found)
+        return all_files
 
     @staticmethod
     def infer_proportional_probs(streams):
