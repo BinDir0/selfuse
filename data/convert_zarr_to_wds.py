@@ -45,7 +45,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
             node = node[part]
         return node
 
-    # presence is per-timestep in data group, shape (total_frames, 2)
+    # presence is per-timestep in data group, shape (total_frames,) int8
     # Only human datasets have presence; real_world datasets do not.
     has_presence = 'presence' in key_mapping
     presence_array = get_array(key_mapping['presence']) if has_presence else None

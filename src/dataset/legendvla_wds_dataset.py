@@ -1,8 +1,7 @@
 """
 WebDataset-based LegendVLA dataset.
 
-Drop-in replacement for LegendVLADataset that reads from WebDataset shards
-instead of Zarr files. Reuses existing preprocess logic (process_state_action,
+Reuses existing preprocess logic (process_state_action,
 process_image, PaliGemmaVLAProcessor) without modification.
 """
 
@@ -17,15 +16,15 @@ from src.model.common.normalizer import LinearNormalizer
 from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image
 from .collator import LegendVLDataCollator
-from .wds_dataset import build_wds_pipeline, build_blended_dataset
+from .wds_dataset import (
+    build_blended_dataset, WindowConfig, LOWDIM_SLICES,
+)
 
 
 class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
     """WebDataset-backed VLA dataset for LegendVLA training.
 
     This is an IterableDataset that streams data from WebDataset shards.
-    It reuses the same preprocess logic as LegendVLADataset so that the
-    training output dict is identical.
 
     Usage:
         dataset = LegendVLAWdsDataset(
@@ -39,7 +38,6 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
         dataset.set_normalizer(normalizer)
         dataloader = DataLoader(dataset, batch_size=20, num_workers=20)
     """
-
     def __init__(
         self,
         wds_datasets: List[Dict],
@@ -49,6 +47,8 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
         mode: str = "train",
         depth_clip_range=None,
         shuffle_buffer: int = 8192,
+        lowdim_slices: Optional[Dict] = None,
+        return_dataset_info: bool = False,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -60,17 +60,25 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
         self.depth_clip_range = depth_clip_range
         self.shuffle_buffer = shuffle_buffer
         self.wds_datasets = wds_datasets
+        self.return_dataset_info = return_dataset_info
 
         self.preprocessor = None
         self.normalizer = None
 
         # Sampling config from shape_meta
         self.action_horizon = shape_meta["action"]["horizon"]
-        self.action_stride = shape_meta["action"]["stride"]
         self.state_horizon = shape_meta["obs"]["state"]["horizon"]
-        self.state_stride = shape_meta["obs"]["state"]["stride"]
         self.image_horizon = shape_meta["obs"]["rgb"]["horizon"]
-        self.image_stride = shape_meta["obs"]["rgb"]["stride"]
+
+        self.window_config = WindowConfig(
+            action_horizon=shape_meta["action"]["horizon"],
+            action_stride=shape_meta["action"]["stride"],
+            state_horizon=shape_meta["obs"]["state"]["horizon"],
+            state_stride=shape_meta["obs"]["state"]["stride"],
+            image_horizon=shape_meta["obs"]["rgb"]["horizon"],
+            image_stride=shape_meta["obs"]["rgb"]["stride"],
+        )
+        self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
 
         self.aug_transform = None
         if self.mode == "train":
@@ -91,9 +99,6 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
 
     def sample_to_data(self, sample):
         """Convert a WebDataset sample dict into model-ready tensors.
-
-        Reuses the same logic as LegendVLADataset.sample_to_data().
-        The input sample dict has the same keys as SequenceSampler output.
         """
         state, action = process_state_action(
             wrist_state=sample["wrist_state"].astype(np.float32),
@@ -161,12 +166,22 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
         }
         if "depth_values" in processed_results:
             data["depth_values"] = processed_results["depth_values"]
+            data["has_depth_values"] = np.array(True, dtype=bool)
+        else: 
+            data["has_depth_values"] = np.array(False, dtype=bool)
         if self.objective != "train_flow":
             data["labels"] = processed_results["labels"]
+        if self.return_dataset_info: 
+            data["dataset_name"] = sample["dataset_name"]
+            data["episode_index"] = sample["episode_index"]
         return data
 
     def build_pipeline(self):
-        """Build the WebDataset pipeline."""
+        """Build the WebDataset pipeline.
+
+        Training: resampled infinite stream with shuffle.
+        Validation: finite single-pass, no shuffle.
+        """
         datasets_config = []
         for ds in self.wds_datasets:
             datasets_config.append({
@@ -193,37 +208,45 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
                 if sample is not None:
                     yield sample
 
-        if len(datasets_config) == 1:
-            pipeline = build_wds_pipeline(
-                shard_urls=datasets_config[0]["shard_urls"],
-                action_horizon=self.action_horizon,
-                state_horizon=self.state_horizon,
-                state_stride=self.state_stride,
-                image_horizon=self.image_horizon,
-                image_stride=self.image_stride,
-                preprocess_fn=preprocess_fn,
-                shuffle_buffer=self.shuffle_buffer,
-            )
-        else:
-            pipeline = build_blended_dataset(
-                datasets_config=datasets_config,
-                action_horizon=self.action_horizon,
-                state_horizon=self.state_horizon,
-                state_stride=self.state_stride,
-                image_horizon=self.image_horizon,
-                image_stride=self.image_stride,
-                preprocess_fn=preprocess_fn,
-                shuffle_buffer=self.shuffle_buffer,
-            )
-
-        # Filter out None samples from failed preprocessing
-        pipeline = pipeline.compose(filter_none)
-        return pipeline
+        pipeline = build_blended_dataset(
+            datasets_config=datasets_config,
+            config=self.window_config,
+            lowdim_slices=self.lowdim_slices,
+            preprocess_fn=preprocess_fn,
+            shuffle_buffer=self.shuffle_buffer,
+            mode=self.mode,
+        )
+        return filter_none(pipeline)
 
     def __iter__(self):
         assert self.preprocessor is not None, "Preprocessor not set"
         pipeline = self.build_pipeline()
         return iter(pipeline)
+
+    def get_validation_dataset(self, val_wds_datasets: List[Dict]):
+        """Create a validation dataset from separate val shard URLs.
+
+        Args:
+            val_wds_datasets: list of dicts with keys:
+                - shard_urls: glob pattern or list of val shard tar paths
+                - name: (optional) dataset name
+        """
+        val_dataset = LegendVLAWdsDataset(
+            wds_datasets=val_wds_datasets,
+            shape_meta=self.shape_meta,
+            objective=self.objective,
+            use_relative_action=self.use_relative_action,
+            mode="val",
+            depth_clip_range=self.depth_clip_range,
+            shuffle_buffer=0,
+            lowdim_slices=self.lowdim_slices,
+            return_dataset_info=self.return_dataset_info,
+        )
+        if self.preprocessor is not None:
+            val_dataset.set_preprocessor(self.preprocessor)
+        if self.normalizer is not None:
+            val_dataset.set_normalizer(self.normalizer)
+        return val_dataset
 
     def get_collator(self):
         """Build a data collator for batching."""
@@ -237,10 +260,10 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
 
 
 class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
-    """Unified dataset combining WebDataset VLA with map-style VLM dataset.
+    """Unified dataset combining WebDataset VLA with streaming VLM dataset.
 
-    For WebDataset VLA + existing VLM dataset integration.
-    VLM samples are interleaved at a fixed ratio.
+    Training mode: VLM samples interleaved at a fixed ratio, VLM auto-restarts.
+    Validation mode: all VLA samples first, then all VLM samples sequentially.
     """
 
     def __init__(
@@ -249,28 +272,62 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
         vlm_dataset=None,
         vla_ratio: float = 5 / 6,
         batch_size: int = 20,
+        mode: str = "train",
     ):
         super().__init__()
         self.vla_dataset = vla_dataset
         self.vlm_dataset = vlm_dataset
         self.vla_ratio = vla_ratio
         self.batch_size = batch_size
+        self.mode = mode
+        assert vla_ratio >= 0 and vla_ratio <= 1, "vla_ratio must be between 0 and 1"
+
+    def distribute(self, rank: int, world_size: int):
+        """Apply distributed shard splitting to sub-datasets.
+
+        VLA uses wds.split_by_node internally, so only VLM needs explicit splitting.
+        """
+        if self.vlm_dataset is not None and hasattr(self.vlm_dataset, 'distribute'):
+            self.vlm_dataset.distribute(rank, world_size)
 
     def get_collator(self):
         return self.vla_dataset.get_collator()
 
+    def get_validation_dataset(self, val_wds_datasets: List[Dict]):
+        """Create a unified validation dataset.
+
+        Args:
+            val_wds_datasets: VLA validation shard configs.
+        """
+        vla_val = self.vla_dataset.get_validation_dataset(val_wds_datasets)
+
+        vlm_val = None
+        if self.vlm_dataset is not None and hasattr(self.vlm_dataset, 'get_validation_dataset'):
+            vlm_val = self.vlm_dataset.get_validation_dataset()
+
+        return LegendUnifiedWdsDataset(
+            vla_dataset=vla_val,
+            vlm_dataset=vlm_val,
+            mode="val",
+        )
+
     def __iter__(self):
-        """Yield samples, interleaving VLA and VLM at the configured ratio."""
+        if self.mode == 'train':
+            yield from self.iter_train()
+        else:
+            yield from self.iter_val()
+
+    def iter_train(self):
+        """Interleave VLA and VLM at the configured ratio."""
         vla_iter = iter(self.vla_dataset)
 
-        if self.vlm_dataset is None or len(self.vlm_dataset) == 0:
+        if self.vlm_dataset is None:
             yield from vla_iter
             return
 
+        vlm_iter = iter(self.vlm_dataset)
         vla_per_batch = int(self.vla_ratio * self.batch_size)
         vlm_per_batch = self.batch_size - vla_per_batch
-        vlm_len = len(self.vlm_dataset)
-        vlm_idx = 0
         shape_meta = None
 
         count = 0
@@ -278,9 +335,7 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
             yield vla_sample
             count += 1
 
-            # After every vla_per_batch VLA samples, yield vlm_per_batch VLM samples
             if count % vla_per_batch == 0:
-                # Lazily capture shape_meta from first VLA sample
                 if shape_meta is None:
                     shape_meta = {}
                     for key in vla_sample:
@@ -288,17 +343,43 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
                             shape_meta[key] = vla_sample[key].shape
 
                 for _ in range(vlm_per_batch):
-                    vlm_sample = self.vlm_dataset[vlm_idx % vlm_len]
-                    vlm_idx += 1
-                    # Pad missing VLA fields
-                    if "states" in shape_meta:
-                        vlm_sample["states"] = torch.zeros(*shape_meta["states"])
-                    if "actions" in shape_meta:
-                        vlm_sample["actions"] = torch.zeros(*shape_meta["actions"])
-                        vlm_sample["actions_valid_mask"] = torch.zeros(
-                            *shape_meta["actions"])
-                    if "n_states" in shape_meta:
-                        vlm_sample["n_states"] = torch.tensor(0, dtype=torch.int32)
-                    if "n_actions" in shape_meta:
-                        vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
+                    try:
+                        vlm_sample = next(vlm_iter)
+                    except StopIteration:
+                        vlm_iter = iter(self.vlm_dataset)
+                        vlm_sample = next(vlm_iter)
+                    self.pad_vlm_sample(vlm_sample, shape_meta)
                     yield vlm_sample
+
+    def iter_val(self):
+        """Sequential single-pass: all VLA samples, then all VLM samples."""
+        shape_meta = None
+
+        for vla_sample in self.vla_dataset:
+            if shape_meta is None:
+                shape_meta = {}
+                for key in vla_sample:
+                    if hasattr(vla_sample[key], "shape"):
+                        shape_meta[key] = vla_sample[key].shape
+            yield vla_sample
+
+        if self.vlm_dataset is None:
+            return
+
+        for vlm_sample in self.vlm_dataset:
+            if shape_meta is not None:
+                self.pad_vlm_sample(vlm_sample, shape_meta)
+            yield vlm_sample
+
+    @staticmethod
+    def pad_vlm_sample(vlm_sample, shape_meta):
+        """Pad missing VLA fields on a VLM sample so the collator sees uniform keys."""
+        if "states" in shape_meta:
+            vlm_sample["states"] = torch.zeros(*shape_meta["states"])
+        if "actions" in shape_meta:
+            vlm_sample["actions"] = torch.zeros(*shape_meta["actions"])
+            vlm_sample["actions_valid_mask"] = torch.zeros(*shape_meta["actions"])
+        if "n_states" in shape_meta:
+            vlm_sample["n_states"] = torch.tensor(0, dtype=torch.int32)
+        if "n_actions" in shape_meta:
+            vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)

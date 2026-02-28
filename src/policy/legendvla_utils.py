@@ -424,7 +424,7 @@ def build_causal_mask_and_position_ids(
     Creates block-diagonal attention patterns:
     - Image/text tokens can attend to themselves
     - Answer only tokens can attend to image/text and the answer tokens before them
-    - Action tokens can attend to image/text, and themselves (causal)
+    - Action tokens can attend to image/text, and themselves
 
     Args:
         attention_mask (torch.Tensor): [B, seq_len] Attention mask indicating valid tokens
