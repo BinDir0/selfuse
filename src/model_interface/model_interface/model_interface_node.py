@@ -120,6 +120,7 @@ class ModelInterfaceNode(Node):
         self.first_ts_ns = 0
         self.total_inactive_ns = 0
         self.inactive_start_ns = None
+        self.dt_ns = int(1e9 / self.data_freq)
         self.first_inference = True
 
         # --- 4. 标定 ---
@@ -129,6 +130,35 @@ class ModelInterfaceNode(Node):
         self.T_base2cam_l = np.linalg.inv(self.T_cam2base_l)
         self.T_base2cam_r = np.linalg.inv(self.T_cam2base_r)
         self.get_logger().info(f"✅ 标定数据加载完成: 内参矩阵形状={self.K_mat.shape}")
+
+        self.T_wrist2tcp_l = np.array([
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [1, 0, 0, 0.0345],
+            [0, 0, 0, 1]
+        ])
+        self.T_wrist2tcp_r = np.array([
+            [0, 1, 0, 0],
+            [0, 0, -1, 0],
+            [-1, 0, 0, 0.0345],
+            [0, 0, 0, 1]
+        ])
+        self.T_tcp2wrist_l = np.linalg.inv(self.T_wrist2tcp_l)
+        self.T_tcp2wrist_r = np.linalg.inv(self.T_wrist2tcp_r)
+        self.T_wrist2handbase_l = np.array([
+            [0, -1, 0, 0],
+            [0, 0, -1, 0],
+            [1, 0, 0, 0.01665],
+            [0, 0, 0, 1]
+        ])
+        self.T_wrist2handbase_r = np.array([
+            [0, -1, 0, 0],
+            [0, 0, 1, 0],
+            [-1, 0, 0, 0.01665],
+            [0, 0, 0, 1]
+        ])
+        self.T_handbase2wrist_l = np.linalg.inv(self.T_wrist2handbase_l)
+        self.T_handbase2wrist_r = np.linalg.inv(self.T_wrist2handbase_r)
 
         # --- 5. 数据结构 ---
         self.state = SystemState.IDLE
@@ -184,6 +214,54 @@ class ModelInterfaceNode(Node):
         self.control_timer = self.create_timer(1.0 / self.ctrl_freq, self.control_timer_cb, callback_group=MutuallyExclusiveCallbackGroup())
 
         self.get_logger().info(f"🚀 Model Interface 启动 (Multi-threaded & Lock-Optimized)")
+
+    def calc_wrist_to_cam(self, T_tcp2base, side):
+        if side == 'left':
+            T_wrist2tcp = self.T_wrist2tcp_l
+            T_base2cam = self.T_base2cam_l
+        elif side == 'right':
+            T_wrist2tcp = self.T_wrist2tcp_r
+            T_base2cam = self.T_base2cam_r
+        T_wrist2cam = T_base2cam @ T_tcp2base @ T_wrist2tcp
+        return T_wrist2cam
+
+    def calc_keypoints_to_wrist(self, keypoints, side):
+        assert len(keypoints) == 5, "关键点数量错误"
+        keypoints_transformed = []
+        for keypoint in keypoints:
+            keypoint_homo = np.ones((4, 1))
+            keypoint_homo[:3, 0] = keypoint
+            if side == 'left':
+                T_handbase2wrist = self.T_handbase2wrist_l
+            elif side == 'right':
+                T_handbase2wrist = self.T_handbase2wrist_r
+            keypoint_homo = T_handbase2wrist @ keypoint_homo
+            keypoints_transformed.append(keypoint_homo[:3, 0])
+        return np.array(keypoints_transformed)
+
+    def calc_tcp_to_arm_base(self, T_wrist2cam, side):
+        if side == 'left':
+            T_tcp2wrist = self.T_tcp2wrist_l
+            T_cam2base = self.T_cam2base_l
+        elif side == 'right':
+            T_tcp2wrist = self.T_tcp2wrist_r
+            T_cam2base = self.T_cam2base_r
+        T_tcp2base = T_cam2base @ T_wrist2cam @ T_tcp2wrist
+        return T_tcp2base
+
+    def calc_keypoints_to_hand_base(self, keypoints, side):
+        assert len(keypoints) == 5, "关键点数量错误"
+        keypoints_transformed = []
+        for keypoint in keypoints:
+            keypoint_homo = np.ones((4, 1))
+            keypoint_homo[:3, 0] = keypoint
+            if side == 'left':
+                T_wrist2handbase = self.T_wrist2handbase_l
+            elif side == 'right':
+                T_wrist2handbase = self.T_wrist2handbase_r
+            keypoint_homo = T_wrist2handbase @ keypoint_homo
+            keypoints_transformed.append(keypoint_homo[:3, 0])
+        return np.array(keypoints_transformed)
 
     # --- 状态与时间逻辑 ---
     def _is_active_recording(self, state):
@@ -308,17 +386,15 @@ class ModelInterfaceNode(Node):
     def l_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
         with self.l_kp_cb_lock:
-            self._update_buffer(self.buf_l_kps, m.header, pts.flatten(), "左手关键点")
+            self._update_buffer(self.buf_l_kps, m.header, pts, "左手关键点")
 
     def r_kp_cb(self, m):
         pts = np.array([[p.position.x, p.position.y, p.position.z] for p in m.poses])
         with self.r_kp_cb_lock:
-            self._update_buffer(self.buf_r_kps, m.header, pts.flatten(), "右手关键点")
+            self._update_buffer(self.buf_r_kps, m.header, pts, "右手关键点")
 
     # --- 采样与推理 ---
     def _find_nearest(self, sorted_buf, target_ns):
-        # 注意：这里输入的是 list 副本，不是 deque
-        if not sorted_buf: return None
         times = [x[0] for x in sorted_buf]
         idx = bisect.bisect_left(times, target_ns)
         
@@ -331,9 +407,7 @@ class ModelInterfaceNode(Node):
             return sorted_buf[idx][1]
 
     def _is_in_range(self, sorted_buf, target_ts):
-        if not sorted_buf: return False
-        dt_ns = int(1e9 / self.data_freq)
-        return (sorted_buf[0][0] - dt_ns) <= target_ts <= (sorted_buf[-1][0] + dt_ns)
+        return (sorted_buf[0][0] - self.dt_ns) <= target_ts <= (sorted_buf[-1][0] + self.dt_ns)
 
     def prepare_inference_payload(self):
         # 1. 创建快照 & 排序
@@ -367,14 +441,14 @@ class ModelInterfaceNode(Node):
             rgb_in = np.stack(rgb_seq)
             depth_in = np.stack(depth_seq)
             if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
-            tl = self.T_base2cam_l @ matrix_from_pose_msg(snap_lw[-1][1])
-            tr = self.T_base2cam_r @ matrix_from_pose_msg(snap_rw[-1][1])
-            lk = snap_lk[-1][1]
-            rk = snap_rk[-1][1]
+            tl = self.calc_wrist_to_cam(matrix_from_pose_msg(snap_lw[-1][1]), 'left')
+            tr = self.calc_wrist_to_cam(matrix_from_pose_msg(snap_rw[-1][1]), 'right')
+            lk = self.calc_keypoints_to_wrist(snap_lk[-1][1], 'left')
+            rk = self.calc_keypoints_to_wrist(snap_rk[-1][1], 'right')
             vec = np.concatenate([
                 tl[:3, 3], tr[:3, 3],
                 get_6d_rot(tl), get_6d_rot(tr),
-                lk, rk])
+                lk.flatten(), rk.flatten()])
             states_in = vec[None, :].astype(np.float32)
             def clear_repeated_data(buf, retained_data):
                 buf.clear()
@@ -389,13 +463,12 @@ class ModelInterfaceNode(Node):
         else:
             # 2. 对齐采样
             t_ref = min(s[-1][0] for s in all_snaps)
-            grid_ns = int(1e9 / self.data_freq)
-            self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={grid_ns/1e6:.1f}ms")
+            self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={self.dt_ns/1e6:.1f}ms")
 
             # Image
             rgb_seq, depth_seq = [], []
             for h in range(self.i_hor):
-                t = t_ref - (h * self.i_str * grid_ns)
+                t = t_ref - (h * self.i_str * self.dt_ns)
                 if not self._is_in_range(snap_rgb, t): break
                 rgb_seq.append(self._find_nearest(snap_rgb, t))
                 depth_seq.append(self._find_nearest(snap_depth, t))
@@ -407,19 +480,19 @@ class ModelInterfaceNode(Node):
             # State
             states_list = []
             for h in range(self.s_hor):
-                t = t_ref - (h * self.s_str * grid_ns)
+                t = t_ref - (h * self.s_str * self.dt_ns)
                 state_snaps = [snap_lw, snap_rw, snap_lk, snap_rk]
                 if not all(self._is_in_range(b, t) for b in state_snaps): break
 
-                tl = self.T_base2cam_l @ matrix_from_pose_msg(self._find_nearest(snap_lw, t))
-                tr = self.T_base2cam_r @ matrix_from_pose_msg(self._find_nearest(snap_rw, t))
-                lk = self._find_nearest(snap_lk, t)
-                rk = self._find_nearest(snap_rk, t)
+                tl = self.calc_wrist_to_cam(matrix_from_pose_msg(self._find_nearest(snap_lw, t)), 'left')
+                tr = self.calc_wrist_to_cam(matrix_from_pose_msg(self._find_nearest(snap_rw, t)), 'right')
+                lk = self.calc_keypoints_to_wrist(self._find_nearest(snap_lk, t), 'left')
+                rk = self.calc_keypoints_to_wrist(self._find_nearest(snap_rk, t), 'right')
 
                 vec = np.concatenate([
                     tl[:3, 3], tr[:3, 3],
                     get_6d_rot(tl), get_6d_rot(tr),
-                    lk, rk
+                    lk.flatten(), rk.flatten()
                 ])
                 states_list.append(vec)
 
@@ -463,9 +536,10 @@ class ModelInterfaceNode(Node):
                     for i in range(steps):
                         v = pred[i]
                         self.action_queue.append({
-                            'l': matrix_from_6d_rot(v[0:3], v[6:12]),
-                            'r': matrix_from_6d_rot(v[3:6], v[12:18]),
-                            'lk': v[18:33], 'rk': v[33:48]
+                            'l': self.calc_tcp_to_arm_base(matrix_from_6d_rot(v[0:3], v[6:12]), 'left'),
+                            'r': self.calc_tcp_to_arm_base(matrix_from_6d_rot(v[3:6], v[12:18]), 'right'),
+                            'lk': self.calc_keypoints_to_hand_base(v[18:33].reshape(-1, 3), 'left'),
+                            'rk': self.calc_keypoints_to_hand_base(v[33:48].reshape(-1, 3), 'right')
                         })
 
                     self.get_logger().info(f"📥 动作队列更新: 当前队列长度={len(self.action_queue)}")
@@ -495,14 +569,14 @@ class ModelInterfaceNode(Node):
             try:
                 # 1. Arm
                 pa = PoseArray(); pa.header.stamp, pa.header.frame_id = now, "base_link"
-                pa.poses.append(pose_from_matrix(self.T_cam2base_l @ data['l']))
-                pa.poses.append(pose_from_matrix(self.T_cam2base_r @ data['r']))
+                pa.poses.append(pose_from_matrix(data['l']))
+                pa.poses.append(pose_from_matrix(data['r']))
                 self.pub_action_poses.publish(pa)
 
                 # 2. Hand
                 def _pub(topic, kps, frame):
                     p_arr = PoseArray(); p_arr.header.stamp, p_arr.header.frame_id = now, frame
-                    for pt in kps.reshape(-1, 3):
+                    for pt in kps:
                         p = Pose(); p.position.x, p.position.y, p.position.z = map(float, pt)
                         p_arr.poses.append(p)
                     topic.publish(p_arr)
