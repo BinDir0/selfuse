@@ -24,59 +24,110 @@ def make_mock_stream(name="ds"):
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests — build_stream (merged file loading)
 # ---------------------------------------------------------------------------
 
 @patch(f"{MOD}.load_dataset")
-@patch(f"{MOD}.interleave_datasets")
-def test_build_stream_train_interleaves(mock_interleave, mock_load):
-    """Train mode with multiple paths calls interleave_datasets + shuffle."""
-    ds1, ds2 = make_mock_stream("ds1"), make_mock_stream("ds2")
-    mock_load.side_effect = [ds1, ds2]
-    merged = make_mock_stream("merged")
-    mock_interleave.return_value = merged
+@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+              return_value=["/data/a/train/data-00000.arrow", "/data/b/train/data-00000.arrow"])
+def test_build_stream_train_shuffles(mock_collect, mock_load):
+    """Train mode: load_dataset called once with all files, then shuffle."""
+    stream = make_mock_stream("stream")
+    mock_load.return_value = stream
 
     obj = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a", "/fake/b"],
+        dataset_paths=["/data/a", "/data/b"],
         split="train", mode="train",
     )
-    mock_interleave.assert_called_once()
-    merged.shuffle.assert_called_once()
+    mock_load.assert_called_once()
+    # Verify data_files contains both files
+    _, kwargs = mock_load.call_args
+    assert len(kwargs["data_files"]) == 2
+    stream.shuffle.assert_called_once()
     assert obj.stream is not None
 
 
 @patch(f"{MOD}.load_dataset")
-@patch(f"{MOD}.concatenate_datasets")
-def test_build_stream_val_concatenates(mock_concat, mock_load):
-    """Val mode with multiple paths calls concatenate_datasets, no shuffle."""
-    ds1, ds2 = make_mock_stream("ds1"), make_mock_stream("ds2")
-    mock_load.side_effect = [ds1, ds2]
-    merged = make_mock_stream("merged")
-    mock_concat.return_value = merged
+@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+              return_value=["/data/a/test/data-00000.arrow"])
+def test_build_stream_val_no_shuffle(mock_collect, mock_load):
+    """Val mode: load_dataset called, no shuffle."""
+    stream = make_mock_stream("stream")
+    mock_load.return_value = stream
 
     obj = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a", "/fake/b"],
+        dataset_paths=["/data/a"],
         split="test", mode="val",
     )
-    mock_concat.assert_called_once()
-    merged.shuffle.assert_not_called()
+    mock_load.assert_called_once()
+    stream.shuffle.assert_not_called()
+
+
+@patch.object(LegendVLMStreamingDataset, "collect_data_files", return_value=[])
+def test_build_stream_no_files_returns_none(mock_collect):
+    """No data files found -> stream is None."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        obj = LegendVLMStreamingDataset(
+            dataset_paths=["/nonexistent"],
+            split="train", mode="train",
+        )
+    assert obj.stream is None
 
 
 @patch(f"{MOD}.load_dataset")
-@patch(f"{MOD}.interleave_datasets")
-def test_single_path_no_interleave(mock_interleave, mock_load):
-    """Single path: no interleave/concatenate, just the raw stream."""
-    ds = make_mock_stream("ds")
-    mock_load.return_value = ds
+@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+              return_value=["/data/a/train/part-00000.parquet"])
+def test_build_stream_detects_parquet(mock_collect, mock_load):
+    """Parquet files detected and loaded with format='parquet'."""
+    stream = make_mock_stream("stream")
+    mock_load.return_value = stream
 
     obj = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a"],
+        dataset_paths=["/data/a"],
         split="train", mode="train",
     )
-    mock_interleave.assert_not_called()
-    # shuffle is still called for train mode
-    ds.shuffle.assert_called_once()
+    args, _ = mock_load.call_args
+    assert args[0] == "parquet"
 
+
+# ---------------------------------------------------------------------------
+# Tests — collect_data_files
+# ---------------------------------------------------------------------------
+
+@patch(f"{MOD}.glob.glob")
+def test_collect_finds_arrow_in_split_dir(mock_glob):
+    """Finds arrow files under {path}/{split}/ pattern."""
+    mock_glob.side_effect = lambda pattern: (
+        ["/d/train/data-00000.arrow", "/d/train/data-00001.arrow"]
+        if "train/data-*.arrow" in pattern else []
+    )
+    obj = LegendVLMStreamingDataset.__new__(LegendVLMStreamingDataset)
+    obj.dataset_paths = ["/d"]
+    obj.split = "train"
+    files = obj.collect_data_files()
+    assert len(files) == 2
+
+
+@patch(f"{MOD}.glob.glob")
+def test_collect_falls_back_to_parquet(mock_glob):
+    """Falls back to parquet when no arrow files found."""
+    def side_effect(pattern):
+        if pattern.endswith(".parquet"):
+            return ["/d/train/part-00000.parquet"]
+        return []
+    mock_glob.side_effect = side_effect
+    obj = LegendVLMStreamingDataset.__new__(LegendVLMStreamingDataset)
+    obj.dataset_paths = ["/d"]
+    obj.split = "train"
+    files = obj.collect_data_files()
+    assert len(files) == 1
+    assert files[0].endswith(".parquet")
+
+
+# ---------------------------------------------------------------------------
+# Tests — infer_proportional_probs (kept for backward compat)
+# ---------------------------------------------------------------------------
 
 def test_infer_probs_with_metadata():
     """When metadata has num_examples, return proportional sizes."""
@@ -102,18 +153,23 @@ def test_infer_probs_no_metadata():
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# Tests — distribute
+# ---------------------------------------------------------------------------
+
 @patch(f"{MOD}.load_dataset")
-def test_distribute_calls_split_by_node(mock_load):
+@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+              return_value=["/d/train/data-00000.arrow"])
+def test_distribute_calls_split_by_node(mock_collect, mock_load):
     """distribute() calls split_dataset_by_node with correct args."""
-    ds = make_mock_stream("ds")
-    mock_load.return_value = ds
+    stream = make_mock_stream("stream")
+    mock_load.return_value = stream
 
     obj = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a"],
-        split="train", mode="train",
+        dataset_paths=["/d"], split="train", mode="train",
     )
 
-    with patch(f"datasets.distributed.split_dataset_by_node") as mock_split:
+    with patch("datasets.distributed.split_dataset_by_node") as mock_split:
         mock_split.return_value = MagicMock(name="split_stream")
         obj.distribute(rank=1, world_size=4)
         mock_split.assert_called_once()
@@ -122,123 +178,55 @@ def test_distribute_calls_split_by_node(mock_load):
         assert kwargs["world_size"] == 4
 
 
-@patch(f"{MOD}.load_dataset")
-def test_distribute_different_ranks(mock_load):
-    """Different ranks get different stream objects after distribute."""
-    ds = make_mock_stream("ds")
-    mock_load.return_value = ds
-
-    obj1 = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a"], split="train", mode="train",
-    )
-    obj2 = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a"], split="train", mode="train",
-    )
-
-    with patch(f"datasets.distributed.split_dataset_by_node") as mock_split:
-        stream_r0 = MagicMock(name="stream_r0")
-        stream_r1 = MagicMock(name="stream_r1")
-        mock_split.side_effect = [stream_r0, stream_r1]
-
-        obj1.distribute(rank=0, world_size=2)
-        obj2.distribute(rank=1, world_size=2)
-
-        assert obj1.stream is stream_r0
-        assert obj2.stream is stream_r1
-
-
-@patch(f"{MOD}.load_dataset")
-def test_distribute_none_stream(mock_load):
+@patch.object(LegendVLMStreamingDataset, "collect_data_files", return_value=[])
+def test_distribute_none_stream(mock_collect):
     """distribute with stream=None does not raise."""
-    mock_load.side_effect = Exception("fail")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         obj = LegendVLMStreamingDataset(
-            dataset_paths=["/fake/a"], split="train", mode="train",
+            dataset_paths=["/fake"], split="train", mode="train",
         )
     assert obj.stream is None
     obj.distribute(rank=0, world_size=2)  # should not raise
 
 
-@patch(f"{MOD}.load_dataset")
-@patch(f"{MOD}.interleave_datasets")
-def test_probs_length_mismatch_fallback(mock_interleave, mock_load):
-    """dataset_probs length mismatch falls back to proportional-to-size."""
-    ds1, ds2 = make_mock_stream("ds1"), make_mock_stream("ds2")
-    mock_load.side_effect = [ds1, ds2]
-    merged = make_mock_stream("merged")
-    mock_interleave.return_value = merged
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        obj = LegendVLMStreamingDataset(
-            dataset_paths=["/fake/a", "/fake/b"],
-            split="train", mode="train",
-            dataset_probs=[0.3],  # length 1 != 2 streams
-        )
-    # Should still call interleave (with fallback probs)
-    mock_interleave.assert_called_once()
-
+# ---------------------------------------------------------------------------
+# Tests — return_dataset_info
+# ---------------------------------------------------------------------------
 
 @patch(f"{MOD}.load_dataset")
-def test_return_dataset_info_maps_episode_index(mock_load):
-    """return_dataset_info=True causes .map() to be called on each loaded stream."""
-    ds = make_mock_stream("ds")
-    mapped_ds = make_mock_stream("mapped_ds")
-    ds.map = MagicMock(return_value=mapped_ds)
-    mock_load.return_value = ds
+@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+              return_value=["/d/train/data-00000.arrow"])
+def test_return_dataset_info_maps_episode_index(mock_collect, mock_load):
+    """return_dataset_info=True causes .map() on the merged stream."""
+    stream = make_mock_stream("stream")
+    mapped = make_mock_stream("mapped")
+    stream.map = MagicMock(return_value=mapped)
+    mock_load.return_value = stream
 
     obj = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a"],
-        split="train", mode="train",
+        dataset_paths=["/d"], split="train", mode="train",
         return_dataset_info=True,
     )
-    ds.map.assert_called_once()
-    # Verify map was called with with_indices=True
-    _, kwargs = ds.map.call_args
+    stream.map.assert_called_once()
+    _, kwargs = stream.map.call_args
     assert kwargs.get("with_indices") is True
 
 
 @patch(f"{MOD}.load_dataset")
-def test_return_dataset_info_false_no_map(mock_load):
+@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+              return_value=["/d/train/data-00000.arrow"])
+def test_return_dataset_info_false_no_map(mock_collect, mock_load):
     """return_dataset_info=False (default) does not call .map()."""
-    ds = make_mock_stream("ds")
-    ds.map = MagicMock()
-    mock_load.return_value = ds
+    stream = make_mock_stream("stream")
+    stream.map = MagicMock()
+    mock_load.return_value = stream
 
     obj = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a"],
-        split="train", mode="train",
+        dataset_paths=["/d"], split="train", mode="train",
         return_dataset_info=False,
     )
-    ds.map.assert_not_called()
-
-
-@patch(f"{MOD}.load_dataset")
-@patch(f"{MOD}.interleave_datasets")
-def test_return_dataset_info_multiple_paths(mock_interleave, mock_load):
-    """return_dataset_info=True maps episode_index on every loaded stream."""
-    ds1 = make_mock_stream("ds1")
-    ds2 = make_mock_stream("ds2")
-    mapped1 = make_mock_stream("mapped1")
-    mapped2 = make_mock_stream("mapped2")
-    ds1.map = MagicMock(return_value=mapped1)
-    ds2.map = MagicMock(return_value=mapped2)
-    mock_load.side_effect = [ds1, ds2]
-    merged = make_mock_stream("merged")
-    mock_interleave.return_value = merged
-
-    obj = LegendVLMStreamingDataset(
-        dataset_paths=["/fake/a", "/fake/b"],
-        split="train", mode="train",
-        return_dataset_info=True,
-    )
-    ds1.map.assert_called_once()
-    ds2.map.assert_called_once()
-    # interleave should receive the mapped streams, not the originals
-    args, _ = mock_interleave.call_args
-    assert mapped1 in args[0]
-    assert mapped2 in args[0]
+    stream.map.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
