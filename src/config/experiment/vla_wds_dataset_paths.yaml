@@ -4,10 +4,9 @@
 # Each entry specifies shard_urls (glob pattern) and sampling weight.
 # This replaces vla_dataset_paths.yaml for WebDataset-based training.
 #
-# After converting zarr datasets with data/convert_zarr_to_wds.py,
-# update the paths below to point to the actual shard directories.
 
-wds_base_dir: /cfs/data/wds
+wds_base_dir: /share_data/guantianrui/datasets/Webdataset
+val_wds_base_dir: /share_data/guantianrui/datasets/Webdataset_val
 
 vla_wds_datasets:
   # --- Human datasets ---
@@ -18,7 +17,7 @@ vla_wds_datasets:
     shard_urls: ${wds_base_dir}/oakink2_train_filtered_v1/shard-*.tar
     weight: 1
   - name: holoassist
-    shard_urls: ${wds_base_dir}/holoassist_filtered_v2/shard-*.tar
+    shard_urls: ${wds_base_dir}/holoassist_filtered_v2_rechunked/shard-*.tar
     weight: 1
   - name: egodex
     shard_urls: ${wds_base_dir}/egodex_train_filtered_v2/shard-*.tar
@@ -26,7 +25,7 @@ vla_wds_datasets:
   - name: epic
     shard_urls: ${wds_base_dir}/epic_train_rechunked/shard-*.tar
     weight: 4
-  - name: ego4d_cooking
+  - name: ego4d_cooking_and_cleaning
     shard_urls: ${wds_base_dir}/ego4d_cooking_and_cleaning_train_rechunked/shard-*.tar
     weight: 8
   - name: ego4d_other
@@ -39,3 +38,11 @@ vla_wds_datasets:
   # - name: Open_book
   #   shard_urls: ${wds_base_dir}/Open_book/shard-*.tar
   #   weight: 0.2
+
+val_wds_datasets:
+  - name: taco_test_seen
+    shard_urls: ${val_wds_base_dir}/taco_test_seen/shard-*.tar
+  - name: oakink2_test_seen
+    shard_urls: ${val_wds_base_dir}/oakink2_test_seen_presence_clean/shard-*.tar
+  - name: egodex_test
+    shard_urls: ${val_wds_base_dir}/egodex_filter_test_presence_clean/shard-*.tar
