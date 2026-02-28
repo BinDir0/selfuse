@@ -85,7 +85,12 @@ def evaluation(workspace, accelerator, dataloader, step_log):
         print(f"Evaluation step {workspace.update_step} started")
     accelerator.wait_for_everyone()
     with torch.no_grad(), eval_with_averaged_model(accelerator, workspace.model, workspace.model_averaging):
-        val_losses = dict()
+        val_losses = {
+            "total_loss": [], 
+            "ce_loss": [], 
+            "diffusion_loss": [], 
+            "flow_loss": [], 
+        }
         eval_thresholds = workspace.cfg.training.eval_thresholds
         eval_accuracy = []
         eval_l1_loss = []
@@ -110,8 +115,6 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             with accelerator.autocast():
                 loss = workspace.model(workspace.objective_func, inputs)
             for key, loss_ in loss.items():
-                if key not in val_losses:
-                    val_losses[key] = list()
                 val_losses[key].append(loss_.detach())
 
             if hasattr(workspace.model, 'module'):
@@ -125,6 +128,8 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             if 'actions' in inputs and workspace.objective_func != "train_ar":
                 gt_actions = inputs['actions']
                 actions_valid_mask = inputs['actions_valid_mask']
+                if not torch.any(actions_valid_mask):
+                    continue
                 # Get action predictions
                 with accelerator.autocast():
                     pred_actions = workspace.model("infer_action", inputs)
@@ -132,8 +137,6 @@ def evaluation(workspace, accelerator, dataloader, step_log):
                 # ignore invalid actions
                 B, H, D = gt_actions.shape
                 eval_sample = torch.any(actions_valid_mask.reshape(B, -1), dim=1)
-                if not torch.any(eval_sample):
-                    continue
                 actions_valid_mask = actions_valid_mask[eval_sample]
                 if workspace.use_relative_action:
                     gt_actions = workspace.normalizer['actions'].unnormalize(gt_actions[eval_sample])

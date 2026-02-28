@@ -55,6 +55,19 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
     checkpointing) is inherited from the parent class.
     """
 
+    def evaluation(self, accelerator, dataloader, step_log):
+        """Override to add device transfer for val batches not wrapped by accelerate."""
+        def device_transfer_wrapper(original_dataloader):
+            for batch in original_dataloader:
+                yield {
+                    k: v.to(accelerator.device) if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+        wrapped = device_transfer_wrapper(dataloader)
+        # Preserve batch_size attribute for compatibility
+        wrapped.__dict__["batch_size"] = getattr(dataloader, "batch_size", 1)
+        super().evaluation(accelerator, wrapped, step_log)
+
     @capture_output_to_training_log
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -211,6 +224,12 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
         dataset.vla_dataset.set_normalizer(normalizer)
         self.normalizer = normalizer
 
+        # Distributed shard splitting: handled at dataset level, not by accelerate
+        dataset.distribute(
+            rank=accelerator.process_index,
+            world_size=accelerator.num_processes,
+        )
+
         # DataLoader for IterableDataset: use batch_size, no batch_sampler
         batch_size = cfg.dataloader.loader.batch_size
         train_dataloader = DataLoader(
@@ -224,8 +243,28 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
         )
         train_dataloader.__dict__["batch_size"] = batch_size
 
-        # No validation for WebDataset streaming mode
+        # Validation dataloader (optional, requires val shard URLs in config)
         val_dataloader = None
+        val_wds_datasets = cfg.dataset.get("val_wds_datasets", None)
+        if val_wds_datasets is not None:
+            val_dataset = dataset.get_validation_dataset(val_wds_datasets)
+            val_dataset.distribute(
+                rank=accelerator.process_index,
+                world_size=accelerator.num_processes,
+            )
+            val_dataloader = DataLoader(
+                dataset=val_dataset,
+                batch_size=batch_size,
+                collate_fn=val_dataset.get_collator(),
+                num_workers=cfg.dataloader.loader.num_workers,
+                pin_memory=cfg.dataloader.loader.get("pin_memory", True),
+                persistent_workers=False,
+            )
+            if accelerator.is_main_process:
+                print("Validation dataloader created from val shard URLs")
+        else:
+            if accelerator.is_main_process:
+                print("No val_wds_datasets configured, skipping validation")
 
         # Steps per epoch: use configured value or default
         steps_per_epoch = cfg.training.get("steps_per_epoch", 100000)
@@ -249,9 +288,9 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
             **cfg.checkpoint.topk
         )
 
-        # Prepare with Accelerate
-        train_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
-            train_dataloader, self.model, self.optimizer, self.lr_scheduler
+        # Prepare with Accelerate (DataLoader excluded — sharding handled manually)
+        self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
+            self.model, self.optimizer, self.lr_scheduler
         )
 
         if accelerator.is_main_process:
@@ -291,27 +330,33 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
             if accelerator.is_main_process:
                 print(f"Training with {steps_per_epoch} steps per epoch (WebDataset streaming)")
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
-                with accelerator.accumulate(self.model):
-                    self.model.train()
-                    if accelerator.is_main_process:
-                        print(f"Training epoch {self.epoch} started")
-                    dataloader = train_dataloader
-                    for batch_idx, batch in enumerate(dataloader):
-                        # Enforce steps_per_epoch limit
-                        if batch_idx >= steps_per_epoch:
-                            break
+                self.model.train()
+                if accelerator.is_main_process:
+                    print(f"Training epoch {self.epoch} started")
+                dataloader = train_dataloader
+                for batch_idx, batch in enumerate(dataloader):
+                    # Enforce steps_per_epoch limit
+                    if batch_idx >= steps_per_epoch:
+                        break
 
-                        step_perf_start = time.perf_counter()
-                        if training_start_time is None:
-                            training_start_time = time.time()
-                        if cfg.training.profile and torch.cuda.is_available():
-                            torch.cuda.reset_peak_memory_stats()
+                    step_perf_start = time.perf_counter()
+                    if training_start_time is None:
+                        training_start_time = time.time()
+                    if cfg.training.profile and torch.cuda.is_available():
+                        torch.cuda.reset_peak_memory_stats()
 
-                        inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
+                    # Manual device transfer (DataLoader not wrapped by accelerate)
+                    batch = {
+                        k: v.to(accelerator.device) if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()
+                    }
 
-                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
-                            self.tracker.track()
-                        self.grad_stats.clear()
+                    inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
+
+                    if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                        self.tracker.track()
+                    self.grad_stats.clear()
+                    with accelerator.accumulate(self.model):
                         with accelerator.autocast():
                             raw_loss = self.model(self.objective_func, inputs)
 
@@ -361,97 +406,97 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
                         self.lr_scheduler.step()
                         self.optimizer.zero_grad(set_to_none=True)
 
-                        self.global_step += 1
-                        if accelerator.sync_gradients:
-                            self.update_step += 1
-                            total_samples_processed += inputs["input_ids"].shape[0]
-                            self.model_averaging.maybe_initialize(self.update_step)
-                            self.model_averaging.maybe_update(self.update_step)
+                    self.global_step += 1
+                    if accelerator.sync_gradients:
+                        self.update_step += 1
+                        total_samples_processed += inputs["input_ids"].shape[0]
+                        self.model_averaging.maybe_initialize(self.update_step)
+                        self.model_averaging.maybe_update(self.update_step)
 
-                        should_eval = (
-                            accelerator.sync_gradients
-                            and val_dataloader is not None
-                            and (self.update_step % cfg.training.eval_every == 0)
-                        )
-                        should_ckpt = (
-                            accelerator.sync_gradients
-                            and (self.update_step % cfg.training.checkpoint_every == 0)
-                        )
-                        should_interval_ckpt = (
-                            accelerator.sync_gradients
-                            and (self.update_step % cfg.training.ckpt_save_interval == 0)
-                        )
+                    should_eval = (
+                        accelerator.sync_gradients
+                        and val_dataloader is not None
+                        and (self.update_step % cfg.training.eval_every == 0)
+                    )
+                    should_ckpt = (
+                        accelerator.sync_gradients
+                        and (self.update_step % cfg.training.checkpoint_every == 0)
+                    )
+                    should_interval_ckpt = (
+                        accelerator.sync_gradients
+                        and (self.update_step % cfg.training.ckpt_save_interval == 0)
+                    )
 
-                        step_log = None
-                        if should_record or should_eval or should_ckpt or should_interval_ckpt:
-                            if self.is_deepspeed:
-                                current_lr = self.model.get_lr()[0]
-                            else:
-                                current_lr = self.lr_scheduler.get_last_lr()[0]
-                            step_log = {
-                                'global_step': self.global_step,
-                                'update_step': self.update_step,
-                                'epoch': self.epoch,
-                                'lr': current_lr,
-                            }
+                    step_log = None
+                    if should_record or should_eval or should_ckpt or should_interval_ckpt:
+                        if self.is_deepspeed:
+                            current_lr = self.model.get_lr()[0]
+                        else:
+                            current_lr = self.lr_scheduler.get_last_lr()[0]
+                        step_log = {
+                            'global_step': self.global_step,
+                            'update_step': self.update_step,
+                            'epoch': self.epoch,
+                            'lr': current_lr,
+                        }
 
-                        if should_record:
-                            raw_loss_cpu = {}
-                            for key, value in raw_loss.items():
-                                raw_loss_cpu[key] = value.item()
-                            step_wall_time = time.time()
-                            step_time_sec = time.perf_counter() - step_perf_start
-                            bs = inputs["input_ids"].shape[0]
-                            elapsed_time_sec = step_wall_time - training_start_time
+                    if should_record:
+                        raw_loss_cpu = {}
+                        for key, value in raw_loss.items():
+                            raw_loss_cpu[key] = value.item()
+                        step_wall_time = time.time()
+                        step_time_sec = time.perf_counter() - step_perf_start
+                        bs = inputs["input_ids"].shape[0]
+                        elapsed_time_sec = step_wall_time - training_start_time
+                        step_log.update({
+                            'elapsed_time_sec': elapsed_time_sec,
+                            'step_time_sec': step_time_sec,
+                            'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
+                            'samples_per_sec': bs / step_time_sec if step_time_sec > 0 else 0,
+                        })
+                        if total_norm is not None:
+                            step_log['grad_norm'] = total_norm
+                        if part_grad_norms is not None:
                             step_log.update({
-                                'elapsed_time_sec': elapsed_time_sec,
-                                'step_time_sec': step_time_sec,
-                                'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
-                                'samples_per_sec': bs / step_time_sec if step_time_sec > 0 else 0,
+                                'grad_norm_action_expert': part_grad_norms["action_expert"],
+                                'grad_norm_vlm': part_grad_norms["vlm"],
+                                'grad_norm_diffloss': part_grad_norms["diffloss"],
                             })
-                            if total_norm is not None:
-                                step_log['grad_norm'] = total_norm
-                            if part_grad_norms is not None:
-                                step_log.update({
-                                    'grad_norm_action_expert': part_grad_norms["action_expert"],
-                                    'grad_norm_vlm': part_grad_norms["vlm"],
-                                    'grad_norm_diffloss': part_grad_norms["diffloss"],
-                                })
-                            with torch.no_grad():
-                                unwrapped_model = accelerator.unwrap_model(self.model)
-                                if cfg.training.train_vlm:
-                                    vlm_params = (
-                                        unwrapped_model.lora_trainable_vlm_parameters
-                                        if cfg.lora
-                                        else unwrapped_model.trainable_vlm_parameters
-                                    )
-                                    step_log["weight_norm/vlm"] = params_l2_norm(vlm_params)
-                                step_log["weight_norm/action"] = params_l2_norm(
-                                    unwrapped_model.action_expert_parameters)
-                                step_log["weight_norm/diffloss"] = params_l2_norm(
-                                    unwrapped_model.diffloss_parameters)
-                            step_log.update(raw_loss_cpu)
+                        with torch.no_grad():
+                            unwrapped_model = accelerator.unwrap_model(self.model)
+                            if cfg.training.train_vlm:
+                                vlm_params = (
+                                    unwrapped_model.lora_trainable_vlm_parameters
+                                    if cfg.lora
+                                    else unwrapped_model.trainable_vlm_parameters
+                                )
+                                step_log["weight_norm/vlm"] = params_l2_norm(vlm_params)
+                            step_log["weight_norm/action"] = params_l2_norm(
+                                unwrapped_model.action_expert_parameters)
+                            step_log["weight_norm/diffloss"] = params_l2_norm(
+                                unwrapped_model.diffloss_parameters)
+                        step_log.update(raw_loss_cpu)
 
-                        if should_eval:
-                            self.evaluation(accelerator, val_dataloader, step_log)
+                    if should_eval:
+                        self.evaluation(accelerator, val_dataloader, step_log)
 
-                        if should_ckpt:
-                            self.save_topk_ckpt(accelerator, topk_manager, step_log)
+                    if should_ckpt:
+                        self.save_topk_ckpt(accelerator, topk_manager, step_log)
 
-                        if should_interval_ckpt:
-                            self.save_interval_ckpt(accelerator)
+                    if should_interval_ckpt:
+                        self.save_interval_ckpt(accelerator)
 
-                        if step_log is not None:
-                            accelerator.log(step_log, step=self.update_step)
+                    if step_log is not None:
+                        accelerator.log(step_log, step=self.update_step)
 
-                        if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps - 1):
-                            break
+                    if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps - 1):
+                        break
 
-                        if self.global_step % 100 == 0 and accelerator.is_main_process:
-                            print(f"Global step {self.global_step} completed")
+                    if self.global_step % 100 == 0 and accelerator.is_main_process:
+                        print(f"Global step {self.global_step} completed")
 
-                        if cfg.training.profile and accelerator.is_main_process:
-                            prof.step()
+                    if cfg.training.profile and accelerator.is_main_process:
+                        prof.step()
 
                 self.epoch += 1
 

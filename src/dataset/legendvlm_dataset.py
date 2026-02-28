@@ -4,13 +4,13 @@ LegendVLM Dataset for VLM-only data stored in HuggingFace datasets format.
 Extracted from legendvla_dataset.py for modularity.
 '''
 
-from typing import Dict
+from typing import Dict, List, Optional, Union
 import pathlib
 import torch
 import numpy as np
 import warnings
 from torchvision import transforms
-from datasets import concatenate_datasets, load_from_disk, DatasetDict
+from datasets import concatenate_datasets, interleave_datasets, load_from_disk, load_dataset, DatasetDict
 from src.utils.pytorch_util import dict_apply
 from src.dataset.collator import LegendVLDataCollator
 
@@ -253,3 +253,285 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             int: Number of samples.
         """
         return len(self.main_dataset)
+
+
+class LegendVLMStreamingDataset(torch.utils.data.IterableDataset):
+    """
+    Streaming VLM dataset using HuggingFace IterableDataset.
+
+    Loads data lazily via load_dataset(streaming=True), reducing memory usage
+    compared to load_from_disk() which loads everything into memory.
+    """
+
+    def __init__(
+        self,
+        dataset_paths: Union[str, List[str]],
+        split: str = 'train',
+        weights: List[float] = [0.5, 0.5, 0.5],
+        seed: int = 42,
+        mode: str = 'train',
+        shuffle_buffer: int = 10000,
+        dataset_probs: Optional[List[float]] = None,
+        return_dataset_info: bool = False,
+    ):
+        """
+        Args:
+            dataset_paths: Dataset paths on disk (arrow-format HF datasets).
+            split: Split name to load (train/val/test).
+            weights: Weights for rating-based text selection.
+            seed: Random seed for shuffling.
+            mode: One of "train", "val", "infer-ar", "infer".
+            shuffle_buffer: Buffer size for streaming shuffle.
+            dataset_probs: Sampling probabilities for interleaving multiple datasets.
+                If None, automatically computes proportional-to-size probabilities
+                from dataset metadata. Falls back to uniform if metadata unavailable.
+            return_dataset_info: If True, return dataset_name and episode_index.
+        """
+        super().__init__()
+        self.dataset_paths = [dataset_paths] if isinstance(dataset_paths, str) else list(dataset_paths)
+        self.split = split
+        self.weights = weights
+        self.seed = seed
+        self.mode = mode
+        self.shuffle_buffer = shuffle_buffer
+        self.dataset_probs = dataset_probs
+        self.preprocessor = None
+        self.return_dataset_info = return_dataset_info
+
+        if self.mode == 'train':
+            self.aug_transform = transforms.Compose([
+                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+                transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))
+            ])
+        else:
+            self.aug_transform = None
+
+        # Load each path as a HF IterableDataset
+        self.stream = self.build_stream()
+
+    def build_stream(self):
+        """Build the streaming dataset from all paths.
+
+        Training mode: interleave_datasets for cross-dataset mixing with
+        probability-based sampling, plus buffer shuffle.
+        Eval mode: concatenate_datasets for exact single-pass traversal,
+        no shuffle.
+        """
+        streams = []
+        for path in self.dataset_paths:
+            try:
+                ds = load_dataset(path, split=self.split, streaming=True)
+
+                # Add episode_index to each sample if return_dataset_info is enabled
+                if self.return_dataset_info:
+                    ds = ds.map(
+                        lambda x, idx: {**x, 'episode_index': idx},
+                        with_indices=True
+                    )
+
+                streams.append(ds)
+            except Exception as e:
+                warnings.warn(f"Error loading streaming dataset from {path}: {e}")
+                continue
+
+        if not streams:
+            warnings.warn(f"No datasets found for split '{self.split}'.")
+            return None
+
+        if len(streams) == 1:
+            stream = streams[0]
+        elif self.mode == 'train':
+            # Training: interleave for better mixing
+            probs = self.dataset_probs
+            if probs is not None:
+                if len(probs) != len(streams):
+                    warnings.warn(
+                        f"dataset_probs length ({len(probs)}) != loaded streams ({len(streams)}), "
+                        "falling back to proportional-to-size sampling."
+                    )
+                    probs = None
+
+            # Auto-compute proportional-to-size probabilities from metadata
+            if probs is None:
+                probs = self.infer_proportional_probs(streams)
+                if probs is None: 
+                    warnings.warn(
+                        "Failed to infer proportional-to-size sampling probabilities, "
+                        "falling back to uniform sampling."
+                    )
+
+            if probs is not None:
+                total = sum(probs)
+                probs = [p / total for p in probs]
+
+            stream = interleave_datasets(
+                streams,
+                probabilities=probs,
+                seed=self.seed,
+                stopping_strategy="all_exhausted",
+            )
+        else:
+            # Eval: concatenate for exact single-pass traversal
+            stream = concatenate_datasets(streams)
+
+        # Shard-level shuffle + buffer shuffle for training only
+        if self.mode == 'train':
+            stream = stream.shuffle(seed=self.seed, buffer_size=self.shuffle_buffer)
+
+        return stream
+
+    @staticmethod
+    def infer_proportional_probs(streams):
+        """Try to read num_examples from dataset metadata for proportional sampling.
+
+        Returns None if metadata is unavailable for any stream.
+        """
+        sizes = []
+        for ds in streams:
+            try:
+                info = ds.info
+                if info is not None and info.splits is not None:
+                    # IterableDataset loaded with split= stores split info
+                    for split_info in info.splits.values():
+                        sizes.append(split_info.num_examples)
+                        break
+                    else:
+                        return None
+                else:
+                    return None
+            except Exception:
+                return None
+        if not sizes or any(s is None or s == 0 for s in sizes):
+            return None
+        return [float(s) for s in sizes]
+
+    def distribute(self, rank: int, world_size: int):
+        """Apply node-level shard splitting for distributed training.
+
+        Must be called before creating the DataLoader.
+        Uses shard-level splitting when #shards >= world_size,
+        otherwise falls back to example-level splitting.
+        """
+        if self.stream is None:
+            return
+        from datasets.distributed import split_dataset_by_node
+        self.stream = split_dataset_by_node(
+            self.stream, rank=rank, world_size=world_size
+        )
+
+    def set_preprocessor(self, preprocessor):
+        """Set the tokenizer/vision preprocessor."""
+        self.preprocessor = preprocessor
+
+    def get_collator(self):
+        """Build a data collator for batching."""
+        assert self.preprocessor is not None, "Preprocessor is not set"
+        padding_side = 'left' if self.mode == 'infer-ar' else 'right'
+        return LegendVLDataCollator(
+            pad_token_id=self.preprocessor.tokenizer.pad_token_id,
+            ignore_index=self.preprocessor.ignore_index,
+            padding_side=padding_side,
+        )
+
+    def get_validation_dataset(self, val_split='test'):
+        """Create a new streaming dataset instance for validation."""
+        val_dataset = LegendVLMStreamingDataset(
+            dataset_paths=self.dataset_paths,
+            split=val_split,
+            weights=self.weights,
+            seed=self.seed,
+            mode='val' if self.mode == 'train' else self.mode,
+            shuffle_buffer=self.shuffle_buffer,
+            dataset_probs=self.dataset_probs,
+            return_dataset_info=self.return_dataset_info,
+        )
+        if self.preprocessor is not None:
+            val_dataset.set_preprocessor(self.preprocessor)
+        if val_dataset.stream is None:
+            return None
+        return val_dataset
+
+    def sample_to_data(self, sample):
+        """
+        Convert a raw streaming dataset row into model-ready fields.
+
+        Reuses the same logic as LegendVLMDataset.sample_to_data.
+        """
+        images = sample['images']
+        text = sample['texts']
+        weights = self.weights
+
+        formatting_ratings = np.array(
+            [r if r is not None else 0 for r in sample['formatting_ratings']]
+        )
+        visual_dependency_ratings = np.array(
+            [r if r is not None else 0 for r in sample['visual_dependency_ratings']]
+        )
+        relevance_ratings = np.array(
+            [r if r is not None else 0 for r in sample['relevance_ratings']]
+        )
+
+        if len(text) > 1:
+            scores = (formatting_ratings * weights[0]
+                      + visual_dependency_ratings * weights[1]
+                      + relevance_ratings * weights[2])
+            text = text[np.argmax(scores)]
+        else:
+            text = text[0]
+        question = str(text['user'])
+        answer = str(text['assistant'])
+
+        for idx in range(len(images)):
+            if images[idx].mode != 'RGB':
+                images[idx] = images[idx].convert('RGB')
+
+        augmented_images = []
+        for img_pil in images:
+            if self.mode == 'train' and self.aug_transform is not None:
+                augmented_pil = self.aug_transform(img_pil)
+            else:
+                augmented_pil = img_pil
+            augmented_np = np.array(augmented_pil, dtype=np.uint8)
+            augmented_images.append(augmented_np)
+        images_to_process = np.stack(augmented_images, dtype=np.uint8)
+
+        processed_results = self.preprocessor(
+            images=images_to_process,
+            text=question,
+            target=answer,
+            mode=self.mode,
+        )
+
+        data = {
+            'input_ids': processed_results['input_ids'],
+            'labels': processed_results['labels'],
+            'attention_mask': processed_results['attention_mask'],
+            'pixel_values': processed_results['pixel_values'],
+            'answer_start_idx': processed_results['answer_start_idx'],
+            'is_vla_data': np.array(False, dtype=bool),
+        }
+
+        # Add dataset info if requested
+        if self.return_dataset_info:
+            data['dataset_name'] = sample.get('source', 'unknown')
+            data['dataset_local_idx'] = np.array(
+                sample.get('episode_index', -1), dtype=np.int32
+            )
+
+        return data
+
+    def __iter__(self):
+        assert self.preprocessor is not None, "Preprocessor is not set"
+        if self.stream is None:
+            return
+
+        for sample in self.stream:
+            try:
+                data = self.sample_to_data(sample)
+                torch_data = dict_apply(
+                    data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+                )
+                yield torch_data
+            except Exception as e:
+                warnings.warn(f"Error processing streaming sample: {e}")
+                continue
