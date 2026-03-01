@@ -8,6 +8,7 @@ import mujoco
 import mujoco.viewer
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import String
 from geometry_msgs.msg import PoseArray
 from sensor_msgs.msg import JointState
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -57,10 +58,21 @@ class ArmIKNode(Node):
         self._warm_up_sim()
 
         # 创建ROS2发布器和订阅器
+        self._publish_count = 0
+        self.mode = 'inference'
+
         self.wrist_poses_sub = self.create_subscription(
             PoseArray,
             '/action/both_arms/wrist_poses',
             self.wrist_poses_callback,
+            10,
+            MutuallyExclusiveCallbackGroup()
+        )
+
+        self.system_mode_sub = self.create_subscription(
+            String,
+            '/system/mode',
+            self.system_mode_callback,
             10,
             MutuallyExclusiveCallbackGroup()
         )
@@ -81,8 +93,6 @@ class ArmIKNode(Node):
         
         # 创建定时器，用于定期求解IK并发布关节状态
         self.timer = self.create_timer(self.dt, self.timer_callback)
-
-        self._publish_count = 0
         
         self.get_logger().info(f'ArmIKNode initialized with frequency: {self.frequency}Hz')
         self.get_logger().info(f'PsiRobot sites: {self.hands}')
@@ -123,6 +133,8 @@ class ArmIKNode(Node):
 
         self.configuration.update_from_keyframe("home")  # 从"home"关键帧更新配置
         self.posture_task.set_target(self.configuration.q)
+        self.initial_mocap_pos = {}
+        self.initial_mocap_quat = {}
         with self.data_lock:
             mujoco.mj_forward(self.model, self.configuration.data)
             # 打印双臂site的位置和四元数
@@ -138,6 +150,8 @@ class ArmIKNode(Node):
                 target_mocap_id = self.model.body(target).mocapid[0]
                 xml_pos = self.configuration.data.mocap_pos[target_mocap_id].copy()
                 xml_quat = self.configuration.data.mocap_quat[target_mocap_id].copy()
+                self.initial_mocap_pos[target] = xml_pos
+                self.initial_mocap_quat[target] = xml_quat
                 self.get_logger().info(f"🟢 {arm_name} ({target}) 保留XML定义的mocap位置: {xml_pos}")
                 self.get_logger().info(f"🟢 {arm_name} ({target}) 保留XML定义的mocap姿态: {xml_quat}")
 
@@ -173,9 +187,22 @@ class ArmIKNode(Node):
                 self.configuration.data.mocap_pos[target_mocap_id] = np.array([pose.position.x, pose.position.y, pose.position.z])
                 self.configuration.data.mocap_quat[target_mocap_id] = np.array([pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z])
 
+    def system_mode_callback(self, msg: String):
+        """接收系统模式切换的回调函数"""
+        self.mode = msg.data
+
     def timer_callback(self):
         """定时器回调函数，用于求解IK并发布关节状态"""
         t0 = time.time()
+
+        if self.mode == 'reset':
+            self.mode = 'inference'
+            self.configuration.update_from_keyframe("home")
+            for target in self.targets:
+                target_mocap_id = self.model.body(target).mocapid[0]
+                with self.data_lock:
+                    self.configuration.data.mocap_pos[target_mocap_id] = self.initial_mocap_pos[target]
+                    self.configuration.data.mocap_quat[target_mocap_id] = self.initial_mocap_quat[target]
 
         # MuJoCo更新
         with self.data_lock:
