@@ -34,6 +34,7 @@ class ArmIKNode(Node):
         # PsiRobot双臂配置 - 使用wrist site作为end-effector
         self.hands = ['left_wrist', 'right_wrist']  # 左臂和右臂的手腕site
         self.targets = ['left_wrist_target', 'right_wrist_target']
+        self.bases = ['arm1_link0', 'arm2_link0']
         self.xml_path = self.get_parameter('robot_xml_path').value
         if self.xml_path == '':
             self.xml_path = "/root/workspace/legendvla-inference/assets/PsiRobot_DC_02_OnlyArm/meshes/psi_robot_scene_transformed.xml"
@@ -135,18 +136,19 @@ class ArmIKNode(Node):
         self.posture_task.set_target(self.configuration.q)
         self.initial_mocap_pos = {}
         self.initial_mocap_quat = {}
+        self.T_base2world_list = []
         with self.data_lock:
             mujoco.mj_forward(self.model, self.configuration.data)
             # 打印双臂site的位置和四元数
             for i in range(len(self.hands)):
                 hand = self.hands[i]
-                target = self.targets[i]
                 site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, hand)
                 site_xpos = self.configuration.data.site(site_id).xpos.copy()
                 site_xmat = self.configuration.data.site(site_id).xmat.copy()
                 arm_name = "左臂" if i == 0 else "右臂"
                 self.get_logger().info(f"🎈 {arm_name} ({hand}) site初始位置: {site_xpos}, 旋转矩阵: {site_xmat}")
 
+                target = self.targets[i]
                 target_mocap_id = self.model.body(target).mocapid[0]
                 xml_pos = self.configuration.data.mocap_pos[target_mocap_id].copy()
                 xml_quat = self.configuration.data.mocap_quat[target_mocap_id].copy()
@@ -154,6 +156,16 @@ class ArmIKNode(Node):
                 self.initial_mocap_quat[target] = xml_quat
                 self.get_logger().info(f"🟢 {arm_name} ({target}) 保留XML定义的mocap位置: {xml_pos}")
                 self.get_logger().info(f"🟢 {arm_name} ({target}) 保留XML定义的mocap姿态: {xml_quat}")
+
+                base = self.bases[i]
+                base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, base)
+                base_pos = self.configuration.data.xpos[base_id].copy()
+                base_quat_mujoco = self.configuration.data.xquat[base_id].copy()
+                T_base2world = np.eye(4)
+                T_base2world[:3, :3] = R.from_quat(base_quat_mujoco, scalar_first=True).as_matrix()
+                T_base2world[:3, 3] = base_pos
+                self.T_base2world_list.append(T_base2world)
+                self.get_logger().info(f"💾 已缓存 {arm_name} 基座 ({base}) 的全局 4x4 变换矩阵")
 
         _mink_joint_limit = mink.ConfigurationLimit(self.model)
         self.limits = [_mink_joint_limit]
@@ -183,9 +195,23 @@ class ArmIKNode(Node):
             pose = msg.poses[i]
             target = self.targets[i]
             target_mocap_id = self.model.body(target).mocapid[0]
+
+            T_base2world = self.T_base2world_list[i]
+            target_pos = np.array([pose.position.x, pose.position.y, pose.position.z])
+            target_quat_scipy =[pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
+            T_target2base = np.eye(4)
+            T_target2base[:3, :3] = R.from_quat(target_quat_scipy).as_matrix()
+            T_target2base[:3, 3] = target_pos
+
+            T_target2world = T_base2world @ T_target2base
+            target_pos_world = T_target2world[:3, 3]
+            target_rot_world = T_target2world[:3, :3]
+            target_quat_world_mujoco = R.from_matrix(target_rot_world).as_quat(scalar_first=True)
+
+            
             with self.data_lock:
-                self.configuration.data.mocap_pos[target_mocap_id] = np.array([pose.position.x, pose.position.y, pose.position.z])
-                self.configuration.data.mocap_quat[target_mocap_id] = np.array([pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z])
+                self.configuration.data.mocap_pos[target_mocap_id] = target_pos_world
+                self.configuration.data.mocap_quat[target_mocap_id] = target_quat_world_mujoco
 
     def system_mode_callback(self, msg: String):
         """接收系统模式切换的回调函数"""

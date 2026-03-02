@@ -5,3 +5,4 @@ websockets
 pynput
 requests
 msgpack
+scipy>=1.14.0
