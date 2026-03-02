@@ -370,8 +370,13 @@ class LegendVLMStreamingDataset(torch.utils.data.IterableDataset):
             if not found:
                 found.extend(sorted(glob.glob(f"{path}/{self.split}/*.parquet")))
             if not found:
-                warnings.warn(f"No data files found in {path}, skipping.")
-            all_files.extend(found)
+                warnings.warn(f"No data files found in {path} for split '{self.split}', skipping.")
+            else:
+                # Filter out empty files (size 0) to avoid PyArrow errors
+                valid_files = [f for f in found if pathlib.Path(f).stat().st_size > 0]
+                if len(valid_files) < len(found):
+                    warnings.warn(f"Found {len(found) - len(valid_files)} empty files in {path} for split '{self.split}', skipping them.")
+                all_files.extend(valid_files)
         return all_files
 
     @staticmethod

@@ -298,7 +298,8 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
             "actions": (chunk_config.action_horizon, action_ndim),
             "n_states": 1,
             "n_actions": 1,
-            "depth_values": (chunk_config.image_horizon, *self.vla_dataset.depth_image_shape),
+            # (T, 3, H, W)
+            "depth_values": (chunk_config.image_horizon, 3, *self.vla_dataset.depth_image_shape),
             "has_depth_values": 1,
         }
 

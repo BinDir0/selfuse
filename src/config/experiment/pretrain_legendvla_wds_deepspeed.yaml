@@ -186,7 +186,7 @@ training:
   # training loop control
   # in epochs
   ckpt_save_interval: 10000
-  eval_every: 100
+  eval_every: 5000
   # make sure it is divisible by eval_every
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 

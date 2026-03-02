@@ -286,6 +286,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
             shardshuffle=False,
             nodesplitter=wds.split_by_node,
             resampled=is_train,
+            empty_check=False,
         )
         .decode("pil")
         .map(decode_meta)
@@ -293,11 +294,12 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         .compose(lambda src: sliding_window_compose(src, config, lowdim_slices))
     )
 
-    if preprocess_fn is not None:
-        pipeline = pipeline.map(preprocess_fn)
-
+    # shuffle first, only need to cache raw samples
     if is_train:
         pipeline = pipeline.shuffle(shuffle_buffer)
+
+    if preprocess_fn is not None:
+        pipeline = pipeline.map(preprocess_fn)
 
     return pipeline
 
