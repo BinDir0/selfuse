@@ -54,6 +54,9 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
         self.shape_meta = shape_meta
         self.motion_type = shape_meta["obs"]["state"]["type"]
         self.hand_ndim = shape_meta["obs"]["state"]["hand"]["shape"][-1] // 2
+        self.action_ndim = shape_meta["action"]["shape"][-1]
+        self.image_shape = shape_meta["obs"]["rgb"]["shape"]
+        self.depth_image_shape = shape_meta["obs"]["depth"]["shape"]
         self.objective = objective
         self.use_relative_action = use_relative_action
         self.mode = mode
@@ -284,6 +287,21 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
         self.mode = mode
         assert vla_ratio >= 0 and vla_ratio <= 1, "vla_ratio must be between 0 and 1"
 
+        self.build_vla_shape_meta()
+
+    def build_vla_shape_meta(self):
+        """Build the shape meta for the VLA dataset."""
+        chunk_config = self.vla_dataset.window_config
+        action_ndim = self.vla_dataset.action_ndim
+        self.shape_meta = {
+            "states": (chunk_config.state_horizon, action_ndim),
+            "actions": (chunk_config.action_horizon, action_ndim),
+            "n_states": 1,
+            "n_actions": 1,
+            "depth_values": (chunk_config.image_horizon, *self.vla_dataset.depth_image_shape),
+            "has_depth_values": 1,
+        }
+
     def distribute(self, rank: int, world_size: int):
         """Apply distributed shard splitting to sub-datasets.
 
@@ -330,7 +348,6 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
         vlm_iter = iter(self.vlm_dataset)
         vla_per_batch = int(self.vla_ratio * self.batch_size)
         vlm_per_batch = self.batch_size - vla_per_batch
-        shape_meta = None
 
         count = 0
         for vla_sample in vla_iter:
@@ -338,54 +355,34 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
             count += 1
 
             if count % vla_per_batch == 0:
-                if shape_meta is None:
-                    shape_meta = {}
-                    for key in vla_sample:
-                        if hasattr(vla_sample[key], "shape"):
-                            shape_meta[key] = vla_sample[key].shape
-
                 for _ in range(vlm_per_batch):
                     try:
                         vlm_sample = next(vlm_iter)
                     except StopIteration:
                         vlm_iter = iter(self.vlm_dataset)
                         vlm_sample = next(vlm_iter)
-                    self.pad_vlm_sample(vlm_sample, shape_meta)
+                    self.pad_vlm_sample(vlm_sample)
                     yield vlm_sample
 
     def iter_val(self):
         """Sequential single-pass: all VLA samples, then all VLM samples."""
-        shape_meta = None
-
         for vla_sample in self.vla_dataset:
-            if shape_meta is None:
-                shape_meta = {}
-                for key in vla_sample:
-                    if hasattr(vla_sample[key], "shape"):
-                        shape_meta[key] = vla_sample[key].shape
             yield vla_sample
 
         if self.vlm_dataset is None:
             return
 
         for vlm_sample in self.vlm_dataset:
-            if shape_meta is not None:
-                self.pad_vlm_sample(vlm_sample, shape_meta)
+            self.pad_vlm_sample(vlm_sample)
             yield vlm_sample
 
-    @staticmethod
-    def pad_vlm_sample(vlm_sample, shape_meta):
+    def pad_vlm_sample(self, vlm_sample):
         """Pad missing VLA fields on a VLM sample so the collator sees uniform keys."""
-        if "states" in shape_meta:
-            vlm_sample["states"] = torch.zeros(*shape_meta["states"])
-        if "actions" in shape_meta:
-            vlm_sample["actions"] = torch.zeros(*shape_meta["actions"])
-            vlm_sample["actions_valid_mask"] = torch.zeros(*shape_meta["actions"])
-        if "n_states" in shape_meta:
-            vlm_sample["n_states"] = torch.tensor(0, dtype=torch.int32)
-        if "n_actions" in shape_meta:
-            vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
-        if "depth_values" in shape_meta:
-            vlm_sample["depth_values"] = torch.zeros(*shape_meta["depth_values"])
-        if "has_depth_values" in shape_meta:
-            vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)
+        shape_meta = self.shape_meta
+        vlm_sample["states"] = torch.zeros(*shape_meta["states"])
+        vlm_sample["actions"] = torch.zeros(*shape_meta["actions"])
+        vlm_sample["actions_valid_mask"] = torch.zeros(*shape_meta["actions"])
+        vlm_sample["n_states"] = torch.tensor(0, dtype=torch.int32)
+        vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
+        vlm_sample["depth_values"] = torch.zeros(*shape_meta["depth_values"])
+        vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)

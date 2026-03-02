@@ -44,6 +44,7 @@ from src.utils.checkpoint_util import TopKCheckpointManager
 from src.utils.training_utils import (
     capture_output_to_training_log,
     params_l2_norm,
+    DeviceTransferWrapper,
 )
 
 
@@ -57,15 +58,7 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
 
     def evaluation(self, accelerator, dataloader, step_log):
         """Override to add device transfer for val batches not wrapped by accelerate."""
-        def device_transfer_wrapper(original_dataloader):
-            for batch in original_dataloader:
-                yield {
-                    k: v.to(accelerator.device) if isinstance(v, torch.Tensor) else v
-                    for k, v in batch.items()
-                }
-        wrapped = device_transfer_wrapper(dataloader)
-        # Preserve batch_size attribute for compatibility
-        wrapped.__dict__["batch_size"] = getattr(dataloader, "batch_size", 1)
+        wrapped = DeviceTransferWrapper(dataloader, accelerator.device)
         super().evaluation(accelerator, wrapped, step_log)
 
     @capture_output_to_training_log
@@ -245,7 +238,7 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
 
         # Validation dataloader (optional, requires val shard URLs in config)
         val_dataloader = None
-        val_wds_datasets = cfg.dataset.get("val_wds_datasets", None)
+        val_wds_datasets = cfg.get("val_wds_datasets", None)
         if val_wds_datasets is not None:
             val_dataset = dataset.get_validation_dataset(val_wds_datasets)
             val_dataset.distribute(
@@ -273,6 +266,7 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
         # LR scheduler
         num_update_steps_per_epoch = math.ceil(steps_per_epoch / accelerator.gradient_accumulation_steps)
         max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
+        max_train_steps = max_train_steps * accelerator.num_processes
         num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
         if accelerator.is_main_process:
             print(f"num_warmup_steps: {num_warmup_steps}, max_train_steps: {max_train_steps}")

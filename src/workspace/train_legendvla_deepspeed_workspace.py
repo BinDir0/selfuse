@@ -582,6 +582,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def preprocess_batch(self, batch, split_mask: bool = False, sample_fm_time: bool = True):
         """Preprocess batch for training"""
         input_ids = batch["input_ids"]
+        bsz = input_ids.shape[0]
         # Get unwrapped model for mask building
         model = self.model
         if hasattr(self.model, 'module'):

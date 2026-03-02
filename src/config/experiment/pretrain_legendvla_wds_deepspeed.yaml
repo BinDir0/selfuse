@@ -61,7 +61,7 @@ dataset:
     objective: ${objective}
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
-    shuffle_buffer: 8192
+    shuffle_buffer: 4096
   vlm_dataset:
     _target_: src.dataset.legendvlm_dataset.LegendVLMStreamingDataset
     dataset_paths: ${vlm_dataset_paths}
@@ -105,8 +105,8 @@ vlm_processor:
 
 dataloader:
   loader:
-    batch_size: 20
-    num_workers: 16
+    batch_size: 16
+    num_workers: 8
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32
@@ -186,7 +186,7 @@ training:
   # training loop control
   # in epochs
   ckpt_save_interval: 10000
-  eval_every: 5000
+  eval_every: 100
   # make sure it is divisible by eval_every
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 
