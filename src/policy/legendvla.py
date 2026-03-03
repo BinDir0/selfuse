@@ -333,11 +333,12 @@ class LegendVLA(nn.Module):
         - Vision tower weights (except LoRA)
         - Multi-modal projector weights (except LoRA)
         - Language model weights (except LoRA)
+        - Token embeddings
 
         Only LoRA parameters remain trainable for efficient fine-tuning.
         """
         from src.policy.legendvla_utils import freeze_non_lora_weights_in_vlm as _freeze_non_lora_weights_in_vlm
-        _freeze_non_lora_weights_in_vlm(self.vision_tower, self.multi_modal_projector, self.joint_model)
+        _freeze_non_lora_weights_in_vlm(self.vision_tower, self.multi_modal_projector, self.joint_model, self.embed_tokens)
 
     def freeze_non_lora_weights_in_ae(self):
         """
@@ -352,6 +353,14 @@ class LegendVLA(nn.Module):
         """
         from src.policy.legendvla_utils import freeze_non_lora_weights_in_ae as _freeze_non_lora_weights_in_ae
         _freeze_non_lora_weights_in_ae(self.action_encoder, self.action_decoder, self.joint_model)
+
+    def freeze_weights_in_depth(self):
+        """
+        Freeze weights in depth encoder and depth missing embeddings.
+        """
+        if self.use_depth:
+            from src.policy.legendvla_utils import freeze_weights_in_depth as _freeze_weights_in_depth
+            _freeze_weights_in_depth(self.depth_encoder, self.depth_missing_embeddings)
 
     def freeze_all_weights(self):
         """

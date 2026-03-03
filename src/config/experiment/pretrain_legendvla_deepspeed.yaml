@@ -112,8 +112,8 @@ vlm_processor:
 dataloader:
   batch_sampler: 
     # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
-    batch_size: 20
-    vla_ratio: ${eval:'5/6'} # ratio of VLA samples in each batch
+    batch_size: 16
+    vla_ratio: 1.0 # ${eval:'5/6'} # ratio of VLA samples in each batch
     seed: 42
     shuffle: True
     drop_last: False
@@ -126,7 +126,7 @@ dataloader:
 val_dataloader:
   batch_sampler: 
     # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
-    batch_size: 20
+    batch_size: 16
     shuffle: False
     drop_last: False
   loader: 
@@ -164,18 +164,20 @@ training:
   resume: True
   lr_scheduler: cosine # follow the naming convention of Transformers
   lr_warmup_steps: 2000 # number of global steps to warm up
-  train_vlm: True
+  train_vlm: False
+  train_depth: False
   init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
-  load_pretrained_pi05_weights: True # load pretrained weights from PI05 (disabled for 448 resolution)
+  load_pretrained_pi05_weights: False # load pretrained weights from PI05 (disabled for 448 resolution)
   # Automatically select pretrained model path based on vlm_backbone and vision_resolution
   pretrained_model_path: /share_data/chenzhang/checkpoints/${vlm_backbone}-3b-pt-${vision_resolution}
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
-  resume_checkpoint_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.20/05.23_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=20000-eval_l1_loss=0.0249
+  resume_checkpoint_path: #/share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.20/05.23_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=20000-eval_l1_loss=0.0249
+  finetune_checkpoint_path: /share_data/chenzhang/projects/diffloss-ar/outputs/2026.02.18/12.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=245000-eval_l1_loss=0.0175/pytorch_model/mp_rank_00_model_states.pt
   normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07-mix/normalizer.pkl
-  num_epochs: 2
+  num_epochs: 200
   use_bf16: True
   clipping:
     enabled: True
@@ -202,7 +204,7 @@ training:
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 
   # steps per epoch
-  max_train_steps: null
+  max_train_steps: 35000
   max_eval_steps: null
   # evaluation settings
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
@@ -289,7 +291,7 @@ policy:
     ar_action_chunk_size: 4 # should be less than or equal to total action chunk size
     loss_weights: 
       ce_loss_weight: 0.1
-      diffusion_loss_weight: 10.0
+      diffusion_loss_weight: 100.0
       flow_loss_weight: 1.0
   shape_meta: ${shape_meta}
   action_encoder_ar: 
@@ -398,9 +400,9 @@ policy:
     width: 2048
     num_sampling_steps: "100"
     grad_checkpointing: False
-    use_ddim_sampling: False  # Use DDIM sampling for diffusion (ignored for flow matching)
+    use_ddim_sampling: True  # Use DDIM sampling for diffusion (ignored for flow matching)
     # Flow Matching options
-    use_flow_matching: True  # Set to True to use Flow Matching instead of traditional Diffusion
+    use_flow_matching: False  # Set to True to use Flow Matching instead of traditional Diffusion
     flow_sig_min: ${flow.sig_min}  # Minimum noise level for Flow Matching
     # Time embedding for Flow Matching (only used when use_flow_matching=True)
     time_min_period: ${time_min_period}   
@@ -413,7 +415,7 @@ policy:
 
 
 logging:
-  project: diffloss-flow
+  project: finetune
   entity: LegendaryVLA
   resume: False
   mode: online
