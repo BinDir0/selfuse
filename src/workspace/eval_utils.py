@@ -13,6 +13,11 @@ import pathlib
 from src.utils.metric import get_action_accuracy
 
 
+def clear_attn_weights(model):
+    if hasattr(model, "joint_model") and hasattr(model.joint_model, "attn_weights"):
+        model.joint_model.attn_weights = [None] * model.joint_model.num_hidden_layers
+
+
 @contextmanager
 def eval_with_averaged_model(accelerator, model, averaged_model):
     """
@@ -327,3 +332,9 @@ def evaluation(workspace, accelerator, dataloader, step_log):
                     print(f"  Saved to: {output_path}")
                 except Exception as e:
                     print(f"  Error saving attention data: {e}")
+
+    if hasattr(workspace.model, 'module'):
+        model = workspace.model.module
+    else:
+        model = workspace.model
+    clear_attn_weights(model)

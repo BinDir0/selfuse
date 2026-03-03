@@ -135,6 +135,8 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
         self._output_dir = output_dir
         accelerator.wait_for_everyone()
 
+        self.reset_run_seed(accelerator)
+
         # --- Model & optimizer setup (identical to parent) ---
         model = self.model
         if cfg.training.load_pretrained_pi05_weights:
