@@ -158,6 +158,7 @@ optimizer:
 
 training:
   seed: 42
+  dynamic_data_seed: True  # Use runtime timestamp seed to avoid replaying the same data order on resume
   objective: ${objective}
   debug: False
   profile: False

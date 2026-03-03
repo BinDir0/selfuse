@@ -1,11 +1,11 @@
-"""Unit tests for LegendVLMStreamingDataset stream building and distribution."""
+"""Unit tests for VLMStreamingDataset stream building and distribution."""
 
 import sys
 import traceback
 import warnings
 from unittest.mock import MagicMock, patch, call
 
-from src.dataset.legendvlm_dataset import LegendVLMStreamingDataset
+from src.dataset.vlm_dataset import VLMStreamingDataset
 
 
 # ---------------------------------------------------------------------------
@@ -28,14 +28,14 @@ def make_mock_stream(name="ds"):
 # ---------------------------------------------------------------------------
 
 @patch(f"{MOD}.load_dataset")
-@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+@patch.object(VLMStreamingDataset, "collect_data_files",
               return_value=["/data/a/train/data-00000.arrow", "/data/b/train/data-00000.arrow"])
 def test_build_stream_train_shuffles(mock_collect, mock_load):
     """Train mode: load_dataset called once with all files, then shuffle."""
     stream = make_mock_stream("stream")
     mock_load.return_value = stream
 
-    obj = LegendVLMStreamingDataset(
+    obj = VLMStreamingDataset(
         dataset_paths=["/data/a", "/data/b"],
         split="train", mode="train",
     )
@@ -48,14 +48,14 @@ def test_build_stream_train_shuffles(mock_collect, mock_load):
 
 
 @patch(f"{MOD}.load_dataset")
-@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+@patch.object(VLMStreamingDataset, "collect_data_files",
               return_value=["/data/a/test/data-00000.arrow"])
 def test_build_stream_val_no_shuffle(mock_collect, mock_load):
     """Val mode: load_dataset called, no shuffle."""
     stream = make_mock_stream("stream")
     mock_load.return_value = stream
 
-    obj = LegendVLMStreamingDataset(
+    obj = VLMStreamingDataset(
         dataset_paths=["/data/a"],
         split="test", mode="val",
     )
@@ -63,12 +63,12 @@ def test_build_stream_val_no_shuffle(mock_collect, mock_load):
     stream.shuffle.assert_not_called()
 
 
-@patch.object(LegendVLMStreamingDataset, "collect_data_files", return_value=[])
+@patch.object(VLMStreamingDataset, "collect_data_files", return_value=[])
 def test_build_stream_no_files_returns_none(mock_collect):
     """No data files found -> stream is None."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        obj = LegendVLMStreamingDataset(
+        obj = VLMStreamingDataset(
             dataset_paths=["/nonexistent"],
             split="train", mode="train",
         )
@@ -76,14 +76,14 @@ def test_build_stream_no_files_returns_none(mock_collect):
 
 
 @patch(f"{MOD}.load_dataset")
-@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+@patch.object(VLMStreamingDataset, "collect_data_files",
               return_value=["/data/a/train/part-00000.parquet"])
 def test_build_stream_detects_parquet(mock_collect, mock_load):
     """Parquet files detected and loaded with format='parquet'."""
     stream = make_mock_stream("stream")
     mock_load.return_value = stream
 
-    obj = LegendVLMStreamingDataset(
+    obj = VLMStreamingDataset(
         dataset_paths=["/data/a"],
         split="train", mode="train",
     )
@@ -102,7 +102,7 @@ def test_collect_finds_arrow_in_split_dir(mock_glob):
         ["/d/train/data-00000.arrow", "/d/train/data-00001.arrow"]
         if "train/data-*.arrow" in pattern else []
     )
-    obj = LegendVLMStreamingDataset.__new__(LegendVLMStreamingDataset)
+    obj = VLMStreamingDataset.__new__(VLMStreamingDataset)
     obj.dataset_paths = ["/d"]
     obj.split = "train"
     files = obj.collect_data_files()
@@ -117,7 +117,7 @@ def test_collect_falls_back_to_parquet(mock_glob):
             return ["/d/train/part-00000.parquet"]
         return []
     mock_glob.side_effect = side_effect
-    obj = LegendVLMStreamingDataset.__new__(LegendVLMStreamingDataset)
+    obj = VLMStreamingDataset.__new__(VLMStreamingDataset)
     obj.dataset_paths = ["/d"]
     obj.split = "train"
     files = obj.collect_data_files()
@@ -141,7 +141,7 @@ def test_infer_probs_with_metadata():
     split_info2.num_examples = 3000
     ds2.info.splits.values.return_value = [split_info2]
 
-    result = LegendVLMStreamingDataset.infer_proportional_probs([ds1, ds2])
+    result = VLMStreamingDataset.infer_proportional_probs([ds1, ds2])
     assert result == [1000.0, 3000.0]
 
 
@@ -149,7 +149,7 @@ def test_infer_probs_no_metadata():
     """When info is None, return None."""
     ds = MagicMock()
     ds.info = None
-    result = LegendVLMStreamingDataset.infer_proportional_probs([ds])
+    result = VLMStreamingDataset.infer_proportional_probs([ds])
     assert result is None
 
 
@@ -158,14 +158,14 @@ def test_infer_probs_no_metadata():
 # ---------------------------------------------------------------------------
 
 @patch(f"{MOD}.load_dataset")
-@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+@patch.object(VLMStreamingDataset, "collect_data_files",
               return_value=["/d/train/data-00000.arrow"])
 def test_distribute_calls_split_by_node(mock_collect, mock_load):
     """distribute() calls split_dataset_by_node with correct args."""
     stream = make_mock_stream("stream")
     mock_load.return_value = stream
 
-    obj = LegendVLMStreamingDataset(
+    obj = VLMStreamingDataset(
         dataset_paths=["/d"], split="train", mode="train",
     )
 
@@ -178,12 +178,12 @@ def test_distribute_calls_split_by_node(mock_collect, mock_load):
         assert kwargs["world_size"] == 4
 
 
-@patch.object(LegendVLMStreamingDataset, "collect_data_files", return_value=[])
+@patch.object(VLMStreamingDataset, "collect_data_files", return_value=[])
 def test_distribute_none_stream(mock_collect):
     """distribute with stream=None does not raise."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        obj = LegendVLMStreamingDataset(
+        obj = VLMStreamingDataset(
             dataset_paths=["/fake"], split="train", mode="train",
         )
     assert obj.stream is None
@@ -195,7 +195,7 @@ def test_distribute_none_stream(mock_collect):
 # ---------------------------------------------------------------------------
 
 @patch(f"{MOD}.load_dataset")
-@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+@patch.object(VLMStreamingDataset, "collect_data_files",
               return_value=["/d/train/data-00000.arrow"])
 def test_return_dataset_info_maps_episode_index(mock_collect, mock_load):
     """return_dataset_info=True causes .map() on the merged stream."""
@@ -204,7 +204,7 @@ def test_return_dataset_info_maps_episode_index(mock_collect, mock_load):
     stream.map = MagicMock(return_value=mapped)
     mock_load.return_value = stream
 
-    obj = LegendVLMStreamingDataset(
+    obj = VLMStreamingDataset(
         dataset_paths=["/d"], split="train", mode="train",
         return_dataset_info=True,
     )
@@ -214,7 +214,7 @@ def test_return_dataset_info_maps_episode_index(mock_collect, mock_load):
 
 
 @patch(f"{MOD}.load_dataset")
-@patch.object(LegendVLMStreamingDataset, "collect_data_files",
+@patch.object(VLMStreamingDataset, "collect_data_files",
               return_value=["/d/train/data-00000.arrow"])
 def test_return_dataset_info_false_no_map(mock_collect, mock_load):
     """return_dataset_info=False (default) does not call .map()."""
@@ -222,7 +222,7 @@ def test_return_dataset_info_false_no_map(mock_collect, mock_load):
     stream.map = MagicMock()
     mock_load.return_value = stream
 
-    obj = LegendVLMStreamingDataset(
+    obj = VLMStreamingDataset(
         dataset_paths=["/d"], split="train", mode="train",
         return_dataset_info=False,
     )

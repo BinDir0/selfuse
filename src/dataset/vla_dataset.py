@@ -21,13 +21,13 @@ from .wds_dataset import (
 )
 
 
-class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
+class VLAWdsDataset(torch.utils.data.IterableDataset):
     """WebDataset-backed VLA dataset for LegendVLA training.
 
     This is an IterableDataset that streams data from WebDataset shards.
 
     Usage:
-        dataset = LegendVLAWdsDataset(
+        dataset = VLAWdsDataset(
             wds_datasets=[
                 {"shard_urls": "/data/wds/taco/shard-*.tar", "weight": 1.0, "name": "taco"},
                 ...
@@ -236,7 +236,7 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
                 - shard_urls: glob pattern or list of val shard tar paths
                 - name: (optional) dataset name
         """
-        val_dataset = LegendVLAWdsDataset(
+        val_dataset = VLAWdsDataset(
             wds_datasets=val_wds_datasets,
             shape_meta=self.shape_meta,
             objective=self.objective,
@@ -264,7 +264,7 @@ class LegendVLAWdsDataset(torch.utils.data.IterableDataset):
         )
 
 
-class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
+class UnifiedWdsDataset(torch.utils.data.IterableDataset):
     """Unified dataset combining WebDataset VLA with streaming VLM dataset.
 
     Training mode: VLM samples interleaved at a fixed ratio, VLM auto-restarts.
@@ -273,7 +273,7 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
 
     def __init__(
         self,
-        vla_dataset: LegendVLAWdsDataset,
+        vla_dataset: VLAWdsDataset,
         vlm_dataset=None,
         vla_ratio: float = 5 / 6,
         batch_size: int = 20,
@@ -326,7 +326,7 @@ class LegendUnifiedWdsDataset(torch.utils.data.IterableDataset):
         if self.vlm_dataset is not None and hasattr(self.vlm_dataset, 'get_validation_dataset'):
             vlm_val = self.vlm_dataset.get_validation_dataset()
 
-        return LegendUnifiedWdsDataset(
+        return UnifiedWdsDataset(
             vla_dataset=vla_val,
             vlm_dataset=vlm_val,
             mode="val",

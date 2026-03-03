@@ -1,11 +1,11 @@
-"""Unit tests for LegendUnifiedWdsDataset interleaving and padding logic."""
+"""Unit tests for UnifiedWdsDataset interleaving and padding logic."""
 
 import sys
 import traceback
 
 import torch
 
-from src.dataset.legendvla_wds_dataset import LegendUnifiedWdsDataset
+from src.dataset.vla_dataset import UnifiedWdsDataset
 
 
 # ---------------------------------------------------------------------------
@@ -65,10 +65,10 @@ class MockIterableDataset(torch.utils.data.IterableDataset):
 
 def build_unified(vla_samples, vlm_samples=None, vla_ratio=5/6,
                   batch_size=6, mode="train"):
-    """Shortcut to build a LegendUnifiedWdsDataset from sample lists."""
+    """Shortcut to build a UnifiedWdsDataset from sample lists."""
     vla_ds = MockIterableDataset(vla_samples)
     vlm_ds = MockIterableDataset(vlm_samples) if vlm_samples is not None else None
-    return LegendUnifiedWdsDataset(
+    return UnifiedWdsDataset(
         vla_dataset=vla_ds,
         vlm_dataset=vlm_ds,
         vla_ratio=vla_ratio,
@@ -203,7 +203,7 @@ def test_pad_vlm_sample():
         "n_states": torch.Size([]),
         "n_actions": torch.Size([]),
     }
-    LegendUnifiedWdsDataset.pad_vlm_sample(vlm, shape_meta)
+    UnifiedWdsDataset.pad_vlm_sample(vlm, shape_meta)
 
     assert vlm["states"].shape == (16, 48)
     assert vlm["actions"].shape == (32, 48)
@@ -229,7 +229,7 @@ def test_distribute_delegates_to_vlm():
         called["world_size"] = world_size
 
     vlm_ds.distribute = mock_distribute
-    unified = LegendUnifiedWdsDataset(
+    unified = UnifiedWdsDataset(
         vla_dataset=vla_ds, vlm_dataset=vlm_ds,
         mode="train",
     )
@@ -281,7 +281,7 @@ def test_return_dataset_info_vlm_padded_keeps_info():
         "n_states": torch.Size([]),
         "n_actions": torch.Size([]),
     }
-    LegendUnifiedWdsDataset.pad_vlm_sample(vlm, shape_meta)
+    UnifiedWdsDataset.pad_vlm_sample(vlm, shape_meta)
 
     # Padding adds states/actions but does not touch dataset_info
     assert vlm["dataset_name"] == "my_vlm"

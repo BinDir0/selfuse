@@ -1,9 +1,9 @@
 """Unit tests for streaming VLM dataset and unified VLA+VLM iteration logic.
 
 Tests cover:
-- LegendUnifiedWdsDataset: train interleaving ratio, VLM auto-restart, val sequential
-- LegendUnifiedWdsDataset.pad_vlm_sample: zero-padding of missing VLA fields
-- LegendVLMStreamingDataset: build_stream train/val modes, distribute, infer_proportional_probs
+- UnifiedWdsDataset: train interleaving ratio, VLM auto-restart, val sequential
+- UnifiedWdsDataset.pad_vlm_sample: zero-padding of missing VLA fields
+- VLMStreamingDataset: build_stream train/val modes, distribute, infer_proportional_probs
 """
 
 import sys
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from src.dataset.legendvla_wds_dataset import LegendUnifiedWdsDataset
+from src.dataset.vla_dataset import UnifiedWdsDataset
 
 
 # ---------------------------------------------------------------------------

@@ -254,7 +254,8 @@ def no_split(src):
 
 
 def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
-                       preprocess_fn=None, shuffle_buffer=8192, mode='train'):
+                       preprocess_fn=None, shuffle_buffer=8192, mode='train',
+                       use_sliding_window=True):
     """Build a WebDataset pipeline for a single dataset.
 
     Training: resampled infinite stream, shard shuffle, buffer shuffle.
@@ -267,6 +268,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         preprocess_fn: optional callable(sample_dict) -> sample_dict
         shuffle_buffer: sample-level shuffle buffer size (train only)
         mode: 'train' or 'val'
+        use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
     """
     if config is None:
         config = WindowConfig()
@@ -280,21 +282,30 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     is_train = (mode == 'train')
     # resampled mode shuffles shards internally, but newer webdataset
     # versions still require an explicit shardshuffle value.
-    pipeline = (
-        wds.WebDataset(
-            shard_urls,
-            shardshuffle=False,
-            nodesplitter=wds.split_by_node,
-            resampled=is_train,
-            empty_check=False,
+    #
+    # NOTE (webdataset==1.0.2):
+    # - resampled=True enters ResampledShards in shardlists.py
+    # - default deterministic=False, and its seed mixes worker_seed/epoch
+    #   with pid/time_ns/os.urandom, so shard sampling is time-dependent
+    # - this is not fully controlled by torch/manual seed alone
+    pipeline = wds.WebDataset(
+        shard_urls,
+        shardshuffle=False,
+        nodesplitter=wds.split_by_node,
+        resampled=is_train,
+        empty_check=False,
+    ).decode("pil").map(decode_meta)
+
+    if use_sliding_window:
+        pipeline = (
+            pipeline
+            .map(decode_lowdim)
+            .compose(lambda src: sliding_window_compose(src, config, lowdim_slices))
         )
-        .decode("pil")
-        .map(decode_meta)
-        .map(decode_lowdim)
-        .compose(lambda src: sliding_window_compose(src, config, lowdim_slices))
-    )
 
     # shuffle first, only need to cache raw samples
+    # NOTE (webdataset==1.0.2): shuffle() without seed uses
+    # random.Random(int((pid + time) * 1e9)), which is also time-dependent.
     if is_train:
         pipeline = pipeline.shuffle(shuffle_buffer)
 
@@ -305,7 +316,8 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
 
 
 def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
-                          preprocess_fn=None, shuffle_buffer=8192, mode='train'):
+                          preprocess_fn=None, shuffle_buffer=8192, mode='train',
+                          use_sliding_window=True):
     """Build a blended dataset from multiple WebDataset sources.
 
     Training: weighted random mixing across sources.
@@ -320,6 +332,7 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
         preprocess_fn: optional preprocess function
         shuffle_buffer: sample-level shuffle buffer size (train only)
         mode: 'train' or 'val'
+        use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
     """
     if config is None:
         config = WindowConfig()
@@ -336,7 +349,8 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
             print(f"Warning: No shards found for {c.get('name', '?')}, skipping.")
             continue
         pipe = build_wds_pipeline(
-            urls, config, lowdim_slices, preprocess_fn, shuffle_buffer, mode=mode)
+            urls, config, lowdim_slices, preprocess_fn, shuffle_buffer, mode=mode,
+            use_sliding_window=use_sliding_window)
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))
 
