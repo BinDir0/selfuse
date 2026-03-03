@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 # Copyright (c) 2025 PSI Robot Team
 # Licensed under the Apache License, Version 2.0
-#
-# Ruiyan hand communication interface
-# Ported from mj-controller/haptic_hand_control for inference deployment
-# Kept consistent with the teleoperation codebase
 
 import logging
 import struct
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -67,6 +63,8 @@ class RuiyanStatusCode(IntEnum):
         )
 
 
+
+
 @dataclass
 class RuiyanFingerControlMessage:
     motor_id: int
@@ -74,6 +72,15 @@ class RuiyanFingerControlMessage:
     position: Optional[int]
     velocity: Optional[int]
     current: Optional[int]
+
+    def print(self):
+        print(
+            f"motor_id: {self.motor_id}, "
+            f"instruction: {self.instruction}, "
+            f"position: {self.position}, "
+            f"velocity: {self.velocity}, "
+            f"current: {self.current}"
+        )
 
 
 @dataclass
@@ -84,6 +91,16 @@ class RuiyanFingerStatusMessage:
     position: Optional[int]
     velocity: Optional[int]
     current: Optional[int]
+
+    def print(self):
+        print(
+            f"Motor ID: {self.motor_id}, "
+            f"Instruction: {self.instruction}, "
+            f"Status: {self.status}, "
+            f"Position: {self.position}, "
+            f"Velocity: {self.velocity}, "
+            f"Current: {self.current}"
+        )
 
 
 class CommunicationInterface(ABC):
@@ -180,7 +197,7 @@ class SerialInterface(CommunicationInterface):
             logger.debug(
                 f"Send - Motor ID: {message.motor_id}, "
                 f"Instruction: {hex(message.instruction)}, "
-                f"Frame data: {' '.join([f'{byte:02X}' for byte in serial_frame])}"
+                f"Frame data: {' '.join([f'{byte:02X}' for byte in serial_frame])}"  # noqa E999
             )
             return True
 
@@ -190,7 +207,7 @@ class SerialInterface(CommunicationInterface):
             logger.debug(
                 f"Send - Motor ID: {message.motor_id}, "
                 f"Instruction: {hex(message.instruction)}, "
-                f"Frame data: {' '.join([f'{byte:02X}' for byte in serial_frame])}"
+                f"Frame data: {' '.join([f'{byte:02X}' for byte in serial_frame])}"  # noqa
             )
             return True
         except Exception as e:
@@ -201,7 +218,7 @@ class SerialInterface(CommunicationInterface):
         if not self.connected:
             return None
         try:
-            response = self.serial_controller.read(13 * 6)
+            response = self.serial_controller.read(13*6)
             return response
         except Exception as e:
             logger.error(f"Serial message receive failed: {e}")
@@ -212,13 +229,15 @@ class SerialInterface(CommunicationInterface):
         if not self.connected:
             logger.warning("Serial port not connected, cannot clear buffer")
             return False
-
+        
         if self.mock:
             logger.debug("Mock mode, buffer clear simulated")
             return True
-
+            
         try:
+            # Clear input buffer (received data)
             self.serial_controller.reset_input_buffer()
+            # Clear output buffer (data to be sent)
             self.serial_controller.reset_output_buffer()
             logger.debug("Serial port buffers cleared successfully")
             return True
@@ -226,32 +245,24 @@ class SerialInterface(CommunicationInterface):
             logger.error(f"Failed to clear serial port buffers: {e}")
             return False
 
-    def _build_serial_frame(self, message: RuiyanFingerControlMessage) -> bytes:
-        # Validate value ranges (ushort: 0-65535)
+    def _build_serial_frame(self, message: RuiyanFingerControlMessage) -> bool:
+        # 验证数值范围，确保在ushort范围内 (0-65535)
         original_position = message.position or 0
         original_velocity = message.velocity or 0
         original_current = message.current or 0
-
+        
         position = max(0, min(65535, original_position))
         velocity = max(0, min(65535, original_velocity))
         current = max(0, min(65535, original_current))
-
+        
+        # 如果值被截断，记录警告
         if original_position != position:
-            logger.warning(
-                f"Position value {original_position} clamped to {position} "
-                f"(ushort range: 0-65535)"
-            )
+            logger.warning(f"Position value {original_position} clamped to {position} (ushort range: 0-65535)")
         if original_velocity != velocity:
-            logger.warning(
-                f"Velocity value {original_velocity} clamped to {velocity} "
-                f"(ushort range: 0-65535)"
-            )
+            logger.warning(f"Velocity value {original_velocity} clamped to {velocity} (ushort range: 0-65535)")
         if original_current != current:
-            logger.warning(
-                f"Current value {original_current} clamped to {current} "
-                f"(ushort range: 0-65535)"
-            )
-
+            logger.warning(f"Current value {original_current} clamped to {current} (ushort range: 0-65535)")
+        
         serial_frame = struct.pack(
             "<B B B 2B 3H 1B",
             0xA5,
@@ -284,3 +295,29 @@ class SerialInterface(CommunicationInterface):
         )
 
         return serial_frame
+
+    # def send(self, message: RuiyanFingerControlMessage) -> bool:
+    #     if not self._send_message(message):
+    #         return False
+    #     return True
+        # if self.mock:
+        #     logger.debug("Mock mode, no need to receive data")
+        #     mock_response = struct.pack(
+        #         "<5B 8B",
+        #         0xA5,
+        #         message.motor_id,
+        #         0x00,
+        #         0x08,
+        #         int(message.instruction),
+        #         0x00,
+        #         0x00,
+        #         0x00,
+        #         0x00,
+        #         0x00,
+        #         0x00,
+        #         0x00,
+        #         0x00,
+        #     )
+        #     return mock_response
+        # response = self._receive_bytes()
+        # return response if response is not None else b""

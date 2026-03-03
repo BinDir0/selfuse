@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 # Copyright (c) 2025 PSI Robot Team
 # Licensed under the Apache License, Version 2.0
-#
-# Ruiyan hand controller (RS485)
-# Ported from mj-controller/haptic_hand_control for inference deployment
-# Kept consistent with the teleoperation codebase
 
 import logging
 import struct
 import time
 from typing import List, Optional
 
-from hand.ry_hand_interface import (
+from .ry_hand_interface import (
     CommunicationInterface,
     RuiyanFingerControlMessage,
-    RuiyanFingerStatusMessage,
     RuiyanInstructionType,
     RuiyanStatusCode,
+    RuiyanFingerStatusMessage,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,15 +23,21 @@ class RuiyanHandController:
     def __init__(
         self,
         communication_interface: CommunicationInterface,
-        motors_id: List[int],
+        motors_id: [int],
         instruction: RuiyanInstructionType = None,
     ):
+
         self.motor_ids = motors_id
         self.communication_interface = communication_interface
         self.instruction = instruction
         self.position_list = [0, 0, 0, 0, 0, 0]
         self.velocity_list = [0, 0, 0, 0, 0, 0]
         self.current_list = [0, 0, 0, 0, 0, 0]
+        self.command_names = {
+            0xA0: "Read motor information",
+            0xAA: "Position velocity current hybrid control",
+            0xA5: "Clear motor error",
+        }
 
     def connect(self) -> bool:
         return self.communication_interface.connect()
@@ -45,6 +47,12 @@ class RuiyanHandController:
 
     def is_connected(self) -> bool:
         return self.communication_interface.is_connected()
+
+    def _validate_motor_ids(self, motor_ids: List[int]) -> bool:
+        for motor_id in motor_ids:
+            if motor_id not in self.motor_ids:
+                return False
+        return True
 
     def _set_motor(
         self,
@@ -68,6 +76,13 @@ class RuiyanHandController:
             f"Current: {request_message.current}"
         )
         return self.communication_interface.send_message(request_message)
+        # status = self._parse_response(
+        #     self.communication_interface.send_and_receive(
+        #         message=request_message
+        #     )
+        # )
+        # return status
+        return True
 
     def set(
         self,
@@ -85,10 +100,10 @@ class RuiyanHandController:
 
     def loop(self) -> List[RuiyanFingerStatusMessage]:
         status_list = []
-
+        
         # Clear serial port buffer before sending commands
         self.communication_interface.clear_buffer()
-
+        
         for index, motor_id in enumerate(self.motor_ids):
             self._set_motor(
                 motor_id=motor_id,
@@ -100,27 +115,21 @@ class RuiyanHandController:
 
         received_bytes = self.communication_interface.receive_bytes()
         time.sleep(0.001)
-
-        # Check if received data is valid
+        
+        # Check if received data is valid, if not, skip this publish cycle
         if received_bytes is None or len(received_bytes) != 13 * 6:
-            logger.warning(
-                f"Received invalid data length: "
-                f"{len(received_bytes) if received_bytes else 'None'}, "
-                f"expected {13 * 6}. Skipping this publish cycle."
-            )
-            return status_list  # Return empty list
-
-        bytes_list = [received_bytes[i * 13 : (i + 1) * 13] for i in range(6)]
+            logger.warning(f"Received invalid data length: {len(received_bytes) if received_bytes else 'None'}, expected {13 * 6}. Skipping this publish cycle.")
+            return status_list  # Return empty list instead of crashing
+        
+        bytes_list = [received_bytes[i*13:(i+1)*13] for i in range(6)]
         for raw_bytes in bytes_list:
             status_list.append(self._parse_response(raw_bytes))
         return status_list
 
-    def _parse_response(self, raw_bytes: bytes) -> Optional[RuiyanFingerStatusMessage]:
+    def _parse_response(self, raw_bytes:bytes) -> RuiyanFingerStatusMessage:
+        # 检查数据长度是否足够
         if len(raw_bytes) < 13:
-            logger.warning(
-                f"Received insufficient data: {len(raw_bytes)} bytes, "
-                f"expected at least 13"
-            )
+            logger.warning(f"Received insufficient data: {len(raw_bytes)} bytes, expected at least 13")
             return None
 
         header, motor_id, _, data_length = struct.unpack("<4B", raw_bytes[:4])
@@ -132,6 +141,7 @@ class RuiyanHandController:
             return None
 
         finger_data = raw_bytes[4:12]
+
         data_uint64 = struct.unpack("<Q", finger_data)[0]
 
         instruction = (data_uint64 >> 0) & 0xFF
@@ -145,13 +155,11 @@ class RuiyanHandController:
         if current & 0x800:
             current = current - 0x1000
 
+        # 检查指令类型是否有效
         try:
             instruction_type = RuiyanInstructionType(instruction)
         except ValueError:
-            logger.error(
-                f"Invalid instruction type: {instruction} "
-                f"(0x{instruction:02X})"
-            )
+            logger.error(f"Invalid instruction type: {instruction} (0x{instruction:02X}), expected one of: 0xA0, 0xAA, 0xA5")
             return None
 
         response_message = RuiyanFingerStatusMessage(
@@ -180,3 +188,4 @@ class RuiyanHandController:
                 f"Current: {response_message.current}"
             )
         return response_message
+
