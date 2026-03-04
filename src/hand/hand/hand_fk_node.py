@@ -142,49 +142,67 @@ class HandFKNode(Node):
         self.hand_side = self.get_parameter('hand_side').value
         self.frequency = self.get_parameter('frequency').value
 
-        self.get_logger().info(f"Initializing {self.hand_side.upper()} Hand FK Node")
+        self.get_logger().info(f"Initializing {self.hand_side.upper()} Hand FK Node (Timer-driven {self.frequency}Hz)")
 
-        # 初始化 FK Solver
+        # 1. 初始化 FK Solver
         self.fk_solver = HandFKSolver(hand_type=self.hand_side)
 
-        # 回调组：确保实时性
-        cb_group = MutuallyExclusiveCallbackGroup()
+        # 2. 状态缓存
+        self.latest_normalized_joints = None  # 存储最近一次收到的真实关节角
+        self.data_lock = threading.Lock()     # 保护关节角缓存
 
-        # 订阅：当前手的关节状态 (由 Hand Control Node 发出，position 为 0~1)
+        # 3. 订阅：来自 Hand Control Node 的真实反馈 (position 是 0.0~1.0)
         self.sub_joint_states = self.create_subscription(
             JointState,
             f'/state/{self.hand_side}_hand/joints',
             self.joint_state_callback,
             10,
-            callback_group=cb_group
+            MutuallyExclusiveCallbackGroup()
         )
 
-        # 发布：当前指尖的 PoseArray (发布给 Interface/Model)
+        # 4. 发布：发给 Interface / Model 的指尖位姿
         self.pub_keypoints = self.create_publisher(
             PoseArray,
             f'/state/{self.hand_side}_hand/keypoints',
             10,
-            callback_group=cb_group
+            MutuallyExclusiveCallbackGroup()
+        )
+
+        # 5. 定时器：固定频率执行 FK 计算并发布
+        self.timer = self.create_timer(
+            1.0 / self.frequency, 
+            self.control_loop, 
+            MutuallyExclusiveCallbackGroup()
         )
 
     def joint_state_callback(self, msg: JointState):
-        """当收到手部真实关节反馈时，计算 FK 并发布指尖位置"""
-        if not msg.position:
+        """仅负责缓存最新的硬件反馈数据，不进行耗时计算"""
+        if msg.position and len(msg.position) == 6:
+            with self.data_lock:
+                self.latest_normalized_joints = np.array(msg.position)
+
+    def control_loop(self):
+        """固定频率执行的 FK 计算循环"""
+        # 获取最新数据副本
+        with self.data_lock:
+            current_joints = self.latest_normalized_joints
+        
+        # 如果还没收到过任何数据，可以选择跳过或发布 Home 位姿
+        if current_joints is None:
+            # 方案：在未收到硬件反馈前，先不发布 keypoints 
+            # 或者调用 self.fk_solver.reset_to_home() 后发布默认值
             return
 
-        # 获取归一化关节角 (Hand Control Node 已经除以了 4095)
-        # 假设顺序与 FK Solver 中的 joint_metadata 映射一致
-        # (即 ID 1-6 对应的顺序)
-        normalized_positions = np.array(msg.position)
-
-        # 计算 FK
-        fingertip_poses = self.fk_solver.compute_fk(normalized_positions)
+        # 1. 计算 FK (传入 0.0 ~ 1.0 的数组)
+        # compute_fk 内部已经处理了：归一化还原、mimic 联动、mj_forward
+        fingertip_poses = self.fk_solver.compute_fk(current_joints)
         
+        # 2. 组装并发布 PoseArray
         if fingertip_poses:
             self.publish_keypoints(fingertip_poses)
 
     def publish_keypoints(self, poses_data):
-        """组装并发布 PoseArray"""
+        """将位姿数组转换为 PoseArray 并发布"""
         msg = PoseArray()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = f"{self.hand_side}_hand_base"
@@ -194,6 +212,7 @@ class HandFKNode(Node):
             p.position.x = float(pos[0])
             p.position.y = float(pos[1])
             p.position.z = float(pos[2])
+            # quat 顺序 [x, y, z, w]
             p.orientation.x = float(quat[0])
             p.orientation.y = float(quat[1])
             p.orientation.z = float(quat[2])
@@ -201,7 +220,6 @@ class HandFKNode(Node):
             msg.poses.append(p)
 
         self.pub_keypoints.publish(msg)
-
 
 def main(args=None):
     rclpy.init(args=args)
@@ -215,7 +233,6 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

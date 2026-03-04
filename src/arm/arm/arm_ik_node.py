@@ -93,7 +93,7 @@ class ArmIKNode(Node):
         )
         
         # 创建定时器，用于定期求解IK并发布关节状态
-        self.timer = self.create_timer(self.dt, self.timer_callback)
+        self.timer = self.create_timer(self.dt, self.timer_callback, MutuallyExclusiveCallbackGroup())
         
         self.get_logger().info(f'ArmIKNode initialized with frequency: {self.frequency}Hz')
         self.get_logger().info(f'PsiRobot sites: {self.hands}')
