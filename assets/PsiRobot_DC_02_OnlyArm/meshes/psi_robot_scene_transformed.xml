@@ -23,12 +23,12 @@
           pos="0.8 0 1.0"/>
 
     <!-- Additional target sites for IK control (similar to original scene.xml) -->
-    <body name="left_wrist_target" pos="0.2 0.45 1.0" quat="0.707 -0.707 0 0" mocap="true">
+    <body name="left_wrist_target" pos="0.2 0.45 1.0" quat="0 0.707 0 0.707" mocap="true">
       <geom type="box" size="0.03 0.03 0.03" contype="0" conaffinity="0" rgba="0.3 0.3 0.8 0.3"/>
       <site type="box" size="0.01 0.01 0.01" rgba="0 0 1 1" group="1"/>
     </body>
     
-    <body name="right_wrist_target" pos="0.2 -0.45 1.0" quat="0.707 0.707 0 0" mocap="true">
+    <body name="right_wrist_target" pos="0.2 -0.45 1.0" quat="0 0.707 0 0.707" mocap="true">
       <geom type="box" size="0.03 0.03 0.03" contype="0" conaffinity="0" rgba="0.8 0.3 0.3 0.3"/>
       <site type="box" size="0.01 0.01 0.01" rgba="1 0 0 1" group="1"/>
     </body>
