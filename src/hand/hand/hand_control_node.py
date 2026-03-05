@@ -13,14 +13,14 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
 
-from .ry_hand_controller import RuiyanHandController, RuiyanInstructionType
-from .ry_hand_interface import RuiyanFingerStatusMessage, SerialInterface
-
 try:
+    from hand.ry_hand_controller import RuiyanHandController, RuiyanInstructionType
+    from hand.ry_hand_interface import RuiyanFingerStatusMessage, SerialInterface
+    from hand.Ruckig_Interpolator import SmoothJointInterpolator
+except ImportError:
+    from .ry_hand_controller import RuiyanHandController, RuiyanInstructionType
+    from .ry_hand_interface import RuiyanFingerStatusMessage, SerialInterface
     from .Ruckig_Interpolator import SmoothJointInterpolator
-except:
-    sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-    from Ruckig_Interpolator import SmoothJointInterpolator
 
 
 logging.basicConfig(
@@ -40,7 +40,7 @@ class HandControlNode(Node):
         
         # Declare parameters
         self.declare_parameter("hand_side", "left")  # 'left' or 'right'
-        self.declare_parameter("frequency", 80)
+        self.declare_parameter("frequency", 80.0)
         self.declare_parameter("serial_port", "/dev/ttyACM0")
         self.declare_parameter("baudrate", 460800)
         self.declare_parameter("enable_interpolation", True)  # Enable Ruckig interpolation
@@ -52,7 +52,7 @@ class HandControlNode(Node):
             .string_value
         )
         self.frequency = (
-            self.get_parameter("frequency").get_parameter_value().integer_value
+            self.get_parameter("frequency").get_parameter_value().double_value
         )
         serial_port = (
             self.get_parameter("serial_port").get_parameter_value().string_value

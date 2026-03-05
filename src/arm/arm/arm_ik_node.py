@@ -67,7 +67,7 @@ class ArmIKNode(Node):
             '/action/both_arms/wrist_poses',
             self.wrist_poses_callback,
             10,
-            MutuallyExclusiveCallbackGroup()
+            callback_group=MutuallyExclusiveCallbackGroup()
         )
 
         self.system_mode_sub = self.create_subscription(
@@ -75,25 +75,23 @@ class ArmIKNode(Node):
             '/system/mode',
             self.system_mode_callback,
             10,
-            MutuallyExclusiveCallbackGroup()
+            callback_group=MutuallyExclusiveCallbackGroup()
         )
 
         self.left_arm_command_pub = self.create_publisher(
             JointState, 
             '/action/left_arm/joints',
-            10,
-            MutuallyExclusiveCallbackGroup()
+            10
         )
 
         self.right_arm_command_pub = self.create_publisher(
             JointState, 
             '/action/right_arm/joints',
-            10,
-            MutuallyExclusiveCallbackGroup()
+            10
         )
         
         # 创建定时器，用于定期求解IK并发布关节状态
-        self.timer = self.create_timer(self.dt, self.timer_callback, MutuallyExclusiveCallbackGroup())
+        self.timer = self.create_timer(self.dt, self.timer_callback, callback_group=MutuallyExclusiveCallbackGroup())
         
         self.get_logger().info(f'ArmIKNode initialized with frequency: {self.frequency}Hz')
         self.get_logger().info(f'PsiRobot sites: {self.hands}')

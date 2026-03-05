@@ -157,7 +157,7 @@ class HandFKNode(Node):
             f'/state/{self.hand_side}_hand/joints',
             self.joint_state_callback,
             10,
-            MutuallyExclusiveCallbackGroup()
+            callback_group=MutuallyExclusiveCallbackGroup()
         )
 
         # 4. 发布：发给 Interface / Model 的指尖位姿
@@ -165,14 +165,14 @@ class HandFKNode(Node):
             PoseArray,
             f'/state/{self.hand_side}_hand/keypoints',
             10,
-            MutuallyExclusiveCallbackGroup()
+            callback_group=MutuallyExclusiveCallbackGroup()
         )
 
         # 5. 定时器：固定频率执行 FK 计算并发布
         self.timer = self.create_timer(
             1.0 / self.frequency, 
             self.control_loop, 
-            MutuallyExclusiveCallbackGroup()
+            callback_group=MutuallyExclusiveCallbackGroup()
         )
 
     def joint_state_callback(self, msg: JointState):
