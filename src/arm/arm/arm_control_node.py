@@ -270,14 +270,14 @@ class ArmControlNode(Node):
 
         _, state = self.rm_arm.rm_get_current_arm_state()
         pose = state['pose']
-        msg.position.x = pose[0]
-        msg.position.y = pose[1]
-        msg.position.z = pose[2]
+        msg.pose.position.x = pose[0]
+        msg.pose.position.y = pose[1]
+        msg.pose.position.z = pose[2]
         quat = R.from_euler('xyz', [pose[3], pose[4], pose[5]]).as_quat()
-        msg.orientation.x = quat[0]
-        msg.orientation.y = quat[1]
-        msg.orientation.z = quat[2]
-        msg.orientation.w = quat[3]
+        msg.pose.orientation.x = quat[0]
+        msg.pose.orientation.y = quat[1]
+        msg.pose.orientation.z = quat[2]
+        msg.pose.orientation.w = quat[3]
         
         self.wrist_pose_pub.publish(msg)
 
@@ -297,9 +297,9 @@ class ArmControlNode(Node):
                 self.status_timer.cancel()
             
             # 断开右臂
-            if self.rm_right_arm is not None:
+            if self.rm_arm is not None:
                 try:
-                    self.rm_right_arm.rm_delete_robot_arm()
+                    self.rm_arm.rm_delete_robot_arm()
                     self.get_logger().info("✅ 右臂连接已清理")
                 except:
                     pass

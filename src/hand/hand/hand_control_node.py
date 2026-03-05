@@ -88,12 +88,12 @@ class HandControlNode(Node):
         # Create publishers and subscribers
         self.joint_states_publisher = self.create_publisher(
             JointState, 
-            f"/state/{self.hand_side}/joints", 
+            f"/state/{self.hand_side}_hand/joints", 
             10
         )
         self.set_angles_subscription = self.create_subscription(
             JointState,
-            f"/action/{self.hand_side}/joints",
+            f"/action/{self.hand_side}_hand/joints",
             self.set_angles_callback,
             10,
         )
