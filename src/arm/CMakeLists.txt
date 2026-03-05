@@ -15,7 +15,6 @@ ament_python_install_package(${PROJECT_NAME})
 # Install Python executables
 install(PROGRAMS
   arm/arm_ik_node.py
-  arm/arm_fk_node.py
   arm/arm_control_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
