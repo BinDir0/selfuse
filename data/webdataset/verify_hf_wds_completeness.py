@@ -26,10 +26,12 @@ from datasets import load_dataset
 def collect_data_files(dataset_path, split):
     arrow_files = sorted(glob.glob(f"{dataset_path}/{split}/*.arrow"))
     if arrow_files:
+        arrow_files = [fp for fp in arrow_files if Path(fp).stat().st_size > 0]
         return arrow_files, "arrow"
 
     parquet_files = sorted(glob.glob(f"{dataset_path}/{split}/*.parquet"))
     if parquet_files:
+        parquet_files = [fp for fp in parquet_files if Path(fp).stat().st_size > 0]
         return parquet_files, "parquet"
 
     return [], None
@@ -48,27 +50,17 @@ def parse_meta(meta):
     return None
 
 
-def count_hf_dataset(args):
-    dataset_path, dataset_name, split = args
-    files, ext = collect_data_files(dataset_path, split)
-    if not files:
-        return {
-            "dataset_name": dataset_name,
-            "expected_count": 0,
-            "missing_source": True,
-            "num_files": 0,
-        }
-
-    stream = load_dataset(ext, data_files=files, split="train", streaming=True)
+def count_hf_file(args):
+    file_path, ext, dataset_name = args
+    stream = load_dataset(ext, data_files=[file_path], split="train", streaming=True)
     count = 0
     for _ in stream:
         count += 1
 
     return {
         "dataset_name": dataset_name,
-        "expected_count": count,
-        "missing_source": False,
-        "num_files": len(files),
+        "file_path": file_path,
+        "count": count,
     }
 
 
@@ -111,6 +103,21 @@ def load_hf_entries(hf_list):
     return entries
 
 
+def collect_hf_source_tasks(entries, split):
+    tasks = []
+    file_counts = defaultdict(int)
+    missing_sources = []
+    for dataset_path, dataset_name in entries:
+        files, ext = collect_data_files(dataset_path, split)
+        if not files:
+            missing_sources.append(dataset_name)
+            continue
+        file_counts[dataset_name] += len(files)
+        for fp in files:
+            tasks.append((fp, ext, dataset_name))
+    return tasks, dict(file_counts), missing_sources
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Verify HF->WDS completeness by per-dataset sample counts"
@@ -151,22 +158,33 @@ def main():
     if not entries:
         print(f"No valid entries in {args.hf_list}")
         raise SystemExit(1)
+    dataset_names = sorted(set([name for _, name in entries]))
 
-    print("Counting expected samples from HF source files...")
-    count_args = [(dataset_path, dataset_name, args.split) for dataset_path, dataset_name in entries]
-    expected_counts = {}
-    missing_sources = []
-    with mp.Pool(min(args.num_workers, len(count_args))) as pool:
-        for result in pool.imap_unordered(count_hf_dataset, count_args):
-            dataset_name = result["dataset_name"]
-            expected_counts[dataset_name] = result["expected_count"]
-            if result["missing_source"]:
-                missing_sources.append(dataset_name)
-            print(
-                f"  {dataset_name}: {result['expected_count']} samples "
-                f"({result['num_files']} files)",
-                flush=True,
-            )
+    print("Counting expected samples from HF source shards...")
+    source_tasks, source_file_counts, missing_sources = collect_hf_source_tasks(
+        entries, args.split
+    )
+    expected_counts = defaultdict(int)
+    if source_tasks:
+        total_expected = 0
+        with mp.Pool(min(args.num_workers, len(source_tasks))) as pool:
+            for i, result in enumerate(pool.imap_unordered(count_hf_file, source_tasks)):
+                dataset_name = result["dataset_name"]
+                expected_counts[dataset_name] += result["count"]
+                total_expected += result["count"]
+                if (i + 1) % 100 == 0 or (i + 1) == len(source_tasks):
+                    print(
+                        f"  [{i+1}/{len(source_tasks)}] counted, "
+                        f"samples={total_expected}",
+                        flush=True,
+                    )
+
+    for dataset_name in dataset_names:
+        print(
+            f"  {dataset_name}: {expected_counts.get(dataset_name, 0)} samples "
+            f"({source_file_counts.get(dataset_name, 0)} files)",
+            flush=True,
+        )
 
     all_shards = sorted(Path(args.wds_dir).rglob(args.shard_pattern))
     if not all_shards:
@@ -190,8 +208,8 @@ def main():
     print("Completeness check:\n")
 
     all_ok = True
-    for ds_name in sorted(expected_counts.keys()):
-        expected = expected_counts[ds_name]
+    for ds_name in dataset_names:
+        expected = expected_counts.get(ds_name, 0)
         actual = actual_counts.get(ds_name, 0)
         ok = (expected == actual)
         if not ok:
@@ -200,7 +218,7 @@ def main():
         delta = actual - expected
         print(f"[{status}] {ds_name}: actual={actual}, expected={expected}, delta={delta}")
 
-    unknown_ds = sorted(set(actual_counts.keys()) - set(expected_counts.keys()))
+    unknown_ds = sorted(set(actual_counts.keys()) - set(dataset_names))
     if unknown_ds:
         all_ok = False
         print(f"\nUnknown datasets in WDS (not in hf_list): {unknown_ds}")

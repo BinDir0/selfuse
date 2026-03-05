@@ -41,10 +41,24 @@ def collect_data_files(dataset_path, split):
     """Collect arrow/parquet files under one HF dataset path."""
     arrow_files = sorted(glob.glob(f"{dataset_path}/{split}/*.arrow"))
     if arrow_files:
+        valid_files = [fp for fp in arrow_files if Path(fp).stat().st_size > 0]
+        skipped = len(arrow_files) - len(valid_files)
+        if skipped > 0:
+            print(
+                f"Warning: {dataset_path}/{split} has {skipped} empty arrow files, skipping."
+            )
+        arrow_files = valid_files
         return arrow_files, "arrow"
 
     parquet_files = sorted(glob.glob(f"{dataset_path}/{split}/*.parquet"))
     if parquet_files:
+        valid_files = [fp for fp in parquet_files if Path(fp).stat().st_size > 0]
+        skipped = len(parquet_files) - len(valid_files)
+        if skipped > 0:
+            print(
+                f"Warning: {dataset_path}/{split} has {skipped} empty parquet files, skipping."
+            )
+        parquet_files = valid_files
         return parquet_files, "parquet"
 
     return [], None
@@ -73,67 +87,75 @@ def process_task_batch(
 
     t0 = time.time()
     report_interval = 10000
+    skipped_files = 0
 
     for file_path, ext, dataset_name in task_batch:
         safe_dataset_name = sanitize_name(dataset_name)
         local_sample_idx = source_sample_idx.get(dataset_name, 0)
-        stream = load_dataset(ext, data_files=[file_path], split="train", streaming=True)
+        try:
+            stream = load_dataset(ext, data_files=[file_path], split="train", streaming=True)
+            for sample in stream:
+                if shard_count > 0 and (shard_count + 1 > maxcount or shard_size > maxsize):
+                    writer.close()
+                    shard_idx += 1
+                    writer = wds.TarWriter(output_pattern % shard_idx)
+                    shard_count = 0
+                    shard_size = 0
 
-        for sample in stream:
-            if shard_count > 0 and (shard_count + 1 > maxcount or shard_size > maxsize):
-                writer.close()
-                shard_idx += 1
-                writer = wds.TarWriter(output_pattern % shard_idx)
-                shard_count = 0
-                shard_size = 0
+                images = sample["images"]
+                image_bytes = {}
+                image_total_bytes = 0
+                for i, image in enumerate(images):
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    buf = io.BytesIO()
+                    image.save(buf, format="JPEG", quality=image_quality)
+                    key = f"image_{i:03d}.jpg"
+                    data = buf.getvalue()
+                    image_bytes[key] = data
+                    image_total_bytes += len(data)
 
-            images = sample["images"]
-            image_bytes = {}
-            image_total_bytes = 0
-            for i, image in enumerate(images):
-                if image.mode != "RGB":
-                    image = image.convert("RGB")
-                buf = io.BytesIO()
-                image.save(buf, format="JPEG", quality=image_quality)
-                key = f"image_{i:03d}.jpg"
-                data = buf.getvalue()
-                image_bytes[key] = data
-                image_total_bytes += len(data)
+                meta_dict = {
+                    "dataset_name": dataset_name,
+                    "source": sample.get("source", dataset_name),
+                    "split": split,
+                    "sample_idx": int(local_sample_idx),
+                    "n_images": int(len(images)),
+                    "texts": sample["texts"],
+                    "formatting_ratings": sample["formatting_ratings"],
+                    "visual_dependency_ratings": sample["visual_dependency_ratings"],
+                    "relevance_ratings": sample["relevance_ratings"],
+                }
+                meta_dict = to_python(meta_dict)
+                meta_size = len(json.dumps(meta_dict, ensure_ascii=False).encode("utf-8"))
 
-            meta_dict = {
-                "dataset_name": dataset_name,
-                "source": sample.get("source", dataset_name),
-                "split": split,
-                "sample_idx": int(local_sample_idx),
-                "n_images": int(len(images)),
-                "texts": sample["texts"],
-                "formatting_ratings": sample["formatting_ratings"],
-                "visual_dependency_ratings": sample["visual_dependency_ratings"],
-                "relevance_ratings": sample["relevance_ratings"],
-            }
-            meta_dict = to_python(meta_dict)
-            meta_size = len(json.dumps(meta_dict, ensure_ascii=False).encode("utf-8"))
+                wds_sample = {
+                    "__key__": f"{safe_dataset_name}_w{worker_id:04d}_{sample_idx:010d}",
+                    "meta.json": meta_dict,
+                }
+                wds_sample.update(image_bytes)
 
-            wds_sample = {
-                "__key__": f"{safe_dataset_name}_w{worker_id:04d}_{sample_idx:010d}",
-                "meta.json": meta_dict,
-            }
-            wds_sample.update(image_bytes)
+                writer.write(wds_sample)
+                shard_count += 1
+                shard_size += image_total_bytes + meta_size + 512 * (2 + len(image_bytes))
+                sample_idx += 1
+                local_sample_idx += 1
 
-            writer.write(wds_sample)
-            shard_count += 1
-            shard_size += image_total_bytes + meta_size + 512 * (2 + len(image_bytes))
-            sample_idx += 1
-            local_sample_idx += 1
-
-            if sample_idx % report_interval == 0:
-                elapsed = time.time() - t0
-                sps = sample_idx / elapsed if elapsed > 0 else 0
-                print(
-                    f"  [w{worker_id:03d}] {sample_idx} samples, "
-                    f"{elapsed:.1f}s ({sps:.1f} samples/s)",
-                    flush=True,
-                )
+                if sample_idx % report_interval == 0:
+                    elapsed = time.time() - t0
+                    sps = sample_idx / elapsed if elapsed > 0 else 0
+                    print(
+                        f"  [w{worker_id:03d}] {sample_idx} samples, "
+                        f"{elapsed:.1f}s ({sps:.1f} samples/s)",
+                        flush=True,
+                    )
+        except Exception as e:
+            skipped_files += 1
+            print(
+                f"  [w{worker_id:03d}] Warning: failed to read {file_path}, "
+                f"skipping. ({type(e).__name__}: {e})",
+                flush=True,
+            )
 
         source_sample_idx[dataset_name] = local_sample_idx
 
@@ -142,7 +164,8 @@ def process_task_batch(
     sps = sample_idx / elapsed if elapsed > 0 else 0
     print(
         f"  [w{worker_id:03d}] done, "
-        f"{sample_idx} samples, {elapsed:.1f}s ({sps:.1f} samples/s)",
+        f"{sample_idx} samples, {elapsed:.1f}s ({sps:.1f} samples/s), "
+        f"skipped_files={skipped_files}",
         flush=True,
     )
 
