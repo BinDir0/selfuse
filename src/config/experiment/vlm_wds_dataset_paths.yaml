@@ -6,87 +6,35 @@
 vlm_wds_base_dir: /share_data/guantianrui/datasets/VLM/FineVision_Webdataset
 
 vlm_wds_datasets:
-  - name: objects365_qa_filtered
-    shard_urls: ${vlm_wds_base_dir}/objects365_qa_filtered/shard-*.tar
+  - name: FineVision
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/FineVision/train/shard-*.tar
+    weight: 10
+  - name: Robo2VLM
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Robo2VLM/train/shard-*.tar
     weight: 1
-  - name: spatialsense_filtered
-    shard_urls: ${vlm_wds_base_dir}/spatialsense_filtered/shard-*.tar
+  - name: RoboPoint
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboPoint/train/shard-*.tar
+    weight: 2
+  - name: Roborefit
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Roborefit/train/shard-*.tar
+    weight: 0.1
+  - name: RoboAfford
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboAfford/train/shard-*.tar
     weight: 1
-  - name: alfworldgpt_filtered
-    shard_urls: ${vlm_wds_base_dir}/alfworldgpt_filtered/shard-*.tar
-    weight: 1
-  - name: indoor_qa_filtered
-    shard_urls: ${vlm_wds_base_dir}/indoor_qa_filtered/shard-*.tar
-    weight: 1
-  - name: LLaVA_Instruct_150K_filtered
-    shard_urls: ${vlm_wds_base_dir}/LLaVA_Instruct_150K_filtered/shard-*.tar
-    weight: 1
-  - name: cocoqa_filtered
-    shard_urls: ${vlm_wds_base_dir}/cocoqa_filtered/shard-*.tar
-    weight: 1
-  - name: cambrian_processed_filtered
-    shard_urls: ${vlm_wds_base_dir}/cambrian(filtered)_processed_filtered/shard-*.tar
-    weight: 1
-  - name: lnqa_filtered
-    shard_urls: ${vlm_wds_base_dir}/lnqa_filtered/shard-*.tar
-    weight: 1
-  - name: lrv_normal_filtered
-    shard_urls: ${vlm_wds_base_dir}/lrv_normal(filtered)_filtered/shard-*.tar
-    weight: 1
-  - name: lvis_instruct4v_filtered
-    shard_urls: ${vlm_wds_base_dir}/lvis_instruct4v_filtered/shard-*.tar
-    weight: 1
-  - name: vqav2_filtered
-    shard_urls: ${vlm_wds_base_dir}/vqav2_filtered/shard-*.tar
-    weight: 1
-  - name: sharegpt4v_llava_filtered
-    shard_urls: ${vlm_wds_base_dir}/sharegpt4v(llava)_filtered/shard-*.tar
-    weight: 1
-  - name: sharegpt4v_sam_filtered
-    shard_urls: ${vlm_wds_base_dir}/sharegpt4v(sam)_filtered/shard-*.tar
-    weight: 1
-  - name: textcaps_filtered
-    shard_urls: ${vlm_wds_base_dir}/textcaps_filtered/shard-*.tar
-    weight: 1
-  - name: image_textualization_filtered
-    shard_urls: ${vlm_wds_base_dir}/image_textualization(filtered)_filtered/shard-*.tar
-    weight: 1
-  - name: aguvis-stage-1
-    shard_urls: ${vlm_wds_base_dir}/aguvis-stage-1/shard-*.tar
-    weight: 1
-  - name: groundui
-    shard_urls: ${vlm_wds_base_dir}/groundui/shard-*.tar
-    weight: 1
-  - name: oodvqa
-    shard_urls: ${vlm_wds_base_dir}/oodvqa/shard-*.tar
-    weight: 1
-  - name: tallyqa
-    shard_urls: ${vlm_wds_base_dir}/tallyqa/shard-*.tar
-    weight: 1
-  - name: allava_laion
-    shard_urls: ${vlm_wds_base_dir}/allava_laion/shard-*.tar
-    weight: 1
-  - name: allava_vflan
-    shard_urls: ${vlm_wds_base_dir}/allava_vflan/shard-*.tar
-    weight: 1
-  - name: mmevol
-    shard_urls: ${vlm_wds_base_dir}/mmevol/shard-*.tar
-    weight: 1
-  - name: vision_flan
-    shard_urls: ${vlm_wds_base_dir}/vision_flan(filtered)/shard-*.tar
-    weight: 1
-  - name: visual7w
-    shard_urls: ${vlm_wds_base_dir}/visual7w/shard-*.tar
-    weight: 1
-  - name: vizwiz_mathv360k
-    shard_urls: ${vlm_wds_base_dir}/vizwiz(mathv360k)/shard-*.tar
-    weight: 1
-  - name: vsr
-    shard_urls: ${vlm_wds_base_dir}/vsr/shard-*.tar
-    weight: 1
-  - name: wildvision
-    shard_urls: ${vlm_wds_base_dir}/wildvision/shard-*.tar
-    weight: 1
-  - name: yesbut
-    shard_urls: ${vlm_wds_base_dir}/yesbut/shard-*.tar
-    weight: 1
+  - name: ShareRobot
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/ShareRobot/train/shard-*.tar
+    weight: 0.5
+
+val_vlm_wds_datasets:
+  - name: FineVision
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/FineVision/test/shard-*.tar
+  - name: Robo2VLM
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Robo2VLM/test/shard-*.tar
+  - name: RoboPoint
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboPoint/test/shard-*.tar
+  - name: Roborefit
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Roborefit/test/shard-*.tar
+  - name: RoboAfford
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboAfford/test/shard-*.tar
+  - name: ShareRobot
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/ShareRobot/test/shard-*.tar

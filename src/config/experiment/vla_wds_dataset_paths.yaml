@@ -39,7 +39,7 @@ vla_wds_datasets:
   #   shard_urls: ${wds_base_dir}/Open_book/shard-*.tar
   #   weight: 0.2
 
-val_wds_datasets:
+val_vla_wds_datasets:
   - name: taco_test_seen
     shard_urls: ${val_wds_base_dir}/taco_test_seen/shard-*.tar
   - name: oakink2_test_seen

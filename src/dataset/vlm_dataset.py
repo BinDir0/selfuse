@@ -267,7 +267,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         weights: List[float] = [0.5, 0.5, 0.5],
         seed: int = 42,
         mode: str = 'train',
-        shuffle_buffer: int = 10000,
+        shuffle_buffer: int = 4096,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
     ):
@@ -309,8 +309,9 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
 
     def get_validation_dataset(self):
         """Create a new WebDataset instance for validation."""
+        assert self.val_wds_datasets is not None, "val_wds_datasets is not set"
         val_dataset = VLMWdsDataset(
-            wds_datasets=self.val_wds_datasets if self.val_wds_datasets is not None else self.wds_datasets,
+            wds_datasets=self.val_wds_datasets,
             weights=self.weights,
             seed=self.seed,
             mode='val' if self.mode == 'train' else self.mode,

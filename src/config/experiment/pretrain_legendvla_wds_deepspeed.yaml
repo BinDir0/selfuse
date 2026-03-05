@@ -61,12 +61,15 @@ dataset:
     objective: ${objective}
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
+    val_wds_datasets: ${val_vla_wds_datasets}
     shuffle_buffer: 4096
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
     wds_datasets: ${vlm_wds_datasets}
     seed: 42
+    shuffle_buffer: 4096
     weights: [0.5, 0.5, 0.5]
+    val_wds_datasets: ${val_vlm_wds_datasets}
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
     
@@ -105,7 +108,7 @@ vlm_processor:
 dataloader:
   loader:
     batch_size: 16
-    num_workers: 8
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32
@@ -113,11 +116,11 @@ dataloader:
 val_dataloader:
   batch_sampler: 
     # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
-    batch_size: 20
+    batch_size: 16
     shuffle: False
     drop_last: False
   loader: 
-    num_workers: 16
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32

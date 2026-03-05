@@ -238,28 +238,20 @@ class TrainLegendVLAWdsWorkspace(TrainLegendVLAWorkspace):
         )
         train_dataloader.__dict__["batch_size"] = batch_size
 
-        # Validation dataloader (optional, requires val shard URLs in config)
-        val_dataloader = None
-        val_wds_datasets = cfg.get("val_wds_datasets", None)
-        if val_wds_datasets is not None:
-            val_dataset = dataset.get_validation_dataset(val_wds_datasets)
-            val_dataset.distribute(
-                rank=accelerator.process_index,
-                world_size=accelerator.num_processes,
-            )
-            val_dataloader = DataLoader(
-                dataset=val_dataset,
-                batch_size=batch_size,
-                collate_fn=val_dataset.get_collator(),
-                num_workers=cfg.dataloader.loader.num_workers,
-                pin_memory=cfg.dataloader.loader.get("pin_memory", True),
-                persistent_workers=False,
-            )
-            if accelerator.is_main_process:
-                print("Validation dataloader created from val shard URLs")
-        else:
-            if accelerator.is_main_process:
-                print("No val_wds_datasets configured, skipping validation")
+        # Validation dataloader (requires val shard URLs in config)
+        val_dataset = dataset.get_validation_dataset()
+        val_dataset.distribute(
+            rank=accelerator.process_index,
+            world_size=accelerator.num_processes,
+        )
+        val_dataloader = DataLoader(
+            dataset=val_dataset,
+            batch_size=batch_size,
+            collate_fn=val_dataset.get_collator(),
+            num_workers=cfg.dataloader.loader.num_workers,
+            pin_memory=cfg.dataloader.loader.get("pin_memory", True),
+            persistent_workers=False,
+        )
 
         # Steps per epoch: use configured value or default
         steps_per_epoch = cfg.training.get("steps_per_epoch", 100000)

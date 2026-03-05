@@ -20,10 +20,10 @@ set -euo pipefail
 
 # ─── defaults ───────────────────────────────────────────────────
 HF_LIST="hf_list.txt"
-OUTPUT_DIR="/share_data/guantianrui/datasets/VLM/FineVision_Webdataset"
-SPLIT="train"
-NODES="pro-10"
-WORKERS_PER_NODE=32
+OUTPUT_DIR="/share_data/guantianrui/datasets/VLM/Webdataset/ShareRobot/test"
+SPLIT="test"
+NODES="pro-04"
+WORKERS_PER_NODE=96
 MAXCOUNT=20000
 MAXSIZE=1000000000
 IMAGE_QUALITY=95

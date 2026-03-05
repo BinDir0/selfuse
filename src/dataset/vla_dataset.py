@@ -49,6 +49,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         shuffle_buffer: int = 8192,
         lowdim_slices: Optional[Dict] = None,
         return_dataset_info: bool = False,
+        val_wds_datasets: Optional[List[Dict]] = None,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -63,8 +64,9 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.depth_clip_range = depth_clip_range
         self.shuffle_buffer = shuffle_buffer
         self.wds_datasets = wds_datasets
+        self.val_wds_datasets = val_wds_datasets
         self.return_dataset_info = return_dataset_info
-
+        
         self.preprocessor = None
         self.normalizer = None
 
@@ -228,16 +230,12 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         pipeline = self.build_pipeline()
         return iter(pipeline)
 
-    def get_validation_dataset(self, val_wds_datasets: List[Dict]):
+    def get_validation_dataset(self):
         """Create a validation dataset from separate val shard URLs.
-
-        Args:
-            val_wds_datasets: list of dicts with keys:
-                - shard_urls: glob pattern or list of val shard tar paths
-                - name: (optional) dataset name
         """
+        assert self.val_wds_datasets is not None, "val_wds_datasets is not set"
         val_dataset = VLAWdsDataset(
-            wds_datasets=val_wds_datasets,
+            wds_datasets=self.val_wds_datasets,
             shape_meta=self.shape_meta,
             objective=self.objective,
             use_relative_action=self.use_relative_action,
@@ -314,13 +312,10 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
     def get_collator(self):
         return self.vla_dataset.get_collator()
 
-    def get_validation_dataset(self, val_wds_datasets: List[Dict]):
+    def get_validation_dataset(self):
         """Create a unified validation dataset.
-
-        Args:
-            val_wds_datasets: VLA validation shard configs.
         """
-        vla_val = self.vla_dataset.get_validation_dataset(val_wds_datasets)
+        vla_val = self.vla_dataset.get_validation_dataset()
 
         vlm_val = None
         if self.vlm_dataset is not None and hasattr(self.vlm_dataset, 'get_validation_dataset'):
