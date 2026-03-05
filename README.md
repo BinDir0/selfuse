@@ -20,7 +20,7 @@ EOF'
 # 立即应用
 sudo sysctl --system
 ```
-4. **创建容器**：修改 `create_container.sh` 第 138 行的宿主机路径为本地项目目录，然后执行：
+4. **创建容器**：修改 `create_container.sh` 第 139 行的宿主机路径为本地项目目录，然后执行：
 ```bash
 ./create_container.sh legendvla-inference
 ```
