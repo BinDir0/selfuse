@@ -12,7 +12,7 @@ from src.dataset.vlm_dataset import VLMStreamingDataset
 # Patch targets
 # ---------------------------------------------------------------------------
 
-MOD = "src.dataset.legendvlm_dataset"
+MOD = "src.dataset.vlm_dataset"
 
 
 def make_mock_stream(name="ds"):
@@ -95,12 +95,14 @@ def test_build_stream_detects_parquet(mock_collect, mock_load):
 # Tests — collect_data_files
 # ---------------------------------------------------------------------------
 
+@patch(f"{MOD}.pathlib.Path.stat")
 @patch(f"{MOD}.glob.glob")
-def test_collect_finds_arrow_in_split_dir(mock_glob):
+def test_collect_finds_arrow_in_split_dir(mock_glob, mock_stat):
     """Finds arrow files under {path}/{split}/ pattern."""
+    mock_stat.return_value = type("st", (), {"st_size": 1})()
     mock_glob.side_effect = lambda pattern: (
         ["/d/train/data-00000.arrow", "/d/train/data-00001.arrow"]
-        if "train/data-*.arrow" in pattern else []
+        if pattern.endswith("/train/*.arrow") else []
     )
     obj = VLMStreamingDataset.__new__(VLMStreamingDataset)
     obj.dataset_paths = ["/d"]
@@ -109,9 +111,11 @@ def test_collect_finds_arrow_in_split_dir(mock_glob):
     assert len(files) == 2
 
 
+@patch(f"{MOD}.pathlib.Path.stat")
 @patch(f"{MOD}.glob.glob")
-def test_collect_falls_back_to_parquet(mock_glob):
+def test_collect_falls_back_to_parquet(mock_glob, mock_stat):
     """Falls back to parquet when no arrow files found."""
+    mock_stat.return_value = type("st", (), {"st_size": 1})()
     def side_effect(pattern):
         if pattern.endswith(".parquet"):
             return ["/d/train/part-00000.parquet"]

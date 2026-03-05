@@ -3,6 +3,12 @@ Verify data completeness between WebDataset shards and original HF datasets.
 
 Counts expected samples from hf_list sources (arrow/parquet), scans all WDS
 samples, and compares per-dataset counts to detect missing or extra samples.
+
+Path protocol:
+- hf_list: each line is "dataset_path [dataset_name]".
+  dataset_path must contain split subdir with {split}/*.arrow or {split}/*.parquet.
+- wds_dir: root directory containing one subdir per dataset,
+  each subdir contains {split}/*.tar shards.
 Usage:
     python data/webdataset/verify_hf_wds_completeness.py \
         --hf_list /path/to/hf_paths.txt \

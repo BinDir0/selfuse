@@ -377,7 +377,7 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         shape_meta = self.shape_meta
         vlm_sample["states"] = torch.zeros(*shape_meta["states"])
         vlm_sample["actions"] = torch.zeros(*shape_meta["actions"])
-        vlm_sample["actions_valid_mask"] = torch.zeros(*shape_meta["actions"])
+        vlm_sample["actions_valid_mask"] = torch.zeros(*shape_meta["actions"], dtype=torch.bool)
         vlm_sample["n_states"] = torch.tensor(0, dtype=torch.int32)
         vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
         vlm_sample["depth_values"] = torch.zeros(*shape_meta["depth_values"])

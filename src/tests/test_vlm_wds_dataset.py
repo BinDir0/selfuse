@@ -74,7 +74,7 @@ def test_build_pipeline_no_sliding_window():
     )
     ds.set_preprocessor(DummyPreprocessor())
 
-    with patch("src.dataset.legendvlm_dataset.build_blended_dataset") as mock_build:
+    with patch("src.dataset.vlm_dataset.build_blended_dataset") as mock_build:
         mock_build.return_value = [{"__key__": "k0", "x": 1}]
         out = list(ds.build_pipeline())
         _, kwargs = mock_build.call_args

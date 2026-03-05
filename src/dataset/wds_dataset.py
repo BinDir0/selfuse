@@ -354,6 +354,8 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))
 
+    assert subsets, "No shards found across all datasets."
+
     if len(subsets) == 1:
         return subsets[0]
 

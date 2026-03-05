@@ -53,6 +53,28 @@ VLA_KEYS = {
 VLA_ONLY_KEYS = VLA_KEYS | {"has_depth_values"}
 
 
+class DummyWindowConfig:
+    """Minimal config to satisfy UnifiedWdsDataset shape meta building."""
+
+    def __init__(self, state_horizon=16, action_horizon=32, image_horizon=1):
+        self.state_horizon = state_horizon
+        self.action_horizon = action_horizon
+        self.image_horizon = image_horizon
+
+
+class MockVlaDataset(torch.utils.data.IterableDataset):
+    """Finite iterable dataset with VLA shape metadata."""
+
+    def __init__(self, samples):
+        self.samples = list(samples)
+        self.window_config = DummyWindowConfig()
+        self.action_ndim = 48
+        self.depth_image_shape = (4, 4)
+
+    def __iter__(self):
+        return iter(self.samples)
+
+
 class MockIterableDataset(torch.utils.data.IterableDataset):
     """Finite iterable dataset backed by a list of samples."""
 
@@ -66,7 +88,7 @@ class MockIterableDataset(torch.utils.data.IterableDataset):
 def build_unified(vla_samples, vlm_samples=None, vla_ratio=5/6,
                   batch_size=6, mode="train"):
     """Shortcut to build a UnifiedWdsDataset from sample lists."""
-    vla_ds = MockIterableDataset(vla_samples)
+    vla_ds = MockVlaDataset(vla_samples)
     vlm_ds = MockIterableDataset(vlm_samples) if vlm_samples is not None else None
     return UnifiedWdsDataset(
         vla_dataset=vla_ds,
@@ -196,14 +218,13 @@ def test_train_vla_only():
 
 def test_pad_vlm_sample():
     """pad_vlm_sample adds zero-filled states/actions and sets n_states/n_actions=0."""
+    ds = build_unified(
+        [make_vla_sample(0)],
+        [make_vlm_sample(0)],
+        vla_ratio=1.0, batch_size=1,
+    )
     vlm = make_vlm_sample(0)
-    shape_meta = {
-        "states": torch.Size([16, 48]),
-        "actions": torch.Size([32, 48]),
-        "n_states": torch.Size([]),
-        "n_actions": torch.Size([]),
-    }
-    UnifiedWdsDataset.pad_vlm_sample(vlm, shape_meta)
+    ds.pad_vlm_sample(vlm)
 
     assert vlm["states"].shape == (16, 48)
     assert vlm["actions"].shape == (32, 48)
@@ -219,7 +240,7 @@ def test_pad_vlm_sample():
 
 def test_distribute_delegates_to_vlm():
     """distribute(rank, world_size) is forwarded to vlm_dataset."""
-    vla_ds = MockIterableDataset([make_vla_sample(0)])
+    vla_ds = MockVlaDataset([make_vla_sample(0)])
     vlm_ds = MockIterableDataset([make_vlm_sample(0)])
     vlm_ds.distribute = lambda rank, world_size: None
     called = {}
@@ -271,17 +292,15 @@ def test_return_dataset_info_passthrough():
 
 def test_return_dataset_info_vlm_padded_keeps_info():
     """pad_vlm_sample does not overwrite dataset_info fields."""
+    ds = build_unified(
+        [make_vla_sample(0)],
+        [make_vlm_sample(0)],
+        vla_ratio=1.0, batch_size=1,
+    )
     vlm = make_vlm_sample(0)
     vlm["dataset_name"] = "my_vlm"
     vlm["dataset_local_idx"] = torch.tensor(42, dtype=torch.int32)
-
-    shape_meta = {
-        "states": torch.Size([16, 48]),
-        "actions": torch.Size([32, 48]),
-        "n_states": torch.Size([]),
-        "n_actions": torch.Size([]),
-    }
-    UnifiedWdsDataset.pad_vlm_sample(vlm, shape_meta)
+    ds.pad_vlm_sample(vlm)
 
     # Padding adds states/actions but does not touch dataset_info
     assert vlm["dataset_name"] == "my_vlm"
