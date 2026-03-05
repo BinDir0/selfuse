@@ -3,7 +3,6 @@ Verify data completeness between WebDataset shards and original HF datasets.
 
 Counts expected samples from hf_list sources (arrow/parquet), scans all WDS
 samples, and compares per-dataset counts to detect missing or extra samples.
-
 Usage:
     python data/webdataset/verify_hf_wds_completeness.py \
         --hf_list /path/to/hf_paths.txt \
@@ -52,15 +51,12 @@ def parse_meta(meta):
 
 def count_hf_file(args):
     file_path, ext, dataset_name = args
-    stream = load_dataset(ext, data_files=[file_path], split="train", streaming=True)
-    count = 0
-    for _ in stream:
-        count += 1
+    ds = load_dataset(ext, data_files=[file_path], split="train")
 
     return {
         "dataset_name": dataset_name,
         "file_path": file_path,
-        "count": count,
+        "count": ds.num_rows,
     }
 
 
@@ -69,24 +65,29 @@ def scan_wds_shard(shard_path):
     counts = defaultdict(int)
     samples = 0
     bad_meta = 0
+    error_str = None 
 
-    for sample in dataset:
-        samples += 1
-        meta = parse_meta(sample.get("meta.json"))
-        if meta is None:
-            bad_meta += 1
-            continue
-        dataset_name = meta.get("dataset_name")
-        if dataset_name is None:
-            bad_meta += 1
-            continue
-        counts[str(dataset_name)] += 1
-
+    try:
+        for sample in dataset:
+            samples += 1
+            meta = parse_meta(sample.get("meta.json"))
+            if meta is None:
+                bad_meta += 1
+                continue
+            dataset_name = meta.get("dataset_name")
+            if dataset_name is None:
+                bad_meta += 1
+                continue
+            counts[str(dataset_name)] += 1
+    except Exception as e:
+        error_str = f"{type(e).__name__}: {str(e)}"
+        
     return {
         "shard": shard_path.name,
         "samples": samples,
         "bad_meta": bad_meta,
         "counts": dict(counts),
+        "error": error_str
     }
 
 
@@ -186,7 +187,16 @@ def main():
             flush=True,
         )
 
-    all_shards = sorted(Path(args.wds_dir).rglob(args.shard_pattern))
+    all_shards = []
+    for sub_wds_path in Path(args.wds_dir).iterdir():
+        if sub_wds_path.is_dir():
+            split_path = Path(sub_wds_path) / args.split
+            sub_wds_shards = sorted(split_path.rglob(args.shard_pattern))
+            if not sub_wds_shards:
+                print(f"No shards found under {split_path} with pattern {args.shard_pattern}")
+                raise SystemExit(1)
+            print(f"\nScanning {len(sub_wds_shards)} shards in {sub_wds_path}, split {args.split}...")
+            all_shards.extend(sub_wds_shards)
     if not all_shards:
         print(f"No shards found under {args.wds_dir} with pattern {args.shard_pattern}")
         raise SystemExit(1)
@@ -199,6 +209,8 @@ def main():
         for i, result in enumerate(pool.imap_unordered(scan_wds_shard, all_shards)):
             total_samples += result["samples"]
             total_bad_meta += result["bad_meta"]
+            if result["error"] is not None:
+                print(f"Error in shard {result['shard']}: {result['error']}")
             for ds_name, cnt in result["counts"].items():
                 actual_counts[ds_name] += cnt
             if (i + 1) % 100 == 0 or (i + 1) == len(all_shards):

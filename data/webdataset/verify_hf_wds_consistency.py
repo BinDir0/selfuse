@@ -202,7 +202,16 @@ def main():
     )
     args = parser.parse_args()
 
-    all_shards = sorted(Path(args.wds_dir).rglob(args.shard_pattern))
+    all_shards = []
+    for sub_wds_path in Path(args.wds_dir).iterdir():
+        if sub_wds_path.is_dir():
+            split_path = Path(sub_wds_path) / args.split
+            sub_wds_shards = sorted(split_path.rglob(args.shard_pattern))
+            if not sub_wds_shards:
+                print(f"No shards found under {split_path} with pattern {args.shard_pattern}")
+                raise SystemExit(1)
+            print(f"\nScanning {len(sub_wds_shards)} shards in {sub_wds_path}, split {args.split}...")
+            all_shards.extend(sub_wds_shards)
     if not all_shards:
         print(f"No shards found under {args.wds_dir} with pattern {args.shard_pattern}")
         raise SystemExit(1)

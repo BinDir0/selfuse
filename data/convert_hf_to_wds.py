@@ -9,7 +9,7 @@ Usage:
     python data/convert_hf_to_wds.py \
         --hf_list /path/to/hf_paths.txt \
         --output_dir /cfs/data/vlm_wds/ \
-        --split train \
+        --split both \
         --num_workers 32
 """
 
@@ -82,7 +82,7 @@ def process_task_batch(
     shard_count = 0
     shard_size = 0
     sample_idx = 0
-    writer = wds.TarWriter(output_pattern % shard_idx)
+    writer = None # create writer on the first sample
     source_sample_idx = {}
 
     t0 = time.time()
@@ -135,6 +135,8 @@ def process_task_batch(
                 }
                 wds_sample.update(image_bytes)
 
+                if writer is None:
+                    writer = wds.TarWriter(output_pattern % shard_idx)
                 writer.write(wds_sample)
                 shard_count += 1
                 shard_size += image_total_bytes + meta_size + 512 * (2 + len(image_bytes))
@@ -269,8 +271,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--split",
         type=str,
-        default="train",
-        help="Split directory to convert, e.g. train/test",
+        default="both",
+        help="Split directory to convert, e.g. both/train/test, default is both",
     )
     parser.add_argument(
         "--num_workers",
@@ -304,13 +306,19 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    convert_hf_list(
-        hf_list=args.hf_list,
-        output_dir=args.output_dir,
-        split=args.split,
-        num_workers=args.num_workers,
-        maxcount=args.maxcount,
-        maxsize=args.maxsize,
-        image_quality=args.image_quality,
-        shard_prefix=args.shard_prefix,
-    )
+    if args.split == "both":
+        splits = ["train", "test"]
+    else:
+        splits = [args.split]
+    for split in splits:
+        print(f"Converting {split} split...")
+        convert_hf_list(
+            hf_list=args.hf_list,
+            output_dir=args.output_dir,
+            split=split,
+            num_workers=args.num_workers,
+            maxcount=args.maxcount,
+            maxsize=args.maxsize,
+            image_quality=args.image_quality,
+            shard_prefix=args.shard_prefix,
+        )
