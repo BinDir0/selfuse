@@ -1,0 +1,1 @@
+docker login dockerhub.cn-northwest-4.ksyunkcr.com -u kcr-admin -p 61TXaPjeApSK2mPMTEOCmGMoHVgfaaKh

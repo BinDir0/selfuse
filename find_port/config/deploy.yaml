@@ -1,0 +1,115 @@
+# Docker 容器配置
+version: "1.0"
+metadata:
+  name: "ros-development-container"
+  description: "ROS Humble 开发环境容器配置"
+  author: "LiTang"
+  created: "2025"
+
+# 容器基础配置
+container:
+  name: "ros-0.8rc1"
+  image:
+    source: "pull"
+    repository: "dockerhub.cn-northwest-4.ksyunkcr.com/psibot/a2d-tele/x86/release/0.8.1rc2"
+    tag: "latest"
+  
+  # 执行模式配置
+  exec_mode: "command"
+  command: "source /ros_entrypoint.sh && source /opt/psi/rt/a2d-tele/install/setup.bash && ros2 launch scripts_pack start_gui.launch.py"
+
+# 硬件资源配置
+resources:
+  gpu:
+    enabled: false
+    options: "--gpus all"
+  network: "host"
+  privileged: true
+
+# 挂载点配置
+volumes:
+  - source: "/home/descfly/workspace_litang/a2d-tele"
+    target: "/root/workspace"
+    enabled: false
+    options: "rw"
+  
+  - source: "/home/descfly/workspace_litang/docker/lib/a2d_sdk_v1_5_0"
+    target: "/root/a2d_sdk"
+    enabled: false
+    options: "rw"
+
+  - source: "/var/psi"
+    target: "/var/psi"
+    enabled: true
+    options: "rw"
+  
+  - source: "~/dataset"
+    target: "/root/dataset"
+    enabled: true
+    options: "rw"
+
+  - source: "~/.ssh/id_rsa"
+    target: "/root/.ssh/id_rsa"
+    enabled: false
+    options: "ro"
+  
+  - source: "/tmp/.X11-unix"
+    target: "/tmp/.X11-unix"
+    enabled: true
+    options: "rw"
+  
+  # PulseAudio 音频挂载点
+  - source: "/run/user/1000/pulse"
+    target: "/run/user/1000/pulse"
+    enabled: true
+    options: "rw"
+    description: "PulseAudio socket 目录"
+  
+  - source: "~/.config/pulse/cookie"
+    target: "/root/.config/pulse/cookie"
+    enabled: true
+    options: "ro"
+    description: "PulseAudio 认证 cookie"
+
+# 设备访问配置
+devices:
+  - path: "/dev/dri"
+    enabled: true
+    options: "rw"
+  
+  # PSI 手套串口设备配置
+  - name: "psi_glove_left"
+    enabled: true
+    usb_vendor: "0483"
+    usb_product: "5739"
+    container_path: "/dev/psi_glove_left"
+  
+  - name: "psi_glove_right"
+    enabled: true
+    usb_vendor: "0483"
+    usb_product: "5740"
+    container_path: "/dev/psi_glove_right"
+  
+  - name: "ry_hand_left"
+    enabled: true
+    usb_vendor: "1a86"
+    usb_product: "55d5"
+    usb_interface: "00"
+    container_path: "/dev/ry_hand_left"
+  
+  - name: "ry_hand_right"
+    enabled: true
+    usb_vendor: "1a86"
+    usb_product: "55d5"
+    usb_interface: "02"
+    container_path: "/dev/ry_hand_right"
+
+# 环境变量配置
+environment:
+  # 显示配置
+  DISPLAY: ":1"
+  auto_detect_display: true
+  fallback_displays: [":0", ":1", ":10", ":11", ":99"]
+  
+  # PulseAudio 音频配置 (可选，不配置则自动生成)
+  # PULSE_SERVER: "unix:/run/user/1000/pulse/native"
