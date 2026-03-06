@@ -131,6 +131,76 @@ class WebsocketPolicyServer:
         self._metadata = metadata or {}
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
+    @staticmethod
+    def _format_obs_details(obs: Dict[str, Any]) -> str:
+        """生成详细的观测数据描述信息"""
+        import numpy as np
+        
+        lines = ["\n观测数据详情:"]
+        lines.append(f"  总字段数: {len(obs)}")
+        lines.append(f"  字段列表: {list(obs.keys())}")
+        lines.append("-" * 80)
+        
+        for key, value in obs.items():
+            lines.append(f"\n字段: '{key}'")
+            
+            if value is None:
+                lines.append(f"  类型: None")
+                continue
+            
+            value_type = type(value).__name__
+            lines.append(f"  Python类型: {value_type}")
+            
+            if hasattr(value, 'shape'):
+                lines.append(f"  Shape: {value.shape}")
+                
+                if hasattr(value, 'dtype'):
+                    lines.append(f"  Dtype: {value.dtype}")
+                
+                if hasattr(value, 'nbytes'):
+                    size_bytes = value.nbytes
+                    if size_bytes < 1024:
+                        size_str = f"{size_bytes} bytes"
+                    elif size_bytes < 1024 * 1024:
+                        size_str = f"{size_bytes / 1024:.2f} KB"
+                    else:
+                        size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
+                    lines.append(f"  内存大小: {size_str}")
+                
+                try:
+                    if hasattr(value, 'size') and value.size == 0:
+                        lines.append(f"  状态: 空数组")
+                    elif np.issubdtype(value.dtype, np.number):
+                        lines.append(f"  数值统计:")
+                        lines.append(f"    - Min: {float(value.min()):.6f}")
+                        lines.append(f"    - Max: {float(value.max()):.6f}")
+                        lines.append(f"    - Mean: {float(value.mean()):.6f}")
+                        if hasattr(value, 'std'):
+                            lines.append(f"    - Std: {float(value.std()):.6f}")
+                    else:
+                        lines.append(f"  数据类型: 非数值型")
+                except Exception as e:
+                    lines.append(f"  统计信息: 无法计算 ({str(e)})")
+            
+            elif isinstance(value, (list, tuple)):
+                lines.append(f"  长度: {len(value)}")
+                if len(value) > 0:
+                    lines.append(f"  首元素类型: {type(value[0]).__name__}")
+            
+            elif isinstance(value, str):
+                lines.append(f"  长度: {len(value)} 字符")
+                preview = value[:50] + "..." if len(value) > 50 else value
+                lines.append(f"  内容预览: {preview}")
+            
+            elif isinstance(value, (int, float)):
+                lines.append(f"  值: {value}")
+            
+            else:
+                lines.append(f"  描述: {str(value)[:100]}")
+        
+        lines.append("-" * 80)
+        return "\n".join(lines)
+
     def serve_forever(self) -> None:
         asyncio.run(self.run())
 
@@ -156,6 +226,8 @@ class WebsocketPolicyServer:
             try:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
+
+                logger.info(f"收到来自 {websocket.remote_address} 的观测数据{self._format_obs_details(obs)}")
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
