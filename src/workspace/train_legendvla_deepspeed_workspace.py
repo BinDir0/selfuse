@@ -202,6 +202,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         else: 
             model.freeze_non_lora_weights_in_vlm()
 
+        if cfg.training.train_depth is False:
+            model.freeze_weights_in_depth()
+
         self.grad_stats = {}
         def get_grad_hook(param):
             def hook(grad):
@@ -213,7 +216,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 return grad
             return hook
         for _, param in model.named_parameters(): 
-            param.register_hook(get_grad_hook(param))
+            if param.requires_grad:
+                param.register_hook(get_grad_hook(param))
         diffloss_trainable_paramters = self.get_grouped_parameters(
             model.diffloss_parameters,
             cfg.optimizer.diffloss,
@@ -299,7 +303,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # Configure learning rate schedulers
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / accelerator.gradient_accumulation_steps)
-        max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
+        if cfg.training.max_train_steps:
+            max_train_steps = cfg.training.max_train_steps
+        else:
+            max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
         # Accelerate prepared scheduler will step num_processes times per global step, 
         # so we need to multiply the warmup steps by num_processes to get the correct warmup steps.
         num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
@@ -338,7 +345,25 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.epoch = self.training_state.epoch
             print(f"Skipping {self.global_step % len(train_dataloader)} batches, total batches: {len(train_dataloader)}")
             skipped_dataloader = accelerator.skip_first_batches(train_dataloader, self.global_step % len(train_dataloader))
-
+            
+        elif cfg.training.finetune_checkpoint_path:
+            # Finetuning from a specific checkpoint (weights only)
+            print(f"Finetuning from checkpoint: {cfg.training.finetune_checkpoint_path}")
+            if os.path.isfile(cfg.training.finetune_checkpoint_path):
+                state_dict = torch.load(cfg.training.finetune_checkpoint_path, map_location='cpu')
+                
+                # Handle potential wrapping in the checkpoint (similar to inference script)
+                if 'module' in state_dict:
+                    state_dict = state_dict['module']
+                elif 'model' in state_dict:
+                    state_dict = state_dict['model']
+                elif 'model_state_dict' in state_dict:
+                    state_dict = state_dict['model_state_dict']
+                
+                accelerator.unwrap_model(self.model).load_state_dict(state_dict)
+                print("Successfully loaded finetuning weights.")
+            else:
+                print(f"Warning: Finetune checkpoint path {cfg.training.finetune_checkpoint_path} is not a file.")
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
         if self.flow_sampling == "beta":
@@ -537,7 +562,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if step_log is not None:
                         accelerator.log(step_log, step=self.update_step)
                     
-                    if cfg.training.max_train_steps and batch_idx >= (cfg.training.max_train_steps-1):
+                    if cfg.training.max_train_steps and self.update_step >= cfg.training.max_train_steps:
+                        if accelerator.is_main_process:
+                            print(f"Max train steps {cfg.training.max_train_steps} reached, stopping training.")
                         break
 
                     if self.global_step % 100 == 0 and accelerator.is_main_process:
@@ -546,6 +573,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if cfg.training.profile and accelerator.is_main_process:
                         prof.step()
 
+                if cfg.training.max_train_steps and self.update_step >= cfg.training.max_train_steps:
+                    break
                 self.epoch += 1
 
         accelerator.end_training()

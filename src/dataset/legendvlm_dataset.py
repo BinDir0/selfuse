@@ -39,7 +39,10 @@ class LegendVLMDataset(torch.utils.data.Dataset):
             mode (str): One of "train" or "val" of "infer-ar" or "infer".
         """
         super().__init__()
-        self.dataset_paths = [dataset_paths] if isinstance(dataset_paths, str) else dataset_paths
+        if dataset_paths is None:
+            self.dataset_paths = []
+        else:
+            self.dataset_paths = [dataset_paths] if isinstance(dataset_paths, str) else dataset_paths
         self.split = split
         self.weights = weights
         self.cache_dir = cache_dir
@@ -253,4 +256,4 @@ class LegendVLMDataset(torch.utils.data.Dataset):
         Returns:
             int: Number of samples.
         """
-        return len(self.main_dataset)
+        return len(self.main_dataset) if self.main_dataset is not None else 0

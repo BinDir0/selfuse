@@ -338,7 +338,7 @@ def load_pretrained_pi05_weights(model):
 
 # ---------- Weight freezing ---------- #
 
-def freeze_non_lora_weights_in_vlm(vision_tower, multi_modal_projector, joint_model):
+def freeze_non_lora_weights_in_vlm(vision_tower, multi_modal_projector, joint_model, embed_tokens=None):
     """
     Freeze non-LoRA weights in VLM components while keeping LoRA weights trainable.
 
@@ -346,6 +346,7 @@ def freeze_non_lora_weights_in_vlm(vision_tower, multi_modal_projector, joint_mo
     - Vision tower weights (except LoRA)
     - Multi-modal projector weights (except LoRA)
     - Language model weights (except LoRA)
+    - Token embeddings (if provided)
 
     Only LoRA parameters remain trainable for efficient fine-tuning.
     """
@@ -360,6 +361,11 @@ def freeze_non_lora_weights_in_vlm(vision_tower, multi_modal_projector, joint_mo
     for name, param in joint_model.mixtures["vlm"].named_parameters():
         param.requires_grad = True if "lora_" in name else False
     log.info("Froze non-lora weights in lm part of the joint model")
+
+    if embed_tokens is not None:
+        for name, param in embed_tokens.named_parameters():
+            param.requires_grad = False
+        log.info("Froze token embeddings")
 
 
 def freeze_non_lora_weights_in_ae(action_encoder, action_decoder, joint_model):
@@ -384,6 +390,20 @@ def freeze_non_lora_weights_in_ae(action_encoder, action_decoder, joint_model):
     for name, param in joint_model.mixtures["action"].named_parameters():
         param.requires_grad = True if "lora_" in name else False
     log.info("Froze non-lora weights in action mixture")
+
+
+def freeze_weights_in_depth(depth_encoder, depth_missing_embeddings):
+    """
+    Freeze weights in depth encoder and depth missing embeddings.
+    """
+    if depth_encoder is not None:
+        for param in depth_encoder.parameters():
+            param.requires_grad = False
+    
+    if depth_missing_embeddings is not None:
+        depth_missing_embeddings.requires_grad = False
+    
+    log.info("Froze weights in depth encoder and depth missing embeddings")
 
 
 def freeze_all_weights(model):

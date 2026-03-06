@@ -473,10 +473,26 @@ class LegendVLAInference(nn.Module):
         ar_max_new_tokens: int | None = None,
         ar_temperature: float = 1.0,
         ar_cfg: float = 1.0,
+        use_mlp_layer_norm: bool = False,
     ) -> None:
         super().__init__()
         model_config_path = pathlib.Path(model_config_path)
         model_cfg = OmegaConf.load(model_config_path)
+        
+        # Patch for old checkpoint compatibility (enable LayerNorm in MLPs)
+        # This is specifically for the checkpoint trained on 2026.02.17 which used LayerNorm
+        if use_mlp_layer_norm:
+            print("启用MLP LayerNorm兼容模式 (Configured via inference.yaml)")
+            policy_cfg = model_cfg.policy
+            if hasattr(policy_cfg, "action_encoder"):
+                policy_cfg.action_encoder.use_mlp_layer_norm = True
+            if hasattr(policy_cfg, "action_decoder"):
+                policy_cfg.action_decoder.use_mlp_layer_norm = True
+            if hasattr(policy_cfg, "action_encoder_ar"):
+                policy_cfg.action_encoder_ar.use_mlp_layer_norm = True
+            if hasattr(policy_cfg, "latent_condition_projector"):
+                policy_cfg.latent_condition_projector.use_mlp_layer_norm = True
+        
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)

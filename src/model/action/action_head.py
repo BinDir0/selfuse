@@ -50,6 +50,7 @@ class FourierActionEncoder(nn.Module):
         fourier_scale: float = 10.0,
         final_layer_norm: bool = True,
         time_emb_dim: Optional[int] = None,
+        use_mlp_layer_norm: bool = False,
     ):
         super().__init__()
         assert mlp_depth >= 0, "mlp_depth must be >= 0"
@@ -78,6 +79,8 @@ class FourierActionEncoder(nn.Module):
             for layer_idx in range(mlp_depth - 1):
                 in_dim = mlp_input_dim if layer_idx == 0 else width
                 layers.append(nn.Linear(in_dim, width))
+                if use_mlp_layer_norm:
+                    layers.append(nn.LayerNorm(width))
                 layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
             self.projector = nn.Linear(width, width)
@@ -136,6 +139,7 @@ class MLPProjector(nn.Module):
         width: int = 1024,
         depth: int = 3,
         final_layer_norm: bool = True,
+        use_mlp_layer_norm: bool = False,
     ):
         super().__init__()
         assert depth >= 0, "depth must be >= 0"
@@ -149,6 +153,8 @@ class MLPProjector(nn.Module):
                 out_dim = width if layer_idx < depth - 1 else output_dim
                 layers.append(nn.Linear(in_dim, out_dim))
                 if layer_idx < depth - 1:
+                    if use_mlp_layer_norm:
+                        layers.append(nn.LayerNorm(width))
                     layers.append(nn.SiLU())
             self.mlp = nn.Sequential(*layers)
             self.final_layer_norm = nn.LayerNorm(output_dim) if final_layer_norm else None

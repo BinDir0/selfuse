@@ -23,512 +23,512 @@ real_world_dataset_mapping:
   instruction_num: instruction_num
   
 vla_dataset_paths:
-  - name: taco 
-    path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
-    mapping: ${human_dataset_mapping}
-    weight: 1
-  - name: oakink2
-    path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
-    mapping: ${human_dataset_mapping}
-    weight: 1
-  - name: holoassist
-    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
-    mapping: ${human_dataset_mapping}
-    weight: 1
-  - name: egodex
-    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
-    mapping: ${human_dataset_mapping}
-    weight: 20
-  - name: epic
-    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
-    mapping: ${human_dataset_mapping}
-    weight: 4
-  - name: ego4d_cooking
-    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
-    mapping: ${human_dataset_mapping}
-    weight: 8
-  - name: ego4d_other
-    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
-    mapping: ${human_dataset_mapping}
-    weight: 8
+  # - name: taco 
+  #   path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
+  #   mapping: ${human_dataset_mapping}
+  #   weight: 1
+  # - name: oakink2
+  #   path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
+  #   mapping: ${human_dataset_mapping}
+  #   weight: 1
+  # - name: holoassist
+  #   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
+  #   mapping: ${human_dataset_mapping}
+  #   weight: 1
+  # - name: egodex
+  #   path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
+  #   mapping: ${human_dataset_mapping}
+  #   weight: 20
+  # - name: epic
+  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
+  #   mapping: ${human_dataset_mapping}
+  #   weight: 4
+  # - name: ego4d_cooking
+  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
+  #   mapping: ${human_dataset_mapping}
+  #   weight: 8
+  # - name: ego4d_other
+  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
+  #   mapping: ${human_dataset_mapping}
+  #   weight: 8
     
-  - name: Arrange_magnets_by_color
-    path: /share_data/yeyuyao/teleop-data-complete/Arrange_magnets_by_color.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.26
-  - name: Attach_magnetic_eraser_to_whiteboard
-    path: /share_data/yeyuyao/teleop-data-complete/Attach_magnetic_eraser_to_whiteboard.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.31
-  - name: Close_book
-    path: /share_data/yeyuyao/teleop-data-complete/Close_book.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.22
-  - name: Close_laptop
-    path: /share_data/yeyuyao/teleop-data-complete/Close_laptop.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.27
-  - name: Close_the_toothpaste_cap
-    path: /share_data/yeyuyao/teleop-data-complete/Close_the_toothpaste_cap.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.37
-  - name: Collect_scattered_paperclips
-    path: /share_data/yeyuyao/teleop-data-complete/Collect_scattered_paperclips.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
-  - name: Cork_wine_test_tube
-    path: /share_data/yeyuyao/teleop-data-complete/Cork_wine_test_tube.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.22
-  - name: Cover_object_with_paper_cup
-    path: /share_data/yeyuyao/teleop-data-complete/Cover_object_with_paper_cup.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.15
-  - name: Cover_the_teapot_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Cover_the_teapot_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.19
-  - name: Deploy_laptop_cooling_stand_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Deploy_laptop_cooling_stand_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
+  # - name: Arrange_magnets_by_color
+  #   path: /share_data/yeyuyao/teleop-data-complete/Arrange_magnets_by_color.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.26
+  # - name: Attach_magnetic_eraser_to_whiteboard
+  #   path: /share_data/yeyuyao/teleop-data-complete/Attach_magnetic_eraser_to_whiteboard.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.31
+  # - name: Close_book
+  #   path: /share_data/yeyuyao/teleop-data-complete/Close_book.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.22
+  # - name: Close_laptop
+  #   path: /share_data/yeyuyao/teleop-data-complete/Close_laptop.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.27
+  # - name: Close_the_toothpaste_cap
+  #   path: /share_data/yeyuyao/teleop-data-complete/Close_the_toothpaste_cap.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.37
+  # - name: Collect_scattered_paperclips
+  #   path: /share_data/yeyuyao/teleop-data-complete/Collect_scattered_paperclips.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
+  # - name: Cork_wine_test_tube
+  #   path: /share_data/yeyuyao/teleop-data-complete/Cork_wine_test_tube.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.22
+  # - name: Cover_object_with_paper_cup
+  #   path: /share_data/yeyuyao/teleop-data-complete/Cover_object_with_paper_cup.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.15
+  # - name: Cover_the_teapot_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Cover_the_teapot_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.19
+  # - name: Deploy_laptop_cooling_stand_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Deploy_laptop_cooling_stand_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
   - name: Dexterous_grasping
     path: /share_data/yeyuyao/teleop-data-complete/Dexterous_grasping.zarr
     mapping: ${real_world_dataset_mapping}
     weight: 1.33
-  - name: Divide_cup
-    path: /share_data/yeyuyao/teleop-data-complete/Divide_cup.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.35
-  - name: Find_and_take_specific_item_from_drawer_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Find_and_take_specific_item_from_drawer_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.25
-  - name: Flip_cup
-    path: /share_data/yeyuyao/teleop-data-complete/Flip_cup.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.21
-  - name: Flip_object
-    path: /share_data/yeyuyao/teleop-data-complete/Flip_object.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.14
-  - name: Flipping_the_calendar_page
-    path: /share_data/yeyuyao/teleop-data-complete/Flipping_the_calendar_page.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.09
+  # - name: Divide_cup
+  #   path: /share_data/yeyuyao/teleop-data-complete/Divide_cup.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.35
+  # - name: Find_and_take_specific_item_from_drawer_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Find_and_take_specific_item_from_drawer_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.25
+  # - name: Flip_cup
+  #   path: /share_data/yeyuyao/teleop-data-complete/Flip_cup.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.21
+  # - name: Flip_object
+  #   path: /share_data/yeyuyao/teleop-data-complete/Flip_object.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.14
+  # - name: Flipping_the_calendar_page
+  #   path: /share_data/yeyuyao/teleop-data-complete/Flipping_the_calendar_page.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.09
   - name: Fold_clothes
     path: /share_data/yeyuyao/teleop-data-complete/Fold_clothes.zarr
     mapping: ${real_world_dataset_mapping}
     weight: 0.24
-  - name: Fold_eyeglass_temples_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Fold_eyeglass_temples_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.16
-  - name: Fold_rag_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Fold_rag_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.26
-  - name: Hammer_hits_sponge
-    path: /share_data/yeyuyao/teleop-data-complete/Hammer_hits_sponge.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.16
-  - name: Hand_gesture
-    path: /share_data/yeyuyao/teleop-data-complete/Hand_gesture.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.20
-  - name: Hand_object
-    path: /share_data/yeyuyao/teleop-data-complete/Hand_object.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.22
-  - name: Hang_small_items_on_hook
-    path: /share_data/yeyuyao/teleop-data-complete/Hang_small_items_on_hook.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.01
-  - name: Ink_stamp
-    path: /share_data/yeyuyao/teleop-data-complete/Ink_stamp.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.23
+  # - name: Fold_eyeglass_temples_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Fold_eyeglass_temples_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.16
+  # - name: Fold_rag_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Fold_rag_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.26
+  # - name: Hammer_hits_sponge
+  #   path: /share_data/yeyuyao/teleop-data-complete/Hammer_hits_sponge.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.16
+  # - name: Hand_gesture
+  #   path: /share_data/yeyuyao/teleop-data-complete/Hand_gesture.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.20
+  # - name: Hand_object
+  #   path: /share_data/yeyuyao/teleop-data-complete/Hand_object.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.22
+  # - name: Hang_small_items_on_hook
+  #   path: /share_data/yeyuyao/teleop-data-complete/Hang_small_items_on_hook.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.01
+  # - name: Ink_stamp
+  #   path: /share_data/yeyuyao/teleop-data-complete/Ink_stamp.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.23
   - name: Insert_straw
     path: /share_data/yeyuyao/teleop-data-complete/Insert_straw.zarr
     mapping: ${real_world_dataset_mapping}
     weight: 0.22
-  - name: Iron_the_clothes
-    path: /share_data/yeyuyao/teleop-data-complete/Iron_the_clothes.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Lay_towel_on_shelf
-    path: /share_data/yeyuyao/teleop-data-complete/Lay_towel_on_shelf.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.31
-  - name: Lift_teapot
-    path: /share_data/yeyuyao/teleop-data-complete/Lift_teapot.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
-  - name: Lift_trash_bag
-    path: /share_data/yeyuyao/teleop-data-complete/Lift_trash_bag.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.20
-  - name: Open_book
-    path: /share_data/yeyuyao/teleop-data-complete/Open_book.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.26
-  - name: Open_box
-    path: /share_data/yeyuyao/teleop-data-complete/Open_box.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.23
+  # - name: Iron_the_clothes
+  #   path: /share_data/yeyuyao/teleop-data-complete/Iron_the_clothes.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Lay_towel_on_shelf
+  #   path: /share_data/yeyuyao/teleop-data-complete/Lay_towel_on_shelf.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.31
+  # - name: Lift_teapot
+  #   path: /share_data/yeyuyao/teleop-data-complete/Lift_teapot.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
+  # - name: Lift_trash_bag
+  #   path: /share_data/yeyuyao/teleop-data-complete/Lift_trash_bag.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.20
+  # - name: Open_book
+  #   path: /share_data/yeyuyao/teleop-data-complete/Open_book.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.26
+  # - name: Open_box
+  #   path: /share_data/yeyuyao/teleop-data-complete/Open_box.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.23
   - name: Open_drawer
     path: /share_data/yeyuyao/teleop-data-complete/Open_drawer.zarr
     mapping: ${real_world_dataset_mapping}
     weight: 0.13
-  - name: Open_laptop
-    path: /share_data/yeyuyao/teleop-data-complete/Open_laptop.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
-  - name: Open_small_drawer
-    path: /share_data/yeyuyao/teleop-data-complete/Open_small_drawer.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.04
-  - name: Open_the_stationery_pouch
-    path: /share_data/yeyuyao/teleop-data-complete/Open_the_stationery_pouch.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.07
-  - name: Open_toothpaste_cap_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Open_toothpaste_cap_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.15
-  - name: Pet_toy_animal
-    path: /share_data/yeyuyao/teleop-data-complete/Pet_toy_animal.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.25
-  - name: Pick_up_clip_with_magnet
-    path: /share_data/yeyuyao/teleop-data-complete/Pick_up_clip_with_magnet.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.27
-  - name: Pick_up_magnet
-    path: /share_data/yeyuyao/teleop-data-complete/Pick_up_magnet.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.16
-  - name: Pick_up_the_mouse_cable_end
-    path: /share_data/yeyuyao/teleop-data-complete/Pick_up_the_mouse_cable_end.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.04
+  # - name: Open_laptop
+  #   path: /share_data/yeyuyao/teleop-data-complete/Open_laptop.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
+  # - name: Open_small_drawer
+  #   path: /share_data/yeyuyao/teleop-data-complete/Open_small_drawer.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.04
+  # - name: Open_the_stationery_pouch
+  #   path: /share_data/yeyuyao/teleop-data-complete/Open_the_stationery_pouch.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.07
+  # - name: Open_toothpaste_cap_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Open_toothpaste_cap_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.15
+  # - name: Pet_toy_animal
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pet_toy_animal.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.25
+  # - name: Pick_up_clip_with_magnet
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pick_up_clip_with_magnet.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.27
+  # - name: Pick_up_magnet
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pick_up_magnet.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.16
+  # - name: Pick_up_the_mouse_cable_end
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pick_up_the_mouse_cable_end.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.04
   - name: Pick_up_trash_bag
     path: /share_data/yeyuyao/teleop-data-complete/Pick_up_trash_bag.zarr
     mapping: ${real_world_dataset_mapping}
     weight: 0.13
-  - name: Place_books_into_backpack_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Place_books_into_backpack_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Place_bowls_or_plates_on_tray
-    path: /share_data/yeyuyao/teleop-data-complete/Place_bowls_or_plates_on_tray.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
-  - name: Place_bread_on_tray
-    path: /share_data/yeyuyao/teleop-data-complete/Place_bread_on_tray.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Place_item_at_specific_orientation
-    path: /share_data/yeyuyao/teleop-data-complete/Place_item_at_specific_orientation.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Place_liner_on_tray
-    path: /share_data/yeyuyao/teleop-data-complete/Place_liner_on_tray.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.27
-  - name: Place_object_into_box
-    path: /share_data/yeyuyao/teleop-data-complete/Place_object_into_box.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.14
-  - name: Place_phone_on_stand
-    path: /share_data/yeyuyao/teleop-data-complete/Place_phone_on_stand.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.27
-  - name: Place_screwdriver_in_rack_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Place_screwdriver_in_rack_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Place_slippers_on_shoe_rack
-    path: /share_data/yeyuyao/teleop-data-complete/Place_slippers_on_shoe_rack.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.27
-  - name: Place_strainer_on_cup
-    path: /share_data/yeyuyao/teleop-data-complete/Place_strainer_on_cup.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Place_the_cup_on_the_coaster
-    path: /share_data/yeyuyao/teleop-data-complete/Place_the_cup_on_the_coaster.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.14
-  - name: Place_the_stapler_on_the_book
-    path: /share_data/yeyuyao/teleop-data-complete/Place_the_stapler_on_the_book.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Place_the_toy_chick_into_the_card_slot
-    path: /share_data/yeyuyao/teleop-data-complete/Place_the_toy_chick_into_the_card_slot.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Point_object
-    path: /share_data/yeyuyao/teleop-data-complete/Point_object.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.14
+  # - name: Place_books_into_backpack_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_books_into_backpack_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Place_bowls_or_plates_on_tray
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_bowls_or_plates_on_tray.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
+  # - name: Place_bread_on_tray
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_bread_on_tray.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Place_item_at_specific_orientation
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_item_at_specific_orientation.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Place_liner_on_tray
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_liner_on_tray.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.27
+  # - name: Place_object_into_box
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_object_into_box.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.14
+  # - name: Place_phone_on_stand
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_phone_on_stand.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.27
+  # - name: Place_screwdriver_in_rack_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_screwdriver_in_rack_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Place_slippers_on_shoe_rack
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_slippers_on_shoe_rack.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.27
+  # - name: Place_strainer_on_cup
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_strainer_on_cup.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Place_the_cup_on_the_coaster
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_the_cup_on_the_coaster.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.14
+  # - name: Place_the_stapler_on_the_book
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_the_stapler_on_the_book.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Place_the_toy_chick_into_the_card_slot
+  #   path: /share_data/yeyuyao/teleop-data-complete/Place_the_toy_chick_into_the_card_slot.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Point_object
+  #   path: /share_data/yeyuyao/teleop-data-complete/Point_object.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.14
   - name: Pour_objects_out_of_box
     path: /share_data/yeyuyao/teleop-data-complete/Pour_objects_out_of_box.zarr
     mapping: ${real_world_dataset_mapping}
     weight: 0.26
-  - name: Pour_teapot
-    path: /share_data/yeyuyao/teleop-data-complete/Pour_teapot.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Pour_water
-    path: /share_data/yeyuyao/teleop-data-complete/Pour_water.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Press_keyboard
-    path: /share_data/yeyuyao/teleop-data-complete/Press_keyboard.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Press_power_strip_button_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Press_power_strip_button_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.22
-  - name: Pull_a_huge_needle_tube
-    path: /share_data/yeyuyao/teleop-data-complete/Pull_a_huge_needle_tube.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.21
-  - name: Pull_out_the_building_blocks_with_both_hands
-    path: /share_data/yeyuyao/teleop-data-complete/Pull_out_the_building_blocks_with_both_hands.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.25
-  - name: Pull_out_tissue
-    path: /share_data/yeyuyao/teleop-data-complete/Pull_out_tissue.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.10
-  - name: Pull_the_tape_measure_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Pull_the_tape_measure_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.33
-  - name: Push_object
-    path: /share_data/yeyuyao/teleop-data-complete/Push_object.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Push_object_to_color_region
-    path: /share_data/yeyuyao/teleop-data-complete/Push_object_to_color_region.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Put_glasses_into_case
-    path: /share_data/yeyuyao/teleop-data-complete/Put_glasses_into_case.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.31
-  - name: Put_glove_on_own_hand
-    path: /share_data/yeyuyao/teleop-data-complete/Put_glove_on_own_hand.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.04
-  - name: Put_hat_on_mannequin
-    path: /share_data/yeyuyao/teleop-data-complete/Put_hat_on_mannequin.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.22
-  - name: Put_items_into_container_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Put_items_into_container_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.10
-  - name: Put_marker_into_pen_holder
-    path: /share_data/yeyuyao/teleop-data-complete/Put_marker_into_pen_holder.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Put_orange_in_basket
-    path: /share_data/yeyuyao/teleop-data-complete/Put_orange_in_basket.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Put_spray_upright
-    path: /share_data/yeyuyao/teleop-data-complete/Put_spray_upright.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Put_tea_bag_into_teapot_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Put_tea_bag_into_teapot_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.30
-  - name: Put_the_three_bottles_together
-    path: /share_data/yeyuyao/teleop-data-complete/Put_the_three_bottles_together.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.11
-  - name: Put_the_toothbrush_and_toothpaste_into_the_cup_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Put_the_toothbrush_and_toothpaste_into_the_cup_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.30
-  - name: Put_toothpaste_into_toothpaste_box_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Put_toothpaste_into_toothpaste_box_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Remove_tape_from_object_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Remove_tape_from_object_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.20
-  - name: Scoop_water
-    path: /share_data/yeyuyao/teleop-data-complete/Scoop_water.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Shake_test_tube_containing_soapy_water_to_create_bubbles
-    path: /share_data/yeyuyao/teleop-data-complete/Shake_test_tube_containing_soapy_water_to_create_bubbles.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.12
-  - name: Sort_objects
-    path: /share_data/yeyuyao/teleop-data-complete/Sort_objects.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.04
-  - name: Sprinkle_seasoning_powder
-    path: /share_data/yeyuyao/teleop-data-complete/Sprinkle_seasoning_powder.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Stack_block
-    path: /share_data/yeyuyao/teleop-data-complete/Stack_block.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Stack_paper_cups_into_column_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Stack_paper_cups_into_column_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.35
-  - name: Stack_paper_cups_into_pyramid_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Stack_paper_cups_into_pyramid_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.26
-  - name: Stack_tableware
-    path: /share_data/yeyuyao/teleop-data-complete/Stack_tableware.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.19
-  - name: Stamp_paper
-    path: /share_data/yeyuyao/teleop-data-complete/Stamp_paper.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Stand_the_fallen_shuttlecock_upright
-    path: /share_data/yeyuyao/teleop-data-complete/Stand_the_fallen_shuttlecock_upright.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.26
-  - name: Stick_card_on_whiteboard
-    path: /share_data/yeyuyao/teleop-data-complete/Stick_card_on_whiteboard.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.31
-  - name: Stir_coffee
-    path: /share_data/yeyuyao/teleop-data-complete/Stir_coffee.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.22
-  - name: Stretch_playdough
-    path: /share_data/yeyuyao/teleop-data-complete/Stretch_playdough.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Swap_hand
-    path: /share_data/yeyuyao/teleop-data-complete/Swap_hand.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Take_clothes_out_of_bag
-    path: /share_data/yeyuyao/teleop-data-complete/Take_clothes_out_of_bag.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Take_items_out_of_container_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Take_items_out_of_container_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.22
-  - name: Take_jelly_from_human
-    path: /share_data/yeyuyao/teleop-data-complete/Take_jelly_from_human.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.31
-  - name: Take_off_the_hat
-    path: /share_data/yeyuyao/teleop-data-complete/Take_off_the_hat.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Take_out_teabag
-    path: /share_data/yeyuyao/teleop-data-complete/Take_out_teabag.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.12
-  - name: Take_tableware
-    path: /share_data/yeyuyao/teleop-data-complete/Take_tableware.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.27
-  - name: Take_the_book_out_of_the_schoolbag
-    path: /share_data/yeyuyao/teleop-data-complete/Take_the_book_out_of_the_schoolbag.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Tear_sticky
-    path: /share_data/yeyuyao/teleop-data-complete/Tear_sticky.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.15
-  - name: Uncover_the_teapot
-    path: /share_data/yeyuyao/teleop-data-complete/Uncover_the_teapot.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
-  - name: Untie_the_bowstring
-    path: /share_data/yeyuyao/teleop-data-complete/Untie_the_bowstring.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
-  - name: Use_lint_roller_on_clothes_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Use_lint_roller_on_clothes_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Wear_badge_merged
-    path: /share_data/yeyuyao/teleop-data-complete/Wear_badge_merged.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: Wipe_cola
-    path: /share_data/yeyuyao/teleop-data-complete/Wipe_cola.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.03
-  - name: Wipe_plate_with_scouring_sponge
-    path: /share_data/yeyuyao/teleop-data-complete/Wipe_plate_with_scouring_sponge.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
-  - name: Wipe_whiteboard
-    path: /share_data/yeyuyao/teleop-data-complete/Wipe_whiteboard.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.02
-  - name: attach_sticky_note
-    path: /share_data/yeyuyao/teleop-data-complete/attach_sticky_note.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.24
-  - name: entangled_rope
-    path: /share_data/yeyuyao/teleop-data-complete/entangled_rope.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.12
-  - name: flip_dice
-    path: /share_data/yeyuyao/teleop-data-complete/flip_dice.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.29
-  - name: flip_phone_over
-    path: /share_data/yeyuyao/teleop-data-complete/flip_phone_over.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.26
-  - name: folding_paper_boxes
-    path: /share_data/yeyuyao/teleop-data-complete/folding_paper_boxes.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.06
-  - name: open_ring_binder
-    path: /share_data/yeyuyao/teleop-data-complete/open_ring_binder.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.18
-  - name: place_bookmark_into_book
-    path: /share_data/yeyuyao/teleop-data-complete/place_bookmark_into_book.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.20
-  - name: place_mouse_on_mouse_pad
-    path: /share_data/yeyuyao/teleop-data-complete/place_mouse_on_mouse_pad.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.26
-  - name: place_tablemat
-    path: /share_data/yeyuyao/teleop-data-complete/place_tablemat.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.20
-  - name: roll_dice
-    path: /share_data/yeyuyao/teleop-data-complete/roll_dice.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.31
-  - name: shuffle_cards
-    path: /share_data/yeyuyao/teleop-data-complete/shuffle_cards.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.27
-  - name: take_cups_from_stack
-    path: /share_data/yeyuyao/teleop-data-complete/take_cups_from_stack.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.13
-  - name: touch_tap_pinch_specific_part
-    path: /share_data/yeyuyao/teleop-data-complete/touch_tap_pinch_specific_part.zarr
-    mapping: ${real_world_dataset_mapping}
-    weight: 0.17
+  # - name: Pour_teapot
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pour_teapot.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Pour_water
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pour_water.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Press_keyboard
+  #   path: /share_data/yeyuyao/teleop-data-complete/Press_keyboard.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Press_power_strip_button_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Press_power_strip_button_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.22
+  # - name: Pull_a_huge_needle_tube
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pull_a_huge_needle_tube.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.21
+  # - name: Pull_out_the_building_blocks_with_both_hands
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pull_out_the_building_blocks_with_both_hands.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.25
+  # - name: Pull_out_tissue
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pull_out_tissue.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.10
+  # - name: Pull_the_tape_measure_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Pull_the_tape_measure_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.33
+  # - name: Push_object
+  #   path: /share_data/yeyuyao/teleop-data-complete/Push_object.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Push_object_to_color_region
+  #   path: /share_data/yeyuyao/teleop-data-complete/Push_object_to_color_region.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Put_glasses_into_case
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_glasses_into_case.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.31
+  # - name: Put_glove_on_own_hand
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_glove_on_own_hand.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.04
+  # - name: Put_hat_on_mannequin
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_hat_on_mannequin.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.22
+  # - name: Put_items_into_container_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_items_into_container_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.10
+  # - name: Put_marker_into_pen_holder
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_marker_into_pen_holder.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Put_orange_in_basket
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_orange_in_basket.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Put_spray_upright
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_spray_upright.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Put_tea_bag_into_teapot_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_tea_bag_into_teapot_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.30
+  # - name: Put_the_three_bottles_together
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_the_three_bottles_together.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.11
+  # - name: Put_the_toothbrush_and_toothpaste_into_the_cup_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_the_toothbrush_and_toothpaste_into_the_cup_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.30
+  # - name: Put_toothpaste_into_toothpaste_box_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Put_toothpaste_into_toothpaste_box_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Remove_tape_from_object_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Remove_tape_from_object_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.20
+  # - name: Scoop_water
+  #   path: /share_data/yeyuyao/teleop-data-complete/Scoop_water.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Shake_test_tube_containing_soapy_water_to_create_bubbles
+  #   path: /share_data/yeyuyao/teleop-data-complete/Shake_test_tube_containing_soapy_water_to_create_bubbles.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.12
+  # - name: Sort_objects
+  #   path: /share_data/yeyuyao/teleop-data-complete/Sort_objects.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.04
+  # - name: Sprinkle_seasoning_powder
+  #   path: /share_data/yeyuyao/teleop-data-complete/Sprinkle_seasoning_powder.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Stack_block
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stack_block.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Stack_paper_cups_into_column_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stack_paper_cups_into_column_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.35
+  # - name: Stack_paper_cups_into_pyramid_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stack_paper_cups_into_pyramid_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.26
+  # - name: Stack_tableware
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stack_tableware.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.19
+  # - name: Stamp_paper
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stamp_paper.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Stand_the_fallen_shuttlecock_upright
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stand_the_fallen_shuttlecock_upright.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.26
+  # - name: Stick_card_on_whiteboard
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stick_card_on_whiteboard.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.31
+  # - name: Stir_coffee
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stir_coffee.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.22
+  # - name: Stretch_playdough
+  #   path: /share_data/yeyuyao/teleop-data-complete/Stretch_playdough.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Swap_hand
+  #   path: /share_data/yeyuyao/teleop-data-complete/Swap_hand.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Take_clothes_out_of_bag
+  #   path: /share_data/yeyuyao/teleop-data-complete/Take_clothes_out_of_bag.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Take_items_out_of_container_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Take_items_out_of_container_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.22
+  # - name: Take_jelly_from_human
+  #   path: /share_data/yeyuyao/teleop-data-complete/Take_jelly_from_human.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.31
+  # - name: Take_off_the_hat
+  #   path: /share_data/yeyuyao/teleop-data-complete/Take_off_the_hat.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Take_out_teabag
+  #   path: /share_data/yeyuyao/teleop-data-complete/Take_out_teabag.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.12
+  # - name: Take_tableware
+  #   path: /share_data/yeyuyao/teleop-data-complete/Take_tableware.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.27
+  # - name: Take_the_book_out_of_the_schoolbag
+  #   path: /share_data/yeyuyao/teleop-data-complete/Take_the_book_out_of_the_schoolbag.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Tear_sticky
+  #   path: /share_data/yeyuyao/teleop-data-complete/Tear_sticky.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.15
+  # - name: Uncover_the_teapot
+  #   path: /share_data/yeyuyao/teleop-data-complete/Uncover_the_teapot.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
+  # - name: Untie_the_bowstring
+  #   path: /share_data/yeyuyao/teleop-data-complete/Untie_the_bowstring.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17
+  # - name: Use_lint_roller_on_clothes_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Use_lint_roller_on_clothes_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Wear_badge_merged
+  #   path: /share_data/yeyuyao/teleop-data-complete/Wear_badge_merged.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: Wipe_cola
+  #   path: /share_data/yeyuyao/teleop-data-complete/Wipe_cola.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.03
+  # - name: Wipe_plate_with_scouring_sponge
+  #   path: /share_data/yeyuyao/teleop-data-complete/Wipe_plate_with_scouring_sponge.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
+  # - name: Wipe_whiteboard
+  #   path: /share_data/yeyuyao/teleop-data-complete/Wipe_whiteboard.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.02
+  # - name: attach_sticky_note
+  #   path: /share_data/yeyuyao/teleop-data-complete/attach_sticky_note.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.24
+  # - name: entangled_rope
+  #   path: /share_data/yeyuyao/teleop-data-complete/entangled_rope.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.12
+  # - name: flip_dice
+  #   path: /share_data/yeyuyao/teleop-data-complete/flip_dice.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.29
+  # - name: flip_phone_over
+  #   path: /share_data/yeyuyao/teleop-data-complete/flip_phone_over.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.26
+  # - name: folding_paper_boxes
+  #   path: /share_data/yeyuyao/teleop-data-complete/folding_paper_boxes.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.06
+  # - name: open_ring_binder
+  #   path: /share_data/yeyuyao/teleop-data-complete/open_ring_binder.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.18
+  # - name: place_bookmark_into_book
+  #   path: /share_data/yeyuyao/teleop-data-complete/place_bookmark_into_book.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.20
+  # - name: place_mouse_on_mouse_pad
+  #   path: /share_data/yeyuyao/teleop-data-complete/place_mouse_on_mouse_pad.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.26
+  # - name: place_tablemat
+  #   path: /share_data/yeyuyao/teleop-data-complete/place_tablemat.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.20
+  # - name: roll_dice
+  #   path: /share_data/yeyuyao/teleop-data-complete/roll_dice.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.31
+  # - name: shuffle_cards
+  #   path: /share_data/yeyuyao/teleop-data-complete/shuffle_cards.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.27
+  # - name: take_cups_from_stack
+  #   path: /share_data/yeyuyao/teleop-data-complete/take_cups_from_stack.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.13
+  # - name: touch_tap_pinch_specific_part
+  #   path: /share_data/yeyuyao/teleop-data-complete/touch_tap_pinch_specific_part.zarr
+  #   mapping: ${real_world_dataset_mapping}
+  #   weight: 0.17

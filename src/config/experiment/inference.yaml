@@ -13,6 +13,7 @@ policy:
   default_instruction: null
   ar_temperature: 1.0
   ar_cfg: 1.0
+  use_mlp_layer_norm: true
 
 serving:
   host: 0.0.0.0
