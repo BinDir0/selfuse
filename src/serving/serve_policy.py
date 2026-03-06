@@ -9,6 +9,7 @@ from src.serving.websocket_policy_server import (
     create_env_wrapper,
     WebsocketPolicyServer,
 )
+from src.serving.serving_recorder import ServingRecorder
 
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -25,11 +26,28 @@ def _load_config() -> OmegaConf:
     return cfg
 
 
+def _create_recorder(serving_cfg: OmegaConf, wrapper_cfg: OmegaConf | None = None) -> ServingRecorder | None:
+    record_root_dir = getattr(serving_cfg, "record_root_dir", None)
+    if not record_root_dir:
+        return None
+
+    root_dir = pathlib.Path(record_root_dir).expanduser()
+    if not root_dir.is_absolute():
+        project_root = pathlib.Path(__file__).resolve().parents[2]
+        root_dir = project_root / root_dir
+    logger.info("Recording serving requests to %s", root_dir)
+
+    image_key = getattr(wrapper_cfg, "image_key", "image")
+    depth_key = getattr(wrapper_cfg, "depth_key", "depth_image")
+    return ServingRecorder(root_dir, image_key=image_key, depth_key=depth_key)
+
+
 def main() -> None:
     try:
         cfg = _load_config()
         logger.info("Initializing policy engine...")
         policy = create_engine(cfg.policy, cfg.serving)
+        wrapper_cfg = None
         if getattr(cfg, "env_wrapper", None) and cfg.env_wrapper.enabled:
             wrapper_cfg = cfg.env_wrapper
             logger.info("Enabling env wrapper: %s", wrapper_cfg)
@@ -45,6 +63,7 @@ def main() -> None:
             host=cfg.serving.host,
             port=cfg.serving.port,
             metadata=policy_metadata,
+            recorder=_create_recorder(cfg.serving, wrapper_cfg),
         )
         logger.info("Serving websocket policy on %s:%s", cfg.serving.host, cfg.serving.port)
         server.serve_forever()

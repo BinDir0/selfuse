@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from . import msgpack_numpy
+from .serving_recorder import ServingRecorder, ConnectionRecorder
 
 
 logger = logging.getLogger(__name__)
@@ -124,11 +125,13 @@ class WebsocketPolicyServer:
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
+        recorder: ServingRecorder | None = None,
     ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+        self._recorder = recorder
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     @staticmethod
@@ -218,6 +221,13 @@ class WebsocketPolicyServer:
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
         packer = msgpack_numpy.Packer()
+        connection_recorder: ConnectionRecorder | None = None
+
+        if self._recorder is not None:
+            try:
+                connection_recorder = self._recorder.open_connection(websocket.remote_address)
+            except Exception:
+                logger.exception("Failed to initialize serving recorder for %s", websocket.remote_address)
 
         await websocket.send(packer.pack(self._metadata))
 
@@ -239,6 +249,12 @@ class WebsocketPolicyServer:
                 if prev_total_time is not None:
                     # We can only record the last total time since we also want to include the send time.
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                if connection_recorder is not None:
+                    try:
+                        connection_recorder.record(obs, action)
+                    except Exception:
+                        logger.exception("Failed to record request for %s", websocket.remote_address)
 
                 await websocket.send(packer.pack(action))
                 prev_total_time = time.monotonic() - start_time

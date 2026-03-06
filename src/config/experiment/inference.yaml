@@ -20,6 +20,7 @@ serving:
   port: 61234
   device: auto
   autocast: true
+  record_root_dir: outputs/serving_records
 
 env_wrapper:
   enabled: true
@@ -28,4 +29,3 @@ env_wrapper:
   intrinsic_key: camera_intrinsics
   instruction_key: instruction
   states_key: states
-
