@@ -66,9 +66,34 @@ alias interface="ros2 launch model_interface model_interface.launch.py"
 
 （1）在宿主机进入本文件夹的`assets/find_port`，执行`python find.py`，把左右手的端口填入`src/hand/launch/dual_hands.launch.py`。
 
-（2）在宿主机进入本文件夹的`assets/`，执行`python host_interaction_server.py`，启动用户指令输入终端。
+（2）把四组手眼标定文件放到本文件夹下的一个统一文件夹中，比如：
 
-（3）在docker容器进入本文件夹，执行构建和启动命令，启动相机、机械臂、机械手及推理客户端节点。
+```bash
+root@zyf-4090:~/workspace/legendvla-inference/examples# tree -L 2
+.
+└── calibration_outputs
+    ├── xiaozi1-chest-cam-left-arm-20251219-221432
+    ├── xiaozi1-chest-cam-right-arm-20251219-222808
+    ├── xiaozi1-head-cam-left-arm-20251219-220859
+    └── xiaozi1-head-cam-right-arm-20251219-222411
+
+5 directories, 0 files
+```
+并把容器中这个文件夹路径（此例中为`/root/workspace/legendvla-inference/examples/calibration_outputs`）写到`src/model_interface/launch/model_interface.launch.py`中的`calibration_path`项。
+
+（3）根据模型服务端所在的服务器，设置`src/model_interface/launch/model_interface.launch.py`中的`model_server_port`项。对应关系如下表：
+
+| 服务器 | 对应端口号 | 服务器 | 对应端口号 | 服务器 | 对应端口号 | 服务器 | 对应端口号 |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| pro-01 | 18020 | pro-04 | 18021 | pro-05 | 18022 | pro-07 | 18023 |
+| pro-09 | 18024 | pro-10 | 18025 | pro-11 | 18026 | pro-14 | 18033 |
+| pro-15 | 18034 | pro-16 | 18035 | pro-17 | 18036 | pro-18 | 18037 |
+| pro-38 | 18028 | pro-48 | 18029 | pro-49 | 18030 | pro-50 | 18031 
+| pro-51 | 18032 |  |  |  |  |  |  |
+
+（4）在宿主机进入本文件夹的`assets/`，执行`python host_interaction_server.py`，启动用户指令输入终端。
+
+（5）在docker容器进入本文件夹，执行构建和启动命令，启动相机、机械臂、机械手及推理客户端节点。
 
 ### 2. 任务循环 (Loop)
 系统按以下流程循环执行任务：
