@@ -32,7 +32,18 @@ sudo apt install tree
 sudo apt-get update && sudo apt-get install ros-$ROS_DISTRO-rmw-cyclonedds-cpp -y
 echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc && source ~/.bashrc
 ```
-
+6. **设置命令缩写**：在container中执行：
+```bash
+echo '
+# ROS2 Aliases
+alias cb="colcon build"
+alias s="source install/setup.bash"
+alias camera="ros2 launch camera camera_node.launch.py"
+alias hand="ros2 launch hand dual_hands.launch.py"
+alias arm="ros2 launch arm dual_arms.launch.py"
+alias interface="ros2 launch model_interface model_interface.launch.py"
+' >> ~/.bashrc && source ~/.bashrc
+```
 
 
 ## 推理流程
