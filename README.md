@@ -63,8 +63,13 @@ alias interface="ros2 launch model_interface model_interface.launch.py"
 ```
    
 2. **启动客户端**：
-在宿主机进入本文件夹的`assets/find_port`，执行`python find.py`，把左右手的端口填入`src/hand/launch/dual_hands.launch.py`。
-在本文件夹执行构建和启动命令，启动相机、机械臂、机械手及推理客户端节点。
+
+（1）在宿主机进入本文件夹的`assets/find_port`，执行`python find.py`，把左右手的端口填入`src/hand/launch/dual_hands.launch.py`。
+
+（2）在宿主机进入本文件夹的`assets/`，执行`python host_interaction_server.py`，启动用户指令输入终端。
+
+（3）在docker容器进入本文件夹，执行构建和启动命令，启动相机、机械臂、机械手及推理客户端节点。
+
 ### 2. 任务循环 (Loop)
 系统按以下流程循环执行任务：
 1. **配置任务**：邀请用户在终端输入语言指令，并选择运行模式（`deploy` 或 `debug`）。
