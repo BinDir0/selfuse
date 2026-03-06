@@ -136,7 +136,7 @@ docker run -d \
   -e ROS_LOCALHOST_ONLY=1 \
   -e PROJECT_DIR=/root/workspace/legendvla-inference \
   ${EXTRA_DISPLAY_MOUNTS[@]} \
-  -v /home/admin01/Documents/projects/LegendaryVLA/LegendVLA-Inference:/root/workspace/legendvla-inference \
+  -v /home/user/Documents/LegendVLA-Inference:/root/workspace/legendvla-inference \
   ${XAUTH_MOUNT_OPT[@]} \
   ${SDK_MOUNT_OPT[@]} \
   "${IMAGE}" \

@@ -25,6 +25,12 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/
 )
 
+# Install resource files (Robotic_Arm SDK)
+install(DIRECTORY
+  resource
+  DESTINATION lib/
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)

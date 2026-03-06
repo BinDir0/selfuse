@@ -1,5 +1,11 @@
+#!/usr/bin/env python3
+
+import os
 import time
 import threading
+
+# 设置 MuJoCo 使用 GLX 渲染后端（Docker 环境需要）
+os.environ['MUJOCO_GL'] = 'glx'
 
 import mink
 import numpy as np
@@ -170,20 +176,25 @@ class ArmIKNode(Node):
 
     def _start_viewer(self):
         """在单独线程中启动MuJoCo viewer"""
-        self.viewer = mujoco.viewer.launch_passive(
-                model=self.model, 
-                data=self.configuration.data, 
-                show_left_ui=True,
-                show_right_ui=True
-            )
-        mujoco.mjv_defaultFreeCamera(self.model, self.viewer.cam)
+        try:
+            self.viewer = mujoco.viewer.launch_passive(
+                    model=self.model, 
+                    data=self.configuration.data, 
+                    show_left_ui=True,
+                    show_right_ui=True
+                )
+            mujoco.mjv_defaultFreeCamera(self.model, self.viewer.cam)
+        except Exception as e:
+            self.get_logger().warning(f"Failed to start viewer (headless environment?): {e}")
+            self.viewer = None
+            self.enable_viewer = False
 
     def _warm_up_sim(self):
         """预热仿真"""
         for _ in range(10):
             with self.data_lock:
                 mujoco.mj_forward(self.model, self.configuration.data)
-                if self.enable_viewer:
+                if self.enable_viewer and self.viewer:
                     self.viewer.sync()
                 time.sleep(0.01)
 
@@ -231,7 +242,7 @@ class ArmIKNode(Node):
         # MuJoCo更新
         with self.data_lock:
             mujoco.mj_forward(self.model, self.configuration.data)
-            if self.enable_viewer:
+            if self.enable_viewer and self.viewer:
                 self.viewer.sync()
         
         # 更新任务目标

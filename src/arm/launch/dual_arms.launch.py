@@ -11,6 +11,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'frequency': 100.0,
+            'enable_viewer': True,
         }]
     )
     
