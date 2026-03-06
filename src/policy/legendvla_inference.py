@@ -604,7 +604,7 @@ class LegendVLAInference(nn.Module):
             inputs["depth_values"] = processed["depth_values"].to(self.dtype)
 
         if self.mode == "flow":
-            inputs["n_actions"] = torch.zeros(batch_size, dtype=torch.long)
+            inputs["n_actions"] = torch.full((batch_size, ), self.action_horizon, dtype=torch.long)
             inputs["answer_start_idx"] = processed["answer_start_idx"]
 
             m = self.model.module if hasattr(self.model, "module") else self.model
