@@ -509,6 +509,10 @@ class LegendVLAInference(nn.Module):
         self.processor = hydra.utils.instantiate(model_cfg.vla_processor)
         if hasattr(self.processor, "tokenizer_padding"):
             self.processor.tokenizer_padding = tokenizer_padding
+        if hasattr(self.processor, "depth_clip_range") and getattr(self.processor, "depth_clip_range", None) is None:
+            depth_clip_range = OmegaConf.select(model_cfg, "depth_clip_range", default=None)
+            if depth_clip_range is not None:
+                self.processor.depth_clip_range = tuple(float(x) for x in depth_clip_range)
 
         self.normalizer, self.use_relative_action = self._load_normalizer(model_cfg)
 

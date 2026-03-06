@@ -172,6 +172,7 @@ def process_depth_images(
     depth_images: np.ndarray,
     size: Tuple[int, int],
     rescale_factor: float = 1.0,
+    clip_range: Tuple[float, float] | None = None,
     image_mean: np.ndarray = IMAGENET_MEAN,
     image_std: np.ndarray = IMAGENET_STD,
 ) -> np.ndarray:
@@ -180,32 +181,34 @@ def process_depth_images(
     Args:
         depth_images: np.ndarray [T, H, W] or [T, C, H, W] or [T, H, W, C]
         size: Tuple[int, int] - target size (height, width)
-        rescale_factor: float - scaling factor for pixel values (default 1.0)
+        rescale_factor: float - scaling factor applied before clipping/normalization
+        clip_range: Optional[Tuple[float, float]] - min/max depth range after rescaling
         
     Returns:
         np.ndarray [T, 3, H, W] - processed depth images
     """
-    # Convert to numpy if input is torch tensor
     if isinstance(depth_images, torch.Tensor):
         depth_images = depth_images.cpu().numpy()
-        
-    # Ensure images are in [B, H, W] format
-    if depth_images.ndim == 4: 
-        if depth_images.shape[-1] <= 3: 
+
+    if depth_images.ndim == 4:
+        if depth_images.shape[-1] <= 3:
             depth_images = depth_images[..., 0]
-        elif depth_images.shape[1] <= 3: 
+        elif depth_images.shape[1] <= 3:
             depth_images = depth_images[:, 0, ...]
-    
-    # Rescale the pixel values if needed
+
+    depth_images = depth_images.astype(np.float32)
     if rescale_factor != 1.0:
         depth_images = rescale(depth_images, scale=rescale_factor)
-    
-    # Resize the depth images to the desired size using PIL
+
+    if clip_range is not None:
+        clip_min = np.float32(clip_range[0])
+        clip_max = np.float32(clip_range[1])
+        depth_images = np.clip(depth_images, clip_min, clip_max)
+        depth_images = (depth_images - clip_min) / np.float32(clip_max - clip_min + 1e-6)
+
     depth_images = resize(depth_images, size=size, is_depth=True)
-    
-    # Normalize the depth images to have mean 0 and standard deviation 1
-    depth_images = depth_images[:, np.newaxis, :, :] # [T, H, W] -> [T, 1, H, W]
-    depth_images = np.tile(depth_images, (1, 3, 1, 1)) # [T, 1, H, W] -> [T, 3, H, W]
+    depth_images = depth_images[:, np.newaxis, :, :]
+    depth_images = np.tile(depth_images, (1, 3, 1, 1))
     depth_images = normalize(depth_images, mean=image_mean, std=image_std)
     return depth_images
 
@@ -432,7 +435,9 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         max_seq_len: int,
         ignore_index: int = -100,
         image_size: int = 224,
-        depth_image_size: int = 224, 
+        depth_image_size: int = 224,
+        depth_rescale_factor: float = 1.0 / 1000.0,
+        depth_clip_range: Tuple[float, float] | None = None,
         tokenizer_padding: str = "longest", # longest or max_length
     ):
         super().__init__(
@@ -444,6 +449,8 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
             tokenizer_padding = tokenizer_padding,
         )
         self.depth_image_size = depth_image_size
+        self.depth_rescale_factor = depth_rescale_factor
+        self.depth_clip_range = depth_clip_range
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
         tokens_to_add = {"additional_special_tokens": [
             self.STATE_TOKEN,
@@ -505,13 +512,11 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         # Process depth images if provided
         depth_values = None
         if depth_images is not None:
-            depth_scale_factor = 1.0  # No rescaling by default, adjust if needed
-            if depth_images.dtype == np.uint16: 
-                depth_scale_factor = 1 / 1000.0 # convert mm to m
             depth_values = process_depth_images(
                 depth_images=depth_images,
                 size=(self.depth_image_size, self.depth_image_size),
-                rescale_factor=depth_scale_factor,
+                rescale_factor=self.depth_rescale_factor,
+                clip_range=self.depth_clip_range,
                 image_mean=IMAGENET_MEAN,
                 image_std=IMAGENET_STD,
             )

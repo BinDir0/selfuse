@@ -206,16 +206,7 @@ def process_image(image, depth_image = None, aug_transform = None, depth_clip_ra
         depth_image: np.ndarray, shape: [N, H, W]
     '''
     images_to_process = image
-    depth_images_to_process = None
-    if depth_image is not None:
-        # Convert to float32 first to avoid dtype leak to float64
-        depth_images_to_process = depth_image / np.float32(1000.0) # convert mm to m
-        # normalize the depth images to [0, 1]
-        depth_images_to_process = np.clip(
-            depth_images_to_process,
-            np.float32(depth_clip_range[0]),
-            np.float32(depth_clip_range[1])
-        ) / np.float32(depth_clip_range[1] - depth_clip_range[0] + 1e-6)
+    depth_images_to_process = depth_image
     if aug_transform is not None:
         augmented_images = []
         for img_np in images_to_process:

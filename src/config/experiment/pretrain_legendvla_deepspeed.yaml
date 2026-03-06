@@ -95,6 +95,8 @@ vla_processor:
   ignore_index: ${ignore_index}
   image_size: ${policy.vision_tower.config.image_size}
   depth_image_size: ${policy.depth_encoder.config.image_size}
+  depth_rescale_factor: 0.001
+  depth_clip_range: ${depth_clip_range}
   tokenizer_padding: ${tokenizer_padding} 
 
 vlm_processor: 
