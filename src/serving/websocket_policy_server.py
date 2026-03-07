@@ -10,6 +10,7 @@ from typing import Any, Dict
 import websockets.asyncio.server as _server
 import websockets.frames
 import hydra
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -37,6 +38,46 @@ class RuntimeEngine:
         if isinstance(data, dict):
             return {k: self._move_to_device(v) for k, v in data.items()}
         return data.to(self.device) if torch.is_tensor(data) else data
+
+    def _get_shape_meta(self) -> Dict[str, Any]:
+        if hasattr(self.policy, "model") and hasattr(self.policy.model, "shape_meta"):
+            return self.policy.model.shape_meta
+        raise AttributeError("Policy does not expose model.shape_meta for warmup")
+
+    def _build_dummy_obs(self, instruction: str = "warmup") -> Dict[str, Any]:
+        shape_meta = self._get_shape_meta()
+        rgb_meta = shape_meta["obs"]["rgb"]
+        state_meta = shape_meta["obs"]["state"]
+
+        image = np.zeros((rgb_meta["horizon"], *rgb_meta["shape"]), dtype=np.uint8)
+        states = np.zeros((state_meta["horizon"], state_meta["shape"][0]), dtype=np.float32)
+        intrinsic = np.array([1.0, 1.0, 0.5, 0.5], dtype=np.float32)
+
+        obs = {
+            "image": image,
+            "intrinsic": intrinsic,
+            "instruction": instruction,
+            "states": states,
+        }
+
+        depth_meta = shape_meta["obs"].get("depth")
+        if depth_meta is not None:
+            obs["depth"] = np.zeros((depth_meta["horizon"], *depth_meta["shape"]), dtype=np.float32)
+
+        return obs
+
+    def warmup(self, warmup_iters: int = 5, instruction: str = "warmup") -> None:
+        if warmup_iters <= 0:
+            return
+
+        dummy_obs = self._build_dummy_obs(instruction=instruction)
+        logger.info("Running %d warmup inference iterations", warmup_iters)
+        start_time = time.monotonic()
+        for _ in range(warmup_iters):
+            self.infer(dummy_obs)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        logger.info("Warmup finished in %.3f ms", (time.monotonic() - start_time) * 1000.0)
 
     @torch.inference_mode()
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:

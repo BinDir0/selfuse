@@ -1,6 +1,7 @@
 import logging
 import pathlib
 import socket
+from typing import Any
 
 from omegaconf import OmegaConf
 
@@ -42,11 +43,22 @@ def _create_recorder(serving_cfg: OmegaConf, wrapper_cfg: OmegaConf | None = Non
     return ServingRecorder(root_dir, image_key=image_key, depth_key=depth_key)
 
 
+def _warmup_policy(policy: Any, serving_cfg: OmegaConf) -> None:
+    if not getattr(serving_cfg, "warmup_enabled", False):
+        return
+
+    warmup_iters = int(getattr(serving_cfg, "warmup_iters", 5))
+    warmup_instruction = str(getattr(serving_cfg, "warmup_instruction", "warmup"))
+    logger.info("Starting policy warmup")
+    policy.warmup(warmup_iters=warmup_iters, instruction=warmup_instruction)
+
+
 def main() -> None:
     try:
         cfg = _load_config()
         logger.info("Initializing policy engine...")
         policy = create_engine(cfg.policy, cfg.serving)
+        _warmup_policy(policy, cfg.serving)
         wrapper_cfg = None
         if getattr(cfg, "env_wrapper", None) and cfg.env_wrapper.enabled:
             wrapper_cfg = cfg.env_wrapper

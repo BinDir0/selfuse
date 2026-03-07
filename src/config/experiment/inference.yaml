@@ -20,6 +20,9 @@ serving:
   port: 61234
   device: auto
   autocast: true
+  warmup_enabled: true
+  warmup_iters: 5
+  warmup_instruction: warmup
   record_root_dir: outputs/serving_records
 
 env_wrapper:
