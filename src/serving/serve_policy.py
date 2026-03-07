@@ -5,12 +5,12 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from src.serving.websocket_policy_server import (
-    create_engine, 
-    create_env_wrapper,
-    WebsocketPolicyServer,
-)
 from src.serving.serving_recorder import ServingRecorder
+from src.serving.websocket_policy_server import (
+    WebsocketPolicyServer,
+    create_engine,
+    create_env_wrapper,
+)
 
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -22,13 +22,19 @@ def _load_config() -> OmegaConf:
     logger.info("Loading inference config: %s", config_path)
     cfg = OmegaConf.load(config_path)
     OmegaConf.resolve(cfg)
-    assert "serving" in cfg and "policy" in cfg and "env_wrapper" in cfg, \
+    assert "serving" in cfg and "policy" in cfg and "env_wrapper" in cfg, (
         f"Missing policy/serving/env_wrapper config in: {config_path}"
+    )
     return cfg
 
 
+
 def _create_recorder(serving_cfg: OmegaConf, wrapper_cfg: OmegaConf | None = None) -> ServingRecorder | None:
-    record_root_dir = getattr(serving_cfg, "record_root_dir", None)
+    if not bool(serving_cfg.record_enabled):
+        logger.info("Serving recorder is disabled")
+        return None
+
+    record_root_dir = serving_cfg.record_root_dir
     if not record_root_dir:
         return None
 
@@ -43,14 +49,16 @@ def _create_recorder(serving_cfg: OmegaConf, wrapper_cfg: OmegaConf | None = Non
     return ServingRecorder(root_dir, image_key=image_key, depth_key=depth_key)
 
 
+
 def _warmup_policy(policy: Any, serving_cfg: OmegaConf) -> None:
-    if not getattr(serving_cfg, "warmup_enabled", False):
+    if not serving_cfg.warmup_enabled:
         return
 
-    warmup_iters = int(getattr(serving_cfg, "warmup_iters", 5))
-    warmup_instruction = str(getattr(serving_cfg, "warmup_instruction", "warmup"))
+    warmup_iters = int(serving_cfg.warmup_iters)
+    warmup_instruction = str(serving_cfg.warmup_instruction)
     logger.info("Starting policy warmup")
     policy.warmup(warmup_iters=warmup_iters, instruction=warmup_instruction)
+
 
 
 def main() -> None:
@@ -76,6 +84,7 @@ def main() -> None:
             port=cfg.serving.port,
             metadata=policy_metadata,
             recorder=_create_recorder(cfg.serving, wrapper_cfg),
+            log_obs_details=bool(cfg.serving.log_obs_details),
         )
         logger.info("Serving websocket policy on %s:%s", cfg.serving.host, cfg.serving.port)
         server.serve_forever()

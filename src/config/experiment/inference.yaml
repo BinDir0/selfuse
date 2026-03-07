@@ -22,7 +22,15 @@ serving:
   autocast: true
   warmup_enabled: true
   warmup_iters: 5
-  warmup_instruction: warmup
+  warmup_instruction: grasp the yellow toy
+  warmup_image_shape: [480, 640, 3]
+  warmup_depth_shape: [480, 640, 1]
+  warmup_intrinsic:
+    - [388.0, 0.0, 320.0]
+    - [0.0, 388.0, 240.0]
+    - [0.0, 0.0, 1.0]
+  log_obs_details: false
+  record_enabled: false
   record_root_dir: outputs/serving_records
 
 env_wrapper:
