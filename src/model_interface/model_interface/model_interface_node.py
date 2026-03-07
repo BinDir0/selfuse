@@ -477,7 +477,7 @@ class ModelInterfaceNode(Node):
             rgb_seq, depth_seq = [], []
             for h in range(self.i_hor):
                 t = t_ref - (h * self.i_str * self.dt_ns)
-                if not self._is_in_range(snap_rgb, t): break
+                if not self._is_in_range(snap_rgb, t) or not self._is_in_range(snap_depth, t): break
                 rgb_seq.append(self._find_nearest(snap_rgb, t))
                 depth_seq.append(self._find_nearest(snap_depth, t))
             

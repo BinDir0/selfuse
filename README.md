@@ -106,3 +106,14 @@ root@zyf-4090:~/workspace/legendvla-inference/examples# tree -L 2
     - `debug` 模式：单步执行。每按一次空格键或踩下脚踏板 2，机器人向前执行一步预测动作。
 4. **归位与重置**：踩下脚踏板 3，系统执行归位动作并结束当前任务（播放“系统归位”提示音）。
 5. **进入下一轮**：系统会再次提示输入新的指令和模式。
+
+
+## 其他功能
+
+### 1. 模拟数据测试interface节点
+
+`mock_robot_data`节点模拟发布相机、机械臂、机械手的数据，可以用于测试推理客户端和服务器。
+
+### 2. 重放RRD数据测试臂和手节点
+
+`replay_rrd`节点读取rrd数据，降频，发布到臂和手的IK节点，可以用于测试臂和手的正确性。注意，使用前需要在docker容器中安装`pip install rerun-sdk==0.23.3`，使用后`pip uninstall rerun-sdk`并重新`pip install -r requirements.txt`。
