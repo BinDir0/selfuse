@@ -54,20 +54,6 @@ class LegendVLAInference:
             policy_cfg.diffloss.num_sampling_steps = f"{cfg.diffusion_sampling_steps}"
             policy_cfg.diffloss.use_ddim_sampling = cfg.diffusion_use_ddim_sampling
             policy_cfg.cfg.num_inference_steps = cfg.flow_sampling_steps
-            
-            # Apply use_mlp_layer_norm from inference config
-            use_mlp_layer_norm = cfg.inference.get("use_mlp_layer_norm", False)
-            if use_mlp_layer_norm:
-                if self.is_main_process:
-                    print("启用MLP LayerNorm兼容模式")
-                if hasattr(policy_cfg, "action_encoder"):
-                    policy_cfg.action_encoder.use_mlp_layer_norm = True
-                if hasattr(policy_cfg, "action_decoder"):
-                    policy_cfg.action_decoder.use_mlp_layer_norm = True
-                if hasattr(policy_cfg, "action_encoder_ar"):
-                    policy_cfg.action_encoder_ar.use_mlp_layer_norm = True
-                if hasattr(policy_cfg, "latent_condition_projector"):
-                    policy_cfg.latent_condition_projector.use_mlp_layer_norm = True
         else:
             # 如果没有指定 model_config_path，使用当前配置中的 policy
             if self.is_main_process:

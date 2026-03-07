@@ -2,22 +2,27 @@
 
 policy:
   _target_: src.policy.legendvla.LegendVLAInference
-  model_config_path: /share_data/chenzhang/projects/LegendVLA-train/outputs/2026.02.09/21.04_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
-  checkpoint_path: /share_data/chenzhang/projects/LegendVLA-train/outputs/2026.02.09/21.04_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=35000-eval_l1_loss=0.0251/pytorch_model/mp_rank_00_model_states.pt
+  model_config_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.03.01/05.48_legendvla_Arrange_magnets_by_color_pretrain_legendvla_deepspeed/.hydra/config.yaml
+  checkpoint_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.03.01/05.48_legendvla_Arrange_magnets_by_color_pretrain_legendvla_deepspeed/checkpoints/update_step=35000-eval_l1_loss=0.0069/pytorch_model/mp_rank_00_model_states.pt
   mode: flow
   use_mixed_precision: true
-  tokenizer_padding: longest
+  tokenizer_padding: max_length
+  max_length: 384
   diffusion_sampling_steps: null
   diffusion_use_ddim_sampling: false
   flow_sampling_steps: null
   default_instruction: null
   ar_temperature: 1.0
   ar_cfg: 1.0
-  use_mlp_layer_norm: true
+  compile:
+    mode: default
+    dynamic: null
+    fullgraph: false
+    backend: inductor
 
 serving:
   host: 0.0.0.0
-  port: 61234
+  port: 11451
   device: auto
   autocast: true
   warmup_enabled: true
@@ -31,7 +36,7 @@ serving:
     - [0.0, 0.0, 1.0]
   log_obs_details: false
   profile_enabled: false
-  profile_steps: 20
+  profile_steps: 5
   profile_skip_first: 0
   profile_dir: outputs/serving_profile
   record_enabled: false

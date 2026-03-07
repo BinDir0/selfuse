@@ -52,6 +52,8 @@ class RuntimeEngine:
         self._profile_output_dir: pathlib.Path | None = None
 
         self.policy.to(device)
+        if hasattr(self.policy, "maybe_compile_model"):
+            self.policy.maybe_compile_model()
 
     def _move_to_device(self, data: Any) -> Any:
         if isinstance(data, dict):
@@ -115,6 +117,8 @@ class RuntimeEngine:
         self._profile_output_dir = None
 
     def _get_shape_meta(self) -> Dict[str, Any]:
+        if hasattr(self.policy, "shape_meta"):
+            return self.policy.shape_meta
         if hasattr(self.policy, "model") and hasattr(self.policy.model, "shape_meta"):
             return self.policy.model.shape_meta
         raise AttributeError("Policy does not expose model.shape_meta for warmup")
