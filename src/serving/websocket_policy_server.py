@@ -4,6 +4,7 @@ import asyncio
 from contextlib import nullcontext
 import http
 import logging
+import pathlib
 import time
 import traceback
 from typing import Any, Dict
@@ -45,6 +46,10 @@ class RuntimeEngine:
         self.warmup_image_shape = tuple(int(x) for x in warmup_image_shape)
         self.warmup_depth_shape = tuple(int(x) for x in warmup_depth_shape)
         self.warmup_intrinsic = np.asarray(warmup_intrinsic, dtype=np.float64)
+        self._profiler = None
+        self._profile_steps = 0
+        self._profile_max_steps = 0
+        self._profile_output_dir: pathlib.Path | None = None
 
         self.policy.to(device)
 
@@ -57,6 +62,51 @@ class RuntimeEngine:
         if not self.use_autocast:
             return nullcontext()
         return torch.autocast(device_type=self.device.type, dtype=self.policy.dtype)
+
+    def enable_profiling(self, output_dir: str | pathlib.Path, steps: int) -> None:
+        if steps <= 0:
+            return
+        output_dir = pathlib.Path(output_dir).expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if self.device.type == "cuda":
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        self._profiler = torch.profiler.profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        )
+        self._profiler.__enter__()
+        self._profile_steps = 0
+        self._profile_max_steps = steps
+        self._profile_output_dir = output_dir
+        logger.info("Enabled inference profiler for %d requests. Output dir: %s", steps, output_dir)
+
+    def _step_profiler(self) -> None:
+        if self._profiler is None:
+            return
+        self._profiler.step()
+        self._profile_steps += 1
+        if self._profile_steps >= self._profile_max_steps:
+            self._finalize_profiler()
+
+    def _finalize_profiler(self) -> None:
+        if self._profiler is None or self._profile_output_dir is None:
+            return
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        sort_by = "self_cuda_time_total" if self.device.type == "cuda" else "self_cpu_time_total"
+        summary = self._profiler.key_averages().table(sort_by=sort_by, row_limit=30)
+        summary_path = self._profile_output_dir / "summary.txt"
+        trace_path = self._profile_output_dir / "trace.json"
+        summary_path.write_text(summary, encoding="utf-8")
+        self._profiler.export_chrome_trace(str(trace_path))
+        self._profiler.__exit__(None, None, None)
+        logger.info("Saved inference profiler summary to %s", summary_path)
+        logger.info("Saved inference profiler trace to %s", trace_path)
+        self._profiler = None
+        self._profile_output_dir = None
 
     def _get_shape_meta(self) -> Dict[str, Any]:
         if hasattr(self.policy, "model") and hasattr(self.policy.model, "shape_meta"):
@@ -103,15 +153,13 @@ class RuntimeEngine:
         """The high-level entry point for inference."""
         prepared = self.policy.prepare_process(obs)
         inputs = self.policy.build_model_inputs(prepared)
-
         inputs = self._move_to_device(inputs)
-
         with self._autocast_context():
             pred_actions = self.policy(inputs)
-
         pred_actions = self.policy.post_process(pred_actions.cpu())
-
-        return {"pred_actions": pred_actions.cpu().float().numpy()[0]}
+        output = {"pred_actions": pred_actions.cpu().float().numpy()[0]}
+        self._step_profiler()
+        return output
 
 
 class EnvWrapper:

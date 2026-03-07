@@ -60,6 +60,17 @@ def _warmup_policy(policy: Any, serving_cfg: OmegaConf) -> None:
     policy.warmup(warmup_iters=warmup_iters, instruction=warmup_instruction)
 
 
+def _enable_profiler(policy: Any, serving_cfg: OmegaConf) -> None:
+    if not serving_cfg.profile_enabled:
+        return
+
+    profile_dir = pathlib.Path(serving_cfg.profile_dir).expanduser()
+    if not profile_dir.is_absolute():
+        project_root = pathlib.Path(__file__).resolve().parents[2]
+        profile_dir = project_root / profile_dir
+    policy.enable_profiling(profile_dir, int(serving_cfg.profile_steps))
+
+
 
 def main() -> None:
     try:
@@ -67,6 +78,7 @@ def main() -> None:
         logger.info("Initializing policy engine...")
         policy = create_engine(cfg.policy, cfg.serving)
         _warmup_policy(policy, cfg.serving)
+        _enable_profiler(policy, cfg.serving)
         wrapper_cfg = None
         if getattr(cfg, "env_wrapper", None) and cfg.env_wrapper.enabled:
             wrapper_cfg = cfg.env_wrapper

@@ -30,6 +30,9 @@ serving:
     - [0.0, 388.0, 240.0]
     - [0.0, 0.0, 1.0]
   log_obs_details: false
+  profile_enabled: false
+  profile_steps: 20
+  profile_dir: outputs/serving_profile
   record_enabled: false
   record_root_dir: outputs/serving_records
 
