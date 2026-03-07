@@ -1,4 +1,4 @@
-numpy
+numpy<2
 opencv-python
 pyrealsense2
 websockets
@@ -6,4 +6,3 @@ pynput
 requests
 msgpack
 scipy>=1.14.0
-rerun-sdk==0.23.3

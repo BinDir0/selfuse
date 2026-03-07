@@ -9,6 +9,8 @@ import os
 import threading
 import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import bisect
 from enum import Enum
 from collections import deque
@@ -176,7 +178,13 @@ class ModelInterfaceNode(Node):
         self.buf_r_kps = deque(maxlen=self.max_buf)
         
         self.cv_bridge = CvBridge()
+        
         self.ui_session = requests.Session()
+        adapter = HTTPAdapter(
+            max_retries=Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        )
+        self.ui_session.mount('http://', adapter)
+        self.ui_session.mount('https://', adapter)
 
         # --- 6. 通信接口 (分配 Callback Group) ---
         self.pub_system_mode = self.create_publisher(String, '/system/mode', 10)
@@ -597,8 +605,7 @@ class ModelInterfaceNode(Node):
             if self.state == SystemState.IDLE:
                 try:
                     url = f"http://{self.ui_host}:{self.ui_port}/get_input"
-                    self.get_logger().info(f"📡 正在请求远程输入: {url}")
-                    # 发起阻塞式请求
+                    self.get_logger().info(f"📡 正在请求远程输入: {url} (无超时限制，等待用户输入...)")
                     resp = self.ui_session.get(url, timeout=None).json()
                     
                     self.current_instr = resp["instruction"]
@@ -606,8 +613,11 @@ class ModelInterfaceNode(Node):
                     self._switch_state(SystemState.READY)
                     
                     self.get_logger().info(f"✅ 指令已接收: '{self.current_instr}' | 模式: {self.mode}")
+                except requests.exceptions.ConnectionError as e:
+                    self.get_logger().warn(f"⚠️  无法连接到宿主机服务: {e}")
+                    time.sleep(2.0)
                 except Exception as e:
-                    self.get_logger().warn(f"⚠️  无法获取远程输入: {e}")
+                    self.get_logger().warn(f"⚠️  获取远程输入时出错: {e}")
                     time.sleep(1.0)
             else:
                 time.sleep(0.5)
