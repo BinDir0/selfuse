@@ -253,7 +253,7 @@ class ReplayRRDNode(Node):
 
         duration_sec = self.frames[-1].timestamp_sec - self.frames[0].timestamp_sec if len(self.frames) > 1 else 0.0
         self.get_logger().info(
-            f'ReplayArmHand ready: {len(self.frames)} frames, {self.target_hz:.1f} Hz, duration {duration_sec:.2f}s, file={self.rrd_file_path}'
+            f'ReplayRRDNode ready: {len(self.frames)} frames, {self.target_hz:.1f} Hz, duration {duration_sec:.2f}s, file={self.rrd_file_path}'
         )
 
     def _load_replay_frames(self, rrd_path: str, target_hz: float) -> List[ReplayFrame]:
