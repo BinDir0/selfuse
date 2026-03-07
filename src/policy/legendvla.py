@@ -12,8 +12,6 @@ from typing import Optional, Tuple
 
 import torch
 from torch import nn
-from torch._dynamo import disable
-import random
 
 from src.model.common.kv_cache import KVCache
 from src.model.common.modules import (
@@ -81,7 +79,6 @@ class LegendVLA(nn.Module):
         # Depth encoder (optional)
         self.use_depth = cfg.use_depth
         if self.use_depth:
-            self.depth_dropout = cfg.get("depth_dropout", 0.1)
             self.depth_encoder = depth_encoder
             self.depth_missing_embeddings = nn.Parameter(
                 torch.zeros(self.depth_encoder.depth_seq_len, self.depth_encoder.output_dim)
@@ -420,7 +417,6 @@ class LegendVLA(nn.Module):
         return _build_causal_mask_and_position_ids_for_text(q_len, attention_mask, kv_cache, dtype)
 
     # ---------- Inference ----------#
-    @disable(recursive=False)
     def _forward_siglip_and_text_embedding(
         self,
         input_ids: torch.LongTensor,
@@ -431,127 +427,111 @@ class LegendVLA(nn.Module):
         actions: Optional[torch.FloatTensor] = None,
         n_states: Optional[torch.LongTensor] = None,
         n_actions: Optional[torch.LongTensor] = None,
-        is_vla_data = None,
+        is_vla_data=None,
         dtype: torch.dtype = torch.float32,
     ) -> torch.FloatTensor:
         """
         Forward pass through SigLIP vision encoder and text embedding, then combine them.
-        
+
         Args:
             input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-            pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values (normalized)
-            depth_values (Optional[torch.FloatTensor]): [Bd, C, H, W] or [Bd, T, C, H, W] Depth images (optional)
-            has_depth_values (Optional[torch.LongTensor]): [B] Bool data indicating whether this sample has valid depth (optional)
+            pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values
+            depth_values (Optional[torch.FloatTensor]): [B, C, H, W] or [B, T, C, H, W] Depth images
+            has_depth_values (Optional[torch.LongTensor]): [B] Bool mask indicating valid depth
             states: [B, state_len, state_dim]
             actions: [B, action_len, action_dim]
             n_states: [B]
             n_actions: [B]
             is_vla_data: [B]
             dtype: torch.dtype
-        
+
         Returns:
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
         """
-        # text embedding
-        # [Batch_Size, Seq_Len, Hidden_Size]
         inputs_embeds = self.embed_tokens(input_ids)
         device = inputs_embeds.device
-
-        if pixel_values is not None:
-            # image features from siglip and projector
-            # [Batch_Size, Channels, Height, Width] or [Batch_Size, Time, Channels, Height, Width] 
-            # -> [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Hidden_Size]
-            if pixel_values.ndim == 5:
-                B, T, C, H, W = pixel_values.shape
-                # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
-                pixel_values = pixel_values.view(B * T, C, H, W)
-            else:
-                T = None
-
-            # Extract RGB vision features
-            rgb_image_features = self.vision_tower(pixel_values)
-            
-            # Extract depth features if enabled
-            if self.use_depth and depth_values is not None:
-                # Handle depth images similar to pixel_values
-                if depth_values.ndim == 5:
-                    Bd, T, C, H, W = depth_values.shape
-                    # pixel_values = rearrange(pixel_values, "B T C H W -> (B T) C H W")
-                    depth_values = depth_values.view(Bd * T, C, H, W)
-                else:
-                    T = None
-                
-                # Extract depth features using DINOv2
-                depth_image_features = self.depth_encoder(depth_values)
-            else: 
-                depth_image_features = None
-
-            if T is not None:
-                # image_features = rearrange(image_features, "(B T) P D -> B (T P) D", B=B, T=T)
-                rgb_image_features = rgb_image_features.view(B, -1, rgb_image_features.shape[-1])
-                if depth_image_features is not None:
-                    depth_image_features = depth_image_features.view(Bd, -1, depth_image_features.shape[-1])
-
-        # normalize the image features
         bsz, seq_len = input_ids.shape
 
-        # put embedding together - image, text, answer, padding
-        final_embedding = torch.full(
-            (bsz, seq_len, self.vlm_hidden_size), 0, dtype=dtype, device=device
+        final_embedding = torch.zeros(
+            (bsz, seq_len, self.vlm_hidden_size), dtype=dtype, device=device
         )
+        text_mask = (input_ids != self.image_token_index) & (input_ids != self.pad_token_id)
+        final_embedding[text_mask] = inputs_embeds[text_mask].to(dtype)
 
-        # [Batch_Size, Seq_Len]
-        text_mask = (input_ids != self.image_token_index) & (
-            input_ids != self.pad_token_id
-        )
-        final_embedding[text_mask] = inputs_embeds[text_mask].to(final_embedding.dtype)
+        image_mask = input_ids == self.image_token_index
         state_mask = input_ids == self.state_token_index
         action_mask = input_ids == self.action_token_index
+        vla_mask = torch.ones(bsz, dtype=torch.bool, device=device)
+        if is_vla_data is not None:
+            vla_mask = is_vla_data.to(device=device, dtype=torch.bool)
+
+        assert (states is None) == (n_states is None), "states and n_states must be provided together"
+        assert (actions is None) == (n_actions is None), "actions and n_actions must be provided together"
         if n_states is not None:
             assert torch.all(n_states == state_mask.sum(dim=1))
-        if n_actions is not None: 
+        if n_actions is not None:
             assert torch.all(n_actions == action_mask.sum(dim=1))
-        # The features will be scaled internally in the joint model
-        if states is not None:
-            state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size**0.5)
-        if actions is not None:
-            actions_input = actions
-            noise = torch.randn_like(actions_input) * self.ar_action_noise_std
-            actions_input = actions_input + noise
-            action_features = self.action_encoder_ar(actions_input) / (self.vlm_hidden_size**0.5)
+
         if pixel_values is not None:
-            image_mask = input_ids == self.image_token_index
-            # autocast does not cast nn.Embedding to the correct dtype, we need to cast manually
-            
-        for i in range(bsz):
-            if pixel_values is not None: 
-                image_indices = image_mask[i].nonzero(as_tuple=True)[0]
-                if depth_image_features is None:
-                    depth_image_feature = None
-                elif has_depth_values is not None and has_depth_values[i] and \
-                    not (self.training and random.random() < self.depth_dropout):
-                    # Each RGB token is paired with corresponding depth token
-                    depth_image_feature = depth_image_features[i]
-                else: 
-                    if T is not None:
-                        depth_image_feature = self.depth_missing_embeddings.repeat(T, 1)
-                    else:
-                        depth_image_feature = self.depth_missing_embeddings
-                if depth_image_feature is not None:
-                    paired_image_features = torch.cat([
-                        rgb_image_features[i], depth_image_feature
-                    ], dim=-1) # [num_patches, rgb_embed_dim+depth_embed_dim]
-                else:  
-                    paired_image_features = rgb_image_features[i]
-                paired_image_features = paired_image_features.view(-1, paired_image_features.shape[-1])
-                paired_image_features = self.multi_modal_projector(paired_image_features)
-                scaled_image_features = paired_image_features / (self.vlm_hidden_size**0.5)
-                final_embedding[i, image_indices] = scaled_image_features
-            if is_vla_data is not None and is_vla_data[i]:
-                if n_states is not None:
-                    final_embedding[i, state_mask[i]] = state_features[i, :n_states[i]].to(final_embedding.dtype)
-                if n_actions is not None:
-                    final_embedding[i, action_mask[i]] = action_features[i, :n_actions[i]].to(final_embedding.dtype)
+            if pixel_values.ndim == 5:
+                batch_size, frame_count, channels, height, width = pixel_values.shape
+                pixel_values = pixel_values.reshape(batch_size * frame_count, channels, height, width)
+            else:
+                batch_size = pixel_values.shape[0]
+                frame_count = 1
+            rgb_image_features = self.vision_tower(pixel_values)
+            rgb_image_features = rgb_image_features.reshape(batch_size, -1, rgb_image_features.shape[-1])
+
+            paired_image_features = rgb_image_features
+            if self.use_depth:
+                depth_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+                if has_depth_values is not None:
+                    depth_mask = has_depth_values.to(device=device, dtype=torch.bool)
+                missing_depth_features = self.depth_missing_embeddings.repeat(frame_count, 1)
+                missing_depth_features = missing_depth_features.unsqueeze(0).expand(batch_size, -1, -1)
+                if depth_values is not None:
+                    if depth_values.ndim == 5:
+                        depth_batch, depth_frames, depth_channels, depth_height, depth_width = depth_values.shape
+                        depth_values = depth_values.reshape(depth_batch * depth_frames, depth_channels, depth_height, depth_width)
+                    depth_image_features = self.depth_encoder(depth_values)
+                    depth_image_features = depth_image_features.reshape(batch_size, -1, depth_image_features.shape[-1])
+                else:
+                    depth_image_features = missing_depth_features
+                    depth_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+                selected_depth_features = torch.where(
+                    depth_mask[:, None, None],
+                    depth_image_features,
+                    missing_depth_features,
+                )
+                paired_image_features = torch.cat((rgb_image_features, selected_depth_features), dim=-1)
+
+            projected_image_features = self.multi_modal_projector(paired_image_features)
+            projected_image_features = projected_image_features / (self.vlm_hidden_size ** 0.5)
+            image_token_counts = image_mask.sum(dim=1)
+            assert torch.all(image_token_counts == projected_image_features.shape[1])
+            final_embedding[image_mask] = projected_image_features.reshape(-1, projected_image_features.shape[-1]).to(dtype)
+
+        if states is not None:
+            state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size ** 0.5)
+            state_slot = state_mask.long().cumsum(dim=1) - 1
+            valid_state_mask = state_mask & vla_mask[:, None] & (state_slot < n_states[:, None])
+            state_batch_index = torch.arange(bsz, device=device)[:, None].expand_as(state_slot)
+            final_embedding[valid_state_mask] = state_features[
+                state_batch_index[valid_state_mask],
+                state_slot[valid_state_mask],
+            ].to(dtype)
+
+        if actions is not None:
+            actions_input = actions + torch.randn_like(actions) * self.ar_action_noise_std
+            action_features = self.action_encoder_ar(actions_input) / (self.vlm_hidden_size ** 0.5)
+            action_slot = action_mask.long().cumsum(dim=1) - 1
+            valid_action_mask = action_mask & vla_mask[:, None] & (action_slot < n_actions[:, None])
+            action_batch_index = torch.arange(bsz, device=device)[:, None].expand_as(action_slot)
+            final_embedding[valid_action_mask] = action_features[
+                action_batch_index[valid_action_mask],
+                action_slot[valid_action_mask],
+            ].to(dtype)
+
         return final_embedding
 
     @torch.inference_mode()

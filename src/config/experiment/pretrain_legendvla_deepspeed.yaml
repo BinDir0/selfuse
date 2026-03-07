@@ -69,6 +69,7 @@ dataset:
       persistent_workers: True
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
+    depth_dropout: 0.1
   vlm_dataset:
     _target_: src.dataset.legendvla_dataset.LegendVLMDataset
     dataset_paths: ${vlm_dataset_paths}
@@ -288,7 +289,6 @@ policy:
     pretrained_pi05_model_path: ${training.pretrained_pi05_model_path}
     # Depth image support
     use_depth: True  # Enable depth image processing with DINOv2
-    depth_dropout: 0.1
     diffloss_micro_batch_size: 16
     ar_action_noise_std: 0.02
     ar_action_chunk_size: 4 # should be less than or equal to total action chunk size
