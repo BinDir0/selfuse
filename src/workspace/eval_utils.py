@@ -103,12 +103,17 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             'inputs': None,
             'metadata': None,
         }
+        save_eval_attn_weights = bool(workspace.cfg.training.save_eval_attn_weights)
         for batch_idx, batch in enumerate(dataloader):
             inputs = workspace.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
 
             # Compute validation loss
             with accelerator.autocast():
-                loss = workspace.model(workspace.objective_func, inputs)
+                loss = workspace.model(
+                    workspace.objective_func,
+                    inputs,
+                    return_attn_weights=save_eval_attn_weights,
+                )
             for key, loss_ in loss.items():
                 if key not in val_losses:
                     val_losses[key] = list()
@@ -119,7 +124,7 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             else:
                 model = workspace.model
             full_seq_attn_maps = None
-            if hasattr(model, 'attn_weights') and len(model.attn_weights) > 0:
+            if save_eval_attn_weights and hasattr(model, 'attn_weights') and len(model.attn_weights) > 0:
                 full_seq_attn_maps = torch.stack(model.attn_weights, dim=0) # [num_layers, B, num_heads, seq_len, seq_len]
             # Compute action accuracy if actions are available
             if 'actions' in inputs and workspace.objective_func != "train_ar":

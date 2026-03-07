@@ -66,6 +66,7 @@ class LegendVLADataset(BaseZarrDataset):
         max_train_episodes=None,
         mode = 'train',
         depth_clip_range=None,
+        depth_dropout: float = 0.0,
         return_dataset_info: bool = False,
     ):
         """
@@ -80,6 +81,7 @@ class LegendVLADataset(BaseZarrDataset):
             max_train_episodes (Optional[int]): Cap on number of training episodes.
             mode (str): One of "train", "val", "infer".
             depth_clip_range (Optional[Tuple[float, float]]): Depth normalization range.
+            depth_dropout (float): Probability of marking depth as unavailable during training.
         """
         # VLA-specific fields (must be set before super().__init__ which calls build_sampler_cfg etc.)
         self.preprocessor = None
@@ -89,6 +91,7 @@ class LegendVLADataset(BaseZarrDataset):
         self.max_train_episodes = max_train_episodes
         self.normalizer = None
         self.depth_clip_range = depth_clip_range
+        self.depth_dropout = depth_dropout
 
         self.mode = mode
         self.aug_transform = None
@@ -193,8 +196,11 @@ class LegendVLADataset(BaseZarrDataset):
         # Add depth_values if available
         if 'depth_values' in processed_results:
             data['depth_values'] = processed_results['depth_values']
-            data['has_depth_values'] = np.array(True, dtype=bool)
-        else: 
+            has_depth_values = True
+            if self.mode == 'train' and self.depth_dropout > 0:
+                has_depth_values = np.random.rand() >= self.depth_dropout
+            data['has_depth_values'] = np.array(has_depth_values, dtype=bool)
+        else:
             data['has_depth_values'] = np.array(False, dtype=bool)
         if self.objective != "train_flow":
             data['labels'] = processed_results['labels']

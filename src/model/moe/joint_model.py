@@ -29,6 +29,7 @@ def forward_mixture_scaled_dot_product_attention(
     attn_softclamp: float = 50.0,
     attention_dropout: float = 0.0,
     training: bool = False,
+    return_attn_weights: bool = False,
 ) -> torch.FloatTensor:
     # Concatenate all the blocks along sequence
     # [Batch_Size, Num_Heads_Q / Num_Heads_KV, Full_Seq_Len, Head_Dim]
@@ -53,8 +54,9 @@ def forward_mixture_scaled_dot_product_attention(
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
         query_states.dtype
     )
-    if not training:
-        attn_weights_before_dropout = attn_weights.clone().detach()
+    attn_weights_before_dropout = None
+    if return_attn_weights:
+        attn_weights_before_dropout = attn_weights.detach().clone()
     attn_weights = nn.functional.dropout(
         attn_weights,
         p=attention_dropout,
@@ -63,10 +65,7 @@ def forward_mixture_scaled_dot_product_attention(
     # Multiply by the values. [Batch_Size, Num_Heads_Q, Full_Seq_Len, Full_Seq_Len] x [Batch_Size, Num_Heads_KV, Full_Seq_Len, Head_Dim] -> [Batch_Size, Num_Heads_Q, Full_Seq_Len, Head_Dim]
     attn_output = torch.matmul(attn_weights, value_states)
     
-    if not training:
-        return attn_output, attn_weights_before_dropout
-    else:
-        return attn_output, None
+    return attn_output, attn_weights_before_dropout if return_attn_weights else None
 
 
 def forward_insulation_scaled_dot_product_attention(
@@ -77,6 +76,7 @@ def forward_insulation_scaled_dot_product_attention(
     attn_softclamp: float = 50.0,
     attention_dropout: float = 0.0,
     training: bool = False,
+    return_attn_weights: bool = False,
 ) -> torch.FloatTensor:
     # Concatenate the blocks into two groups: vlm and other mixtures
     # [Batch_Size, Num_Heads_Q / Num_Heads_KV, VLM_Seq_Len, Head_Dim]
@@ -121,8 +121,9 @@ def forward_insulation_scaled_dot_product_attention(
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
         query_states_vlm.dtype
     )
-    if not training:
-        attn_weights_before_dropout = attn_weights.clone().detach()
+    attn_weights_before_dropout = None
+    if return_attn_weights:
+        attn_weights_before_dropout = attn_weights.detach().clone()
     attn_weights = nn.functional.dropout(
         attn_weights,
         p=attention_dropout,
@@ -135,10 +136,7 @@ def forward_insulation_scaled_dot_product_attention(
     attn_output_others = torch.matmul(attn_weights[:, :, vlm_seq_len:, :], value_states_all)
     attn_output = torch.cat((attn_output_vlm, attn_output_others), dim=-2)
 
-    if not training:
-        return attn_output, attn_weights_before_dropout
-    else:
-        return attn_output, None
+    return attn_output, attn_weights_before_dropout if return_attn_weights else None
 
 
 def forward_mixture_attn(
@@ -153,6 +151,7 @@ def forward_mixture_attn(
     attn_softclamp: float = 50.0,  # default in gemma
     attention_dropout: float = 0.0,
     sdpa: callable = forward_mixture_scaled_dot_product_attention,
+    return_attn_weights: bool = False,
 ) -> dict[torch.FloatTensor]:
     """Assume all mixtures have the same head dim"""
     assert cache_mode in [
@@ -273,6 +272,7 @@ def forward_mixture_attn(
         attn_softclamp,
         attention_dropout,
         mixtures[active_mixture_names[0]].training,
+        return_attn_weights,
     )
 
     # Make sure the sequence length is the second dimension. # [Batch_Size, Num_Heads_Q, Full_Seq_Len, Head_Dim] -> [Batch_Size, Full_Seq_Len, Num_Heads_Q, Head_Dim]
@@ -308,6 +308,7 @@ def forward_mixture_layers(
     cache_mode: str = "append_non_active",
     time_cond: Optional[torch.FloatTensor] = None,
     sdpa: callable = forward_mixture_scaled_dot_product_attention,
+    return_attn_weights: bool = False,
 ) -> dict[torch.FloatTensor]:
     """the usual norm + attn + res + norm + mlp + res"""
     active_mixture_names = list(embeds_all.keys())
@@ -337,6 +338,7 @@ def forward_mixture_layers(
         kv_caches=kv_caches,
         cache_mode=cache_mode,
         sdpa=sdpa,
+        return_attn_weights=return_attn_weights,
     )
     hidden_states_pre_res = hidden_states_post_attn
 
@@ -424,7 +426,7 @@ class JointModel(nn.Module):
         for mixture_name, mixture_config in config.mixture.items():
             mixture_config = OmegaConf.merge(config, mixture_config)
             self.mixtures[mixture_name] = Mixture(mixture_config)
-        self.attn_weights = [None] * self.num_hidden_layers
+        self.attn_weights = []
         self.mixture_names = list(config.mixture.keys())
 
     def build_mixture_caches(self):
@@ -440,9 +442,10 @@ class JointModel(nn.Module):
         kv_caches: dict[KVCache] = {},
         cache_mode: str = "append_non_active",
         final_layer_post_attn_skip_names: Tuple[str, ...] = ("vlm"),
+        return_attn_weights: bool = False,
     ): 
         attn_weights = None
-        if not self.training: 
+        if return_attn_weights:
             attn_weights = []
         for layer_idx in range(self.num_hidden_layers):
             is_final_layer = layer_idx == self.num_hidden_layers - 1
@@ -459,8 +462,9 @@ class JointModel(nn.Module):
                 if is_final_layer
                 else [],
                 sdpa=self.sdpa,
+                return_attn_weights=return_attn_weights,
             )
-            if not self.training:
+            if return_attn_weights:
                 attn_weights.append(attn_weights_before_dropout)
         return embeds_all, attn_weights
 
@@ -474,6 +478,7 @@ class JointModel(nn.Module):
         kv_caches: dict[KVCache] = {},
         cache_mode: str = "append_non_active",
         return_caches: bool = False,
+        return_attn_weights: bool = False,
     ) -> dict[torch.FloatTensor]:
         """
         Assume attention_mask is in the right block attention form
@@ -506,9 +511,12 @@ class JointModel(nn.Module):
             kv_caches,
             cache_mode,
             final_layer_post_attn_skip_names,
+            return_attn_weights,
         )
         if attn_weights_before_dropout is not None:
             self.attn_weights = attn_weights_before_dropout
+        elif not return_attn_weights:
+            self.attn_weights = []
 
         # [Batch_Size, Seq_Len, Hidden_Size]
         hidden_states_all = {}

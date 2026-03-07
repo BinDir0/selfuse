@@ -1,19 +1,24 @@
 # https://github.com/Physical-Intelligence/openpi/blob/main/src/openpi/serving/websocket_policy_server.py
 
 import asyncio
+from contextlib import nullcontext
 import http
 import logging
+import pathlib
 import time
 import traceback
 from typing import Any, Dict
 
-import websockets.asyncio.server as _server
-import websockets.frames
 import hydra
+import numpy as np
 import torch
 import torch.nn as nn
+import websockets
+import websockets.asyncio.server as _server
+import websockets.frames
 
 from . import msgpack_numpy
+from .serving_recorder import ConnectionRecorder, ServingRecorder
 
 
 logger = logging.getLogger(__name__)
@@ -21,36 +26,150 @@ logger = logging.getLogger(__name__)
 
 class RuntimeEngine:
     """
-    The Runtime Engine. 
+    The Runtime Engine.
     It manages the execution context (Device, Autocast) for a Policy.
     """
-    def __init__(self, policy: Any, device: torch.device, use_autocast: bool = True) -> None:
+
+    def __init__(
+        self,
+        policy: Any,
+        device: torch.device,
+        use_autocast: bool,
+        warmup_image_shape: tuple[int, int, int],
+        warmup_depth_shape: tuple[int, int, int],
+        warmup_intrinsic: np.ndarray,
+    ) -> None:
         self.policy = policy
         self.device = device
         self.use_autocast = use_autocast
         self.metadata = policy.metadata
-        
+        self.warmup_image_shape = tuple(int(x) for x in warmup_image_shape)
+        self.warmup_depth_shape = tuple(int(x) for x in warmup_depth_shape)
+        self.warmup_intrinsic = np.asarray(warmup_intrinsic, dtype=np.float64)
+        self._profiler = None
+        self._profile_steps = 0
+        self._profile_max_steps = 0
+        self._profile_output_dir: pathlib.Path | None = None
+
         self.policy.to(device)
+        if hasattr(self.policy, "maybe_compile_model"):
+            self.policy.maybe_compile_model()
 
     def _move_to_device(self, data: Any) -> Any:
         if isinstance(data, dict):
             return {k: self._move_to_device(v) for k, v in data.items()}
         return data.to(self.device) if torch.is_tensor(data) else data
 
+    def _autocast_context(self):
+        if not self.use_autocast:
+            return nullcontext()
+        return torch.autocast(device_type=self.device.type, dtype=self.policy.dtype)
+
+    def enable_profiling(self, output_dir: str | pathlib.Path, steps: int, skip_first: int) -> None:
+        if steps <= 0:
+            return
+        output_dir = pathlib.Path(output_dir).expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if self.device.type == "cuda":
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        self._profiler = torch.profiler.profile(
+            activities=activities,
+            schedule=torch.profiler.schedule(wait=0, warmup=0, active=steps, repeat=1, skip_first=skip_first),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        )
+        self._profiler.__enter__()
+        self._profile_steps = 0
+        self._profile_max_steps = skip_first + steps
+        self._profile_output_dir = output_dir
+        logger.info(
+            "Enabled inference profiler for %d requests after skipping %d requests. Output dir: %s",
+            steps,
+            skip_first,
+            output_dir,
+        )
+
+    def _step_profiler(self) -> None:
+        if self._profiler is None:
+            return
+        self._profiler.step()
+        self._profile_steps += 1
+        if self._profile_steps >= self._profile_max_steps:
+            self._finalize_profiler()
+
+    def _finalize_profiler(self) -> None:
+        if self._profiler is None or self._profile_output_dir is None:
+            return
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        sort_by = "self_cuda_time_total" if self.device.type == "cuda" else "self_cpu_time_total"
+        summary = self._profiler.key_averages().table(sort_by=sort_by, row_limit=30)
+        summary_path = self._profile_output_dir / "summary.txt"
+        trace_path = self._profile_output_dir / "trace.json"
+        summary_path.write_text(summary, encoding="utf-8")
+        self._profiler.export_chrome_trace(str(trace_path))
+        self._profiler.__exit__(None, None, None)
+        logger.info("Saved inference profiler summary to %s", summary_path)
+        logger.info("Saved inference profiler trace to %s", trace_path)
+        self._profiler = None
+        self._profile_output_dir = None
+
+    def _get_shape_meta(self) -> Dict[str, Any]:
+        if hasattr(self.policy, "shape_meta"):
+            return self.policy.shape_meta
+        if hasattr(self.policy, "model") and hasattr(self.policy.model, "shape_meta"):
+            return self.policy.model.shape_meta
+        raise AttributeError("Policy does not expose model.shape_meta for warmup")
+
+    def _build_dummy_obs(self, instruction: str) -> Dict[str, Any]:
+        shape_meta = self._get_shape_meta()
+        rgb_meta = shape_meta["obs"]["rgb"]
+        state_meta = shape_meta["obs"]["state"]
+
+        image = np.zeros((rgb_meta["horizon"], *self.warmup_image_shape), dtype=np.uint8)
+        states = np.zeros((state_meta["horizon"], state_meta["shape"][0]), dtype=np.float32)
+        intrinsic = self.warmup_intrinsic.copy()
+
+        obs = {
+            "image": image,
+            "intrinsic": intrinsic,
+            "instruction": instruction,
+            "states": states,
+        }
+
+        depth_meta = shape_meta["obs"].get("depth")
+        if depth_meta is not None:
+            obs["depth"] = np.zeros((depth_meta["horizon"], *self.warmup_depth_shape), dtype=np.uint16)
+
+        return obs
+
+    def warmup(self, warmup_iters: int, instruction: str) -> None:
+        if warmup_iters <= 0:
+            return
+
+        dummy_obs = self._build_dummy_obs(instruction=instruction)
+        logger.info("Running %d warmup inference iterations", warmup_iters)
+        start_time = time.monotonic()
+        for _ in range(warmup_iters):
+            self.infer(dummy_obs)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        logger.info("Warmup finished in %.3f ms", (time.monotonic() - start_time) * 1000.0)
+
     @torch.inference_mode()
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """The high-level entry point for inference."""
         prepared = self.policy.prepare_process(obs)
         inputs = self.policy.build_model_inputs(prepared)
-        
         inputs = self._move_to_device(inputs)
-        
-        with torch.autocast(device_type=self.device.type, dtype=self.policy.dtype):
+        with self._autocast_context():
             pred_actions = self.policy(inputs)
-
         pred_actions = self.policy.post_process(pred_actions.cpu())
-        
-        return {"pred_actions": pred_actions.cpu().float().numpy()[0]}
+        output = {"pred_actions": pred_actions.cpu().float().numpy()[0]}
+        self._step_profiler()
+        return output
 
 
 class EnvWrapper:
@@ -72,7 +191,6 @@ class EnvWrapper:
         self.metadata = getattr(policy, "metadata", {})
 
     def __getattr__(self, name: str) -> Any:
-        # Delegate unknown attributes/methods to the wrapped policy.
         return getattr(self._policy, name)
 
     def __dir__(self) -> list[str]:
@@ -89,17 +207,30 @@ class EnvWrapper:
         return self._policy.infer(mapped_obs)
 
 
+
 def _resolve_device(device: str | None) -> torch.device:
     if device in (None, "auto"):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
+
 def create_engine(policy_cfg: Any, serving_cfg: Any) -> Any:
     policy = hydra.utils.instantiate(policy_cfg)
-    device = _resolve_device(getattr(serving_cfg, "device", "auto"))
-    use_autocast = bool(getattr(serving_cfg, "autocast", True))
-    return RuntimeEngine(policy, device=device, use_autocast=use_autocast)
+    device = _resolve_device(serving_cfg.device)
+    use_autocast = bool(serving_cfg.autocast)
+    warmup_image_shape = tuple(int(x) for x in serving_cfg.warmup_image_shape)
+    warmup_depth_shape = tuple(int(x) for x in serving_cfg.warmup_depth_shape)
+    warmup_intrinsic = np.asarray(serving_cfg.warmup_intrinsic, dtype=np.float64)
+    return RuntimeEngine(
+        policy,
+        device=device,
+        use_autocast=use_autocast,
+        warmup_image_shape=warmup_image_shape,
+        warmup_depth_shape=warmup_depth_shape,
+        warmup_intrinsic=warmup_intrinsic,
+    )
+
 
 
 def create_env_wrapper(policy: Any, wrapper_cfg: Any) -> Any:
@@ -112,15 +243,15 @@ def create_env_wrapper(policy: Any, wrapper_cfg: Any) -> Any:
         states_key=wrapper_cfg.states_key,
     )
 
-class WebsocketPolicyServer:
-    """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
 
-    Currently only implements the `load` and `infer` methods.
-    """
+class WebsocketPolicyServer:
+    """Serve a policy with the websocket protocol."""
 
     def __init__(
         self,
         policy: Any,
+        recorder: ServingRecorder | None,
+        log_obs_details: bool,
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
@@ -129,7 +260,78 @@ class WebsocketPolicyServer:
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+        self._recorder = recorder
+        self._log_obs_details = log_obs_details
         logging.getLogger("websockets.server").setLevel(logging.INFO)
+
+    @staticmethod
+    def _format_obs_details(obs: Dict[str, Any]) -> str:
+        import numpy as np
+
+        lines = ["\n观测数据详情:"]
+        lines.append(f"  总字段数: {len(obs)}")
+        lines.append(f"  字段列表: {list(obs.keys())}")
+        lines.append("-" * 80)
+
+        for key, value in obs.items():
+            lines.append(f"\n字段: '{key}'")
+
+            if value is None:
+                lines.append("  类型: None")
+                continue
+
+            value_type = type(value).__name__
+            lines.append(f"  Python类型: {value_type}")
+
+            if hasattr(value, "shape"):
+                lines.append(f"  Shape: {value.shape}")
+
+                if hasattr(value, "dtype"):
+                    lines.append(f"  Dtype: {value.dtype}")
+
+                if hasattr(value, "nbytes"):
+                    size_bytes = value.nbytes
+                    if size_bytes < 1024:
+                        size_str = f"{size_bytes} bytes"
+                    elif size_bytes < 1024 * 1024:
+                        size_str = f"{size_bytes / 1024:.2f} KB"
+                    else:
+                        size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
+                    lines.append(f"  内存大小: {size_str}")
+
+                try:
+                    if hasattr(value, "size") and value.size == 0:
+                        lines.append("  状态: 空数组")
+                    elif np.issubdtype(value.dtype, np.number):
+                        lines.append("  数值统计:")
+                        lines.append(f"    - Min: {float(value.min()):.6f}")
+                        lines.append(f"    - Max: {float(value.max()):.6f}")
+                        lines.append(f"    - Mean: {float(value.mean()):.6f}")
+                        if hasattr(value, "std"):
+                            lines.append(f"    - Std: {float(value.std()):.6f}")
+                    else:
+                        lines.append("  数据类型: 非数值型")
+                except Exception as exc:
+                    lines.append(f"  统计信息: 无法计算 ({str(exc)})")
+
+            elif isinstance(value, (list, tuple)):
+                lines.append(f"  长度: {len(value)}")
+                if len(value) > 0:
+                    lines.append(f"  首元素类型: {type(value[0]).__name__}")
+
+            elif isinstance(value, str):
+                lines.append(f"  长度: {len(value)} 字符")
+                preview = value[:50] + "..." if len(value) > 50 else value
+                lines.append(f"  内容预览: {preview}")
+
+            elif isinstance(value, (int, float)):
+                lines.append(f"  值: {value}")
+
+            else:
+                lines.append(f"  描述: {str(value)[:100]}")
+
+        lines.append("-" * 80)
+        return "\n".join(lines)
 
     def serve_forever(self) -> None:
         asyncio.run(self.run())
@@ -146,8 +348,15 @@ class WebsocketPolicyServer:
             await server.serve_forever()
 
     async def _handler(self, websocket: _server.ServerConnection):
-        logger.info(f"Connection from {websocket.remote_address} opened")
+        logger.info("Connection from %s opened", websocket.remote_address)
         packer = msgpack_numpy.Packer()
+        connection_recorder: ConnectionRecorder | None = None
+
+        if self._recorder is not None:
+            try:
+                connection_recorder = self._recorder.open_connection(websocket.remote_address)
+            except Exception:
+                logger.exception("Failed to initialize serving recorder for %s", websocket.remote_address)
 
         await websocket.send(packer.pack(self._metadata))
 
@@ -157,6 +366,9 @@ class WebsocketPolicyServer:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
 
+                if self._log_obs_details:
+                    logger.info("Received observation from %s%s", websocket.remote_address, self._format_obs_details(obs))
+
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
@@ -165,14 +377,19 @@ class WebsocketPolicyServer:
                     "infer_ms": infer_time * 1000,
                 }
                 if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                if connection_recorder is not None:
+                    try:
+                        connection_recorder.record(obs, action)
+                    except Exception:
+                        logger.exception("Failed to record request for %s", websocket.remote_address)
 
                 await websocket.send(packer.pack(action))
                 prev_total_time = time.monotonic() - start_time
 
             except websockets.ConnectionClosed:
-                logger.info(f"Connection from {websocket.remote_address} closed")
+                logger.info("Connection from %s closed", websocket.remote_address)
                 break
             except Exception:
                 await websocket.send(traceback.format_exc())
@@ -183,8 +400,8 @@ class WebsocketPolicyServer:
                 raise
 
 
+
 def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
     if request.path == "/healthz":
         return connection.respond(http.HTTPStatus.OK, "OK\n")
-    # Continue with the normal request handling.
     return None

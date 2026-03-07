@@ -87,7 +87,7 @@ def psi_t(
 
 
 # TODO: Deprecated method, to be updated
-def compute_ar_loss(model, batch: dict) -> dict:
+def compute_ar_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     """
     Compute autoregressive loss for action prediction and vision language understanding.
 
@@ -130,6 +130,7 @@ def compute_ar_loss(model, batch: dict) -> dict:
         embeds_all={"vlm": inputs_embeds},
         kv_caches={},
         final_layer_post_attn_skip_names=[],
+        return_attn_weights=return_attn_weights,
     )
     hidden_states = output["vlm"]
 
@@ -141,7 +142,7 @@ def compute_ar_loss(model, batch: dict) -> dict:
 
 
 # TODO: Deprecated method, to be updated
-def compute_flow_loss(model, batch: dict) -> dict:
+def compute_flow_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     """
     Forward pass for flow matching training.
 
@@ -199,6 +200,7 @@ def compute_flow_loss(model, batch: dict) -> dict:
         embeds_all={"vlm": inputs_embeds, "action": action_embeds},
         time_cond=time_cond,
         kv_caches={},
+        return_attn_weights=return_attn_weights,
     )["action"]
 
     v_psi = model.action_decoder(action_embeds)
@@ -211,7 +213,7 @@ def compute_flow_loss(model, batch: dict) -> dict:
     return {"flow_loss": flow_loss}
 
 
-def compute_loss(model, batch: dict) -> dict:
+def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     """
     Compute combined VLA loss: cross-entropy (VLM) + flow matching + diffusion loss.
 
@@ -278,6 +280,7 @@ def compute_loss(model, batch: dict) -> dict:
         time_cond=time_cond,
         kv_caches={},
         final_layer_post_attn_skip_names=[],
+        return_attn_weights=return_attn_weights,
     )
     hidden_states = output["vlm"]
     action_embeds = output["action"]

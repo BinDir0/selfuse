@@ -9,6 +9,16 @@ import websockets.asyncio.client as _client
 from . import msgpack_numpy
 
 
+DEFAULT_CAMERA_INTRINSICS = np.array(
+    [
+        [388.0, 0.0, 320.0],
+        [0.0, 388.0, 240.0],
+        [0.0, 0.0, 1.0],
+    ],
+    dtype=np.float64,
+)
+
+
 def _parse_shape(value: str) -> Tuple[int, ...]:
     parts = [p.strip() for p in value.split(",") if p.strip()]
     if not parts:
@@ -22,6 +32,35 @@ def _parse_shape(value: str) -> Tuple[int, ...]:
     return shape
 
 
+
+def _random_rgb_image(shape: Tuple[int, ...]) -> np.ndarray:
+    return np.random.randint(0, 256, size=shape, dtype=np.uint8)
+
+
+
+def _random_depth_image(shape: Tuple[int, ...]) -> np.ndarray:
+    depth = np.random.randint(300, 1500, size=shape, dtype=np.uint16)
+    invalid_mask = np.random.rand(*shape[:-1], 1) < 0.01
+    saturated_mask = np.random.rand(*shape[:-1], 1) < 0.01
+    depth = np.where(invalid_mask, 0, depth)
+    depth = np.where(saturated_mask, np.iinfo(np.uint16).max, depth)
+    return depth.astype(np.uint16)
+
+
+
+def _camera_intrinsics(shape: Tuple[int, ...]) -> np.ndarray:
+    if shape == (3, 3):
+        return DEFAULT_CAMERA_INTRINSICS.copy()
+    return np.random.rand(*shape).astype(np.float64)
+
+
+
+def _random_states(state_horizon: int, state_dim: int) -> np.ndarray:
+    states = np.random.normal(loc=0.0, scale=0.35, size=(state_horizon, state_dim))
+    return np.clip(states, -1.0, 1.0).astype(np.float32)
+
+
+
 def _random_obs(
     image_shape: Tuple[int, ...],
     depth_shape: Tuple[int, ...],
@@ -31,11 +70,11 @@ def _random_obs(
     instruction: str,
 ) -> Dict[str, Any]:
     return {
-        "image": np.random.rand(*image_shape).astype(np.float32),
-        "depth_image": np.random.rand(*depth_shape).astype(np.float32),
-        "camera_intrinsics": np.random.rand(*intrinsic_shape).astype(np.float32),
+        "image": _random_rgb_image(image_shape),
+        "depth_image": _random_depth_image(depth_shape),
+        "camera_intrinsics": _camera_intrinsics(intrinsic_shape),
         "instruction": instruction,
-        "states": np.random.rand(state_horizon, state_dim).astype(np.float32),
+        "states": _random_states(state_horizon, state_dim),
     }
 
 
@@ -75,21 +114,23 @@ async def _run_client(args: argparse.Namespace) -> None:
                 await asyncio.sleep(args.sleep_ms / 1000.0)
 
 
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="WebSocket client that sends random observations and prints inference time."
+        description="WebSocket client that sends representative observations and prints inference time."
     )
     parser.add_argument("--host", default="127.0.0.1", help="Server host.")
     parser.add_argument("--port", type=int, required=True, help="Server port.")
     parser.add_argument("--num-requests", type=int, default=5, help="Number of requests to send.")
     parser.add_argument("--sleep-ms", type=int, default=200, help="Sleep between requests in ms.")
-    parser.add_argument("--image-shape", default="1,224,224,3", help="Image shape, e.g. 1,224,224,3")
-    parser.add_argument("--depth-shape", default="1,224,224,1", help="Depth shape, e.g. 1,224,224,1")
+    parser.add_argument("--image-shape", default="1,480,640,3", help="Image shape, e.g. 1,480,640,3")
+    parser.add_argument("--depth-shape", default="1,480,640,1", help="Depth shape, e.g. 1,480,640,1")
     parser.add_argument("--intrinsic-shape", default="3,3", help="Intrinsic shape, e.g. 3,3")
     parser.add_argument("--state-horizon", type=int, default=16, help="State horizon.")
     parser.add_argument("--state-dim", type=int, default=48, help="State vector dim.")
-    parser.add_argument("--instruction", default="random instruction", help="Instruction string.")
+    parser.add_argument("--instruction", default="grasp the yellow toy", help="Instruction string.")
     return parser.parse_args()
+
 
 
 def main() -> None:
@@ -99,4 +140,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

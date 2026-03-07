@@ -79,8 +79,11 @@ def infer_action(
         embeds_all={"vlm": inputs_embeds},
         kv_caches=kv_caches,
         return_caches=True,
+        return_attn_weights=return_attn_weights,
     )
-    vlm_attn_weights = torch.stack(model.attn_weights, dim=0).detach().clone()
+    vlm_attn_weights = None
+    if return_attn_weights:
+        vlm_attn_weights = torch.stack(model.attn_weights, dim=0).detach().clone()
     action_expert_attn_weights = None
 
     # sample pure action noise
@@ -105,8 +108,9 @@ def infer_action(
             time_cond=time_cond,
             kv_caches=kv_caches,
             cache_mode="append_non_active",
+            return_attn_weights=return_attn_weights,
         )["action"]
-        if step_idx == 0:
+        if return_attn_weights and step_idx == 0:
             action_expert_attn_weights = torch.stack(model.attn_weights, dim=0).detach().clone()
 
         action_vel = model.action_decoder(action_embeds)
@@ -168,6 +172,7 @@ def infer_single_step(
         kv_caches={"vlm": kv_cache},
         cache_mode="append",
         final_layer_post_attn_skip_names=[],
+        return_attn_weights=return_attn_weights,
     )["vlm"]
     output = {"hidden_states": hidden_states}
     if return_attn_weights:
@@ -466,6 +471,7 @@ class LegendVLAInference(nn.Module):
         mode: str = "flow",
         use_mixed_precision: bool = True,
         tokenizer_padding: str = "longest",
+        max_length: int | None = None,
         default_instruction: str | None = None,
         diffusion_sampling_steps: int = None,
         diffusion_use_ddim_sampling: bool = False,
@@ -474,8 +480,10 @@ class LegendVLAInference(nn.Module):
         ar_temperature: float = 1.0,
         ar_cfg: float = 1.0,
         use_mlp_layer_norm: bool = False,
+        compile: Any = None,
     ) -> None:
         super().__init__()
+        self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
         model_config_path = pathlib.Path(model_config_path)
         model_cfg = OmegaConf.load(model_config_path)
         
@@ -496,6 +504,9 @@ class LegendVLAInference(nn.Module):
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)
+        if self.dtype != torch.float32:
+            self.model.to(dtype=self.dtype)
+            log.info("Cast model weights to %s on CPU before moving to device", self.dtype)
         self.model.eval()
 
         if diffusion_sampling_steps:
@@ -509,12 +520,17 @@ class LegendVLAInference(nn.Module):
         self.processor = hydra.utils.instantiate(model_cfg.vla_processor)
         if hasattr(self.processor, "tokenizer_padding"):
             self.processor.tokenizer_padding = tokenizer_padding
+        if max_length is not None and hasattr(self.processor, "max_seq_len"):
+            self.processor.max_seq_len = max_length
+        if hasattr(self.processor, "depth_clip_range") and getattr(self.processor, "depth_clip_range", None) is None:
+            depth_clip_range = OmegaConf.select(model_cfg, "depth_clip_range", default=None)
+            if depth_clip_range is not None:
+                self.processor.depth_clip_range = tuple(float(x) for x in depth_clip_range)
 
         self.normalizer, self.use_relative_action = self._load_normalizer(model_cfg)
 
         # Hyperparameters & Meta
         self.mode = mode
-        self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
         self.default_instruction = default_instruction
         self.action_horizon = int(self.model.shape_meta["action"]["horizon"])
         self.action_dim = int(self.model.shape_meta["action"]["shape"][0])
@@ -527,6 +543,32 @@ class LegendVLAInference(nn.Module):
             "action_horizon": self.action_horizon,
             "action_dim": self.action_dim,
         }
+        self._model_compiled = False
+        self.compile_kwargs = None
+        if compile is not None:
+            self.compile_kwargs = OmegaConf.to_container(compile, resolve=True)
+
+    @property
+    def shape_meta(self) -> Dict[str, Any]:
+        return self.get_model_core().shape_meta
+
+    def get_model_core(self) -> nn.Module:
+        model = self.model
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        if hasattr(model, "module"):
+            model = model.module
+        return model
+
+    def maybe_compile_model(self) -> None:
+        if self.compile_kwargs is None or self._model_compiled:
+            return
+        log.info("Compiling model with kwargs=%s", self.compile_kwargs)
+        self.model = torch.compile(
+            self.model,
+            **self.compile_kwargs,
+        )
+        self._model_compiled = True
 
     def _load_checkpoint(self, path: str) -> None:
         """Load model weights from a given path."""
@@ -604,10 +646,10 @@ class LegendVLAInference(nn.Module):
             inputs["depth_values"] = processed["depth_values"].to(self.dtype)
 
         if self.mode == "flow":
-            inputs["n_actions"] = torch.zeros(batch_size, dtype=torch.long)
+            inputs["n_actions"] = torch.full((batch_size, ), self.action_horizon, dtype=torch.long)
             inputs["answer_start_idx"] = processed["answer_start_idx"]
 
-            m = self.model.module if hasattr(self.model, "module") else self.model
+            m = self.get_model_core()
             causal_mask, vlm_pos, act_pos = m.build_causal_mask_and_position_ids(
                 inputs["attention_mask"], inputs["answer_start_idx"], inputs["n_actions"], self.dtype
             )
@@ -639,6 +681,7 @@ class LegendVLAInference(nn.Module):
     @torch.inference_mode()
     def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Step 3: Actual model forward pass."""
+        self.maybe_compile_model()
         if self.mode == "flow":
             return self.model("infer_action", inputs)
         else:

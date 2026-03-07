@@ -477,44 +477,41 @@ def build_causal_mask_and_position_ids(
     max_vlm_tokens = attention_mask.shape[-1]
     total_num_tokens = max_vlm_tokens + num_action_tokens
     action_start = max_vlm_tokens
-    vlm_token_cnts = torch.sum(attention_mask, dim=1)
+    vlm_token_cnts = torch.sum(attention_mask, dim=1, dtype=torch.long)
+
+    q_idx = torch.arange(total_num_tokens, device=device).view(1, total_num_tokens, 1)
+    k_idx = torch.arange(total_num_tokens, device=device).view(1, 1, total_num_tokens)
+    cnt = vlm_token_cnts.view(bsz, 1, 1)
+    answer_start = answer_start_idx.view(bsz, 1, 1)
+    num_valid_actions = n_actions.view(bsz, 1, 1)
+
+    vlm_queries = q_idx < cnt
+    image_text_keys = k_idx < answer_start
+    answer_queries = (q_idx >= answer_start) & (q_idx < cnt)
+    answer_keys = (k_idx >= answer_start) & (k_idx < cnt)
+    action_queries = (q_idx >= action_start) & (q_idx < action_start + num_valid_actions)
+    action_keys = (k_idx >= action_start) & (k_idx < action_start + num_valid_actions)
+
+    allow_image_text = vlm_queries & image_text_keys
+    allow_answer = answer_queries & answer_keys & (k_idx <= q_idx)
+    allow_action = action_queries & (image_text_keys | action_keys)
+    allow_mask = allow_image_text | allow_answer | allow_action
+
     causal_mask = torch.full(
         (bsz, total_num_tokens, total_num_tokens),
         torch.finfo(dtype).min,
         dtype=dtype,
         device=device,
-    )  # smallest value, avoid using inf for softmax nan issues with padding
-    for idx in range(bsz):
-        cnt = vlm_token_cnts[idx].item()
-        start = answer_start_idx[idx].item()
-        answer_len = cnt - start
-        n_action = n_actions[idx].item()
-        causal_mask[idx, :cnt, :start] = 0  # image/text/answer attend to image/text
-        mask = torch.tril(torch.ones((answer_len, answer_len), dtype=torch.bool, device=device))
-        causal_mask[idx, start:cnt, start:cnt] = torch.where(
-            mask, 0, torch.finfo(dtype).min
-        ) # answer tokens attend to answer tokens before them
-        causal_mask[idx, action_start:action_start+n_action, :start] = (
-            0  # action attend to image/text
-        )
-        causal_mask[idx, action_start:action_start+n_action, action_start:action_start+n_action] = (
-            0  # action attend to itself
-        )
-
-    # add the head dimension for broadcasting to all attention heads
-    # [Batch_Size, Q_Len, KV_Len] -> [Batch_Size, 1, Q_Len, KV_Len]
+    )
+    causal_mask = torch.where(allow_mask, torch.zeros(1, dtype=dtype, device=device), causal_mask)
     causal_mask = causal_mask.unsqueeze(1)
 
-    # position ids for each blocks --- start at 1
-    vlm_position_ids = torch.arange(1, max_vlm_tokens + 1, device=device).repeat(
-        bsz, 1
+    vlm_position_ids = torch.arange(1, max_vlm_tokens + 1, device=device).repeat(bsz, 1)
+    action_position_ids = (
+        torch.arange(0, num_action_tokens, device=device).unsqueeze(0)
+        + answer_start_idx.unsqueeze(1)
+        + 1
     )
-    # action position ids start from answer_start_idx for each sample
-    action_position_ids = torch.arange(
-        0,
-        num_action_tokens,
-        device=device,
-    ).unsqueeze(0) + answer_start_idx.unsqueeze(1) + 1
     return causal_mask, vlm_position_ids, action_position_ids
 
 
