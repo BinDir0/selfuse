@@ -79,10 +79,8 @@ def _resolve_hand_mjcf_file(hand_type: str) -> Path:
 class ReplayFrame:
     left_arm: np.ndarray
     right_arm: np.ndarray
-    left_hand_raw: np.ndarray
-    right_hand_raw: np.ndarray
-    left_hand_cmd: np.ndarray
-    right_hand_cmd: np.ndarray
+    left_hand: np.ndarray
+    right_hand: np.ndarray
     timestamp_sec: float
 
 
@@ -219,7 +217,7 @@ class HandFKSolver:
 
 class ReplayRRDNode(Node):
     def __init__(self):
-        super().__init__('replay_rrd_node')
+        super().__init__('replay_rrd')
 
         self.declare_parameter('rrd_file_path', '')
         self.declare_parameter('target_hz', 30.0)
@@ -278,25 +276,23 @@ class ReplayRRDNode(Node):
 
         left_arm_samples = self._resample_stream(left_arm, target_timestamps)
         right_arm_samples = self._resample_stream(right_arm, target_timestamps)
-        left_hand_raw_samples = self._resample_stream(left_hand, target_timestamps)
-        right_hand_raw_samples = self._resample_stream(right_hand, target_timestamps)
+        left_hand_samples = self._resample_stream(left_hand, target_timestamps)
+        right_hand_samples = self._resample_stream(right_hand, target_timestamps)
 
         frames: List[ReplayFrame] = []
-        for ts, l_arm, r_arm, l_hand_raw, r_hand_raw in zip(
+        for ts, l_arm, r_arm, l_hand, r_hand in zip(
             target_timestamps,
             left_arm_samples,
             right_arm_samples,
-            left_hand_raw_samples,
-            right_hand_raw_samples,
+            left_hand_samples,
+            right_hand_samples,
         ):
             frames.append(
                 ReplayFrame(
                     left_arm=np.asarray(l_arm, dtype=np.float64),
                     right_arm=np.asarray(r_arm, dtype=np.float64),
-                    left_hand_raw=np.asarray(l_hand_raw, dtype=np.float64),
-                    right_hand_raw=np.asarray(r_hand_raw, dtype=np.float64),
-                    left_hand_cmd=self._reorder_hand_action_for_control(l_hand_raw),
-                    right_hand_cmd=self._reorder_hand_action_for_control(r_hand_raw),
+                    left_hand=np.asarray(l_hand, dtype=np.float64),
+                    right_hand=np.asarray(r_hand, dtype=np.float64),
                     timestamp_sec=float(ts),
                 )
             )
@@ -408,8 +404,8 @@ class ReplayRRDNode(Node):
         return self._extract_joint_stream(table, timestamps_sec, candidate_specs, f'{side} arm')
 
     def _extract_hand_stream(self, table, timestamps_sec: np.ndarray, side: str) -> Dict[str, np.ndarray]:
-        action_joint_names = ['thumb_bend', 'thumb_rotate', 'index_bend', 'middle_bend', 'ring_bend', 'pinky_bend']
-        state_joint_names = ['thumb_bend', 'thumb_rotation', 'index', 'middle', 'ring', 'pinky']
+        action_joint_names = ['thumb_rotate', 'thumb_bend', 'index_bend', 'middle_bend', 'ring_bend', 'pinky_bend']
+        state_joint_names = ['thumb_rotation', 'thumb_bend', 'index', 'middle', 'ring', 'pinky']
 
         candidate_specs = [
             {
@@ -435,12 +431,6 @@ class ReplayRRDNode(Node):
             samples.append(source_data[idx])
         return samples
 
-    def _reorder_hand_action_for_control(self, raw_hand_action: np.ndarray) -> np.ndarray:
-        reordered = np.asarray(raw_hand_action, dtype=np.float64).copy()
-        reordered[0] = raw_hand_action[1]
-        reordered[1] = raw_hand_action[0]
-        return reordered
-
     def _timer_callback(self):
         if self.frame_index >= len(self.frames):
             if self.loop_playback:
@@ -454,8 +444,8 @@ class ReplayRRDNode(Node):
         now = self.get_clock().now().to_msg()
 
         arm_fk = self.arm_fk_solver.compute_fk(frame.left_arm, frame.right_arm)
-        left_hand_fk = self.left_hand_fk_solver.compute_fk(frame.left_hand_cmd)
-        right_hand_fk = self.right_hand_fk_solver.compute_fk(frame.right_hand_cmd)
+        left_hand_fk = self.left_hand_fk_solver.compute_fk(frame.left_hand)
+        right_hand_fk = self.right_hand_fk_solver.compute_fk(frame.right_hand)
 
         self.arm_action_pub.publish(self._build_arm_pose_array(now, arm_fk))
         self.left_hand_action_pub.publish(self._build_hand_pose_array(now, 'left', left_hand_fk))
