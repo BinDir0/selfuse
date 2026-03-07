@@ -615,11 +615,11 @@ class LegendVLA(nn.Module):
         from src.policy.legendvla_loss import compute_loss, compute_ar_loss, compute_flow_loss
         from src.policy.legendvla_inference import infer_action, infer_vlm, infer_vla
         if mode == "train":
-            return compute_loss(self, batch)
+            return compute_loss(self, batch, **kwargs)
         elif mode == "train_ar":
-            return compute_ar_loss(self, batch)
+            return compute_ar_loss(self, batch, **kwargs)
         elif mode == "train_flow":
-            return compute_flow_loss(self, batch)
+            return compute_flow_loss(self, batch, **kwargs)
         elif mode == "infer_action":
             return infer_action(self, batch, **kwargs)
         elif mode == "infer_vla":

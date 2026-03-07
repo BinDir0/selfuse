@@ -79,8 +79,11 @@ def infer_action(
         embeds_all={"vlm": inputs_embeds},
         kv_caches=kv_caches,
         return_caches=True,
+        return_attn_weights=return_attn_weights,
     )
-    vlm_attn_weights = torch.stack(model.attn_weights, dim=0).detach().clone()
+    vlm_attn_weights = None
+    if return_attn_weights:
+        vlm_attn_weights = torch.stack(model.attn_weights, dim=0).detach().clone()
     action_expert_attn_weights = None
 
     # sample pure action noise
@@ -105,8 +108,9 @@ def infer_action(
             time_cond=time_cond,
             kv_caches=kv_caches,
             cache_mode="append_non_active",
+            return_attn_weights=return_attn_weights,
         )["action"]
-        if step_idx == 0:
+        if return_attn_weights and step_idx == 0:
             action_expert_attn_weights = torch.stack(model.attn_weights, dim=0).detach().clone()
 
         action_vel = model.action_decoder(action_embeds)
@@ -168,6 +172,7 @@ def infer_single_step(
         kv_caches={"vlm": kv_cache},
         cache_mode="append",
         final_layer_post_attn_skip_names=[],
+        return_attn_weights=return_attn_weights,
     )["vlm"]
     output = {"hidden_states": hidden_states}
     if return_attn_weights:
@@ -476,6 +481,7 @@ class LegendVLAInference(nn.Module):
         use_mlp_layer_norm: bool = False,
     ) -> None:
         super().__init__()
+        self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
         model_config_path = pathlib.Path(model_config_path)
         model_cfg = OmegaConf.load(model_config_path)
         
@@ -496,6 +502,9 @@ class LegendVLAInference(nn.Module):
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)
+        if self.dtype != torch.float32:
+            self.model.to(dtype=self.dtype)
+            log.info("Cast model weights to %s on CPU before moving to device", self.dtype)
         self.model.eval()
 
         if diffusion_sampling_steps:
@@ -518,7 +527,6 @@ class LegendVLAInference(nn.Module):
 
         # Hyperparameters & Meta
         self.mode = mode
-        self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
         self.default_instruction = default_instruction
         self.action_horizon = int(self.model.shape_meta["action"]["horizon"])
         self.action_dim = int(self.model.shape_meta["action"]["shape"][0])
