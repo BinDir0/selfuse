@@ -43,6 +43,7 @@ alias hand="ros2 launch hand dual_hands.launch.py"
 alias arm="ros2 launch arm dual_arms.launch.py"
 alias interface="ros2 launch model_interface model_interface.launch.py"
 alias mock="ros2 launch mock_robot_data mock_data.launch.py"
+sudo ip link set lo multicast on
 ' >> ~/.bashrc && source ~/.bashrc
 ```
 

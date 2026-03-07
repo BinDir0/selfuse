@@ -1,0 +1,6 @@
+/**:
+  ros__parameters:
+    rrd_file_path: "/root/workspace/legendvla-inference/examples/episode_000112.rrd"
+    target_hz: 30.0
+    loop_playback: false
+    arm_xml_path: "/root/workspace/legendvla-inference/assets/PsiRobot_DC_02_OnlyArm/meshes/psi_robot_scene_transformed.xml"

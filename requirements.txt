@@ -6,3 +6,4 @@ pynput
 requests
 msgpack
 scipy>=1.14.0
+rerun==0.23.3
