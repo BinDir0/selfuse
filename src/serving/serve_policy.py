@@ -68,7 +68,7 @@ def _enable_profiler(policy: Any, serving_cfg: OmegaConf) -> None:
     if not profile_dir.is_absolute():
         project_root = pathlib.Path(__file__).resolve().parents[2]
         profile_dir = project_root / profile_dir
-    policy.enable_profiling(profile_dir, int(serving_cfg.profile_steps))
+    policy.enable_profiling(profile_dir, int(serving_cfg.profile_steps), int(serving_cfg.profile_skip_first))
 
 
 

@@ -63,7 +63,7 @@ class RuntimeEngine:
             return nullcontext()
         return torch.autocast(device_type=self.device.type, dtype=self.policy.dtype)
 
-    def enable_profiling(self, output_dir: str | pathlib.Path, steps: int) -> None:
+    def enable_profiling(self, output_dir: str | pathlib.Path, steps: int, skip_first: int) -> None:
         if steps <= 0:
             return
         output_dir = pathlib.Path(output_dir).expanduser()
@@ -73,15 +73,21 @@ class RuntimeEngine:
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         self._profiler = torch.profiler.profile(
             activities=activities,
+            schedule=torch.profiler.schedule(wait=0, warmup=0, active=steps, repeat=1, skip_first=skip_first),
             record_shapes=True,
             profile_memory=True,
             with_stack=False,
         )
         self._profiler.__enter__()
         self._profile_steps = 0
-        self._profile_max_steps = steps
+        self._profile_max_steps = skip_first + steps
         self._profile_output_dir = output_dir
-        logger.info("Enabled inference profiler for %d requests. Output dir: %s", steps, output_dir)
+        logger.info(
+            "Enabled inference profiler for %d requests after skipping %d requests. Output dir: %s",
+            steps,
+            skip_first,
+            output_dir,
+        )
 
     def _step_profiler(self) -> None:
         if self._profiler is None:
