@@ -2,8 +2,8 @@
 
 policy:
   _target_: src.policy.legendvla.LegendVLAInference
-  model_config_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.03.01/05.48_legendvla_Arrange_magnets_by_color_pretrain_legendvla_deepspeed/.hydra/config.yaml
-  checkpoint_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.03.01/05.48_legendvla_Arrange_magnets_by_color_pretrain_legendvla_deepspeed/checkpoints/update_step=35000-eval_l1_loss=0.0069/pytorch_model/mp_rank_00_model_states.pt
+  model_config_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.03.02/02.44_legendvla_Dexterous_grasping_pretrain_legendvla_deepspeed/.hydra/config.yaml
+  checkpoint_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.03.02/02.44_legendvla_Dexterous_grasping_pretrain_legendvla_deepspeed/checkpoints/update_step=15000-eval_l1_loss=0.0168/pytorch_model/mp_rank_00_model_states.pt
   mode: flow
   use_mixed_precision: true
   tokenizer_padding: max_length
@@ -15,9 +15,9 @@ policy:
   ar_temperature: 1.0
   ar_cfg: 1.0
   compile:
-    mode: default
+    mode: reduce-overhead
     dynamic: null
-    fullgraph: false
+    fullgraph: true
     backend: inductor
 
 serving:

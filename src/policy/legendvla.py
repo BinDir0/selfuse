@@ -23,6 +23,21 @@ from src.utils.monitor import log_execution_time
 log = logging.getLogger(__name__)
 
 
+def _align_features_by_slot(
+    features: torch.Tensor,
+    slot: torch.LongTensor,
+) -> torch.Tensor:
+    batch_size, seq_len = slot.shape
+    hidden_size = features.shape[-1]
+
+    if features.size(1) == 0:
+        return features.new_zeros((batch_size, seq_len, hidden_size))
+
+    safe_slot = slot.clamp(min=0, max=features.size(1) - 1)
+    gather_index = safe_slot.unsqueeze(-1).expand(-1, -1, hidden_size)
+    return torch.gather(features, dim=1, index=gather_index)
+
+
 class LegendVLA(nn.Module):
     @log_execution_time(log)
     def __init__(
@@ -456,7 +471,11 @@ class LegendVLA(nn.Module):
             (bsz, seq_len, self.vlm_hidden_size), dtype=dtype, device=device
         )
         text_mask = (input_ids != self.image_token_index) & (input_ids != self.pad_token_id)
-        final_embedding[text_mask] = inputs_embeds[text_mask].to(dtype)
+        final_embedding = torch.where(
+            text_mask.unsqueeze(-1),
+            inputs_embeds.to(dtype),
+            final_embedding,
+        )
 
         image_mask = input_ids == self.image_token_index
         state_mask = input_ids == self.state_token_index
@@ -509,28 +528,45 @@ class LegendVLA(nn.Module):
             projected_image_features = projected_image_features / (self.vlm_hidden_size ** 0.5)
             image_token_counts = image_mask.sum(dim=1)
             assert torch.all(image_token_counts == projected_image_features.shape[1])
-            final_embedding[image_mask] = projected_image_features.reshape(-1, projected_image_features.shape[-1]).to(dtype)
+            image_slot = image_mask.long().cumsum(dim=1) - 1
+            aligned_image_features = _align_features_by_slot(
+                projected_image_features.to(dtype),
+                image_slot,
+            )
+            final_embedding = torch.where(
+                image_mask.unsqueeze(-1),
+                aligned_image_features,
+                final_embedding,
+            )
 
         if states is not None:
             state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size ** 0.5)
             state_slot = state_mask.long().cumsum(dim=1) - 1
             valid_state_mask = state_mask & vla_mask[:, None] & (state_slot < n_states[:, None])
-            state_batch_index = torch.arange(bsz, device=device)[:, None].expand_as(state_slot)
-            final_embedding[valid_state_mask] = state_features[
-                state_batch_index[valid_state_mask],
-                state_slot[valid_state_mask],
-            ].to(dtype)
+            aligned_state_features = _align_features_by_slot(
+                state_features.to(dtype),
+                state_slot,
+            )
+            final_embedding = torch.where(
+                valid_state_mask.unsqueeze(-1),
+                aligned_state_features,
+                final_embedding,
+            )
 
         if actions is not None:
             actions_input = actions + torch.randn_like(actions) * self.ar_action_noise_std
             action_features = self.action_encoder_ar(actions_input) / (self.vlm_hidden_size ** 0.5)
             action_slot = action_mask.long().cumsum(dim=1) - 1
             valid_action_mask = action_mask & vla_mask[:, None] & (action_slot < n_actions[:, None])
-            action_batch_index = torch.arange(bsz, device=device)[:, None].expand_as(action_slot)
-            final_embedding[valid_action_mask] = action_features[
-                action_batch_index[valid_action_mask],
-                action_slot[valid_action_mask],
-            ].to(dtype)
+            aligned_action_features = _align_features_by_slot(
+                action_features.to(dtype),
+                action_slot,
+            )
+            final_embedding = torch.where(
+                valid_action_mask.unsqueeze(-1),
+                aligned_action_features,
+                final_embedding,
+            )
 
         return final_embedding
 
