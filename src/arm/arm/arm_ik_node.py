@@ -307,9 +307,6 @@ class ArmIKNode(Node):
         self.right_arm_command_pub.publish(right_arm_joint_state_msg)
 
         self._publish_count += 1
-            
-        if self._publish_count % 100 == 0:  # 每100次输出一次
-            self.get_logger().info(f"🔍 [调试] 发布IK结果到/action/left_arm/joints 和 /action/right_arm/joints: 长度={len(joint_positions)}, 前3个关节={joint_positions[:3]}")
 
     def destroy_node(self):
         """节点销毁时的清理函数"""
