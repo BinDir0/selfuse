@@ -160,12 +160,12 @@ class HandIKSolver:
                 qpos[adr] = np.clip(qpos[adr], low, high)
 
     def reset_to_home(self):
-        try:
-            self.configuration.update_from_keyframe("home")
-        except:
-            self.configuration.q = np.zeros(self.model.nq)
-            
         with self.data_lock:
+            try:
+                self.configuration.update_from_keyframe("home")
+            except:
+                self.configuration.q = np.zeros(self.model.nq)
+            
             mujoco.mj_forward(self.model, self.configuration.data)
             for m_id, s_id in zip(self.mocap_ids_list, self.site_ids_list):
                 self.configuration.data.mocap_pos[m_id] = self.configuration.data.site(s_id).xpos.copy()
@@ -258,22 +258,19 @@ class HandIKNode(Node):
             PoseArray,
             f'/action/{self.hand_side}_hand/keypoints',
             self.keypoints_callback,
-            10,
-            callback_group=MutuallyExclusiveCallbackGroup()
+            10
         )
         
         self.sub_mode = self.create_subscription(
             String,
             '/system/mode',
             self.mode_callback,
-            10,
-            callback_group=MutuallyExclusiveCallbackGroup()
+            10
         )
 
         self.timer = self.create_timer(
             1.0 / self.frequency, 
-            self.control_loop, 
-            callback_group=MutuallyExclusiveCallbackGroup()
+            self.control_loop
         )
         
         self.get_logger().info(f"{self.hand_side.upper()} Hand IK Node ready. Waiting for action chunk...")
@@ -332,11 +329,9 @@ class HandIKNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    executor = MultiThreadedExecutor()
     node = HandIKNode()
-    executor.add_node(node)
     try: 
-        executor.spin()
+        rclpy.spin(node)
     except KeyboardInterrupt: 
         pass
     finally: 
