@@ -15,10 +15,11 @@ policy:
   ar_temperature: 1.0
   ar_cfg: 1.0
   compile:
-    mode: reduce-overhead
-    dynamic: null
-    fullgraph: true
-    backend: inductor
+    backend: tensorrt
+    dynamic: False,
+    options: 
+      enable_autocast: True
+      autocast_low_precision_type: torch.bfloat16
 
 serving:
   host: 0.0.0.0
@@ -34,7 +35,7 @@ serving:
     - [388.0, 0.0, 320.0]
     - [0.0, 388.0, 240.0]
     - [0.0, 0.0, 1.0]
-  log_obs_details: false
+  log_obs_details: true
   profile_enabled: false
   profile_steps: 5
   profile_skip_first: 0
