@@ -7,8 +7,9 @@
 ```bash
 docker load -i teleop.tar
 ```
-3. **修改宿主机的UDP缓冲区参数**：
+3. **配置宿主机**：
 ```bash
+# 修改宿主机的UDP缓冲区参数
 # 创建独立的 ROS 2 优化配置文件
 sudo sh -c 'cat > /etc/sysctl.d/60-ros2-realsense.conf <<EOF
 net.core.rmem_max=2147483647
@@ -16,9 +17,15 @@ net.core.wmem_max=2147483647
 net.core.rmem_default=2147483647
 net.core.wmem_default=2147483647
 EOF'
-
 # 立即应用
 sudo sysctl --system
+
+# 配置X11
+echo 'xhost +SI:localuser:root > /dev/null 2>&1' >> ~/.xprofile && xhost +SI:localuser:root
+
+# 安装音频播放库
+sudo apt update
+sudo apt install mpg123
 ```
 4. **创建容器**：修改 `create_container.sh` 第 139 行的宿主机路径为本地项目目录，然后执行：
 ```bash
