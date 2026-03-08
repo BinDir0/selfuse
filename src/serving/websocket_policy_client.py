@@ -61,6 +61,17 @@ def _random_states(state_horizon: int, state_dim: int) -> np.ndarray:
 
 
 
+def _state_horizon_candidates(state_horizon: int) -> Tuple[int, ...]:
+    candidates = {
+        1,
+        max(1, state_horizon // 4),
+        max(1, state_horizon // 2),
+        state_horizon,
+    }
+    return tuple(sorted(candidates))
+
+
+
 def _random_obs(
     image_shape: Tuple[int, ...],
     depth_shape: Tuple[int, ...],
@@ -68,14 +79,15 @@ def _random_obs(
     state_horizon: int,
     state_dim: int,
     instruction: str,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], int]:
+    sampled_state_horizon = int(np.random.choice(_state_horizon_candidates(state_horizon)))
     return {
         "image": _random_rgb_image(image_shape),
         "depth_image": _random_depth_image(depth_shape),
         "camera_intrinsics": _camera_intrinsics(intrinsic_shape),
         "instruction": instruction,
-        "states": _random_states(state_horizon, state_dim),
-    }
+        "states": _random_states(sampled_state_horizon, state_dim),
+    }, sampled_state_horizon
 
 
 async def _run_client(args: argparse.Namespace) -> None:
@@ -90,7 +102,7 @@ async def _run_client(args: argparse.Namespace) -> None:
         print("server metadata:", metadata)
 
         for idx in range(args.num_requests):
-            obs = _random_obs(
+            obs, sampled_state_horizon = _random_obs(
                 image_shape=image_shape,
                 depth_shape=depth_shape,
                 intrinsic_shape=intrinsic_shape,
@@ -106,9 +118,13 @@ async def _run_client(args: argparse.Namespace) -> None:
             timing = response.get("server_timing", {})
             infer_ms = timing.get("infer_ms")
             if infer_ms is None:
-                print(f"[{idx}] infer_ms missing, response keys: {list(response.keys())}")
+                print(
+                    f"[{idx}] state_horizon={sampled_state_horizon}, infer_ms missing, response keys: {list(response.keys())}"
+                )
             else:
-                print(f"[{idx}] infer_ms={infer_ms:.3f}ms, rtt_ms={elapsed_ms:.3f}ms")
+                print(
+                    f"[{idx}] state_horizon={sampled_state_horizon}, infer_ms={infer_ms:.3f}ms, rtt_ms={elapsed_ms:.3f}ms"
+                )
 
             if args.sleep_ms > 0:
                 await asyncio.sleep(args.sleep_ms / 1000.0)
@@ -126,7 +142,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--image-shape", default="1,480,640,3", help="Image shape, e.g. 1,480,640,3")
     parser.add_argument("--depth-shape", default="1,480,640,1", help="Depth shape, e.g. 1,480,640,1")
     parser.add_argument("--intrinsic-shape", default="3,3", help="Intrinsic shape, e.g. 3,3")
-    parser.add_argument("--state-horizon", type=int, default=16, help="State horizon.")
+    parser.add_argument("--state-horizon", type=int, default=16, help="Maximum state horizon; each request samples a smaller horizon to simulate real traffic.")
     parser.add_argument("--state-dim", type=int, default=48, help="State vector dim.")
     parser.add_argument("--instruction", default="grasp the yellow toy", help="Instruction string.")
     return parser.parse_args()
