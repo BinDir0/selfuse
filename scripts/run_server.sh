@@ -1,3 +1,4 @@
+# export TORCH_LOGS="+dynamo"
 TORCH_LOGS=recompiles,guards,cudagraphs
 # Enable graph cache and CUDA code cache for torch.compile
 export TORCHINDUCTOR_FX_GRAPH_CACHE=1

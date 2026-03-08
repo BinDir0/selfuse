@@ -18,6 +18,7 @@ import hydra
 import numpy as np
 from omegaconf import OmegaConf
 import torch
+import torch_tensorrt
 from torch import nn
 
 from src.model.common.kv_cache import KVCache
@@ -534,6 +535,8 @@ class LegendVLAInference(nn.Module):
         self.default_instruction = default_instruction
         self.action_horizon = int(self.model.shape_meta["action"]["horizon"])
         self.action_dim = int(self.model.shape_meta["action"]["shape"][0])
+        self.state_horizon = int(self.model.shape_meta["obs"]["state"]["horizon"])
+        self.state_dim = int(self.model.shape_meta["obs"]["state"]["shape"][0])
         self.ar_max_new_tokens = ar_max_new_tokens or self.action_horizon
         self.ar_temperature = ar_temperature
         self.ar_cfg = ar_cfg
@@ -624,8 +627,27 @@ class LegendVLAInference(nn.Module):
                 states = self.normalizer["states"](states)
             else:
                 states = self.normalizer["motions"](states)
+        states = self._pad_states_to_horizon(states)
         states = torch.from_numpy(states)[None, ...]
         return {"processed": processed, "states": states, "n_states": n_states}
+
+    def _pad_states_to_horizon(self, states: np.ndarray) -> np.ndarray:
+        states = np.asarray(states, dtype=np.float32)
+        if states.ndim != 2:
+            raise ValueError(f"Expected states to have shape [T, D], got {states.shape}")
+        if states.shape[1] != self.state_dim:
+            raise ValueError(f"Expected state dim {self.state_dim}, got {states.shape[1]}")
+
+        current_horizon = states.shape[0]
+        if current_horizon >= self.state_horizon:
+            return states[-self.state_horizon:, :]
+
+        pad_count = self.state_horizon - current_horizon
+        if current_horizon == 0:
+            padding = np.zeros((pad_count, self.state_dim), dtype=states.dtype)
+        else:
+            padding = np.repeat(states[-1:, :], pad_count, axis=0)
+        return np.concatenate([states, padding], axis=0)
 
     def build_model_inputs(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
         """Construct tensors required by the model forward pass (Masks, Position ids)."""

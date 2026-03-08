@@ -34,7 +34,7 @@ serving:
     - [388.0, 0.0, 320.0]
     - [0.0, 388.0, 240.0]
     - [0.0, 0.0, 1.0]
-  log_obs_details: false
+  log_obs_details: true
   profile_enabled: false
   profile_steps: 5
   profile_skip_first: 0

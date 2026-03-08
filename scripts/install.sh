@@ -37,5 +37,9 @@ pip install -e .
 
 # install legendvla
 cd ..
-pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 \
+    torch-tensorrt==2.8.0+cu128 tensorrt-cu12==10.12.0.36 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    -f https://mirrors.aliyun.com/pytorch-wheels/cu128/ \
+    --extra-index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
