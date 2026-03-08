@@ -360,32 +360,54 @@ class WebsocketPolicyServer:
 
         await websocket.send(packer.pack(self._metadata))
 
+        prev_send_time = None
         prev_total_time = None
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+
+                recv_start = time.monotonic()
+                raw_obs = await websocket.recv()
+                recv_wait_time = time.monotonic() - recv_start
+                obs = msgpack_numpy.unpackb(raw_obs)
 
                 if self._log_obs_details:
                     logger.info("Received observation from %s%s", websocket.remote_address, self._format_obs_details(obs))
 
-                infer_time = time.monotonic()
+                infer_start = time.monotonic()
                 action = self._policy.infer(obs)
-                infer_time = time.monotonic() - infer_time
+                infer_time = time.monotonic() - infer_start
 
                 action["server_timing"] = {
+                    "recv_wait_ms": recv_wait_time * 1000,
                     "infer_ms": infer_time * 1000,
                 }
+                if prev_send_time is not None:
+                    action["server_timing"]["prev_send_ms"] = prev_send_time * 1000
                 if prev_total_time is not None:
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
+                pack_start = time.monotonic()
+                packed_action = packer.pack(action)
+                pack_time = time.monotonic() - pack_start
+                action["server_timing"]["pack_ms"] = pack_time * 1000
+                action["server_timing"]["pre_send_total_ms"] = (time.monotonic() - start_time) * 1000
+
+                record_time = 0.0
                 if connection_recorder is not None:
                     try:
+                        record_start = time.monotonic()
                         connection_recorder.record(obs, action)
+                        record_time = time.monotonic() - record_start
                     except Exception:
                         logger.exception("Failed to record request for %s", websocket.remote_address)
 
-                await websocket.send(packer.pack(action))
+                action["server_timing"]["record_ms"] = record_time * 1000
+
+                packed_action = packer.pack(action)
+                send_start = time.monotonic()
+                await websocket.send(packed_action)
+                prev_send_time = time.monotonic() - send_start
                 prev_total_time = time.monotonic() - start_time
 
             except websockets.ConnectionClosed:
