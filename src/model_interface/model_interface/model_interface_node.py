@@ -12,6 +12,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import bisect
+import cv2
 from enum import Enum
 from collections import deque
 from pynput import keyboard
@@ -119,7 +120,7 @@ class ModelInterfaceNode(Node):
         self.do_resize = self.get_parameter('do_resize').value
 
         self.get_logger().info(f"📋 参数配置: 控制频率={self.ctrl_freq}Hz, 数据频率={self.data_freq}Hz, "
-                              f"状态窗口={self.s_hor}, 图像窗口={self.i_hor}, 动作长度={self.act_len}, 缓冲区大小={self.max_buf}")
+                              f"状态窗口={self.s_hor}, 图像窗口={self.i_hor}, 动作长度={self.act_len}, 缓冲区大小={self.max_buf}, do_resize={self.do_resize}")
 
         # --- 3. 虚拟时间轴 ---
         self.first_ts_ns = 0
@@ -423,6 +424,16 @@ class ModelInterfaceNode(Node):
     def _is_in_range(self, sorted_buf, target_ts):
         return (sorted_buf[0][0] - self.dt_ns) <= target_ts <= (sorted_buf[-1][0] + self.dt_ns)
 
+    def _resize_image(self, img, width=224, height=224, is_depth=False):
+        if not self.do_resize:
+            return img
+
+        if is_depth:
+            resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)
+        else:
+            resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+        return resized_img
+
     def prepare_inference_payload(self):
         # 1. 创建快照 & 排序
         all_snaps = [
@@ -452,8 +463,8 @@ class ModelInterfaceNode(Node):
             self._print_buffer_info("Right Kps", snap_rk)
 
         if self.first_inference:
-            rgb_seq = [np.array(snap_rgb[-1][1])]
-            depth_seq = [np.array(snap_depth[-1][1])]
+            rgb_seq = [self._resize_image(np.array(snap_rgb[-1][1]), is_depth=False)]
+            depth_seq = [self._resize_image(np.array(snap_depth[-1][1]), is_depth=True)]
             rgb_in = np.stack(rgb_seq)
             depth_in = np.stack(depth_seq)
             if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
@@ -487,8 +498,8 @@ class ModelInterfaceNode(Node):
             for h in range(self.i_hor):
                 t = t_ref - (h * self.i_str * self.dt_ns)
                 if not self._is_in_range(snap_rgb, t) or not self._is_in_range(snap_depth, t): break
-                rgb_seq.append(self._find_nearest(snap_rgb, t))
-                depth_seq.append(self._find_nearest(snap_depth, t))
+                rgb_seq.append(self._resize_image(self._find_nearest(snap_rgb, t), is_depth=False))
+                depth_seq.append(self._resize_image(self._find_nearest(snap_depth, t), is_depth=True))
             
             rgb_in = np.stack(rgb_seq)[::-1]
             depth_in = np.stack(depth_seq)[::-1]
