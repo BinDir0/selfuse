@@ -86,31 +86,18 @@ def psi_t(
     return (1 - (1 - flow_sig_min) * t) * x + t * x1
 
 
-def _get_sample_indices(
-    batch: dict,
-    is_vla_data: torch.BoolTensor,
-) -> tuple[torch.LongTensor, torch.LongTensor]:
-    vla_sample_indices = batch.get("vla_sample_indices")
-    vlm_sample_indices = batch.get("vlm_sample_indices")
-    if vla_sample_indices is None:
-        vla_sample_indices = torch.nonzero(is_vla_data, as_tuple=False).squeeze(1)
-    if vlm_sample_indices is None:
-        vlm_sample_indices = torch.nonzero(~is_vla_data, as_tuple=False).squeeze(1)
-    return vla_sample_indices, vlm_sample_indices
-
-
 def _build_dense_diffloss_inputs(
     model,
     hidden_states: torch.FloatTensor,
     actions: torch.FloatTensor,
     answer_start_idx: torch.LongTensor,
     n_actions: torch.LongTensor,
-    vla_sample_indices: torch.LongTensor,
+    vla_sample_mask: torch.BoolTensor,
 ) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.BoolTensor]:
-    vla_hidden = hidden_states.index_select(0, vla_sample_indices)
-    vla_action = actions.index_select(0, vla_sample_indices)
-    vla_answer_start_idx = answer_start_idx.index_select(0, vla_sample_indices)
-    vla_n_actions = n_actions.index_select(0, vla_sample_indices)
+    vla_hidden = hidden_states[vla_sample_mask]
+    vla_action = actions[vla_sample_mask]
+    vla_answer_start_idx = answer_start_idx[vla_sample_mask]
+    vla_n_actions = n_actions[vla_sample_mask]
 
     ar_action_chunk_size = model.ar_action_chunk_size
     ar_action_chunks = vla_action.unfold(dimension=1, size=ar_action_chunk_size, step=1)
@@ -330,13 +317,11 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     hidden_states = output["vlm"]
     action_embeds = output["action"]
 
-    vla_sample_indices, vlm_sample_indices = _get_sample_indices(batch, is_vla_data)
-
     ce_loss = compute_celoss(
         model.lm_head, model.final_logit_softcapping,
         model.CELoss, model.ignore_index,
-        hidden_states.index_select(0, vlm_sample_indices),
-        labels.index_select(0, vlm_sample_indices)
+        hidden_states[~is_vla_data],
+        labels[~is_vla_data]
     )
 
     # diffusion loss
@@ -346,7 +331,7 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
         actions,
         answer_start_idx,
         n_actions,
-        vla_sample_indices,
+        is_vla_data,
     )
     vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
     action_gt_repeated = action_gt.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
