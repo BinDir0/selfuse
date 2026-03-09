@@ -92,7 +92,6 @@ class ModelInterfaceNode(Node):
         self.declare_parameter('camera_name', 'head')
         self.declare_parameter('ui_service_host', 'localhost')
         self.declare_parameter('ui_service_port', 8080)
-        
         self.declare_parameter('data_frequency', 30.0)
         self.declare_parameter('state_horizon', 10)
         self.declare_parameter('state_stride', 1)
@@ -100,6 +99,8 @@ class ModelInterfaceNode(Node):
         self.declare_parameter('image_stride', 1)
         self.declare_parameter('action_execution_len', 6)
         self.declare_parameter('buffer_size', 300)
+        self.declare_parameter('debug_code', False)
+        self.declare_parameter('do_resize', False)
 
         # 参数提取
         self.ctrl_freq = self.get_parameter('control_frequency').value
@@ -114,7 +115,9 @@ class ModelInterfaceNode(Node):
         self.i_str = self.get_parameter('image_stride').value
         self.act_len = self.get_parameter('action_execution_len').value
         self.max_buf = self.get_parameter('buffer_size').value
-        
+        self.debug_code = self.get_parameter('debug_code').value
+        self.do_resize = self.get_parameter('do_resize').value
+
         self.get_logger().info(f"📋 参数配置: 控制频率={self.ctrl_freq}Hz, 数据频率={self.data_freq}Hz, "
                               f"状态窗口={self.s_hor}, 图像窗口={self.i_hor}, 动作长度={self.act_len}, 缓冲区大小={self.max_buf}")
 
@@ -337,6 +340,10 @@ class ModelInterfaceNode(Node):
         # 2. 计算虚拟时间
         raw_ns = self._get_msg_ns(header)
         virtual_ts = raw_ns - self.first_ts_ns - self.total_inactive_ns
+
+        if len(buf) > 0 and buf[-1][0] >= virtual_ts:
+            self.get_logger().warn(f"⚠️  时间戳错误: 当前={buf[-1][0]/1e9:.3f}s, 新={virtual_ts/1e9:.3f}s")
+            return
         
         # 3. 原子写入
         buf.append((virtual_ts, data))
@@ -403,13 +410,12 @@ class ModelInterfaceNode(Node):
 
     # --- 采样与推理 ---
     def _find_nearest(self, sorted_buf, target_ns):
-        times = [x[0] for x in sorted_buf]
-        idx = bisect.bisect_left(times, target_ns)
+        idx = bisect.bisect_left(sorted_buf, target_ns, key=lambda x: x[0])
         
         if idx == 0: return sorted_buf[0][1]
-        if idx == len(times): return sorted_buf[-1][1]
+        if idx == len(sorted_buf): return sorted_buf[-1][1]
         
-        if (target_ns - times[idx-1]) < (times[idx] - target_ns):
+        if (target_ns - sorted_buf[idx-1][0]) < (sorted_buf[idx][0] - target_ns):
             return sorted_buf[idx-1][1]
         else:
             return sorted_buf[idx][1]
@@ -420,28 +426,30 @@ class ModelInterfaceNode(Node):
     def prepare_inference_payload(self):
         # 1. 创建快照 & 排序
         all_snaps = [
-            sorted(list(self.buf_rgb), key=lambda x: x[0]),
-            sorted(list(self.buf_depth), key=lambda x: x[0]),
-            sorted(list(self.buf_l_wrist), key=lambda x: x[0]),
-            sorted(list(self.buf_r_wrist), key=lambda x: x[0]),
-            sorted(list(self.buf_l_kps), key=lambda x: x[0]),
-            sorted(list(self.buf_r_kps), key=lambda x: x[0])
+            list(self.buf_rgb),
+            list(self.buf_depth),
+            list(self.buf_l_wrist),
+            list(self.buf_r_wrist),
+            list(self.buf_l_kps),
+            list(self.buf_r_kps)
         ]
 
         assert all(len(s) > 0 for s in all_snaps), "缓冲区数据不全"
         
-        buf_sizes = [len(s) for s in all_snaps]
-        self.get_logger().info(f"📊 准备推理数据: 缓冲区大小={buf_sizes}")
+        if self.debug_code:
+            buf_sizes = [len(s) for s in all_snaps]
+            self.get_logger().info(f"📊 准备推理数据: 缓冲区大小={buf_sizes}")
 
         snap_rgb, snap_depth, snap_lw, snap_rw, snap_lk, snap_rk = all_snaps
 
         # check the timestamp of all_snaps
-        self._print_buffer_info("RGB", snap_rgb)
-        self._print_buffer_info("Depth", snap_depth)
-        self._print_buffer_info("Left Wrist", snap_lw)
-        self._print_buffer_info("Right Wrist", snap_rw)
-        self._print_buffer_info("Left Kps", snap_lk)
-        self._print_buffer_info("Right Kps", snap_rk)
+        if self.debug_code:
+            self._print_buffer_info("RGB", snap_rgb)
+            self._print_buffer_info("Depth", snap_depth)
+            self._print_buffer_info("Left Wrist", snap_lw)
+            self._print_buffer_info("Right Wrist", snap_rw)
+            self._print_buffer_info("Left Kps", snap_lk)
+            self._print_buffer_info("Right Kps", snap_rk)
 
         if self.first_inference:
             rgb_seq = [np.array(snap_rgb[-1][1])]
@@ -471,7 +479,8 @@ class ModelInterfaceNode(Node):
         else:
             # 2. 对齐采样
             t_ref = min(s[-1][0] for s in all_snaps)
-            self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={self.dt_ns/1e6:.1f}ms")
+            if self.debug_code:
+                self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={self.dt_ns/1e6:.1f}ms")
 
             # Image
             rgb_seq, depth_seq = [], []
@@ -508,7 +517,8 @@ class ModelInterfaceNode(Node):
 
         instr = self.current_instr
         
-        self.get_logger().info(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, 状态形状={states_in.shape}")
+        if self.debug_code:
+            self.get_logger().info(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, 状态形状={states_in.shape}")
 
         return {
             "image": rgb_in, "depth_image": depth_in, "camera_intrinsics": self.K_mat,
