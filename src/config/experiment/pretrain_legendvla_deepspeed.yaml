@@ -214,6 +214,13 @@ training:
   save_eval_attn_weights: false
   # misc
   log_interval: 20
+  compile:
+    enabled: False
+    fullgraph: True
+    backend: inductor
+    mode: default
+    dynamic:
+    static_batch_layout: True
 
 mixture:
   # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action

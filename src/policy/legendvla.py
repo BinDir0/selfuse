@@ -486,9 +486,9 @@ class LegendVLA(nn.Module):
 
         assert (states is None) == (n_states is None), "states and n_states must be provided together"
         assert (actions is None) == (n_actions is None), "actions and n_actions must be provided together"
-        if n_states is not None:
+        if n_states is not None and not torch.compiler.is_compiling():
             assert torch.all(n_states == state_mask.sum(dim=1))
-        if n_actions is not None:
+        if n_actions is not None and not torch.compiler.is_compiling():
             assert torch.all(n_actions == action_mask.sum(dim=1))
 
         if pixel_values is not None:
@@ -527,7 +527,8 @@ class LegendVLA(nn.Module):
             projected_image_features = self.multi_modal_projector(paired_image_features)
             projected_image_features = projected_image_features / (self.vlm_hidden_size ** 0.5)
             image_token_counts = image_mask.sum(dim=1)
-            assert torch.all(image_token_counts == projected_image_features.shape[1])
+            if not torch.compiler.is_compiling():
+                assert torch.all(image_token_counts == projected_image_features.shape[1])
             image_slot = image_mask.long().cumsum(dim=1) - 1
             aligned_image_features = _align_features_by_slot(
                 projected_image_features.to(dtype),
@@ -606,14 +607,14 @@ class LegendVLA(nn.Module):
         return _psi_t(x, x1, t, self.flow_sig_min)
 
     # TODO: Deprecated method, to be updated
-    def compute_ar_loss(self, batch: dict) -> dict:
+    def compute_ar_loss(self, batch: dict, **kwargs) -> dict:
         from src.policy.legendvla_loss import compute_ar_loss as _compute_ar_loss
-        return _compute_ar_loss(self, batch)
+        return _compute_ar_loss(self, batch, **kwargs)
 
     # TODO: Deprecated method, to be updated
-    def compute_flow_loss(self, batch: dict) -> dict:
+    def compute_flow_loss(self, batch: dict, **kwargs) -> dict:
         from src.policy.legendvla_loss import compute_flow_loss as _compute_flow_loss
-        return _compute_flow_loss(self, batch)
+        return _compute_flow_loss(self, batch, **kwargs)
 
     @torch.compile
     def compute_celoss(self, hidden_states: torch.FloatTensor, labels: torch.LongTensor) -> torch.FloatTensor:
@@ -623,25 +624,23 @@ class LegendVLA(nn.Module):
             self.CELoss, self.ignore_index, hidden_states, labels
         )
 
-    def compute_loss(self, batch: dict) -> dict:
+    def compute_loss(self, batch: dict, **kwargs) -> dict:
         from src.policy.legendvla_loss import compute_loss as _compute_loss
-        return _compute_loss(self, batch)
+        return _compute_loss(self, batch, **kwargs)
 
     def forward(self, mode: str, batch: dict, **kwargs) -> dict:
-        from src.policy.legendvla_loss import compute_loss, compute_ar_loss, compute_flow_loss
-        from src.policy.legendvla_inference import infer_action, infer_vlm, infer_vla
         if mode == "train":
-            return compute_loss(self, batch, **kwargs)
+            return self.compute_loss(batch, **kwargs)
         elif mode == "train_ar":
-            return compute_ar_loss(self, batch, **kwargs)
+            return self.compute_ar_loss(batch, **kwargs)
         elif mode == "train_flow":
-            return compute_flow_loss(self, batch, **kwargs)
+            return self.compute_flow_loss(batch, **kwargs)
         elif mode == "infer_action":
-            return infer_action(self, batch, **kwargs)
+            return self.infer_action(batch, **kwargs)
         elif mode == "infer_vla":
-            return infer_vla(self, batch, **kwargs)
+            return self.infer_vla(batch, **kwargs)
         elif mode == "infer_vlm":
-            return infer_vlm(self, batch, **kwargs)
+            return self.infer_vlm(batch, **kwargs)
         else:
             raise ValueError(f"Invalid mode: {mode}")
         

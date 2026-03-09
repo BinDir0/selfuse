@@ -383,7 +383,15 @@ class DiffLoss(nn.Module):
             return self.flow_matching_loss(target, z, mask, t)
         else:
             return self.diffusion_loss(target, z, mask)
-    
+
+    @staticmethod
+    def _broadcast_mask(mask, loss):
+        if mask is None:
+            return None
+        while mask.ndim < loss.ndim:
+            mask = mask.unsqueeze(-1)
+        return mask.to(dtype=loss.dtype)
+
     def diffusion_loss(self, target, z, mask=None):
         """Traditional DDPM diffusion loss"""
         t = torch.randint(0, self.train_diffusion.num_timesteps, (target.shape[0],), device=target.device)
@@ -391,6 +399,7 @@ class DiffLoss(nn.Module):
         loss_dict = self.train_diffusion.training_losses(self.net, target, t, model_kwargs)
         loss = loss_dict["loss"]
         if mask is not None:
+            mask = self._broadcast_mask(mask, loss)
             loss = (loss * mask).sum() / mask.sum().clamp(min=1)
         return loss.mean()
     
@@ -430,8 +439,9 @@ class DiffLoss(nn.Module):
         
         # 5. MSE Loss
         loss = (v_pred - v_target) ** 2
-        
+
         if mask is not None:
+            mask = self._broadcast_mask(mask, loss)
             loss = (loss * mask).sum() / mask.sum().clamp(min=1)
         else:
             loss = loss.mean()

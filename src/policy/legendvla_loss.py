@@ -86,6 +86,56 @@ def psi_t(
     return (1 - (1 - flow_sig_min) * t) * x + t * x1
 
 
+def _get_sample_indices(
+    batch: dict,
+    is_vla_data: torch.BoolTensor,
+) -> tuple[torch.LongTensor, torch.LongTensor]:
+    vla_sample_indices = batch.get("vla_sample_indices")
+    vlm_sample_indices = batch.get("vlm_sample_indices")
+    if vla_sample_indices is None:
+        vla_sample_indices = torch.nonzero(is_vla_data, as_tuple=False).squeeze(1)
+    if vlm_sample_indices is None:
+        vlm_sample_indices = torch.nonzero(~is_vla_data, as_tuple=False).squeeze(1)
+    return vla_sample_indices, vlm_sample_indices
+
+
+def _build_dense_diffloss_inputs(
+    model,
+    hidden_states: torch.FloatTensor,
+    actions: torch.FloatTensor,
+    answer_start_idx: torch.LongTensor,
+    n_actions: torch.LongTensor,
+    vla_sample_indices: torch.LongTensor,
+) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.BoolTensor]:
+    vla_hidden = hidden_states.index_select(0, vla_sample_indices)
+    vla_action = actions.index_select(0, vla_sample_indices)
+    vla_answer_start_idx = answer_start_idx.index_select(0, vla_sample_indices)
+    vla_n_actions = n_actions.index_select(0, vla_sample_indices)
+
+    ar_action_chunk_size = model.ar_action_chunk_size
+    ar_action_chunks = vla_action.unfold(dimension=1, size=ar_action_chunk_size, step=1)
+    ar_action_chunks_flat = ar_action_chunks.flatten(start_dim=2)
+
+    max_chunk_count = ar_action_chunks_flat.shape[1]
+    chunk_indices = torch.arange(max_chunk_count, device=hidden_states.device).unsqueeze(0)
+    hidden_positions = vla_answer_start_idx.unsqueeze(1) - 1 + chunk_indices
+    hidden_positions = hidden_positions.clamp(min=0, max=hidden_states.shape[1] - 1)
+
+    gather_index = hidden_positions.unsqueeze(-1).expand(-1, -1, hidden_states.shape[-1])
+    vla_hidden_z = torch.gather(vla_hidden, dim=1, index=gather_index)
+
+    valid_chunk_counts = (
+        vla_n_actions - ar_action_chunk_size + 1
+    ).clamp(min=0, max=max_chunk_count).unsqueeze(1)
+    diffloss_mask = chunk_indices < valid_chunk_counts
+
+    return (
+        vla_hidden_z.reshape(-1, vla_hidden_z.shape[-1]),
+        ar_action_chunks_flat.reshape(-1, ar_action_chunks_flat.shape[-1]),
+        diffloss_mask.reshape(-1),
+    )
+
+
 # TODO: Deprecated method, to be updated
 def compute_ar_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     """
@@ -237,8 +287,7 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     t = batch["t"]
     states = batch["states"]
     answer_start_idx = batch["answer_start_idx"]
-    is_vla_data = batch["is_vla_data"]
-    is_vlm_data = (is_vla_data != True)
+    is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
     n_actions = batch["n_actions"]
     n_states = batch["n_states"]
 
@@ -247,12 +296,8 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     x1 = actions
     psi_t_val = psi_t(x0, x1, t, model.flow_sig_min)
 
-    if 'depth_values' in batch:
-        depth_values = batch["depth_values"]
-        has_depth_values = batch["has_depth_values"]
-    else:
-        depth_values = None
-        has_depth_values = None
+    depth_values = batch.get("depth_values")
+    has_depth_values = batch.get("has_depth_values")
     inputs_embeds = model._forward_siglip_and_text_embedding(
         input_ids=input_ids,
         pixel_values=pixel_values,
@@ -285,55 +330,33 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     hidden_states = output["vlm"]
     action_embeds = output["action"]
 
-    if torch.any(is_vlm_data):
-        ce_loss = compute_celoss(
-            model.lm_head, model.final_logit_softcapping,
-            model.CELoss, model.ignore_index,
-            hidden_states[is_vlm_data], labels[is_vlm_data]
-        )
-    else:
-        ce_loss = compute_celoss(
-            model.lm_head, model.final_logit_softcapping,
-            model.CELoss, model.ignore_index,
-            hidden_states, labels
-        )
+    vla_sample_indices, vlm_sample_indices = _get_sample_indices(batch, is_vla_data)
+
+    ce_loss = compute_celoss(
+        model.lm_head, model.final_logit_softcapping,
+        model.CELoss, model.ignore_index,
+        hidden_states.index_select(0, vlm_sample_indices),
+        labels.index_select(0, vlm_sample_indices)
+    )
 
     # diffusion loss
-    device = hidden_states.device
-    max_vlm_tokens = hidden_states.shape[1]
-    num_action_tokens = model.num_action_tokens
-    ar_action_chunk_size = model.ar_action_chunk_size
-    vla_hidden = hidden_states[is_vla_data]
-    vla_action = actions[is_vla_data]  # (B, H, D)
-    ar_action_chunks = vla_action.unfold(dimension=1, size=ar_action_chunk_size, step=1)  # (B, H-chunk_size+1, D, chunk_size)
-    ar_action_chunks_flat = ar_action_chunks.flatten(start_dim=2)  # (B, H-chunk_size+1, D*chunk_size)
-
-    # Build index sequences
-    range_hidden = torch.arange(max_vlm_tokens, device=device).unsqueeze(0)
-    range_action = torch.arange(num_action_tokens - ar_action_chunk_size + 1, device=device).unsqueeze(0)
-
-    starts = answer_start_idx[is_vla_data].unsqueeze(1)
-    ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1) - ar_action_chunk_size + 1
-    action_ends = n_actions[is_vla_data].unsqueeze(1) - ar_action_chunk_size + 1
-
-    mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
-    mask_action = range_action < action_ends
-
-    vla_hidden_z = vla_hidden[mask_hidden]
-    action_gt = ar_action_chunks_flat[mask_action]
-    assert vla_hidden_z.shape[0] == action_gt.shape[0], \
-        f"The number of vla hidden and action gt should be the same, but got {vla_hidden_z.shape[0]} and {action_gt.shape[0]}"
-    if action_gt.numel() == 0:
-        dummy_vla_hidden_z = hidden_states[0:1, 0, :]
-        dummy_action_gt = action_gt.new_zeros(1, action_gt.shape[-1])
-        dummy_latent_condition_embeds = model.latent_condition_projector(dummy_vla_hidden_z)
-        dummy_diff_loss = model.diffloss(dummy_action_gt, dummy_latent_condition_embeds)
-        diff_loss = dummy_diff_loss * 0
-    else:
-        vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
-        action_gt_repeated = action_gt.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
-        latent_condition_embeds = model.latent_condition_projector(vla_hidden_z_repeated)
-        diff_loss = model.diffloss(action_gt_repeated, latent_condition_embeds) / model.diffloss_micro_batch_size
+    vla_hidden_z, action_gt, diffloss_mask = _build_dense_diffloss_inputs(
+        model,
+        hidden_states,
+        actions,
+        answer_start_idx,
+        n_actions,
+        vla_sample_indices,
+    )
+    vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
+    action_gt_repeated = action_gt.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
+    diffloss_mask_repeated = diffloss_mask.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
+    latent_condition_embeds = model.latent_condition_projector(vla_hidden_z_repeated)
+    diff_loss = model.diffloss(
+        action_gt_repeated,
+        latent_condition_embeds,
+        mask=diffloss_mask_repeated.to(dtype=action_gt_repeated.dtype),
+    ) / model.diffloss_micro_batch_size
 
     # flow loss
     v_psi = model.action_decoder(action_embeds)

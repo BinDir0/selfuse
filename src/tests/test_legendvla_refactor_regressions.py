@@ -6,6 +6,7 @@ import types
 import torch
 from torch import nn
 
+from src.policy.legendvla_loss import _build_dense_diffloss_inputs
 from src.policy.legendvla_utils import build_causal_mask_and_position_ids
 
 
@@ -432,6 +433,47 @@ def test_forward_siglip_and_text_embedding_requires_n_actions_with_actions():
         assert str(exc) == "actions and n_actions must be provided together"
     else:
         raise AssertionError("Expected assertion when actions is provided without n_actions")
+
+
+def test_build_dense_diffloss_inputs_matches_original_masked_alignment():
+    model = types.SimpleNamespace(
+        ar_action_chunk_size=2,
+    )
+    hidden_states = torch.arange(3 * 7 * 4, dtype=torch.float32).reshape(3, 7, 4)
+    actions = torch.arange(3 * 4 * 3, dtype=torch.float32).reshape(3, 4, 3)
+    answer_start_idx = torch.tensor([2, 1, 3], dtype=torch.long)
+    n_actions = torch.tensor([4, 2, 3], dtype=torch.long)
+    is_vla_data = torch.tensor([True, False, True], dtype=torch.bool)
+    vla_sample_indices = torch.nonzero(is_vla_data, as_tuple=False).squeeze(1)
+
+    dense_hidden, dense_action, dense_mask = _build_dense_diffloss_inputs(
+        model,
+        hidden_states,
+        actions,
+        answer_start_idx,
+        n_actions,
+        vla_sample_indices,
+    )
+
+    vla_hidden = hidden_states[is_vla_data]
+    vla_action = actions[is_vla_data]
+    ar_action_chunks = vla_action.unfold(dimension=1, size=model.ar_action_chunk_size, step=1)
+    ar_action_chunks_flat = ar_action_chunks.flatten(start_dim=2)
+
+    range_hidden = torch.arange(hidden_states.shape[1]).unsqueeze(0)
+    range_action = torch.arange(ar_action_chunks_flat.shape[1]).unsqueeze(0)
+    starts = answer_start_idx[is_vla_data].unsqueeze(1)
+    ends = (answer_start_idx[is_vla_data] + n_actions[is_vla_data]).unsqueeze(1) - model.ar_action_chunk_size + 1
+    action_ends = n_actions[is_vla_data].unsqueeze(1) - model.ar_action_chunk_size + 1
+
+    mask_hidden = (range_hidden >= (starts - 1)) & (range_hidden < (ends - 1))
+    mask_action = range_action < action_ends
+
+    reference_hidden = vla_hidden[mask_hidden]
+    reference_action = ar_action_chunks_flat[mask_action]
+
+    torch.testing.assert_close(dense_hidden[dense_mask], reference_hidden)
+    torch.testing.assert_close(dense_action[dense_mask], reference_action)
 
 
 def test_forward_siglip_and_text_embedding_matches_original_logic_with_depth():

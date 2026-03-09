@@ -69,7 +69,44 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.objective_func = "train"
         else: 
             self.objective_func = "train_" + cfg.training.objective
+        self._compile_cfg = OmegaConf.to_container(cfg.training.get("compile", {}), resolve=True)
+        self._static_train_layout = None
         print(f"Training with objective function: {self.objective_func}")
+
+    def maybe_compile_model(self, accelerator):
+        compile_cfg = dict(self._compile_cfg)
+        enabled = bool(compile_cfg.pop("enabled", False))
+        compile_cfg.pop("static_batch_layout", None)
+        compile_cfg = {key: value for key, value in compile_cfg.items() if value is not None}
+        if not enabled:
+            return
+        if accelerator.is_main_process:
+            print(f"Compiling model with kwargs: {compile_cfg}")
+        self.model.compile(**compile_cfg)
+
+    def get_static_train_layout(self, is_vla_data: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        current_layout = is_vla_data.to(dtype=torch.bool)
+        if self._static_train_layout is None:
+            vla_indices = torch.nonzero(current_layout, as_tuple=False).squeeze(1)
+            vlm_indices = torch.nonzero(~current_layout, as_tuple=False).squeeze(1)
+            if vla_indices.numel() == 0:
+                raise ValueError("Fullgraph train path requires at least one VLA sample per batch.")
+            self._static_train_layout = {
+                "is_vla_data": current_layout.detach().cpu(),
+                "vla_indices": vla_indices.detach().cpu(),
+                "vlm_indices": vlm_indices.detach().cpu(),
+            }
+        elif not torch.equal(current_layout.cpu(), self._static_train_layout["is_vla_data"]):
+            raise ValueError(
+                "Batch is_vla_data layout changed after static fullgraph compile was enabled. "
+                "Please keep the VLA/VLM sample order fixed within each batch."
+            )
+
+        device = is_vla_data.device
+        return (
+            self._static_train_layout["vla_indices"].to(device=device),
+            self._static_train_layout["vlm_indices"].to(device=device),
+        )
 
     @capture_output_to_training_log
     def run(self):
@@ -173,6 +210,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             model.load_pretrained_vlm_weights()
         if cfg.lora:
             model.freeze_non_lora_weights_in_vlm()
+
+        self.maybe_compile_model(accelerator)
 
         self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device)
         for key in self.include_keys:
@@ -632,18 +671,24 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             "is_vla_data": batch["is_vla_data"],
             "n_states": batch["n_states"],
             "n_actions": batch["n_actions"],
+            "depth_values": batch["depth_values"].to(self.dtype) if "depth_values" in batch else None,
+            "has_depth_values": batch["has_depth_values"] if "has_depth_values" in batch else None,
         }
-        # Add depth_values if available
-        if "depth_values" in batch:
-            inputs["depth_values"] = batch["depth_values"].to(self.dtype)
-            inputs["has_depth_values"] = batch["has_depth_values"]
         if self.objective_func != "train_ar":
             inputs["action_position_ids"] = action_position_ids
             inputs["actions"] = batch["actions"].to(self.dtype)
             inputs["actions_valid_mask"] = batch["actions_valid_mask"]
         if self.objective_func != "train_flow":
             inputs["labels"] = batch["labels"]
-        
+        if (
+            self.objective_func == "train"
+            and self._compile_cfg.get("enabled", False)
+            and self._compile_cfg.get("static_batch_layout", False)
+        ):
+            vla_indices, vlm_indices = self.get_static_train_layout(batch["is_vla_data"])
+            inputs["vla_sample_indices"] = vla_indices
+            inputs["vlm_sample_indices"] = vlm_indices
+
         if split_mask:
             max_vlm_tokens = input_ids.shape[-1]
             vlm_mask, action_mask = (
