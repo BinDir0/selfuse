@@ -7,8 +7,9 @@
 ```bash
 docker load -i teleop.tar
 ```
-3. **修改宿主机的UDP缓冲区参数**：
+3. **配置宿主机**：
 ```bash
+# 修改宿主机的UDP缓冲区参数
 # 创建独立的 ROS 2 优化配置文件
 sudo sh -c 'cat > /etc/sysctl.d/60-ros2-realsense.conf <<EOF
 net.core.rmem_max=2147483647
@@ -16,9 +17,15 @@ net.core.wmem_max=2147483647
 net.core.rmem_default=2147483647
 net.core.wmem_default=2147483647
 EOF'
-
 # 立即应用
 sudo sysctl --system
+
+# 配置X11
+echo 'xhost +SI:localuser:root > /dev/null 2>&1' >> ~/.xprofile && xhost +SI:localuser:root
+
+# 安装音频播放库
+sudo apt update
+sudo apt install mpg123
 ```
 4. **创建容器**：修改 `create_container.sh` 第 139 行的宿主机路径为本地项目目录，然后执行：
 ```bash
@@ -88,8 +95,7 @@ root@zyf-4090:~/workspace/legendvla-inference/examples# tree -L 2
 | 服务器 | 对应端口号 | 服务器 | 对应端口号 | 服务器 | 对应端口号 | 服务器 | 对应端口号 |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | pro-01 | 18020 | pro-04 | 18021 | pro-05 | 18022 | pro-07 | 18023 |
-| pro-09 | 18024 | pro-10 | 18025 | pro-11 | 18026 | pro-14 | 18033 |
-| pro-15 | 18034 | pro-16 | 18035 | pro-17 | 18036 | pro-18 | 18037 |
+| pro-09 | 18024 | pro-10 | 18025 | pro-11 | 18026 | pro-32 | 18038 |
 | pro-38 | 18028 | pro-48 | 18029 | pro-49 | 18030 | pro-50 | 18031 
 | pro-51 | 18032 |  |  |  |  |  |  |
 
