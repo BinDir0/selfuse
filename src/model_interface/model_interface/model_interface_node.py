@@ -534,7 +534,8 @@ class ModelInterfaceNode(Node):
                     self.infer_event.clear()
                     continue
 
-                self.get_logger().info(f"🧠 开始推理: 指令='{self.current_instr}', 模式={self.mode}")
+                if self.debug_code:
+                    self.get_logger().info(f"🧠 开始推理: 指令='{self.current_instr}', 模式={self.mode}")
                 start_time = time.time()
                 
                 try:
@@ -542,6 +543,7 @@ class ModelInterfaceNode(Node):
                 except AssertionError as e:
                     self.get_logger().warn(f"⚠️  数据准备失败: {e}, 等待更多数据...")
                     time.sleep(0.02); continue
+                self.get_logger().info(f"🧠 推理数据准备完成: 耗时={time.time() - start_time:.3f}s")
 
                 try:
                     res = self.policy_client.infer(payload)
