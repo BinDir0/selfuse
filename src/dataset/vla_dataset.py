@@ -1,8 +1,5 @@
 """
-WebDataset-based LegendVLA dataset.
-
-Reuses existing preprocess logic (process_state_action,
-process_image, PaliGemmaVLAProcessor) without modification.
+WebDataset-based VLA datasets for LegendVLA training and normalizer fitting.
 """
 
 import warnings
@@ -15,7 +12,7 @@ from torchvision import transforms
 from src.model.common.normalizer import LinearNormalizer
 from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image
-from .collator import LegendVLDataCollator
+from .collator import LegendVLDataCollator, ConcatDataCollator
 from .wds_dataset import (
     build_blended_dataset, WindowConfig, LOWDIM_SLICES,
 )
@@ -382,3 +379,108 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
         vlm_sample["depth_values"] = torch.zeros(*shape_meta["depth_values"])
         vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)
+
+
+class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
+    """Low-level WebDataset for normalizer fitting (state/action only, no images).
+
+    Streams lowdim data from WebDataset shards, applies process_state_action(),
+    and yields {'states': ..., 'actions': ...} or {'motions': ...} for normalizer.
+    """
+
+    def __init__(
+        self,
+        wds_datasets: List[Dict],
+        shape_meta: Dict,
+        use_relative_action: bool = False,
+        lowdim_slices: Optional[Dict] = None,
+    ):
+        super().__init__()
+        self.wds_datasets = wds_datasets
+        self.shape_meta = shape_meta
+        self.motion_type = shape_meta["obs"]["state"]["type"]
+        self.hand_ndim = shape_meta["obs"]["state"]["hand"]["shape"][-1] // 2
+        self.use_relative_action = use_relative_action
+        self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
+
+        self.window_config = WindowConfig(
+            action_horizon=shape_meta["action"]["horizon"],
+            action_stride=shape_meta["action"]["stride"],
+            state_horizon=shape_meta["obs"]["state"]["horizon"],
+            state_stride=shape_meta["obs"]["state"]["stride"],
+            image_horizon=shape_meta["obs"]["rgb"]["horizon"],
+            image_stride=shape_meta["obs"]["rgb"]["stride"],
+        )
+
+    def sample_to_data(self, sample):
+        """Extract lowdim fields and compute state/action."""
+        state, action = process_state_action(
+            wrist_state=sample["wrist_state"].astype(np.float32),
+            hand_state=sample["hand_state"].astype(np.float32),
+            wrist_action=sample["wrist_action"].astype(np.float32),
+            hand_action=sample["hand_action"].astype(np.float32),
+            extrinsic=sample["extrinsic"].astype(np.float32).reshape(4, 4),
+            normalizer=None,
+            hand_ndim=self.hand_ndim,
+            motion_type=self.motion_type,
+            use_relative_action=self.use_relative_action,
+        )
+
+        if not self.use_relative_action:
+            data = {
+                "motions": np.concatenate([state, action], axis=0),
+            }
+        else:
+            data = {
+                "states": state,
+                "actions": action,
+            }
+        return data
+
+    def build_pipeline(self):
+        """Build a streaming pipeline for lowdim-only data."""
+        datasets_config = []
+        for ds in self.wds_datasets:
+            datasets_config.append({
+                "shard_urls": ds["shard_urls"],
+                "weight": ds.get("weight", 1.0),
+                "name": ds.get("name", "unknown"),
+            })
+
+        def preprocess_fn(sample):
+            try:
+                data = self.sample_to_data(sample)
+                torch_data = {
+                    k: torch.from_numpy(v) if isinstance(v, np.ndarray) else v
+                    for k, v in data.items()
+                }
+                return torch_data
+            except Exception as e:
+                warnings.warn(f"Error in lowlevel preprocess: {e}")
+                return None
+
+        def filter_none(src):
+            for sample in src:
+                if sample is not None:
+                    sample.pop("__key__", None)
+                    yield sample
+
+        pipeline = build_blended_dataset(
+            datasets_config=datasets_config,
+            config=self.window_config,
+            lowdim_slices=self.lowdim_slices,
+            preprocess_fn=preprocess_fn,
+            shuffle_buffer=0,
+            mode="train",
+            use_sliding_window=True,
+            lowdim_only=True,
+        )
+        return filter_none(pipeline)
+
+    def __iter__(self):
+        pipeline = self.build_pipeline()
+        return iter(pipeline)
+
+    def get_collator(self):
+        """Return ConcatDataCollator for normalizer fitting."""
+        return ConcatDataCollator()

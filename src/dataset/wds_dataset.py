@@ -75,6 +75,27 @@ def decode_lowdim(sample):
     return sample
 
 
+def decode_lowdim_only(sample):
+    """Decode only meta.json and lowdim.npy, drop image/depth bytes.
+
+    Used by lowdim-only pipelines (e.g. normalizer fitting) to avoid
+    the cost of JPEG decompression and PIL Image creation.
+    """
+    import io
+    result = {"__key__": sample.get("__key__", "")}
+    meta = sample.get("meta.json")
+    if isinstance(meta, bytes):
+        result["meta.json"] = json.loads(meta.decode("utf-8"))
+    elif meta is not None:
+        result["meta.json"] = meta
+    ld = sample.get("lowdim.npy")
+    if isinstance(ld, bytes):
+        result["lowdim.npy"] = np.load(io.BytesIO(ld))
+    elif ld is not None:
+        result["lowdim.npy"] = ld
+    return result
+
+
 def unpack_lowdim(lowdim):
     """Unpack a (116,) float32 lowdim vector into named fields."""
     return {k: lowdim[s:e] for k, (s, e) in LOWDIM_SLICES.items()}
@@ -113,7 +134,7 @@ def gather_history_frames(past, buf, horizon, stride, pad_mode):
     return frames
 
 
-def build_sample_from_window(buf, past, config, lowdim_slices):
+def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False):
     """Build a training sample from the sliding window buffer.
 
     Args:
@@ -121,6 +142,7 @@ def build_sample_from_window(buf, past, config, lowdim_slices):
         past: deque of past frames (already yielded), past[-1] is most recent
         config: WindowConfig with sampling parameters
         lowdim_slices: dict mapping field names to (start, end) index pairs
+        lowdim_only: if True, only extract lowdim fields (skip image/depth)
     """
     current = buf[0]
     meta = current["meta.json"]
@@ -152,27 +174,29 @@ def build_sample_from_window(buf, past, config, lowdim_slices):
     hand_state = state_lds[:, hss:hse]   # (state_horizon, 30)
 
     # --- Image: gather history frames ---
-    image_frames = gather_history_frames(
-        past, buf, config.image_horizon, config.image_stride, config.pad_mode)
-
-    images = []
-    for frame in image_frames:
-        img = np.array(frame["image.jpg"])
-        if img.ndim == 2:
-            img = np.stack([img] * 3, axis=-1)
-        images.append(img)
-    image = np.stack(images, axis=0)  # (image_horizon, H, W, 3)
-
-    # --- Depth: same frames as image ---
+    image = None
     depth = None
-    if current.get("depth.npy") is not None:
-        depth_list = []
+    if not lowdim_only:
+        image_frames = gather_history_frames(
+            past, buf, config.image_horizon, config.image_stride, config.pad_mode)
+
+        images = []
         for frame in image_frames:
-            d = frame.get("depth.npy")
-            if d is not None:
-                depth_list.append(d)
-        if depth_list:
-            depth = np.stack(depth_list, axis=0)  # (image_horizon, H, W)
+            img = np.array(frame["image.jpg"])
+            if img.ndim == 2:
+                img = np.stack([img] * 3, axis=-1)
+            images.append(img)
+        image = np.stack(images, axis=0)  # (image_horizon, H, W, 3)
+
+        # --- Depth: same frames as image ---
+        if current.get("depth.npy") is not None:
+            depth_list = []
+            for frame in image_frames:
+                d = frame.get("depth.npy")
+                if d is not None:
+                    depth_list.append(d)
+            if depth_list:
+                depth = np.stack(depth_list, axis=0)  # (image_horizon, H, W)
 
     # --- Extrinsic / Intrinsic: from current frame ---
     ld = current["lowdim.npy"]
@@ -193,7 +217,6 @@ def build_sample_from_window(buf, past, config, lowdim_slices):
         "hand_state":     hand_state.astype(np.float32),
         "wrist_action":   wrist_action.astype(np.float32),
         "hand_action":    hand_action.astype(np.float32),
-        "image":          image,
         "extrinsic":      extrinsic.astype(np.float32),
         "intrinsic":      intrinsic.astype(np.float32),
         "instruction":    instruction,
@@ -202,12 +225,14 @@ def build_sample_from_window(buf, past, config, lowdim_slices):
         "dataset_name":   meta.get("dataset_name", ""),
         "episode_index":  meta.get("episode_index", 0),
     }
+    if image is not None:
+        result["image"] = image
     if depth is not None:
         result["depth"] = depth
     return result
 
 
-def sliding_window_compose(src, config, lowdim_slices):
+def sliding_window_compose(src, config, lowdim_slices, lowdim_only=False):
     """Compose filter: sliding window over episode frames.
 
     Guarantees:
@@ -230,7 +255,7 @@ def sliding_window_compose(src, config, lowdim_slices):
         if ep_key != cur_ep:
             # Episode boundary: flush remaining frames with clamped actions
             while buf:
-                yield build_sample_from_window(buf, past, config, lowdim_slices)
+                yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
                 past.append(buf.popleft())
             past.clear()
             cur_ep = ep_key
@@ -239,12 +264,12 @@ def sliding_window_compose(src, config, lowdim_slices):
 
         # Yield as soon as we have enough future context
         if len(buf) > config.future_size:
-            yield build_sample_from_window(buf, past, config, lowdim_slices)
+            yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
             past.append(buf.popleft())
 
     # Final flush
     while buf:
-        yield build_sample_from_window(buf, past, config, lowdim_slices)
+        yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
         past.append(buf.popleft())
 
 
@@ -255,7 +280,7 @@ def no_split(src):
 
 def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
                        preprocess_fn=None, shuffle_buffer=8192, mode='train',
-                       use_sliding_window=True):
+                       use_sliding_window=True, lowdim_only=False):
     """Build a WebDataset pipeline for a single dataset.
 
     Training: resampled infinite stream, shard shuffle, buffer shuffle.
@@ -269,6 +294,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         shuffle_buffer: sample-level shuffle buffer size (train only)
         mode: 'train' or 'val'
         use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
+        lowdim_only: if True, only decode lowdim.npy and meta.json (skip image/depth)
     """
     if config is None:
         config = WindowConfig()
@@ -294,13 +320,18 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         nodesplitter=wds.split_by_node,
         resampled=is_train,
         empty_check=False,
-    ).decode("pil").map(decode_meta)
+    )
+    if lowdim_only:
+        # Only decode lowdim.npy and meta.json, drop everything else
+        pipeline = pipeline.map(decode_lowdim_only)
+    else:
+        pipeline = pipeline.decode("pil").map(decode_meta)
 
     if use_sliding_window:
-        pipeline = (
-            pipeline
-            .map(decode_lowdim)
-            .compose(lambda src: sliding_window_compose(src, config, lowdim_slices))
+        if not lowdim_only:
+            pipeline = pipeline.map(decode_lowdim)
+        pipeline = pipeline.compose(
+            lambda src: sliding_window_compose(src, config, lowdim_slices, lowdim_only)
         )
 
     # shuffle first, only need to cache raw samples
@@ -317,7 +348,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
 
 def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
                           preprocess_fn=None, shuffle_buffer=8192, mode='train',
-                          use_sliding_window=True):
+                          use_sliding_window=True, lowdim_only=False):
     """Build a blended dataset from multiple WebDataset sources.
 
     Training: weighted random mixing across sources.
@@ -333,6 +364,7 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
         shuffle_buffer: sample-level shuffle buffer size (train only)
         mode: 'train' or 'val'
         use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
+        lowdim_only: if True, only decode lowdim.npy and meta.json (skip image/depth)
     """
     if config is None:
         config = WindowConfig()
@@ -350,7 +382,7 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
             continue
         pipe = build_wds_pipeline(
             urls, config, lowdim_slices, preprocess_fn, shuffle_buffer, mode=mode,
-            use_sliding_window=use_sliding_window)
+            use_sliding_window=use_sliding_window, lowdim_only=lowdim_only)
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))
 
