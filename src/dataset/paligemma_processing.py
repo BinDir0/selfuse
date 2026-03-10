@@ -1,4 +1,3 @@
-from math import e
 from typing import Tuple
 import warnings
 import re

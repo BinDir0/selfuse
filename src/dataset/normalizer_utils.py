@@ -1,7 +1,5 @@
 '''
 Normalizer utility functions for LegendVLA datasets.
-
-Extracted from legendvla_dataset.py for modularity.
 '''
 
 import numpy as np
@@ -12,11 +10,9 @@ from torch.utils.data import DataLoader
 from src.model.common.normalizer import LinearNormalizer
 
 
-def get_normalizer(dataloader_cfg, normalizer_dataset=None, **kwargs):
+def get_normalizer(dataloader_cfg, normalizer_dataset):
+    assert normalizer_dataset is not None, "normalizer_dataset must be provided"
     # Merge all data
-    if normalizer_dataset is None:
-        from src.dataset.legendvla_dataset import LegendVLALowLevelDataset
-        normalizer_dataset = LegendVLALowLevelDataset(**kwargs)
     dataloader = DataLoader(normalizer_dataset, collate_fn=normalizer_dataset.get_collator(), **dataloader_cfg)
     assert len(dataloader) > 0, "No data to calculate normalizer"
     normalizer = LinearNormalizer()

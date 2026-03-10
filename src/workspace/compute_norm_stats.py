@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to compute normalizer statistics from dataset.
+Script to compute normalizer statistics from WebDataset.
 
 Usage:
     python src/workspace/compute_norm_stats.py \
@@ -17,13 +17,16 @@ from datetime import datetime
 import hydra
 from omegaconf import OmegaConf
 
+from src.dataset.vla_dataset import VLALowLevelWdsDataset
+from src.dataset.normalizer_utils import get_normalizer
+
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 OmegaConf.register_new_resolver(
     "now", lambda fmt: datetime.now().strftime(fmt), replace=True
 )
 
 def main():
-    parser = argparse.ArgumentParser(description='Compute normalizer statistics from dataset')
+    parser = argparse.ArgumentParser(description='Compute normalizer statistics from WebDataset')
     parser.add_argument(
         '--config',
         type=str,
@@ -42,17 +45,29 @@ def main():
         default='normalizer.pkl',
         help='Output filename (default: normalizer.pkl)'
     )
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=4096,
+        help='Batch size for normalizer dataloader (default: 4096)'
+    )
+    parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=64,
+        help='Number of dataloader workers (default: 64)'
+    )
     args = parser.parse_args()
-    
+
     # Load config file
     config_path = pathlib.Path(args.config)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    
+
     print(f"Loading config from: {config_path}")
     raw_cfg = OmegaConf.load(config_path)
     if "defaults" in raw_cfg:
-        # Compose with Hydra to resolve defaults like vla_dataset_paths/vlm_dataset_paths
+        # Compose with Hydra to resolve defaults like vla_wds_dataset_paths
         config_dir = config_path.parent.parent.resolve()  # .../src/config (absolute)
         config_name = f"{config_path.parent.name}/{config_path.stem}"
         with hydra.initialize_config_dir(
@@ -61,73 +76,75 @@ def main():
             cfg = hydra.compose(config_name=config_name)
     else:
         cfg = raw_cfg
-    
+
     # Resolve config
     try:
         OmegaConf.resolve(cfg)
     except Exception as e:
         print(f"Warning: Some config values could not be resolved: {e}")
         print("Continuing with unresolved config...")
-    
+
     # Create output directory
     output_dir = pathlib.Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / args.output_name
-    
+
     print("\n" + "="*80)
-    print("Computing Normalizer Statistics")
+    print("Computing Normalizer Statistics (WebDataset)")
     print("="*80)
     print(f"Config: {config_path}")
     print(f"Output: {output_path}")
     print("="*80)
-    
-    # Create VLA dataset
-    print("\n1. Creating VLA dataset...")
-    print(f"   Using vla_dataset_paths: {cfg.vla_dataset_paths}")
-    try:
-        vla_dataset = hydra.utils.instantiate(cfg.dataset.vla_dataset)
-        print(f"   ✓ VLA Dataset created successfully")
-        print(f"   - Dataset length: {len(vla_dataset)}")
-        print(f"   - Number of replay buffers: {len(vla_dataset.replay_buffers)}")
-        print(f"   - Sampler lengths: {vla_dataset.sampler_lens}")
-    except Exception as e:
-        print(f"   ✗ Error creating VLA dataset: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-    
+
+    # Create low-level WDS dataset for normalizer fitting
+    print("\n1. Creating VLALowLevelWdsDataset...")
+    vla_cfg = cfg.dataset.vla_dataset
+    wds_datasets = OmegaConf.to_container(vla_cfg.wds_datasets, resolve=True)
+    shape_meta = OmegaConf.to_container(cfg.shape_meta, resolve=True)
+    use_relative_action = vla_cfg.get("use_relative_action", False)
+
+    normalizer_dataset = VLALowLevelWdsDataset(
+        wds_datasets=wds_datasets,
+        shape_meta=shape_meta,
+        use_relative_action=use_relative_action,
+    )
+    print("   Dataset created successfully")
+
     # Compute normalizer
     print("\n2. Computing normalizer statistics...")
-    print(f"   Using dataloader config:")
-    print(f"   - batch_size: {cfg.dataset.vla_dataset.normalizer_dataloader_cfg.batch_size}")
-    print(f"   - num_workers: {cfg.dataset.vla_dataset.normalizer_dataloader_cfg.num_workers}")
-    print(f"   - shuffle: {cfg.dataset.vla_dataset.normalizer_dataloader_cfg.shuffle}")
-    
+    dataloader_cfg = {
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "pin_memory": True,
+    }
+    print(f"   - batch_size: {args.batch_size}")
+    print(f"   - num_workers: {args.num_workers}")
+
     try:
-        normalizer = vla_dataset.get_normalizer()
-        print(f"\n   ✓ Normalizer computed successfully")
+        normalizer = get_normalizer(dataloader_cfg, normalizer_dataset)
+        print(f"\n   Normalizer computed successfully")
     except Exception as e:
-        print(f"   ✗ Error computing normalizer: {e}")
+        print(f"   Error computing normalizer: {e}")
         import traceback
         traceback.print_exc()
         return
-    
+
     # Save normalizer
     print(f"\n3. Saving normalizer to {output_path}...")
     try:
         with open(output_path, 'wb') as f:
             pickle.dump(normalizer, f)
-        print(f"   ✓ Normalizer saved successfully")
-        
+        print(f"   Normalizer saved successfully")
+
         # Print file size
         file_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
         print(f"   - File size: {file_size:.2f} MB")
     except Exception as e:
-        print(f"   ✗ Error saving normalizer: {e}")
+        print(f"   Error saving normalizer: {e}")
         import traceback
         traceback.print_exc()
         return
-    
+
     # Print summary
     print("\n" + "="*80)
     print("Normalizer Statistics Summary")
@@ -142,7 +159,7 @@ def main():
         print(f"  Max: {stats.get('max', 'N/A')}")
         print(f"  Scale: {params.get('scale', 'N/A')}")
         print(f"  Offset: {params.get('offset', 'N/A')}")
-    
+
     print("\n" + "="*80)
     print("Normalizer computation completed!")
     print(f"Saved to: {output_path}")

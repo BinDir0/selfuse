@@ -1,3 +1,7 @@
+# TODO: The dataset loading section of this script (LegendVLAInference._init_dataset_and_processor)
+# still references zarr-based datasets. It needs to be migrated to use WebDataset
+# (VLAWdsDataset / UnifiedWdsDataset) for consistency with the training pipeline.
+
 import os
 import random
 import hydra

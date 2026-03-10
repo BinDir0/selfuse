@@ -1,9 +1,8 @@
-"""Unit tests for streaming VLM dataset and unified VLA+VLM iteration logic.
+"""Unit tests for streaming VLA+VLM unified dataset iteration logic.
 
 Tests cover:
 - UnifiedWdsDataset: train interleaving ratio, VLM auto-restart, val sequential
 - UnifiedWdsDataset.pad_vlm_sample: zero-padding of missing VLA fields
-- VLMStreamingDataset: build_stream train/val modes, distribute, infer_proportional_probs
 """
 
 import sys

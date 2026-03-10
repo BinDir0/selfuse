@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
-  - vla_dataset_paths
-  - vlm_dataset_paths
+  - vla_wds_dataset_paths
+  - vlm_wds_dataset_paths
   - _self_
 name: legendvla
 exp_name: "pretrain_legendvla_deepspeed"
@@ -53,30 +53,25 @@ shape_meta: &shape_meta
     stride: ${n_action_stride}
 
 dataset:
-  _target_: src.dataset.legendvla_dataset.LegendUnifiedDataset
-  vla_dataset: 
-    _target_: src.dataset.legendvla_dataset.LegendVLADataset
-    zarr_paths: ${vla_dataset_paths}
+  _target_: src.dataset.vla_dataset.UnifiedWdsDataset
+  vla_dataset:
+    _target_: src.dataset.vla_dataset.VLAWdsDataset
+    wds_datasets: ${vla_wds_datasets}
     shape_meta: ${shape_meta}
-    seed: 42
-    val_ratio: 0.001
     objective: ${objective}
-    normalizer_dataloader_cfg:
-      batch_size: 4096
-      num_workers: 120
-      shuffle: False
-      pin_memory: True
-      persistent_workers: True
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
-    depth_dropout: 0.1
+    val_wds_datasets: ${val_vla_wds_datasets}
+    shuffle_buffer: 4096
   vlm_dataset:
-    _target_: src.dataset.legendvla_dataset.LegendVLMDataset
-    dataset_paths: ${vlm_dataset_paths}
-    split: train
-    cache_dir: /share_data/guantianrui/datasets/VLM/FineVision/.cache
+    _target_: src.dataset.vlm_dataset.VLMWdsDataset
+    wds_datasets: ${vlm_wds_datasets}
     seed: 42
+    shuffle_buffer: 4096
     weights: [0.5, 0.5, 0.5]
+    val_wds_datasets: ${val_vlm_wds_datasets}
+  vla_ratio: ${eval:'5/6'}
+  batch_size: ${dataloader.loader.batch_size}
     
 n_obs_image_steps: 1
 n_obs_image_stride: 30
@@ -113,27 +108,21 @@ vlm_processor:
   tokenizer_padding: ${tokenizer_padding} 
 
 dataloader:
-  batch_sampler: 
-    # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
+  loader:
     batch_size: 16
-    vla_ratio: 1.0 # ${eval:'5/6'} # ratio of VLA samples in each batch
-    seed: 42
-    shuffle: True
-    drop_last: False
-  loader: 
-    num_workers: 20
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32
 
 val_dataloader:
-  batch_sampler: 
+  batch_sampler:
     # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
     batch_size: 16
     shuffle: False
     drop_last: False
-  loader: 
-    num_workers: 16
+  loader:
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32
@@ -160,6 +149,7 @@ optimizer:
     weight_decay: 1e-2
 
 training:
+  steps_per_epoch: 100000
   seed: 42
   dynamic_data_seed: True  # Use runtime timestamp seed to avoid replaying the same data order on resume
   objective: ${objective}
@@ -208,7 +198,7 @@ training:
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 
   # steps per epoch
-  max_train_steps: 35000
+  max_train_steps: null
   max_eval_steps: null
   # evaluation settings
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation

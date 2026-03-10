@@ -1,7 +1,5 @@
 '''
 Data transformation functions for LegendVLA datasets.
-
-Extracted from legendvla_dataset.py for modularity.
 '''
 
 from typing import Optional

@@ -33,6 +33,7 @@ from src.model.common.model_average import ModelAveraging
 from src.utils.training_utils import (
     TrainingState,
     capture_output_to_training_log,
+    DeviceTransferWrapper,
     FullMemoryTracker,
     params_l2_norm,
 )
@@ -129,22 +130,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             print("\n--- CPU Bottlenecks ---")
             print(output_cpu)
 
-            '''
-            # sort by GPU memory usage, find GPU memory bottleneck
-            output_gpu_mem = p.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10)
-            print("\n--- GPU Memory Consumption ---")
-            print(output_gpu_mem)
-            '''
-            
             p.export_chrome_trace(f"{self.output_dir}/trace/trace_step_{p.step_num}.json")
 
-        if cfg.training.profile: 
+        if cfg.training.profile:
             profile_kwargs = ProfileKwargs(
                 activities=['cpu', 'cuda'],
                 schedule_option={"wait": 1, "warmup": 2, "active": 10, "repeat": 3, "skip_first": 50},
-                on_trace_ready=trace_handler, 
-                # profile_memory=True,  # enable memory analysis
-                # with_stack=True
+                on_trace_ready=trace_handler,
             )
             os.makedirs(f"{self.output_dir}/trace", exist_ok=True)
 
@@ -154,7 +146,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         kwargs_handlers = [init_process_group_kwargs]
         if cfg.training.profile:
             kwargs_handlers.append(profile_kwargs)
-        
+
         self.is_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
         self.is_deepspeed = False
 
@@ -168,10 +160,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         accelerator = Accelerator(
             log_with='wandb',
-            deepspeed_plugin=deepspeed_plugin,  # None 的话不影响
+            deepspeed_plugin=deepspeed_plugin,
             kwargs_handlers=kwargs_handlers
         )
-        
+
         # Print accelerator initialization info
         if accelerator.is_main_process:
             print("=" * 80)
@@ -193,7 +185,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         )
 
         # Broadcast output directory to all processes
-        # so that all processes can save checkpoint to the same directory
         if accelerator.is_main_process:
             output_dir = self.output_dir
             objects_to_broadcast = [output_dir]
@@ -208,10 +199,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.reset_run_seed(accelerator)
 
         # Configure optimizers
-        model = self.model  # Get unwrapped model for parameter access
+        model = self.model
 
-        # Load pretrained weights and freeze non-lora weights in VLM before deepspeed optimizer setup
-        # cause deepspeed will back up the parameters, manually load pretrained weights after setup can't affect these parameters
+        # Load pretrained weights before optimizer setup
         if cfg.training.load_pretrained_pi05_weights:
             model.load_pretrained_pi05_weights()
         elif cfg.training.load_pretrained_vlm_weights:
@@ -229,12 +219,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         all_trainable_parameters = []
         if self.objective_func != "train_ar":
             all_trainable_parameters = self.get_grouped_parameters(
-                model.action_expert_parameters, 
-                cfg.optimizer.action, 
+                model.action_expert_parameters,
+                cfg.optimizer.action,
             )
-        else: 
+        else:
             model.freeze_non_lora_weights_in_ae()
-        
+
         # VLM optimizer (if training VLM)
         if cfg.training.train_vlm:
             if cfg.lora:
@@ -242,11 +232,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             else:
                 vlm_trained_parameters = model.trainable_vlm_parameters
             vlm_trainable_parameters = self.get_grouped_parameters(
-                vlm_trained_parameters, 
-                cfg.optimizer.vlm, 
+                vlm_trained_parameters,
+                cfg.optimizer.vlm,
             )
             all_trainable_parameters.extend(vlm_trainable_parameters)
-        else: 
+        else:
             model.freeze_non_lora_weights_in_vlm()
 
         if cfg.training.train_depth is False:
@@ -255,14 +245,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.grad_stats = {}
         def get_grad_hook(param):
             def hook(grad):
-                # 这里的 grad 是当前 rank 上的梯度分片
-                # 我们计算它的 norm（或者 mean）
                 if grad is not None:
-                    # 注意：ZeRO-2 下这是局部梯度的 norm，足以监控“是否有梯度产生”
                     self.grad_stats[id(param)] = grad.detach()
                 return grad
             return hook
-        for _, param in model.named_parameters(): 
+        for _, param in model.named_parameters():
             if param.requires_grad:
                 param.register_hook(get_grad_hook(param))
         diffloss_trainable_paramters = self.get_grouped_parameters(
@@ -274,7 +261,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         all_trainable_params_list = []
         for params_dict in all_trainable_parameters:
             all_trainable_params_list.extend(params_dict['params'])
-        
+
         trainable_param_ids = {id(p) for p in all_trainable_params_list}
 
         for i, param in enumerate(all_trainable_params_list):
@@ -285,11 +272,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             if param.requires_grad:
                 assert id(param) in trainable_param_ids, \
                     f"Parameter '{name}' requires grad but is NOT in the optimizer parameters list"
-        
+
         self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
-        
-        print("--> Configure dataset and dataloader...................")
-        # Configure dataset and dataloader
+
+        # ============================================================
+        # WebDataset: dataset and dataloader creation
+        # ============================================================
+        print("--> Configure WebDataset dataset and dataloader...")
         dataset = hydra.utils.instantiate(cfg.dataset)
         self.use_relative_action = dataset.vla_dataset.use_relative_action
         print("--> dataset instantiated")
@@ -300,62 +289,53 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         dataset.vla_dataset.set_preprocessor(self.vla_processor)
         if dataset.vlm_dataset is not None:
             dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
-        # According to the PaliGemma paper, we can initialize the motion token embeddings 
-        # to gain better performance.
 
-        print("Computing normalizer...")
-        if cfg.training.normalizer_path is not None:
-            normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
-        else:
-            # compute normalizer on the main process and save to disk
-            if accelerator.is_main_process:
-                # 1. main process compute/get object
-                normalizer = dataset.vla_dataset.get_normalizer()
-                normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
-                pickle.dump(normalizer, open(normalizer_path, 'wb'))
-                objects_to_broadcast = [normalizer]
-            else:
-                # 2. other process prepare a placeholder
-                objects_to_broadcast = [None]
-
-            # 3. broadcast object from main process (from_process=0) to all processes
-            objects_to_broadcast = accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
-            normalizer = objects_to_broadcast[0]
-
-        # 4. now all processes have a fully identical object copy
+        # Normalizer must be pre-computed for WebDataset
+        print("Loading normalizer...")
+        assert cfg.training.normalizer_path is not None, (
+            "WebDataset training requires a pre-computed normalizer_path.")
+        normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
         dataset.vla_dataset.set_normalizer(normalizer)
         self.normalizer = normalizer
 
-        # configure training dataset
-        train_dataloader = DataLoader(
-            dataset=dataset, 
-            batch_sampler=dataset.get_sampler(**cfg.dataloader.batch_sampler),
-            collate_fn=dataset.get_collator(), 
-            **cfg.dataloader.loader
+        # Distributed shard splitting: handled at dataset level, not by accelerate
+        dataset.distribute(
+            rank=accelerator.process_index,
+            world_size=accelerator.num_processes,
         )
-        # Accelerate needs to know the batch size. 
-        # But Dataloader does not support batch_size argument, when we set batch_sampler, 
-        # so we set the batch_size here.
-        train_dataloader.__dict__["batch_size"] = cfg.dataloader.batch_sampler.batch_size
 
-        # configure validation dataset
-        val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(
-            dataset=val_dataset, 
-            batch_sampler=val_dataset.get_sampler(**cfg.val_dataloader.batch_sampler),
-            collate_fn=val_dataset.get_collator(), 
-            **cfg.val_dataloader.loader
+        # DataLoader for IterableDataset: use batch_size, no batch_sampler
+        train_dataloader = DataLoader(
+            dataset=dataset,
+            collate_fn=dataset.get_collator(),
+            **cfg.dataloader.loader,
         )
-        val_dataloader.__dict__["batch_size"] = cfg.val_dataloader.batch_sampler.batch_size
+        # Validation dataloader
+        val_dataset = dataset.get_validation_dataset()
+        val_dataset.distribute(
+            rank=accelerator.process_index,
+            world_size=accelerator.num_processes,
+        )
+        val_dataloader = DataLoader(
+            dataset=val_dataset,
+            collate_fn=val_dataset.get_collator(),
+            **cfg.val_dataloader.loader,
+        )
+
+        # Steps per epoch: configured value (streaming has no fixed length)
+        steps_per_epoch = cfg.training.get("steps_per_epoch", 100000)
+
+        # Wrap dataloaders with DeviceTransferWrapper (not managed by accelerate)
+        train_dataloader = DeviceTransferWrapper(train_dataloader, accelerator.device)
+        val_dataloader = DeviceTransferWrapper(val_dataloader, accelerator.device)
+        # ============================================================
 
         # Configure learning rate schedulers
-        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / accelerator.gradient_accumulation_steps)
-        if cfg.training.max_train_steps:
-            max_train_steps = cfg.training.max_train_steps * accelerator.num_processes
-        else:
-            max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
-        # Accelerate prepared scheduler will step num_processes times per global step, 
-        # so we need to multiply the warmup steps by num_processes to get the correct warmup steps.
+        num_update_steps_per_epoch = math.ceil(steps_per_epoch / accelerator.gradient_accumulation_steps)
+        max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
+        if cfg.training.max_train_steps is not None:
+            max_train_steps = cfg.training.max_train_steps
+        max_train_steps = max_train_steps * accelerator.num_processes
         num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
         if accelerator.is_main_process:
             print(f"num_warmup_steps: {num_warmup_steps}, max_train_steps: {max_train_steps}")
@@ -366,15 +346,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             num_training_steps=max_train_steps,
         )
 
-        # Configure checkpoint manager (if available)
+        # Configure checkpoint manager
         topk_manager = TopKCheckpointManager(
             save_dir=os.path.join(self.output_dir, 'checkpoints'),
             **cfg.checkpoint.topk
         )
 
-        # Prepare everything with Accelerate
-        train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
-            train_dataloader, val_dataloader, self.model, self.optimizer, self.lr_scheduler
+        # Prepare with Accelerate (DataLoader excluded — sharding handled manually)
+        self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
+            self.model, self.optimizer, self.lr_scheduler
         )
 
         if accelerator.is_main_process:
@@ -384,33 +364,31 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 print(f"  Has model.step(): {hasattr(self.model, 'step')}")
                 print(f"  Has model.backward(): {hasattr(self.model, 'backward')}")
 
-        # resume training from checkpoint after accelerator prepare
+        # Resume training from checkpoint after accelerator prepare
         if cfg.training.resume_checkpoint_path:
             accelerator.load_state(cfg.training.resume_checkpoint_path)
             self.update_step = self.training_state.update_step
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
-            print(f"Skipping {self.global_step % len(train_dataloader)} batches, total batches: {len(train_dataloader)}")
-            skipped_dataloader = accelerator.skip_first_batches(train_dataloader, self.global_step % len(train_dataloader))
-            
+
         elif cfg.training.finetune_checkpoint_path:
             # Finetuning from a specific checkpoint (weights only)
             print(f"Finetuning from checkpoint: {cfg.training.finetune_checkpoint_path}")
             if os.path.isfile(cfg.training.finetune_checkpoint_path):
                 state_dict = torch.load(cfg.training.finetune_checkpoint_path, map_location='cpu')
-                
-                # Handle potential wrapping in the checkpoint (similar to inference script)
+
                 if 'module' in state_dict:
                     state_dict = state_dict['module']
                 elif 'model' in state_dict:
                     state_dict = state_dict['model']
                 elif 'model_state_dict' in state_dict:
                     state_dict = state_dict['model_state_dict']
-                
+
                 accelerator.unwrap_model(self.model).load_state_dict(state_dict)
                 print("Successfully loaded finetuning weights.")
             else:
                 print(f"Warning: Finetune checkpoint path {cfg.training.finetune_checkpoint_path} is not a file.")
+
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling
         if self.flow_sampling == "beta":
@@ -431,21 +409,22 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             profile_context = accelerator.profile()
 
         # Training loop
-        training_start_time = None  # set at first step
+        training_start_time = None
         total_samples_processed = 0
         log_interval = int(getattr(cfg.training, "log_interval", 50))
         with profile_context as prof:
             if accelerator.is_main_process:
-                print(f"Training with {len(train_dataloader)} steps per epoch")
+                print(f"Training with {steps_per_epoch} steps per epoch (WebDataset streaming)")
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
                 if accelerator.is_main_process:
                     print(f"Training epoch {self.epoch} started")
-                if epoch_idx == 0 and cfg.training.resume_checkpoint_path: 
-                    dataloader = skipped_dataloader
-                else:
-                    dataloader = train_dataloader
+                dataloader = train_dataloader
                 for batch_idx, batch in enumerate(dataloader):
+                    # Enforce steps_per_epoch limit
+                    if batch_idx >= steps_per_epoch:
+                        break
+
                     step_perf_start = time.perf_counter()
                     if training_start_time is None:
                         training_start_time = time.time()
@@ -463,14 +442,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         # Forward pass
                         with accelerator.autocast():
                             raw_loss = self.model(self.objective_func, inputs)
-                        
-                        # Use cached DeepSpeed status (set after prepare())
+
                         if self.is_deepspeed:
-                            self.model.backward(raw_loss["total_loss"])   
+                            self.model.backward(raw_loss["total_loss"])
                         else:
                             accelerator.backward(raw_loss["total_loss"])
                         if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
-                            torch.cuda.empty_cache() 
+                            torch.cuda.empty_cache()
                             print(torch.cuda.memory_summary())
                             self.tracker.report()
                             self.tracker.stop()
@@ -502,11 +480,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 if total_sq is None:
                                     return None
                                 return torch.sqrt(total_sq)
-                            for name, params in part_params.items(): 
+                            for name, params in part_params.items():
                                 part_grad_norms[name] = grad_stats_l2_norm(params)
                         if accelerator.sync_gradients and cfg.training.clipping.enabled:
                             total_norm = accelerator.clip_grad_norm_(
-                                self.model.parameters(), 
+                                self.model.parameters(),
                                 float('inf')
                             )
 
@@ -515,7 +493,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         self.lr_scheduler.step()
                         # Zero gradients
                         self.optimizer.zero_grad(set_to_none=True)
-                    
+
                     self.global_step += 1
                     if accelerator.sync_gradients:
                         self.update_step += 1
@@ -541,13 +519,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     step_log = None
                     if should_record or should_eval or should_ckpt or should_interval_ckpt:
-                        # Get learning rate from DeepSpeed engine or scheduler
                         if self.is_deepspeed:
-                            # Get lr from DeepSpeed engine
                             current_lr = self.model.get_lr()[0]
                         else:
                             current_lr = self.lr_scheduler.get_last_lr()[0]
-                        
+
                         step_log = {
                             'global_step': self.global_step,
                             'update_step': self.update_step,
@@ -558,17 +534,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if should_record:
                         # Logging
                         raw_loss_cpu = {}
-                        for key, value in raw_loss.items(): 
+                        for key, value in raw_loss.items():
                             raw_loss_cpu[key] = value.item()
                         step_wall_time = time.time()
                         step_time_sec = time.perf_counter() - step_perf_start
-                        batch_size = inputs["input_ids"].shape[0]
+                        batch_size_local = inputs["input_ids"].shape[0]
                         elapsed_time_sec = step_wall_time - training_start_time
                         step_log.update({
                             'elapsed_time_sec': elapsed_time_sec,
                             'step_time_sec': step_time_sec,
                             'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
-                            'samples_per_sec': batch_size / step_time_sec if step_time_sec > 0 else 0,
+                            'samples_per_sec': batch_size_local / step_time_sec if step_time_sec > 0 else 0,
                         })
                         if total_norm is not None:
                             step_log['grad_norm'] = total_norm
@@ -608,7 +584,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     if step_log is not None:
                         accelerator.log(step_log, step=self.update_step)
-                    
+
                     if cfg.training.max_train_steps and self.update_step >= cfg.training.max_train_steps:
                         if accelerator.is_main_process:
                             print(f"Max train steps {cfg.training.max_train_steps} reached, stopping training.")
@@ -722,10 +698,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             {'params': nodecay_params, 'weight_decay': 0.0, 'lr': cfg.lr, 'betas': cfg.betas}
         ]
         return optimizer_grouped_parameters
-
-
-# Backward-compatible import: eval_with_averaged_model was moved to eval_utils.py
-from src.workspace.eval_utils import eval_with_averaged_model  # noqa: F401
 
 
 @hydra.main(
