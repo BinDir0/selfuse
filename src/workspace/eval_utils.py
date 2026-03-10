@@ -125,7 +125,7 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             inputs = workspace.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
 
             # Compute validation loss
-            with accelerator.autocast():
+            with accelerator.autocast(), torch.inference_mode():
                 loss = workspace.model(
                     workspace.objective_func,
                     inputs,

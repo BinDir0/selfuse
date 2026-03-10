@@ -158,13 +158,12 @@ class RuntimeEngine:
             torch.cuda.synchronize(self.device)
         logger.info("Warmup finished in %.3f ms", (time.monotonic() - start_time) * 1000.0)
 
-    @torch.inference_mode()
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """The high-level entry point for inference."""
         prepared = self.policy.prepare_process(obs)
         inputs = self.policy.build_model_inputs(prepared)
         inputs = self._move_to_device(inputs)
-        with self._autocast_context():
+        with self._autocast_context(), torch.inference_mode():
             pred_actions = self.policy(inputs)
         pred_actions = self.policy.post_process(pred_actions.cpu())
         output = {"pred_actions": pred_actions.cpu().float().numpy()[0]}

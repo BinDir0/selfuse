@@ -15,7 +15,7 @@ ps3-torch
 nvtx
 h5py
 pymodbus
-bitsandbytes==0.47.0
+bitsandbytes
 datasets==4.1.0
 pyarrow==21.0.0
 decord

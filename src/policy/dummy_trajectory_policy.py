@@ -159,7 +159,6 @@ class DummyTrajectoryPolicy(nn.Module):
     def post_process(self, actions: torch.Tensor) -> torch.Tensor:
         return actions
 
-    @torch.inference_mode()
     def forward(self, inputs: Dict[str, Any]) -> torch.Tensor:
         del inputs
         chunk = self.action_chunks[self._cursor].unsqueeze(0)

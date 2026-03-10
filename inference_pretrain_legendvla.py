@@ -336,7 +336,6 @@ class LegendVLAInference:
                 results[key] = []
             results[key].append(batch_result[key])
 
-    @torch.inference_mode()
     def run(self):
         cfg = self.cfg
         
@@ -436,7 +435,7 @@ class LegendVLAInference:
                 prefill_text_hidden_states = None
                 generated_hidden_states = None
                 # Inference (different for each mode)
-                with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+                with torch.autocast(device_type=self.device.type, dtype=self.dtype), torch.inference_mode():
                     if self.mode == "flow":
                         # Flow Matching Inference (normalized actions)
                         pred_actions, vlm_attn_maps, action_expert_attn_maps = self.model(

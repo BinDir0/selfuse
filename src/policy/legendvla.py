@@ -571,17 +571,14 @@ class LegendVLA(nn.Module):
 
         return final_embedding
 
-    @torch.inference_mode()
     def infer_action(self, input: dict, return_attn_weights: bool = False) -> torch.FloatTensor:
         from src.policy.legendvla_inference import infer_action as _infer_action
         return _infer_action(self, input, return_attn_weights)
 
-    @torch.inference_mode()
     def infer_single_step(self, input: dict, kv_cache=None, dtype=torch.float32, return_attn_weights=False) -> dict:
         from src.policy.legendvla_inference import infer_single_step as _infer_single_step
         return _infer_single_step(self, input, kv_cache, dtype, return_attn_weights)
 
-    @torch.inference_mode()
     def infer_vlm(self, input: dict, max_new_tokens: int, temperature: float = 1.0,
                   top_k: int = 10, top_p: float = 1.0, allowed_token_ids=None,
                   eos_token_id=None, return_kv_cache: bool = False,
@@ -590,7 +587,6 @@ class LegendVLA(nn.Module):
         return _infer_vlm(self, input, max_new_tokens, temperature, top_k, top_p,
                           allowed_token_ids, eos_token_id, return_kv_cache, return_attn_weights)
 
-    @torch.inference_mode()
     def infer_vla(self, input: dict, max_new_tokens: int, temperature: float = 1.0,
                   return_attn_weights: bool = False, cfg: float = 1.0, **kwargs) -> dict:
         from src.policy.legendvla_inference import infer_vla as _infer_vla

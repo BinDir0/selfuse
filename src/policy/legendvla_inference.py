@@ -122,7 +122,6 @@ def infer_action(
     return action
 
 
-@torch.inference_mode()
 def infer_single_step(
     model,
     input: dict,
@@ -182,7 +181,6 @@ def infer_single_step(
     return output
 
 
-@torch.inference_mode()
 def infer_vlm(
     model,
     input: dict,
@@ -312,7 +310,6 @@ def infer_vlm(
     return result
 
 
-@torch.inference_mode()
 def infer_vla(
     model,
     input: dict,
@@ -712,7 +709,6 @@ class LegendVLAInference(nn.Module):
             intrinsic = np.array([intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]])
         return intrinsic.reshape(-1)
 
-    @torch.inference_mode()
     def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Step 3: Actual model forward pass."""
         self.maybe_compile_model()
