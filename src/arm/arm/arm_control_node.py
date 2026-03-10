@@ -55,9 +55,14 @@ class ArmControlNode(Node):
 
         self.declare_parameter('arm_side', "")
         self.declare_parameter('frequency', 100.0)
+        self.declare_parameter('arm_state', 'api_gt')
         self.arm_side = self.get_parameter('arm_side').value
         self.frequency = self.get_parameter('frequency').value
+        self.arm_state = self.get_parameter('arm_state').value
         self.dt = 1.0 / self.frequency
+
+        if self.arm_state not in ['api_gt', 'ruckig']:
+            raise ValueError(f"不支持的 arm_state: {self.arm_state}，可选值为 ['api_gt', 'ruckig']")
 
         # 配置
         self.rm_config = RealmanConfig()
@@ -86,12 +91,22 @@ class ArmControlNode(Node):
             callback_group=MutuallyExclusiveCallbackGroup()
         )
 
-        self.wrist_pose_pub = self.create_publisher(
-            PoseStamped,
-            f'/state/{self.arm_side}_arm/wrist_pose',
-            10,
-            callback_group=MutuallyExclusiveCallbackGroup()
-        )
+        self.joint_state_pub = None
+        self.wrist_pose_pub = None
+        if self.arm_state == 'ruckig':
+            self.joint_state_pub = self.create_publisher(
+                JointState,
+                f'/state/{self.arm_side}_arm/joints',
+                10,
+                callback_group=MutuallyExclusiveCallbackGroup()
+            )
+        else:
+            self.wrist_pose_pub = self.create_publisher(
+                PoseStamped,
+                f'/state/{self.arm_side}_arm/wrist_pose',
+                10,
+                callback_group=MutuallyExclusiveCallbackGroup()
+            )
 
         self.control_timer = self.create_timer(
             self.dt,
@@ -108,7 +123,7 @@ class ArmControlNode(Node):
         # 信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
 
-        self.get_logger().info(f"🤖 {self.arm_name}专用控制节点启动完成")
+        self.get_logger().info(f"🤖 {self.arm_name}专用控制节点启动完成 (arm_state={self.arm_state})")
 
     def _init_robotic_arm(self) -> bool:
         """初始化机械臂"""
@@ -264,8 +279,17 @@ class ArmControlNode(Node):
             self.get_logger().error(f"❌ 发送{self.arm_name}指令异常: {e}")
             return False
 
-    def publish_status(self):
-        """发布关节状态"""
+    def _publish_joint_state(self):
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = f"{self.arm_name}_base"
+        msg.name = [f'{self.arm_side}_joint_{i+1}' for i in range(self.dof)]
+        msg.position = self.current_joint_positions.tolist()
+        msg.velocity = [0.0] * self.dof
+        msg.effort = [0.0] * self.dof
+        self.joint_state_pub.publish(msg)
+
+    def _publish_wrist_pose(self):
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = f"{self.arm_name}_base"
@@ -282,6 +306,13 @@ class ArmControlNode(Node):
         msg.pose.orientation.w = quat[3]
         
         self.wrist_pose_pub.publish(msg)
+
+    def publish_status(self):
+        """发布机械臂状态"""
+        if self.arm_state == 'ruckig':
+            self._publish_joint_state()
+        else:
+            self._publish_wrist_pose()
 
     def _signal_handler(self, signum, frame):
         """信号处理"""
