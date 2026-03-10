@@ -79,12 +79,19 @@ def save_interval_ckpt(workspace, accelerator):
 
 
 # Combine validation and sampling, so we can process data only once.
-@torch.compiler.disable()
 def evaluation(workspace, accelerator, dataloader, step_log):
     if accelerator.is_main_process:
         print(f"Evaluation step {workspace.update_step} started")
     accelerator.wait_for_everyone()
-    with torch.no_grad(), eval_with_averaged_model(accelerator, workspace.model, workspace.model_averaging):
+    with (
+        torch.compiler.set_stance("force_eager"),
+        torch.no_grad(),
+        eval_with_averaged_model(
+            accelerator,
+            workspace.model,
+            workspace.model_averaging,
+        ),
+    ):
         val_losses = dict()
         eval_thresholds = workspace.cfg.training.eval_thresholds
         eval_accuracy = []

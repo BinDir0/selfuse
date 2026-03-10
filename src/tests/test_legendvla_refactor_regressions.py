@@ -444,7 +444,6 @@ def test_build_dense_diffloss_inputs_matches_original_masked_alignment():
     answer_start_idx = torch.tensor([2, 1, 3], dtype=torch.long)
     n_actions = torch.tensor([4, 2, 3], dtype=torch.long)
     is_vla_data = torch.tensor([True, False, True], dtype=torch.bool)
-    vla_sample_indices = torch.nonzero(is_vla_data, as_tuple=False).squeeze(1)
 
     dense_hidden, dense_action, dense_mask = _build_dense_diffloss_inputs(
         model,
@@ -452,7 +451,7 @@ def test_build_dense_diffloss_inputs_matches_original_masked_alignment():
         actions,
         answer_start_idx,
         n_actions,
-        vla_sample_indices,
+        is_vla_data,
     )
 
     vla_hidden = hidden_states[is_vla_data]
