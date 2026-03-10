@@ -10,8 +10,9 @@
 #   bash scripts/convert_zarr_to_wds.sh \
 #       --zarr_list  data/zarr_paths.txt \
 #       --output_dir /cfs/data/wds \
-#       --nodes      "pro-10 pro-01" \.0
-#       --workers    120
+#       --nodes      "pro-10 pro-01" \
+#       --workers    120 \
+#       --is_merge
 #
 set -euo pipefail
 
@@ -20,6 +21,7 @@ ZARR_LIST="zarr_list.txt"
 OUTPUT_DIR="/share_data/guantianrui/datasets/Webdataset_val"
 NODES="pro-10"
 WORKERS_PER_NODE=160
+IS_MERGE=false
 PYTHON_PATH="/share_data/chenzhang/miniconda3/envs/legendvla/bin/python3.10"
 PROJECT_DIR="/home/chenzhang/projects/diffloss-ar"
 LOG_DIR="outputs/convert_wds"
@@ -31,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --output_dir)  OUTPUT_DIR="$2";  shift 2 ;;
         --nodes)       NODES="$2";       shift 2 ;;
         --workers)     WORKERS_PER_NODE="$2"; shift 2 ;;
+        --is_merge)    IS_MERGE=true;      shift 1 ;;
         --python)      PYTHON_PATH="$2"; shift 2 ;;
         --project_dir) PROJECT_DIR="$2"; shift 2 ;;
         *)
@@ -69,6 +72,7 @@ echo " zarr_list:   $ZARR_LIST ($TOTAL datasets)"
 echo " output_dir:  $OUTPUT_DIR"
 echo " nodes:       ${NODE_ARR[*]} ($NUM_NODES)"
 echo " workers/node: $WORKERS_PER_NODE"
+echo " is_merge:    $IS_MERGE"
 echo " python:      $PYTHON_PATH"
 echo " project_dir: $PROJECT_DIR"
 echo "============================================"
@@ -101,6 +105,11 @@ for (( i=0; i<NUM_NODES; i++ )); do
 
     LOG_FILE="${LOG_DIR}/convert_${NODE}.log"
 
+    MERGE_FLAG=""
+    if [[ "$IS_MERGE" == "true" ]]; then
+        MERGE_FLAG="--is_merge"
+    fi
+
     # Launch on remote node via SSH (nohup so it survives SSH disconnect)
     ssh -o StrictHostKeyChecking=no "$NODE" bash -lc "
         cd $PROJECT_DIR && \
@@ -108,6 +117,7 @@ for (( i=0; i<NUM_NODES; i++ )); do
             --zarr_list $SPLIT_FILE \
             --output_dir $OUTPUT_DIR \
             --num_workers $WORKERS_PER_NODE \
+            $MERGE_FLAG
     " > "$LOG_FILE" 2>&1 &
 
     PIDS+=($!)

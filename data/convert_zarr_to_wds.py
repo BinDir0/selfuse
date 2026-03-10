@@ -8,7 +8,8 @@ Usage:
     python data/convert_zarr_to_wds.py \
         --zarr_list /path/to/zarr_paths.txt \
         --output_dir /cfs/data/wds/ \
-        --num_workers 120
+        --num_workers 120 \
+        --is_merge
 """
 
 import io
@@ -160,7 +161,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
 
 
 def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
-                         num_workers=120):
+                         num_workers=120, is_merge=False):
     """Convert a single zarr dataset using multiple workers."""
     try:
         src = zarr.open_consolidated(zarr_path, mode='r')
@@ -188,14 +189,22 @@ def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
     chunks = [episodes[i:i + chunk_size]
               for i in range(0, len(episodes), chunk_size)]
 
-    # Output directory
-    ds_output_dir = Path(output_dir) / dataset_name
+    # Output directory: merge mode writes all shards into output_dir directly,
+    # non-merge mode creates a per-dataset subdirectory.
+    if is_merge:
+        ds_output_dir = Path(output_dir)
+    else:
+        ds_output_dir = Path(output_dir) / dataset_name
     ds_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Each worker writes its own shard sequence
+    # Each worker writes its own shard sequence.
+    # In merge mode, prefix shards with dataset_name to avoid collisions.
     args_list = []
     for worker_id, chunk in enumerate(chunks):
-        pattern = str(ds_output_dir / f"shard-w{worker_id:04d}-%06d.tar")
+        if is_merge:
+            pattern = str(ds_output_dir / f"shard-{dataset_name}-w{worker_id:04d}-%06d.tar")
+        else:
+            pattern = str(ds_output_dir / f"shard-w{worker_id:04d}-%06d.tar")
         args_list.append((zarr_path, chunk, pattern, dataset_name, key_mapping,
                           worker_id))
 
@@ -249,10 +258,25 @@ if __name__ == "__main__":
                         help="Output directory for WebDataset shards")
     parser.add_argument("--num_workers", type=int, default=120,
                         help="Number of parallel workers per dataset")
+    parser.add_argument("--is_merge", action="store_true",
+                        help="Merge all zarr datasets into one webdataset")
     args = parser.parse_args()
 
     with open(args.zarr_list) as f:
         lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+    if args.is_merge:
+        # Check for duplicate dataset names before starting conversion
+        all_names = [Path(line.split()[0]).stem for line in lines]
+        seen = {}
+        for i, name in enumerate(all_names):
+            if name in seen:
+                print(f"Error: duplicate dataset name '{name}' "
+                      f"from line {seen[name]+1} and line {i+1}. "
+                      f"Each zarr must have a unique stem in merge mode.")
+                sys.exit(1)
+            seen[name] = i
+        print(f"Merge mode: all shards will be written to {args.output_dir}")
 
     for line in lines:
         parts = line.split()
@@ -266,4 +290,5 @@ if __name__ == "__main__":
             zarr_path, args.output_dir, dataset_name,
             key_mapping=key_mapping,
             num_workers=args.num_workers,
+            is_merge=args.is_merge,
         )
