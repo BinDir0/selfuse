@@ -18,7 +18,6 @@ import hydra
 import numpy as np
 from omegaconf import OmegaConf
 import torch
-import torch_tensorrt
 from torch import nn
 
 from src.model.common.kv_cache import KVCache
