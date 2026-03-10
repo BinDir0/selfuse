@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
+
 def generate_launch_description():
-    
+    arm_state = LaunchConfiguration('arm_state')
+
     arm_ik_node = Node(
         package='arm',
         executable='arm_ik_node.py',
@@ -14,7 +19,7 @@ def generate_launch_description():
             'enable_viewer': True,
         }]
     )
-    
+
     left_arm_control_node = Node(
         package='arm',
         executable='arm_control_node.py',
@@ -23,6 +28,7 @@ def generate_launch_description():
         parameters=[{
             'arm_side': 'left',
             'frequency': 100.0,
+            'arm_state': arm_state,
         }]
     )
 
@@ -34,11 +40,41 @@ def generate_launch_description():
         parameters=[{
             'arm_side': 'right',
             'frequency': 100.0,
+            'arm_state': arm_state,
         }]
     )
-    
+
+    left_arm_fk_node = Node(
+        package='arm',
+        executable='arm_fk_node.py',
+        name='left_arm_fk_node',
+        output='screen',
+        parameters=[{
+            'arm_side': 'left',
+        }],
+        condition=IfCondition(PythonExpression(["'", arm_state, "' == 'ruckig'"]))
+    )
+
+    right_arm_fk_node = Node(
+        package='arm',
+        executable='arm_fk_node.py',
+        name='right_arm_fk_node',
+        output='screen',
+        parameters=[{
+            'arm_side': 'right',
+        }],
+        condition=IfCondition(PythonExpression(["'", arm_state, "' == 'ruckig'"]))
+    )
+
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'arm_state',
+            default_value='api_gt',
+            description="Arm state source: 'api_gt' uses RM API wrist pose, 'ruckig' uses interpolated joints + FK node.",
+        ),
         arm_ik_node,
         left_arm_control_node,
         right_arm_control_node,
+        left_arm_fk_node,
+        right_arm_fk_node,
     ])
