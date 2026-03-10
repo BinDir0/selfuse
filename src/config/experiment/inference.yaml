@@ -14,6 +14,9 @@ policy:
   default_instruction: null
   ar_temperature: 1.0
   ar_cfg: 1.0
+  dinov2_repo_path: null
+  dinov2_model_path: null
+  paligemma_model_path: null
   compile:
     mode: reduce-overhead
     dynamic: null

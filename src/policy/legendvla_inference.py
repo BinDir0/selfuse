@@ -480,13 +480,26 @@ class LegendVLAInference(nn.Module):
         ar_temperature: float = 1.0,
         ar_cfg: float = 1.0,
         use_mlp_layer_norm: bool = False,
+        dinov2_repo_path: str | None = None,
+        dinov2_model_path: str | None = None,
+        paligemma_model_path: str | None = None,
         compile: Any = None,
     ) -> None:
         super().__init__()
         self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
         model_config_path = pathlib.Path(model_config_path)
         model_cfg = OmegaConf.load(model_config_path)
-        
+
+        # Override model paths for local deployment
+        if dinov2_repo_path is not None:
+            OmegaConf.update(model_cfg, "policy.depth_encoder.config.dinov2_repo_path", dinov2_repo_path)
+        if dinov2_model_path is not None:
+            OmegaConf.update(model_cfg, "policy.depth_encoder.config.dinov2_model_path", dinov2_model_path)
+        if paligemma_model_path is not None:
+            OmegaConf.update(model_cfg, "policy.cfg.pretrained_model_path", paligemma_model_path)
+            OmegaConf.update(model_cfg, "vla_processor.tokenizer.pretrained_model_name_or_path", paligemma_model_path)
+            OmegaConf.update(model_cfg, "vlm_processor.tokenizer.pretrained_model_name_or_path", paligemma_model_path)
+
         # Patch for old checkpoint compatibility (enable LayerNorm in MLPs)
         # This is specifically for the checkpoint trained on 2026.02.17 which used LayerNorm
         if use_mlp_layer_norm:
