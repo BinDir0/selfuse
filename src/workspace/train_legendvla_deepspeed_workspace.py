@@ -315,7 +315,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Configure learning rate schedulers
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / accelerator.gradient_accumulation_steps)
         if cfg.training.max_train_steps:
-            max_train_steps = cfg.training.max_train_steps
+            max_train_steps = cfg.training.max_train_steps * accelerator.num_processes
         else:
             max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
         # Accelerate prepared scheduler will step num_processes times per global step, 
