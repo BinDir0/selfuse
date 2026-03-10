@@ -13,6 +13,11 @@ import pathlib
 from src.utils.metric import get_action_accuracy
 
 
+def clear_attn_weights(model):
+    if hasattr(model, "joint_model") and hasattr(model.joint_model, "attn_weights"):
+        model.joint_model.attn_weights = [None] * model.joint_model.num_hidden_layers
+
+
 @contextmanager
 def eval_with_averaged_model(accelerator, model, averaged_model):
     """
@@ -92,7 +97,12 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             workspace.model_averaging,
         ),
     ):
-        val_losses = dict()
+        val_losses = {
+            "total_loss": [],
+            "ce_loss": [],
+            "diffusion_loss": [],
+            "flow_loss": [],
+        }
         eval_thresholds = workspace.cfg.training.eval_thresholds
         eval_accuracy = []
         eval_l1_loss = []
@@ -122,8 +132,6 @@ def evaluation(workspace, accelerator, dataloader, step_log):
                     return_attn_weights=save_eval_attn_weights,
                 )
             for key, loss_ in loss.items():
-                if key not in val_losses:
-                    val_losses[key] = list()
                 val_losses[key].append(loss_.detach())
 
             if hasattr(workspace.model, 'module'):
@@ -137,6 +145,8 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             if 'actions' in inputs and workspace.objective_func != "train_ar":
                 gt_actions = inputs['actions']
                 actions_valid_mask = inputs['actions_valid_mask']
+                if not torch.any(actions_valid_mask):
+                    continue
                 # Get action predictions
                 with accelerator.autocast():
                     pred_actions = workspace.model("infer_action", inputs)
@@ -144,8 +154,6 @@ def evaluation(workspace, accelerator, dataloader, step_log):
                 # ignore invalid actions
                 B, H, D = gt_actions.shape
                 eval_sample = torch.any(actions_valid_mask.reshape(B, -1), dim=1)
-                if not torch.any(eval_sample):
-                    continue
                 actions_valid_mask = actions_valid_mask[eval_sample]
                 if workspace.use_relative_action:
                     gt_actions = workspace.normalizer['actions'].unnormalize(gt_actions[eval_sample])
@@ -239,16 +247,24 @@ def evaluation(workspace, accelerator, dataloader, step_log):
             if workspace.cfg.training.max_eval_steps and batch_idx >= (workspace.cfg.training.max_eval_steps-1):
                 break
 
-        # Process validation loss
+         # Process validation loss
+        # Count only non-zero losses to avoid bias from VLA/VLM mixed batches
         for key in val_losses.keys():
-            num_samples = torch.tensor(len(val_losses[key]), device=accelerator.device)
             if len(val_losses[key]) == 0:
                 local_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=accelerator.device)
+                num_nonzero_samples = torch.tensor(0, device=accelerator.device)
             else:
-                local_loss_sum = torch.stack(val_losses[key]).sum().to(accelerator.device)
-            total_num_samples = accelerator.reduce(num_samples, reduction='sum')
+                stacked_losses = torch.stack(val_losses[key])
+                # Count non-zero losses (losses > 1e-8 to handle floating point precision)
+                nonzero_mask = stacked_losses > 1e-8
+                num_nonzero_samples = nonzero_mask.sum().to(accelerator.device)
+                local_loss_sum = stacked_losses.sum().to(accelerator.device)
+
+            total_num_nonzero = accelerator.reduce(num_nonzero_samples, reduction='sum')
             total_loss_sum = accelerator.reduce(local_loss_sum, reduction='sum')
-            val_losses[key] = total_loss_sum / total_num_samples.clamp(min=1)
+
+            # Average only over non-zero samples
+            val_losses[key] = total_loss_sum / total_num_nonzero.clamp(min=1)
             val_losses[key] = val_losses[key].item()
             step_log[f'val_{key}'] = val_losses[key]
 
@@ -328,3 +344,9 @@ def evaluation(workspace, accelerator, dataloader, step_log):
                     print(f"  Saved to: {output_path}")
                 except Exception as e:
                     print(f"  Error saving attention data: {e}")
+
+    if hasattr(workspace.model, 'module'):
+        model = workspace.model.module
+    else:
+        model = workspace.model
+    clear_attn_weights(model)

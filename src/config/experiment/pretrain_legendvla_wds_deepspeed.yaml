@@ -1,11 +1,11 @@
 # @package _global_
 defaults:
-  - vla_dataset_paths
-  - vlm_dataset_paths
+  - vla_wds_dataset_paths
+  - vlm_wds_dataset_paths
   - _self_
 name: legendvla
-exp_name: "pretrain_legendvla_deepspeed"
-_target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
+exp_name: "pretrain_legendvla_wds_deepspeed"
+_target_: src.workspace.train_legendvla_wds_workspace.TrainLegendVLAWdsWorkspace
 objective:  # ar, flow, or None(None means both)
 
 action_expert_adaptive_mode: adaLN-Zero # adaLN, adaLN-Zero, or None
@@ -53,30 +53,25 @@ shape_meta: &shape_meta
     stride: ${n_action_stride}
 
 dataset:
-  _target_: src.dataset.legendvla_dataset.LegendUnifiedDataset
-  vla_dataset: 
-    _target_: src.dataset.legendvla_dataset.LegendVLADataset
-    zarr_paths: ${vla_dataset_paths}
+  _target_: src.dataset.vla_dataset.UnifiedWdsDataset
+  vla_dataset:
+    _target_: src.dataset.vla_dataset.VLAWdsDataset
+    wds_datasets: ${vla_wds_datasets}
     shape_meta: ${shape_meta}
-    seed: 42
-    val_ratio: 0.001
     objective: ${objective}
-    normalizer_dataloader_cfg:
-      batch_size: 4096
-      num_workers: 120
-      shuffle: False
-      pin_memory: True
-      persistent_workers: True
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
-    depth_dropout: 0.1
+    val_wds_datasets: ${val_vla_wds_datasets}
+    shuffle_buffer: 4096
   vlm_dataset:
-    _target_: src.dataset.legendvla_dataset.LegendVLMDataset
-    dataset_paths: ${vlm_dataset_paths}
-    split: train
-    cache_dir: /share_data/guantianrui/datasets/VLM/FineVision/.cache
+    _target_: src.dataset.vlm_dataset.VLMWdsDataset
+    wds_datasets: ${vlm_wds_datasets}
     seed: 42
+    shuffle_buffer: 4096
     weights: [0.5, 0.5, 0.5]
+    val_wds_datasets: ${val_vlm_wds_datasets}
+  vla_ratio: ${eval:'5/6'}
+  batch_size: ${dataloader.loader.batch_size}
     
 n_obs_image_steps: 1
 n_obs_image_stride: 30
@@ -96,8 +91,6 @@ vla_processor:
   ignore_index: ${ignore_index}
   image_size: ${policy.vision_tower.config.image_size}
   depth_image_size: ${policy.depth_encoder.config.image_size}
-  depth_rescale_factor: 0.001
-  depth_clip_range: ${depth_clip_range}
   tokenizer_padding: ${tokenizer_padding} 
 
 vlm_processor: 
@@ -113,15 +106,9 @@ vlm_processor:
   tokenizer_padding: ${tokenizer_padding} 
 
 dataloader:
-  batch_sampler: 
-    # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
+  loader:
     batch_size: 16
-    vla_ratio: 1.0 # ${eval:'5/6'} # ratio of VLA samples in each batch
-    seed: 42
-    shuffle: True
-    drop_last: False
-  loader: 
-    num_workers: 20
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32
@@ -133,7 +120,7 @@ val_dataloader:
     shuffle: False
     drop_last: False
   loader: 
-    num_workers: 16
+    num_workers: 4
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 32
@@ -160,6 +147,7 @@ optimizer:
     weight_decay: 1e-2
 
 training:
+  steps_per_epoch: 100000
   seed: 42
   dynamic_data_seed: True  # Use runtime timestamp seed to avoid replaying the same data order on resume
   objective: ${objective}
@@ -169,19 +157,17 @@ training:
   lr_scheduler: cosine # follow the naming convention of Transformers
   lr_warmup_steps: 2000 # number of global steps to warm up
   train_vlm: True
-  train_depth: True
   init_motion_token_embeddings: True # initialize motion token embeddings
   load_pretrained_vlm_weights: True # load pretrained weights from VLM
-  load_pretrained_pi05_weights: False # load pretrained weights from PI05 (disabled for 448 resolution)
+  load_pretrained_pi05_weights: True # load pretrained weights from PI05 (disabled for 448 resolution)
   # Automatically select pretrained model path based on vlm_backbone and vision_resolution
   pretrained_model_path: /share_data/chenzhang/checkpoints/${vlm_backbone}-3b-pt-${vision_resolution}
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
-  resume_checkpoint_path: #/share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.20/05.23_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=20000-eval_l1_loss=0.0249
-  finetune_checkpoint_path: /share_data/chenzhang/projects/diffloss-ar/outputs/2026.02.18/12.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=245000-eval_l1_loss=0.0175/pytorch_model/mp_rank_00_model_states.pt
+  resume_checkpoint_path: # /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.20/05.23_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=20000-eval_l1_loss=0.0249
   normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07-mix/normalizer.pkl
-  num_epochs: 200
+  num_epochs: 2
   use_bf16: True
   clipping:
     enabled: True
@@ -208,19 +194,12 @@ training:
   # cause we use eval_l1 loss to save topk checkpoint
   checkpoint_every: 5000 
   # steps per epoch
-  max_train_steps: 35000
+  max_train_steps: null
   max_eval_steps: null
   # evaluation settings
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5] # Action accuracy thresholds for evaluation
-  save_eval_attn_weights: false
   # misc
   log_interval: 20
-  compile:
-    enabled: True
-    fullgraph: True
-    backend: inductor
-    mode: default
-    dynamic:
 
 mixture:
   # Note: Make sure the order of the mixtures is correct, i.e., vlm should be the first one, then action
@@ -296,12 +275,13 @@ policy:
     pretrained_pi05_model_path: ${training.pretrained_pi05_model_path}
     # Depth image support
     use_depth: True  # Enable depth image processing with DINOv2
+    depth_dropout: 0.1
     diffloss_micro_batch_size: 16
     ar_action_noise_std: 0.02
     ar_action_chunk_size: 4 # should be less than or equal to total action chunk size
     loss_weights: 
       ce_loss_weight: 0.1
-      diffusion_loss_weight: 100.0
+      diffusion_loss_weight: 10.0
       flow_loss_weight: 1.0
   shape_meta: ${shape_meta}
   action_encoder_ar: 
@@ -314,14 +294,12 @@ policy:
     fourier_embed_dim: 1024
     fourier_scale: 1.0
     final_layer_norm: False
-    use_mlp_layer_norm: False
   latent_condition_projector:
     _target_: src.model.action.action_head.MLPProjector
     input_dim: ${mixture.vlm.hidden_size}  # Dynamically use VLM hidden size (2048 for paligemma, 2304 for paligemma2)
     output_dim: ${mixture.vlm.hidden_size}  # Must match diffloss z_channels
     depth: 2 # 0 means identity projection
     final_layer_norm: False
-    use_mlp_layer_norm: False
   action_encoder: 
     _target_: src.model.action.action_head.FourierActionEncoder
     action_dim: 48
@@ -332,7 +310,6 @@ policy:
     fourier_embed_dim: 1024
     fourier_scale: 1.0
     final_layer_norm: False
-    use_mlp_layer_norm: False
   action_decoder: 
     _target_: src.model.action.action_head.MLPProjector
     input_dim: 1024
@@ -340,7 +317,6 @@ policy:
     output_dim: 48
     depth: 2 # 0 means identity projection
     final_layer_norm: False
-    use_mlp_layer_norm: False
   depth_encoder: 
     _target_: src.model.vlm.paligemma.depth_encoder.DINOv2DepthEncoder
     config: 
@@ -414,9 +390,9 @@ policy:
     width: 2048
     num_sampling_steps: "100"
     grad_checkpointing: False
-    use_ddim_sampling: True  # Use DDIM sampling for diffusion (ignored for flow matching)
+    use_ddim_sampling: False  # Use DDIM sampling for diffusion (ignored for flow matching)
     # Flow Matching options
-    use_flow_matching: False  # Set to True to use Flow Matching instead of traditional Diffusion
+    use_flow_matching: True  # Set to True to use Flow Matching instead of traditional Diffusion
     flow_sig_min: ${flow.sig_min}  # Minimum noise level for Flow Matching
     # Time embedding for Flow Matching (only used when use_flow_matching=True)
     time_min_period: ${time_min_period}   
@@ -429,7 +405,7 @@ policy:
 
 
 logging:
-  project: finetune
+  project: diffloss-flow
   entity: LegendaryVLA
   resume: False
   mode: online

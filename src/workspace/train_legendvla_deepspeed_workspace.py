@@ -80,6 +80,40 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             print(f"Compiling model with kwargs: {self.compile_cfg}")
         self.model.compile(**self.compile_cfg)
 
+    def reset_run_seed(self, accelerator):
+        """Reset runtime seed before building dataset/dataloader."""
+        base_seed = int(self.cfg.training.seed)
+        dynamic_data_seed = bool(self.cfg.training.get("dynamic_data_seed", False))
+
+        timestamp_seed = None
+        run_seed = base_seed
+        if dynamic_data_seed:
+            if accelerator.is_main_process:
+                timestamp_seed = int(time.time())
+                objects = [timestamp_seed]
+            else:
+                objects = [None]
+            objects = accelerate.utils.broadcast_object_list(objects, from_process=0)
+            timestamp_seed = int(objects[0])
+            run_seed = base_seed + timestamp_seed
+
+        torch.manual_seed(run_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(run_seed)
+        np.random.seed(run_seed % (2**32 - 1))
+        random.seed(run_seed)
+        self.run_seed = run_seed
+
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            if dynamic_data_seed:
+                print(
+                    f"Using runtime seed: {run_seed} "
+                    f"(base={base_seed}, timestamp={timestamp_seed})"
+                )
+            else:
+                print(f"Using fixed seed: {run_seed}")
+
     @capture_output_to_training_log
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -170,6 +204,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         output_dir = objects_to_broadcast[0]
         self._output_dir = output_dir
         accelerator.wait_for_everyone()
+
+        self.reset_run_seed(accelerator)
 
         # Configure optimizers
         model = self.model  # Get unwrapped model for parameter access
@@ -620,6 +656,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def preprocess_batch(self, batch, split_mask: bool = False, sample_fm_time: bool = True):
         """Preprocess batch for training"""
         input_ids = batch["input_ids"]
+        bsz = input_ids.shape[0]
         # Get unwrapped model for mask building
         model = self.model
         if hasattr(self.model, 'module'):

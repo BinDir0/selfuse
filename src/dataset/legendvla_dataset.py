@@ -17,7 +17,7 @@ from .base_dataset import BaseZarrDataset
 from .data_transforms import process_state_action, process_image
 from .collator import LegendVLDataCollator, ConcatDataCollator
 from .normalizer_utils import get_normalizer
-from .legendvlm_dataset import LegendVLMDataset
+from .vlm_dataset import LegendVLMDataset
 
 
 def build_default_key_mapping(motion_type: str) -> Dict[str, str]:

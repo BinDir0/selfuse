@@ -28,6 +28,21 @@ class TrainingState:
         self.global_step = state_dict["global_step"]
 
 
+class DeviceTransferWrapper:
+    """Wraps a dataloader to transfer batches to the target device on iteration."""
+    def __init__(self, dataloader, device):
+        self.dataloader = dataloader
+        self.device = device
+        self.batch_size = getattr(dataloader, "batch_size", 1)
+
+    def __iter__(self):
+        for batch in self.dataloader:
+            yield {
+                k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                for k, v in batch.items()
+            }
+
+
 @contextmanager
 def tee_output_to_file(path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)

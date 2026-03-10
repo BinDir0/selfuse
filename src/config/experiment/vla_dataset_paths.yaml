@@ -23,34 +23,34 @@ real_world_dataset_mapping:
   instruction_num: instruction_num
   
 vla_dataset_paths:
-  # - name: taco 
-  #   path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
-  #   mapping: ${human_dataset_mapping}
-  #   weight: 1
-  # - name: oakink2
-  #   path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
-  #   mapping: ${human_dataset_mapping}
-  #   weight: 1
-  # - name: holoassist
-  #   path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2.zarr
-  #   mapping: ${human_dataset_mapping}
-  #   weight: 1
-  # - name: egodex
-  #   path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
-  #   mapping: ${human_dataset_mapping}
-  #   weight: 20
-  # - name: epic
-  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
-  #   mapping: ${human_dataset_mapping}
-  #   weight: 4
-  # - name: ego4d_cooking
-  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
-  #   mapping: ${human_dataset_mapping}
-  #   weight: 8
-  # - name: ego4d_other
-  #   path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
-  #   mapping: ${human_dataset_mapping}
-  #   weight: 8
+  - name: taco
+    path: /share_data/guantianrui/datasets/taco/taco_train_filtered_v1.zarr
+    mapping: ${human_dataset_mapping}
+    weight: 1
+  - name: oakink2
+    path: /share_data/guantianrui/datasets/Oakink-v2/oakink2_train_filtered_v1.zarr
+    mapping: ${human_dataset_mapping}
+    weight: 1
+  - name: holoassist
+    path: /share_data/guantianrui/datasets/HoloAssist/holoassist_filtered_v2_rechunked.zarr
+    mapping: ${human_dataset_mapping}
+    weight: 1
+  - name: egodex
+    path: /share_data/guantianrui/datasets/EgoDex/egodex_train_filtered_v2.zarr
+    mapping: ${human_dataset_mapping}
+    weight: 20
+  - name: epic
+    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/epic_train_rechunked.zarr
+    mapping: ${human_dataset_mapping}
+    weight: 4
+  - name: ego4d_cooking
+    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_cooking_and_cleaning_train_rechunked.zarr
+    mapping: ${human_dataset_mapping}
+    weight: 8
+  - name: ego4d_other
+    path: /share_data/guantianrui/datasets/VITRA-1M/zarr/ego4d_other_train_rechunked.zarr
+    mapping: ${human_dataset_mapping}
+    weight: 8
     
   # - name: Arrange_magnets_by_color
   #   path: /share_data/yeyuyao/teleop-data-complete/Arrange_magnets_by_color.zarr

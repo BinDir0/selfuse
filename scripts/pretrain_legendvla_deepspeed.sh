@@ -37,6 +37,8 @@ export TORCHINDUCTOR_FX_GRAPH_CACHE=1
 export TORCHINDUCTOR_FORCE_CUDA_CODE_CACHE=1
 # Enable NCCL trace buffer for debugging
 export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
+# Enable full error for Hydra
+export HYDRA_FULL_ERROR=1
 
 # # 设置 NCCL 超时为 1 小时 (单位毫秒: 3600000)
 # export NCCL_TIMEOUT=3600000 
@@ -52,4 +54,4 @@ export PYTHONUNBUFFERED=1
 accelerate launch \
     --config_file src/config/acc_config.yaml \
     train.py \
-    experiment=pretrain_legendvla_deepspeed 
+    experiment=pretrain_legendvla_wds_deepspeed 

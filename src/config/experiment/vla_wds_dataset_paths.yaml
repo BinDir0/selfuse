@@ -1,0 +1,48 @@
+# @package _global_
+#
+# WebDataset shard paths for VLA training.
+# Each entry specifies shard_urls (glob pattern) and sampling weight.
+# This replaces vla_dataset_paths.yaml for WebDataset-based training.
+#
+
+wds_base_dir: /share_data/guantianrui/datasets/Webdataset
+val_wds_base_dir: /share_data/guantianrui/datasets/Webdataset_val
+
+vla_wds_datasets:
+  # --- Human datasets ---
+  - name: taco
+    shard_urls: ${wds_base_dir}/taco_train_filtered_v1/shard-*.tar
+    weight: 1
+  - name: oakink2
+    shard_urls: ${wds_base_dir}/oakink2_train_filtered_v1/shard-*.tar
+    weight: 1
+  - name: holoassist
+    shard_urls: ${wds_base_dir}/holoassist_filtered_v2_rechunked/shard-*.tar
+    weight: 1
+  - name: egodex
+    shard_urls: ${wds_base_dir}/egodex_train_filtered_v2/shard-*.tar
+    weight: 20
+  - name: epic
+    shard_urls: ${wds_base_dir}/epic_train_rechunked/shard-*.tar
+    weight: 4
+  - name: ego4d_cooking_and_cleaning
+    shard_urls: ${wds_base_dir}/ego4d_cooking_and_cleaning_train_rechunked/shard-*.tar
+    weight: 8
+  - name: ego4d_other
+    shard_urls: ${wds_base_dir}/ego4d_other_train_rechunked/shard-*.tar
+    weight: 8
+
+  # --- Real-world datasets ---
+  # Add real-world datasets here after conversion.
+  # Example:
+  # - name: Open_book
+  #   shard_urls: ${wds_base_dir}/Open_book/shard-*.tar
+  #   weight: 0.2
+
+val_vla_wds_datasets:
+  - name: taco_test_seen
+    shard_urls: ${val_wds_base_dir}/taco_test_seen/shard-*.tar
+  - name: oakink2_test_seen
+    shard_urls: ${val_wds_base_dir}/oakink2_test_seen_presence_clean/shard-*.tar
+  - name: egodex_test
+    shard_urls: ${val_wds_base_dir}/egodex_filter_test_presence_clean/shard-*.tar
