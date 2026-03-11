@@ -315,7 +315,12 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         vla_val = self.vla_dataset.get_validation_dataset()
 
         vlm_val = None
-        if self.vlm_dataset is not None and hasattr(self.vlm_dataset, 'get_validation_dataset'):
+        has_vlm_val = getattr(self.vlm_dataset, "val_wds_datasets", None) is not None
+        if (
+            self.vlm_dataset is not None
+            and has_vlm_val
+            and hasattr(self.vlm_dataset, 'get_validation_dataset')
+        ):
             vlm_val = self.vlm_dataset.get_validation_dataset()
 
         return UnifiedWdsDataset(

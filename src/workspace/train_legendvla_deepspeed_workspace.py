@@ -77,10 +77,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         enabled = self.compile_cfg.get("enabled", False)
         if not enabled:
             return
-        if accelerator.is_main_process:
-            print(f"Compiling model with kwargs: {self.compile_cfg}")
-        self.model.compile(**self.compile_cfg)
 
+        compile_kwargs = OmegaConf.to_container(self.compile_cfg, resolve=True)
+        compile_kwargs.pop("enabled", None)
+
+        if accelerator.is_main_process:
+            print(f"Compiling model with kwargs: {compile_kwargs}")
+
+        self.model = torch.compile(self.model, **compile_kwargs)
+        
     def reset_run_seed(self, accelerator):
         """Reset runtime seed before building dataset/dataloader."""
         base_seed = int(self.cfg.training.seed)
@@ -206,6 +211,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             model.load_pretrained_pi05_weights()
         elif cfg.training.load_pretrained_vlm_weights:
             model.load_pretrained_vlm_weights()
+        elif cfg.training.finetune_checkpoint_path:
+            state_dict = torch.load(cfg.training.finetune_checkpoint_path, map_location='cpu')
+            # handle wrapping
+            for key in ['module', 'model', 'model_state_dict']:
+                if key in state_dict:
+                    state_dict = state_dict[key]
+                    break
+            model.load_state_dict(state_dict)
+            print("Successfully loaded finetuning weights.")
         if cfg.lora:
             model.freeze_non_lora_weights_in_vlm()
 
@@ -370,24 +384,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.update_step = self.training_state.update_step
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
-
-        elif cfg.training.finetune_checkpoint_path:
-            # Finetuning from a specific checkpoint (weights only)
-            print(f"Finetuning from checkpoint: {cfg.training.finetune_checkpoint_path}")
-            if os.path.isfile(cfg.training.finetune_checkpoint_path):
-                state_dict = torch.load(cfg.training.finetune_checkpoint_path, map_location='cpu')
-
-                if 'module' in state_dict:
-                    state_dict = state_dict['module']
-                elif 'model' in state_dict:
-                    state_dict = state_dict['model']
-                elif 'model_state_dict' in state_dict:
-                    state_dict = state_dict['model_state_dict']
-
-                accelerator.unwrap_model(self.model).load_state_dict(state_dict)
-                print("Successfully loaded finetuning weights.")
-            else:
-                print(f"Warning: Finetune checkpoint path {cfg.training.finetune_checkpoint_path} is not a file.")
 
         # Flow matching timestep sampling
         self.flow_sampling = cfg.flow.sampling

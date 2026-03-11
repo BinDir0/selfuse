@@ -108,6 +108,11 @@ class LegendVLA(nn.Module):
         self.ar_action_noise_std = cfg.get("ar_action_noise_std", 0.02)
         self.ar_action_chunk_size = cfg.get("ar_action_chunk_size", 4)
 
+        # RTC
+        self.use_rtc = cfg.use_rtc
+        self.rtc_delay_strategy = cfg.rtc_delay_strategy
+        self.rtc_max_delay = cfg.rtc_max_delay
+
         # Action, time encoders
         self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
         if self.action_expert_adaptive_mode:  # adaLN or adaLN-Zero
