@@ -480,6 +480,8 @@ class LegendVLAInference(nn.Module):
         dinov2_repo_path: str | None = None,
         dinov2_model_path: str | None = None,
         paligemma_model_path: str | None = None,
+        normalizer_path: str = None,
+        use_relative_action: bool = False,
         compile: Any = None,
     ) -> None:
         super().__init__()
@@ -537,7 +539,8 @@ class LegendVLAInference(nn.Module):
             if depth_clip_range is not None:
                 self.processor.depth_clip_range = tuple(float(x) for x in depth_clip_range)
 
-        self.normalizer, self.use_relative_action = self._load_normalizer(model_cfg)
+        self.normalizer = self._load_normalizer(normalizer_path)
+        self.use_relative_action = use_relative_action
 
         # Hyperparameters & Meta
         self.mode = mode
@@ -596,19 +599,18 @@ class LegendVLAInference(nn.Module):
         self.model.load_state_dict(state_dict)
         print(f"Successfully load model checkpoint from {path}")
 
-    def _load_normalizer(self, model_cfg: Any) -> Tuple[Optional[Dict], bool]:
-        """Load normalization stats for actions."""
-        normalizer_path = None
-        use_relative_action = False
-        if hasattr(model_cfg, "training") and model_cfg.training.get("normalizer_path"):
-            normalizer_path = pathlib.Path(model_cfg.training.normalizer_path)
-        if hasattr(model_cfg, "dataset"):
-            use_relative_action = bool(OmegaConf.select(model_cfg, "dataset.vla_dataset.use_relative_action", default=False))
+    def _load_normalizer(self, normalizer_path: str) -> Dict:
+        """Load normalization stats for actions.
 
-        if normalizer_path and normalizer_path.exists():
-            with open(normalizer_path, "rb") as f:
-                return pickle.load(f), use_relative_action
-        return None, use_relative_action
+        Args:
+            normalizer_path: Path to the normalizer pickle file.
+        """
+        normalizer_path = pathlib.Path(normalizer_path)
+        if not normalizer_path.exists():
+            raise FileNotFoundError(f"Normalizer file not found: {normalizer_path}")
+        with open(normalizer_path, "rb") as f:
+            log.info("Loaded normalizer from %s", normalizer_path)
+            return pickle.load(f)
 
     def prepare_process(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """Convert raw data into standard processor inputs."""

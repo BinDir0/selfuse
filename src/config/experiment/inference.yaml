@@ -17,6 +17,8 @@ policy:
   dinov2_repo_path: /home/psibot/projects/dinov2
   dinov2_model_path: /home/psibot/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   paligemma_model_path: /home/psibot/checkpoints/paligemma-3b-pt-224
+  normalizer_path: /home/psibot/checkpoints/legendvla/normalizer.pkl
+  use_relative_action: false
   compile:
     mode: reduce-overhead
     dynamic: null
