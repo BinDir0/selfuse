@@ -116,12 +116,10 @@ dataloader:
     prefetch_factor: 32
 
 val_dataloader:
-  batch_sampler:
-    # Note: For vision_resolution=448, consider reducing batch_size (e.g., 8 or 4) due to 4x memory usage
+  loader:
     batch_size: 16
     shuffle: False
     drop_last: False
-  loader:
     num_workers: 4
     pin_memory: True
     persistent_workers: True
@@ -206,7 +204,7 @@ training:
   # misc
   log_interval: 20
   compile:
-    enabled: True
+    enabled: False
     fullgraph: True
     backend: inductor
     mode: default

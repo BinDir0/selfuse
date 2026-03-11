@@ -213,6 +213,7 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     presence = meta.get("presence", 3)
 
     result = {
+        "valid_action_len": len_lowdims,
         "wrist_state":    wrist_state.astype(np.float32),
         "hand_state":     hand_state.astype(np.float32),
         "wrist_action":   wrist_action.astype(np.float32),

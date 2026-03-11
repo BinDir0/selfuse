@@ -151,8 +151,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             (self.action_horizon, *action.shape[1:]), dtype=np.float32)
         actions_valid_mask = np.zeros(
             (self.action_horizon, *action.shape[1:]), dtype=bool)
-        actions_valid_mask[:action.shape[0]] = True
+        # actions_valid_mask[:action.shape[0]] = True
         action_pad[:action.shape[0]] = action
+        
+        valid_action_len = sample["valid_action_len"]
+        actions_valid_mask[:valid_action_len] = True
 
         data = {
             "input_ids": processed_results["input_ids"],
@@ -163,7 +166,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             "n_states": np.array(state.shape[0], dtype=np.int32),
             "actions": action_pad,
             "actions_valid_mask": actions_valid_mask,
-            "n_actions": np.array(action.shape[0], dtype=np.int32),
+            "n_actions": np.array(valid_action_len, dtype=np.int32),
             "is_vla_data": np.array(True, dtype=bool),
         }
         if "depth_values" in processed_results:
