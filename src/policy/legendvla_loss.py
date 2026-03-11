@@ -367,7 +367,7 @@ def compute_flow_loss(model, batch: dict, return_attn_weights: bool = False) -> 
     if use_rtc:
         if model.rtc_delay_strategy != "uniform":
             raise ValueError(f"Unsupported RTC delay strategy: {model.rtc_delay_strategy}")
-        time_for_model, rtc_mask, _, _ = _build_rtc_flow_inputs(
+        time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
             actions=x1,
             actions_valid_mask=actions_valid_mask,
             postfix_time=t,
@@ -375,6 +375,9 @@ def compute_flow_loss(model, batch: dict, return_attn_weights: bool = False) -> 
             rtc_max_delay=model.rtc_max_delay,
         )
     psi_t_val = psi_t(x0, x1, time_for_model, model.flow_sig_min)
+    if use_rtc:
+        psi_t_val = torch.where(prefix_mask.unsqueeze(-1), x1, psi_t_val)
+
     if 'depth_values' in batch:
         depth_values = batch["depth_values"]
         has_depth_values = batch["has_depth_values"]
@@ -463,7 +466,7 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     if use_rtc:
         if model.rtc_delay_strategy != "uniform":
             raise ValueError(f"Unsupported RTC delay strategy: {model.rtc_delay_strategy}")
-        time_for_model, rtc_mask, _, _ = _build_rtc_flow_inputs(
+        time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
             actions=x1,
             actions_valid_mask=actions_valid_mask,
             postfix_time=t,
@@ -471,7 +474,9 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
             rtc_max_delay=model.rtc_max_delay,
         )
     psi_t_val = psi_t(x0, x1, time_for_model, model.flow_sig_min)
-
+    if use_rtc:
+        psi_t_val = torch.where(prefix_mask.unsqueeze(-1), x1, psi_t_val)
+        
     depth_values = batch.get("depth_values")
     has_depth_values = batch.get("has_depth_values")
     inputs_embeds = model._forward_siglip_and_text_embedding(
