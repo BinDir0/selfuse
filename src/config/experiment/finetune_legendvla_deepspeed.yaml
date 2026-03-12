@@ -81,6 +81,7 @@ n_obs_state_steps: 16
 n_obs_state_stride: 2
 n_action_steps: 32
 n_action_stride: 1
+use_mem: True
 
 vla_processor: 
   _target_: src.dataset.paligemma_processing.PaliGemmaVLAProcessor
@@ -260,7 +261,8 @@ text_seq_len: ${eval:'${state_seq_len}+128'}
 answer_seq_len: 256 
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
-max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'}
+max_vlm_image_steps: ${eval:'1 if ${use_mem} else ${shape_meta.obs.rgb.horizon}'}
+max_vlm_tokens: ${eval:'${image_seq_len}*${max_vlm_image_steps}+${text_seq_len}+${answer_seq_len}'}
 tokenizer_padding: max_length # longest or max_length
 
 policy: 
@@ -361,6 +363,9 @@ policy:
       attention_dropout: 0.0
       # Automatically calculate num_image_tokens based on resolution
       num_image_tokens: ${image_seq_len}
+      use_mem: ${use_mem}
+      temporal_max_frames: 18
+      temporal_interval: 4
       lora:
         r: ${lora_r}
         dropout: ${lora_dropout}

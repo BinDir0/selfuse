@@ -75,7 +75,7 @@ dataset:
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
     
-n_obs_image_steps: 6
+n_obs_image_steps: 1
 n_obs_image_stride: 30
 n_obs_state_steps: 16
 n_obs_state_stride: 2
@@ -97,6 +97,7 @@ vla_processor:
   depth_rescale_factor: 0.001
   depth_clip_range: ${depth_clip_range}
   tokenizer_padding: ${tokenizer_padding} 
+  max_image_steps: ${max_vlm_image_steps} 
 vlm_processor: 
   _target_: src.dataset.paligemma_processing.PaliGemmaProcessor
   tokenizer: 
@@ -169,7 +170,7 @@ training:
   dinov2_repo_path: /share_data/chenzhang/repos/dinov2
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: #/share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.20/05.23_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=20000-eval_l1_loss=0.0249
-  finetune_checkpoint_path: /share_data/chenzhang/projects/diffloss-ar/outputs/2026.02.18/12.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=245000-eval_l1_loss=0.0175/pytorch_model/mp_rank_00_model_states.pt
+  finetune_checkpoint_path: #/share_data/chenzhang/projects/diffloss-ar/outputs/2026.02.18/12.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=245000-eval_l1_loss=0.0175/pytorch_model/mp_rank_00_model_states.pt
   normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07-mix/normalizer.pkl
   num_epochs: 200
   use_bf16: True

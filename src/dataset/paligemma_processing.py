@@ -328,7 +328,7 @@ class PaliGemmaProcessor:
             prefix_prompt=text,
             bos_token=self.tokenizer.bos_token,
             eos_token=self.tokenizer.eos_token,
-            image_seq_len=self.image_seq_length * images.shape[0],
+            image_seq_len=self.image_seq_length * num_image_frames,
             image_token=self.IMAGE_TOKEN,
             suffix_target=target,
             need_target=('infer' not in mode),
@@ -438,6 +438,7 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         depth_rescale_factor: float = 1.0 / 1000.0,
         depth_clip_range: Tuple[float, float] | None = None,
         tokenizer_padding: str = "longest", # longest or max_length
+        max_image_steps: int = None,
     ):
         super().__init__(
             tokenizer = tokenizer,
@@ -450,6 +451,7 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
         self.depth_image_size = depth_image_size
         self.depth_rescale_factor = depth_rescale_factor
         self.depth_clip_range = depth_clip_range
+        self.max_image_steps = max_image_steps
         # Tokenizer described here: https://github.com/google-research/big_vision/blob/main/big_vision/configs/proj/paligemma/README.md#tokenizer
         tokens_to_add = {"additional_special_tokens": [
             self.STATE_TOKEN,
@@ -529,12 +531,18 @@ class PaliGemmaVLAProcessor(PaliGemmaProcessor):
             f"Actions: "
         )
         suffix = f"{self.ACTION_TOKEN * len(actions)}"
+        
+        # Determine the number of image tokens to add based on max_image_steps (for use_mem logic)
+        num_image_frames = images.shape[0]
+        if self.max_image_steps is not None:
+            num_image_frames = min(num_image_frames, self.max_image_steps)
+
         # Prepend a `self.image_seq_length` number of image tokens to the prompt
         input_string = add_image_tokens_to_prompt(
             prefix_prompt=prefix,
             bos_token=self.tokenizer.bos_token,
             eos_token=self.tokenizer.eos_token,
-            image_seq_len=self.image_seq_length * images.shape[0],
+            image_seq_len=self.image_seq_length * num_image_frames,
             image_token=self.IMAGE_TOKEN,
             suffix_target=suffix,
             need_target=(('infer' not in mode) and objective != "train_flow"),

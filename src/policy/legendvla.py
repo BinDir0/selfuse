@@ -499,26 +499,41 @@ class LegendVLA(nn.Module):
         if pixel_values is not None:
             if pixel_values.ndim == 5:
                 batch_size, frame_count, channels, height, width = pixel_values.shape
-                pixel_values = pixel_values.reshape(batch_size * frame_count, channels, height, width)
+                # Do not reshape here, let SigLIP handle 5D input for use_mem
             else:
                 batch_size = pixel_values.shape[0]
                 frame_count = 1
             rgb_image_features = self.vision_tower(pixel_values)
             rgb_image_features = rgb_image_features.reshape(batch_size, -1, rgb_image_features.shape[-1])
 
+            # Determine effective frame count based on actual output shape
+            effective_frame_count = rgb_image_features.shape[1] // self.vision_tower.config.num_image_tokens
+            
             paired_image_features = rgb_image_features
             if self.use_depth:
                 depth_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
                 if has_depth_values is not None:
                     depth_mask = has_depth_values.to(device=device, dtype=torch.bool)
-                missing_depth_features = self.depth_missing_embeddings.repeat(frame_count, 1)
+                
+                # Adjust missing_depth_features to match effective frame count
+                missing_depth_features = self.depth_missing_embeddings.repeat(effective_frame_count, 1)
                 missing_depth_features = missing_depth_features.unsqueeze(0).expand(batch_size, -1, -1)
+                
                 if depth_values is not None:
                     if depth_values.ndim == 5:
+                        # [B, T, C, H, W]
                         depth_batch, depth_frames, depth_channels, depth_height, depth_width = depth_values.shape
+                        
+                        # If RGB was compressed (T -> 1) but Depth has T frames, take the last frame
+                        if effective_frame_count == 1 and depth_frames > 1:
+                            depth_values = depth_values[:, -1:, ...] # Take last frame
+                            depth_frames = 1
+                            
                         depth_values = depth_values.reshape(depth_batch * depth_frames, depth_channels, depth_height, depth_width)
+                    
                     depth_image_features = self.depth_encoder(depth_values)
                     depth_image_features = depth_image_features.reshape(batch_size, -1, depth_image_features.shape[-1])
+                    
                 else:
                     depth_image_features = missing_depth_features
                     depth_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
