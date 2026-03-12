@@ -6,7 +6,7 @@ numpy==1.26.4
 accelerate==1.10.0
 diffusers==0.34.0
 deepspeed==0.17.5
-zarr
+zarr  # legacy data build/conversion/visualization utilities
 tensorstore
 numba
 transformers==4.46.0

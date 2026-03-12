@@ -13,7 +13,6 @@ import seaborn as sns
 from pathlib import Path
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-import zarr
 
 
 def plot_embedding_tsne_by_class(
@@ -138,10 +137,10 @@ def plot_embedding_tsne_by_class(
     plt.close()
 
 
-def plot_tsne_from_zarrs(
-    zarr_paths: Sequence[Union[str, Path]],
+def plot_tsne_from_npzs(
+    npz_paths: Sequence[Union[str, Path]],
     keys: Sequence[str],
-    sample_per_zarr: int = 200,
+    sample_per_npz: int = 200,
     seed: int = 42,
     save_path: Optional[Union[str, Path]] = None,
     show: bool = False,
@@ -151,11 +150,11 @@ def plot_tsne_from_zarrs(
     tsne_iter: int = 1000,
 ):
     """
-    Read multiple zarr stores, sample embeddings per key, and plot t-SNE by key.
-    Each key is treated as a class label; samples from all zarrs are merged.
+    Read multiple NPZ files, sample embeddings per key, and plot t-SNE by key.
+    Each key is treated as a class label; samples from all NPZs are merged.
     """
-    if not zarr_paths:
-        raise ValueError("zarr_paths is empty.")
+    if not npz_paths:
+        raise ValueError("npz_paths is empty.")
     if not keys:
         raise ValueError("keys is empty.")
 
@@ -171,23 +170,23 @@ def plot_tsne_from_zarrs(
     embeddings_by_class: Dict[str, np.ndarray] = {}
     for key in keys:
         key_samples = []
-        for zarr_path in zarr_paths:
-            root = zarr.open_group(str(zarr_path), mode="r")
-            if key not in root:
+        for npz_path in npz_paths:
+            data = np.load(str(npz_path), allow_pickle=True)
+            if key not in data:
                 continue
-            arr = root[key][:]
+            arr = data[key]
             if arr.ndim > 2:
                 arr = arr.reshape(-1, arr.shape[-1])
             if arr.ndim != 2 or arr.shape[0] == 0:
                 continue
-            take = min(sample_per_zarr, arr.shape[0])
+            take = min(sample_per_npz, arr.shape[0])
             indices = rng.choice(arr.shape[0], size=take, replace=False)
             key_samples.append(arr[indices])
         if key_samples:
             embeddings_by_class[_short_key(key)] = np.concatenate(key_samples, axis=0)
 
     if not embeddings_by_class:
-        raise ValueError("No samples collected from zarrs for the given keys.")
+        raise ValueError("No samples collected from NPZs for the given keys.")
 
     plot_embedding_tsne_by_class(
         embeddings_by_class=embeddings_by_class,

@@ -89,62 +89,51 @@ class DummyTrajectoryPolicy(nn.Module):
         )
 
     def _build_action_chunks(self, dataset) -> tuple[list[np.ndarray], list[int]]:
+        from src.dataset.wds_dataset import build_blended_dataset
         from src.dataset.data_transforms import process_state_action
-        from src.dataset.sampler import SequenceSampler
 
-        if self.dataset_index < 0 or self.dataset_index >= len(dataset.replay_buffers):
-            raise IndexError(
-                f"dataset_index={self.dataset_index} is out of range for {len(dataset.replay_buffers)} datasets"
-            )
+        datasets_config = [
+            {"shard_urls": ds["shard_urls"], "weight": ds.get("weight", 1.0),
+             "name": ds.get("name", "unknown")}
+            for ds in dataset.wds_datasets
+        ]
+        if 0 <= self.dataset_index < len(datasets_config):
+            datasets_config = [datasets_config[self.dataset_index]]
 
-        replay_buffer = dataset.replay_buffers[self.dataset_index]
-        if self.episode_index < 0 or self.episode_index >= replay_buffer.n_episodes:
-            raise IndexError(
-                f"episode_index={self.episode_index} is out of range for {replay_buffer.n_episodes} episodes"
-            )
-
-        episode_mask = np.zeros(replay_buffer.n_episodes, dtype=bool)
-        episode_mask[self.episode_index] = True
-        sampler = SequenceSampler(
-            replay_buffer=replay_buffer,
-            episode_mask=episode_mask,
-            **dataset.sampler_cfg,
+        pipeline = build_blended_dataset(
+            datasets_config=datasets_config,
+            config=dataset.window_config,
+            lowdim_slices=dataset.lowdim_slices,
+            mode="val",
+            lowdim_only=True,
         )
 
-        episode_ends = replay_buffer.episode_ends[:]
-        episode_start = 0 if self.episode_index == 0 else int(episode_ends[self.episode_index - 1])
-        episode_end = int(episode_ends[self.episode_index])
-        action_steps, action_stride, _ = dataset.sampler_cfg["action"]
-        full_span = (action_steps - 1) * action_stride
-        max_anchor = episode_end - 1 - full_span
-        anchor_start = episode_start + self.start_t
-        if anchor_start > max_anchor:
-            raise ValueError(
-                f"start_t={self.start_t} leaves no full action chunk in episode of length {episode_end - episode_start}"
-            )
+        chunks, anchors = [], []
+        frame_in_episode = 0
 
-        chunks: list[np.ndarray] = []
-        anchors: list[int] = []
-        for anchor in range(anchor_start, max_anchor + 1, self.step_hop):
-            sampler_index = anchor - episode_start
-            sample = sampler.sample_sequence(sampler_index)
-            _, action = process_state_action(
-                wrist_state=sample["wrist_state"].astype(np.float32),
-                hand_state=sample["hand_state"].astype(np.float32),
-                wrist_action=sample["wrist_action"].astype(np.float32),
-                hand_action=sample["hand_action"].astype(np.float32),
-                extrinsic=sample["extrinsic"].astype(np.float32).reshape(4, 4),
-                hand_ndim=dataset.hand_ndim,
-                motion_type=dataset.motion_type,
-                use_relative_action=self.use_relative_action,
-                normalizer=None,
-            )
-            if action.shape != (self.action_horizon, self.action_dim):
-                raise ValueError(
-                    f"Expected full action chunk shape {(self.action_horizon, self.action_dim)}, got {action.shape} at anchor {anchor}"
-                )
-            chunks.append(action.astype(np.float32))
-            anchors.append(anchor)
+        for sample in pipeline:
+            if sample.get("episode_index") != self.episode_index:
+                frame_in_episode = 0
+                continue
+            if frame_in_episode >= self.start_t:
+                offset = frame_in_episode - self.start_t
+                if offset % self.step_hop == 0:
+                    _, action = process_state_action(
+                        wrist_state=sample["wrist_state"].astype(np.float32),
+                        hand_state=sample["hand_state"].astype(np.float32),
+                        wrist_action=sample["wrist_action"].astype(np.float32),
+                        hand_action=sample["hand_action"].astype(np.float32),
+                        extrinsic=sample["extrinsic"].astype(np.float32).reshape(4, 4),
+                        hand_ndim=dataset.hand_ndim,
+                        motion_type=dataset.motion_type,
+                        use_relative_action=self.use_relative_action,
+                        normalizer=None,
+                    )
+                    if action.shape == (self.action_horizon, self.action_dim):
+                        chunks.append(action.astype(np.float32))
+                        anchors.append(frame_in_episode)
+            frame_in_episode += 1
+
         return chunks, anchors
 
     def maybe_compile_model(self) -> None:

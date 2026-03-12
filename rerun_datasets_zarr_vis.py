@@ -19,6 +19,9 @@ from src.utils.geometry import (
 from src.utils.mano_vis import mano_forward
 import torch
 
+# TODO(webdataset): Add a WebDataset-native dataset visualization workflow and
+# retire this legacy zarr-only viewer.
+
 def get_colored_point_cloud(color_rgb, depth, width, height, K, depth_scale=0.001, min_depth=0.1, max_depth=5.0):
     X_grid, Y_grid = np.meshgrid(np.arange(width), np.arange(height))
     depth_raw = depth.reshape(-1).astype(np.float32) * depth_scale

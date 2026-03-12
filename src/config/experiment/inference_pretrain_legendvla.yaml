@@ -2,70 +2,56 @@
 name: legendvla_inference
 exp_name: "inference_pretrain"
 
-human_dataset_mapping: 
-  image: image
-  depth: depth
-  wrist_state: state/wrist
-  hand_state: state/fingertips
-  wrist_action: action/wrist
-  hand_action: action/fingertips
-  extrinsic: extrinsic
-  intrinsic: intrinsic
-  instruction: instruction
-  instruction_num: instruction_num
-real_world_dataset_mapping: 
-  image: image-head
-  depth: depth-head
-  wrist_state: state/wrist-head
-  hand_state: state/fingertips-head
-  wrist_action: action/wrist-head
-  hand_action: action/fingertips-head
-  extrinsic: extrinsic
-  intrinsic: intrinsic/head
-  instruction: instruction
-  instruction_num: instruction_num
-
-# 使用较小的数据集进行快速测试（可选）
-vla_dataset_paths:
-  # - name: Dexterous_grasping
-  #   path: /share_data/yanruilin/complete_data/Dexterous_grasping.zarr
-  #   mapping: ${real_world_dataset_mapping}
-  #   weight: 0.2
- - name: oakink2_test_seen
-   path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen_presence_clean.zarr 
-   mapping: ${human_dataset_mapping}
-   weight: 1
+# VLA WebDataset datasets for inference
+vla_wds_datasets:
+  - name: oakink2_test_seen
+    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/oakink2_test_seen_presence_clean/shard-*.tar
+    weight: 1
 #  - name: oakink2_test_unseen_scene
-#    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_scene_presence_clean.zarr  
-#    mapping: ${human_dataset_mapping}
+#    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/oakink2_test_unseen_scene_presence_clean/shard-*.tar
 #    weight: 1
 #  - name: oakink2_test_unseen_task
-#    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_unseen_task_presence_clean.zarr
-#    mapping: ${human_dataset_mapping}
+#    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/oakink2_test_unseen_task_presence_clean/shard-*.tar
 #    weight: 1
 #  - name: egodex_test
-#    path: /share_data/guantianrui/datasets/EgoDex/egodex_filter_test_presence_clean.zarr
-#    mapping: ${human_dataset_mapping}
+#    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/egodex_filter_test_presence_clean/shard-*.tar
 #    weight: 1
 #  - name: taco_test_seen
-#    path: /share_data/guantianrui/datasets/taco/taco_test_seen.zarr
-#    mapping: ${human_dataset_mapping}
+#    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/taco_test_seen/shard-*.tar
 #    weight: 1
 #  - name: taco_test_unseen_task
-#    path: /share_data/guantianrui/datasets/taco/taco_test_unseen_task.zarr
-#    mapping: ${human_dataset_mapping}
+#    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/taco_test_unseen_task/shard-*.tar
 #    weight: 1
 
-vlm_dataset_paths: 
- - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/objects365_qa_filtered"  # localization & grounding
-#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/spatialsense_filtered"  # spatialsense
-#  - "/share_data/guantianrui/datasets/VLM/FineVision_Arrow_Format/alfworldgpt_filtered"  # high level subtask action
+# VLM WebDataset datasets for inference
+vlm_wds_datasets:
+  - name: FineVision
+    shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/FineVision/test/shard-*.tar
+    weight: 1
 
-# 覆盖dataloader配置（推理时不需要shuffle）
+# TODO(webdataset): remove this registry after rerun_inference_vis.py can load
+# comparison data directly from WebDataset instead of original zarr sources.
+# Origin zarr registry for visualization (maps dataset name to original zarr path)
+# Used by rerun_inference_vis.py to resolve origin data for visualization
+origin_zarr_registry:
+  oakink2_test_seen:
+    path: /share_data/guantianrui/datasets/OakInk-v2/oakink2_test_seen_presence_clean.zarr
+    mapping:
+      image: image
+      depth: depth
+      wrist_state: state/wrist
+      hand_state: state/fingertips
+      wrist_action: action/wrist
+      hand_action: action/fingertips
+      extrinsic: extrinsic
+      intrinsic: intrinsic
+      instruction: instruction
+      instruction_num: instruction_num
+
+# 覆盖dataloader配置
 dataloader:
   batch_size: 16
   num_workers: 16
-  shuffle: True
   pin_memory: True
   persistent_workers: False
 
@@ -82,7 +68,7 @@ flow_sampling_steps: 10
 inference:
   # 推理模式: "ar" (autoregressive) or "flow" (flow matching) or "vlm" (text)
   mode: flow
-  autoregressive_config: 
+  autoregressive_config:
     max_new_tokens: 32
     temperature: 1.0
     top_k: 10
@@ -94,21 +80,20 @@ inference:
   # 如果不指定，将使用当前配置中的policy配置
   model_config_path: /home/chenzhang/projects/diffloss-ar/outputs/2026.02.18/12.39_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
   #/home/chenzhang/projects/LegendVLA-train/outputs/2026.02.17/09.07_legendvla_pretrain_legendvla_deepspeed/.hydra/config.yaml
-  
+
   # checkpoint路径（用于加载模型权重）
   checkpoint_path: /home/chenzhang/projects/diffloss-ar/outputs/2026.02.18/12.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=245000-eval_l1_loss=0.0175/pytorch_model/mp_rank_00_model_states.pt
   #/home/chenzhang/projects/LegendVLA-train/outputs/2026.02.17/09.07_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=275000-eval_l1_loss=0.0176/pytorch_model/mp_rank_00_model_states.pt
-  
+
   # 数据配置
   # Note: If val_ratio=0.0 in dataset config, all data is used regardless of this setting
   use_val_dataset: False  # True: 使用验证集（需要 val_ratio > 0）, False: 使用训练集或完整数据集
-  
+
   # 推理控制
   max_steps: 5  # 最大推理步数，null表示推理所有数据
   skip_first: 0  # 跳过前N个batch
-  save_zarr: True  # True: 保存zarr, False: 仅内存统计
   attention_sample_count: 4  # 随机保存 attention_maps 的样本数
-  
+
   # 精度配置
   use_mixed_precision: True  # True: 使用混合精度（bf16/fp16）加速推理，False: 使用全精度（fp32）获得最高精度
                              # 注意：混合精度通常对结果影响很小（<1%），但能显著加速推理
@@ -122,10 +107,10 @@ inference:
     dynamic: True # 是否动态编译
     fullgraph: False # 是否使用全图编译
     backend: "inductor" # "inductor", "aot_eager", "aot_nvfuser", etc.
-  
+
   # 其他配置
   seed: 42
-  
+
 hydra:
   job:
     override_dirname: ${name}

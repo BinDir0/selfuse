@@ -22,17 +22,30 @@ from src.utils.mano_vis import mano_forward
 import torch
 
 
+# TODO(webdataset): Replace this origin-zarr-based visualization path with a
+# WDS-native loader so rerun visualization no longer depends on the original
+# zarr dataset registry.
+
+
 # ── helpers for resolving dataset name → zarr path ──────────────────────────
 
+DEFAULT_MAPPING = {
+    "image": "image",
+    "depth": "depth",
+    "wrist_state": "state/wrist",
+    "hand_state": "state/fingertips",
+    "wrist_action": "action/wrist",
+    "hand_action": "action/fingertips",
+    "extrinsic": "extrinsic",
+    "intrinsic": "intrinsic",
+    "instruction": "instruction",
+    "instruction_num": "instruction_num",
+}
+
+
 def _load_default_mapping():
-    """Load ``human_dataset_mapping`` from the inference config."""
-    cfg = OmegaConf.load(INFERENCE_CONFIG_PATH)
-    raw = OmegaConf.select(cfg, "human_dataset_mapping")
-    if raw is None:
-        raise RuntimeError(
-            f"human_dataset_mapping not found in {INFERENCE_CONFIG_PATH}"
-        )
-    return OmegaConf.to_container(raw, resolve=True)
+    """Return the default human_dataset_mapping."""
+    return dict(DEFAULT_MAPPING)
 
 
 def _navigate_zarr(data_group, key_path, indices=None):
@@ -44,22 +57,36 @@ def _navigate_zarr(data_group, key_path, indices=None):
     return cur[indices] if indices is not None else cur
 
 
-def build_dataset_registry(inference_zarr_path):
+def build_dataset_registry(inference_results_path):
     """Return ``{name: {'path': str, 'mapping': dict}}`` from the inference config.
 
-    Reads ``vla_dataset_paths`` from the saved ``inference_config.yaml``
-    next to the zarr, falling back to ``INFERENCE_CONFIG_PATH``.
+    Reads ``origin_zarr_registry`` from the saved ``inference_config.yaml``
+    next to the inference results, falling back to ``INFERENCE_CONFIG_PATH``.
+    Also supports legacy ``vla_dataset_paths`` for backwards compatibility.
     """
-    inference_dir = os.path.dirname(os.path.abspath(inference_zarr_path))
+    inference_dir = os.path.dirname(os.path.abspath(inference_results_path))
     saved_cfg_path = os.path.join(inference_dir, "inference_config.yaml")
     cfg_path = saved_cfg_path if os.path.exists(saved_cfg_path) else INFERENCE_CONFIG_PATH
 
     cfg = OmegaConf.load(cfg_path)
+
+    # Try new format: origin_zarr_registry
+    registry_raw = OmegaConf.select(cfg, "origin_zarr_registry", default=None)
+    if registry_raw is not None:
+        registry_raw = OmegaConf.to_container(registry_raw, resolve=True)
+        registry: dict = {}
+        for name, entry in registry_raw.items():
+            mapping = entry.get("mapping", _load_default_mapping())
+            registry[name] = {"path": entry["path"], "mapping": mapping}
+        return registry
+
+    # Fallback: legacy vla_dataset_paths format
     items = OmegaConf.select(cfg, "vla_dataset_paths", default=[])
     if not items:
-        raise RuntimeError(f"vla_dataset_paths not found in {cfg_path}")
+        print(f"Warning: neither origin_zarr_registry nor vla_dataset_paths found in {cfg_path}")
+        return {}
 
-    registry: dict = {}
+    registry = {}
     for item in items:
         mapping_raw = OmegaConf.to_container(item.get('mapping', {}), resolve=True)
         if not isinstance(mapping_raw, dict) or not mapping_raw:
@@ -68,18 +95,18 @@ def build_dataset_registry(inference_zarr_path):
     return registry
 
 
-def select_sample_indices(inference_zarr_path, dataset_names=None,
+def select_sample_indices(inference_npz_path, dataset_names=None,
                           num_samples=1, sample_idx=None):
     """Pick sample indices, optionally filtering by *dataset_names*."""
-    inf_z = zarr.open(inference_zarr_path, mode='r')
+    data = np.load(inference_npz_path, allow_pickle=True)
 
     if sample_idx is not None:
         return [sample_idx]
 
-    num_total = inf_z['pred_actions'].shape[0]
+    num_total = data['pred_actions'].shape[0]
 
-    if dataset_names and 'dataset_name' in inf_z:
-        all_names = [str(x) for x in inf_z['dataset_name'][:]]
+    if dataset_names and 'dataset_name' in data:
+        all_names = [str(x) for x in data['dataset_name']]
         name_set = set(dataset_names)
         valid = np.array([i for i, n in enumerate(all_names) if n in name_set])
         if len(valid) == 0:
@@ -266,14 +293,14 @@ class HandVisualizer:
             )
         )
 
-def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=None,
-                       use_relative_action=None, motion_type='fingertips',
-                       dataset_registry=None):
+def get_data_from_results(inference_npz_path, origin_zarr_path=None, sample_idx=None,
+                          use_relative_action=None, motion_type='fingertips',
+                          dataset_registry=None):
     """
-    Load data from inference results zarr file and corresponding original dataset.
-    
+    Load data from inference results NPZ file and corresponding original dataset.
+
     Args:
-        inference_zarr_path: Path to inference results zarr file.
+        inference_npz_path: Path to inference results NPZ file.
         origin_zarr_path: Explicit path to original dataset zarr (takes precedence).
         sample_idx: Index of sample in inference results. If None, randomly select.
         use_relative_action: Whether actions are relative. If None, default to True.
@@ -281,35 +308,35 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
         dataset_registry: ``{name: {'path', 'mapping'}}`` built by
             :func:`build_dataset_registry`.  Used to auto-resolve *origin_zarr_path*
             and field-key mapping from the sample's ``dataset_name``.
-    
+
     Returns:
         dict with image, depth, intrinsic, extrinsic, gt/pred_actions, frame_idx, dataset_name …
     """
-    if not os.path.exists(inference_zarr_path):
-        raise FileNotFoundError(f"Inference results zarr file not found: {inference_zarr_path}")
-    
-    inference_z = zarr.open(inference_zarr_path, mode='r')
-    
-    required_keys = ['pred_actions', 'gt_actions', 'actions_valid_mask', 'dataset_local_idx']
+    if not os.path.exists(inference_npz_path):
+        raise FileNotFoundError(f"Inference results NPZ file not found: {inference_npz_path}")
+
+    inference_data = np.load(inference_npz_path, allow_pickle=True)
+
+    required_keys = ['pred_actions', 'gt_actions', 'actions_valid_mask', 'episode_index']
     for key in required_keys:
-        if key not in inference_z:
+        if key not in inference_data:
             raise ValueError(f"{key} not found in inference results.")
-    
-    pred_actions_all = inference_z['pred_actions']
-    gt_actions_all = inference_z['gt_actions']
-    actions_valid_mask_all = inference_z['actions_valid_mask']
-    origin_frame_indices_all = inference_z['dataset_local_idx']
-    
+
+    pred_actions_all = inference_data['pred_actions']
+    gt_actions_all = inference_data['gt_actions']
+    actions_valid_mask_all = inference_data['actions_valid_mask']
+    origin_frame_indices_all = inference_data['episode_index']
+
     num_total = pred_actions_all.shape[0]
     horizon = pred_actions_all.shape[1]
-    
+
     print(f"Inference results: {num_total} samples, Horizon: {horizon}")
-    
+
     if sample_idx is None:
         sample_idx = np.random.randint(0, num_total)
     elif sample_idx >= num_total:
         raise ValueError(f"sample_idx {sample_idx} out of range ({num_total})")
-    
+
     pred_actions = pred_actions_all[sample_idx]
     gt_actions = gt_actions_all[sample_idx]
     actions_valid_mask = actions_valid_mask_all[sample_idx]
@@ -319,9 +346,8 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
     sample_dataset_name = None
     field_mapping = _load_default_mapping()
 
-    if 'dataset_name' in inference_z:
-        ds_arr = inference_z['dataset_name']
-        # Guard against corrupted char-level storage
+    if 'dataset_name' in inference_data:
+        ds_arr = inference_data['dataset_name']
         if ds_arr.shape[0] == num_total:
             sample_dataset_name = str(ds_arr[sample_idx])
         else:
@@ -332,13 +358,11 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
             entry = dataset_registry[sample_dataset_name]
             origin_zarr_path = entry['path']
             field_mapping = entry.get('mapping', field_mapping)
-        elif 'origin_zarr_path' in inference_z.attrs:
-            origin_zarr_path = inference_z.attrs['origin_zarr_path']
         else:
             raise ValueError(
                 f"Cannot resolve origin zarr for sample {sample_idx} "
                 f"(dataset_name={sample_dataset_name!r}). "
-                "Provide --origin_zarr_path or ensure config is accessible."
+                "Provide --origin_zarr_path or ensure origin_zarr_registry is configured."
             )
     elif sample_dataset_name and dataset_registry and sample_dataset_name in dataset_registry:
         field_mapping = dataset_registry[sample_dataset_name].get('mapping', field_mapping)
@@ -387,7 +411,7 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
     print(f"Selected sample {sample_idx} from inference results")
     print(f"Origin frame index: {origin_frame_idx}")
     print(f"Frame range: {frame_indices[0]} to {frame_indices[-1]} ({horizon} frames)")
-    print(f"Inference zarr path: {inference_zarr_path}")
+    print(f"Inference NPZ path: {inference_npz_path}")
     print(f"Original dataset path: {origin_zarr_path}")
     
     # Calculate L1 loss between pred_actions and gt_actions (before coordinate transformation)
@@ -490,9 +514,9 @@ def get_data_from_zarr(inference_zarr_path, origin_zarr_path=None, sample_idx=No
     mano_shape = None
     if motion_type == 'mano':
         # Check if inference results contain MANO data
-        if 'pred_mano' in inference_z and 'gt_mano' in inference_z:
-            mano_pred = inference_z['pred_mano'][sample_idx]  # (H, 90)
-            mano_gt = inference_z['gt_mano'][sample_idx]  # (H, 90)
+        if 'pred_mano' in inference_data and 'gt_mano' in inference_data:
+            mano_pred = inference_data['pred_mano'][sample_idx]  # (H, 90)
+            mano_gt = inference_data['gt_mano'][sample_idx]  # (H, 90)
             
             if use_relative_action:
                 mano_state_key = fm.get('mano_state', 'state/mano')
@@ -920,8 +944,8 @@ def visualize_one_sample(zarr_data, motion_type, save_path=None,
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize inference results with Rerun")
-    parser.add_argument("--inference_zarr_path", type=str, required=True,
-                        help="Path to inference results zarr file.")
+    parser.add_argument("--inference_npz_path", type=str, required=True,
+                        help="Path to inference results NPZ file.")
     parser.add_argument("--origin_zarr_path", type=str, default=None,
                         help="(Optional) Explicit origin dataset zarr path. "
                              "If omitted, resolved automatically from dataset_name.")
@@ -942,8 +966,8 @@ def main():
                         help="Directory or file path to save .rrd files.")
     args = parser.parse_args()
 
-    if not os.path.exists(args.inference_zarr_path):
-        raise FileNotFoundError(f"Inference zarr not found: {args.inference_zarr_path}")
+    if not os.path.exists(args.inference_npz_path):
+        raise FileNotFoundError(f"Inference NPZ not found: {args.inference_npz_path}")
 
     # Load model config defaults
     config_defaults = load_config_from_inference_config()
@@ -952,13 +976,13 @@ def main():
     print(f"Config: use_relative_action={use_relative_action}, motion_type={motion_type}")
 
     # Build dataset name → zarr path registry
-    dataset_registry = build_dataset_registry(args.inference_zarr_path)
+    dataset_registry = build_dataset_registry(args.inference_npz_path)
     if dataset_registry:
         print(f"Dataset registry: {list(dataset_registry.keys())}")
 
     # Select sample indices
     selected = select_sample_indices(
-        args.inference_zarr_path,
+        args.inference_npz_path,
         dataset_names=args.dataset_names,
         num_samples=args.num_samples,
         sample_idx=args.sample_idx,
@@ -967,8 +991,8 @@ def main():
 
     for seq, sidx in enumerate(selected):
         print(f"\n{'='*60}\n[{seq+1}/{len(selected)}] Loading sample index {sidx}...")
-        zarr_data = get_data_from_zarr(
-            args.inference_zarr_path,
+        sample_data = get_data_from_results(
+            args.inference_npz_path,
             origin_zarr_path=args.origin_zarr_path,
             sample_idx=sidx,
             use_relative_action=use_relative_action,
@@ -977,7 +1001,7 @@ def main():
         )
 
         visualize_one_sample(
-            zarr_data, motion_type=motion_type,
+            sample_data, motion_type=motion_type,
             save_path=args.save_path,
             target_width=args.target_width,
             target_height=args.target_height,

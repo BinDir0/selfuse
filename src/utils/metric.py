@@ -5,7 +5,6 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import zarr
 import json
 
 
@@ -706,16 +705,13 @@ def plot_all_visualizations(
     )
 
 
-def _prepare_metrics_data_from_zarr(zarr_path, dataset_name):
-    store = zarr.DirectoryStore(str(zarr_path))
-    zarr_root = zarr.group(store=store)
-
-    if 'pred_actions' not in zarr_root:
+def _prepare_metrics_data_from_npz(npz_path, dataset_name):
+    data = np.load(str(npz_path), allow_pickle=True)
+    if 'pred_actions' not in data:
         print(f"  Warning: {dataset_name} has no pred_actions, skipping")
         return None
-
-    pred_actions = zarr_root['pred_actions'][:]  # [N, H, D]
-    gt_actions = zarr_root['gt_actions'][:] if 'gt_actions' in zarr_root else None
+    pred_actions = data['pred_actions']
+    gt_actions = data['gt_actions'] if 'gt_actions' in data else None
     return {
         'pred_actions': pred_actions,
         'gt_actions': gt_actions,
@@ -892,11 +888,11 @@ def _compute_and_save_metrics_from_data(metrics_data, output_dir, dataset_name):
     print(f"  Visualizations saved to: {output_dir}")
 
 
-def compute_and_save_metrics_from_zarr(zarr_path, output_dir, dataset_name):
+def compute_and_save_metrics_from_npz(npz_path, output_dir, dataset_name):
     """
-    Read data from zarr file, compute all metrics and save visualizations.
+    Read data from NPZ file, compute all metrics and save visualizations.
     """
-    metrics_data = _prepare_metrics_data_from_zarr(zarr_path, dataset_name)
+    metrics_data = _prepare_metrics_data_from_npz(npz_path, dataset_name)
     if metrics_data is None:
         return
     _compute_and_save_metrics_from_data(metrics_data, output_dir, dataset_name)

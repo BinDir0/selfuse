@@ -6,6 +6,10 @@ ROOT_DIR = str(pathlib.Path(__file__).parent.parent.parent)
 sys.path.append(ROOT_DIR)
 os.chdir(ROOT_DIR)
 
+# TODO(webdataset): Port this workspace to the current IterableDataset /
+# WebDataset pipeline. The implementation below still assumes the legacy
+# indexed zarr dataset workflow.
+
 import numpy as np
 
 # Fix chumpy compatibility with numpy 2.x
@@ -388,4 +392,3 @@ if __name__ == "__main__":
     # Initialize visualizer and run
     visualizer = DatasetGTVisualizer(cfg)
     visualizer.run()
-

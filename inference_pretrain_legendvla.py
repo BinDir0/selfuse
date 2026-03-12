@@ -1,7 +1,3 @@
-# TODO: The dataset loading section of this script (LegendVLAInference._init_dataset_and_processor)
-# still references zarr-based datasets. It needs to be migrated to use WebDataset
-# (VLAWdsDataset / UnifiedWdsDataset) for consistency with the training pipeline.
-
 import os
 import random
 import hydra
@@ -16,8 +12,6 @@ import pickle
 from tqdm import tqdm
 import json
 from hydra.core.hydra_config import HydraConfig
-import zarr
-import numcodecs
 from PIL import Image
 
 from src.policy.legendvla import LegendVLA
@@ -193,7 +187,7 @@ class LegendVLAInference:
             generation_params['eos_token_id'] = self.processor.eos_token_id
         return generation_params
     
-    def _save_sample_images(self, pixel_values, num_images, output_dir, dataset_name, dataset_local_idx):
+    def _save_sample_images(self, pixel_values, num_images, output_dir, dataset_name, episode_index):
         images_dir = os.path.join(str(output_dir), "vlm_outputs", "images", dataset_name)
         os.makedirs(images_dir, exist_ok=True)
         image_paths = []
@@ -201,7 +195,7 @@ class LegendVLAInference:
             image = pixel_values[img_idx]
             image_path = os.path.join(
                 images_dir,
-                f"p{self.accelerator.process_index}_s{dataset_local_idx}_img{img_idx}.png"
+                f"p{self.accelerator.process_index}_s{episode_index}_img{img_idx}.png"
             )
             Image.fromarray(image).save(image_path)
             image_paths.append(image_path)
@@ -224,8 +218,8 @@ class LegendVLAInference:
                 vlm_dataset_cfg = cfg.vlm_dataset
             else:
                 vlm_dataset_cfg = cfg.dataset
-            if hasattr(cfg, "vlm_dataset_paths"):
-                vlm_dataset_cfg.dataset_paths = cfg.vlm_dataset_paths
+            if hasattr(cfg, "vlm_wds_datasets"):
+                vlm_dataset_cfg.wds_datasets = cfg.vlm_wds_datasets
             vlm_dataset_cfg.mode = "infer-ar"
             vlm_dataset_cfg.return_dataset_info = True
             self.dataset = hydra.utils.instantiate(vlm_dataset_cfg)
@@ -236,8 +230,8 @@ class LegendVLAInference:
                 vla_dataset_cfg = cfg.vla_dataset
             else:
                 vla_dataset_cfg = cfg.dataset
-            if hasattr(cfg, "vla_dataset_paths"):
-                vla_dataset_cfg.zarr_paths = cfg.vla_dataset_paths
+            if hasattr(cfg, "vla_wds_datasets"):
+                vla_dataset_cfg.wds_datasets = cfg.vla_wds_datasets
             vla_dataset_cfg.mode = "infer" if self.mode == "flow" else "infer-ar"
             vla_dataset_cfg.return_dataset_info = True
             self.dataset = hydra.utils.instantiate(vla_dataset_cfg)
@@ -270,16 +264,6 @@ class LegendVLAInference:
         with open(json_path, "w") as f:
             json.dump(vlm_records, f, ensure_ascii=False, indent=2)
         print(f"VLM 结果已保存至: {json_path}")
-
-    def _prepare_vla_output_dirs(self, output_dir):
-        zarr_root = None
-        zarr_datasets = {}
-        if self.is_main_process:
-            zarr_path = output_dir / "inference_results.zarr"
-            store = zarr.DirectoryStore(str(zarr_path))
-            zarr_root = zarr.group(store=store, overwrite=True)
-            print(f"创建zarr文件: {zarr_path}")
-        return zarr_root, zarr_datasets
 
     def _save_vla_metrics(self, output_dir, results):
         print("\n开始计算统计信息和生成可视化...")
@@ -323,7 +307,7 @@ class LegendVLAInference:
             )
             vlm_local_records.append({
                 "dataset": dataset_name,
-                "dataset_local_idx": int(dataset_local_indices[i]),
+                "episode_index": int(dataset_local_indices[i]),
                 "instruction": vlm_outputs["instructions"][i],
                 "image_paths": image_paths,
                 "pred_text": vlm_outputs["pred_texts"][i],
@@ -351,10 +335,7 @@ class LegendVLAInference:
                 if self.is_main_process:
                     print(f"成功加载normalizer: {self.model_cfg.training.normalizer_path}")
             else:
-                if self.is_main_process:
-                    print("警告: 未指定normalizer路径，使用默认normalizer")
-                self.normalizer = self.dataset.get_normalizer()
-                self.dataset.set_normalizer(self.normalizer)
+                raise ValueError("normalizer_path not specified in model config")
         
         # Select dataset based on configuration
         if hasattr(cfg.inference, 'use_val_dataset') and cfg.inference.use_val_dataset:
@@ -368,11 +349,10 @@ class LegendVLAInference:
         
         # 创建dataloader
         dataloader = DataLoader(
-            inference_dataset, 
+            inference_dataset,
             collate_fn=inference_dataset.get_collator(),
             batch_size=cfg.dataloader.batch_size,
             num_workers=cfg.dataloader.num_workers,
-            shuffle=cfg.dataloader.shuffle,
             pin_memory=True
         )
         
@@ -387,14 +367,9 @@ class LegendVLAInference:
         # 同步所有进程，确保目录已创建
         self.accelerator.wait_for_everyone()
         
-        save_zarr = cfg.inference.get("save_zarr", True)
         if self.mode == "vlm":
             vlm_records = []
         else:
-            if save_zarr:
-                zarr_root, zarr_datasets = self._prepare_vla_output_dirs(output_dir)
-            else:
-                zarr_root, zarr_datasets = None, {}
             vlm_records = None
             results = {} if self.is_main_process else None
         
@@ -487,10 +462,10 @@ class LegendVLAInference:
                             break
                 
                 dataset_name_list = batch["dataset_name"]
-                dataset_local_idx = batch["dataset_local_idx"]
-                if torch.is_tensor(dataset_local_idx):
-                    dataset_local_idx_list = dataset_local_idx.cpu().numpy().astype(int).tolist()
-                batch_result["dataset_local_idx"] = dataset_local_idx
+                episode_index = batch["episode_index"]
+                if torch.is_tensor(episode_index):
+                    episode_index_list = episode_index.cpu().numpy().astype(int).tolist()
+                batch_result["episode_index"] = episode_index
                 
                 # 如果有ground truth，也保存并计算误差
                 if self.mode in ["ar", "flow"] and "actions" in inputs:
@@ -510,7 +485,7 @@ class LegendVLAInference:
                         inputs,
                         batch_idx,
                         dataset_name_list,
-                        dataset_local_idx_list,
+                        episode_index_list,
                     )
                     total_attention_seen += vlm_attn_maps.shape[1]
 
@@ -521,7 +496,7 @@ class LegendVLAInference:
                         actual_batch_size=actual_batch_size,
                         output_dir=output_dir,
                         dataset_names=dataset_name_list,
-                        dataset_local_indices=dataset_local_idx_list,
+                        dataset_local_indices=episode_index_list,
                     )
                 
                 actual_batch_count += 1
@@ -652,10 +627,8 @@ class LegendVLAInference:
                     gathered_batch_results_np["dataset_name"] = np.array(dataset_names_all, dtype=object)
                 batch_result = gathered_batch_results_np
                 
-                # Split batch by dataset and write to corresponding zarr files (只在主进程)
+                # Accumulate results (only on main process)
                 if self.is_main_process and self.mode != "vlm":
-                    if save_zarr:
-                        self.append_batch_to_zarr(zarr_root, zarr_datasets, batch_result)
                     self.update_results(results, batch_result)
                 
                 # 同步所有进程
@@ -684,6 +657,20 @@ class LegendVLAInference:
                 print("VLM 模式下跳过统计信息计算")
                 self.accelerator.end_training()
                 return
+
+            # Save inference results as NPZ
+            npz_path = output_dir / "inference_results.npz"
+            merged = {}
+            for key, chunks in results.items():
+                if not chunks:
+                    continue
+                if isinstance(chunks[0], np.ndarray):
+                    merged[key] = np.concatenate(chunks, axis=0)
+                else:
+                    merged[key] = np.array(chunks)
+            np.savez_compressed(str(npz_path), **merged)
+            print(f"推理结果已保存至: {npz_path}")
+
             self._save_vla_metrics(output_dir, results=results)
         
         self.accelerator.end_training()
@@ -744,14 +731,14 @@ class LegendVLAInference:
         inputs,
         batch_idx,
         dataset_name_list,
-        dataset_local_idx_list,
+        episode_index_list,
     ):
         """
         Reservoir sampling to keep a random subset of attention maps.
         """
         if sample_count <= 0:
             return
-        if attn_weights is not None: 
+        if attn_weights is not None:
             print(f"attn_weights shape: {attn_weights.shape}")
         if action_expert_attn_weights is not None:
             print(f"action_expert_attn_weights shape: {action_expert_attn_weights.shape}")
@@ -764,8 +751,8 @@ class LegendVLAInference:
             }
             if dataset_name_list is not None:
                 metadata["dataset_name"] = dataset_name_list[sample_idx]
-            if dataset_local_idx_list is not None:
-                metadata["dataset_local_idx"] = dataset_local_idx_list[sample_idx]
+            if episode_index_list is not None:
+                metadata["episode_index"] = episode_index_list[sample_idx]
 
             sample_data = {
                 "attn_weights": attn_weights[:, sample_idx, :, :, :].float().cpu(),
@@ -787,52 +774,6 @@ class LegendVLAInference:
                 if j < sample_count:
                     samples[j] = sample_data
     
-    def append_batch_to_zarr(self, root, zarr_datasets, batch_result):
-        """Append a batch of results to zarr file incrementally"""
-        # Keys to save
-        keys_to_save = [
-            'pred_actions',
-            'gt_actions',
-            'actions_valid_mask',
-            'dataset_local_idx',
-            'dataset_name',
-            'prefill_vlm_hidden_states',
-            'prefill_image_hidden_states',
-            'prefill_state_hidden_states',
-            'prefill_text_hidden_states',
-            'generated_hidden_states',
-        ]
-        
-        for key in keys_to_save:
-            if key not in batch_result:
-                continue
-            
-            data = batch_result[key]
-            if not isinstance(data, np.ndarray):
-                data = np.array(data)
-            
-            object_codec = None
-            if data.dtype == object:
-                # Use a variable-length UTF-8 codec for object/string arrays
-                object_codec = numcodecs.VLenUTF8()
-
-            if key not in zarr_datasets:
-                # First time: create dataset with maxshape to allow appending
-                zarr_datasets[key] = root.create_dataset(
-                    key,
-                    shape=(0,) + data.shape[1:],
-                    maxshape=(None,) + data.shape[1:],
-                    dtype=data.dtype,
-                    chunks=True,
-                    compression='gzip',
-                    compression_opts=1,
-                    object_codec=object_codec
-                )
-            
-            # Directly append using zarr's append method
-            dataset = zarr_datasets[key]
-            dataset.append(data, axis=0)
-
 
 @hydra.main(
     version_base=None,

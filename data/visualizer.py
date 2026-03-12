@@ -9,6 +9,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+# TODO(webdataset): If this visualizer is still needed long-term, add a
+# WebDataset-native path and deprecate the zarr-only workflow.
+
 AXIS_BASE = np.array([[0, 0, 1, 0],
                       [-1, 0, 0, 0],
                       [0, -1, 0, 0],
