@@ -110,7 +110,7 @@ class SiglipAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        is_causal: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # hidden_states: [Batch_Size, Num_Patches, Embed_Dim]
         batch_size, seq_len, _ = hidden_states.size()
@@ -136,8 +136,8 @@ class SiglipAttention(nn.Module):
             query_states,
             key_states,
             value_states,
-            attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
+            is_causal=is_causal,
         )
         attn_weights = None
 
@@ -210,7 +210,7 @@ class SiglipEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        is_causal: bool = False,
     ) -> torch.Tensor:
         # residual: [Batch_Size, Num_Patches, Embed_Dim]
         residual = hidden_states
@@ -219,7 +219,7 @@ class SiglipEncoderLayer(nn.Module):
         # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
-            attn_mask=attn_mask,
+            is_causal=is_causal,
         )
         # [Batch_Size, Num_Patches, Embed_Dim]
         hidden_states = residual + hidden_states
@@ -346,24 +346,15 @@ class SiglipVisionTransformer(nn.Module):
         num_patches = hidden_states.shape[1]
         embed_dim = hidden_states.shape[2]
 
-        # Causal temporal mask — frame t can only attend to frames <= t
-        causal_mask = torch.triu(
-            torch.full(
-                (num_frames, num_frames),
-                torch.finfo(hidden_states.dtype).min,
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
-            ),
-            diagonal=1,
-        )
         temporal_pos_emb = self.temporal_pos_emb[:num_frames].to(
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
 
+        last_temporal_layer_idx = max(
+            i for i in range(len(self.encoder.layers)) if (i + 1) % self.temporal_interval == 0
+        )
         for layer_idx, encoder_layer in enumerate(self.encoder.layers):
-            # ALWAYS run the full spatial layer (LN + attn + MLP)
-            hidden_states = encoder_layer(hidden_states)  # [B*T, n, D]
 
             # Every N-th layer, ADDITIONALLY add temporal attention (LN + attn, no MLP)
             if (layer_idx + 1) % self.temporal_interval == 0:
@@ -379,7 +370,7 @@ class SiglipVisionTransformer(nn.Module):
                 residual = ht
                 normed = encoder_layer.layer_norm1(ht)
                 normed = normed + temporal_pos_emb.unsqueeze(0)
-                attn_out, _ = encoder_layer.self_attn(normed, attn_mask=causal_mask)
+                attn_out, _ = encoder_layer.self_attn(normed, is_causal=True)
                 ht = residual + attn_out
 
                 # reshape back: [B*n, T, D] -> [B*T, n, D]
@@ -389,6 +380,14 @@ class SiglipVisionTransformer(nn.Module):
                 hidden_states = hidden_states.permute(0, 2, 1, 3).reshape(
                     batch_size * num_frames, num_patches, embed_dim,
                 )
+            # ALWAYS run the full spatial layer (LN + attn + MLP)
+            hidden_states = encoder_layer(hidden_states)  # [B*T, n, D]
+            # dropping representations for all patches from past timesteps to speed up the computation
+            if layer_idx == last_temporal_layer_idx and num_frames > 1:
+                hidden_states = hidden_states.reshape(batch_size, num_frames, num_patches, embed_dim)
+                hidden_states = hidden_states[:, -1:, :, :] 
+                num_frames = 1
+                hidden_states = hidden_states.reshape(batch_size * num_frames, num_patches, embed_dim)
 
         hidden_states = self.post_layernorm(hidden_states)
         hidden_states = hidden_states.reshape(

@@ -97,7 +97,6 @@ vla_processor:
   depth_rescale_factor: 0.001
   depth_clip_range: ${depth_clip_range}
   tokenizer_padding: ${tokenizer_padding} 
-  use_mem: ${use_mem}
 vlm_processor: 
   _target_: src.dataset.paligemma_processing.PaliGemmaProcessor
   tokenizer: 
@@ -276,7 +275,6 @@ policy:
     # Gemma2-specific: Final logit softcapping for numerical stability in text generation
     final_logit_softcapping:  #${eval:'30.0 if "${vlm_backbone}"=="paligemma2" else None'}
     max_vlm_tokens: ${max_vlm_tokens}
-    use_mem: ${use_mem}
     use_action_position_ids_continue_from_vlm: False
     num_inference_steps: ${flow.num_inference_steps}
     action_expert_adaptive_mode: ${action_expert_adaptive_mode}
