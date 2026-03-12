@@ -107,6 +107,8 @@ def main():
         wds_datasets=wds_datasets,
         shape_meta=shape_meta,
         use_relative_action=use_relative_action,
+        history_pad_mode=vla_cfg.get("history_pad_mode"),
+        future_pad_mode=vla_cfg.get("future_pad_mode"),
     )
     print("   Dataset created successfully")
 

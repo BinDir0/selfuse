@@ -64,7 +64,7 @@ def test_sample_to_data():
     assert data["pixel_values"].shape[0] == 2
     assert bool(data["is_vla_data"]) is False
     assert data["dataset_name"] == "demo_src"
-    assert data["dataset_local_idx"].item() == 7
+    assert data["episode_index"].item() == 7
 
 
 def test_build_pipeline_no_sliding_window():

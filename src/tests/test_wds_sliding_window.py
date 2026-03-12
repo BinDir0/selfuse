@@ -10,6 +10,7 @@ from src.dataset.wds_dataset import (
     WindowConfig,
     LOWDIM_SLICES,
     build_sample_from_window,
+    materialize_sample_media,
     sliding_window_compose,
 )
 
@@ -96,7 +97,7 @@ def test_state_causal_order_stride1():
 def test_state_repeat_no_past():
     """Episode start: no past at all, all state slots repeat current frame."""
     config = WindowConfig(
-        state_horizon=4, state_stride=2, pad_mode="repeat",
+        state_horizon=4, state_stride=2, history_pad_mode="repeat",
         action_horizon=4, image_horizon=1, image_stride=1,
     )
     past = collections.deque(maxlen=config.past_size)
@@ -113,7 +114,7 @@ def test_state_repeat_no_past():
 def test_state_repeat_partial_past():
     """Partial past: some slots repeat earliest available frame."""
     config = WindowConfig(
-        state_horizon=4, state_stride=2, pad_mode="repeat",
+        state_horizon=4, state_stride=2, history_pad_mode="repeat",
         action_horizon=2, image_horizon=1, image_stride=1,
     )
     # past = [frame0, frame1, frame2], current = frame3
@@ -137,7 +138,7 @@ def test_state_repeat_partial_past():
 def test_action_repeat_padding():
     """Action chunk pads with last available frame in repeat mode."""
     config = WindowConfig(
-        action_horizon=6, pad_mode="repeat",
+        action_horizon=6, future_pad_mode="repeat",
         state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
     )
@@ -156,7 +157,7 @@ def test_action_repeat_padding():
 def test_state_truncate_no_past():
     """Truncate mode with no past: state has only current frame."""
     config = WindowConfig(
-        state_horizon=4, state_stride=2, pad_mode="truncate",
+        state_horizon=4, state_stride=2, history_pad_mode="truncate",
         action_horizon=2, image_horizon=1, image_stride=1,
     )
     past = collections.deque(maxlen=config.past_size)
@@ -172,7 +173,7 @@ def test_state_truncate_no_past():
 def test_action_truncate():
     """Truncate mode: action chunk is shorter than horizon."""
     config = WindowConfig(
-        action_horizon=6, pad_mode="truncate",
+        action_horizon=6, future_pad_mode="truncate",
         state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
     )
@@ -184,11 +185,32 @@ def test_action_truncate():
     assert wa.shape[0] == 2
 
 
+def test_history_and_future_pad_modes_are_independent():
+    """History and future padding policies should be configurable independently."""
+    config = WindowConfig(
+        action_horizon=4,
+        state_horizon=3,
+        state_stride=1,
+        image_horizon=1,
+        image_stride=1,
+        history_pad_mode="repeat",
+        future_pad_mode="truncate",
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque([make_frame(5), make_frame(6)])
+
+    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+
+    assert sample["wrist_state"].shape[0] == 3
+    assert sample["wrist_action"].shape[0] == 2
+    np.testing.assert_allclose(sample["wrist_state"][0], 5.0)
+
+
 def test_single_episode_state_progression():
     """Walk through a 10-frame episode and check state at each yield."""
     config = WindowConfig(
         action_horizon=3, state_horizon=3, state_stride=1,
-        image_horizon=1, image_stride=1, pad_mode="repeat",
+        image_horizon=1, image_stride=1, history_pad_mode="repeat",
     )
     frames = make_episode(10)
     samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES))
@@ -209,7 +231,7 @@ def test_episode_boundary_resets_past():
     """Past buffer clears at episode boundary."""
     config = WindowConfig(
         action_horizon=2, state_horizon=3, state_stride=1,
-        image_horizon=1, image_stride=1, pad_mode="repeat",
+        image_horizon=1, image_stride=1, history_pad_mode="repeat",
     )
     ep1 = make_episode(5, episode_index=0)
     ep2 = make_episode(5, episode_index=1)
@@ -223,16 +245,45 @@ def test_episode_boundary_resets_past():
         np.testing.assert_allclose(ws[i], 0.0)
 
 
-def test_image_shape():
-    """Image output has correct horizon dimension."""
+def test_window_media_stays_lazy_until_materialized():
+    """Window samples should keep media as frame refs until post-shuffle materialization."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
-        image_horizon=1, image_stride=1, pad_mode="repeat",
+        image_horizon=2, image_stride=1, history_pad_mode="repeat",
     )
-    frames = make_episode(5)
-    samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES))
-    for s in samples:
-        assert s["image"].shape[0] == 1
+    past = collections.deque([make_frame(4, with_depth=True)], maxlen=config.past_size)
+    buf = collections.deque([make_frame(5, with_depth=True), make_frame(6, with_depth=True)])
+
+    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+
+    assert "image" not in sample
+    assert "depth" not in sample
+    assert len(sample["image_frame_refs"]) == 2
+
+
+def test_materialize_sample_media_copies_and_drops_refs():
+    """Materialization should copy media arrays and release frame refs."""
+    config = WindowConfig(
+        action_horizon=2, state_horizon=1, state_stride=1,
+        image_horizon=2, image_stride=1, history_pad_mode="repeat",
+    )
+    past = collections.deque([make_frame(4, with_depth=True)], maxlen=config.past_size)
+    current = make_frame(5, with_depth=True)
+    future = make_frame(6, with_depth=True)
+    buf = collections.deque([current, future])
+
+    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    materialize_sample_media(sample)
+
+    assert "image_frame_refs" not in sample
+    assert sample["image"].shape[0] == 2
+    assert sample["depth"].shape[0] == 2
+
+    sample["image"][0, 0, 0, 0] = 255
+    sample["depth"][0, 0, 0] = 123
+
+    assert current["image.jpg"][0, 0, 0] == 5
+    assert current["depth.npy"][0, 0] == 5
 
 
 def test_lowdim_slices_no_magic_numbers():
@@ -262,11 +313,11 @@ def test_lowdim_slices_no_magic_numbers():
     assert sample["intrinsic"].shape[-1] == 4
 
 
-def test_depth_uses_image_history():
-    """Depth should use the same history frames as image."""
+def test_depth_uses_history_pad_mode_with_image_history():
+    """Depth should share the same history sampling/padding policy as image."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
-        image_horizon=3, image_stride=2, pad_mode="repeat",
+        image_horizon=3, image_stride=2, history_pad_mode="repeat",
     )
     # Past: frames 0..9, current = frame 10
     past = collections.deque(
@@ -277,6 +328,7 @@ def test_depth_uses_image_history():
         make_frame(11, with_depth=True)])
 
     sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    materialize_sample_media(sample)
 
     # image_horizon=3, stride=2 => offsets -4, -2, 0 => frames 6, 8, 10
     assert sample["image"].shape[0] == 3
@@ -293,12 +345,13 @@ def test_depth_none_when_missing():
     """Depth should be None if current frame has no depth."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
-        image_horizon=2, image_stride=1, pad_mode="repeat",
+        image_horizon=2, image_stride=1, history_pad_mode="repeat",
     )
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(5), make_frame(6)])  # no depth
 
     sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    materialize_sample_media(sample)
     assert "depth" not in sample or sample["depth"] is None
 
 

@@ -270,7 +270,7 @@ def test_return_dataset_info_passthrough():
     for i in range(2):
         s = make_vlm_sample(i)
         s["dataset_name"] = f"vlm_{i}"
-        s["dataset_local_idx"] = torch.tensor(i, dtype=torch.int32)
+        s["episode_index"] = torch.tensor(i, dtype=torch.int32)
         vlm_samples.append(s)
 
     ds = build_unified(vla_samples, vlm_samples, vla_ratio=5/6, batch_size=6)
@@ -284,10 +284,10 @@ def test_return_dataset_info_passthrough():
         assert s["dataset_name"] == f"ds_{i}"
         assert s["episode_index"].item() == i * 10
 
-    # VLM samples retain dataset_name and dataset_local_idx after padding
+    # VLM samples retain dataset_name and episode_index after padding
     for i, s in enumerate(vlm_out):
         assert s["dataset_name"] == f"vlm_{i}"
-        assert s["dataset_local_idx"].item() == i
+        assert s["episode_index"].item() == i
 
 
 def test_return_dataset_info_vlm_padded_keeps_info():
@@ -299,12 +299,12 @@ def test_return_dataset_info_vlm_padded_keeps_info():
     )
     vlm = make_vlm_sample(0)
     vlm["dataset_name"] = "my_vlm"
-    vlm["dataset_local_idx"] = torch.tensor(42, dtype=torch.int32)
+    vlm["episode_index"] = torch.tensor(42, dtype=torch.int32)
     ds.pad_vlm_sample(vlm)
 
     # Padding adds states/actions but does not touch dataset_info
     assert vlm["dataset_name"] == "my_vlm"
-    assert vlm["dataset_local_idx"].item() == 42
+    assert vlm["episode_index"].item() == 42
     assert vlm["states"].shape == (16, 48)
 
 

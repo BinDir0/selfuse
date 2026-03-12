@@ -40,7 +40,15 @@ class WindowConfig:
     state_stride: int = 2
     image_horizon: int = 1
     image_stride: int = 30
-    pad_mode: str = "repeat"  # "repeat" or "truncate"
+    history_pad_mode: str = "repeat"
+    future_pad_mode: str = "repeat"
+
+    def __post_init__(self):
+        valid_modes = {"repeat", "truncate"}
+        if self.history_pad_mode not in valid_modes:
+            raise ValueError(f"Invalid history pad mode: {self.history_pad_mode}")
+        if self.future_pad_mode not in valid_modes:
+            raise ValueError(f"Invalid future pad mode: {self.future_pad_mode}")
 
     @property
     def past_size(self):
@@ -109,7 +117,7 @@ def gather_history_frames(past, buf, horizon, stride, pad_mode):
         buf: deque of current + future frames, buf[0] is current
         horizon: number of frames to gather (including current)
         stride: temporal stride between frames
-        pad_mode: "repeat" or "truncate"
+        pad_mode: "repeat" or "truncate" for history features
 
     Returns:
         List of frames in causal order (oldest first, current last).
@@ -137,6 +145,11 @@ def gather_history_frames(past, buf, horizon, stride, pad_mode):
 def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False):
     """Build a training sample from the sliding window buffer.
 
+    Lowdim fields are materialized eagerly because they are small. RGB/depth
+    media stay as frame references so WebDataset shuffle buffers only retain
+    lightweight window descriptors; media arrays are copied later, after
+    shuffling, by ``materialize_sample_media``.
+
     Args:
         buf: deque of decoded samples, buf[0] is the current frame
         past: deque of past frames (already yielded), past[-1] is most recent
@@ -149,14 +162,19 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
 
     # --- Action chunk: vectorized gather of future frames ---
     n_avail = min(config.future_size, len(buf))
-    lowdims = np.stack([buf[i]["lowdim.npy"] for i in range(0, n_avail, config.action_stride)], axis=0) 
+    lowdims = np.stack([buf[i]["lowdim.npy"] for i in range(0, n_avail, config.action_stride)], axis=0)
 
     len_lowdims = len(lowdims)
-    if config.pad_mode == "repeat" and len_lowdims < config.action_horizon:
-        pad = np.tile(lowdims[-1:], (config.action_horizon - len_lowdims, 1))
-        lowdims_full = np.concatenate([lowdims, pad], axis=0)
+    if config.future_pad_mode == "repeat":
+        if len_lowdims < config.action_horizon:
+            pad = np.tile(lowdims[-1:], (config.action_horizon - len_lowdims, 1))
+            lowdims_full = np.concatenate([lowdims, pad], axis=0)
+        else:
+            lowdims_full = lowdims
+    elif config.future_pad_mode == "truncate":
+        lowdims_full = lowdims
     else:
-        lowdims_full = lowdims  # truncate: (len_lowdims, 116)
+        raise ValueError(f"Invalid future pad mode: {config.future_pad_mode}")
 
     ws, we = lowdim_slices['wrist_action']
     hs, he = lowdim_slices['hand_action']
@@ -165,7 +183,7 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
 
     # --- State: gather history frames and extract state slices ---
     state_frames = gather_history_frames(
-        past, buf, config.state_horizon, config.state_stride, config.pad_mode)
+        past, buf, config.state_horizon, config.state_stride, config.history_pad_mode)
     state_lds = np.stack([f["lowdim.npy"] for f in state_frames], axis=0)
 
     wss, wse = lowdim_slices['wrist_state']
@@ -173,30 +191,12 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     wrist_state = state_lds[:, wss:wse]  # (state_horizon, 18)
     hand_state = state_lds[:, hss:hse]   # (state_horizon, 30)
 
-    # --- Image: gather history frames ---
-    image = None
-    depth = None
+    # --- Image/depth: keep frame references for post-shuffle materialization ---
+    image_frame_refs = None
     if not lowdim_only:
         image_frames = gather_history_frames(
-            past, buf, config.image_horizon, config.image_stride, config.pad_mode)
-
-        images = []
-        for frame in image_frames:
-            img = np.array(frame["image.jpg"])
-            if img.ndim == 2:
-                img = np.stack([img] * 3, axis=-1)
-            images.append(img)
-        image = np.stack(images, axis=0)  # (image_horizon, H, W, 3)
-
-        # --- Depth: same frames as image ---
-        if current.get("depth.npy") is not None:
-            depth_list = []
-            for frame in image_frames:
-                d = frame.get("depth.npy")
-                if d is not None:
-                    depth_list.append(d)
-            if depth_list:
-                depth = np.stack(depth_list, axis=0)  # (image_horizon, H, W)
+            past, buf, config.image_horizon, config.image_stride, config.history_pad_mode)
+        image_frame_refs = tuple(image_frames)
 
     # --- Extrinsic / Intrinsic: from current frame ---
     ld = current["lowdim.npy"]
@@ -214,23 +214,50 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
 
     result = {
         "valid_action_len": len_lowdims,
-        "wrist_state":    wrist_state.astype(np.float32),
-        "hand_state":     hand_state.astype(np.float32),
-        "wrist_action":   wrist_action.astype(np.float32),
-        "hand_action":    hand_action.astype(np.float32),
-        "extrinsic":      extrinsic.astype(np.float32),
-        "intrinsic":      intrinsic.astype(np.float32),
-        "instruction":    instruction,
+        "wrist_state": wrist_state.astype(np.float32),
+        "hand_state": hand_state.astype(np.float32),
+        "wrist_action": wrist_action.astype(np.float32),
+        "hand_action": hand_action.astype(np.float32),
+        "extrinsic": extrinsic.astype(np.float32),
+        "intrinsic": intrinsic.astype(np.float32),
+        "instruction": instruction,
         "instruction_num": instruction_num,
-        "presence":       int(presence),
-        "dataset_name":   meta.get("dataset_name", ""),
-        "episode_index":  meta.get("episode_index", 0),
+        "presence": int(presence),
+        "dataset_name": meta.get("dataset_name", ""),
+        "episode_index": meta.get("episode_index", 0),
     }
-    if image is not None:
-        result["image"] = image
-    if depth is not None:
-        result["depth"] = depth
+    if image_frame_refs is not None:
+        result["image_frame_refs"] = image_frame_refs
     return result
+
+
+def materialize_sample_media(sample):
+    """Materialize RGB/depth arrays from frame refs and drop the refs.
+
+    This runs after shuffle so buffered samples share underlying decoded frame
+    objects. The returned arrays are copied to keep per-sample media private for
+    later augmentation / preprocessing.
+    """
+    image_frame_refs = sample.pop("image_frame_refs", None)
+    if image_frame_refs is not None:
+        images = []
+        for frame in image_frame_refs:
+            image = np.array(frame["image.jpg"], copy=True)
+            if image.ndim == 2:
+                image = np.stack([image] * 3, axis=-1)
+            images.append(image)
+        sample["image"] = np.stack(images, axis=0)
+
+    if image_frame_refs and image_frame_refs[-1].get("depth.npy") is not None:
+        depth_list = [
+            np.array(frame["depth.npy"], copy=True)
+            for frame in image_frame_refs
+            if frame.get("depth.npy") is not None
+        ]
+        if depth_list:
+            sample["depth"] = np.stack(depth_list, axis=0)
+
+    return sample
 
 
 def sliding_window_compose(src, config, lowdim_slices, lowdim_only=False):
@@ -335,11 +362,15 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
             lambda src: sliding_window_compose(src, config, lowdim_slices, lowdim_only)
         )
 
-    # shuffle first, only need to cache raw samples
+    # Shuffle before media materialization so the buffer retains lightweight
+    # window descriptors with shared frame refs rather than copied image arrays.
     # NOTE (webdataset==1.0.2): shuffle() without seed uses
     # random.Random(int((pid + time) * 1e9)), which is also time-dependent.
-    if is_train:
+    if is_train and shuffle_buffer and shuffle_buffer > 0:
         pipeline = pipeline.shuffle(shuffle_buffer)
+
+    if use_sliding_window and not lowdim_only:
+        pipeline = pipeline.map(materialize_sample_media)
 
     if preprocess_fn is not None:
         pipeline = pipeline.map(preprocess_fn)

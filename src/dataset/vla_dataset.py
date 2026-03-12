@@ -44,6 +44,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         mode: str = "train",
         depth_clip_range=None,
         shuffle_buffer: int = 8192,
+        history_pad_mode: str = "repeat",
+        future_pad_mode: str = "repeat",
         lowdim_slices: Optional[Dict] = None,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
@@ -79,6 +81,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             state_stride=shape_meta["obs"]["state"]["stride"],
             image_horizon=shape_meta["obs"]["rgb"]["horizon"],
             image_stride=shape_meta["obs"]["rgb"]["stride"],
+            history_pad_mode=history_pad_mode,
+            future_pad_mode=future_pad_mode,
         )
         self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
 
@@ -151,11 +155,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             (self.action_horizon, *action.shape[1:]), dtype=np.float32)
         actions_valid_mask = np.zeros(
             (self.action_horizon, *action.shape[1:]), dtype=bool)
-        # actions_valid_mask[:action.shape[0]] = True
         action_pad[:action.shape[0]] = action
-        
-        valid_action_len = sample["valid_action_len"]
-        actions_valid_mask[:valid_action_len] = True
+        actions_valid_mask[:action.shape[0]] = True
 
         data = {
             "input_ids": processed_results["input_ids"],
@@ -166,7 +167,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             "n_states": np.array(state.shape[0], dtype=np.int32),
             "actions": action_pad,
             "actions_valid_mask": actions_valid_mask,
-            "n_actions": np.array(valid_action_len, dtype=np.int32),
+            "n_actions": np.array(action.shape[0], dtype=np.int32),
             "is_vla_data": np.array(True, dtype=bool),
         }
         if "depth_values" in processed_results:
@@ -176,7 +177,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             data["has_depth_values"] = np.array(False, dtype=bool)
         if self.objective != "train_flow":
             data["labels"] = processed_results["labels"]
-        if self.return_dataset_info: 
+        if self.return_dataset_info:
             data["dataset_name"] = sample["dataset_name"]
             data["episode_index"] = sample["episode_index"]
         return data
@@ -242,6 +243,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             mode="val",
             depth_clip_range=self.depth_clip_range,
             shuffle_buffer=0,
+            history_pad_mode=self.window_config.history_pad_mode,
+            future_pad_mode=self.window_config.future_pad_mode,
             lowdim_slices=self.lowdim_slices,
             return_dataset_info=self.return_dataset_info,
         )
@@ -401,6 +404,8 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         wds_datasets: List[Dict],
         shape_meta: Dict,
         use_relative_action: bool = False,
+        history_pad_mode: str = "repeat",
+        future_pad_mode: str = "repeat",
         lowdim_slices: Optional[Dict] = None,
     ):
         super().__init__()
@@ -418,6 +423,8 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             state_stride=shape_meta["obs"]["state"]["stride"],
             image_horizon=shape_meta["obs"]["rgb"]["horizon"],
             image_stride=shape_meta["obs"]["rgb"]["stride"],
+            history_pad_mode=history_pad_mode,
+            future_pad_mode=future_pad_mode,
         )
 
     def sample_to_data(self, sample):

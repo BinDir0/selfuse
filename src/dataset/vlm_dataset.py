@@ -142,7 +142,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
 
         if self.return_dataset_info:
             data['dataset_name'] = meta.get('source', meta.get('dataset_name', 'unknown'))
-            data['dataset_local_idx'] = np.array(
+            data['episode_index'] = np.array(
                 meta.get('sample_idx', -1), dtype=np.int32
             )
         return data

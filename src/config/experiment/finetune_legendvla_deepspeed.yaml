@@ -62,6 +62,8 @@ dataset:
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
     val_wds_datasets: ${val_vla_wds_datasets}
+    history_pad_mode: truncate
+    future_pad_mode: truncate
     shuffle_buffer: 4096
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
