@@ -73,12 +73,13 @@ dataset:
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
     
-n_obs_image_steps: 1
+n_obs_image_steps: 6
 n_obs_image_stride: 30
 n_obs_state_steps: 16
 n_obs_state_stride: 2
 n_action_steps: 32
 n_action_stride: 1
+use_mem: True
 
 vla_processor: 
   _target_: src.dataset.paligemma_processing.PaliGemmaVLAProcessor
@@ -94,7 +95,7 @@ vla_processor:
   depth_rescale_factor: 0.001
   depth_clip_range: ${depth_clip_range}
   tokenizer_padding: ${tokenizer_padding} 
-
+  use_mem: ${use_mem}
 vlm_processor: 
   _target_: src.dataset.paligemma_processing.PaliGemmaProcessor
   tokenizer: 
@@ -256,7 +257,8 @@ text_seq_len: ${eval:'${state_seq_len}+128'}
 answer_seq_len: 256 
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
-max_vlm_tokens: ${eval:'${image_seq_len}*${shape_meta.obs.rgb.horizon}+${text_seq_len}+${answer_seq_len}'}
+max_vlm_image_steps: ${eval:'1 if ${use_mem} else ${shape_meta.obs.rgb.horizon}'}
+max_vlm_tokens: ${eval:'${image_seq_len}*${max_vlm_image_steps}+${text_seq_len}+${answer_seq_len}'}
 tokenizer_padding: max_length # longest or max_length
 
 policy: 
@@ -272,6 +274,7 @@ policy:
     # Gemma2-specific: Final logit softcapping for numerical stability in text generation
     final_logit_softcapping:  #${eval:'30.0 if "${vlm_backbone}"=="paligemma2" else None'}
     max_vlm_tokens: ${max_vlm_tokens}
+    use_mem: ${use_mem}
     use_action_position_ids_continue_from_vlm: False
     num_inference_steps: ${flow.num_inference_steps}
     action_expert_adaptive_mode: ${action_expert_adaptive_mode}
@@ -357,6 +360,9 @@ policy:
       attention_dropout: 0.0
       # Automatically calculate num_image_tokens based on resolution
       num_image_tokens: ${image_seq_len}
+      use_mem: ${use_mem}
+      temporal_max_frames: 18
+      temporal_interval: 4
       lora:
         r: ${lora_r}
         dropout: ${lora_dropout}
