@@ -75,12 +75,18 @@ class LegendVLDataCollator(BaseDataCollator):
             if key in ['input_ids', 'attention_mask', 'labels']:
                 continue
             if key in ['pixel_values', 'depth_values']:
-                batch[key] = rnn_utils.pad_sequence(
-                    [item[key] for item in data_list],
-                    batch_first=True,
-                    padding_value=0,
-                    padding_side='right'
-                )
+                tensors = [item[key] for item in data_list]
+                max_len = max(t.shape[0] for t in tensors)
+                padded_tensors = []
+                for t in tensors:
+                    pad_len = max_len - t.shape[0]
+                    if pad_len > 0:
+                        # left padding with the first frame
+                        padding = t[0:1].expand(pad_len, *t.shape[1:])
+                        padded_tensors.append(torch.cat([padding, t], dim=0))
+                    else:
+                        padded_tensors.append(t)
+                batch[key] = torch.stack(padded_tensors)
             else:
                 values = [item[key] for item in data_list]
                 if isinstance(values[0], str):
