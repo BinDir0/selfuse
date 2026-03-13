@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 from src.model.common.lora import get_layer
 
@@ -190,9 +191,13 @@ class SiglipEncoderLayer(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        use_temporal_attention: bool = False,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
+        self.use_temporal_attention = use_temporal_attention
+        if self.use_temporal_attention:
+            self.temporal_residual_scale = nn.Parameter(torch.zeros(()))
         self.self_attn = SiglipAttention(
             config,
             use_quantize=use_quantize,
@@ -206,33 +211,33 @@ class SiglipEncoderLayer(nn.Module):
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
-    # Ignore copy
     def forward(
         self,
         hidden_states: torch.Tensor,
+        batch_size: int,
+        temporal_pos_emb: torch.Tensor,
         is_causal: bool = False,
     ) -> torch.Tensor:
-        # residual: [Batch_Size, Num_Patches, Embed_Dim]
-        residual = hidden_states
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.layer_norm1(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states, _ = self.self_attn(
-            hidden_states=hidden_states,
-            is_causal=is_causal,
-        )
-        # [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = residual + hidden_states
-        # residual: [Batch_Size, Num_Patches, Embed_Dim]
-        residual = hidden_states
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.layer_norm2(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = self.mlp(hidden_states)
-        # [Batch_Size, Num_Patches, Embed_Dim]
-        hidden_states = residual + hidden_states
+        if self.use_temporal_attention:
+            temporal_hidden_states = rearrange(hidden_states, '(b t) n d -> (b n) t d', b=batch_size)
+            temporal_residual = temporal_hidden_states
+            temporal_hidden_states = temporal_hidden_states + temporal_pos_emb.unsqueeze(0)
+            temporal_hidden_states = self.layer_norm1(temporal_hidden_states)
+            temporal_hidden_states, _ = self.self_attn(temporal_hidden_states, is_causal=True)
+            hidden_states = rearrange(
+                temporal_residual + self.temporal_residual_scale * temporal_hidden_states,
+                '(b n) t d -> (b t) n d',
+                b=batch_size,
+            )
 
-        return hidden_states
+        residual = hidden_states
+        hidden_states = self.layer_norm1(hidden_states)
+        hidden_states, _ = self.self_attn(hidden_states, is_causal=is_causal)
+        hidden_states = residual + hidden_states
+        residual = hidden_states
+        hidden_states = self.layer_norm2(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        return residual + hidden_states
 
 
 class SiglipEncoder(nn.Module):
@@ -241,41 +246,52 @@ class SiglipEncoder(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        compress_to_current: bool = True,
     ):
         super().__init__()
         self.config = config
+        self.compress_to_current = compress_to_current
+        use_mem = bool(getattr(config, 'use_mem', False))
+        temporal_interval = int(getattr(config, 'temporal_interval', 4))
+        temporal_layer_indices = tuple(
+            idx for idx in range(config.num_hidden_layers)
+            if use_mem and temporal_interval > 0 and (idx + 1) % temporal_interval == 0
+        )
         self.layers = nn.ModuleList(
             [
                 SiglipEncoderLayer(
                     config,
                     use_quantize=use_quantize,
                     use_lora=use_lora,
+                    use_temporal_attention=(idx in temporal_layer_indices),
                 )
-                for _ in range(config.num_hidden_layers)
+                for idx in range(config.num_hidden_layers)
             ]
         )
 
-    # Ignore copy
-    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
-        # inputs_embeds: [Batch_Size, Num_Patches, Embed_Dim]
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        batch_size: int,
+        temporal_pos_emb: torch.Tensor,
+    ) -> torch.Tensor:
         hidden_states = inputs_embeds
-
         for encoder_layer in self.layers:
-            # [Batch_Size, Num_Patches, Embed_Dim] -> [Batch_Size, Num_Patches, Embed_Dim]
-            hidden_states = encoder_layer(hidden_states)
-
+            hidden_states = encoder_layer(hidden_states, batch_size, temporal_pos_emb)
+        if self.compress_to_current:
+            hidden_states = rearrange(hidden_states, '(b t) n d -> b t n d', b=batch_size)[:, -1]
         return hidden_states
 
 
-def _build_sinusoidal_temporal_pos_emb(max_frames: int, dim: int) -> torch.Tensor:
-    position = torch.arange(max_frames, dtype=torch.float32).unsqueeze(1)
+def build_sinusoidal_temporal_pos_emb(positions: torch.Tensor, dim: int) -> torch.Tensor:
+    positions = positions.to(dtype=torch.float32).unsqueeze(1)
     half_dim = dim // 2
     div_term = torch.exp(
         torch.arange(half_dim, dtype=torch.float32) * -(math.log(10000.0) / max(half_dim, 1))
     )
-    emb = torch.zeros(max_frames, dim, dtype=torch.float32)
+    emb = torch.zeros(positions.shape[0], dim, dtype=torch.float32)
     if half_dim > 0:
-        sinusoid = position * div_term
+        sinusoid = positions * div_term
         emb[:, :half_dim] = torch.sin(sinusoid)
         emb[:, half_dim : 2 * half_dim] = torch.cos(sinusoid) - 1.0
     return emb
@@ -287,9 +303,12 @@ class SiglipVisionTransformer(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        compress_to_current: bool = True,
     ):
         super().__init__()
         self.config = config
+        self.use_mem = bool(getattr(config, 'use_mem', False))
+        self.temporal_max_frames = int(getattr(config, 'temporal_max_frames', 18))
         embed_dim = config.hidden_size
 
         self.embeddings = SiglipVisionEmbeddings(config)
@@ -297,120 +316,46 @@ class SiglipVisionTransformer(nn.Module):
             config,
             use_quantize=use_quantize,
             use_lora=use_lora,
+            compress_to_current=(compress_to_current and self.use_mem),
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.use_mem = bool(getattr(config, "use_mem", False))
-        self.temporal_max_frames = int(getattr(config, "temporal_max_frames", 18))
-        self.temporal_interval = int(getattr(config, "temporal_interval", 4))
+        temporal_positions = torch.arange(1 - self.temporal_max_frames, 1, dtype=torch.float32)
+        temporal_pos_emb = build_sinusoidal_temporal_pos_emb(temporal_positions, embed_dim)
+        self.register_buffer('temporal_pos_emb', temporal_pos_emb, persistent=False)
 
-        if self.use_mem:
-            temporal_pos_emb = _build_sinusoidal_temporal_pos_emb(
-                self.temporal_max_frames,
-                embed_dim,
-            )
-            self.register_buffer(
-                "temporal_pos_emb",
-                temporal_pos_emb,
-                persistent=False,
-            )
-
-    def _encode_spatial(self, pixel_values: torch.Tensor) -> torch.Tensor:
+    def encode_spatial(self, pixel_values: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embeddings(pixel_values)
-        hidden_states = self.encoder(inputs_embeds=hidden_states)
+        hidden_states = self.encoder(hidden_states, pixel_values.shape[0], self.temporal_pos_emb[-1:])
         hidden_states = self.post_layernorm(hidden_states)
         return hidden_states
 
-    def _encode_mem(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """
-        MEM-style short-term memory encoding.
+    def encode_mem(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        if pixel_values.ndim != 5:
+            raise ValueError(f'MEM expects 5D input, got shape {tuple(pixel_values.shape)}')
 
-        Every layer runs the full spatial encoder layer (LN1 -> attn -> res -> LN2 -> MLP -> res).
-        Every ``temporal_interval``-th layer **additionally** applies a temporal
-        attention branch (LN1 -> attn only, no MLP) using the *same* layer weights,
-        added back via a residual connection.  Temporal pos-emb is injected only
-        into the normed input of the temporal attention so it does not pollute the
-        main residual stream.
-        """
-        batch_size, num_frames, channels, height, width = pixel_values.shape
-        if num_frames > self.temporal_max_frames:
-            pixel_values = pixel_values[:, -self.temporal_max_frames :, ...]
-            num_frames = self.temporal_max_frames
-
-        if num_frames == 1:
-            return self._encode_spatial(pixel_values[:, 0, ...])
-
-        flat_pixel_values = pixel_values.reshape(
-            batch_size * num_frames, channels, height, width
-        )
-        hidden_states = self.embeddings(flat_pixel_values)
-        num_patches = hidden_states.shape[1]
-        embed_dim = hidden_states.shape[2]
-        # T in [-k, 0], 0 is current frame, so need to flip the temporal pos embedding
-        temporal_pos_emb = self.temporal_pos_emb[:num_frames].flip(0).to(
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
-        )
-
-        last_temporal_layer_idx = max(
-            i for i in range(len(self.encoder.layers)) if (i + 1) % self.temporal_interval == 0
-        )
-        for layer_idx, encoder_layer in enumerate(self.encoder.layers):
-
-            # Every N-th layer, ADDITIONALLY add temporal attention (LN + attn, no MLP)
-            if (layer_idx + 1) % self.temporal_interval == 0:
-                # reshape: [B*T, n, D] -> [B*n, T, D]
-                ht = hidden_states.reshape(
-                    batch_size, num_frames, num_patches, embed_dim,
-                )
-                ht = ht.permute(0, 2, 1, 3).reshape(
-                    batch_size * num_patches, num_frames, embed_dim,
-                )
-
-                # Temporal attention using the same layer's LN1 + self_attn
-                residual = ht
-                ht_with_pos = ht + temporal_pos_emb.unsqueeze(0)
-                normed = encoder_layer.layer_norm1(ht_with_pos)
-                attn_out, _ = encoder_layer.self_attn(normed, is_causal=True)
-                ht = residual + attn_out
-
-                # reshape back: [B*n, T, D] -> [B*T, n, D]
-                hidden_states = ht.reshape(
-                    batch_size, num_patches, num_frames, embed_dim,
-                )
-                hidden_states = hidden_states.permute(0, 2, 1, 3).reshape(
-                    batch_size * num_frames, num_patches, embed_dim,
-                )
-            # ALWAYS run the full spatial layer (LN + attn + MLP)
-            hidden_states = encoder_layer(hidden_states)  # [B*T, n, D]
-            # dropping representations for all patches from past timesteps to speed up the computation
-            if layer_idx == last_temporal_layer_idx and num_frames > 1:
-                hidden_states = hidden_states.reshape(batch_size, num_frames, num_patches, embed_dim)
-                hidden_states = hidden_states[:, -1:, :, :] 
-                num_frames = 1
-                hidden_states = hidden_states.reshape(batch_size * num_frames, num_patches, embed_dim)
-
+        pixel_values = pixel_values[:, -self.temporal_max_frames:]
+        batch_size, num_frames = pixel_values.shape[:2]
+        hidden_states = self.embeddings(rearrange(pixel_values, 'b t c h w -> (b t) c h w'))
+        hidden_states = self.encoder(hidden_states, batch_size, self.temporal_pos_emb[-num_frames:])
         hidden_states = self.post_layernorm(hidden_states)
-        hidden_states = hidden_states.reshape(
-            batch_size, num_frames, num_patches, embed_dim
-        )
-        return hidden_states[:, -1, :, :]
+        return hidden_states
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        if pixel_values.ndim == 4:
-            return self._encode_spatial(pixel_values)
-
-        if pixel_values.ndim != 5:
-            raise ValueError(
-                f"Expected 4D or 5D input, got shape {tuple(pixel_values.shape)}"
-            )
-
         if self.use_mem:
-            return self._encode_mem(pixel_values)
+            if pixel_values.ndim == 4:
+                pixel_values = pixel_values.unsqueeze(1)
+            if pixel_values.ndim != 5:
+                raise ValueError(f'MEM expects 5D input, got shape {tuple(pixel_values.shape)}')
+            return self.encode_mem(pixel_values)
 
-        batch_size, num_frames, channels, height, width = pixel_values.shape
-        flat_pixel_values = pixel_values.reshape(batch_size * num_frames, channels, height, width)
-        hidden_states = self._encode_spatial(flat_pixel_values)
-        return hidden_states.reshape(batch_size, -1, hidden_states.shape[-1])
+        if pixel_values.ndim not in (4, 5):
+            raise ValueError(f'Expected 4D or 5D input, got shape {tuple(pixel_values.shape)}')
+        if pixel_values.ndim == 4:
+            return self.encode_spatial(pixel_values)
+
+        batch_size, num_frames = pixel_values.shape[:2]
+        hidden_states = self.encode_spatial(rearrange(pixel_values, 'b t c h w -> (b t) c h w'))
+        return rearrange(hidden_states, '(b t) n d -> b (t n) d', b=batch_size, t=num_frames)
 
 
 class SiglipVisionModel(nn.Module):
@@ -419,6 +364,7 @@ class SiglipVisionModel(nn.Module):
         config,
         use_quantize: bool = False,
         use_lora: bool = False,
+        compress_to_current: bool = True,
     ):
         super().__init__()
         self.config = config
@@ -426,6 +372,7 @@ class SiglipVisionModel(nn.Module):
             config,
             use_quantize=use_quantize,
             use_lora=use_lora,
+            compress_to_current=compress_to_current,
         )
 
     @torch.compile(mode="default")

@@ -62,7 +62,7 @@ dataset:
     use_relative_action: False
     depth_clip_range: ${depth_clip_range}
     val_wds_datasets: ${val_vla_wds_datasets}
-    history_pad_mode: truncate
+    history_pad_mode: repeat
     future_pad_mode: truncate
     shuffle_buffer: 4096
   vlm_dataset:
@@ -77,11 +77,12 @@ dataset:
     
 n_obs_image_steps: 6
 n_obs_image_stride: 30
-n_obs_state_steps: 16
-n_obs_state_stride: 2
+n_obs_state_steps: 18
+n_obs_state_stride: 10
 n_action_steps: 32
 n_action_stride: 1
 use_mem: True
+compress_to_current: True
 
 vla_processor: 
   _target_: src.dataset.paligemma_processing.PaliGemmaVLAProcessor
@@ -259,7 +260,7 @@ text_seq_len: ${eval:'${state_seq_len}+128'}
 answer_seq_len: 256 
 # Make sure at least one tokens for VLM answer in the training, 
 # otherwise it will cause error(the VLM parameters may have no gradient, then it will cause error in all-reduce stage)
-max_vlm_image_steps: ${eval:'1 if ${use_mem} else ${shape_meta.obs.rgb.horizon}'}
+max_vlm_image_steps: ${eval:'1 if ${compress_to_current} else ${shape_meta.obs.rgb.horizon}'}
 max_vlm_tokens: ${eval:'${image_seq_len}*${max_vlm_image_steps}+${text_seq_len}+${answer_seq_len}'}
 tokenizer_padding: max_length # longest or max_length
 
@@ -369,6 +370,7 @@ policy:
         dropout: ${lora_dropout}
     use_quantize: ${quantize}
     use_lora: ${lora}
+    compress_to_current: ${compress_to_current}
 
   multi_modal_projector:
     _target_: src.model.vlm.paligemma.siglip.PaliGemmaMultiModalProjector
