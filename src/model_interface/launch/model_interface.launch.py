@@ -10,8 +10,8 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'control_frequency': 30.0,
-                'model_server_host': '81.68.132.224',
-                'model_server_port': 18028,
+                'model_server_host': '172.16.1.10',
+                'model_server_port': 61234,
                 'calibration_path': '/root/workspace/legendvla-inference/examples/calibration_outputs',
                 'camera_name': 'head',
                 'ui_service_host': 'localhost',
@@ -24,7 +24,7 @@ def generate_launch_description():
                 'action_execution_len': 6,
                 'buffer_size': 200,
                 'debug_code': False,
-                'do_resize': True
+                'do_resize': False
             }]
         )
     ])

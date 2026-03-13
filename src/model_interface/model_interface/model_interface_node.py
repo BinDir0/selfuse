@@ -385,11 +385,13 @@ class ModelInterfaceNode(Node):
     # --- 传感器回调 (完全无锁，依赖 Executor 并行) ---
     def rgb_cb(self, m): 
         data = self.cv_bridge.imgmsg_to_cv2(m, 'rgb8')
+        data = self._resize_image(data, is_depth=False)
         with self.rgb_cb_lock:
             self._update_buffer(self.buf_rgb, m.header, data, "RGB")
 
     def depth_cb(self, m): 
         data = self.cv_bridge.imgmsg_to_cv2(m, 'passthrough')
+        data = self._resize_image(data, is_depth=True)
         with self.depth_cb_lock:
             self._update_buffer(self.buf_depth, m.header, data, "Depth")
 
@@ -546,8 +548,8 @@ class ModelInterfaceNode(Node):
             self._print_buffer_info("Right Kps", snap_rk)
 
         if self.first_inference:
-            rgb_seq = [self._resize_image(np.array(snap_rgb[-1][1]), is_depth=False)]
-            depth_seq = [self._resize_image(np.array(snap_depth[-1][1]), is_depth=True)]
+            rgb_seq = [snap_rgb[-1][1]]
+            depth_seq = [snap_depth[-1][1]]
             rgb_in = np.stack(rgb_seq)
             depth_in = np.stack(depth_seq)
             if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
@@ -581,8 +583,8 @@ class ModelInterfaceNode(Node):
             for h in range(self.i_hor):
                 t = t_ref - (h * self.i_str * self.dt_ns)
                 if not self._is_in_range(snap_rgb, t) or not self._is_in_range(snap_depth, t): break
-                rgb_seq.append(self._resize_image(self._find_nearest(snap_rgb, t), is_depth=False))
-                depth_seq.append(self._resize_image(self._find_nearest(snap_depth, t), is_depth=True))
+                rgb_seq.append(self._find_nearest(snap_rgb, t))
+                depth_seq.append(self._find_nearest(snap_depth, t))
             
             rgb_in = np.stack(rgb_seq)[::-1]
             depth_in = np.stack(depth_seq)[::-1]

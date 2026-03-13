@@ -69,7 +69,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'arm_state',
-            default_value='api_gt',
+            default_value='ruckig',
             description="Arm state source: 'api_gt' uses RM API wrist pose, 'ruckig' uses interpolated joints + FK node.",
         ),
         arm_ik_node,
