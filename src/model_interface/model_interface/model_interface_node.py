@@ -17,6 +17,8 @@ from enum import Enum
 from collections import deque
 from pynput import keyboard
 from scipy.spatial.transform import Rotation as R
+from scipy.signal import savgol_filter
+from scipy.interpolate import interp1d
 
 # ROS 消息
 from sensor_msgs.msg import Image
@@ -434,6 +436,87 @@ class ModelInterfaceNode(Node):
             resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
         return resized_img
 
+    def _orthogonalize_6d_svd(self, rot_6d):
+        """ 使用SVD将非正交矩阵投影回SO(3) """
+        b1 = rot_6d[:3]
+        b2 = rot_6d[3:6]
+        b3 = np.cross(b1, b2)
+        
+        # 构造近似旋转矩阵
+        R_approx = np.stack([b1, b2, b3], axis=1)
+        
+        # SVD 投影
+        U, S, Vh = np.linalg.svd(R_approx)
+        R_real = U @ Vh
+        
+        # 确保是旋转矩阵而非反射矩阵 (det=1)
+        if np.linalg.det(R_real) < 0:
+            U[:, -1] *= -1
+            R_real = U @ Vh
+            
+        # 转回 6D
+        return np.concatenate([R_real[:3, 0], R_real[:3, 1]])
+
+    def _orthogonalize_6d(self, rot_6d):
+        """
+        对6D旋转向量进行施密特正交化，确保其符合旋转矩阵特性
+        rot_6d: (6,) -> [b1_x, b1_y, b1_z, b2_x, b2_y, b2_z]
+        """
+        b1 = rot_6d[:3]
+        b2 = rot_6d[3:6]
+        
+        # 归一化第一个基向量
+        eps = 1e-6
+        v1 = b1 / (np.linalg.norm(b1) + eps)
+        # 正交化第二个基向量
+        v2 = b2 - np.dot(v1, b2) * v1
+        v2 = v2 / (np.linalg.norm(v2) + eps)
+        
+        return np.concatenate([v1, v2])
+
+    def smooth_action_chunk(self, pred_actions):
+        """
+        对 (32, 48) 的 action chunk 进行平滑处理
+        """
+        # pred_actions 形状为 (32, 48)
+        seq_len, dim = pred_actions.shape
+        x_old = np.linspace(0, 1, seq_len)
+        
+        # 1. 上采样：从 32 步插值到 64 步，增加 SG 滤波器的采样密度
+        upsample_len = 64
+        x_new = np.linspace(0, 1, upsample_len)
+        # 使用线性插值防止在边界出现过冲
+        interp_func = interp1d(x_old, pred_actions, axis=0, kind='linear')
+        upsampled_actions = interp_func(x_new)
+
+        smoothed_actions = np.zeros_like(upsampled_actions)
+
+        # 2. 分组平滑
+        # A. 平移部分 (维度 0-6): 左臂(0-3), 右臂(3-6)
+        # 窗口长度需为奇数。这里选 11 对应插值后的序列，平滑效果明显
+        for i in range(0, 6):
+            smoothed_actions[:, i] = savgol_filter(upsampled_actions[:, i], window_length=11, polyorder=3)
+
+        # B. 旋转部分 (维度 6-18): 左臂(6-12), 右臂(12-18)
+        for i in range(6, 18):
+            smoothed_actions[:, i] = savgol_filter(upsampled_actions[:, i], window_length=9, polyorder=2)
+        
+        # C. 灵巧手关键点 (维度 18-48): 左手(18-33), 右手(33-48)
+        # 手指动作通常比较细微，窗口选小一点(7)，保留灵活性
+        for i in range(18, 48):
+            smoothed_actions[:, i] = savgol_filter(upsampled_actions[:, i], window_length=7, polyorder=2)
+
+        # 3. 旋转正交化修正 (必须在平滑后做)
+        # SG 滤波会破坏 6D 向量的正交性，需要逐帧修复
+        for t in range(upsample_len):
+            smoothed_actions[t, 6:12] = self._orthogonalize_6d(smoothed_actions[t, 6:12])
+            smoothed_actions[t, 12:18] = self._orthogonalize_6d(smoothed_actions[t, 12:18])
+
+        # 4. 下采样还原：回到 32 步输出给后续逻辑
+        final_actions = smoothed_actions[::2]
+        
+        return final_actions.astype(np.float32)
+
     def prepare_inference_payload(self):
         # 1. 创建快照 & 排序
         all_snaps = [
@@ -559,6 +642,8 @@ class ModelInterfaceNode(Node):
                 try:
                     res = self.policy_client.infer(payload)
                     pred = res["pred_actions"]
+                    self.get_logger().info("🪄 正在对预测轨迹进行平滑处理...")
+                    pred = self.smooth_action_chunk(pred)
                     steps = min(self.act_len, pred.shape[0])
                     
                     inference_time = time.time() - start_time
