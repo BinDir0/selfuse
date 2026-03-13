@@ -644,8 +644,8 @@ class ModelInterfaceNode(Node):
                 try:
                     res = self.policy_client.infer(payload)
                     pred = res["pred_actions"]
-                    self.get_logger().info("🪄 正在对预测轨迹进行平滑处理...")
-                    pred = self.smooth_action_chunk(pred)
+                    # self.get_logger().info("🪄 正在对预测轨迹进行平滑处理...")
+                    # pred = self.smooth_action_chunk(pred)
                     steps = min(self.act_len, pred.shape[0])
                     
                     inference_time = time.time() - start_time

@@ -21,10 +21,10 @@ def generate_launch_description():
                 'state_stride': 2,
                 'image_horizon': 1,
                 'image_stride': 1,
-                'action_execution_len': 6,
+                'action_execution_len': 32,
                 'buffer_size': 200,
                 'debug_code': False,
-                'do_resize': False
+                'do_resize': True
             }]
         )
     ])
