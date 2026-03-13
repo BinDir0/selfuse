@@ -328,7 +328,7 @@ class PaliGemmaProcessor:
             prefix_prompt=text,
             bos_token=self.tokenizer.bos_token,
             eos_token=self.tokenizer.eos_token,
-            image_seq_len=self.image_seq_length * num_image_frames,
+            image_seq_len=self.image_seq_length * images.shape[0],
             image_token=self.IMAGE_TOKEN,
             suffix_target=target,
             need_target=('infer' not in mode),

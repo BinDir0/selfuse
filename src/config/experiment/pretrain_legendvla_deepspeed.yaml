@@ -75,7 +75,7 @@ dataset:
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
     
-n_obs_image_steps: 1
+n_obs_image_steps: 6
 n_obs_image_stride: 30
 n_obs_state_steps: 16
 n_obs_state_stride: 2
@@ -112,7 +112,7 @@ vlm_processor:
 
 dataloader:
   loader:
-    batch_size: 16
+    batch_size: 12
     num_workers: 4
     pin_memory: True
     persistent_workers: True
@@ -120,7 +120,7 @@ dataloader:
 
 val_dataloader:
   loader:
-    batch_size: 16
+    batch_size: 12
     shuffle: False
     drop_last: False
     num_workers: 4

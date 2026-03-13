@@ -345,8 +345,8 @@ class SiglipVisionTransformer(nn.Module):
         hidden_states = self.embeddings(flat_pixel_values)
         num_patches = hidden_states.shape[1]
         embed_dim = hidden_states.shape[2]
-
-        temporal_pos_emb = self.temporal_pos_emb[:num_frames].to(
+        # T in [-k, 0], 0 is current frame, so need to flip the temporal pos embedding
+        temporal_pos_emb = self.temporal_pos_emb[:num_frames].flip(0).to(
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
@@ -368,8 +368,8 @@ class SiglipVisionTransformer(nn.Module):
 
                 # Temporal attention using the same layer's LN1 + self_attn
                 residual = ht
-                normed = encoder_layer.layer_norm1(ht)
-                normed = normed + temporal_pos_emb.unsqueeze(0)
+                ht_with_pos = ht + temporal_pos_emb.unsqueeze(0)
+                normed = encoder_layer.layer_norm1(ht_with_pos)
                 attn_out, _ = encoder_layer.self_attn(normed, is_causal=True)
                 ht = residual + attn_out
 
