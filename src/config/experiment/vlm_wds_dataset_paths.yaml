@@ -24,6 +24,9 @@ vlm_wds_datasets:
   - name: ShareRobot
     shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/ShareRobot/train/shard-*.tar
     weight: 0.5
+  - name: RoboInter-VQA
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/train/shard-*.tar
+    weight: 1
 
 val_vlm_wds_datasets:
   - name: FineVision
@@ -38,3 +41,5 @@ val_vlm_wds_datasets:
     shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboAfford/test/shard-*.tar
   - name: ShareRobot
     shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/ShareRobot/test/shard-*.tar
+  - name: RoboInter-VQA
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/test/shard-*.tar

@@ -163,8 +163,8 @@ training:
   train_vlm: True
   train_depth: True
   init_motion_token_embeddings: True # initialize motion token embeddings
-  load_pretrained_vlm_weights: True # load pretrained weights from VLM
-  load_pretrained_pi05_weights: False # load pretrained weights from PI05 (disabled for 448 resolution)
+  load_pretrained_vlm_weights: False # load pretrained weights from VLM
+  load_pretrained_pi05_weights: True # load pretrained weights from PI05 (disabled for 448 resolution)
   # Automatically select pretrained model path based on vlm_backbone and vision_resolution
   pretrained_model_path: /share_data/chenzhang/checkpoints/${vlm_backbone}-3b-pt-${vision_resolution}
   pretrained_pi05_model_path: /share_data/chenzhang/checkpoints/pi05_base_pytorch # use pi05 checkpoint first

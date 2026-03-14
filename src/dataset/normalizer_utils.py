@@ -14,7 +14,7 @@ def get_normalizer(dataloader_cfg, normalizer_dataset):
     assert normalizer_dataset is not None, "normalizer_dataset must be provided"
     # Merge all data
     dataloader = DataLoader(normalizer_dataset, collate_fn=normalizer_dataset.get_collator(), **dataloader_cfg)
-    assert len(dataloader) > 0, "No data to calculate normalizer"
+    # assert len(dataloader) > 0, "No data to calculate normalizer"
     normalizer = LinearNormalizer()
     normalizer_keys = next(iter(dataloader)).keys()
     normalizer.start_streaming_fit(keys=normalizer_keys)

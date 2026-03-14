@@ -716,7 +716,15 @@ class GaussianDiffusion:
         output = th.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    def training_losses(
+        self,
+        model,
+        x_start,
+        t,
+        model_kwargs=None,
+        noise=None,
+        dim_weights=None,
+    ):
         """
         Compute training losses for a single timestep.
         :param model: the model to evaluate loss on.
@@ -725,6 +733,8 @@ class GaussianDiffusion:
         :param model_kwargs: if not None, a dict of extra keyword arguments to
             pass to the model. This can be used for conditioning.
         :param noise: if specified, the specific Gaussian noise to try to remove.
+        :param dim_weights: optional per-dimension weights applied to the raw MSE
+            before reduction. Expected shape is [C] for x_start shaped [N, C, ...].
         :return: a dict with the key "loss" containing a tensor of shape [N].
                  Some mean or variance settings may also have other keys.
         """
@@ -780,7 +790,11 @@ class GaussianDiffusion:
                 ModelMeanType.EPSILON: noise,
             }[self.model_mean_type]
             assert model_output.shape == target.shape == x_start.shape
-            terms["mse"] = mean_flat((target - model_output) ** 2)
+            mse = (target - model_output) ** 2
+            if dim_weights is not None:
+                weight_shape = [1, dim_weights.shape[0]] + [1] * (mse.ndim - 2)
+                mse = mse * dim_weights.to(device=mse.device, dtype=mse.dtype).view(*weight_shape)
+            terms["mse"] = mean_flat(mse)
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
             else:

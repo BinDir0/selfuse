@@ -406,11 +406,14 @@ class DiffLoss(nn.Module):
         """Traditional DDPM diffusion loss"""
         t = torch.randint(0, self.train_diffusion.num_timesteps, (target.shape[0],), device=target.device)
         model_kwargs = dict(c=z)
-        loss_dict = self.train_diffusion.training_losses(self.net, target, t, model_kwargs)
+        loss_dict = self.train_diffusion.training_losses(
+            self.net,
+            target,
+            t,
+            model_kwargs,
+            dim_weights=getattr(self, "dim_weights", None),
+        )
         loss = loss_dict["loss"]
-        # Apply per-dimension weighting
-        if hasattr(self, 'dim_weights') and self.dim_weights is not None:
-            loss = loss * self.dim_weights
         if mask is not None:
             mask = self._broadcast_mask(mask, loss)
             loss = (loss * mask).sum() / mask.sum().clamp(min=1)
