@@ -239,6 +239,11 @@ def _compute_flow_loss(
     """
     target_v_t = actions - (1 - model.flow_sig_min) * noise
     flow_loss = (pred_v_t - target_v_t) ** 2
+
+    # Apply per-dimension weighting
+    if hasattr(model, 'action_dim_weights'):
+        flow_loss = flow_loss * model.action_dim_weights
+
     loss_mask = rtc_mask if rtc_mask is not None else actions_valid_mask
     masked_loss = flow_loss * loss_mask.to(dtype=flow_loss.dtype)
     valid_count = loss_mask.to(dtype=flow_loss.dtype).sum()

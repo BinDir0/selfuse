@@ -366,6 +366,16 @@ class DiffLoss(nn.Module):
             t = torch.rand(bsz, device=device)
         return t
 
+    def set_dim_weights(self, dim_weights, chunk_size):
+        """Register per-dimension loss weights, tiled for flattened action chunks.
+
+        Args:
+            dim_weights: [action_dim] per-dimension weight, e.g. shape [48]
+            chunk_size: temporal chunk size, e.g. 4
+        """
+        tiled = dim_weights.repeat_interleave(chunk_size)
+        self.register_buffer('dim_weights', tiled)
+
     def forward(self, target, z, mask=None, t=None):
         """
         Compute loss based on configuration.
@@ -398,6 +408,9 @@ class DiffLoss(nn.Module):
         model_kwargs = dict(c=z)
         loss_dict = self.train_diffusion.training_losses(self.net, target, t, model_kwargs)
         loss = loss_dict["loss"]
+        # Apply per-dimension weighting
+        if hasattr(self, 'dim_weights') and self.dim_weights is not None:
+            loss = loss * self.dim_weights
         if mask is not None:
             mask = self._broadcast_mask(mask, loss)
             loss = (loss * mask).sum() / mask.sum().clamp(min=1)
@@ -439,6 +452,9 @@ class DiffLoss(nn.Module):
         
         # 5. MSE Loss
         loss = (v_pred - v_target) ** 2
+        # Apply per-dimension weighting
+        if hasattr(self, 'dim_weights') and self.dim_weights is not None:
+            loss = loss * self.dim_weights
 
         if mask is not None:
             mask = self._broadcast_mask(mask, loss)

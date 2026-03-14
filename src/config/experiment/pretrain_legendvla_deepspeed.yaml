@@ -59,7 +59,7 @@ dataset:
     wds_datasets: ${vla_wds_datasets}
     shape_meta: ${shape_meta}
     objective: ${objective}
-    use_relative_action: False
+    use_relative_action: True
     depth_clip_range: ${depth_clip_range}
     val_wds_datasets: ${val_vla_wds_datasets}
     history_pad_mode: repeat
@@ -295,10 +295,14 @@ policy:
     use_rtc: False
     rtc_delay_strategy: null
     rtc_max_delay: null
-    loss_weights: 
+    loss_weights:
       ce_loss_weight: 0.1
-      diffusion_loss_weight: 100.0
+      diffusion_loss_weight: 20.0
       flow_loss_weight: 1.0
+    action_dim_loss_weights:
+      wrist_translation: 2.0   # dims [0:6]
+      wrist_rotation: 5.0      # dims [6:18]
+      hand: 1.0                # dims [18:48]
   shape_meta: ${shape_meta}
   action_encoder_ar: 
     _target_: src.model.action.action_head.FourierActionEncoder

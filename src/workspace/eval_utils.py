@@ -18,6 +18,20 @@ def clear_attn_weights(model):
         model.joint_model.attn_weights = [None] * model.joint_model.num_hidden_layers
 
 
+def _unwrap_model(workspace):
+    if hasattr(workspace.model, 'module'):
+        return workspace.model.module
+    return workspace.model
+
+
+def _to_numpy(value):
+    if torch.is_tensor(value):
+        return value.detach().float().cpu().numpy()
+    if isinstance(value, np.ndarray):
+        return value
+    return np.array(value)
+
+
 @contextmanager
 def eval_with_averaged_model(accelerator, model, averaged_model):
     """
@@ -83,270 +97,301 @@ def save_interval_ckpt(workspace, accelerator):
     save_checkpoint_accelerator(workspace, accelerator, path=os.path.join(save_dir, f'update_step_{workspace.update_step}'))
 
 
-# Combine validation and sampling, so we can process data only once.
+# ---------------------------------------------------------------------------
+# Evaluation sub-routines
+# ---------------------------------------------------------------------------
+
+def compute_batch_action_metrics(
+    workspace, accelerator, inputs, eval_thresholds, wrist_trans_dim, wrist_dim,
+):
+    """Compute action accuracy and L1 metrics for a single eval batch.
+
+    Returns None if no valid actions, otherwise a dict with keys:
+        accuracy, l1_loss, l1_parts, per_sample_l1, eval_sample
+    """
+    gt_actions = inputs['actions']
+    actions_valid_mask = inputs['actions_valid_mask']
+    if not torch.any(actions_valid_mask):
+        return None
+
+    with accelerator.autocast():
+        pred_actions = workspace.model("infer_action", inputs)
+
+    B, H, D = gt_actions.shape
+    eval_sample = torch.any(actions_valid_mask.reshape(B, -1), dim=1)
+    actions_valid_mask = actions_valid_mask[eval_sample]
+
+    # Unnormalize to original scale
+    if workspace.use_relative_action:
+        gt_actions = workspace.normalizer['actions'].unnormalize(gt_actions[eval_sample])
+        pred_actions = workspace.normalizer['actions'].unnormalize(pred_actions[eval_sample])
+    else:
+        gt_actions = workspace.normalizer['motions'].unnormalize(gt_actions[eval_sample])
+        pred_actions = workspace.normalizer['motions'].unnormalize(pred_actions[eval_sample])
+    gt_actions = gt_actions * actions_valid_mask
+    pred_actions = pred_actions * actions_valid_mask
+
+    accuracy = get_action_accuracy(gt_actions, pred_actions, eval_thresholds)
+
+    abs_diff = torch.abs(pred_actions - gt_actions)
+    per_sample_l1 = (
+        torch.sum(abs_diff.flatten(start_dim=1), dim=1)
+        / torch.sum(actions_valid_mask.flatten(start_dim=1), dim=1)
+    )
+    l1_loss = torch.sum(abs_diff) / torch.sum(actions_valid_mask)
+
+    # Per-part L1 loss
+    l1_parts = {}
+    for pname, ps, pe in [
+        ("wrist_trans", 0, wrist_trans_dim),
+        ("wrist_rot", wrist_trans_dim, wrist_dim),
+        ("hand", wrist_dim, D),
+    ]:
+        pvalid = actions_valid_mask[:, :, ps:pe].sum().clamp(min=1)
+        l1_parts[pname] = torch.sum(abs_diff[:, :, ps:pe]) / pvalid
+
+    return {
+        "accuracy": accuracy,
+        "l1_loss": l1_loss,
+        "l1_parts": l1_parts,
+        "per_sample_l1": per_sample_l1,
+        "eval_sample": eval_sample,
+    }
+
+
+def update_attn_sample_tracker(
+    inputs, full_seq_attn_maps, eval_sample, per_sample_l1,
+    batch_idx, min_loss_sample, max_loss_sample,
+):
+    """Update min/max loss sample trackers for attention visualization."""
+    if full_seq_attn_maps is None:
+        return
+
+    attn_weights = full_seq_attn_maps[:, eval_sample, :, :, :]
+    eval_indices = torch.nonzero(eval_sample, as_tuple=False).squeeze(1)
+    batch_size = inputs["input_ids"].shape[0]
+
+    def build_sample_inputs(sample_batch_idx):
+        sample_inputs = {}
+        for key, value in inputs.items():
+            if torch.is_tensor(value) and value.shape[0] == batch_size:
+                sample_inputs[key] = _to_numpy(value[sample_batch_idx])
+            else:
+                sample_inputs[key] = _to_numpy(value)
+        return sample_inputs
+
+    min_idx = torch.argmin(per_sample_l1).item()
+    max_idx = torch.argmax(per_sample_l1).item()
+    min_loss = per_sample_l1[min_idx].item()
+    max_loss = per_sample_l1[max_idx].item()
+    min_batch_idx = eval_indices[min_idx].item()
+    max_batch_idx = eval_indices[max_idx].item()
+
+    if min_loss < min_loss_sample['loss']:
+        min_loss_sample['loss'] = min_loss
+        min_loss_sample['attn_weights'] = attn_weights[:, min_idx, :, :, :].float().cpu()
+        min_loss_sample['inputs'] = build_sample_inputs(min_batch_idx)
+        min_loss_sample['metadata'] = {
+            'batch_idx': batch_idx, 'sample_idx': min_batch_idx,
+            'eval_sample_idx': min_idx, 'l1_loss': min_loss,
+        }
+
+    if max_loss > max_loss_sample['loss']:
+        max_loss_sample['loss'] = max_loss
+        max_loss_sample['attn_weights'] = attn_weights[:, max_idx, :, :, :].float().cpu()
+        max_loss_sample['inputs'] = build_sample_inputs(max_batch_idx)
+        max_loss_sample['metadata'] = {
+            'batch_idx': batch_idx, 'sample_idx': max_batch_idx,
+            'eval_sample_idx': max_idx, 'l1_loss': max_loss,
+        }
+
+
+def aggregate_val_losses(val_losses, accelerator, step_log):
+    """Reduce per-batch validation losses across all processes and write to step_log."""
+    for key in val_losses.keys():
+        if len(val_losses[key]) == 0:
+            local_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=accelerator.device)
+            num_nonzero_samples = torch.tensor(0, device=accelerator.device)
+        else:
+            stacked_losses = torch.stack(val_losses[key])
+            # Count non-zero losses (losses > 1e-8 to handle floating point precision)
+            nonzero_mask = stacked_losses > 1e-8
+            num_nonzero_samples = nonzero_mask.sum().to(accelerator.device)
+            local_loss_sum = stacked_losses.sum().to(accelerator.device)
+
+        total_num_nonzero = accelerator.reduce(num_nonzero_samples, reduction='sum')
+        total_loss_sum = accelerator.reduce(local_loss_sum, reduction='sum')
+
+        # Average only over non-zero samples
+        val_losses[key] = (total_loss_sum / total_num_nonzero.clamp(min=1)).item()
+        step_log[f'val_{key}'] = val_losses[key]
+
+
+def aggregate_action_metrics(
+    eval_accuracy, eval_l1_loss, eval_l1_loss_parts,
+    eval_thresholds, accelerator, step_log,
+):
+    """Reduce action metrics across processes, write to step_log, and return averaged values."""
+    eval_len = len(eval_accuracy)
+    device = accelerator.device
+
+    if eval_len > 0:
+        sum_accuracy = torch.stack(eval_accuracy).sum(dim=0).to(device)
+        sum_l1 = torch.stack(eval_l1_loss).sum().to(device)
+        sum_l1_parts = {k: torch.stack(v).sum().to(device) for k, v in eval_l1_loss_parts.items()}
+    else:
+        sum_accuracy = torch.zeros(len(eval_thresholds), device=device)
+        sum_l1 = torch.tensor(0.0, device=device)
+        sum_l1_parts = {k: torch.tensor(0.0, device=device) for k in eval_l1_loss_parts}
+
+    count = torch.tensor(eval_len, device=device)
+    sum_accuracy = accelerator.reduce(sum_accuracy, reduction='sum')
+    sum_l1 = accelerator.reduce(sum_l1, reduction='sum')
+    count = accelerator.reduce(count, reduction='sum')
+
+    avg_accuracy = sum_accuracy / count.clamp(min=1)
+    avg_l1 = sum_l1 / count.clamp(min=1)
+    avg_l1_parts = {
+        k: accelerator.reduce(v, reduction='sum') / count.clamp(min=1)
+        for k, v in sum_l1_parts.items()
+    }
+
+    step_log['eval_l1_loss'] = avg_l1.item()
+    for part_name, part_loss in avg_l1_parts.items():
+        step_log[f'eval_l1_{part_name}'] = part_loss.item()
+    for i, threshold in enumerate(eval_thresholds):
+        step_log[f'eval_acc_{threshold}'] = avg_accuracy[i].item()
+
+    return avg_l1, avg_l1_parts, avg_accuracy
+
+
+def save_attn_samples(workspace, accelerator, min_loss_sample, max_loss_sample):
+    """Save attention weights for min/max loss samples to disk (main process only)."""
+    if not accelerator.is_main_process or min_loss_sample['attn_weights'] is None:
+        return
+
+    print(f"\nSaving attention weights and inputs for selected samples...")
+    selected_samples = {
+        'lowest_loss': min_loss_sample,
+        'highest_loss': max_loss_sample,
+    }
+
+    print(f"Selected samples for visualization:")
+    print(f"  Lowest loss: batch {min_loss_sample['metadata']['batch_idx']}, "
+          f"sample {min_loss_sample['metadata']['sample_idx']}, loss={min_loss_sample['loss']:.4f}")
+    print(f"  Highest loss: batch {max_loss_sample['metadata']['batch_idx']}, "
+          f"sample {max_loss_sample['metadata']['sample_idx']}, loss={max_loss_sample['loss']:.4f}")
+
+    for name, sample_data in selected_samples.items():
+        if sample_data['attn_weights'] is None:
+            continue
+
+        print(f"\nProcessing {name} sample...")
+
+        output_dir = os.path.join(
+            workspace.output_dir,
+            'attention_visualization',
+            f'step_{workspace.update_step}',
+            name,
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, 'attention_and_inputs.npz')
+        save_payload = dict(sample_data['inputs'])
+        save_payload['attn_weights'] = sample_data['attn_weights'].numpy()
+        save_payload['metadata'] = np.array(sample_data['metadata'], dtype=object)
+        save_payload['update_step'] = np.array(workspace.update_step)
+        try:
+            np.savez_compressed(output_path, **save_payload)
+            print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"  Error saving attention data: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Main evaluation entry point
+# ---------------------------------------------------------------------------
+
 def evaluation(workspace, accelerator, dataloader, step_log):
     if accelerator.is_main_process:
         print(f"Evaluation step {workspace.update_step} started")
     accelerator.wait_for_everyone()
+
+    model = _unwrap_model(workspace)
+    wrist_dim = model.shape_meta["obs"]["state"]["wrist"]["shape"][0]
+    wrist_trans_dim = 6  # 2 wrists * 3 xyz, fixed layout
+
     with (
         torch.compiler.set_stance("force_eager"),
         torch.no_grad(),
-        eval_with_averaged_model(
-            accelerator,
-            workspace.model,
-            workspace.model_averaging,
-        ),
+        eval_with_averaged_model(accelerator, workspace.model, workspace.model_averaging),
     ):
-        val_losses = {
-            "total_loss": [],
-            "ce_loss": [],
-            "diffusion_loss": [],
-            "flow_loss": [],
-        }
+        val_losses = {"total_loss": [], "ce_loss": [], "diffusion_loss": [], "flow_loss": []}
         eval_thresholds = workspace.cfg.training.eval_thresholds
         eval_accuracy = []
         eval_l1_loss = []
+        eval_l1_loss_parts = {"wrist_trans": [], "wrist_rot": [], "hand": []}
 
-        # Track min/max loss batches for saving (only store these two)
-        min_loss_sample = {
-            'loss': float('inf'),
-            'attn_weights': None,
-            'inputs': None,
-            'metadata': None,
-        }
-        max_loss_sample = {
-            'loss': float('-inf'),
-            'attn_weights': None,
-            'inputs': None,
-            'metadata': None,
-        }
+        min_loss_sample = {'loss': float('inf'), 'attn_weights': None, 'inputs': None, 'metadata': None}
+        max_loss_sample = {'loss': float('-inf'), 'attn_weights': None, 'inputs': None, 'metadata': None}
         save_eval_attn_weights = bool(workspace.cfg.training.save_eval_attn_weights)
+
         for batch_idx, batch in enumerate(dataloader):
             inputs = workspace.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
 
             # Compute validation loss
             with accelerator.autocast(), torch.inference_mode():
                 loss = workspace.model(
-                    workspace.objective_func,
-                    inputs,
+                    workspace.objective_func, inputs,
                     return_attn_weights=save_eval_attn_weights,
                 )
             for key, loss_ in loss.items():
                 val_losses[key].append(loss_.detach())
 
-            if hasattr(workspace.model, 'module'):
-                model = workspace.model.module
-            else:
-                model = workspace.model
+            # Attention maps for visualization
             full_seq_attn_maps = None
             if save_eval_attn_weights and hasattr(model, 'attn_weights') and len(model.attn_weights) > 0:
-                full_seq_attn_maps = torch.stack(model.attn_weights, dim=0) # [num_layers, B, num_heads, seq_len, seq_len]
-            # Compute action accuracy if actions are available
+                full_seq_attn_maps = torch.stack(model.attn_weights, dim=0)
+
+            # Action metrics
             if 'actions' in inputs and workspace.objective_func != "train_ar":
-                gt_actions = inputs['actions']
-                actions_valid_mask = inputs['actions_valid_mask']
-                if not torch.any(actions_valid_mask):
-                    continue
-                # Get action predictions
-                with accelerator.autocast():
-                    pred_actions = workspace.model("infer_action", inputs)
-
-                # ignore invalid actions
-                B, H, D = gt_actions.shape
-                eval_sample = torch.any(actions_valid_mask.reshape(B, -1), dim=1)
-                actions_valid_mask = actions_valid_mask[eval_sample]
-                if workspace.use_relative_action:
-                    gt_actions = workspace.normalizer['actions'].unnormalize(gt_actions[eval_sample])
-                    pred_actions = workspace.normalizer['actions'].unnormalize(pred_actions[eval_sample])
-                else:
-                    gt_actions = workspace.normalizer['motions'].unnormalize(gt_actions[eval_sample])
-                    pred_actions = workspace.normalizer['motions'].unnormalize(pred_actions[eval_sample])
-                gt_actions = gt_actions * actions_valid_mask
-                pred_actions = pred_actions * actions_valid_mask
-
-                # Compute accuracy metrics
-                batch_accuracy = get_action_accuracy(
-                    gt_actions,
-                    pred_actions,
-                    eval_thresholds,
+                metrics = compute_batch_action_metrics(
+                    workspace, accelerator, inputs,
+                    eval_thresholds, wrist_trans_dim, wrist_dim,
                 )
-                eval_accuracy.append(batch_accuracy)
+                if metrics is None:
+                    continue
+                eval_accuracy.append(metrics["accuracy"])
+                eval_l1_loss.append(metrics["l1_loss"])
+                for k, v in metrics["l1_parts"].items():
+                    eval_l1_loss_parts[k].append(v)
 
-                abs_diff = torch.abs(pred_actions - gt_actions)
-                # Compute L1 loss per sample (not batch average)
-                # Calculate per-sample loss for finding min/max
-                per_sample_l1_loss = torch.sum(
-                    abs_diff.flatten(start_dim=1), dim=1
-                ) / torch.sum(actions_valid_mask.flatten(start_dim=1), dim=1)  # [B]
+                update_attn_sample_tracker(
+                    inputs, full_seq_attn_maps, metrics["eval_sample"],
+                    metrics["per_sample_l1"], batch_idx,
+                    min_loss_sample, max_loss_sample,
+                )
 
-                # Compute batch-level statistics for logging
-                actions_valid_num = torch.sum(actions_valid_mask)
-                batch_l1_loss = torch.sum(abs_diff) / actions_valid_num
-                eval_l1_loss.append(batch_l1_loss)
-
-                # Track min/max loss samples for saving
-                if full_seq_attn_maps is not None:
-                    # [num_layers, eval_sample, num_heads, seq_len, seq_len]
-                    attn_weights = full_seq_attn_maps[:, eval_sample, :, :, :]
-                    eval_indices = torch.nonzero(eval_sample, as_tuple=False).squeeze(1)
-                    batch_size = inputs["input_ids"].shape[0]
-
-                    def to_numpy(value):
-                        if torch.is_tensor(value):
-                            return value.detach().float().cpu().numpy()
-                        if isinstance(value, np.ndarray):
-                            return value
-                        return np.array(value)
-
-                    def build_sample_inputs(sample_batch_idx):
-                        sample_inputs = {}
-                        for key, value in inputs.items():
-                            if torch.is_tensor(value) and value.shape[0] == batch_size:
-                                sample_inputs[key] = to_numpy(value[sample_batch_idx])
-                            else:
-                                sample_inputs[key] = to_numpy(value)
-                        return sample_inputs
-
-                    # Find min/max loss samples in this batch
-                    min_idx = torch.argmin(per_sample_l1_loss).item()
-                    max_idx = torch.argmax(per_sample_l1_loss).item()
-
-                    min_loss = per_sample_l1_loss[min_idx].item()
-                    max_loss = per_sample_l1_loss[max_idx].item()
-
-                    min_batch_idx = eval_indices[min_idx].item()
-                    max_batch_idx = eval_indices[max_idx].item()
-
-                    min_metadata = {
-                        'batch_idx': batch_idx,
-                        'sample_idx': min_batch_idx,
-                        'eval_sample_idx': min_idx,
-                        'l1_loss': min_loss,
-                    }
-                    max_metadata = {
-                        'batch_idx': batch_idx,
-                        'sample_idx': max_batch_idx,
-                        'eval_sample_idx': max_idx,
-                        'l1_loss': max_loss,
-                    }
-
-                    # Update min loss sample
-                    if min_loss < min_loss_sample['loss']:
-                        min_loss_sample['loss'] = min_loss
-                        min_loss_sample['attn_weights'] = attn_weights[:, min_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
-                        min_loss_sample['inputs'] = build_sample_inputs(min_batch_idx)
-                        min_loss_sample['metadata'] = min_metadata
-
-                    # Update max loss sample
-                    if max_loss > max_loss_sample['loss']:
-                        max_loss_sample['loss'] = max_loss
-                        max_loss_sample['attn_weights'] = attn_weights[:, max_idx, :, :, :].float().cpu()  # [num_layers, num_heads, seq_len, seq_len]
-                        max_loss_sample['inputs'] = build_sample_inputs(max_batch_idx)
-                        max_loss_sample['metadata'] = max_metadata
-
-            if workspace.cfg.training.max_eval_steps and batch_idx >= (workspace.cfg.training.max_eval_steps-1):
+            if workspace.cfg.training.max_eval_steps and batch_idx >= (workspace.cfg.training.max_eval_steps - 1):
                 break
 
-         # Process validation loss
-        # Count only non-zero losses to avoid bias from VLA/VLM mixed batches
-        for key in val_losses.keys():
-            if len(val_losses[key]) == 0:
-                local_loss_sum = torch.tensor(0.0, dtype=torch.float32, device=accelerator.device)
-                num_nonzero_samples = torch.tensor(0, device=accelerator.device)
-            else:
-                stacked_losses = torch.stack(val_losses[key])
-                # Count non-zero losses (losses > 1e-8 to handle floating point precision)
-                nonzero_mask = stacked_losses > 1e-8
-                num_nonzero_samples = nonzero_mask.sum().to(accelerator.device)
-                local_loss_sum = stacked_losses.sum().to(accelerator.device)
+        # Aggregate across processes
+        aggregate_val_losses(val_losses, accelerator, step_log)
+        avg_l1, avg_l1_parts, avg_accuracy = aggregate_action_metrics(
+            eval_accuracy, eval_l1_loss, eval_l1_loss_parts,
+            eval_thresholds, accelerator, step_log,
+        )
 
-            total_num_nonzero = accelerator.reduce(num_nonzero_samples, reduction='sum')
-            total_loss_sum = accelerator.reduce(local_loss_sum, reduction='sum')
-
-            # Average only over non-zero samples
-            val_losses[key] = total_loss_sum / total_num_nonzero.clamp(min=1)
-            val_losses[key] = val_losses[key].item()
-            step_log[f'val_{key}'] = val_losses[key]
-
-        # fill eval_accuracy and eval_l1_loss to the same length as dataloader
-        # Note: we assume at least one action dimension is available for evaluation
-        eval_len = len(eval_accuracy)
-
-        # Process action accuracy metrics
-        if eval_len > 0:
-            # Average over batches
-            sum_eval_accuracy = torch.stack(eval_accuracy).sum(dim=0).to(accelerator.device)
-            sum_eval_l1_loss = torch.stack(eval_l1_loss).sum().to(accelerator.device)
-        else:
-            num_thresholds = len(eval_thresholds)
-            sum_eval_accuracy = torch.zeros(num_thresholds, device=accelerator.device)
-            sum_eval_l1_loss = torch.tensor(0.0, device=accelerator.device)
-        eval_len_tensor = torch.tensor(eval_len, device=accelerator.device)
-        # Gather metrics across all processes
-        sum_eval_accuracy = accelerator.reduce(sum_eval_accuracy, reduction='sum')
-        sum_eval_l1_loss = accelerator.reduce(sum_eval_l1_loss, reduction='sum')
-        eval_len_tensor = accelerator.reduce(eval_len_tensor, reduction='sum')
-
-        eval_accuracy = sum_eval_accuracy / eval_len_tensor.clamp(min=1)
-        eval_l1_loss = sum_eval_l1_loss / eval_len_tensor.clamp(min=1)
-
-        # Log accuracy metrics
-        step_log['eval_l1_loss'] = eval_l1_loss.item()
-        for i, threshold in enumerate(eval_thresholds):
-            step_log[f'eval_acc_{threshold}'] = eval_accuracy[i].item()
-
-        # Create log message
-        log_msg = f"Eval | Epoch {workspace.epoch} | L1 Loss: {eval_l1_loss.item():.3f} | "
+        # Print summary
+        log_msg = f"Eval | Epoch {workspace.epoch} | L1 Loss: {avg_l1.item():.3f} | "
+        log_msg += " | ".join([f"{k}: {v.item():.3f}" for k, v in avg_l1_parts.items()])
+        log_msg += " | "
         log_msg += " | ".join([
-            f"acc thres {threshold}: {eval_accuracy[i].item():.3f}"
+            f"acc thres {threshold}: {avg_accuracy[i].item():.3f}"
             for i, threshold in enumerate(eval_thresholds)
         ])
         if accelerator.is_main_process:
             print(log_msg)
 
-        # Save attention weights and inputs for selected samples
-        if accelerator.is_main_process and min_loss_sample['attn_weights'] is not None:
-            print(f"\nSaving attention weights and inputs for selected samples...")
+        save_attn_samples(workspace, accelerator, min_loss_sample, max_loss_sample)
 
-            selected_samples = {
-                'lowest_loss': min_loss_sample,
-                'highest_loss': max_loss_sample,
-            }
-
-            print(f"Selected samples for visualization:")
-            print(f"  Lowest loss: batch {min_loss_sample['metadata']['batch_idx']}, "
-                  f"sample {min_loss_sample['metadata']['sample_idx']}, loss={min_loss_sample['loss']:.4f}")
-            print(f"  Highest loss: batch {max_loss_sample['metadata']['batch_idx']}, "
-                  f"sample {max_loss_sample['metadata']['sample_idx']}, loss={max_loss_sample['loss']:.4f}")
-
-            # Visualize each selected sample
-            for name, sample_data in selected_samples.items():
-                if sample_data['attn_weights'] is None:
-                    continue
-
-                print(f"\nProcessing {name} sample...")
-
-                # Create output directory
-                output_dir = os.path.join(
-                    workspace.output_dir,
-                    'attention_visualization',
-                    f'step_{workspace.update_step}',
-                    name
-                )
-                os.makedirs(output_dir, exist_ok=True)
-                output_path = os.path.join(output_dir, 'attention_and_inputs.npz')
-                save_payload = dict(sample_data['inputs'])
-                save_payload['attn_weights'] = sample_data['attn_weights'].numpy()
-                save_payload['metadata'] = np.array(sample_data['metadata'], dtype=object)
-                save_payload['update_step'] = np.array(workspace.update_step)
-                try:
-                    np.savez_compressed(output_path, **save_payload)
-                    print(f"  Saved to: {output_path}")
-                except Exception as e:
-                    print(f"  Error saving attention data: {e}")
-
-    if hasattr(workspace.model, 'module'):
-        model = workspace.model.module
-    else:
-        model = workspace.model
     clear_attn_weights(model)

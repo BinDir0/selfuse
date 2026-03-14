@@ -148,6 +148,24 @@ class LegendVLA(nn.Module):
         self.ignore_index = cfg.ignore_index
         self.loss_weights = cfg.loss_weights
 
+        # Build per-dimension loss weights for action dimensions
+        wrist_dim = shape_meta["obs"]["state"]["wrist"]["shape"][0]  # 18
+        action_dim = shape_meta["action"]["shape"][0]  # 48
+        wrist_trans_dim = 6  # 2 wrists * 3 xyz, fixed layout
+        adlw = cfg.get("action_dim_loss_weights", {})
+        w_trans = adlw.get("wrist_translation", 1.0)
+        w_rot = adlw.get("wrist_rotation", 1.0)
+        w_hand = adlw.get("hand", 1.0)
+
+        dim_weights = torch.ones(action_dim)
+        dim_weights[:wrist_trans_dim] = w_trans
+        dim_weights[wrist_trans_dim:wrist_dim] = w_rot
+        dim_weights[wrist_dim:] = w_hand
+        self.register_buffer('action_dim_weights', dim_weights)
+
+        # Tile for DiffLoss (chunk_size-step chunks flattened)
+        self.diffloss.set_dim_weights(dim_weights, self.ar_action_chunk_size)
+
     def _apply_final_logit_softcapping(self, logits: torch.Tensor) -> torch.Tensor:
         """
         Apply final logit softcapping (Gemma2 feature).
@@ -497,9 +515,10 @@ class LegendVLA(nn.Module):
             assert torch.all(n_actions == action_mask.sum(dim=1))
 
         if pixel_values is not None:
+            if getattr(self.vision_tower, "use_mem", False) and pixel_values.ndim == 4:
+                pixel_values = pixel_values[:, None, ...]
             if pixel_values.ndim == 5:
                 batch_size, frame_count, channels, height, width = pixel_values.shape
-                # Do not reshape here, let SigLIP handle 5D input for use_mem
             else:
                 batch_size = pixel_values.shape[0]
                 frame_count = 1
@@ -520,20 +539,21 @@ class LegendVLA(nn.Module):
                 missing_depth_features = missing_depth_features.unsqueeze(0).expand(batch_size, -1, -1)
                 
                 if depth_values is not None:
+                    if getattr(self.vision_tower, "use_mem", False) and depth_values.ndim == 4:
+                        depth_values = depth_values[:, None, ...]
                     if depth_values.ndim == 5:
                         # [B, T, C, H, W]
                         depth_batch, depth_frames, depth_channels, depth_height, depth_width = depth_values.shape
                         
                         # If RGB was compressed (T -> 1) but Depth has T frames, take the last frame
                         if effective_frame_count == 1 and depth_frames > 1:
-                            depth_values = depth_values[:, -1:, ...] # Take last frame
+                            depth_values = depth_values[:, -1, ...].clone() # Take last frame
                             depth_frames = 1
                             
                         depth_values = depth_values.reshape(depth_batch * depth_frames, depth_channels, depth_height, depth_width)
                     
                     depth_image_features = self.depth_encoder(depth_values)
                     depth_image_features = depth_image_features.reshape(batch_size, -1, depth_image_features.shape[-1])
-                    
                 else:
                     depth_image_features = missing_depth_features
                     depth_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
