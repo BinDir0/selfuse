@@ -82,6 +82,109 @@ class ImageFolderFrameSource(BaseFrameSource):
         return frame
 
 
+class WebDatasetFrameSource(BaseFrameSource):
+    """Frame source that reads from WebDataset tar archives."""
+
+    def __init__(self, tar_pattern, use_turbojpeg=True, cache_shards=True):
+        """
+        Args:
+            tar_pattern: Glob pattern for tar files, e.g.,
+                        "/path/to/video/frames_*.tar"
+            use_turbojpeg: Use TurboJPEG for faster decoding if available
+            cache_shards: Keep tar file handles open for faster sequential access
+        """
+        import glob
+
+        self.tar_files = sorted(glob.glob(tar_pattern))
+        if not self.tar_files:
+            raise FileNotFoundError(f"No tar files found: {tar_pattern}")
+
+        if not QUIET_MODE:
+            print(f"WebDatasetFrameSource: {len(self.tar_files)} tar shards")
+
+        # Build index: frame_idx -> (tar_file, member_name)
+        self._build_index()
+
+        self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE
+        if self.use_turbojpeg:
+            self.jpeg_decoder = TurboJPEG()
+
+        # Shard-level caching for performance
+        self.cache_shards = cache_shards
+        self._tar_cache = {}  # {tar_path: tarfile.TarFile}
+        self._cache_size_limit = 2  # Keep 2 shards open
+
+    def _build_index(self):
+        """Scan tar files to build frame index."""
+        import tarfile
+        self.frame_index = []  # [(tar_path, member_name), ...]
+
+        for tar_path in self.tar_files:
+            with tarfile.open(tar_path, 'r') as tar:
+                members = sorted([m for m in tar.getmembers() if m.isfile()],
+                               key=lambda m: m.name)
+                for member in members:
+                    if member.name.endswith(('.jpg', '.jpeg', '.png')):
+                        self.frame_index.append((tar_path, member.name))
+
+        if not QUIET_MODE:
+            print(f"WebDatasetFrameSource: indexed {len(self.frame_index)} frames")
+
+    def __len__(self):
+        return len(self.frame_index)
+
+    def get_frame(self, index: int, rgb: bool = False):
+        import tarfile
+
+        if index < 0 or index >= len(self.frame_index):
+            raise IndexError(
+                f"Frame index {index} out of range [0, {len(self.frame_index)}). "
+                f"Total frames available: {len(self.frame_index)}"
+            )
+
+        tar_path, member_name = self.frame_index[index]
+
+        # Use cached tar file if available
+        if self.cache_shards and tar_path in self._tar_cache:
+            tar = self._tar_cache[tar_path]
+        else:
+            tar = tarfile.open(tar_path, 'r')
+            if self.cache_shards:
+                self._tar_cache[tar_path] = tar
+                # LRU eviction if cache full
+                if len(self._tar_cache) > self._cache_size_limit:
+                    oldest = next(iter(self._tar_cache))
+                    self._tar_cache[oldest].close()
+                    del self._tar_cache[oldest]
+
+        member = tar.getmember(member_name)
+        f = tar.extractfile(member)
+        jpeg_data = f.read()
+
+        if self.use_turbojpeg and member_name.lower().endswith(('.jpg', '.jpeg')):
+            try:
+                pixel_format = 0 if rgb else 1  # RGB=0, BGR=1
+                frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=pixel_format)
+                return frame
+            except Exception:
+                pass
+
+        frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError(f"Failed to decode image from tar: {tar_path}/{member_name}")
+        if rgb:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return frame
+
+    def __del__(self):
+        """Close all cached tar files on cleanup."""
+        for tar in self._tar_cache.values():
+            try:
+                tar.close()
+            except Exception:
+                pass
+
+
 class FrameDataset(torch.utils.data.Dataset):
     """PyTorch Dataset wrapper for parallel frame loading via DataLoader."""
 
@@ -130,7 +233,12 @@ def _frame_dataset_worker_init(worker_id):
 
 
 def build_frame_source(video_path: str):
-    """Build an ImageFolderFrameSource from pre-extracted frames. Raises if not found."""
+    """Build frame source from pre-extracted frames (JPEG or WebDataset).
+
+    Auto-detects format:
+    - If frames_*.tar exists → WebDatasetFrameSource (new format)
+    - If extracted_images/ exists with JPEGs → ImageFolderFrameSource (old format)
+    """
     from pathlib import Path
     import glob
     from natsort import natsorted
@@ -139,25 +247,30 @@ def build_frame_source(video_path: str):
     video_dir = video_path_obj.parent
     video_stem = video_path_obj.stem
 
-    extracted_dir = video_dir / video_stem / "extracted_images"
+    base_dir = video_dir / video_stem
 
-    if not extracted_dir.exists() or not extracted_dir.is_dir():
-        raise FileNotFoundError(
-            f"Pre-extracted frames not found at: {extracted_dir}\n"
-            f"Run frame extraction first: python scripts/extract_frames.py --video_path {video_path}"
-        )
+    # Check for WebDataset tar files first (new format)
+    tar_pattern = str(base_dir / "frames_*.tar")
+    tar_files = glob.glob(tar_pattern)
+    if tar_files:
+        if not QUIET_MODE:
+            print(f"Using WebDataset frames: {tar_pattern} ({len(tar_files)} shards)")
+        return WebDatasetFrameSource(tar_pattern)
 
-    image_files = natsorted(glob.glob(str(extracted_dir / "*.jpg")))
-    if not image_files:
-        image_files = natsorted(glob.glob(str(extracted_dir / "*.png")))
+    # Fall back to JPEG folder (old format)
+    extracted_dir = base_dir / "extracted_images"
+    if extracted_dir.exists():
+        image_files = natsorted(glob.glob(str(extracted_dir / "*.jpg")))
+        if not image_files:
+            image_files = natsorted(glob.glob(str(extracted_dir / "*.png")))
 
-    if not image_files:
-        raise FileNotFoundError(
-            f"No image files (jpg/png) found in: {extracted_dir}\n"
-            f"Run frame extraction first: python scripts/extract_frames.py --video_path {video_path}"
-        )
+        if image_files:
+            if not QUIET_MODE:
+                print(f"Using extracted frames: {extracted_dir} ({len(image_files)} frames)")
+            return ImageFolderFrameSource(image_files)
 
-    if not QUIET_MODE:
-        print(f"Using extracted frames from: {extracted_dir} ({len(image_files)} frames)")
-
-    return ImageFolderFrameSource(image_files)
+    raise FileNotFoundError(
+        f"No frames found for {video_path}. Expected either:\n"
+        f"  - WebDataset: {tar_pattern}\n"
+        f"  - JPEG folder: {extracted_dir}/*.jpg"
+    )

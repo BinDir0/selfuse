@@ -410,10 +410,10 @@ class HAWOR(pl.LightningModule):
             batch_ranges.append((start, min(start + dataloader_batch_size, total_padded)))
 
         # --- Multi-threaded batch loading + GPU pipeline ---
-        # Background thread uses ThreadPoolExecutor(32) for parallel frame loading
+        # Background thread uses ThreadPoolExecutor(64) for parallel frame loading
         # (JPEG decode, crop, resize are all C extensions that release GIL)
         # Main thread runs GPU inference on current batch while next batch loads
-        load_workers = min(num_workers, 32)
+        load_workers = min(num_workers, 64)
         prefetch_q = queue.Queue(maxsize=2)
 
         def _collate(items):

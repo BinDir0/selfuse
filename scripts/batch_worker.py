@@ -260,12 +260,12 @@ class WorkerRuntime:
         infiller_weight: str,
         img_focal: float = None,
         input_type: str = "file",
-        chunk_batch_size: int = 4,
+        chunk_batch_size: int = 8,
         num_workers: int = 16,
         render_batch_size: int = 8,
         metric3d_batch_size: int = 8,
-        detect_batch_size: int = 128,
-        detect_io_workers: int = 8,
+        detect_batch_size: int = 256,
+        detect_io_workers: int = 16,
     ):
         self.gpu = gpu
         self.checkpoint = checkpoint
