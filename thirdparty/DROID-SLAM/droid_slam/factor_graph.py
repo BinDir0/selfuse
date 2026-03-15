@@ -42,15 +42,22 @@ class FactorGraph:
         self.weight_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
 
     def __filter_repeated_edges(self, ii, jj):
-        """ remove duplicate edges """
+        """ remove duplicate edges (vectorized, no per-element .item()) """
 
-        keep = torch.zeros(ii.shape[0], dtype=torch.bool, device=ii.device)
-        eset = set(
-            [(i.item(), j.item()) for i, j in zip(self.ii, self.jj)] +
-            [(i.item(), j.item()) for i, j in zip(self.ii_inac, self.jj_inac)])
+        if ii.shape[0] == 0:
+            return ii, jj
 
-        for k, (i, j) in enumerate(zip(ii, jj)):
-            keep[k] = (i.item(), j.item()) not in eset
+        # Pack edge pairs into unique keys: i * N + j
+        N = max(self.video.counter.value, 1)
+        existing_ii = torch.cat([self.ii, self.ii_inac], 0)
+        existing_jj = torch.cat([self.jj, self.jj_inac], 0)
+
+        if existing_ii.shape[0] == 0:
+            return ii, jj
+
+        existing_keys = existing_ii.long() * N + existing_jj.long()
+        new_keys = ii.long() * N + jj.long()
+        keep = ~torch.isin(new_keys, existing_keys)
 
         return ii[keep], jj[keep]
 
@@ -103,7 +110,8 @@ class FactorGraph:
         if self.max_factors > 0 and self.ii.shape[0] + ii.shape[0] > self.max_factors \
                 and self.corr is not None and remove:
             
-            ix = torch.arange(len(self.age))[torch.argsort(self.age).cpu()]
+            sorted_idx = torch.argsort(self.age)
+            ix = torch.arange(len(self.age), device=self.device)[sorted_idx]
             self.rm_factors(ix >= self.max_factors - ii.shape[0], store=True)
 
         net = self.video.nets[ii].to(self.device).unsqueeze(0)
@@ -272,6 +280,7 @@ class FactorGraph:
         corr_op = AltCorrBlock(self.video.fmaps.view(1, num*rig, ch, ht, wd))
 
         # print("Global BA Iteration with {} steps".format(steps))
+        jj_max_plus1 = self.jj.max().item() + 1  # hoist out of loop to avoid repeated GPU sync
         for step in range(steps):
             # print("Global BA Iteration #{}".format(step+1))
             with torch.cuda.amp.autocast(enabled=False):
@@ -280,7 +289,7 @@ class FactorGraph:
                 motn = motn.permute(0,1,4,2,3).clamp(-64.0, 64.0)
 
             s = 8
-            for i in range(0, self.jj.max()+1, s):
+            for i in range(0, jj_max_plus1, s):
                 v = (self.ii >= i) & (self.ii < i + s)
                 iis = self.ii[v]
                 jjs = self.jj[v]
@@ -330,6 +339,54 @@ class FactorGraph:
         self.add_factors(ii[keep], jj[keep])
 
     
+    def _nms_suppress(self, d, ii_edges, jj_edges, t0, t1, t, nms, stride_j):
+        """Vectorized NMS: suppress d entries near existing edges.
+
+        For each edge (i,j), suppress all (i+di, j+dj) where
+        |di|+|dj| <= max(min(|i-j|-2, nms), 0), within bounds.
+        """
+        if ii_edges.shape[0] == 0:
+            return
+
+        # Precompute NMS offset pairs (di, dj) satisfying |di|+|dj| <= nms
+        offsets = []
+        for di in range(-nms, nms+1):
+            for dj in range(-nms, nms+1):
+                if abs(di) + abs(dj) <= nms:
+                    offsets.append((di, dj))
+
+        # Transfer to CPU once for vectorized numpy operations
+        ii_np = ii_edges.cpu().numpy()
+        jj_np = jj_edges.cpu().numpy()
+        n_edges = len(ii_np)
+
+        # Per-edge radius: max(min(|i-j|-2, nms), 0)
+        gap = np.abs(ii_np - jj_np)
+        edge_radius = np.maximum(np.minimum(gap - 2, nms), 0)  # (n_edges,)
+
+        # Collect all suppression indices
+        suppress_indices = []
+        for di, dj in offsets:
+            mask = (abs(di) + abs(dj)) <= edge_radius
+            if not np.any(mask):
+                continue
+            i1 = ii_np[mask] + di
+            j1 = jj_np[mask] + dj
+            # Bounds check
+            valid = (t0 <= i1) & (i1 < t) & (t1 <= j1) & (j1 < t)
+            i1 = i1[valid]
+            j1 = j1[valid]
+            if len(i1) > 0:
+                idx = (i1 - t0) * stride_j + (j1 - t1)
+                suppress_indices.append(idx)
+
+        if suppress_indices:
+            all_idx = np.concatenate(suppress_indices)
+            # Clamp to valid range and suppress
+            all_idx = all_idx[(all_idx >= 0) & (all_idx < d.shape[0])]
+            if len(all_idx) > 0:
+                d[torch.from_numpy(all_idx).long().to(d.device)] = float('inf')
+
     def add_proximity_factors(self, t0=0, t1=0, rad=2, nms=2, beta=0.25, thresh=16.0, remove=False):
         """ add edges to the factor graph based on distance """
 
@@ -342,56 +399,70 @@ class FactorGraph:
         jj = jj.reshape(-1)
 
         d = self.video.distance(ii, jj, beta=beta)
-        d[ii - rad < jj] = np.inf
-        d[d > 100] = np.inf
+        d[ii - rad < jj] = float('inf')
+        d[d > 100] = float('inf')
 
+        stride_j = t - t1
+
+        # Vectorized NMS suppression for existing edges
         ii1 = torch.cat([self.ii, self.ii_bad, self.ii_inac], 0)
         jj1 = torch.cat([self.jj, self.jj_bad, self.jj_inac], 0)
-        for i, j in zip(ii1.cpu().numpy(), jj1.cpu().numpy()):
-            for di in range(-nms, nms+1):
-                for dj in range(-nms, nms+1):
-                    if abs(di) + abs(dj) <= max(min(abs(i-j)-2, nms), 0):
-                        i1 = i + di
-                        j1 = j + dj
+        self._nms_suppress(d, ii1, jj1, t0, t1, t, nms, stride_j)
 
-                        if (t0 <= i1 < t) and (t1 <= j1 < t):
-                            d[(i1-t0)*(t-t1) + (j1-t1)] = np.inf
-
-
+        # Vectorized proximity edge generation (replaces double-nested loop)
         es = []
-        for i in range(t0, t):
-            if self.video.stereo:
+        if self.video.stereo:
+            for i in range(t0, t):
                 es.append((i, i))
-                d[(i-t0)*(t-t1) + (i-t1)] = np.inf
+                d[(i-t0)*stride_j + (i-t1)] = float('inf')
 
+        # Proximity edges: for each i in [t0,t), j in [max(i-rad-1,0), i)
+        for i in range(t0, t):
             for j in range(max(i-rad-1,0), i):
                 es.append((i,j))
                 es.append((j,i))
-                d[(i-t0)*(t-t1) + (j-t1)] = np.inf
+                idx_ij = (i-t0)*stride_j + (j-t1)
+                if 0 <= idx_ij < d.shape[0]:
+                    d[idx_ij] = float('inf')
 
-        ix = torch.argsort(d)
-        for k in ix:
-            if d[k].item() > thresh:
-                continue
+        # Greedy selection: batch-filter then CPU loop
+        # First filter out all entries > thresh to avoid per-element .item()
+        sorted_idx = torch.argsort(d)
+        d_sorted = d[sorted_idx]
+        valid_mask = d_sorted <= thresh
+        valid_count = valid_mask.sum().item()
 
-            if len(es) > self.max_factors:
-                break
+        if valid_count > 0:
+            # Transfer only the valid candidates to CPU (one sync)
+            valid_sorted_idx = sorted_idx[valid_mask].cpu().numpy()
+            ii_cpu = ii.numpy() if ii.device.type == 'cpu' else ii.cpu().numpy()
+            jj_cpu = jj.numpy() if jj.device.type == 'cpu' else jj.cpu().numpy()
+            d_cpu = d.cpu().numpy()
 
-            i = ii[k]
-            j = jj[k]
-            
-            # bidirectional
-            es.append((i, j))
-            es.append((j, i))
+            for k in valid_sorted_idx:
+                if len(es) > self.max_factors:
+                    break
 
-            for di in range(-nms, nms+1):
-                for dj in range(-nms, nms+1):
-                    if abs(di) + abs(dj) <= max(min(abs(i-j)-2, nms), 0):
-                        i1 = i + di
-                        j1 = j + dj
+                i = ii_cpu[k]
+                j = jj_cpu[k]
 
-                        if (t0 <= i1 < t) and (t1 <= j1 < t):
-                            d[(i1-t0)*(t-t1) + (j1-t1)] = np.inf
+                if d_cpu[k] > thresh:
+                    continue
+
+                # bidirectional
+                es.append((i, j))
+                es.append((j, i))
+
+                # NMS suppression on CPU array
+                gap = abs(i - j)
+                edge_rad = max(min(gap - 2, nms), 0)
+                for di in range(-nms, nms+1):
+                    for dj in range(-nms, nms+1):
+                        if abs(di) + abs(dj) <= edge_rad:
+                            i1 = i + di
+                            j1 = j + dj
+                            if (t0 <= i1 < t) and (t1 <= j1 < t):
+                                d_cpu[(i1-t0)*stride_j + (j1-t1)] = np.inf
 
         if len(es) == 0:
             return
