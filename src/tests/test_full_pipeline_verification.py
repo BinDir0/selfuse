@@ -490,23 +490,25 @@ class TestLinearNormalizerIgnoreDim:
         # Non-ignored dim (0): should be clipped to q99 then scaled
         assert result[0, 0].item() != pytest.approx(100.0, abs=1.0)
 
-    def test_ignore_dim_sets_quantiles_to_inf(self):
-        """After ignore_dim, q01 should be -inf and q99 should be +inf."""
+    def test_ignore_dim_preserves_quantiles_and_records_mask(self):
+        """ignore_dim should preserve stored quantiles and record ignored dimensions."""
         data = torch.randn(50, 10)
         normalizer = LinearNormalizer()
         normalizer.fit({"k": data})
+        q01_before = normalizer.params_dict["k"]["input_stats"]["q01"].clone()
+        q99_before = normalizer.params_dict["k"]["input_stats"]["q99"].clone()
+
         normalizer.ignore_dim(key="k", dim=slice(2, 5))
 
         params = normalizer.params_dict["k"]
         q01 = params["input_stats"]["q01"]
         q99 = params["input_stats"]["q99"]
-        assert q01[2].item() == float('-inf')
-        assert q01[4].item() == float('-inf')
-        assert q99[2].item() == float('inf')
-        assert q99[4].item() == float('inf')
-        # Non-ignored dims should remain finite
-        assert np.isfinite(q01[0].item())
-        assert np.isfinite(q99[0].item())
+        ignored_dim_mask = params["ignored_dim_mask"]
+        torch.testing.assert_close(q01, q01_before)
+        torch.testing.assert_close(q99, q99_before)
+        assert ignored_dim_mask[2].item() == pytest.approx(1.0)
+        assert ignored_dim_mask[4].item() == pytest.approx(1.0)
+        assert ignored_dim_mask[0].item() == pytest.approx(0.0)
 
     def test_normalize_unnormalize_round_trip(self):
         """normalize then unnormalize should recover original (within clipping range)."""

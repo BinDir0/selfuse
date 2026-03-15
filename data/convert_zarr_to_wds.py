@@ -4,26 +4,33 @@ Convert Zarr datasets to WebDataset shard format.
 Each sample stores per-frame raw data identical to zarr structure.
 All frames of an episode are written contiguously to the same shard.
 
+`zarr_list` format:
+    zarr_path [human|real_world] [wds_dataset]
+
+If `wds_dataset` is omitted, it defaults to the zarr directory stem.
+Datasets with the same `wds_dataset` are written into the same output folder.
+
 Usage:
     python data/convert_zarr_to_wds.py \
         --zarr_list /path/to/zarr_paths.txt \
         --output_dir /cfs/data/wds/ \
-        --num_workers 120 \
-        --is_merge
+        --num_workers 120
 """
 
 import io
 import sys
 import time
-import json
 import argparse
 import multiprocessing as mp
 from pathlib import Path
+from collections import Counter
 
 import numpy as np
 import zarr
 import webdataset as wds
 from PIL import Image
+
+from zarr_list_utils import HUMAN_KEY_MAPPING, REAL_WORLD_KEY_MAPPING, parse_zarr_list
 
 
 def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
@@ -161,7 +168,7 @@ def process_episodes(zarr_path, episode_batch, output_pattern, dataset_name,
 
 
 def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
-                         num_workers=120, is_merge=False):
+                         num_workers=120, shard_prefix=None):
     """Convert a single zarr dataset using multiple workers."""
     try:
         src = zarr.open_consolidated(zarr_path, mode='r')
@@ -189,20 +196,13 @@ def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
     chunks = [episodes[i:i + chunk_size]
               for i in range(0, len(episodes), chunk_size)]
 
-    # Output directory: merge mode writes all shards into output_dir directly,
-    # non-merge mode creates a per-dataset subdirectory.
-    if is_merge:
-        ds_output_dir = Path(output_dir)
-    else:
-        ds_output_dir = Path(output_dir) / dataset_name
+    ds_output_dir = Path(output_dir)
     ds_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Each worker writes its own shard sequence.
-    # In merge mode, prefix shards with dataset_name to avoid collisions.
     args_list = []
     for worker_id, chunk in enumerate(chunks):
-        if is_merge:
-            pattern = str(ds_output_dir / f"shard-{dataset_name}-w{worker_id:04d}-%06d.tar")
+        if shard_prefix:
+            pattern = str(ds_output_dir / f"shard-{shard_prefix}-w{worker_id:04d}-%06d.tar")
         else:
             pattern = str(ds_output_dir / f"shard-w{worker_id:04d}-%06d.tar")
         args_list.append((zarr_path, chunk, pattern, dataset_name, key_mapping,
@@ -220,75 +220,37 @@ def convert_zarr_dataset(zarr_path, output_dir, dataset_name, key_mapping,
           f"{int(episode_ends[-1])} frames)")
 
 
-# Default key mappings matching vla_dataset_paths.yaml
-HUMAN_KEY_MAPPING = {
-    'image': 'image',
-    'depth': 'depth',
-    'wrist_state': 'state/wrist',
-    'hand_state': 'state/fingertips',
-    'wrist_action': 'action/wrist',
-    'hand_action': 'action/fingertips',
-    'extrinsic': 'extrinsic',
-    'intrinsic': 'intrinsic',
-    'instruction': 'instruction',
-    'instruction_num': 'instruction_num',
-    'presence': 'presence',
-}
-
-REAL_WORLD_KEY_MAPPING = {
-    'image': 'image-head',
-    'depth': 'depth-head',
-    'wrist_state': 'state/wrist-head',
-    'hand_state': 'state/fingertips-head',
-    'wrist_action': 'action/wrist-head',
-    'hand_action': 'action/fingertips-head',
-    'extrinsic': 'extrinsic',
-    'intrinsic': 'intrinsic/head',
-    'instruction': 'instruction',
-    'instruction_num': 'instruction_num',
-}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Convert Zarr datasets to WebDataset shards")
     parser.add_argument("--zarr_list", type=str, required=True,
-                        help="Text file: each line is 'zarr_path [human|real_world]'")
+                        help="Text file: each line is 'zarr_path [human|real_world] [wds_dataset]'")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory for WebDataset shards")
     parser.add_argument("--num_workers", type=int, default=120,
                         help="Number of parallel workers per dataset")
-    parser.add_argument("--is_merge", action="store_true",
-                        help="Merge all zarr datasets into one webdataset")
     args = parser.parse_args()
 
-    with open(args.zarr_list) as f:
-        lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    try:
+        entries = parse_zarr_list(args.zarr_list)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
-    if args.is_merge:
-        # Check for duplicate dataset names before starting conversion
-        all_names = [Path(line.split()[0]).stem for line in lines]
-        seen = {}
-        for i, name in enumerate(all_names):
-            if name in seen:
-                print(f"Error: duplicate dataset name '{name}' "
-                      f"from line {seen[name]+1} and line {i+1}. "
-                      f"Each zarr must have a unique stem in merge mode.")
-                sys.exit(1)
-            seen[name] = i
-        print(f"Merge mode: all shards will be written to {args.output_dir}")
+    group_sizes = Counter(entry.wds_dataset for entry in entries)
 
-    for line in lines:
-        parts = line.split()
-        zarr_path = parts[0]
-        mapping_type = parts[1] if len(parts) > 1 else "human"
-        key_mapping = (REAL_WORLD_KEY_MAPPING if mapping_type == "real_world"
+    for entry in entries:
+        key_mapping = (REAL_WORLD_KEY_MAPPING if entry.mapping_type == "real_world"
                        else HUMAN_KEY_MAPPING)
-        dataset_name = Path(zarr_path).stem
-        print(f"Converting {zarr_path} ({mapping_type}) -> {dataset_name}")
+        ds_output_dir = Path(args.output_dir) / entry.wds_dataset
+        shard_prefix = entry.dataset_name if group_sizes[entry.wds_dataset] > 1 else None
+
+        print(f"Converting {entry.zarr_path} ({entry.mapping_type}) -> {entry.wds_dataset}")
         convert_zarr_dataset(
-            zarr_path, args.output_dir, dataset_name,
+            entry.zarr_path, ds_output_dir, entry.dataset_name,
             key_mapping=key_mapping,
             num_workers=args.num_workers,
-            is_merge=args.is_merge,
+            shard_prefix=shard_prefix,
         )

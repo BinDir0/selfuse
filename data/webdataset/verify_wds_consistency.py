@@ -16,6 +16,7 @@ Usage:
 import io
 import re
 import json
+import sys
 import random
 import argparse
 import multiprocessing as mp
@@ -28,33 +29,14 @@ import webdataset as wds
 from PIL import Image
 
 
-# Must match convert_zarr_to_wds.py
-HUMAN_KEY_MAPPING = {
-    'image': 'image',
-    'depth': 'depth',
-    'wrist_state': 'state/wrist',
-    'hand_state': 'state/fingertips',
-    'wrist_action': 'action/wrist',
-    'hand_action': 'action/fingertips',
-    'extrinsic': 'extrinsic',
-    'intrinsic': 'intrinsic',
-    'instruction': 'instruction',
-    'instruction_num': 'instruction_num',
-    'presence': 'presence',
-}
+DATA_DIR = Path(__file__).resolve().parents[1]
+if str(DATA_DIR) not in sys.path:
+    sys.path.insert(0, str(DATA_DIR))
 
-REAL_WORLD_KEY_MAPPING = {
-    'image': 'image-head',
-    'depth': 'depth-head',
-    'wrist_state': 'state/wrist-head',
-    'hand_state': 'state/fingertips-head',
-    'wrist_action': 'action/wrist-head',
-    'hand_action': 'action/fingertips-head',
-    'extrinsic': 'extrinsic',
-    'intrinsic': 'intrinsic/head',
-    'instruction': 'instruction',
-    'instruction_num': 'instruction_num',
-}
+from zarr_list_utils import HUMAN_KEY_MAPPING, REAL_WORLD_KEY_MAPPING, parse_zarr_list
+
+
+
 
 KEY_PATTERN = re.compile(r"^(.+)_ep(\d+)_f(\d+)$")
 IMAGE_MAX_DIFF = 100   # JPEG quality=95 can produce per-pixel diffs up to ~30
@@ -64,16 +46,13 @@ IMAGE_AVG_DIFF = 5.0  # JPEG quality=95 average diff is typically < 2
 def load_zarr_registry(zarr_list):
     """Build mapping: dataset_name -> (zarr_handle, key_mapping, episode_starts)."""
     registry = {}
-    with open(zarr_list) as f:
-        lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+    entries = parse_zarr_list(zarr_list)
 
-    for line in lines:
-        parts = line.split()
-        zarr_path = parts[0]
-        mapping_type = parts[1] if len(parts) > 1 else "human"
-        key_mapping = (REAL_WORLD_KEY_MAPPING if mapping_type == "real_world"
+    for entry in entries:
+        zarr_path = entry.zarr_path
+        key_mapping = (REAL_WORLD_KEY_MAPPING if entry.mapping_type == "real_world"
                        else HUMAN_KEY_MAPPING)
-        dataset_name = Path(zarr_path).stem
+        dataset_name = entry.dataset_name
 
         try:
             src = zarr.open_consolidated(zarr_path, mode='r')
@@ -101,12 +80,22 @@ def get_zarr_array(data_root, key_path):
     return node
 
 
+def normalize_instruction(value):
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (bytes, np.bytes_)):
+        value = value.decode('utf-8')
+    return value
+
+
 def verify_sample(sample, data_root, km, abs_idx, key):
     """Verify a single sample. Returns (checks, error, img_max_diff, img_avg_diff)."""
     checks = {
         "image": False, "depth": False, "lowdim": False,
         "instruction": False, "instruction_num": False,
     }
+    if 'presence' in km:
+        checks["presence"] = False
 
     # --- Image ---
     wds_img = np.array(Image.open(io.BytesIO(sample["image.jpg"])))
@@ -124,12 +113,13 @@ def verify_sample(sample, data_root, km, abs_idx, key):
 
     # --- Depth ---
     wds_depth = sample.get("depth.npy")
-    if wds_depth is not None:
-        if isinstance(wds_depth, bytes):
-            wds_depth = np.load(io.BytesIO(wds_depth))
-        zarr_depth = get_zarr_array(data_root, km['depth'])[abs_idx]
-        if not np.array_equal(wds_depth, zarr_depth):
-            return checks, f"{key}: depth mismatch", img_max_diff, img_avg_diff
+    if wds_depth is None:
+        return checks, f"{key}: depth.npy missing from sample", img_max_diff, img_avg_diff
+    if isinstance(wds_depth, bytes):
+        wds_depth = np.load(io.BytesIO(wds_depth))
+    zarr_depth = get_zarr_array(data_root, km['depth'])[abs_idx]
+    if not np.array_equal(wds_depth, zarr_depth):
+        return checks, f"{key}: depth mismatch", img_max_diff, img_avg_diff
     checks["depth"] = True
 
     # --- Lowdim ---
@@ -155,11 +145,7 @@ def verify_sample(sample, data_root, km, abs_idx, key):
     if isinstance(meta, bytes):
         meta = json.loads(meta.decode("utf-8"))
 
-    zarr_instr = get_zarr_array(data_root, km['instruction'])[abs_idx]
-    if isinstance(zarr_instr, bytes):
-        zarr_instr = zarr_instr.decode('utf-8')
-    if isinstance(zarr_instr, np.ndarray):
-        zarr_instr = zarr_instr.tolist()
+    zarr_instr = normalize_instruction(get_zarr_array(data_root, km['instruction'])[abs_idx])
     if str(meta["instruction"]) != str(zarr_instr):
         return checks, f"{key}: instruction mismatch", img_max_diff, img_avg_diff
     checks["instruction"] = True
@@ -168,6 +154,14 @@ def verify_sample(sample, data_root, km, abs_idx, key):
     if meta["instruction_num"] != zarr_instr_num:
         return checks, f"{key}: instruction_num mismatch", img_max_diff, img_avg_diff
     checks["instruction_num"] = True
+
+    if 'presence' in km:
+        if "presence" not in meta:
+            return checks, f"{key}: presence missing from meta.json", img_max_diff, img_avg_diff
+        zarr_presence = int(get_zarr_array(data_root, km['presence'])[abs_idx])
+        if int(meta["presence"]) != zarr_presence:
+            return checks, f"{key}: presence mismatch", img_max_diff, img_avg_diff
+        checks["presence"] = True
 
     return checks, None, img_max_diff, img_avg_diff
 
@@ -251,7 +245,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Verify WebDataset shards against original Zarr data")
     parser.add_argument("--zarr_list", type=str, required=True,
-                        help="Text file: each line is 'zarr_path [human|real_world]'")
+                        help="Text file: each line is 'zarr_path [human|real_world] [wds_dataset]'")
     parser.add_argument("--wds_dir", type=str, required=True,
                         help="Root directory containing WebDataset shards")
     parser.add_argument("--num_shards", type=int, default=100,
@@ -260,6 +254,12 @@ def main():
                         help="Number of parallel verification workers")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    try:
+        parse_zarr_list(args.zarr_list)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
     random.seed(args.seed)
 
@@ -290,14 +290,15 @@ def main():
             # Print per-field pass counts
             ct = result["check_totals"]
             print(f"  passed: image={ct.get('image',0)} depth={ct.get('depth',0)} "
-                  f"lowdim={ct.get('lowdim',0)} instruction={ct.get('instruction',0)}")
+                  f"lowdim={ct.get('lowdim',0)} instruction={ct.get('instruction',0)} "
+                  f"presence={ct.get('presence',0)}")
             for err in result["error_msgs"]:
                 print(f"  ERROR: {err}")
 
     print(f"\n{'='*60}")
     print(f"Total: {total_samples} samples, {total_errors} errors")
     print(f"Field pass totals:")
-    for field in ["image", "depth", "lowdim", "instruction", "instruction_num"]:
+    for field in ["image", "depth", "lowdim", "instruction", "instruction_num", "presence"]:
         print(f"  {field}: {all_check_totals.get(field, 0)}/{total_samples}")
     if total_errors == 0:
         print("All samples verified OK.")

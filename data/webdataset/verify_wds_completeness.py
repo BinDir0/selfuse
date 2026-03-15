@@ -12,14 +12,21 @@ Usage:
 """
 
 import re
+import sys
 import argparse
 import multiprocessing as mp
 from pathlib import Path
 from collections import defaultdict
 
-import numpy as np
 import zarr
 import webdataset as wds
+
+
+DATA_DIR = Path(__file__).resolve().parents[1]
+if str(DATA_DIR) not in sys.path:
+    sys.path.insert(0, str(DATA_DIR))
+
+from zarr_list_utils import parse_zarr_list
 
 
 KEY_PATTERN = re.compile(r"^(.+)_ep(\d+)_f(\d+)$")
@@ -44,44 +51,22 @@ def main():
     parser = argparse.ArgumentParser(
         description="Verify WebDataset completeness against Zarr episode_ends")
     parser.add_argument("--zarr_list", type=str, required=True,
-                        help="Text file: each line is 'zarr_path [human|real_world]'")
+                        help="Text file: each line is 'zarr_path [human|real_world] [wds_dataset]'")
     parser.add_argument("--wds_dir", type=str, required=True,
                         help="Root directory containing WebDataset shards")
     parser.add_argument("--num_workers", type=int, default=16,
                         help="Number of parallel scan workers")
     args = parser.parse_args()
 
-    # --- Build expected frame set from Zarr ---
-    print("Loading Zarr episode metadata...")
-    # expected[dataset_name] = {ep_idx: num_frames}
-    expected = {}
-    with open(args.zarr_list) as f:
-        lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+    try:
+        entries = parse_zarr_list(args.zarr_list)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
-    for line in lines:
-        parts = line.split()
-        zarr_path = parts[0]
-        dataset_name = Path(zarr_path).stem
-
-        try:
-            src = zarr.open_consolidated(zarr_path, mode='r')
-        except Exception:
-            src = zarr.open(zarr_path, mode='r')
-
-        episode_ends = src['meta/episode_ends'][:]
-        ep_frames = {}
-        for i, end in enumerate(episode_ends):
-            start = 0 if i == 0 else int(episode_ends[i - 1])
-            ep_frames[i] = int(end) - start
-        expected[dataset_name] = ep_frames
-        total_frames = int(episode_ends[-1])
-        print(f"  {dataset_name}: {len(ep_frames)} episodes, {total_frames} frames")
-
-    # --- Scan all shards in parallel ---
     all_shards = sorted(Path(args.wds_dir).rglob("shard-*.tar"))
-    print(f"\nScanning {len(all_shards)} shards with {args.num_workers} workers...")
+    print(f"Scanning {len(all_shards)} shards with {args.num_workers} workers...")
 
-    # actual[dataset_name][ep_idx] = set of frame indices
     actual = defaultdict(lambda: defaultdict(set))
     total_samples = 0
     total_bad_keys = 0
@@ -97,7 +82,33 @@ def main():
                 print(f"  [{i+1}/{len(all_shards)}] scanned, "
                       f"{total_samples} samples so far", flush=True)
 
-    # --- Compare ---
+    direct_shards = any(Path(args.wds_dir).glob("shard-*.tar"))
+    entries_to_check = entries
+    group_entries = [entry for entry in entries if entry.wds_dataset == Path(args.wds_dir).name]
+    actual_dataset_names = set(actual.keys())
+    if direct_shards and group_entries:
+        group_dataset_names = {entry.dataset_name for entry in group_entries}
+        if not actual_dataset_names or actual_dataset_names.issubset(group_dataset_names):
+            entries_to_check = group_entries
+            print(f"\nUsing {len(entries_to_check)} zarr entries for wds_dataset '{Path(args.wds_dir).name}'")
+
+    print("Loading Zarr episode metadata...")
+    expected = {}
+    for entry in entries_to_check:
+        try:
+            src = zarr.open_consolidated(entry.zarr_path, mode='r')
+        except Exception:
+            src = zarr.open(entry.zarr_path, mode='r')
+
+        episode_ends = src['meta/episode_ends'][:]
+        ep_frames = {}
+        for i, end in enumerate(episode_ends):
+            start = 0 if i == 0 else int(episode_ends[i - 1])
+            ep_frames[i] = int(end) - start
+        expected[entry.dataset_name] = ep_frames
+        total_frames = int(episode_ends[-1])
+        print(f"  {entry.dataset_name}: {len(ep_frames)} episodes, {total_frames} frames")
+
     print(f"\n{'='*60}")
     print("Completeness check:\n")
 
@@ -127,7 +138,6 @@ def main():
                 if extra:
                     total_extra_frames += len(extra)
 
-        # Episodes in WDS but not in Zarr
         for ep_idx in ds_actual:
             if ep_idx not in ep_frames:
                 extra_eps.append(ep_idx)
@@ -162,7 +172,6 @@ def main():
         if total_extra_frames:
             print(f"  Total extra frames: {total_extra_frames}")
 
-    # Datasets in WDS but not in zarr_list
     unknown_ds = set(actual.keys()) - set(expected.keys())
     if unknown_ds:
         all_ok = False
