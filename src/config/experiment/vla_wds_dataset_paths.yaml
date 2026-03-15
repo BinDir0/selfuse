@@ -8,27 +8,28 @@
 wds_base_dir: /share_data/guantianrui/datasets/Webdataset
 val_wds_base_dir: /share_data/guantianrui/datasets/Webdataset_val
 
+# !!!Make sure the name of dataset is consistent with the name of the dataset in the WebDataset.
 vla_wds_datasets:
   # --- Human datasets ---
-  - name: taco
+  - name: taco_train_filtered_v1
     shard_urls: ${wds_base_dir}/taco_train_filtered_v1/shard-*.tar
     weight: 1
-  - name: oakink2
+  - name: oakink2_train_filtered_v1
     shard_urls: ${wds_base_dir}/oakink2_train_filtered_v1/shard-*.tar
     weight: 1
-  - name: holoassist
+  - name: holoassist_filtered_v2_rechunked
     shard_urls: ${wds_base_dir}/holoassist_filtered_v2_rechunked/shard-*.tar
     weight: 1
-  - name: egodex
+  - name: egodex_train_filtered_v2
     shard_urls: ${wds_base_dir}/egodex_train_filtered_v2/shard-*.tar
     weight: 20
-  - name: epic
+  - name: epic_train_rechunked
     shard_urls: ${wds_base_dir}/epic_train_rechunked/shard-*.tar
     weight: 4
-  - name: ego4d_cooking_and_cleaning
+  - name: ego4d_cooking_and_cleaning_train_rechunked
     shard_urls: ${wds_base_dir}/ego4d_cooking_and_cleaning_train_rechunked/shard-*.tar
     weight: 8
-  - name: ego4d_other
+  - name: ego4d_other_train_rechunked
     shard_urls: ${wds_base_dir}/ego4d_other_train_rechunked/shard-*.tar
     weight: 8
 
@@ -42,7 +43,7 @@ vla_wds_datasets:
 val_vla_wds_datasets:
   - name: taco_test_seen
     shard_urls: ${val_wds_base_dir}/taco_test_seen/shard-*.tar
-  - name: oakink2_test_seen
+  - name: oakink2_test_seen_presence_clean
     shard_urls: ${val_wds_base_dir}/oakink2_test_seen_presence_clean/shard-*.tar
-  - name: egodex_test
+  - name: egodex_filter_test_presence_clean
     shard_urls: ${val_wds_base_dir}/egodex_filter_test_presence_clean/shard-*.tar

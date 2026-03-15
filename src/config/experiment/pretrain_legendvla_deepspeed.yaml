@@ -113,7 +113,7 @@ vlm_processor:
 
 dataloader:
   loader:
-    batch_size: 12
+    batch_size: 20
     num_workers: 4
     pin_memory: True
     persistent_workers: True
@@ -121,7 +121,7 @@ dataloader:
 
 val_dataloader:
   loader:
-    batch_size: 12
+    batch_size: 20
     shuffle: False
     drop_last: False
     num_workers: 4
