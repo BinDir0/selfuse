@@ -308,7 +308,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         print("Loading normalizer...")
         assert cfg.training.normalizer_path is not None, (
             "WebDataset training requires a pre-computed normalizer_path.")
-        normalizer = pickle.load(open(cfg.training.normalizer_path, 'rb'))
+        with open(cfg.training.normalizer_path, 'rb') as f:
+            normalizer = pickle.load(f)
         dataset.vla_dataset.set_normalizer(normalizer)
         self.normalizer = normalizer
 

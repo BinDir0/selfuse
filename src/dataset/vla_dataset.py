@@ -2,7 +2,9 @@
 WebDataset-based VLA datasets for LegendVLA training and normalizer fitting.
 """
 
+import glob
 import warnings
+from collections import Counter
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -14,7 +16,7 @@ from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image
 from .collator import LegendVLDataCollator, ConcatDataCollator
 from .wds_dataset import (
-    build_blended_dataset, WindowConfig, LOWDIM_SLICES,
+    build_blended_dataset, build_wds_pipeline, WindowConfig, LOWDIM_SLICES,
 )
 
 
@@ -395,8 +397,26 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
 class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
     """Low-level WebDataset for normalizer fitting (state/action only, no images).
 
-    Streams lowdim data from WebDataset shards, applies process_state_action(),
-    and yields {'states': ..., 'actions': ...} or {'motions': ...} for normalizer.
+    This dataset is dedicated to normalizer computation. In practice it should
+    run with ``mode="val"`` so the scan is a finite single pass over shards,
+    without the training-time ``resampled=True`` behavior.
+
+    Sampling notes:
+    - ``max_total_shards`` caps the total number of scanned shards. This keeps
+      the approximation logic at shard level instead of introducing frame-level
+      early stop semantics inside the dataloader.
+    - ``min_shards_per_dataset`` is a per-dataset coverage floor. After the
+      floor is reserved, the remaining shard pool is sampled without replacement.
+      Larger datasets naturally contribute more shards because they occupy more
+      entries in that remaining pool.
+    - The final shard list preserves dataset-grouped ordering after shard
+      selection is finished. Since selected shards are scanned to completion,
+      the normalizer statistics depend on coverage rather than on an additional
+      mixing order.
+    - The collator intentionally concatenates rows instead of stacking windows.
+      History/action horizons can be shorter under ``truncate`` mode; concat
+      preserves only valid rows and lets the streaming normalizer consume a flat
+      matrix directly.
     """
 
     def __init__(
@@ -404,6 +424,10 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         wds_datasets: List[Dict],
         shape_meta: Dict,
         use_relative_action: bool = False,
+        mode: str = "val",
+        max_total_shards: Optional[int] = None,
+        min_shards_per_dataset: int = 8,
+        seed: int = 0,
         history_pad_mode: str = "repeat",
         future_pad_mode: str = "repeat",
         lowdim_slices: Optional[Dict] = None,
@@ -414,7 +438,29 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         self.motion_type = shape_meta["obs"]["state"]["type"]
         self.hand_ndim = shape_meta["obs"]["state"]["hand"]["shape"][-1] // 2
         self.use_relative_action = use_relative_action
+        self.mode = mode
+        self.max_total_shards = max_total_shards
+        self.min_shards_per_dataset = min_shards_per_dataset
+        self.seed = seed
         self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
+        self.dataset_index_to_name = {
+            dataset_index: dataset_cfg.get("name", f"dataset_{dataset_index}")
+            for dataset_index, dataset_cfg in enumerate(self.wds_datasets)
+        }
+        self.dataset_name_to_index = {
+            dataset_name: dataset_index
+            for dataset_index, dataset_name in self.dataset_index_to_name.items()
+        }
+
+        if self.mode != "val":
+            warnings.warn(
+                "VLALowLevelWdsDataset is intended for normalizer fitting and usually "
+                "should run with mode='val' for a finite single-pass scan."
+            )
+        if self.min_shards_per_dataset < 1:
+            raise ValueError("min_shards_per_dataset must be >= 1")
+        if self.max_total_shards is not None and self.max_total_shards < 1:
+            raise ValueError("max_total_shards must be >= 1 when provided")
 
         self.window_config = WindowConfig(
             action_horizon=shape_meta["action"]["horizon"],
@@ -441,37 +487,145 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             use_relative_action=self.use_relative_action,
         )
 
+        dataset_name = sample["dataset_name"]
+        dataset_index = self.dataset_name_to_index.get(dataset_name)
+        if dataset_index is None:
+            raise KeyError(f"Unknown dataset_name in sample: {dataset_name}")
+
         if not self.use_relative_action:
-            data = {
+            return {
                 "motions": np.concatenate([state, action], axis=0),
+                "_dataset_index": np.asarray([dataset_index], dtype=np.int32),
             }
+        return {
+            "states": state,
+            "actions": action,
+            "_dataset_index": np.asarray([dataset_index], dtype=np.int32),
+        }
+
+    def build_shard_groups(self):
+        """Expand shard globs and shuffle each dataset independently."""
+        shard_groups = []
+        for dataset_index, dataset_cfg in enumerate(self.wds_datasets):
+            shard_spec = dataset_cfg["shard_urls"]
+            if isinstance(shard_spec, str):
+                shard_urls = sorted(glob.glob(shard_spec))
+                shard_spec_metadata = shard_spec
+            else:
+                shard_urls = list(shard_spec)
+                shard_spec_metadata = [str(url) for url in shard_urls]
+            if not shard_urls:
+                warnings.warn(
+                    f"No shards found for {dataset_cfg.get('name', '?')}, skipping."
+                )
+                continue
+
+            rng = np.random.default_rng(self.seed + dataset_index)
+            order = rng.permutation(len(shard_urls)).tolist()
+            shuffled_urls = [shard_urls[idx] for idx in order]
+            shard_groups.append({
+                "dataset_index": dataset_index,
+                "name": dataset_cfg.get("name", f"dataset_{dataset_index}"),
+                "shard_spec": shard_spec_metadata,
+                "shard_urls": shuffled_urls,
+            })
+
+        if not shard_groups:
+            raise ValueError("No shards found across all datasets.")
+        return shard_groups
+
+    def select_shards(self):
+        """Select final shard URLs with a coverage floor and random remainder sampling."""
+        shard_groups = self.build_shard_groups()
+        selected_shards = []
+        remaining_shards = []
+        minimum_selected = 0
+
+        for group in shard_groups:
+            base_count = min(len(group["shard_urls"]), self.min_shards_per_dataset)
+            selected_shards.extend(
+                (group["dataset_index"], shard_url)
+                for shard_url in group["shard_urls"][:base_count]
+            )
+            remaining_shards.extend(
+                (group["dataset_index"], shard_url)
+                for shard_url in group["shard_urls"][base_count:]
+            )
+            minimum_selected += base_count
+
+        if self.max_total_shards is not None and self.max_total_shards < minimum_selected:
+            raise ValueError(
+                "max_total_shards is smaller than the required minimum shard coverage"
+            )
+
+        if self.max_total_shards is None:
+            extra_budget = len(remaining_shards)
         else:
-            data = {
-                "states": state,
-                "actions": action,
-            }
-        return data
+            extra_budget = min(
+                len(remaining_shards),
+                self.max_total_shards - minimum_selected,
+            )
+
+        if extra_budget > 0:
+            rng = np.random.default_rng(self.seed)
+            chosen_indices = np.sort(rng.permutation(len(remaining_shards))[:extra_budget])
+            selected_shards.extend(
+                remaining_shards[int(pool_index)] for pool_index in chosen_indices
+            )
+
+        return shard_groups, selected_shards
+
+    def build_shard_urls(self):
+        """Build the final shard list used for normalizer fitting."""
+        _, selected_shards = self.select_shards()
+        return [shard_url for _, shard_url in selected_shards]
+
+    def describe_shard_selection(self):
+        """Return a JSON-serializable summary of shard coverage."""
+        shard_groups, selected_shards = self.select_shards()
+        selected_counts = Counter(dataset_index for dataset_index, _ in selected_shards)
+        datasets = []
+        for group in shard_groups:
+            available_count = len(group["shard_urls"])
+            selected_count = selected_counts.get(group["dataset_index"], 0)
+            datasets.append({
+                "name": group["name"],
+                "shard_spec": group["shard_spec"],
+                "available_shards": available_count,
+                "selected_shards": selected_count,
+                "full_coverage": selected_count == available_count,
+                "selected_fraction": (
+                    float(selected_count) / float(available_count)
+                    if available_count > 0 else 0.0
+                ),
+            })
+
+        available_total = sum(item["available_shards"] for item in datasets)
+        selected_total = len(selected_shards)
+        return {
+            "mode": self.mode,
+            "seed": self.seed,
+            "max_total_shards": self.max_total_shards,
+            "min_shards_per_dataset": self.min_shards_per_dataset,
+            "available_shards_total": available_total,
+            "selected_shards_total": selected_total,
+            "full_dataset_coverage": selected_total == available_total,
+            "datasets": datasets,
+        }
 
     def build_pipeline(self):
         """Build a streaming pipeline for lowdim-only data."""
-        datasets_config = []
-        for ds in self.wds_datasets:
-            datasets_config.append({
-                "shard_urls": ds["shard_urls"],
-                "weight": ds.get("weight", 1.0),
-                "name": ds.get("name", "unknown"),
-            })
+        shard_urls = self.build_shard_urls()
 
         def preprocess_fn(sample):
             try:
                 data = self.sample_to_data(sample)
-                torch_data = {
-                    k: torch.from_numpy(v) if isinstance(v, np.ndarray) else v
-                    for k, v in data.items()
+                return {
+                    key: torch.from_numpy(value) if isinstance(value, np.ndarray) else value
+                    for key, value in data.items()
                 }
-                return torch_data
-            except Exception as e:
-                warnings.warn(f"Error in lowlevel preprocess: {e}")
+            except Exception as exc:
+                warnings.warn(f"Error in lowlevel preprocess: {exc}")
                 return None
 
         def filter_none(src):
@@ -480,13 +634,13 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
                     sample.pop("__key__", None)
                     yield sample
 
-        pipeline = build_blended_dataset(
-            datasets_config=datasets_config,
+        pipeline = build_wds_pipeline(
+            shard_urls=shard_urls,
             config=self.window_config,
             lowdim_slices=self.lowdim_slices,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=0,
-            mode="train",
+            mode=self.mode,
             use_sliding_window=True,
             lowdim_only=True,
         )
@@ -497,5 +651,9 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         return iter(pipeline)
 
     def get_collator(self):
-        """Return ConcatDataCollator for normalizer fitting."""
+        """Return ConcatDataCollator for normalizer fitting.
+
+        Concatenation keeps only valid lowdim rows when truncate padding is used,
+        and avoids stacking windows only to flatten them again for streaming stats.
+        """
         return ConcatDataCollator()

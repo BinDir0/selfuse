@@ -119,4 +119,5 @@ class ConcatDataCollator(BaseDataCollator):
                 batch[key] = np.concatenate([item[key] for item in data_list], axis=0)
             else: # list
                 batch[key] = [item[key] for item in data_list]
+        batch["_batch_num_samples"] = len(data_list)
         return batch

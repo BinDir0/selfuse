@@ -306,6 +306,11 @@ def no_split(src):
     yield from src
 
 
+def select_lowdim_files(fname):
+    """Keep only lowdim metadata files for lowdim-only pipelines."""
+    return fname.endswith("meta.json") or fname.endswith("lowdim.npy")
+
+
 def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
                        preprocess_fn=None, shuffle_buffer=8192, mode='train',
                        use_sliding_window=True, lowdim_only=False):
@@ -342,12 +347,15 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     # - default deterministic=False, and its seed mixes worker_seed/epoch
     #   with pid/time_ns/os.urandom, so shard sampling is time-dependent
     # - this is not fully controlled by torch/manual seed alone
+    select_files = select_lowdim_files if lowdim_only else None
+
     pipeline = wds.WebDataset(
         shard_urls,
         shardshuffle=False,
         nodesplitter=wds.split_by_node,
         resampled=is_train,
         empty_check=False,
+        select_files=select_files,
     )
     if lowdim_only:
         # Only decode lowdim.npy and meta.json, drop everything else

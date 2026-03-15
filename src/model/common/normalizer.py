@@ -238,6 +238,11 @@ class LinearNormalizer(DictOfTensorMixin):
         params = self.params_dict[key]
         params['scale'][dim] = 1.0
         params['offset'][dim] = 0.0
+        # Prevent q01/q99 clipping on ignored dimensions so that
+        # _normalize passes these values through unchanged.
+        if 'input_stats' in params:
+            params['input_stats']['q01'][dim] = float('-inf')
+            params['input_stats']['q99'][dim] = float('inf')
     
     def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> Union[Dict, torch.Tensor]:
         return self.normalize(x)
