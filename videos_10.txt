@@ -1,0 +1,10 @@
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop000.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop001.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop002.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop003.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop005.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop006.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop007.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00000_crop008.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00001_crop000.mp4
+/share_data/lvjianan/datasets/BuildAI-processed/factory_001/worker_001/processed/factory001_worker001_00001_crop001.mp4
