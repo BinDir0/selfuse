@@ -61,20 +61,22 @@ def build_metric3d_runner(weight_path=None):
     return metric
 
 
-def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size=32, droid_net=None):
+def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size=32, droid_net=None, frame_source=None, seq_folder=None):
     import time
     timing = {}
     t_start = time.time()
 
     # File and folders
-    file = args.video_path
-    video_root = os.path.dirname(file)
-    video = os.path.basename(file).split('.')[0]
-    seq_folder = os.path.join(video_root, video)
+    if seq_folder is None:
+        file = args.video_path
+        video_root = os.path.dirname(file)
+        video = os.path.basename(file).split('.')[0]
+        seq_folder = os.path.join(video_root, video)
     os.makedirs(seq_folder, exist_ok=True)
-    video_folder = os.path.join(video_root, video)
+    video_folder = seq_folder
 
-    frame_source = build_frame_source(file)
+    if frame_source is None:
+        frame_source = build_frame_source(args.video_path)
 
     first_img = frame_source.get_frame(0, rgb=False)
     height, width, _ = first_img.shape

@@ -82,84 +82,58 @@ class ImageFolderFrameSource(BaseFrameSource):
         return frame
 
 
-class WebDatasetFrameSource(BaseFrameSource):
-    """Frame source that reads from WebDataset tar archives."""
+class ShardVideoFrameSource(BaseFrameSource):
+    """Frame source that reads a single video's frames from a WebDataset tar shard.
 
-    def __init__(self, tar_pattern, use_turbojpeg=True, cache_shards=True):
+    Unlike reading all frames from a tar, this reads only the frames belonging
+    to one specific video (identified by a pre-built frame_names list).
+    """
+
+    def __init__(self, tar_path, frame_names, use_turbojpeg=True):
         """
         Args:
-            tar_pattern: Glob pattern for tar files, e.g.,
-                        "/path/to/video/frames_*.tar"
-            use_turbojpeg: Use TurboJPEG for faster decoding if available
-            cache_shards: Keep tar file handles open for faster sequential access
+            tar_path: Path to the tar shard containing this video's frames.
+            frame_names: Sorted list of JPEG filenames within the tar for this video.
+            use_turbojpeg: Use TurboJPEG for faster decoding if available.
         """
-        import glob
+        import tarfile
 
-        self.tar_files = sorted(glob.glob(tar_pattern))
-        if not self.tar_files:
-            raise FileNotFoundError(f"No tar files found: {tar_pattern}")
+        self.tar_path = tar_path
+        self.frame_names = list(frame_names)
+
+        if len(self.frame_names) == 0:
+            raise RuntimeError(f"ShardVideoFrameSource requires non-empty frame_names for {tar_path}")
 
         if not QUIET_MODE:
-            print(f"WebDatasetFrameSource: {len(self.tar_files)} tar shards")
-
-        # Build index: frame_idx -> (tar_file, member_name)
-        self._build_index()
+            print(f"ShardVideoFrameSource: {len(self.frame_names)} frames from {os.path.basename(tar_path)}")
 
         self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE
         if self.use_turbojpeg:
             self.jpeg_decoder = TurboJPEG()
 
-        # Shard-level caching for performance
-        self.cache_shards = cache_shards
-        self._tar_cache = {}  # {tar_path: tarfile.TarFile}
-        self._cache_size_limit = 2  # Keep 2 shards open
+        # Lazy-opened tar handle (single shard, no LRU needed)
+        self._tar = None
 
-    def _build_index(self):
-        """Scan tar files to build frame index."""
-        import tarfile
-        self.frame_index = []  # [(tar_path, member_name), ...]
-
-        for tar_path in self.tar_files:
-            with tarfile.open(tar_path, 'r') as tar:
-                members = sorted([m for m in tar.getmembers() if m.isfile()],
-                               key=lambda m: m.name)
-                for member in members:
-                    if member.name.endswith(('.jpg', '.jpeg', '.png')):
-                        self.frame_index.append((tar_path, member.name))
-
-        if not QUIET_MODE:
-            print(f"WebDatasetFrameSource: indexed {len(self.frame_index)} frames")
+    def _get_tar(self):
+        if self._tar is None:
+            import tarfile
+            self._tar = tarfile.open(self.tar_path, 'r')
+        return self._tar
 
     def __len__(self):
-        return len(self.frame_index)
+        return len(self.frame_names)
 
     def get_frame(self, index: int, rgb: bool = False):
-        import tarfile
-
-        if index < 0 or index >= len(self.frame_index):
+        if index < 0 or index >= len(self.frame_names):
             raise IndexError(
-                f"Frame index {index} out of range [0, {len(self.frame_index)}). "
-                f"Total frames available: {len(self.frame_index)}"
+                f"Frame index {index} out of range [0, {len(self.frame_names)}). "
+                f"Total frames available: {len(self.frame_names)}"
             )
 
-        tar_path, member_name = self.frame_index[index]
-
-        # Use cached tar file if available
-        if self.cache_shards and tar_path in self._tar_cache:
-            tar = self._tar_cache[tar_path]
-        else:
-            tar = tarfile.open(tar_path, 'r')
-            if self.cache_shards:
-                self._tar_cache[tar_path] = tar
-                # LRU eviction if cache full
-                if len(self._tar_cache) > self._cache_size_limit:
-                    oldest = next(iter(self._tar_cache))
-                    self._tar_cache[oldest].close()
-                    del self._tar_cache[oldest]
-
+        member_name = self.frame_names[index]
+        tar = self._get_tar()
         member = tar.getmember(member_name)
-        f = tar.extractfile(member)
-        jpeg_data = f.read()
+        jpeg_data = tar.extractfile(member).read()
 
         if self.use_turbojpeg and member_name.lower().endswith(('.jpg', '.jpeg')):
             try:
@@ -171,16 +145,15 @@ class WebDatasetFrameSource(BaseFrameSource):
 
         frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
-            raise RuntimeError(f"Failed to decode image from tar: {tar_path}/{member_name}")
+            raise RuntimeError(f"Failed to decode image from tar: {self.tar_path}/{member_name}")
         if rgb:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return frame
 
     def __del__(self):
-        """Close all cached tar files on cleanup."""
-        for tar in self._tar_cache.values():
+        if self._tar is not None:
             try:
-                tar.close()
+                self._tar.close()
             except Exception:
                 pass
 
@@ -233,11 +206,9 @@ def _frame_dataset_worker_init(worker_id):
 
 
 def build_frame_source(video_path: str):
-    """Build frame source from pre-extracted frames (JPEG or WebDataset).
+    """Build an ImageFolderFrameSource from pre-extracted frames.
 
-    Auto-detects format:
-    - If frames_*.tar exists → WebDatasetFrameSource (new format)
-    - If extracted_images/ exists with JPEGs → ImageFolderFrameSource (old format)
+    For WebDataset format, use ShardVideoFrameSource directly instead.
     """
     from pathlib import Path
     import glob
@@ -247,18 +218,7 @@ def build_frame_source(video_path: str):
     video_dir = video_path_obj.parent
     video_stem = video_path_obj.stem
 
-    base_dir = video_dir / video_stem
-
-    # Check for WebDataset tar files first (new format)
-    tar_pattern = str(base_dir / "frames_*.tar")
-    tar_files = glob.glob(tar_pattern)
-    if tar_files:
-        if not QUIET_MODE:
-            print(f"Using WebDataset frames: {tar_pattern} ({len(tar_files)} shards)")
-        return WebDatasetFrameSource(tar_pattern)
-
-    # Fall back to JPEG folder (old format)
-    extracted_dir = base_dir / "extracted_images"
+    extracted_dir = video_dir / video_stem / "extracted_images"
     if extracted_dir.exists():
         image_files = natsorted(glob.glob(str(extracted_dir / "*.jpg")))
         if not image_files:
@@ -270,7 +230,7 @@ def build_frame_source(video_path: str):
             return ImageFolderFrameSource(image_files)
 
     raise FileNotFoundError(
-        f"No frames found for {video_path}. Expected either:\n"
-        f"  - WebDataset: {tar_pattern}\n"
-        f"  - JPEG folder: {extracted_dir}/*.jpg"
+        f"No frames found for {video_path}. Expected:\n"
+        f"  - JPEG folder: {extracted_dir}/*.jpg\n"
+        f"  - Or use ShardVideoFrameSource for WebDataset format"
     )

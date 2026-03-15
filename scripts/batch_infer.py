@@ -39,13 +39,20 @@ tempfile.tempdir = str(SHARED_TMP_DIR)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STAGES = ["detect_track", "motion", "slam", "infiller"]
 
+# Add project root to path for imports
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from lib.pipeline.video_index import VideoDescriptor, collect_videos_from_factory, collect_videos_from_factories
+
 
 class VideoTask:
-    def __init__(self, video_path: str, run_id: str, log_dir: Path):
+    def __init__(self, video_path: str, run_id: str, log_dir: Path, descriptor: VideoDescriptor = None):
         self.video_path = video_path
-        self.video_name = Path(video_path).stem
+        self.video_name = Path(video_path).stem if not descriptor else descriptor.video_key
         self.run_id = run_id
         self.log_dir = log_dir
+        self.descriptor = descriptor
         self.stage_status = {stage: "pending" for stage in STAGES}
         self.retry_count = {stage: 0 for stage in STAGES}
         self.start_time = None
@@ -86,6 +93,7 @@ class BatchScheduler:
         persistent_worker: bool,
         max_stage_retries: int,
         enable_profiler: bool = False,
+        descriptors: List[VideoDescriptor] = None,
     ):
         self.video_paths = video_paths
         self.gpus = gpus
@@ -108,6 +116,7 @@ class BatchScheduler:
         self.persistent_worker = persistent_worker
         self.max_stage_retries = max_stage_retries
         self.enable_profiler = enable_profiler
+        self.descriptors = descriptors  # Optional list of VideoDescriptors (same length as video_paths)
 
         self.log_dir = run_dir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -118,8 +127,9 @@ class BatchScheduler:
         self.tasks: Dict[str, VideoTask] = {}
         self.lock = mp.Lock()
 
-        for vp in video_paths:
-            task = VideoTask(vp, run_dir.name, self.log_dir)
+        for i, vp in enumerate(video_paths):
+            desc = descriptors[i] if descriptors else None
+            task = VideoTask(vp, run_dir.name, self.log_dir, descriptor=desc)
             self.tasks[vp] = task
 
     def emit_event(self, event: str, **kwargs):
@@ -157,7 +167,8 @@ class BatchScheduler:
     def run_stage_subprocess(
         self, video_path: str, stage: str, gpu: int
     ) -> Tuple[int, str, str]:
-        log_file = self.log_dir / f"{Path(video_path).stem}_{stage}.log"
+        task = self.tasks[video_path]
+        log_file = self.log_dir / f"{task.video_name}_{stage}.log"
         cmd = [
             sys.executable,
             str(PROJECT_ROOT / "scripts" / "batch_worker.py"),
@@ -167,6 +178,9 @@ class BatchScheduler:
             "--checkpoint", self.checkpoint,
             "--infiller_weight", self.infiller_weight,
         ]
+        # Pass descriptor if available
+        if task.descriptor is not None:
+            cmd.extend(["--video_descriptor", task.descriptor.to_json()])
         if self.img_focal is not None:
             cmd.extend(["--img_focal", str(self.img_focal)])
         cmd.extend(["--run_dir", str(self.run_dir)])
@@ -209,7 +223,12 @@ class BatchScheduler:
         list_file = self.run_dir / f"stage_{stage}_gpu{gpu}_videos.txt"
         with open(list_file, "w") as f:
             for vp in video_paths:
-                f.write(vp + "\n")
+                task = self.tasks[vp]
+                if task.descriptor is not None:
+                    # Write as JSON Lines for WebDataset mode
+                    f.write(task.descriptor.to_json() + "\n")
+                else:
+                    f.write(vp + "\n")
 
         log_file = self.log_dir / f"stage_wave_{stage}_gpu{gpu}.log"
         cmd = [
@@ -265,8 +284,12 @@ class BatchScheduler:
     def verify_stage_complete(self, video_path: str, stage: str) -> bool:
         """Verify that stage output actually exists on disk (fast check)."""
         try:
-            video_path_obj = Path(video_path)
-            seq_folder = video_path_obj.parent / video_path_obj.stem
+            task = self.tasks.get(video_path)
+            if task and task.descriptor:
+                seq_folder = Path(task.descriptor.seq_folder)
+            else:
+                video_path_obj = Path(video_path)
+                seq_folder = video_path_obj.parent / video_path_obj.stem
 
             # Import validation function from batch_worker
             sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
@@ -984,6 +1007,16 @@ def get_parser():
         type=str,
         help="Directory to recursively search for video files",
     )
+    input_group.add_argument(
+        "--factory_dir",
+        type=str,
+        help="WebDataset factory directory containing tar shards",
+    )
+    input_group.add_argument(
+        "--factory_list",
+        type=str,
+        help="Path to text file with one factory directory per line",
+    )
 
     parser.add_argument(
         "--gpus",
@@ -1134,11 +1167,27 @@ def get_parser():
 def main():
     args = get_parser().parse_args()
 
+    descriptors = None  # Will be set for factory mode
+
     if args.video_list:
         with open(args.video_list) as f:
             video_paths = [line.strip() for line in f if line.strip()]
-    else:
+    elif args.video_dir:
         video_paths = collect_videos(Path(args.video_dir))
+    elif args.factory_dir:
+        descs = collect_videos_from_factory(args.factory_dir)
+        descriptors = descs
+        video_paths = [d.video_key for d in descs]
+        print(f"Factory mode: {args.factory_dir}")
+        print(f"Discovered {len(descs)} videos from factory")
+    elif args.factory_list:
+        with open(args.factory_list) as f:
+            factory_dirs = [line.strip() for line in f if line.strip()]
+        descs = collect_videos_from_factories(factory_dirs)
+        descriptors = descs
+        video_paths = [d.video_key for d in descs]
+        print(f"Factory mode: {len(factory_dirs)} factories")
+        print(f"Discovered {len(descs)} videos total")
 
     if not video_paths:
         print("Error: No videos found", file=sys.stderr)
@@ -1158,6 +1207,8 @@ def main():
         sys.exit(1)
 
     video_paths = video_paths[start_idx:end_idx]
+    if descriptors is not None:
+        descriptors = descriptors[start_idx:end_idx]
 
     if not video_paths:
         print(f"Error: No videos in range [{start_idx}, {end_idx})", file=sys.stderr)
@@ -1216,6 +1267,7 @@ def main():
         persistent_worker=args.persistent_worker,
         max_stage_retries=args.max_stage_retries,
         enable_profiler=args.enable_profiler,
+        descriptors=descriptors,
     )
 
     success = scheduler.run()

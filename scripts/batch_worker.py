@@ -25,6 +25,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lib.pipeline.video_index import VideoDescriptor
+from lib.pipeline.frame_source import ShardVideoFrameSource
+
 # Set temporary directory to shared storage instead of local /tmp
 # IMPORTANT: Set this AFTER importing torch to avoid library loading issues
 SHARED_TMP_DIR = Path("/share_data/guantianrui/tmp")
@@ -52,7 +55,9 @@ def set_determinism(seed: int):
     torch.backends.cudnn.benchmark = True
 
 
-def get_seq_folder(video_path: str) -> Path:
+def get_seq_folder(video_path: str = None, descriptor: VideoDescriptor = None) -> Path:
+    if descriptor is not None:
+        return Path(descriptor.seq_folder)
     video_path = Path(video_path)
     return video_path.parent / video_path.stem
 
@@ -378,8 +383,18 @@ def build_stage_args(ns):
 
 
 def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
-    stage_args = runtime.build_stage_args(ns.video_path)
-    seq_folder = get_seq_folder(ns.video_path)
+    # Determine frame_source and seq_folder from descriptor or video_path
+    descriptor = getattr(ns, '_descriptor', None)
+    if descriptor is not None:
+        seq_folder = Path(descriptor.seq_folder)
+        frame_source = ShardVideoFrameSource(descriptor.shard_path, descriptor.frame_names)
+        stage_args = runtime.build_stage_args(descriptor.video_key)
+        # Set a dummy video_path on stage_args for legacy code paths
+        stage_args.video_path = descriptor.video_key
+    else:
+        seq_folder = get_seq_folder(ns.video_path)
+        frame_source = None
+        stage_args = runtime.build_stage_args(ns.video_path)
 
     if ns.resume and not ns.force and is_stage_complete(ns.stage, seq_folder, fast_check=True):
         return {
@@ -402,6 +417,8 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
             num_io_workers=ns.detect_io_workers,
             device=ns.detect_device,
             half_precision=ns.detect_half_precision,
+            frame_source=frame_source,
+            seq_folder=str(seq_folder),
         )
     else:
         start_idx, end_idx = get_track_range(seq_folder, fast=True)
@@ -429,9 +446,10 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
             motion_runner=runtime.motion_runner,
             mano_models=mano_models,
             prefetched_data=prefetched_data,
+            frame_source=frame_source,
         )
     elif ns.stage == "slam":
-        hawor_slam(stage_args, start_idx, end_idx, metric_runner=runtime.metric_runner, metric3d_batch_size=ns.metric3d_batch_size, droid_net=runtime.droid_net)
+        hawor_slam(stage_args, start_idx, end_idx, metric_runner=runtime.metric_runner, metric3d_batch_size=ns.metric3d_batch_size, droid_net=runtime.droid_net, frame_source=frame_source, seq_folder=str(seq_folder))
     elif ns.stage == "infiller":
         tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
         frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
@@ -441,6 +459,8 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
             end_idx,
             frame_chunks_all,
             infiller_runner=runtime.infiller_runner,
+            frame_source=frame_source,
+            seq_folder=str(seq_folder),
         )
     elif ns.stage == "detect_track":
         pass
@@ -475,15 +495,31 @@ def worker_runtime_loop(ns):
     )
 
     with open(ns.video_list) as f:
-        video_paths = [line.strip() for line in f if line.strip()]
+        lines = [line.strip() for line in f if line.strip()]
+
+    # Detect format: JSON Lines (descriptor) or plain paths
+    descriptors = []
+    for line in lines:
+        if line.startswith('{'):
+            descriptors.append(VideoDescriptor.from_json(line))
+        else:
+            descriptors.append(None)  # plain video_path mode
 
     overall_success = True
-    for video_path in video_paths:
+    for i, line in enumerate(lines):
         task_ns = argparse.Namespace(**vars(ns))
-        task_ns.video_path = video_path
+        desc = descriptors[i]
+        if desc is not None:
+            task_ns._descriptor = desc
+            task_ns.video_path = desc.video_key
+            video_label = desc.video_key
+        else:
+            task_ns._descriptor = None
+            task_ns.video_path = line
+            video_label = line
 
         common_fields = {
-            "video": task_ns.video_path,
+            "video": video_label,
             "stage": task_ns.stage,
             "gpu": task_ns.gpu,
         }
@@ -642,8 +678,9 @@ def get_parser():
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     parser.add_argument("--force", action="store_true", help="Ignore existing outputs and rerun this stage")
-    parser.add_argument("--video_list", type=str, help="Optional file with one video path per line for persistent worker mode")
+    parser.add_argument("--video_list", type=str, help="Optional file with one video path per line (or JSON Lines for WebDataset) for persistent worker mode")
     parser.add_argument("--persistent_worker", action="store_true", help="Run as long-lived stage worker for multiple videos")
+    parser.add_argument("--video_descriptor", type=str, help="JSON VideoDescriptor for WebDataset mode (alternative to --video_path)")
     parser.add_argument("--enable_profiler", action="store_true", help="Enable torch profiler to diagnose performance bottlenecks")
     parser.add_argument("--run_dir", type=str, help="Batch run directory for output organization")
     return parser
@@ -651,6 +688,14 @@ def get_parser():
 
 if __name__ == "__main__":
     args = get_parser().parse_args()
+
+    # Parse video_descriptor if provided
+    if args.video_descriptor:
+        args._descriptor = VideoDescriptor.from_json(args.video_descriptor)
+        if not args.video_path:
+            args.video_path = args._descriptor.video_key
+    else:
+        args._descriptor = None
 
     if args.persistent_worker:
         if not args.video_list:

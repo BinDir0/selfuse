@@ -17,16 +17,17 @@ def vprint(*args, **kwargs):
         print(*args, **kwargs)
 
 
-def detect_track_video(args, detector_runner=None, force=False, detect_batch_size=128, num_io_workers=8, device='cuda:0', half_precision=True):
-    file = args.video_path
-    root = os.path.dirname(file)
-    seq = os.path.basename(file).split('.')[0]
+def detect_track_video(args, detector_runner=None, force=False, detect_batch_size=128, num_io_workers=8, device='cuda:0', half_precision=True, frame_source=None, seq_folder=None):
+    if seq_folder is None:
+        file = args.video_path
+        root = os.path.dirname(file)
+        seq = os.path.basename(file).split('.')[0]
+        seq_folder = f'{root}/{seq}'
+    if frame_source is None:
+        frame_source = build_frame_source(args.video_path)
 
-    seq_folder = f'{root}/{seq}'
     os.makedirs(seq_folder, exist_ok=True)
-    vprint(f'Running detect_track on {file} ...')
-
-    frame_source = build_frame_source(file)
+    vprint(f'Running detect_track on {seq_folder} ...')
 
     ##### Detection + Track #####
     vprint('Detect and Track ...')

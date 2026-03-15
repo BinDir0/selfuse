@@ -83,7 +83,7 @@ def build_infiller_runner(weight_path, device=None):
     }
 
 
-def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=None, profiler=None, mano_models=None, prefetched_data=None):
+def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=None, profiler=None, mano_models=None, prefetched_data=None, frame_source=None):
     import time
     timing = {}
     t_start_total = time.time()
@@ -151,12 +151,13 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
 
     video_path = args.video_path
 
-    # Use prefetched data if available, otherwise load fresh
+    # Use prefetched data if available, then explicit frame_source, otherwise load fresh
     if prefetched_data is not None:
         frame_source = prefetched_data['frame_source']
         tracks = prefetched_data['tracks']
     else:
-        frame_source = build_frame_source(video_path)
+        if frame_source is None:
+            frame_source = build_frame_source(args.video_path)
         tracks = np.load(f'{seq_folder}/tracks_{start_idx}_{end_idx}/model_tracks.npy', allow_pickle=True).item()
 
     # Validate and auto-fix tracks that reference frames beyond available frames
@@ -542,16 +543,18 @@ def hawor_motion_estimation(args, start_idx, end_idx, seq_folder, profiler=None)
     return run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=None, profiler=profiler)
 
 
-def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_runner=None):
+def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_runner=None, frame_source=None, seq_folder=None):
     # load infiller
     infiller_runner = infiller_runner or build_infiller_runner(args.infiller_weight)
     filling_model = infiller_runner['model']
     device = infiller_runner['device']
     horizon = infiller_runner['horizon']
 
-    video_path = args.video_path
-    frame_source = build_frame_source(video_path)
-    seq_folder = os.path.join(os.path.dirname(video_path), os.path.basename(video_path).split('.')[0])
+    if seq_folder is None:
+        video_path = args.video_path
+        seq_folder = os.path.join(os.path.dirname(video_path), os.path.basename(video_path).split('.')[0])
+    if frame_source is None:
+        frame_source = build_frame_source(args.video_path)
 
     # Previous steps
     num_frames = len(frame_source)
