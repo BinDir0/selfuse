@@ -182,7 +182,8 @@ def main():
 
     torch.cuda.synchronize()
     t0 = time.time()
-    metric = Metric3D()
+    metric3d_weight = str(PROJECT_ROOT / 'thirdparty' / 'Metric3D' / 'weights' / 'metric_depth_vit_large_800k.pth')
+    metric = Metric3D(metric3d_weight)
     H, W = get_dimention(frame_source)
     pred_depths = []
     num_frames = len(tstamp)

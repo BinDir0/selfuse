@@ -50,7 +50,11 @@ def split_list_by_interval(lst, interval=1000):
     
     return start_indices, end_indices, split_lists
 
-def build_metric3d_runner(weight_path='thirdparty/Metric3D/weights/metric_depth_vit_large_800k.pth'):
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def build_metric3d_runner(weight_path=None):
+    if weight_path is None:
+        weight_path = os.path.join(_PROJECT_ROOT, 'thirdparty', 'Metric3D', 'weights', 'metric_depth_vit_large_800k.pth')
     block_print()
     metric = Metric3D(weight_path)
     enable_print()
