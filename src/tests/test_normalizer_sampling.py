@@ -143,24 +143,12 @@ def assert_stats_match(normalizer, key, rows):
     }
     for stat_name, expected_value in expected.items():
         actual = stats[stat_name].detach().to(torch.float64)
-        if stat_name in ("q01", "q99"):
-            # ignore_dim sets q01=-inf / q99=+inf on rotation dims;
-            # only compare the finite (non-ignored) dimensions.
-            finite_mask = torch.isfinite(actual)
-            if finite_mask.any():
-                torch.testing.assert_close(
-                    actual[finite_mask],
-                    expected_value[finite_mask],
-                    rtol=1e-5,
-                    atol=1e-5,
-                )
-        else:
-            torch.testing.assert_close(
-                actual,
-                expected_value,
-                rtol=1e-5,
-                atol=1e-5,
-            )
+        torch.testing.assert_close(
+            actual,
+            expected_value,
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 def test_get_normalizer_matches_direct_stats_with_concat_collator():

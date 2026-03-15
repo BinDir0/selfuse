@@ -238,11 +238,12 @@ class LinearNormalizer(DictOfTensorMixin):
         params = self.params_dict[key]
         params['scale'][dim] = 1.0
         params['offset'][dim] = 0.0
-        # Prevent q01/q99 clipping on ignored dimensions so that
-        # _normalize passes these values through unchanged.
-        if 'input_stats' in params:
-            params['input_stats']['q01'][dim] = float('-inf')
-            params['input_stats']['q99'][dim] = float('inf')
+
+        ignored_dim_mask = params.get('ignored_dim_mask')
+        if ignored_dim_mask is None:
+            ignored_dim_mask = torch.zeros_like(params['scale'])
+            params['ignored_dim_mask'] = nn.Parameter(ignored_dim_mask, requires_grad=False)
+        params['ignored_dim_mask'][dim] = 1.0
     
     def __call__(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> Union[Dict, torch.Tensor]:
         return self.normalize(x)
@@ -572,6 +573,13 @@ def _normalize(x, params, forward=True):
         if 'q01' in input_stats and 'q99' in input_stats:
             q01 = input_stats['q01']
             q99 = input_stats['q99']
+            ignored_dim_mask = params.get('ignored_dim_mask')
+            if ignored_dim_mask is not None:
+                ignored_dim_mask = ignored_dim_mask > 0.5
+                q01 = q01.clone()
+                q99 = q99.clone()
+                q01[ignored_dim_mask] = float('-inf')
+                q99[ignored_dim_mask] = float('inf')
             if is_numpy:
                 q01 = q01.cpu().numpy()
                 q99 = q99.cpu().numpy()
