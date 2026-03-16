@@ -45,8 +45,7 @@ def detect_track(
 
     if device:
         hand_det_model.to(device)
-    if half_precision and device and 'cuda' in device:
-        hand_det_model.model.half()
+    use_half = half_precision and device and 'cuda' in device
 
     num_frames = len(frame_source)
     img_h, img_w = frame_source.get_size()
@@ -71,7 +70,7 @@ def detect_track(
     for batch_indices, batch_frames in tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)"):
         with torch.no_grad():
             results_list = hand_det_model.predict(
-                batch_frames, conf=thresh, verbose=False
+                batch_frames, conf=thresh, verbose=False, half=use_half
             )
 
         for frame_idx, result in zip(batch_indices, results_list):
