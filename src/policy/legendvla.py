@@ -547,7 +547,7 @@ class LegendVLA(nn.Module):
                         
                         # If RGB was compressed (T -> 1) but Depth has T frames, take the last frame
                         if effective_frame_count == 1 and depth_frames > 1:
-                            depth_values = depth_values[:, -1, ...].clone() # Take last frame
+                            depth_values = depth_values[:, -1, ...] # Take last frame
                             depth_frames = 1
                             
                         depth_values = depth_values.reshape(depth_batch * depth_frames, depth_channels, depth_height, depth_width)

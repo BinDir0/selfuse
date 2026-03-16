@@ -32,7 +32,363 @@ vla_wds_datasets:
   - name: ego4d_other_train_rechunked
     shard_urls: ${wds_base_dir}/ego4d_other_train_rechunked/shard-*.tar
     weight: 8
-
+  - name: Arrange_magnets_by_color
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Arrange_magnets_by_color-*.tar
+    weight: 0.26
+  - name: Attach_magnetic_eraser_to_whiteboard
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Attach_magnetic_eraser_to_whiteboard-*.tar
+    weight: 0.31
+  - name: Close_book
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Close_book-*.tar
+    weight: 0.22
+  - name: Close_laptop
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Close_laptop-*.tar
+    weight: 0.27
+  - name: Close_the_toothpaste_cap
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Close_the_toothpaste_cap-*.tar
+    weight: 0.37
+  - name: Collect_scattered_paperclips
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Collect_scattered_paperclips-*.tar
+    weight: 0.13
+  - name: Cork_wine_test_tube
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Cork_wine_test_tube-*.tar
+    weight: 0.22
+  - name: Cover_object_with_paper_cup
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Cover_object_with_paper_cup-*.tar
+    weight: 0.15
+  - name: Cover_the_teapot_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Cover_the_teapot_merged-*.tar
+    weight: 0.19
+  - name: Deploy_laptop_cooling_stand_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Deploy_laptop_cooling_stand_merged-*.tar
+    weight: 0.13
+  - name: Dexterous_grasping
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Dexterous_grasping-*.tar
+    weight: 1.33
+  - name: Divide_cup
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Divide_cup-*.tar
+    weight: 0.35
+  - name: Find_and_take_specific_item_from_drawer_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Find_and_take_specific_item_from_drawer_merged-*.tar
+    weight: 0.25
+  - name: Flip_cup
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Flip_cup-*.tar
+    weight: 0.21
+  - name: Flip_object
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Flip_object-*.tar
+    weight: 0.14
+  - name: Flipping_the_calendar_page
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Flipping_the_calendar_page-*.tar
+    weight: 0.09
+  - name: Fold_clothes
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Fold_clothes-*.tar
+    weight: 0.24
+  - name: Fold_eyeglass_temples_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Fold_eyeglass_temples_merged-*.tar
+    weight: 0.16
+  - name: Fold_rag_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Fold_rag_merged-*.tar
+    weight: 0.26
+  - name: Hammer_hits_sponge
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Hammer_hits_sponge-*.tar
+    weight: 0.16
+  - name: Hand_gesture
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Hand_gesture-*.tar
+    weight: 0.2
+  - name: Hand_object
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Hand_object-*.tar
+    weight: 0.22
+  - name: Hang_small_items_on_hook
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Hang_small_items_on_hook-*.tar
+    weight: 0.01
+  - name: Ink_stamp
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Ink_stamp-*.tar
+    weight: 0.23
+  - name: Insert_straw
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Insert_straw-*.tar
+    weight: 0.22
+  - name: Iron_the_clothes
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Iron_the_clothes-*.tar
+    weight: 0.18
+  - name: Lay_towel_on_shelf
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Lay_towel_on_shelf-*.tar
+    weight: 0.31
+  - name: Lift_teapot
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Lift_teapot-*.tar
+    weight: 0.13
+  - name: Lift_trash_bag
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Lift_trash_bag-*.tar
+    weight: 0.2
+  - name: Open_book
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Open_book-*.tar
+    weight: 0.26
+  - name: Open_box
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Open_box-*.tar
+    weight: 0.23
+  - name: Open_drawer
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Open_drawer-*.tar
+    weight: 0.13
+  - name: Open_laptop
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Open_laptop-*.tar
+    weight: 0.13
+  - name: Open_small_drawer
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Open_small_drawer-*.tar
+    weight: 0.04
+  - name: Open_the_stationery_pouch
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Open_the_stationery_pouch-*.tar
+    weight: 0.07
+  - name: Open_toothpaste_cap_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Open_toothpaste_cap_merged-*.tar
+    weight: 0.15
+  - name: Pet_toy_animal
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pet_toy_animal-*.tar
+    weight: 0.25
+  - name: Pick_up_clip_with_magnet
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pick_up_clip_with_magnet-*.tar
+    weight: 0.27
+  - name: Pick_up_magnet
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pick_up_magnet-*.tar
+    weight: 0.16
+  - name: Pick_up_the_mouse_cable_end
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pick_up_the_mouse_cable_end-*.tar
+    weight: 0.04
+  - name: Pick_up_trash_bag
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pick_up_trash_bag-*.tar
+    weight: 0.13
+  - name: Place_books_into_backpack_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_books_into_backpack_merged-*.tar
+    weight: 0.17
+  - name: Place_bowls_or_plates_on_tray
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_bowls_or_plates_on_tray-*.tar
+    weight: 0.13
+  - name: Place_bread_on_tray
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_bread_on_tray-*.tar
+    weight: 0.18
+  - name: Place_item_at_specific_orientation
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_item_at_specific_orientation-*.tar
+    weight: 0.18
+  - name: Place_liner_on_tray
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_liner_on_tray-*.tar
+    weight: 0.27
+  - name: Place_object_into_box
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_object_into_box-*.tar
+    weight: 0.14
+  - name: Place_phone_on_stand
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_phone_on_stand-*.tar
+    weight: 0.27
+  - name: Place_screwdriver_in_rack_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_screwdriver_in_rack_merged-*.tar
+    weight: 0.17
+  - name: Place_slippers_on_shoe_rack
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_slippers_on_shoe_rack-*.tar
+    weight: 0.27
+  - name: Place_strainer_on_cup
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_strainer_on_cup-*.tar
+    weight: 0.18
+  - name: Place_the_cup_on_the_coaster
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_the_cup_on_the_coaster-*.tar
+    weight: 0.14
+  - name: Place_the_stapler_on_the_book
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_the_stapler_on_the_book-*.tar
+    weight: 0.17
+  - name: Place_the_toy_chick_into_the_card_slot
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Place_the_toy_chick_into_the_card_slot-*.tar
+    weight: 0.18
+  - name: Point_object
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Point_object-*.tar
+    weight: 0.14
+  - name: Pour_objects_out_of_box
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pour_objects_out_of_box-*.tar
+    weight: 0.26
+  - name: Pour_teapot
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pour_teapot-*.tar
+    weight: 0.18
+  - name: Pour_water
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pour_water-*.tar
+    weight: 0.17
+  - name: Press_keyboard
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Press_keyboard-*.tar
+    weight: 0.17
+  - name: Press_power_strip_button_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Press_power_strip_button_merged-*.tar
+    weight: 0.22
+  - name: Pull_a_huge_needle_tube
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pull_a_huge_needle_tube-*.tar
+    weight: 0.21
+  - name: Pull_out_the_building_blocks_with_both_hands
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pull_out_the_building_blocks_with_both_hands-*.tar
+    weight: 0.25
+  - name: Pull_out_tissue
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pull_out_tissue-*.tar
+    weight: 0.1
+  - name: Pull_the_tape_measure_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Pull_the_tape_measure_merged-*.tar
+    weight: 0.33
+  - name: Push_object
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Push_object-*.tar
+    weight: 0.17
+  - name: Push_object_to_color_region
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Push_object_to_color_region-*.tar
+    weight: 0.17
+  - name: Put_glasses_into_case
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_glasses_into_case-*.tar
+    weight: 0.31
+  - name: Put_glove_on_own_hand
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_glove_on_own_hand-*.tar
+    weight: 0.04
+  - name: Put_hat_on_mannequin
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_hat_on_mannequin-*.tar
+    weight: 0.22
+  - name: Put_items_into_container_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_items_into_container_merged-*.tar
+    weight: 0.1
+  - name: Put_marker_into_pen_holder
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_marker_into_pen_holder-*.tar
+    weight: 0.17
+  - name: Put_orange_in_basket
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_orange_in_basket-*.tar
+    weight: 0.17
+  - name: Put_spray_upright
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_spray_upright-*.tar
+    weight: 0.18
+  - name: Put_tea_bag_into_teapot_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_tea_bag_into_teapot_merged-*.tar
+    weight: 0.3
+  - name: Put_the_three_bottles_together
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_the_three_bottles_together-*.tar
+    weight: 0.11
+  - name: Put_the_toothbrush_and_toothpaste_into_the_cup_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_the_toothbrush_and_toothpaste_into_the_cup_merged-*.tar
+    weight: 0.3
+  - name: Put_toothpaste_into_toothpaste_box_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Put_toothpaste_into_toothpaste_box_merged-*.tar
+    weight: 0.17
+  - name: Remove_tape_from_object_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Remove_tape_from_object_merged-*.tar
+    weight: 0.2
+  - name: Scoop_water
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Scoop_water-*.tar
+    weight: 0.18
+  - name: Sort_objects
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Sort_objects-*.tar
+    weight: 0.04
+  - name: Sprinkle_seasoning_powder
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Sprinkle_seasoning_powder-*.tar
+    weight: 0.17
+  - name: Stack_block
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stack_block-*.tar
+    weight: 0.17
+  - name: Stack_paper_cups_into_column_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stack_paper_cups_into_column_merged-*.tar
+    weight: 0.35
+  - name: Stack_paper_cups_into_pyramid_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stack_paper_cups_into_pyramid_merged-*.tar
+    weight: 0.26
+  - name: Stack_tableware
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stack_tableware-*.tar
+    weight: 0.19
+  - name: Stamp_paper
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stamp_paper-*.tar
+    weight: 0.17
+  - name: Stand_the_fallen_shuttlecock_upright
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stand_the_fallen_shuttlecock_upright-*.tar
+    weight: 0.26
+  - name: Stick_card_on_whiteboard
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stick_card_on_whiteboard-*.tar
+    weight: 0.31
+  - name: Stir_coffee
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stir_coffee-*.tar
+    weight: 0.22
+  - name: Stretch_playdough
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Stretch_playdough-*.tar
+    weight: 0.18
+  - name: Swap_hand
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Swap_hand-*.tar
+    weight: 0.17
+  - name: Take_clothes_out_of_bag
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Take_clothes_out_of_bag-*.tar
+    weight: 0.18
+  - name: Take_items_out_of_container_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Take_items_out_of_container_merged-*.tar
+    weight: 0.22
+  - name: Take_jelly_from_human
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Take_jelly_from_human-*.tar
+    weight: 0.31
+  - name: Take_off_the_hat
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Take_off_the_hat-*.tar
+    weight: 0.18
+  - name: Take_out_teabag
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Take_out_teabag-*.tar
+    weight: 0.12
+  - name: Take_tableware
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Take_tableware-*.tar
+    weight: 0.27
+  - name: Take_the_book_out_of_the_schoolbag
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Take_the_book_out_of_the_schoolbag-*.tar
+    weight: 0.18
+  - name: Tear_sticky
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Tear_sticky-*.tar
+    weight: 0.15
+  - name: Uncover_the_teapot
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Uncover_the_teapot-*.tar
+    weight: 0.13
+  - name: Untie_the_bowstring
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Untie_the_bowstring-*.tar
+    weight: 0.17
+  - name: Use_lint_roller_on_clothes_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Use_lint_roller_on_clothes_merged-*.tar
+    weight: 0.18
+  - name: Wear_badge_merged
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Wear_badge_merged-*.tar
+    weight: 0.18
+  - name: Wipe_cola
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Wipe_cola-*.tar
+    weight: 0.03
+  - name: Wipe_plate_with_scouring_sponge
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Wipe_plate_with_scouring_sponge-*.tar
+    weight: 0.13
+  - name: Wipe_whiteboard
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-Wipe_whiteboard-*.tar
+    weight: 0.02
+  - name: attach_sticky_note
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-attach_sticky_note-*.tar
+    weight: 0.24
+  - name: entangled_rope
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-entangled_rope-*.tar
+    weight: 0.12
+  - name: flip_dice
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-flip_dice-*.tar
+    weight: 0.29
+  - name: flip_phone_over
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-flip_phone_over-*.tar
+    weight: 0.26
+  - name: folding_paper_boxes
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-folding_paper_boxes-*.tar
+    weight: 0.06
+  - name: open_ring_binder
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-open_ring_binder-*.tar
+    weight: 0.18
+  - name: place_bookmark_into_book
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-place_bookmark_into_book-*.tar
+    weight: 0.2
+  - name: place_mouse_on_mouse_pad
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-place_mouse_on_mouse_pad-*.tar
+    weight: 0.26
+  - name: place_tablemat
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-place_tablemat-*.tar
+    weight: 0.2
+  - name: roll_dice
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-roll_dice-*.tar
+    weight: 0.31
+  - name: shuffle_cards
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-shuffle_cards-*.tar
+    weight: 0.27
+  - name: take_cups_from_stack
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-take_cups_from_stack-*.tar
+    weight: 0.13
+  - name: touch_tap_pinch_specific_part
+    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-touch_tap_pinch_specific_part-*.tar
+    weight: 0.17
   # --- Real-world datasets ---
   # Add real-world datasets here after conversion.
   # Example:

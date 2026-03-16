@@ -279,7 +279,7 @@ class SiglipEncoder(nn.Module):
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states, batch_size, temporal_pos_emb)
         if self.compress_to_current:
-            hidden_states = rearrange(hidden_states, '(b t) n d -> b t n d', b=batch_size)[:, -1].clone()
+            hidden_states = rearrange(hidden_states, '(b t) n d -> b t n d', b=batch_size)[:, -1]
         return hidden_states
 
 

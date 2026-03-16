@@ -113,7 +113,7 @@ vlm_processor:
 
 dataloader:
   loader:
-    batch_size: 20
+    batch_size: 14
     num_workers: 4
     pin_memory: True
     persistent_workers: True
@@ -121,7 +121,7 @@ dataloader:
 
 val_dataloader:
   loader:
-    batch_size: 20
+    batch_size: 14
     shuffle: False
     drop_last: False
     num_workers: 4
@@ -172,8 +172,8 @@ training:
   dinov2_model_path: /share_data/chenzhang/checkpoints/dinov2/dinov2_vitb14_reg4_pretrain.pth
   resume_checkpoint_path: #/share_data/zengfanlian/Projects/EgoVLA/outputs/2026.02.20/05.23_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=20000-eval_l1_loss=0.0249
   finetune_checkpoint_path: #/share_data/chenzhang/projects/diffloss-ar/outputs/2026.02.18/12.39_legendvla_pretrain_legendvla_deepspeed/checkpoints/update_step=245000-eval_l1_loss=0.0175/pytorch_model/mp_rank_00_model_states.pt
-  normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.02.07-mix/normalizer.pkl
-  num_epochs: 200
+  normalizer_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/normalizer/2026.03.16-relative-mixed/normalizer.pkl
+  num_epochs: 2
   use_bf16: True
   clipping:
     enabled: True
@@ -292,8 +292,8 @@ policy:
     diffloss_micro_batch_size: 16
     ar_action_noise_std: 0.02
     ar_action_chunk_size: 4 # should be less than or equal to total action chunk size
-    use_rtc: False
-    rtc_delay_strategy: null
+    use_rtc: True
+    rtc_delay_strategy: "uniform"
     rtc_max_delay: null
     loss_weights:
       ce_loss_weight: 0.1
