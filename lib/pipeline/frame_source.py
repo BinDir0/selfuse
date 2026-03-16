@@ -159,34 +159,43 @@ class ShardVideoFrameSource(BaseFrameSource):
 
 
 class FrameDataset(torch.utils.data.Dataset):
-    """PyTorch Dataset wrapper for parallel frame loading via DataLoader."""
+    """PyTorch Dataset wrapper for parallel frame loading via DataLoader.
 
-    def __init__(self, frame_source: ImageFolderFrameSource):
-        self.image_paths = frame_source.image_paths
-        self.use_turbojpeg = frame_source.use_turbojpeg
+    Works with any BaseFrameSource (ImageFolderFrameSource, ShardVideoFrameSource, etc.).
+    """
+
+    def __init__(self, frame_source: BaseFrameSource):
+        self.frame_source = frame_source
+        self.use_turbojpeg = getattr(frame_source, 'use_turbojpeg', False)
         if self.use_turbojpeg:
             self.jpeg_decoder = TurboJPEG()
         else:
             self.jpeg_decoder = None
+        # Cache image_paths for ImageFolderFrameSource fast path
+        self._image_paths = getattr(frame_source, 'image_paths', None)
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.frame_source)
 
     def __getitem__(self, idx):
-        path = self.image_paths[idx]
+        # Fast path: ImageFolderFrameSource with TurboJPEG (avoids get_frame overhead)
+        if self._image_paths is not None:
+            path = self._image_paths[idx]
+            if self.use_turbojpeg and path.lower().endswith(('.jpg', '.jpeg')):
+                try:
+                    with open(path, 'rb') as f:
+                        jpeg_data = f.read()
+                    frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=1)  # BGR
+                    return idx, frame
+                except Exception:
+                    pass
+            frame = cv2.imread(path)
+            if frame is None:
+                raise RuntimeError(f"Failed to read image: {path}")
+            return idx, frame
 
-        if self.use_turbojpeg and path.lower().endswith(('.jpg', '.jpeg')):
-            try:
-                with open(path, 'rb') as f:
-                    jpeg_data = f.read()
-                frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=1)  # BGR
-                return idx, frame
-            except Exception:
-                pass
-
-        frame = cv2.imread(path)
-        if frame is None:
-            raise RuntimeError(f"Failed to read image: {path}")
+        # Generic path: any BaseFrameSource (ShardVideoFrameSource etc.)
+        frame = self.frame_source.get_frame(idx, rgb=False)
         return idx, frame
 
 
@@ -203,6 +212,11 @@ def _frame_dataset_worker_init(worker_id):
     dataset = worker_info.dataset
     if dataset.use_turbojpeg and TURBOJPEG_AVAILABLE:
         dataset.jpeg_decoder = TurboJPEG()
+    # Re-open tar handle for ShardVideoFrameSource (tarfile not fork-safe)
+    fs = dataset.frame_source
+    if hasattr(fs, '_tar') and fs._tar is not None:
+        fs._tar.close()
+        fs._tar = None
 
 
 def build_frame_source(video_path: str):

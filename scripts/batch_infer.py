@@ -489,9 +489,21 @@ class BatchScheduler:
 
         try:
             sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-            from batch_worker import get_seq_folder, get_track_range, is_stage_complete
+            from batch_worker import get_track_range, is_stage_complete
 
-            seq_folder = get_seq_folder(video_path)
+            # Determine seq_folder and frame_source based on mode
+            task = self.tasks.get(video_path)
+            if task and task.descriptor:
+                from lib.pipeline.frame_source import ShardVideoFrameSource
+                seq_folder = Path(task.descriptor.seq_folder)
+                frame_source_factory = lambda: ShardVideoFrameSource(
+                    task.descriptor.shard_path, task.descriptor.frame_names
+                )
+            else:
+                from batch_worker import get_seq_folder
+                from lib.pipeline.frame_source import build_frame_source
+                seq_folder = get_seq_folder(video_path)
+                frame_source_factory = lambda: build_frame_source(video_path)
 
             # Skip if already complete (no need to prefetch)
             if self.resume and is_stage_complete(stage, seq_folder, fast_check=True):
@@ -507,8 +519,7 @@ class BatchScheduler:
                 return None
 
             # Prefetch frame source and tracks (IO-bound operations)
-            from lib.pipeline.frame_source import build_frame_source
-            frame_source = build_frame_source(video_path)
+            frame_source = frame_source_factory()
             tracks = np.load(tracks_dir / "model_tracks.npy", allow_pickle=True).item()
 
             return {
