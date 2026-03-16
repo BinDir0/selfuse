@@ -64,44 +64,48 @@ class WindowConfig:
         return (self.action_horizon - 1) * self.action_stride + 1
 
 
-def decode_meta(sample):
-    """Decode meta.json from bytes to dict if needed."""
-    meta = sample.get("meta.json")
-    if isinstance(meta, bytes):
-        meta = json.loads(meta.decode("utf-8"))
-        sample["meta.json"] = meta
-    return sample
+def decode_sample_fields(sample, lowdim_only=False):
+    """Decode metadata fields from a raw WebDataset sample.
 
-
-def decode_lowdim(sample):
-    """Decode lowdim.npy from bytes to numpy array if needed."""
-    ld = sample.get("lowdim.npy")
-    if isinstance(ld, bytes):
-        import io
-        ld = np.load(io.BytesIO(ld))
-        sample["lowdim.npy"] = ld
-    return sample
-
-
-def decode_lowdim_only(sample):
-    """Decode only meta.json and lowdim.npy, drop image/depth bytes.
-
-    Used by lowdim-only pipelines (e.g. normalizer fitting) to avoid
-    the cost of JPEG decompression and PIL Image creation.
+    Always decodes meta.json and lowdim.npy.  When *lowdim_only* is True
+    every other key is dropped so the sample is as small as possible
+    (used by normalizer-fitting pipelines).  Otherwise image/depth fields
+    are kept as raw bytes for deferred decoding after the shuffle buffer.
     """
-    import io
-    result = {"__key__": sample.get("__key__", "")}
+    import io as _io
     meta = sample.get("meta.json")
     if isinstance(meta, bytes):
-        result["meta.json"] = json.loads(meta.decode("utf-8"))
-    elif meta is not None:
-        result["meta.json"] = meta
+        sample["meta.json"] = json.loads(meta.decode("utf-8"))
     ld = sample.get("lowdim.npy")
     if isinstance(ld, bytes):
-        result["lowdim.npy"] = np.load(io.BytesIO(ld))
-    elif ld is not None:
-        result["lowdim.npy"] = ld
-    return result
+        sample["lowdim.npy"] = np.load(_io.BytesIO(ld))
+    if lowdim_only:
+        return {
+            "__key__": sample.get("__key__", ""),
+            "meta.json": sample["meta.json"],
+            "lowdim.npy": sample.get("lowdim.npy"),
+        }
+    return sample
+
+
+def decode_media_fields(sample):
+    """Decode image/depth bytes into PIL Image / numpy array.
+
+    Called after the shuffle buffer so that downstream consumers (VLA /
+    VLM datasets) always receive decoded media, keeping the deferred-
+    decode logic internal to the pipeline.
+    """
+    from PIL import Image
+    import io as _io
+    for key in list(sample.keys()):
+        val = sample[key]
+        if not isinstance(val, bytes):
+            continue
+        if key.endswith(".jpg") or key.endswith(".jpeg") or key.endswith(".png"):
+            sample[key] = Image.open(_io.BytesIO(val)).convert("RGB")
+        elif key.endswith(".npy"):
+            sample[key] = np.load(_io.BytesIO(val))
+    return sample
 
 
 def unpack_lowdim(lowdim):
@@ -231,29 +235,48 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     return result
 
 
+def decode_image_bytes(raw):
+    """Decode a single image from raw bytes or PIL Image to numpy array."""
+    if isinstance(raw, bytes):
+        from PIL import Image
+        import io
+        image = np.array(Image.open(io.BytesIO(raw)).convert("RGB"), copy=False)
+    else:
+        # Already decoded (PIL Image or numpy array)
+        image = np.array(raw, copy=True)
+    if image.ndim == 2:
+        image = np.stack([image] * 3, axis=-1)
+    return image
+
+
+def decode_depth_bytes(raw):
+    """Decode a single depth map from raw npy bytes or numpy array."""
+    if isinstance(raw, bytes):
+        import io
+        return np.load(io.BytesIO(raw))
+    return np.array(raw, copy=True)
+
+
 def materialize_sample_media(sample):
     """Materialize RGB/depth arrays from frame refs and drop the refs.
 
-    This runs after shuffle so buffered samples share underlying decoded frame
-    objects. The returned arrays are copied to keep per-sample media private for
-    later augmentation / preprocessing.
+    Supports both deferred-decode mode (raw bytes) and legacy mode
+    (already-decoded PIL Images / numpy arrays).  This runs after
+    shuffle so buffered samples share underlying frame objects.
     """
     image_frame_refs = sample.pop("image_frame_refs", None)
     if image_frame_refs is not None:
-        images = []
-        for frame in image_frame_refs:
-            image = np.array(frame["image.jpg"], copy=True)
-            if image.ndim == 2:
-                image = np.stack([image] * 3, axis=-1)
-            images.append(image)
+        images = [decode_image_bytes(frame["image.jpg"]) for frame in image_frame_refs]
         sample["image"] = np.stack(images, axis=0)
 
     if image_frame_refs and image_frame_refs[-1].get("depth.npy") is not None:
         depth_list = [
-            np.array(frame["depth.npy"], copy=True)
+            decode_depth_bytes(frame["depth.npy"])
             for frame in image_frame_refs
             if frame.get("depth.npy") is not None
         ]
+        if len(depth_list) != len(images):
+            raise ValueError(f"Depth list length {len(depth_list)} does not match image list length {len(images)}")
         if depth_list:
             sample["depth"] = np.stack(depth_list, axis=0)
 
@@ -312,7 +335,7 @@ def select_lowdim_files(fname):
 
 
 def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
-                       preprocess_fn=None, shuffle_buffer=8192, mode='train',
+                       preprocess_fn=None, shuffle_buffer=4096, mode='train',
                        use_sliding_window=True, lowdim_only=False):
     """Build a WebDataset pipeline for a single dataset.
 
@@ -320,7 +343,8 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     Validation: finite single-pass, deterministic order, no shuffle.
 
     Args:
-        shard_urls: list of shard tar paths, or a braceexpand pattern string
+        shard_urls: list of shard tar paths, a braceexpand pattern string,
+                    or a list of glob pattern strings (each expanded separately)
         config: WindowConfig with sampling parameters (uses defaults if None)
         lowdim_slices: dict mapping field names to (start, end) pairs
         preprocess_fn: optional callable(sample_dict) -> sample_dict
@@ -336,6 +360,13 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
 
     if isinstance(shard_urls, str):
         shard_urls = sorted(glob.glob(shard_urls))
+    elif isinstance(shard_urls, list) and shard_urls:
+        # Support list of glob patterns: expand each and merge
+        expanded = []
+        for entry in shard_urls:
+            matches = sorted(glob.glob(entry))
+            expanded.extend(matches if matches else [entry])
+        shard_urls = expanded
     assert shard_urls, f"No shards found: {shard_urls}"
 
     is_train = (mode == 'train')
@@ -357,15 +388,13 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         empty_check=False,
         select_files=select_files,
     )
-    if lowdim_only:
-        # Only decode lowdim.npy and meta.json, drop everything else
-        pipeline = pipeline.map(decode_lowdim_only)
-    else:
-        pipeline = pipeline.decode("pil").map(decode_meta)
+    # Deferred decode: parse meta.json and lowdim.npy eagerly;
+    # image/depth stay as compressed bytes through the shuffle buffer.
+    pipeline = pipeline.map(
+        lambda s: decode_sample_fields(s, lowdim_only=lowdim_only)
+    )
 
     if use_sliding_window:
-        if not lowdim_only:
-            pipeline = pipeline.map(decode_lowdim)
         pipeline = pipeline.compose(
             lambda src: sliding_window_compose(src, config, lowdim_slices, lowdim_only)
         )
@@ -377,8 +406,13 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     if is_train and shuffle_buffer and shuffle_buffer > 0:
         pipeline = pipeline.shuffle(shuffle_buffer)
 
-    if use_sliding_window and not lowdim_only:
-        pipeline = pipeline.map(materialize_sample_media)
+    # Materialize media after shuffle: VLA path decodes from frame refs,
+    # non-sliding-window path (VLM) decodes raw bytes in-place.
+    if not lowdim_only:
+        if use_sliding_window:
+            pipeline = pipeline.map(materialize_sample_media)
+        else:
+            pipeline = pipeline.map(decode_media_fields)
 
     if preprocess_fn is not None:
         pipeline = pipeline.map(preprocess_fn)
@@ -387,7 +421,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
 
 
 def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
-                          preprocess_fn=None, shuffle_buffer=8192, mode='train',
+                          preprocess_fn=None, shuffle_buffer=4096, mode='train',
                           use_sliding_window=True, lowdim_only=False):
     """Build a blended dataset from multiple WebDataset sources.
 
@@ -415,11 +449,6 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
     weights = []
     for c in datasets_config:
         urls = c["shard_urls"]
-        if isinstance(urls, str):
-            urls = sorted(glob.glob(urls))
-        if not urls:
-            print(f"Warning: No shards found for {c.get('name', '?')}, skipping.")
-            continue
         pipe = build_wds_pipeline(
             urls, config, lowdim_slices, preprocess_fn, shuffle_buffer, mode=mode,
             use_sliding_window=use_sliding_window, lowdim_only=lowdim_only)

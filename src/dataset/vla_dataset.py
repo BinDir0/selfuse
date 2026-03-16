@@ -443,14 +443,6 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         self.min_shards_per_dataset = min_shards_per_dataset
         self.seed = seed
         self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
-        self.dataset_index_to_name = {
-            dataset_index: dataset_cfg.get("name", f"dataset_{dataset_index}")
-            for dataset_index, dataset_cfg in enumerate(self.wds_datasets)
-        }
-        self.dataset_name_to_index = {
-            dataset_name: dataset_index
-            for dataset_index, dataset_name in self.dataset_index_to_name.items()
-        }
 
         if self.mode != "val":
             warnings.warn(

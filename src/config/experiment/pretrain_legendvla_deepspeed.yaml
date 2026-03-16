@@ -299,10 +299,10 @@ policy:
       ce_loss_weight: 0.1
       diffusion_loss_weight: 20.0
       flow_loss_weight: 1.0
-    action_dim_loss_weights:
-      wrist_translation: 2.0   # dims [0:6]
-      wrist_rotation: 5.0      # dims [6:18]
-      hand: 1.0                # dims [18:48]
+    action_dim_loss_weights: # make sure the sum(weights*dims) is 1
+      wrist_translation: 1     # dims [0:6]
+      wrist_rotation: 2        # dims [6:18]
+      hand: 0.4                # dims [18:48]
   shape_meta: ${shape_meta}
   action_encoder_ar: 
     _target_: src.model.action.action_head.FourierActionEncoder

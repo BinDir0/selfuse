@@ -5,7 +5,6 @@ WebDataset-based VLM dataset for LegendVLA training.
 from typing import Dict, List, Optional
 import torch
 import numpy as np
-import warnings
 from torchvision import transforms
 from src.utils.pytorch_util import dict_apply
 from src.dataset.collator import LegendVLDataCollator
@@ -87,6 +86,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             if k.startswith("image_") and k.endswith(".jpg")
         ])
         images = [sample[k] for k in image_keys]
+
         text = meta['texts']
         weights = self.weights
 
@@ -110,12 +110,10 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         question = str(text['user'])
         answer = str(text['assistant'])
 
-        for idx in range(len(images)):
-            if images[idx].mode != 'RGB':
-                images[idx] = images[idx].convert('RGB')
-
         augmented_images = []
         for img_pil in images:
+            if img_pil.mode != 'RGB':
+                img_pil = img_pil.convert('RGB')
             if self.mode == 'train' and self.aug_transform is not None:
                 augmented_pil = self.aug_transform(img_pil)
             else:
