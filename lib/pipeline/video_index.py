@@ -24,6 +24,7 @@ class VideoDescriptor:
     shard_path: str         # absolute path to the tar containing this video
     frame_names: List[str]  # sorted list of JPEG filenames within the tar
     seq_folder: str         # output directory for this video
+    frame_offsets: Optional[List[List]] = None  # [[offset, size], ...] parallel to frame_names
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -102,7 +103,11 @@ def build_video_index(factory_dir: str) -> dict:
                             "frames": [],
                             "video_name": json_meta.pop(video_key, ""),
                         }
-                    videos[video_key]["frames"].append(name)
+                    videos[video_key]["frames"].append({
+                        "name": name,
+                        "offset": member.offset_data,
+                        "size": member.size,
+                    })
                     n_frames_total += 1
                     if n_frames_total % 500 == 0:
                         pbar.set_postfix(videos=len(videos), frames=n_frames_total)
@@ -133,7 +138,7 @@ def build_video_index(factory_dir: str) -> dict:
 
     # Sort frames within each video and set num_frames
     for video_key, info in videos.items():
-        info["frames"] = sorted(info["frames"])
+        info["frames"] = sorted(info["frames"], key=lambda f: f["name"])
         info["num_frames"] = len(info["frames"])
         if not info["video_name"]:
             info["video_name"] = video_key
@@ -151,12 +156,21 @@ def _index_cache_path(factory_dir: str) -> str:
 
 
 def _is_index_stale(index: dict, factory_dir: str) -> bool:
-    """Check if cached index is stale by comparing shard file list."""
+    """Check if cached index is stale by comparing shard file list or missing offsets."""
     current_shards = sorted([
         f for f in os.listdir(factory_dir)
         if f.endswith('.tar')
     ])
-    return current_shards != index.get("shards", [])
+    if current_shards != index.get("shards", []):
+        return True
+    # Check if index has frame offsets (new format with dicts instead of strings)
+    videos = index.get("videos", {})
+    if videos:
+        first_video = next(iter(videos.values()))
+        frames = first_video.get("frames", [])
+        if frames and isinstance(frames[0], str):
+            return True  # Old format without offsets — rebuild
+    return False
 
 
 def load_or_build_index(factory_dir: str, force_rebuild: bool = False) -> dict:
@@ -210,13 +224,19 @@ def collect_videos_from_factory(factory_dir: str) -> List[VideoDescriptor]:
         shard_path = os.path.join(factory_dir, info["shard"])
         seq_folder = os.path.join(factory_dir, "outputs", video_key)
 
+        frames = info["frames"]
+        # frames is List[dict] with keys: name, offset, size
+        frame_names = [f["name"] for f in frames]
+        frame_offsets = [[f["offset"], f["size"]] for f in frames]
+
         desc = VideoDescriptor(
             video_key=video_key,
             video_name=info["video_name"],
             factory_dir=factory_dir,
             shard_path=shard_path,
-            frame_names=info["frames"],
+            frame_names=frame_names,
             seq_folder=seq_folder,
+            frame_offsets=frame_offsets,
         )
         descriptors.append(desc)
 

@@ -497,7 +497,8 @@ class BatchScheduler:
                 from lib.pipeline.frame_source import ShardVideoFrameSource
                 seq_folder = Path(task.descriptor.seq_folder)
                 frame_source_factory = lambda: ShardVideoFrameSource(
-                    task.descriptor.shard_path, task.descriptor.frame_names
+                    task.descriptor.shard_path, task.descriptor.frame_names,
+                    frame_offsets=task.descriptor.frame_offsets,
                 )
             else:
                 from batch_worker import get_seq_folder

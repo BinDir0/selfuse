@@ -387,7 +387,7 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
     descriptor = getattr(ns, '_descriptor', None)
     if descriptor is not None:
         seq_folder = Path(descriptor.seq_folder)
-        frame_source = ShardVideoFrameSource(descriptor.shard_path, descriptor.frame_names)
+        frame_source = ShardVideoFrameSource(descriptor.shard_path, descriptor.frame_names, frame_offsets=descriptor.frame_offsets)
         stage_args = runtime.build_stage_args(descriptor.video_key)
         # Set a dummy video_path on stage_args for legacy code paths
         stage_args.video_path = descriptor.video_key

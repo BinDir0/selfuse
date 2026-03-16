@@ -85,34 +85,44 @@ class ImageFolderFrameSource(BaseFrameSource):
 class ShardVideoFrameSource(BaseFrameSource):
     """Frame source that reads a single video's frames from a WebDataset tar shard.
 
-    Unlike reading all frames from a tar, this reads only the frames belonging
-    to one specific video (identified by a pre-built frame_names list).
+    Uses pre-computed byte offsets to read frames via direct seek+read,
+    bypassing tarfile's expensive member index scanning entirely.
     """
 
-    def __init__(self, tar_path, frame_names, use_turbojpeg=True):
+    def __init__(self, tar_path, frame_names, frame_offsets=None, use_turbojpeg=True):
         """
         Args:
             tar_path: Path to the tar shard containing this video's frames.
             frame_names: Sorted list of JPEG filenames within the tar for this video.
+            frame_offsets: List of [offset, size] pairs parallel to frame_names.
+                          If provided, uses direct seek+read (fast path).
+                          If None, falls back to tarfile (legacy path).
             use_turbojpeg: Use TurboJPEG for faster decoding if available.
         """
-        import tarfile
-
         self.tar_path = tar_path
         self.frame_names = list(frame_names)
+        self.frame_offsets = frame_offsets  # [[offset, size], ...]
 
         if len(self.frame_names) == 0:
             raise RuntimeError(f"ShardVideoFrameSource requires non-empty frame_names for {tar_path}")
 
         if not QUIET_MODE:
-            print(f"ShardVideoFrameSource: {len(self.frame_names)} frames from {os.path.basename(tar_path)}")
+            mode = "direct-seek" if frame_offsets else "tarfile"
+            print(f"ShardVideoFrameSource: {len(self.frame_names)} frames from {os.path.basename(tar_path)} ({mode})")
 
         self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE
         if self.use_turbojpeg:
             self.jpeg_decoder = TurboJPEG()
 
-        # Lazy-opened tar handle (single shard, no LRU needed)
+        # Lazy-opened file handle for direct seek mode
+        self._fh = None
+        # Lazy-opened tar handle for legacy fallback
         self._tar = None
+
+    def _get_fh(self):
+        if self._fh is None:
+            self._fh = open(self.tar_path, 'rb')
+        return self._fh
 
     def _get_tar(self):
         if self._tar is None:
@@ -131,9 +141,18 @@ class ShardVideoFrameSource(BaseFrameSource):
             )
 
         member_name = self.frame_names[index]
-        tar = self._get_tar()
-        member = tar.getmember(member_name)
-        jpeg_data = tar.extractfile(member).read()
+
+        # Fast path: direct seek+read using pre-computed offsets
+        if self.frame_offsets is not None:
+            offset, size = self.frame_offsets[index]
+            fh = self._get_fh()
+            fh.seek(offset)
+            jpeg_data = fh.read(size)
+        else:
+            # Legacy fallback: tarfile
+            tar = self._get_tar()
+            member = tar.getmember(member_name)
+            jpeg_data = tar.extractfile(member).read()
 
         if self.use_turbojpeg and member_name.lower().endswith(('.jpg', '.jpeg')):
             try:
@@ -151,6 +170,11 @@ class ShardVideoFrameSource(BaseFrameSource):
         return frame
 
     def __del__(self):
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except Exception:
+                pass
         if self._tar is not None:
             try:
                 self._tar.close()
@@ -212,8 +236,11 @@ def _frame_dataset_worker_init(worker_id):
     dataset = worker_info.dataset
     if dataset.use_turbojpeg and TURBOJPEG_AVAILABLE:
         dataset.jpeg_decoder = TurboJPEG()
-    # Re-open tar handle for ShardVideoFrameSource (tarfile not fork-safe)
+    # Re-open file/tar handles for ShardVideoFrameSource (not fork-safe)
     fs = dataset.frame_source
+    if hasattr(fs, '_fh') and fs._fh is not None:
+        fs._fh.close()
+        fs._fh = None
     if hasattr(fs, '_tar') and fs._tar is not None:
         fs._tar.close()
         fs._tar = None
