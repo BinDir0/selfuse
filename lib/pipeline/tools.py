@@ -2,14 +2,79 @@ import cv2
 from tqdm import tqdm
 import numpy as np
 import torch
+import torchvision
 import os
 
 from ultralytics import YOLO
-from ultralytics.utils.ops import non_max_suppression
 import supervision as sv
 
 # Check if we should suppress verbose output
 QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
+
+
+def _yolo_nms(preds, conf_thres=0.25, iou_thres=0.7, max_det=300):
+    """Post-process raw YOLO output: filter + NMS, returns per-image detections.
+
+    Args:
+        preds: Raw model output — (batch, 4+nc, num_boxes) for YOLOv8,
+               or tuple where preds[0] is the tensor.
+        conf_thres: Minimum confidence threshold.
+        iou_thres: IoU threshold for NMS.
+        max_det: Maximum detections per image.
+
+    Returns:
+        List of (N, 6) tensors per image: [x1, y1, x2, y2, conf, cls]
+    """
+    if isinstance(preds, (list, tuple)):
+        preds = preds[0]
+
+    # YOLOv8: (batch, 4+nc, num_boxes) -> (batch, num_boxes, 4+nc)
+    if preds.shape[1] < preds.shape[2]:
+        preds = preds.transpose(1, 2)
+
+    batch_size = preds.shape[0]
+    results = []
+
+    for i in range(batch_size):
+        pred = preds[i]  # (num_boxes, 4+nc)
+        boxes_cxcywh = pred[:, :4]
+        class_scores = pred[:, 4:]
+
+        # Max class score per box
+        max_scores, class_ids = class_scores.max(dim=1)
+
+        # Filter by confidence
+        mask = max_scores > conf_thres
+        if not mask.any():
+            results.append(torch.zeros((0, 6), device=preds.device))
+            continue
+
+        boxes_cxcywh = boxes_cxcywh[mask]
+        max_scores = max_scores[mask]
+        class_ids = class_ids[mask]
+
+        # cxcywh -> xyxy
+        half_w = boxes_cxcywh[:, 2] / 2
+        half_h = boxes_cxcywh[:, 3] / 2
+        boxes_xyxy = torch.stack([
+            boxes_cxcywh[:, 0] - half_w,
+            boxes_cxcywh[:, 1] - half_h,
+            boxes_cxcywh[:, 0] + half_w,
+            boxes_cxcywh[:, 1] + half_h,
+        ], dim=1)
+
+        # Per-class NMS
+        keep = torchvision.ops.batched_nms(boxes_xyxy, max_scores, class_ids, iou_thres)
+        keep = keep[:max_det]
+
+        det = torch.cat([
+            boxes_xyxy[keep],
+            max_scores[keep].unsqueeze(1),
+            class_ids[keep].float().unsqueeze(1),
+        ], dim=1)
+        results.append(det)
+
+    return results
 
 
 def detect_track(
@@ -95,7 +160,7 @@ def detect_track(
             preds = model_nn(batch_tensor)
 
         # NMS: returns list of (N, 6) tensors [x1, y1, x2, y2, conf, cls] per image
-        dets_list = non_max_suppression(preds, conf_thres=thresh, iou_thres=0.7)
+        dets_list = _yolo_nms(preds, conf_thres=thresh, iou_thres=0.7)
 
         for i, frame_idx in enumerate(batch_indices):
             det = dets_list[i]  # (N, 6) tensor on device
