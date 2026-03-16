@@ -82,48 +82,48 @@ def build_video_index(factory_dir: str) -> dict:
 
     for shard_file in shard_files:
         shard_path = str(factory_path / shard_file)
-        with tarfile.open(shard_path, 'r') as tar:
-            members = tar.getnames()
+        # Single pass: iterate members streaming (no getnames() full scan),
+        # and extract JSON metadata inline to avoid re-opening the tar.
+        # json_meta: buffer for video_name read from JSON that appeared
+        # before the first frame of that video in the tar stream.
+        json_meta: Dict[str, str] = {}
+        with tarfile.open(shard_path, 'r|') as tar:  # streaming mode 'r|'
+            for member in tar:
+                name = member.name
+                if name.endswith(('.jpg', '.jpeg', '.png')):
+                    parsed = _parse_frame_name(name)
+                    if parsed is None:
+                        continue
+                    video_key, frame_sort, ext = parsed
 
-        # Read one JSON per video to get video_name metadata
-        json_members = {}  # video_key -> json_filename
+                    if video_key not in videos:
+                        videos[video_key] = {
+                            "shard": shard_file,
+                            "frames": [],
+                            "video_name": json_meta.pop(video_key, ""),
+                        }
+                    videos[video_key]["frames"].append(name)
 
-        for name in members:
-            if name.endswith(('.jpg', '.jpeg', '.png')):
-                parsed = _parse_frame_name(name)
-                if parsed is None:
-                    continue
-                video_key, frame_sort, ext = parsed
-
-                if video_key not in videos:
-                    videos[video_key] = {
-                        "shard": shard_file,
-                        "frames": [],
-                        "video_name": "",
-                    }
-                videos[video_key]["frames"].append(name)
-
-            elif name.endswith('.json'):
-                # Try to associate with a video_key
-                base = name[:-5]  # remove .json
-                parsed = _parse_frame_name(base + '.jpg')  # fake extension for parsing
-                if parsed:
-                    video_key = parsed[0]
-                    if video_key not in json_members:
-                        json_members[video_key] = (shard_file, name)
-
-        # Read JSON metadata for video_name (just one per video)
-        for video_key, (sf, json_name) in json_members.items():
-            if video_key in videos and not videos[video_key]["video_name"]:
-                try:
-                    sp = str(factory_path / sf)
-                    with tarfile.open(sp, 'r') as tar:
-                        f = tar.extractfile(json_name)
-                        if f:
-                            meta = json.loads(f.read())
-                            videos[video_key]["video_name"] = meta.get("video_name", video_key)
-                except Exception:
-                    videos[video_key]["video_name"] = video_key
+                elif name.endswith('.json') and member.isreg():
+                    base = name[:-5]  # remove .json
+                    parsed = _parse_frame_name(base + '.jpg')  # fake ext for parsing
+                    if parsed:
+                        video_key = parsed[0]
+                        try:
+                            f = tar.extractfile(member)
+                            if f:
+                                meta = json.loads(f.read())
+                                vn = meta.get("video_name", "")
+                                if vn:
+                                    if video_key in videos:
+                                        # Video already seen, fill directly
+                                        if not videos[video_key]["video_name"]:
+                                            videos[video_key]["video_name"] = vn
+                                    else:
+                                        # Video not seen yet, buffer for later
+                                        json_meta[video_key] = vn
+                        except Exception:
+                            pass
 
     # Sort frames within each video and set num_frames
     for video_key, info in videos.items():
