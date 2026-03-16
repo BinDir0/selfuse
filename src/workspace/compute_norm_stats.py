@@ -47,15 +47,6 @@ def build_metadata(
     selection_metadata,
     fit_metadata,
 ):
-    frames_by_dataset = fit_metadata.get("current_frames_scanned_by_dataset", {})
-    datasets_metadata = []
-    for dataset_metadata in selection_metadata["datasets"]:
-        merged_metadata = dict(dataset_metadata)
-        merged_metadata["current_frames_scanned"] = frames_by_dataset.get(
-            dataset_metadata["name"], 0
-        )
-        datasets_metadata.append(merged_metadata)
-
     return {
         "schema_version": 1,
         "generated_at": datetime.now().isoformat(),
@@ -82,7 +73,7 @@ def build_metadata(
             "current_frames_scanned": fit_metadata["current_frames_scanned"],
         },
         "scan_summary": fit_metadata,
-        "datasets": datasets_metadata,
+        "datasets": selection_metadata["datasets"],
     }
 
 

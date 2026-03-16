@@ -8,6 +8,8 @@ pipeline builders for single/blended WebDataset sources.
 import collections
 import glob
 import json
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -29,6 +31,49 @@ LOWDIM_SLICES = {
     'extrinsic':    (96, 112),
     'intrinsic':    (112, 116),
 }
+
+
+def _is_shard_sequence(shard_patterns):
+    """Return True when *shard_patterns* is a non-string sequence of shard entries."""
+    return isinstance(shard_patterns, Sequence) and not isinstance(shard_patterns, (str, bytes, os.PathLike))
+
+
+def _is_glob_pattern(shard_entry):
+    """Return True when a shard entry uses shell-style glob wildcards."""
+    return any(token in shard_entry for token in "*?[")
+
+
+def expand_shard_patterns(shard_patterns):
+    """Expand shard patterns into explicit shard paths.
+
+    Supports a single string/path-like shard pattern or a sequence of patterns.
+    Sequence entries are expanded independently and concatenated so one logical
+    dataset subset can keep a single downstream shuffle buffer.
+
+    Glob patterns that match nothing are ignored; literal paths and WebDataset
+    brace patterns are preserved as-is.
+    """
+    if isinstance(shard_patterns, (str, bytes, os.PathLike)):
+        shard_entries = [os.fspath(shard_patterns)]
+        shard_patterns_metadata = shard_entries[0]
+    elif _is_shard_sequence(shard_patterns):
+        shard_entries = [os.fspath(entry) for entry in shard_patterns]
+        shard_patterns_metadata = list(shard_entries)
+    else:
+        raise TypeError(
+            "shard_patterns must be a string/path-like value or a sequence of shard patterns, "
+            f"got {type(shard_patterns)!r}"
+        )
+
+    shard_urls = []
+    for entry in shard_entries:
+        matches = sorted(glob.glob(entry))
+        if matches:
+            shard_urls.extend(matches)
+        elif not _is_glob_pattern(entry):
+            shard_urls.append(entry)
+
+    return shard_urls, shard_patterns_metadata
 
 
 @dataclass
@@ -358,16 +403,8 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     if lowdim_slices is None:
         lowdim_slices = LOWDIM_SLICES
 
-    if isinstance(shard_urls, str):
-        shard_urls = sorted(glob.glob(shard_urls))
-    elif isinstance(shard_urls, list) and shard_urls:
-        # Support list of glob patterns: expand each and merge
-        expanded = []
-        for entry in shard_urls:
-            matches = sorted(glob.glob(entry))
-            expanded.extend(matches if matches else [entry])
-        shard_urls = expanded
-    assert shard_urls, f"No shards found: {shard_urls}"
+    shard_urls, shard_patterns_metadata = expand_shard_patterns(shard_urls)
+    assert shard_urls, f"No shards found: {shard_patterns_metadata}"
 
     is_train = (mode == 'train')
     # resampled mode shuffles shards internally, but newer webdataset

@@ -633,7 +633,7 @@ class TestShardSelection:
             {
                 "dataset_index": i,
                 "name": f"d{i}",
-                "shard_spec": f"d{i}",
+                "shard_patterns": f"d{i}",
                 "shard_urls": [f"d{i}_shard_{j}" for j in range(cap)],
             }
             for i, cap in enumerate(capacities)
@@ -679,7 +679,7 @@ class TestShardSelection:
         ds.seed = 0
         ds.mode = "val"
         ds.build_shard_groups = lambda: [
-            {"dataset_index": i, "name": f"d{i}", "shard_spec": f"d{i}", "shard_urls": [f"d{i}_{j}" for j in range(10)]}
+            {"dataset_index": i, "name": f"d{i}", "shard_patterns": f"d{i}", "shard_urls": [f"d{i}_{j}" for j in range(10)]}
             for i in range(3)
         ]
         with pytest.raises(ValueError, match="max_total_shards is smaller than the required minimum shard coverage"):

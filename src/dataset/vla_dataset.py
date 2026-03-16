@@ -2,7 +2,6 @@
 WebDataset-based VLA datasets for LegendVLA training and normalizer fitting.
 """
 
-import glob
 import warnings
 from collections import Counter
 from typing import Dict, List, Optional
@@ -17,6 +16,7 @@ from .data_transforms import process_state_action, process_image
 from .collator import LegendVLDataCollator, ConcatDataCollator
 from .wds_dataset import (
     build_blended_dataset, build_wds_pipeline, WindowConfig, LOWDIM_SLICES,
+    expand_shard_patterns,
 )
 
 
@@ -492,16 +492,12 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         """Expand shard globs and shuffle each dataset independently."""
         shard_groups = []
         for dataset_index, dataset_cfg in enumerate(self.wds_datasets):
-            shard_spec = dataset_cfg["shard_urls"]
-            if isinstance(shard_spec, str):
-                shard_urls = sorted(glob.glob(shard_spec))
-                shard_spec_metadata = shard_spec
-            else:
-                shard_urls = list(shard_spec)
-                shard_spec_metadata = [str(url) for url in shard_urls]
+            shard_patterns = dataset_cfg["shard_urls"]
+            shard_urls, shard_patterns_metadata = expand_shard_patterns(shard_patterns)
             if not shard_urls:
                 warnings.warn(
-                    f"No shards found for {dataset_cfg.get('name', '?')}, skipping."
+                    f"No shards found for {dataset_cfg.get('name', '?')}: "
+                    f"{shard_patterns_metadata}, skipping."
                 )
                 continue
 
@@ -511,7 +507,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             shard_groups.append({
                 "dataset_index": dataset_index,
                 "name": dataset_cfg.get("name", f"dataset_{dataset_index}"),
-                "shard_spec": shard_spec_metadata,
+                "shard_patterns": shard_patterns_metadata,
                 "shard_urls": shuffled_urls,
             })
 
@@ -575,7 +571,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             selected_count = selected_counts.get(group["dataset_index"], 0)
             datasets.append({
                 "name": group["name"],
-                "shard_spec": group["shard_spec"],
+                "shard_patterns": group["shard_patterns"],
                 "available_shards": available_count,
                 "selected_shards": selected_count,
                 "full_coverage": selected_count == available_count,

@@ -3,8 +3,10 @@
 from unittest.mock import patch
 
 import numpy as np
+from omegaconf import OmegaConf
 
 from src.dataset.vla_dataset import VLAWdsDataset
+from src.dataset.wds_dataset import build_wds_pipeline
 
 
 def _shape_meta():
@@ -89,3 +91,52 @@ def test_sample_to_data_uses_truncated_action_shape_for_prompt_tokens():
     assert data["n_actions"] == np.array(2, dtype=np.int32)
     assert data["actions_valid_mask"][:2].all()
     assert not data["actions_valid_mask"][2:].any()
+
+
+def test_build_wds_pipeline_expands_listconfig_globs_into_one_subset(tmp_path):
+    left_dir = tmp_path / "left"
+    right_dir = tmp_path / "right"
+    left_dir.mkdir()
+    right_dir.mkdir()
+    (left_dir / "shard-000001.tar").touch()
+    (left_dir / "shard-000003.tar").touch()
+    (right_dir / "shard-000002.tar").touch()
+
+    shard_urls_cfg = OmegaConf.create(
+        {
+            "shard_urls": [
+                str(left_dir / "shard-*.tar"),
+                str(right_dir / "shard-*.tar"),
+            ]
+        }
+    )
+    captured = {}
+
+    class DummyPipeline:
+        def map(self, _fn):
+            return self
+
+        def compose(self, _fn):
+            return self
+
+        def shuffle(self, _size):
+            return self
+
+    def fake_webdataset(shard_urls, **kwargs):
+        captured["shard_urls"] = shard_urls
+        captured["kwargs"] = kwargs
+        return DummyPipeline()
+
+    with patch("src.dataset.wds_dataset.wds.WebDataset", side_effect=fake_webdataset):
+        build_wds_pipeline(
+            shard_urls_cfg.shard_urls,
+            mode="val",
+            lowdim_only=True,
+        )
+
+    assert captured["shard_urls"] == [
+        str(left_dir / "shard-000001.tar"),
+        str(left_dir / "shard-000003.tar"),
+        str(right_dir / "shard-000002.tar"),
+    ]
+    assert captured["kwargs"]["resampled"] is False

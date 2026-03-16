@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from src.dataset.collator import ConcatDataCollator
 from src.dataset.normalizer_utils import get_normalizer
@@ -264,6 +265,51 @@ def test_lowlevel_dataset_describe_shard_selection_reports_coverage(tmp_path):
     assert not per_dataset["dataset_b"]["full_coverage"]
 
 
+def test_lowlevel_dataset_expands_listconfig_globs_per_subset(tmp_path):
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    (first_dir / "shard-000000.tar").touch()
+    (first_dir / "shard-000001.tar").touch()
+    (second_dir / "shard-000002.tar").touch()
+
+    cfg = OmegaConf.create(
+        {
+            "datasets": [
+                {
+                    "name": "combo",
+                    "shard_urls": [
+                        str(first_dir / "shard-*.tar"),
+                        str(second_dir / "shard-*.tar"),
+                    ],
+                    "weight": 1.0,
+                }
+            ]
+        }
+    )
+    dataset = VLALowLevelWdsDataset(
+        wds_datasets=cfg.datasets,
+        shape_meta=shape_meta_mano(),
+        mode="val",
+        seed=0,
+    )
+
+    shard_groups = dataset.build_shard_groups()
+
+    assert len(shard_groups) == 1
+    assert shard_groups[0]["name"] == "combo"
+    assert shard_groups[0]["shard_patterns"] == [
+        str(first_dir / "shard-*.tar"),
+        str(second_dir / "shard-*.tar"),
+    ]
+    assert sorted(shard_groups[0]["shard_urls"]) == [
+        str(first_dir / "shard-000000.tar"),
+        str(first_dir / "shard-000001.tar"),
+        str(second_dir / "shard-000002.tar"),
+    ]
+
+
 def test_lowlevel_dataset_raises_when_budget_is_smaller_than_floor(tmp_path):
     wds_datasets = build_random_wds_root(tmp_path, shard_counts=(3, 3))
     dataset = VLALowLevelWdsDataset(
@@ -299,7 +345,7 @@ def test_lowlevel_dataset_build_shard_urls_raises_value_error_when_empty(tmp_pat
         dataset.build_shard_urls()
 
 
-def test_lowlevel_wds_metadata_tracks_frames_per_dataset(tmp_path):
+def test_lowlevel_wds_metadata_tracks_total_frames(tmp_path):
     wds_datasets = build_random_wds_root(tmp_path, shard_counts=(1, 1), num_frames=5)
     dataset = VLALowLevelWdsDataset(
         wds_datasets=wds_datasets,
@@ -317,10 +363,6 @@ def test_lowlevel_wds_metadata_tracks_frames_per_dataset(tmp_path):
     )
 
     assert metadata["current_frames_scanned"] == 10
-    assert metadata["current_frames_scanned_by_dataset"] == {
-        "dataset_a": 5,
-        "dataset_b": 5,
-    }
 
 
 def test_lowlevel_wds_normalizer_matches_direct_rows_on_random_wds(tmp_path):
