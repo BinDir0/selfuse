@@ -70,7 +70,8 @@ def detect_track(
     for batch_indices, batch_frames in tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)"):
         with torch.no_grad():
             results_list = hand_det_model.predict(
-                batch_frames, conf=thresh, verbose=False, half=use_half
+                batch_frames, conf=thresh, verbose=False, half=use_half,
+                batch=len(batch_frames),
             )
 
         for frame_idx, result in zip(batch_indices, results_list):
