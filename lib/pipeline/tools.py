@@ -5,6 +5,7 @@ import torch
 import os
 
 from ultralytics import YOLO
+from ultralytics.utils.ops import non_max_suppression
 import supervision as sv
 
 # Check if we should suppress verbose output
@@ -25,7 +26,7 @@ def detect_track(
     """
     Detect and track hands using batched YOLO inference + post-hoc ByteTrack.
 
-    Phase 1: Batch detection - YOLO.predict() with large batch sizes for high GPU utilization
+    Phase 1: Batch detection - direct model forward pass with parallel preprocessing
     Phase 2: Sequential tracking - supervision.ByteTrack on CPU for track assignment
 
     Args:
@@ -34,18 +35,34 @@ def detect_track(
         edge_margin_ratio: Ratio of image size to define edge region (default 0.1 = 10%)
         min_edge_conf: Minimum confidence required for detections near edges
         hand_det_model: Optional preloaded YOLO detector for reuse
-        detect_batch_size: Batch size for YOLO.predict() (default 128)
+        detect_batch_size: Batch size for YOLO inference (default 128)
         num_io_workers: Number of DataLoader workers for parallel frame loading
         device: Device for YOLO detector (e.g., 'cuda:0')
         half_precision: Use FP16 for YOLO inference
     """
-    from lib.pipeline.frame_source import FrameDataset, _numpy_collate, _frame_dataset_worker_init
+    from lib.pipeline.frame_source import (
+        DetectFrameDataset, _detect_collate, _frame_dataset_worker_init,
+    )
 
     hand_det_model = hand_det_model or YOLO('./weights/external/detector.pt')
 
     if device:
         hand_det_model.to(device)
     use_half = half_precision and device and 'cuda' in device
+
+    # Get model parameters for preprocessing
+    imgsz = hand_det_model.overrides.get('imgsz', 640)
+    if isinstance(imgsz, (list, tuple)):
+        imgsz = imgsz[0]
+    stride = int(hand_det_model.model.stride.max())
+
+    # Fuse model layers for faster inference
+    model_nn = hand_det_model.model
+    if hasattr(model_nn, 'fuse'):
+        model_nn.fuse()
+    model_nn.eval()
+    if use_half:
+        model_nn.half()
 
     num_frames = len(frame_source)
     img_h, img_w = frame_source.get_size()
@@ -54,30 +71,59 @@ def detect_track(
     all_detections = [None] * num_frames  # (xyxy, confs, class_ids) per frame
     all_boxes_raw = [np.array([]).reshape(0, 5)] * num_frames  # boxes with conf for output
 
-    dataset = FrameDataset(frame_source)
+    dataset = DetectFrameDataset(frame_source, imgsz=imgsz, stride=stride)
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=detect_batch_size,
         shuffle=False,
         num_workers=num_io_workers,
-        collate_fn=_numpy_collate,
+        collate_fn=_detect_collate,
         worker_init_fn=_frame_dataset_worker_init,
-        pin_memory=False,
+        pin_memory=True,
         prefetch_factor=2 if num_io_workers > 0 else None,
         persistent_workers=num_io_workers > 0,
     )
 
-    for batch_indices, batch_frames in tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)"):
-        with torch.no_grad():
-            results_list = hand_det_model.predict(
-                batch_frames, conf=thresh, verbose=False, half=use_half,
-                batch=len(batch_frames),
-            )
+    for batch_indices, batch_imgs, batch_metas in tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)"):
+        # batch_imgs: (B, 3, imgsz, imgsz) uint8
+        # batch_metas: (B, 5) = [orig_h, orig_w, pad_top, pad_left, ratio]
+        batch_tensor = batch_imgs.to(device, non_blocking=True).float() / 255.0
+        if use_half:
+            batch_tensor = batch_tensor.half()
 
-        for frame_idx, result in zip(batch_indices, results_list):
-            boxes = result.boxes.xyxy.cpu().numpy()
-            confs = result.boxes.conf.cpu().numpy()
-            class_ids = result.boxes.cls.cpu().numpy()
+        with torch.no_grad():
+            preds = model_nn(batch_tensor)
+
+        # NMS: returns list of (N, 6) tensors [x1, y1, x2, y2, conf, cls] per image
+        dets_list = non_max_suppression(preds, conf_thres=thresh, iou_thres=0.7)
+
+        for i, frame_idx in enumerate(batch_indices):
+            det = dets_list[i]  # (N, 6) tensor on device
+            if len(det) == 0:
+                all_detections[frame_idx] = (
+                    np.array([]).reshape(0, 4),
+                    np.array([]),
+                    np.array([]),
+                )
+                continue
+
+            # Scale boxes from letterboxed coords back to original image coords
+            meta = batch_metas[i]  # [orig_h, orig_w, pad_top, pad_left, ratio]
+            pad_top, pad_left, ratio = meta[2], meta[3], meta[4]
+
+            det_cpu = det.float().cpu()
+            boxes = det_cpu[:, :4].numpy()
+            confs = det_cpu[:, 4].numpy()
+            class_ids = det_cpu[:, 5].numpy()
+
+            # Undo padding then undo resize
+            boxes[:, [0, 2]] -= pad_left
+            boxes[:, [1, 3]] -= pad_top
+            boxes[:, :4] /= ratio
+
+            # Clip to original image bounds
+            boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, meta[1])  # orig_w
+            boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, meta[0])  # orig_h
 
             all_detections[frame_idx] = (boxes, confs, class_ids)
             if len(boxes) > 0:

@@ -182,6 +182,78 @@ class ShardVideoFrameSource(BaseFrameSource):
                 pass
 
 
+class DetectFrameDataset(torch.utils.data.Dataset):
+    """Dataset that does letterbox preprocessing in workers for direct YOLO forward pass.
+
+    Returns (idx, preprocessed_uint8_CHW, orig_shape) so the main thread
+    only needs to stack, cast to float, /255, and send to GPU.
+    """
+
+    def __init__(self, frame_source: BaseFrameSource, imgsz=640, stride=32):
+        self.frame_source = frame_source
+        self.imgsz = imgsz
+        self.stride = stride
+        self.use_turbojpeg = getattr(frame_source, 'use_turbojpeg', False)
+        if self.use_turbojpeg:
+            self.jpeg_decoder = TurboJPEG()
+        else:
+            self.jpeg_decoder = None
+        self._image_paths = getattr(frame_source, 'image_paths', None)
+
+    def __len__(self):
+        return len(self.frame_source)
+
+    def _load_frame(self, idx):
+        """Load raw BGR frame."""
+        if self._image_paths is not None:
+            path = self._image_paths[idx]
+            if self.use_turbojpeg and path.lower().endswith(('.jpg', '.jpeg')):
+                try:
+                    with open(path, 'rb') as f:
+                        jpeg_data = f.read()
+                    return self.jpeg_decoder.decode(jpeg_data, pixel_format=1)  # BGR
+                except Exception:
+                    pass
+            frame = cv2.imread(path)
+            if frame is None:
+                raise RuntimeError(f"Failed to read image: {path}")
+            return frame
+        return self.frame_source.get_frame(idx, rgb=False)
+
+    def __getitem__(self, idx):
+        frame = self._load_frame(idx)
+        orig_h, orig_w = frame.shape[:2]
+
+        # Letterbox resize (same as ultralytics LetterBox with auto=False)
+        r = min(self.imgsz / orig_h, self.imgsz / orig_w)
+        new_w, new_h = round(orig_w * r), round(orig_h * r)
+        if new_w != orig_w or new_h != orig_h:
+            img = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            img = frame
+        # Pad to imgsz x imgsz
+        dw, dh = self.imgsz - new_w, self.imgsz - new_h
+        top, bottom = dh // 2, dh - dh // 2
+        left, right = dw // 2, dw - dw // 2
+        if top > 0 or bottom > 0 or left > 0 or right > 0:
+            img = cv2.copyMakeBorder(img, top, bottom, left, right,
+                                     cv2.BORDER_CONSTANT, value=(114, 114, 114))
+
+        # BGR -> RGB, HWC -> CHW, contiguous uint8
+        img = img[:, :, ::-1].transpose(2, 0, 1)
+        img = np.ascontiguousarray(img)
+
+        return idx, img, np.array([orig_h, orig_w, top, left, r], dtype=np.float32)
+
+
+def _detect_collate(batch):
+    """Collate for DetectFrameDataset: stack preprocessed images into a tensor."""
+    indices = [b[0] for b in batch]
+    imgs = torch.from_numpy(np.stack([b[1] for b in batch]))
+    metas = np.stack([b[2] for b in batch])
+    return indices, imgs, metas
+
+
 class FrameDataset(torch.utils.data.Dataset):
     """PyTorch Dataset wrapper for parallel frame loading via DataLoader.
 
