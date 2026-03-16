@@ -479,20 +479,13 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             use_relative_action=self.use_relative_action,
         )
 
-        dataset_name = sample["dataset_name"]
-        dataset_index = self.dataset_name_to_index.get(dataset_name)
-        if dataset_index is None:
-            raise KeyError(f"Unknown dataset_name in sample: {dataset_name}")
-
         if not self.use_relative_action:
             return {
                 "motions": np.concatenate([state, action], axis=0),
-                "_dataset_index": np.asarray([dataset_index], dtype=np.int32),
             }
         return {
             "states": state,
             "actions": action,
-            "_dataset_index": np.asarray([dataset_index], dtype=np.int32),
         }
 
     def build_shard_groups(self):

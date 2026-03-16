@@ -44,7 +44,6 @@ def get_normalizer(dataloader_cfg, normalizer_dataset, return_metadata=False):
     metadata = {
         "normalizer_keys": list(normalizer_keys),
         "current_frames_scanned": 0,
-        "current_frames_scanned_by_dataset": {},
         "effective_rows": {key: 0 for key in normalizer_keys},
     }
 
@@ -62,22 +61,6 @@ def get_normalizer(dataloader_cfg, normalizer_dataset, return_metadata=False):
         if batch_num_samples is None:
             batch_num_samples = batch[normalizer_keys[0]].shape[0]
         metadata["current_frames_scanned"] += int(batch_num_samples)
-        dataset_indices = batch.get("_dataset_index")
-        if dataset_indices is not None and hasattr(normalizer_dataset, "dataset_index_to_name"):
-            if isinstance(dataset_indices, torch.Tensor):
-                dataset_indices = dataset_indices.reshape(-1).tolist()
-            elif isinstance(dataset_indices, np.ndarray):
-                dataset_indices = dataset_indices.reshape(-1).tolist()
-            for dataset_index in dataset_indices:
-                dataset_name = normalizer_dataset.dataset_index_to_name[int(dataset_index)]
-                metadata["current_frames_scanned_by_dataset"].setdefault(dataset_name, 0)
-                metadata["current_frames_scanned_by_dataset"][dataset_name] += 1
-        else:
-            dataset_names = batch.get("dataset_name")
-            if dataset_names is not None:
-                for dataset_name in dataset_names:
-                    metadata["current_frames_scanned_by_dataset"].setdefault(dataset_name, 0)
-                    metadata["current_frames_scanned_by_dataset"][dataset_name] += 1
         for key, value in input_data.items():
             metadata["effective_rows"][key] += int(value.shape[0])
         normalizer.update_streaming_fit(input_data)
