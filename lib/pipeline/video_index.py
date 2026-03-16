@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Dict, Optional
 
+from tqdm import tqdm
+
 
 @dataclass
 class VideoDescriptor:
@@ -80,12 +82,10 @@ def build_video_index(factory_dir: str) -> dict:
     # Group frames by video_key
     videos: Dict[str, dict] = {}
 
-    for shard_file in shard_files:
+    n_frames_total = 0
+    pbar = tqdm(shard_files, desc="Scanning shards", unit="shard")
+    for shard_file in pbar:
         shard_path = str(factory_path / shard_file)
-        # Single pass: iterate members streaming (no getnames() full scan),
-        # and extract JSON metadata inline to avoid re-opening the tar.
-        # json_meta: buffer for video_name read from JSON that appeared
-        # before the first frame of that video in the tar stream.
         json_meta: Dict[str, str] = {}
         with tarfile.open(shard_path, 'r|') as tar:  # streaming mode 'r|'
             for member in tar:
@@ -103,6 +103,9 @@ def build_video_index(factory_dir: str) -> dict:
                             "video_name": json_meta.pop(video_key, ""),
                         }
                     videos[video_key]["frames"].append(name)
+                    n_frames_total += 1
+                    if n_frames_total % 500 == 0:
+                        pbar.set_postfix(videos=len(videos), frames=n_frames_total)
 
                 elif name.endswith('.json') and member.isreg():
                     base = name[:-5]  # remove .json
@@ -124,6 +127,9 @@ def build_video_index(factory_dir: str) -> dict:
                                         json_meta[video_key] = vn
                         except Exception:
                             pass
+
+    pbar.set_postfix(videos=len(videos), frames=n_frames_total)
+    pbar.close()
 
     # Sort frames within each video and set num_frames
     for video_key, info in videos.items():
