@@ -630,6 +630,10 @@ class BatchScheduler:
         task_ns.num_workers = self.num_workers
         task_ns.metric3d_batch_size = self.metric3d_batch_size
 
+        # Attach descriptor for WebDataset mode
+        task = self.tasks.get(video_path)
+        task_ns._descriptor = task.descriptor if task else None
+
         try:
             result = run_stage_with_runtime(runtime, task_ns, prefetched_data=prefetched_data)
             success = result.get("status") in ("success", "skipped")
