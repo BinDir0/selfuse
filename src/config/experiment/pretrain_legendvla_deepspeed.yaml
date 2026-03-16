@@ -433,7 +433,7 @@ policy:
 
 
 logging:
-  project: finetune
+  project: lossweight-mem-rtc
   entity: LegendaryVLA
   resume: False
   mode: online
