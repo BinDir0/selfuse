@@ -1033,6 +1033,20 @@ def get_parser():
         type=str,
         help="Path to text file with one factory directory per line",
     )
+    input_group.add_argument(
+        "--factory_range",
+        type=str,
+        nargs=2,
+        metavar=("START", "END"),
+        help="Factory ID range (inclusive), e.g. --factory_range 1 10",
+    )
+
+    parser.add_argument(
+        "--factory_base",
+        type=str,
+        default="/share_data/guantianrui/datasets/Egocentric-100K/processed_v9_test_jpg",
+        help="Base directory for --factory_range (default: processed_v9_test_jpg)",
+    )
 
     parser.add_argument(
         "--gpus",
@@ -1203,6 +1217,25 @@ def main():
         descriptors = descs
         video_paths = [d.video_key for d in descs]
         print(f"Factory mode: {len(factory_dirs)} factories")
+        print(f"Discovered {len(descs)} videos total")
+    elif args.factory_range:
+        fstart, fend = int(args.factory_range[0]), int(args.factory_range[1])
+        factory_dirs = [
+            os.path.join(args.factory_base, f"factory{i:03d}")
+            for i in range(fstart, fend + 1)
+        ]
+        # Filter to only existing directories
+        missing = [d for d in factory_dirs if not os.path.isdir(d)]
+        if missing:
+            print(f"Warning: {len(missing)} factory dirs not found, skipping", file=sys.stderr)
+            factory_dirs = [d for d in factory_dirs if os.path.isdir(d)]
+        if not factory_dirs:
+            print("Error: No valid factory directories found", file=sys.stderr)
+            sys.exit(1)
+        descs = collect_videos_from_factories(factory_dirs)
+        descriptors = descs
+        video_paths = [d.video_key for d in descs]
+        print(f"Factory range: factory{fstart:03d} ~ factory{fend:03d} ({len(factory_dirs)} factories)")
         print(f"Discovered {len(descs)} videos total")
 
     if not video_paths:
