@@ -480,6 +480,109 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
     }
 
 
+def _run_detect_track_batched(ns, runtime, descriptors, lines):
+    """Run detect_track across all videos in one cross-video batch.
+
+    Returns (overall_success, processed_count).
+    """
+    from lib.pipeline.tools import detect_track_multi
+
+    runtime.ensure_runner("detect_track")
+
+    # Collect pending videos (skip already-complete ones)
+    pending = []  # (index, descriptor, video_label, seq_folder)
+    for i, line in enumerate(lines):
+        desc = descriptors[i]
+        if desc is not None:
+            seq_folder = Path(desc.seq_folder)
+            video_label = desc.video_key
+        else:
+            seq_folder = get_seq_folder(line)
+            video_label = line
+
+        if ns.resume and not ns.force and is_stage_complete("detect_track", seq_folder, fast_check=True):
+            emit_event("stage_end", video=video_label, stage="detect_track", gpu=ns.gpu,
+                        status="skipped", reason="existing_valid_output", elapsed_sec=0)
+            continue
+        pending.append((i, desc, video_label, seq_folder))
+
+    if not pending:
+        return True, 0
+
+    # Build video_infos with frame_sources
+    video_infos = []
+    for i, desc, video_label, seq_folder in pending:
+        if desc is not None:
+            frame_source = ShardVideoFrameSource(
+                desc.shard_path, desc.frame_names, frame_offsets=desc.frame_offsets,
+            )
+        else:
+            from lib.pipeline.frame_source import build_frame_source
+            frame_source = build_frame_source(lines[i])
+
+        os.makedirs(str(seq_folder), exist_ok=True)
+        num_frames = len(frame_source)
+        img_h, img_w = frame_source.get_size()
+
+        video_infos.append({
+            "frame_source": frame_source,
+            "seq_folder": str(seq_folder),
+            "video_key": video_label,
+            "num_frames": num_frames,
+            "img_size": (img_h, img_w),
+        })
+
+    emit_event("detect_track_multi_start", gpu=ns.gpu,
+               num_videos=len(video_infos),
+               total_frames=sum(vi["num_frames"] for vi in video_infos))
+
+    started_at = time.time()
+    results = detect_track_multi(
+        video_infos,
+        hand_det_model=runtime.detector_runner,
+        thresh=0.35,
+        detect_batch_size=getattr(ns, 'detect_batch_size', 128),
+        num_io_workers=getattr(ns, 'detect_io_workers', 8),
+        device=getattr(ns, 'detect_device', 'cuda:0'),
+        half_precision=getattr(ns, 'detect_half_precision', True),
+    )
+
+    elapsed = time.time() - started_at
+    overall_success = True
+
+    for (i, desc, video_label, seq_folder), result in zip(pending, results):
+        status = result.get("status", "unknown")
+        if status == "success":
+            # Validate and mark done
+            try:
+                start_idx = result["start_idx"]
+                end_idx = result["end_idx"]
+                validate_stage_output("detect_track", seq_folder, start_idx, end_idx)
+                done_marker = seq_folder / f".detect_track.done"
+                done_marker.touch()
+            except Exception as e:
+                status = "failed"
+                result["error"] = str(e)
+
+        if status != "success":
+            overall_success = False
+
+        emit_event("stage_end", video=video_label, stage="detect_track", gpu=ns.gpu,
+                    status=status,
+                    elapsed_sec=round(elapsed / max(len(pending), 1), 3),
+                    start_idx=result.get("start_idx"),
+                    end_idx=result.get("end_idx"),
+                    error=result.get("error"))
+
+    emit_event("detect_track_multi_end", gpu=ns.gpu,
+               num_videos=len(video_infos),
+               elapsed_sec=round(elapsed, 3),
+               success=sum(1 for r in results if r["status"] == "success"),
+               failed=sum(1 for r in results if r["status"] != "success"))
+
+    return overall_success, len(pending)
+
+
 def worker_runtime_loop(ns):
     set_determinism(ns.seed)
     runtime = WorkerRuntime(
@@ -505,6 +608,12 @@ def worker_runtime_loop(ns):
         else:
             descriptors.append(None)  # plain video_path mode
 
+    # --- Cross-video batched detect_track ---
+    if ns.stage == "detect_track":
+        success, _ = _run_detect_track_batched(ns, runtime, descriptors, lines)
+        return success
+
+    # --- Standard per-video loop for other stages ---
     overall_success = True
     for i, line in enumerate(lines):
         task_ns = argparse.Namespace(**vars(ns))
