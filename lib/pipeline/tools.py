@@ -2,7 +2,6 @@ import cv2
 from tqdm import tqdm
 import numpy as np
 import torch
-import torchvision
 import os
 
 from ultralytics import YOLO
@@ -10,71 +9,6 @@ import supervision as sv
 
 # Check if we should suppress verbose output
 QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
-
-
-def _yolo_nms(preds, conf_thres=0.25, iou_thres=0.7, max_det=300):
-    """Post-process raw YOLO output: filter + NMS, returns per-image detections.
-
-    Args:
-        preds: Raw model output — (batch, 4+nc, num_boxes) for YOLOv8,
-               or tuple where preds[0] is the tensor.
-        conf_thres: Minimum confidence threshold.
-        iou_thres: IoU threshold for NMS.
-        max_det: Maximum detections per image.
-
-    Returns:
-        List of (N, 6) tensors per image: [x1, y1, x2, y2, conf, cls]
-    """
-    if isinstance(preds, (list, tuple)):
-        preds = preds[0]
-
-    # YOLOv8: (batch, 4+nc, num_boxes) -> (batch, num_boxes, 4+nc)
-    if preds.shape[1] < preds.shape[2]:
-        preds = preds.transpose(1, 2)
-
-    batch_size = preds.shape[0]
-    results = []
-
-    for i in range(batch_size):
-        pred = preds[i]  # (num_boxes, 4+nc)
-        boxes_cxcywh = pred[:, :4]
-        class_scores = pred[:, 4:]
-
-        # Max class score per box
-        max_scores, class_ids = class_scores.max(dim=1)
-
-        # Filter by confidence
-        mask = max_scores > conf_thres
-        if not mask.any():
-            results.append(torch.zeros((0, 6), device=preds.device))
-            continue
-
-        boxes_cxcywh = boxes_cxcywh[mask]
-        max_scores = max_scores[mask]
-        class_ids = class_ids[mask]
-
-        # cxcywh -> xyxy
-        half_w = boxes_cxcywh[:, 2] / 2
-        half_h = boxes_cxcywh[:, 3] / 2
-        boxes_xyxy = torch.stack([
-            boxes_cxcywh[:, 0] - half_w,
-            boxes_cxcywh[:, 1] - half_h,
-            boxes_cxcywh[:, 0] + half_w,
-            boxes_cxcywh[:, 1] + half_h,
-        ], dim=1)
-
-        # Per-class NMS
-        keep = torchvision.ops.batched_nms(boxes_xyxy, max_scores, class_ids, iou_thres)
-        keep = keep[:max_det]
-
-        det = torch.cat([
-            boxes_xyxy[keep],
-            max_scores[keep].unsqueeze(1),
-            class_ids[keep].float().unsqueeze(1),
-        ], dim=1)
-        results.append(det)
-
-    return results
 
 
 def detect_track(
@@ -91,7 +25,7 @@ def detect_track(
     """
     Detect and track hands using batched YOLO inference + post-hoc ByteTrack.
 
-    Phase 1: Batch detection - direct model forward pass with parallel preprocessing
+    Phase 1: Batch detection - YOLO.predict() with large batch sizes for high GPU utilization
     Phase 2: Sequential tracking - supervision.ByteTrack on CPU for track assignment
 
     Args:
@@ -100,34 +34,18 @@ def detect_track(
         edge_margin_ratio: Ratio of image size to define edge region (default 0.1 = 10%)
         min_edge_conf: Minimum confidence required for detections near edges
         hand_det_model: Optional preloaded YOLO detector for reuse
-        detect_batch_size: Batch size for YOLO inference (default 128)
+        detect_batch_size: Batch size for YOLO.predict() (default 128)
         num_io_workers: Number of DataLoader workers for parallel frame loading
         device: Device for YOLO detector (e.g., 'cuda:0')
         half_precision: Use FP16 for YOLO inference
     """
-    from lib.pipeline.frame_source import (
-        DetectFrameDataset, _detect_collate, _frame_dataset_worker_init,
-    )
+    from lib.pipeline.frame_source import FrameDataset, _numpy_collate, _frame_dataset_worker_init
 
     hand_det_model = hand_det_model or YOLO('./weights/external/detector.pt')
 
     if device:
         hand_det_model.to(device)
     use_half = half_precision and device and 'cuda' in device
-
-    # Get model parameters for preprocessing
-    imgsz = hand_det_model.overrides.get('imgsz', 640)
-    if isinstance(imgsz, (list, tuple)):
-        imgsz = imgsz[0]
-    stride = int(hand_det_model.model.stride.max())
-
-    # Fuse model layers for faster inference
-    model_nn = hand_det_model.model
-    if hasattr(model_nn, 'fuse'):
-        model_nn.fuse()
-    model_nn.eval()
-    if use_half:
-        model_nn.half()
 
     num_frames = len(frame_source)
     img_h, img_w = frame_source.get_size()
@@ -136,59 +54,29 @@ def detect_track(
     all_detections = [None] * num_frames  # (xyxy, confs, class_ids) per frame
     all_boxes_raw = [np.array([]).reshape(0, 5)] * num_frames  # boxes with conf for output
 
-    dataset = DetectFrameDataset(frame_source, imgsz=imgsz, stride=stride)
+    dataset = FrameDataset(frame_source)
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=detect_batch_size,
         shuffle=False,
         num_workers=num_io_workers,
-        collate_fn=_detect_collate,
+        collate_fn=_numpy_collate,
         worker_init_fn=_frame_dataset_worker_init,
-        pin_memory=True,
+        pin_memory=False,
         prefetch_factor=2 if num_io_workers > 0 else None,
         persistent_workers=num_io_workers > 0,
     )
 
-    for batch_indices, batch_imgs, batch_metas in tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)"):
-        # batch_imgs: (B, 3, imgsz, imgsz) uint8
-        # batch_metas: (B, 5) = [orig_h, orig_w, pad_top, pad_left, ratio]
-        batch_tensor = batch_imgs.to(device, non_blocking=True).float() / 255.0
-        if use_half:
-            batch_tensor = batch_tensor.half()
-
+    for batch_indices, batch_frames in tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)"):
         with torch.no_grad():
-            preds = model_nn(batch_tensor)
+            results_list = hand_det_model.predict(
+                batch_frames, conf=thresh, verbose=False, half=use_half,
+            )
 
-        # NMS: returns list of (N, 6) tensors [x1, y1, x2, y2, conf, cls] per image
-        dets_list = _yolo_nms(preds, conf_thres=thresh, iou_thres=0.7)
-
-        for i, frame_idx in enumerate(batch_indices):
-            det = dets_list[i]  # (N, 6) tensor on device
-            if len(det) == 0:
-                all_detections[frame_idx] = (
-                    np.array([]).reshape(0, 4),
-                    np.array([]),
-                    np.array([]),
-                )
-                continue
-
-            # Scale boxes from letterboxed coords back to original image coords
-            meta = batch_metas[i]  # [orig_h, orig_w, pad_top, pad_left, ratio]
-            pad_top, pad_left, ratio = meta[2], meta[3], meta[4]
-
-            det_cpu = det.float().cpu()
-            boxes = det_cpu[:, :4].numpy()
-            confs = det_cpu[:, 4].numpy()
-            class_ids = det_cpu[:, 5].numpy()
-
-            # Undo padding then undo resize
-            boxes[:, [0, 2]] -= pad_left
-            boxes[:, [1, 3]] -= pad_top
-            boxes[:, :4] /= ratio
-
-            # Clip to original image bounds
-            boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, meta[1])  # orig_w
-            boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, meta[0])  # orig_h
+        for frame_idx, result in zip(batch_indices, results_list):
+            boxes = result.boxes.xyxy.cpu().numpy()
+            confs = result.boxes.conf.cpu().numpy()
+            class_ids = result.boxes.cls.cpu().numpy()
 
             all_detections[frame_idx] = (boxes, confs, class_ids)
             if len(boxes) > 0:
