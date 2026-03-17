@@ -61,7 +61,7 @@ def build_metric3d_runner(weight_path=None):
     return metric
 
 
-def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size=32, droid_net=None, frame_source=None, seq_folder=None, slam_stride=1):
+def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size=32, droid_net=None, frame_source=None, seq_folder=None):
     import time
     timing = {}
     t_start = time.time()
@@ -109,7 +109,7 @@ def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size
 
     ##### Run SLAM #####
     t0 = time.time()
-    droid, traj = run_slam(frame_source, masks=masks, calib=calib, droid_net=droid_net, stride=slam_stride)
+    droid, traj = run_slam(frame_source, masks=masks, calib=calib, droid_net=droid_net)
     n = droid.video.counter.value
     tstamp = droid.video.tstamp.cpu().int().numpy()[:n]
     disps = droid.video.disps_up.cpu().numpy()[:n]

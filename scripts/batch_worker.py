@@ -449,7 +449,7 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
             frame_source=frame_source,
         )
     elif ns.stage == "slam":
-        hawor_slam(stage_args, start_idx, end_idx, metric_runner=runtime.metric_runner, metric3d_batch_size=ns.metric3d_batch_size, droid_net=runtime.droid_net, frame_source=frame_source, seq_folder=str(seq_folder), slam_stride=getattr(ns, 'slam_stride', 1))
+        hawor_slam(stage_args, start_idx, end_idx, metric_runner=runtime.metric_runner, metric3d_batch_size=ns.metric3d_batch_size, droid_net=runtime.droid_net, frame_source=frame_source, seq_folder=str(seq_folder))
     elif ns.stage == "infiller":
         tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
         frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
@@ -670,7 +670,6 @@ def get_parser():
     parser.add_argument("--num_workers", type=int, default=16, help="Number of DataLoader workers for parallel frame loading")
     parser.add_argument("--render_batch_size", type=int, default=8, help="Batch size for rendering phase")
     parser.add_argument("--metric3d_batch_size", type=int, default=32, help="Batch size for Metric3D depth estimation")
-    parser.add_argument("--slam_stride", type=int, default=1, help="Frame stride for DROID-SLAM (2=2x faster, 3=3x faster)")
     parser.add_argument("--detect_batch_size", type=int, default=128, help="Batch size for YOLO detection (default 128)")
     parser.add_argument("--detect_io_workers", type=int, default=8, help="Number of DataLoader workers for parallel frame loading")
     parser.add_argument("--detect_device", type=str, default="cuda:0", help="Device for YOLO detector (e.g., cuda:0)")
