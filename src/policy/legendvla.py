@@ -38,6 +38,34 @@ def _align_features_by_slot(
     return torch.gather(features, dim=1, index=gather_index)
 
 
+def _probe_non_finite(name: str, tensor: Optional[torch.Tensor]) -> None:
+    if tensor is None or not isinstance(tensor, torch.Tensor):
+        return
+    if tensor.numel() == 0:
+        return
+    if not torch.is_floating_point(tensor) and not torch.is_complex(tensor):
+        return
+
+    with torch.no_grad():
+        data = tensor.detach()
+        has_nan = bool(torch.isnan(data).any().item())
+        has_inf = bool(torch.isinf(data).any().item())
+        if not has_nan and not has_inf:
+            return
+
+        finite = data[torch.isfinite(data)]
+        if finite.numel() == 0:
+            stats = "ALL_BAD"
+        else:
+            finite = finite.float()
+            stats = f"min={finite.min().item():.4e}, max={finite.max().item():.4e}"
+
+        print(
+            f"[NaN PROBE] {name}: nan={has_nan} inf={has_inf} shape={list(data.shape)} {stats}",
+            flush=True,
+        )
+
+
 class LegendVLA(nn.Module):
     @log_execution_time(log)
     def __init__(
@@ -487,6 +515,7 @@ class LegendVLA(nn.Module):
             torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
         """
         inputs_embeds = self.embed_tokens(input_ids)
+        _probe_non_finite("inputs_embeds (raw text embedding)", inputs_embeds)
         device = inputs_embeds.device
         bsz, seq_len = input_ids.shape
 
@@ -523,6 +552,7 @@ class LegendVLA(nn.Module):
                 batch_size = pixel_values.shape[0]
                 frame_count = 1
             rgb_image_features = self.vision_tower(pixel_values)
+            _probe_non_finite("rgb_image_features", rgb_image_features)
             rgb_image_features = rgb_image_features.reshape(batch_size, -1, rgb_image_features.shape[-1])
 
             # Determine effective frame count based on actual output shape
@@ -539,6 +569,7 @@ class LegendVLA(nn.Module):
                 missing_depth_features = missing_depth_features.unsqueeze(0).expand(batch_size, -1, -1)
                 
                 if depth_values is not None:
+                    _probe_non_finite("depth_values", depth_values)
                     if getattr(self.vision_tower, "use_mem", False) and depth_values.ndim == 4:
                         depth_values = depth_values[:, None, ...]
                     if depth_values.ndim == 5:
@@ -553,6 +584,7 @@ class LegendVLA(nn.Module):
                         depth_values = depth_values.reshape(depth_batch * depth_frames, depth_channels, depth_height, depth_width)
                     
                     depth_image_features = self.depth_encoder(depth_values)
+                    _probe_non_finite("depth_image_features", depth_image_features)
                     depth_image_features = depth_image_features.reshape(batch_size, -1, depth_image_features.shape[-1])
                 else:
                     depth_image_features = missing_depth_features
@@ -562,9 +594,12 @@ class LegendVLA(nn.Module):
                     depth_image_features,
                     missing_depth_features,
                 )
+                _probe_non_finite("selected_depth_features", selected_depth_features)
                 paired_image_features = torch.cat((rgb_image_features, selected_depth_features), dim=-1)
+            _probe_non_finite("paired_image_features", paired_image_features)
 
             projected_image_features = self.multi_modal_projector(paired_image_features)
+            _probe_non_finite("projected_image_features", projected_image_features)
             projected_image_features = projected_image_features / (self.vlm_hidden_size ** 0.5)
             image_token_counts = image_mask.sum(dim=1)
             if not torch.compiler.is_compiling():
@@ -581,7 +616,10 @@ class LegendVLA(nn.Module):
             )
 
         if states is not None:
-            state_features = self.action_encoder_ar(states) / (self.vlm_hidden_size ** 0.5)
+            _probe_non_finite("states", states)
+            state_features = self.action_encoder_ar(states)
+            _probe_non_finite("state_features", state_features)
+            state_features = state_features / (self.vlm_hidden_size ** 0.5)
             state_slot = state_mask.long().cumsum(dim=1) - 1
             valid_state_mask = state_mask & vla_mask[:, None] & (state_slot < n_states[:, None])
             aligned_state_features = _align_features_by_slot(
@@ -595,8 +633,12 @@ class LegendVLA(nn.Module):
             )
 
         if actions is not None:
+            _probe_non_finite("actions", actions)
             actions_input = actions + torch.randn_like(actions) * self.ar_action_noise_std
-            action_features = self.action_encoder_ar(actions_input) / (self.vlm_hidden_size ** 0.5)
+            _probe_non_finite("actions_input", actions_input)
+            action_features = self.action_encoder_ar(actions_input)
+            _probe_non_finite("action_features", action_features)
+            action_features = action_features / (self.vlm_hidden_size ** 0.5)
             action_slot = action_mask.long().cumsum(dim=1) - 1
             valid_action_mask = action_mask & vla_mask[:, None] & (action_slot < n_actions[:, None])
             aligned_action_features = _align_features_by_slot(
