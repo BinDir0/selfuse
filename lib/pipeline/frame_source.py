@@ -246,67 +246,6 @@ def _frame_dataset_worker_init(worker_id):
         fs._tar = None
 
 
-class MultiVideoFrameDataset(torch.utils.data.Dataset):
-    """Dataset that spans multiple videos for cross-video batched detection.
-
-    Builds a flat index mapping global_idx -> (video_idx, local_frame_idx).
-    Workers load frames from any video in parallel.
-    """
-
-    def __init__(self, frame_sources):
-        """
-        Args:
-            frame_sources: List of BaseFrameSource, one per video.
-        """
-        self.frame_sources = frame_sources
-        self.use_turbojpeg = TURBOJPEG_AVAILABLE
-        if self.use_turbojpeg:
-            self.jpeg_decoder = TurboJPEG()
-        else:
-            self.jpeg_decoder = None
-
-        # Build flat index: [(video_idx, local_frame_idx), ...]
-        self._index = []
-        for vid_idx, fs in enumerate(frame_sources):
-            for local_idx in range(len(fs)):
-                self._index.append((vid_idx, local_idx))
-
-    def __len__(self):
-        return len(self._index)
-
-    def __getitem__(self, global_idx):
-        vid_idx, local_idx = self._index[global_idx]
-        frame = self.frame_sources[vid_idx].get_frame(local_idx, rgb=False)
-        return vid_idx, local_idx, frame
-
-
-def _multi_video_collate(batch):
-    """Collate for MultiVideoFrameDataset."""
-    vid_indices = [b[0] for b in batch]
-    local_indices = [b[1] for b in batch]
-    frames = [b[2] for b in batch]
-    return vid_indices, local_indices, frames
-
-
-def _multi_video_worker_init(worker_id):
-    """Re-init TurboJPEG + file handles for each DataLoader worker."""
-    worker_info = torch.utils.data.get_worker_info()
-    dataset = worker_info.dataset
-    if dataset.use_turbojpeg and TURBOJPEG_AVAILABLE:
-        dataset.jpeg_decoder = TurboJPEG()
-    # Re-open file/tar handles for all ShardVideoFrameSources (not fork-safe)
-    for fs in dataset.frame_sources:
-        if hasattr(fs, '_fh') and fs._fh is not None:
-            fs._fh.close()
-            fs._fh = None
-        if hasattr(fs, '_tar') and fs._tar is not None:
-            fs._tar.close()
-            fs._tar = None
-        # Re-init turbojpeg decoder per worker
-        if hasattr(fs, 'use_turbojpeg') and fs.use_turbojpeg:
-            fs.jpeg_decoder = TurboJPEG()
-
-
 def build_frame_source(video_path: str):
     """Build an ImageFolderFrameSource from pre-extracted frames.
 
