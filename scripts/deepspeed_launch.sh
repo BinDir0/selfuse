@@ -87,5 +87,5 @@ deepspeed --hostfile hostfile \
     --no_local_rank \
     --include "pro-10:4,5,6,7@pro-01:0,1,2,3,4,5,6,7" \
     train.py \
-    experiment=pretrain_legendvla_deepspeed \
+    experiment=legendvla_qwen3_vl \
     2>&1 | tee multi_node_train.log

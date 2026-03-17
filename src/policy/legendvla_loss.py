@@ -314,281 +314,190 @@ def _build_dense_diffloss_inputs(
     )
 
 
-# TODO: Deprecated method, to be updated
-def compute_ar_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
-    """
-    Compute autoregressive loss for action prediction and vision language understanding.
+def zero_loss(reference: torch.Tensor) -> torch.Tensor:
+    return reference.new_zeros(())
 
-    Args:
-        model: LegendVLA model instance
-        batch: Input dictionary containing input_ids, labels, pixel_values,
-               causal_mask, vlm_position_ids, states, actions, n_states, n_actions, is_vla_data
 
-    Returns:
-        dict: {"ce_loss": cross-entropy loss}
-    """
-    input_ids = batch["input_ids"]
-    labels = batch["labels"]
-    pixel_values = batch["pixel_values"]
-    causal_mask = batch["causal_mask"]
-    vlm_position_ids = batch["vlm_position_ids"]
-
-    if 'depth_values' in batch:
-        depth_values = batch["depth_values"]
-        has_depth_values = batch["has_depth_values"]
-    else:
-        depth_values = None
-        has_depth_values = None
-    inputs_embeds = model._forward_siglip_and_text_embedding(
-        input_ids=input_ids,
-        pixel_values=pixel_values,
-        depth_values=depth_values,
-        has_depth_values=has_depth_values,
-        states=batch["states"],
-        actions=batch["actions"],
-        n_states=batch["n_states"],
-        n_actions=batch["n_actions"],
-        is_vla_data=batch["is_vla_data"],
-        dtype=pixel_values.dtype
+def compute_ce_loss(model, hidden_states: torch.Tensor, labels: torch.Tensor, is_vla_data: torch.Tensor) -> torch.Tensor:
+    non_vla_mask = ~is_vla_data.to(dtype=torch.bool)
+    if not torch.any(non_vla_mask):
+        return zero_loss(hidden_states)
+    return compute_celoss(
+        model.lm_head,
+        model.final_logit_softcapping,
+        model.CELoss,
+        model.ignore_index,
+        hidden_states[non_vla_mask],
+        labels[non_vla_mask],
     )
 
-    output = model.joint_model(
-        attention_mask=causal_mask,
-        position_ids_all={"vlm": vlm_position_ids},
-        embeds_all={"vlm": inputs_embeds},
-        kv_caches={},
-        final_layer_post_attn_skip_names=[],
-        return_attn_weights=return_attn_weights,
-    )
-    hidden_states = output["vlm"]
 
-    ce_loss = compute_celoss(
-        model.lm_head, model.final_logit_softcapping,
-        model.CELoss, model.ignore_index, hidden_states, labels
-    )
-    return {"ce_loss": ce_loss}
+def compute_diffloss_loss(
+    model,
+    hidden_states: torch.Tensor,
+    actions: torch.Tensor,
+    answer_start_idx: torch.Tensor,
+    n_actions: torch.Tensor,
+    is_vla_data: torch.Tensor,
+) -> torch.Tensor:
+    if model.diffloss is None or not torch.any(is_vla_data.to(dtype=torch.bool)):
+        return zero_loss(hidden_states)
 
-
-# TODO: Deprecated method, to be updated
-def compute_flow_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
-    """
-    Forward pass for flow matching training.
-
-    Args:
-        model: LegendVLA model instance
-        batch: Input dictionary containing input_ids, pixel_values, causal_mask,
-               vlm_position_ids, action_position_ids, actions, actions_valid_mask, t,
-               states, n_states, n_actions, is_vla_data
-
-    Returns:
-        dict: {"flow_loss": flow matching loss}
-    """
-    input_ids = batch["input_ids"]
-    pixel_values = batch["pixel_values"]
-    causal_mask = batch["causal_mask"]
-    vlm_position_ids = batch["vlm_position_ids"]
-    action_position_ids = batch["action_position_ids"]
-    actions = batch["actions"]
-    actions_valid_mask = batch["actions_valid_mask"]
-    t = batch["t"]
-    use_rtc = model.use_rtc
-    rtc_mask = None
-    # noisy action
-    x0 = torch.randn_like(actions, device=t.device, dtype=t.dtype)
-    x1 = actions
-    time_for_model = t
-    if use_rtc:
-        time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
-            actions=x1,
-            actions_valid_mask=actions_valid_mask,
-            postfix_time=t,
-            n_actions=batch.get("n_actions"),
-            rtc_delay_strategy=model.rtc_delay_strategy,
-            rtc_max_delay=model.rtc_max_delay,
-        )
-    psi_t_val = psi_t(x0, x1, time_for_model, model.flow_sig_min)
-    if use_rtc:
-        psi_t_val = torch.where(prefix_mask.unsqueeze(-1), x1, psi_t_val)
-
-    if 'depth_values' in batch:
-        depth_values = batch["depth_values"]
-        has_depth_values = batch["has_depth_values"]
-    else:
-        depth_values = None
-        has_depth_values = None
-    inputs_embeds = model._forward_siglip_and_text_embedding(
-        input_ids=input_ids,
-        pixel_values=pixel_values,
-        depth_values=depth_values,
-        has_depth_values=has_depth_values,
-        states=batch["states"],
-        actions=batch["actions"],
-        n_states=batch["n_states"],
-        n_actions=batch["n_actions"],
-        is_vla_data=batch["is_vla_data"],
-        dtype=pixel_values.dtype
-    )
-
-    if time_for_model.ndim == 2 and use_rtc:
-        time_cond = model.time_embedding(time_for_model.reshape(-1)).reshape(
-            time_for_model.shape[0], time_for_model.shape[1], -1
-        )
-    else:
-        time_cond = model.time_embedding(time_for_model)
-
-    if model.action_expert_adaptive_mode:
-        action_embeds = model.action_encoder(psi_t_val)
-    else:
-        action_embeds = model.action_encoder(psi_t_val, time_cond)
-    action_embeds = action_embeds / (model.action_hidden_size**0.5)
-    action_embeds = model.joint_model(
-        attention_mask=causal_mask,
-        position_ids_all={"vlm": vlm_position_ids, "action": action_position_ids},
-        embeds_all={"vlm": inputs_embeds, "action": action_embeds},
-        time_cond=time_cond,
-        kv_caches={},
-        return_attn_weights=return_attn_weights,
-    )["action"]
-
-    v_psi = model.action_decoder(action_embeds)
-    flow_loss = _compute_flow_loss(
-        model=model,
-        actions=x1,
-        actions_valid_mask=actions_valid_mask,
-        pred_v_t=v_psi,
-        noise=x0,
-        rtc_mask=rtc_mask,
-    )
-    return {"flow_loss": flow_loss}
-
-
-def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
-    """
-    Compute combined VLA loss: cross-entropy (VLM) + flow matching + diffusion loss.
-
-    Args:
-        model: LegendVLA model instance
-        batch: Input dictionary containing input_ids, labels, pixel_values, causal_mask,
-               vlm_position_ids, action_position_ids, actions, actions_valid_mask, t,
-               states, answer_start_idx, is_vla_data, n_actions, n_states
-
-    Returns:
-        dict: {"total_loss", "ce_loss", "diffusion_loss", "flow_loss"}
-    """
-    input_ids = batch["input_ids"]
-    labels = batch["labels"]
-    pixel_values = batch["pixel_values"]
-    causal_mask = batch["causal_mask"]
-    vlm_position_ids = batch["vlm_position_ids"]
-    action_position_ids = batch["action_position_ids"]
-    actions = batch["actions"]
-    actions_valid_mask = batch["actions_valid_mask"]
-    t = batch["t"]
-    states = batch["states"]
-    answer_start_idx = batch["answer_start_idx"]
-    is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
-    n_actions = batch["n_actions"]
-    n_states = batch["n_states"]
-    use_rtc = model.use_rtc
-    # noisy action
-    x0 = torch.randn_like(actions, device=t.device, dtype=t.dtype)
-    x1 = actions
-    rtc_mask = None
-    time_for_model = t
-    if use_rtc:
-        time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
-            actions=x1,
-            actions_valid_mask=actions_valid_mask,
-            postfix_time=t,
-            n_actions=n_actions,
-            rtc_delay_strategy=model.rtc_delay_strategy,
-            rtc_max_delay=model.rtc_max_delay,
-        )
-    psi_t_val = psi_t(x0, x1, time_for_model, model.flow_sig_min)
-    if use_rtc:
-        psi_t_val = torch.where(prefix_mask.unsqueeze(-1), x1, psi_t_val)
-        
-    depth_values = batch.get("depth_values")
-    has_depth_values = batch.get("has_depth_values")
-    inputs_embeds = model._forward_siglip_and_text_embedding(
-        input_ids=input_ids,
-        pixel_values=pixel_values,
-        depth_values=depth_values,
-        has_depth_values=has_depth_values,
-        states=states,
-        actions=actions,
-        n_states=n_states,
-        n_actions=n_actions,
-        is_vla_data=is_vla_data,
-        dtype=pixel_values.dtype
-    )
-
-    # inference with noisy action
-    if time_for_model.ndim == 2 and use_rtc:
-        time_cond = model.time_embedding(time_for_model.reshape(-1)).reshape(
-            time_for_model.shape[0], time_for_model.shape[1], -1
-        )
-    else:
-        time_cond = model.time_embedding(time_for_model)
-    if model.action_expert_adaptive_mode:
-        action_embeds = model.action_encoder(psi_t_val)
-    else:
-        action_embeds = model.action_encoder(psi_t_val, time_cond)
-    action_embeds = action_embeds / (model.action_hidden_size**0.5)
-    output = model.joint_model(
-        attention_mask=causal_mask,
-        position_ids_all={"vlm": vlm_position_ids, "action": action_position_ids},
-        embeds_all={"vlm": inputs_embeds, "action": action_embeds},
-        time_cond=time_cond,
-        kv_caches={},
-        final_layer_post_attn_skip_names=[],
-        return_attn_weights=return_attn_weights,
-    )
-    hidden_states = output["vlm"]
-    action_embeds = output["action"]
-
-    ce_loss = compute_celoss(
-        model.lm_head, model.final_logit_softcapping,
-        model.CELoss, model.ignore_index,
-        hidden_states[~is_vla_data],
-        labels[~is_vla_data]
-    )
-
-    # diffusion loss
     vla_hidden_z, action_gt, diffloss_mask = _build_dense_diffloss_inputs(
         model,
         hidden_states,
         actions,
         answer_start_idx,
         n_actions,
-        is_vla_data,
+        is_vla_data.to(dtype=torch.bool),
     )
-    vla_hidden_z_repeated = vla_hidden_z.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
-    action_gt_repeated = action_gt.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
-    diffloss_mask_repeated = diffloss_mask.repeat_interleave(model.diffloss_micro_batch_size, dim=0)
-    latent_condition_embeds = model.latent_condition_projector(vla_hidden_z_repeated)
-    diff_loss = model.diffloss(
-        action_gt_repeated,
-        latent_condition_embeds,
-        mask=diffloss_mask_repeated.to(dtype=action_gt_repeated.dtype),
-    ) / model.diffloss_micro_batch_size
+    if vla_hidden_z.numel() == 0:
+        return zero_loss(hidden_states)
 
-    # flow loss
-    v_psi = model.action_decoder(action_embeds)
+    repeat_factor = int(getattr(model, "diffloss_micro_batch_size", 1))
+    vla_hidden_z = vla_hidden_z.repeat_interleave(repeat_factor, dim=0)
+    action_gt = action_gt.repeat_interleave(repeat_factor, dim=0)
+    diffloss_mask = diffloss_mask.repeat_interleave(repeat_factor, dim=0)
+    latent_condition_embeds = model.latent_condition_projector(vla_hidden_z)
+    diff_loss = model.diffloss(
+        action_gt,
+        latent_condition_embeds,
+        mask=diffloss_mask.to(dtype=action_gt.dtype),
+    )
+    return diff_loss / repeat_factor
+
+
+def build_flow_inputs(model, batch: dict[str, torch.Tensor | None]) -> dict[str, torch.Tensor | None]:
+    actions = batch["actions"]
+    actions_valid_mask = batch["actions_valid_mask"]
+    t = batch["t"]
+    n_actions = batch["n_actions"]
+
+    noise = torch.randn_like(actions, device=actions.device, dtype=actions.dtype)
+    rtc_mask = None
+    prefix_mask = None
+    time_for_model = t
+    if model.use_rtc:
+        time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
+            actions=actions,
+            actions_valid_mask=actions_valid_mask,
+            postfix_time=t,
+            n_actions=n_actions,
+            rtc_delay_strategy=model.rtc_delay_strategy,
+            rtc_max_delay=model.rtc_max_delay,
+        )
+    noisy_actions = psi_t(noise, actions, time_for_model, model.flow_sig_min)
+    if prefix_mask is not None:
+        noisy_actions = torch.where(prefix_mask.unsqueeze(-1), actions, noisy_actions)
+    return {
+        "noise": noise,
+        "rtc_mask": rtc_mask,
+        "time_for_model": time_for_model,
+        "noisy_actions": noisy_actions,
+    }
+
+
+def _compute_flow_stream_loss(
+    model,
+    batch: dict[str, torch.Tensor | None],
+    backbone_output,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
+    if "actions" not in batch or "actions_valid_mask" not in batch:
+        return zero_loss(backbone_output.last_hidden_states), {}
+
+    flow_inputs = build_flow_inputs(model, batch)
+    flow_output = model.forward_flow_stream(
+        batch=batch,
+        backbone_output=backbone_output,
+        flow_inputs=flow_inputs,
+    )
     flow_loss = _compute_flow_loss(
         model=model,
-        actions=x1,
-        actions_valid_mask=actions_valid_mask,
-        pred_v_t=v_psi,
-        noise=x0,
-        rtc_mask=rtc_mask,
+        actions=batch["actions"],
+        actions_valid_mask=batch["actions_valid_mask"],
+        pred_v_t=flow_output["pred_v"],
+        noise=flow_inputs["noise"],
+        rtc_mask=flow_inputs["rtc_mask"],
     )
-    total_loss = (model.loss_weights.ce_loss_weight * ce_loss
-                  + model.loss_weights.diffusion_loss_weight * diff_loss
-                  + model.loss_weights.flow_loss_weight * flow_loss)
+    flow_output["flow_loss"] = flow_loss
+    return flow_loss, flow_output
+
+
+def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    slot_embeds = model.build_slot_embeddings(batch)
+    backbone_output = model.forward_backbone_stream(batch, slot_embeds)
+    hidden_states = backbone_output.last_hidden_states
+    is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
+
+    ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
+    diff_loss = compute_diffloss_loss(
+        model,
+        hidden_states,
+        batch["actions"],
+        batch["answer_start_idx"],
+        batch["n_actions"],
+        is_vla_data,
+    )
+    flow_loss, _ = _compute_flow_stream_loss(model, batch, backbone_output)
+
+    total_loss = (
+        model.loss_weights.ce_loss_weight * ce_loss
+        + model.loss_weights.diffusion_loss_weight * diff_loss
+        + model.loss_weights.flow_loss_weight * flow_loss
+    )
     return {
         "total_loss": total_loss,
         "ce_loss": ce_loss,
         "diffusion_loss": diff_loss,
         "flow_loss": flow_loss,
     }
+
+
+def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    slot_embeds = model.build_slot_embeddings(batch)
+    backbone_output = model.forward_backbone_stream(batch, slot_embeds)
+    hidden_states = backbone_output.last_hidden_states
+    is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
+    ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
+    diff_loss = compute_diffloss_loss(
+        model,
+        hidden_states,
+        batch["actions"],
+        batch["answer_start_idx"],
+        batch["n_actions"],
+        is_vla_data,
+    )
+    total_loss = model.loss_weights.ce_loss_weight * ce_loss + model.loss_weights.diffusion_loss_weight * diff_loss
+    return {
+        "total_loss": total_loss,
+        "ce_loss": ce_loss,
+        "diffusion_loss": diff_loss,
+        "flow_loss": zero_loss(hidden_states),
+    }
+
+
+def compute_flow_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    slot_embeds = model.build_slot_embeddings(batch)
+    backbone_output = model.forward_backbone_stream(batch, slot_embeds)
+    flow_loss, _ = _compute_flow_stream_loss(model, batch, backbone_output)
+    return {
+        "total_loss": model.loss_weights.flow_loss_weight * flow_loss,
+        "ce_loss": zero_loss(backbone_output.last_hidden_states),
+        "diffusion_loss": zero_loss(backbone_output.last_hidden_states),
+        "flow_loss": flow_loss,
+    }
+
+
+def compute_ar_loss(model, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
+    del kwargs
+    return compute_ar_only_loss(model, batch)
+
+
+def compute_flow_loss(model, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
+    del kwargs
+    return compute_flow_only_loss(model, batch)
+
+
+def compute_loss(model, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
+    del kwargs
+    return compute_total_loss(model, batch)

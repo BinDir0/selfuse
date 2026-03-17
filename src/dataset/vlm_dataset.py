@@ -9,6 +9,7 @@ import numpy as np
 from torchvision import transforms
 from src.utils.pytorch_util import dict_apply
 from src.dataset.collator import LegendVLDataCollator
+from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.dataset.sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from src.dataset.wds_dataset import build_blended_dataset
 
@@ -57,6 +58,12 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         """Build a data collator for batching."""
         assert self.preprocessor is not None, "Preprocessor is not set"
         padding_side = 'left' if self.mode == 'infer-ar' else 'right'
+        if hasattr(self.preprocessor, 'processor'):
+            return UnifiedVLACollator(
+                pad_token_id=self.preprocessor.tokenizer.pad_token_id,
+                ignore_index=self.preprocessor.ignore_index,
+                padding_side=padding_side,
+            )
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,
@@ -154,6 +161,10 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             'answer_start_idx': processed_results['answer_start_idx'],
             'is_vla_data': np.array(False, dtype=bool),
         }
+        if 'image_grid_thw' in processed_results:
+            data['image_grid_thw'] = processed_results['image_grid_thw']
+        if 'mm_token_type_ids' in processed_results:
+            data['mm_token_type_ids'] = processed_results['mm_token_type_ids']
 
         if self.return_dataset_info:
             data['dataset_name'] = meta.get('source', meta.get('dataset_name', 'unknown'))

@@ -97,7 +97,7 @@ def get_training_command(dataset):
         "accelerate", "launch",
         "--config_file", "src/config/acc_config.yaml",
         "train.py",
-        "experiment=finetune_legendvla_deepspeed",
+        "experiment=legendvla_qwen3_vl",
         dataset_override,
         exp_name_override
     ]

@@ -4,7 +4,7 @@ Script to compute normalizer statistics from WebDataset.
 
 Usage:
     python src/workspace/compute_norm_stats.py \
-        --config src/config/experiment/pretrain_legendvla_deepspeed.yaml \
+        --config src/config/experiment/legendvla_qwen3_vl.yaml \
         --output_dir outputs/normalizer
 """
 
@@ -87,7 +87,7 @@ def main():
         required=True,
         help=(
             "Path to training config file "
-            "(e.g., src/config/experiment/pretrain_legendvla_deepspeed.yaml)"
+            "(e.g., src/config/experiment/legendvla_qwen3_vl.yaml)"
         ),
     )
     parser.add_argument(

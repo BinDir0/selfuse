@@ -52,10 +52,14 @@ import os
 import warnings
 from typing import Dict
 
-import bitsandbytes as bnb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    import bitsandbytes as bnb
+except ImportError:
+    bnb = None
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,8 @@ def get_layer(
     r: int = 32,
     dropout: float = 0.05,
 ):
+    if quantize and bnb is None:
+        raise ImportError("Quantized layers require bitsandbytes to be installed.")
     if quantize and lora:
         return lambda *args, **kwargs: LoRALinear4bit(
             r=r, lora_dropout=dropout, *args, **kwargs
@@ -211,153 +217,109 @@ class LoRALinear(nn.Linear, LoRALayer):
         return result
 
 
-class Params4bit(bnb.nn.Params4bit):
-    # as in bitsandbytes version 0.41.3, the original Params4bit has issue when moving model between CPU and GPU.
-    # for example, when we try to move a quantized layer to CPU, and later move back to GPU, the weights would stay on CPU
-    # https://github.com/TimDettmers/bitsandbytes/issues/902
-    def cuda(self, device):
-        if self.quant_state is not None:
-            if self.data.device != device:
-                self.data = self.data.to(device)
-                self.quant_state.to(device)
+if bnb is not None:
+    class Params4bit(bnb.nn.Params4bit):
+        def cuda(self, device):
+            if self.quant_state is not None:
+                if self.data.device != device:
+                    self.data = self.data.to(device)
+                    self.quant_state.to(device)
+                return self
+            w = self.data.contiguous().half().cuda(device)
+            w_4bit, quant_state = bnb.functional.quantize_4bit(
+                w,
+                blocksize=self.blocksize,
+                compress_statistics=self.compress_statistics,
+                quant_type=self.quant_type,
+            )
+            self.data = w_4bit
+            self.quant_state = quant_state
             return self
-        w = self.data.contiguous().half().cuda(device)
-        w_4bit, quant_state = bnb.functional.quantize_4bit(
-            w,
-            blocksize=self.blocksize,
-            compress_statistics=self.compress_statistics,
-            quant_type=self.quant_type,
-        )
-        self.data = w_4bit
-        self.quant_state = quant_state
-        return self
 
 
-class Linear4bit(bnb.nn.Linear4bit):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.weight = Params4bit(
-            self.weight.data,
-            requires_grad=False,
-            compress_statistics=self.weight.compress_statistics,
-            quant_type=self.weight.quant_type,
-        )
+    class Linear4bit(bnb.nn.Linear4bit):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.weight = Params4bit(
+                self.weight.data,
+                requires_grad=False,
+                compress_statistics=self.weight.compress_statistics,
+                quant_type=self.weight.quant_type,
+            )
 
 
-class LoRALinear4bit(Linear4bit, LoRALayer):
-    def __init__(
-        self,
-        in_features,
-        out_features,
-        bias=True,
-        compress_statistics=True,
-        quant_type="fp4",
-        compute_dtype=None,
-        device=None,
-        r: int = 32,
-        lora_scaling: float = 1.0,
-        lora_dropout: float = 0.05,
-        merge_weights: bool = True,
-    ) -> None:
-        Linear4bit.__init__(
+    class LoRALinear4bit(Linear4bit, LoRALayer):
+        def __init__(
             self,
-            input_features=in_features,
-            output_features=out_features,
-            bias=bias,
-            compute_dtype=compute_dtype,
-            compress_statistics=compress_statistics,
-            quant_type=quant_type,
-            device=device,
-        )
+            in_features,
+            out_features,
+            bias=True,
+            compress_statistics=True,
+            quant_type="fp4",
+            compute_dtype=None,
+            device=None,
+            r: int = 32,
+            lora_scaling: float = 1.0,
+            lora_dropout: float = 0.05,
+            merge_weights: bool = True,
+        ) -> None:
+            Linear4bit.__init__(
+                self,
+                input_features=in_features,
+                output_features=out_features,
+                bias=bias,
+                compute_dtype=compute_dtype,
+                compress_statistics=compress_statistics,
+                quant_type=quant_type,
+                device=device,
+            )
 
-        LoRALayer.__init__(
-            self,
-            r=r,
-            lora_scaling=lora_scaling,
-            lora_dropout=lora_dropout,
-            merge_weights=merge_weights,
-        )
+            LoRALayer.__init__(
+                self,
+                r=r,
+                lora_scaling=lora_scaling,
+                lora_dropout=lora_dropout,
+                merge_weights=merge_weights,
+            )
 
-        # Actual trainable parameters
-        if r > 0:
-            factory_kwargs = {"device": device, "dtype": compute_dtype}
-            self.lora_A = nn.Parameter(torch.empty((r, in_features), **factory_kwargs))
-            self.lora_B = nn.Parameter(torch.empty((out_features, r), **factory_kwargs))
-        self.reset_parameters()
+            if r > 0:
+                factory_kwargs = {"device": device, "dtype": compute_dtype}
+                self.lora_A = nn.Parameter(torch.empty((r, in_features), **factory_kwargs))
+                self.lora_B = nn.Parameter(torch.empty((out_features, r), **factory_kwargs))
+            self.reset_parameters()
 
-    def reset_parameters(self):
-        # Don't reset the Linear4bit's weights here
-        if hasattr(self, "lora_A"):
-            # initialize A the same way as the default for nn.Linear and B to zero
-            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-            nn.init.zeros_(self.lora_B)
+        def reset_parameters(self):
+            if hasattr(self, "lora_A"):
+                nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+                nn.init.zeros_(self.lora_B)
 
-    def get_delta_weight(self) -> torch.Tensor:
-        return (self.lora_B @ self.lora_A) * self.scaling
+        def get_delta_weight(self) -> torch.Tensor:
+            return (self.lora_B @ self.lora_A) * self.scaling
 
-    # NOTE: this standard un-merge and re-merge may or may not messed up the weights when we switching from train() to eval() mode
-    # plus it's much slower, so we skip it altogether
-    # def train(self, mode: bool = True):
-    #     nn.Linear.train(self, mode)
-    #     if mode:
-    #         if self.merge_weights and self.merged:
-    #             # Make sure that the weights are not merged
-    #             if self.r > 0:
-    #                 # dequantize so we can un-merge LoRA weights
-    #                 weight = self.weight
-    #                 kwargs = weight.__dict__
-    #                 w_data = bnb.functional.dequantize_4bit(weight.data.clone(), weight.quant_state)
+        def forward(self, x: torch.Tensor):
+            result = Linear4bit.forward(self, x)
+            if self.r > 0:
+                result += (
+                    self.dropout(x)
+                    @ self.lora_A.transpose(0, 1)
+                    @ self.lora_B.transpose(0, 1)
+                ) * self.scaling
+            return result
+else:
+    class Params4bit:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("Params4bit requires bitsandbytes to be installed.")
 
-    #                 if not torch.isfinite(w_data).all():
-    #                     raise ValueError("NaNs detected in the merged weights. The QLoRA layer seems to be broken")
 
-    #                 w_data -= self.get_delta_weight()
+    class Linear4bit(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            raise ImportError("Linear4bit requires bitsandbytes to be installed.")
 
-    #                 # avoid passing old quant_state as this will prevent quantize the new weights
-    #                 if 'quant_state' in kwargs:
-    #                     del kwargs['quant_state']
 
-    #                 self.weight = Params4bit(w_data.to("cpu"), requires_grad=False, **kwargs).to(weight.device)
-
-    #             self.merged = False
-    #     else:
-    #         if self.merge_weights and not self.merged:
-    #             # Merge the weights and mark it
-    #             if self.r > 0:
-    #                 #  dequantize so we can merge LoRA weights
-
-    #                 weight = self.weight
-    #                 kwargs = weight.__dict__
-
-    #                 w_data = bnb.functional.dequantize_4bit(weight.data.clone(), weight.quant_state)
-    #                 if not torch.isfinite(w_data).all():
-    #                     raise ValueError("NaNs detected in the merged weights. The QLoRA layer seems to be broken")
-
-    #                 w_data += self.get_delta_weight()
-
-    #                 # avoid passing old quant_state as this will prevent quantize the new weights
-    #                 if 'quant_state' in kwargs:
-    #                     del kwargs['quant_state']
-
-    #                 self.weight = Params4bit(w_data.to("cpu"), requires_grad=False, **kwargs).to(weight.device)
-
-    #             self.merged = True
-
-    def forward(self, x: torch.Tensor):
-        result = Linear4bit.forward(self, x)
-
-        # if self.r > 0 and not self.merged:
-        #     result += (self.dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
-
-        if self.r > 0:
-            # dropout don't affect the model when in eval() mode
-            result += (
-                self.dropout(x)
-                @ self.lora_A.transpose(0, 1)
-                @ self.lora_B.transpose(0, 1)
-            ) * self.scaling
-
-        return result
+    class LoRALinear4bit(Linear4bit):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
 
 
 head_layers = ["lm_head", "scalar_head"]

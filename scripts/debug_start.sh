@@ -51,7 +51,7 @@ $PYTHON_PATH -m accelerate.commands.launch \
     --machine_rank 0 \
     --main_process_port 29501 \
     train.py \
-    experiment=pretrain_legendvla_deepspeed \
+    experiment=legendvla_qwen3_vl \
     # training.max_train_steps=10 \
     # training.eval_every=5 \
     2>&1 | tee debug_training.log

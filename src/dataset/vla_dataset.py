@@ -13,6 +13,7 @@ from torchvision import transforms
 from src.model.common.normalizer import LinearNormalizer
 from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image
+from .unified_vla_collator import UnifiedVLACollator
 from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from .collator import LegendVLDataCollator, ConcatDataCollator
 from .wds_dataset import (
@@ -190,6 +191,10 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             "n_actions": np.array(action.shape[0], dtype=np.int32),
             "is_vla_data": np.array(True, dtype=bool),
         }
+        if "image_grid_thw" in processed_results:
+            data["image_grid_thw"] = processed_results["image_grid_thw"]
+        if "mm_token_type_ids" in processed_results:
+            data["mm_token_type_ids"] = processed_results["mm_token_type_ids"]
         if "depth_values" in processed_results:
             data["depth_values"] = processed_results["depth_values"]
             data["has_depth_values"] = np.array(True, dtype=bool)
@@ -285,6 +290,12 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         """Build a data collator for batching."""
         assert self.preprocessor is not None, "Preprocessor not set"
         padding_side = "left" if self.mode == "infer-ar" else "right"
+        if hasattr(self.preprocessor, "processor"):
+            return UnifiedVLACollator(
+                pad_token_id=self.preprocessor.tokenizer.pad_token_id,
+                ignore_index=self.preprocessor.ignore_index,
+                padding_side=padding_side,
+            )
         return LegendVLDataCollator(
             pad_token_id=self.preprocessor.tokenizer.pad_token_id,
             ignore_index=self.preprocessor.ignore_index,

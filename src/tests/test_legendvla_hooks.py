@@ -505,7 +505,7 @@ if __name__ == "__main__":
             / "src"
             / "config"
             / "experiment"
-            / "pretrain_legendvla_deepspeed.yaml"
+            / "legendvla_qwen3_vl.yaml"
         )
         print(f"Loading config from: {config_path}")
         # Register eval resolver for config

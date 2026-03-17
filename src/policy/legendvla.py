@@ -1,740 +1,411 @@
-"""
-Wrapper around the joint model (mixtures). Siglip from PaliGemma, action-time encoder, proprio encoder, action decoder. Flow matching training
+from __future__ import annotations
 
-Generates causal masking for the mixtures
-
-Potentially customized to add/remove mixtures, e.g., remove proprio or add another vision module
-
-"""
-
-import logging
-from typing import Optional, Tuple
+from types import SimpleNamespace
+from typing import Any
 
 import torch
 from torch import nn
 
-from src.model.common.kv_cache import KVCache
-from src.model.common.modules import (
-    SinusoidalPosEmb,
-    TimeEncoder,
+from src.model.action.action_head import FourierActionEncoder, MLPProjector
+from src.model.action.diffloss import DiffLoss
+from src.model.action_expert.qwen_shared_kv_expert import ActionExpertDecoder
+from src.model.common.modules import SinusoidalPosEmb, TimeEncoder
+from src.model.vlm.prefix_cache import (
+    BackboneStreamOutput,
+    gather_action_position_ids,
+    slice_prefix_cache_from_full_kv,
 )
-from src.utils.monitor import log_execution_time
-
-log = logging.getLogger(__name__)
+from src.model.vlm.qwen3_vl_backbone import Qwen3VLBackboneWrapper
 
 
-def _align_features_by_slot(
-    features: torch.Tensor,
-    slot: torch.LongTensor,
-) -> torch.Tensor:
-    batch_size, seq_len = slot.shape
-    hidden_size = features.shape[-1]
-
-    if features.size(1) == 0:
-        return features.new_zeros((batch_size, seq_len, hidden_size))
-
-    safe_slot = slot.clamp(min=0, max=features.size(1) - 1)
-    gather_index = safe_slot.unsqueeze(-1).expand(-1, -1, hidden_size)
-    return torch.gather(features, dim=1, index=gather_index)
+def get_cfg_value(cfg: Any, name: str, default: Any = None) -> Any:
+    if isinstance(cfg, dict):
+        return cfg.get(name, default)
+    return getattr(cfg, name, default)
 
 
-def _probe_non_finite(name: str, tensor: Optional[torch.Tensor]) -> None:
-    if tensor is None or not isinstance(tensor, torch.Tensor):
-        return
-    if tensor.numel() == 0:
-        return
-    if not torch.is_floating_point(tensor) and not torch.is_complex(tensor):
-        return
-
-    with torch.no_grad():
-        data = tensor.detach()
-        has_nan = bool(torch.isnan(data).any().item())
-        has_inf = bool(torch.isinf(data).any().item())
-        if not has_nan and not has_inf:
-            return
-
-        finite = data[torch.isfinite(data)]
-        if finite.numel() == 0:
-            stats = "ALL_BAD"
-        else:
-            finite = finite.float()
-            stats = f"min={finite.min().item():.4e}, max={finite.max().item():.4e}"
-
-        print(
-            f"[NaN PROBE] {name}: nan={has_nan} inf={has_inf} shape={list(data.shape)} {stats}",
-            flush=True,
-        )
+def build_loss_weights(cfg: Any) -> SimpleNamespace:
+    loss_cfg = get_cfg_value(cfg, "loss_weights", {})
+    return SimpleNamespace(
+        ce_loss_weight=float(get_cfg_value(loss_cfg, "ce_loss_weight", 0.1)),
+        diffusion_loss_weight=float(get_cfg_value(loss_cfg, "diffusion_loss_weight", 1.0)),
+        flow_loss_weight=float(get_cfg_value(loss_cfg, "flow_loss_weight", 1.0)),
+    )
 
 
 class LegendVLA(nn.Module):
-    @log_execution_time(log)
-    def __init__(
-        self, 
-        cfg,
-        shape_meta,
-        action_encoder_ar, 
-        latent_condition_projector,
-        action_encoder,
-        action_decoder,
-        depth_encoder, 
-        vision_tower,
-        multi_modal_projector,
-        joint_model,
-        diffloss,
-    ):
+    def __init__(self, cfg: Any, shape_meta: dict, backbone: nn.Module | None = None, diffloss: nn.Module | None = None):
         super().__init__()
         self.cfg = cfg
-        self.shape_meta = shape_meta    
-        self.vocab_size = cfg.vocab_size
-        self.pad_token_id = cfg.pad_token_id
-        self.image_token_index = cfg.image_token_index
-        self.state_token_index = cfg.state_token_index
-        self.action_token_index = cfg.action_token_index
-        self.use_lm_head = cfg.get("use_lm_head", False)
-        self.use_action_position_ids_continue_from_vlm = cfg.get(
-            "use_action_position_ids_continue_from_vlm", False
+        self.shape_meta = shape_meta
+
+        self.backbone = backbone if backbone is not None else Qwen3VLBackboneWrapper(get_cfg_value(cfg, "backbone"))
+        self.vlm_hidden_size = int(getattr(self.backbone, "hidden_size"))
+        self.vocab_size = int(getattr(self.backbone, "vocab_size"))
+        self.pad_token_id = int(getattr(self.backbone, "pad_token_id"))
+        self.image_token_index = int(getattr(self.backbone, "image_token_id"))
+        self.state_token_index = int(getattr(self.backbone, "state_token_id"))
+        self.action_token_index = int(getattr(self.backbone, "action_token_id"))
+        self.lm_head = getattr(self.backbone, "lm_head")
+        self.final_logit_softcapping = get_cfg_value(cfg, "final_logit_softcapping", None)
+        self.ignore_index = int(get_cfg_value(cfg, "ignore_index", -100))
+        self.CELoss = nn.CrossEntropyLoss(reduction="sum", ignore_index=self.ignore_index)
+
+        self.action_dim = int(shape_meta["action"]["shape"][0])
+        self.state_dim = int(shape_meta["obs"]["state"]["shape"][0])
+        self.horizon_steps = int(shape_meta["action"]["horizon"])
+        self.num_state_tokens = int(shape_meta["obs"]["state"]["horizon"])
+        self.num_action_tokens = int(shape_meta["action"]["horizon"])
+
+        expert_cfg = get_cfg_value(cfg, "expert")
+        self.action_hidden_size = int(get_cfg_value(expert_cfg, "hidden_size"))
+        self.time_hidden_size = int(get_cfg_value(cfg, "time_hidden_size", self.action_hidden_size))
+        self.flow_sig_min = float(get_cfg_value(cfg, "flow_sig_min", 0.001))
+        diffloss_cfg = get_cfg_value(cfg, "diffloss", None)
+        self.num_inference_steps = int(
+            get_cfg_value(
+                cfg,
+                "num_inference_steps",
+                get_cfg_value(diffloss_cfg or {}, "num_inference_steps", 10),
+            )
+        )
+        self.ar_action_noise_std = float(get_cfg_value(cfg, "ar_action_noise_std", 0.02))
+        self.ar_action_chunk_size = int(get_cfg_value(cfg, "ar_action_chunk_size", 4))
+        self.diffloss_micro_batch_size = int(get_cfg_value(cfg, "diffloss_micro_batch_size", 1))
+        self.use_rtc = bool(get_cfg_value(cfg, "use_rtc", True))
+        self.rtc_delay_strategy = get_cfg_value(cfg, "rtc_delay_strategy", "exp")
+        self.rtc_max_delay = get_cfg_value(cfg, "rtc_max_delay", 16)
+        self.loss_weights = build_loss_weights(cfg)
+        self.eos_token_id = getattr(getattr(self.backbone, "tokenizer", None), "eos_token_id", None)
+
+        self.slot_state_encoder = FourierActionEncoder(
+            action_dim=self.state_dim,
+            width=self.vlm_hidden_size,
+            time_cond=False,
+            enable_fourier_embed=False,
+            mlp_depth=2,
+            final_layer_norm=False,
+            use_mlp_layer_norm=False,
+        )
+        self.slot_action_encoder = FourierActionEncoder(
+            action_dim=self.action_dim,
+            width=self.vlm_hidden_size,
+            time_cond=False,
+            enable_fourier_embed=False,
+            mlp_depth=2,
+            final_layer_norm=False,
+            use_mlp_layer_norm=False,
+        )
+        self.flow_action_encoder = FourierActionEncoder(
+            action_dim=self.action_dim,
+            width=self.action_hidden_size,
+            time_cond=False,
+            enable_fourier_embed=False,
+            mlp_depth=2,
+            final_layer_norm=False,
+            use_mlp_layer_norm=False,
+        )
+        self.time_embedding = nn.Sequential(
+            SinusoidalPosEmb(
+                self.time_hidden_size,
+                min_period=float(get_cfg_value(cfg, "time_min_period", 0.004)),
+                max_period=float(get_cfg_value(cfg, "time_max_period", 4.0)),
+            ),
+            TimeEncoder(self.time_hidden_size),
         )
 
-        self.max_vlm_tokens = cfg.max_vlm_tokens
-        self.num_action_tokens = shape_meta["action"]["horizon"]
+        expert_runtime_cfg = {
+            "hidden_size": self.action_hidden_size,
+            "intermediate_size": int(get_cfg_value(expert_cfg, "intermediate_size")),
+            "num_layers": int(get_cfg_value(expert_cfg, "num_layers")),
+            "time_hidden_size": self.time_hidden_size,
+            "num_heads": int(getattr(self.backbone, "num_heads")),
+            "num_kv_heads": int(getattr(self.backbone, "num_kv_heads")),
+            "head_dim": int(getattr(self.backbone, "head_dim")),
+            "rope_theta": float(get_cfg_value(expert_cfg, "rope_theta", 10000.0)),
+            "attention_bias": bool(get_cfg_value(expert_cfg, "attention_bias", False)),
+        }
+        self.flow_expert = ActionExpertDecoder(expert_runtime_cfg)
+        self.action_decoder = MLPProjector(
+            input_dim=self.action_hidden_size,
+            output_dim=self.action_dim,
+            width=int(get_cfg_value(cfg, "action_decoder_width", self.action_hidden_size)),
+            depth=int(get_cfg_value(cfg, "action_decoder_depth", 2)),
+            final_layer_norm=False,
+            use_mlp_layer_norm=False,
+        )
 
-        # Get hidden sizes from joint_model config
-        self.vlm_hidden_size = joint_model.config.mixture.vlm.hidden_size
-        self.action_hidden_size = joint_model.config.mixture.action.hidden_size
-
-        # Action parameterization
-        self.num_inference_steps = cfg.num_inference_steps
-        self.horizon_steps = shape_meta["action"]["horizon"]
-        self.action_dim = shape_meta["action"]["shape"][0]
-        self.flow_sig_min = cfg.get("flow_sig_min", 0.001)
-
-        # text input only
-        self.embed_tokens = nn.Embedding(
-            cfg.vocab_size,
-            self.vlm_hidden_size,
-            self.pad_token_id,
-        )  # 0.527B parameters
-
-        # Vision
-        self.vision_tower = vision_tower
-        self.multi_modal_projector = multi_modal_projector
-        
-        # Depth encoder (optional)
-        self.use_depth = cfg.use_depth
-        if self.use_depth:
-            self.depth_encoder = depth_encoder
-            self.depth_missing_embeddings = nn.Parameter(
-                torch.zeros(self.depth_encoder.depth_seq_len, self.depth_encoder.output_dim)
+        if diffloss is not None:
+            self.diffloss = diffloss
+        elif diffloss_cfg is None or not bool(get_cfg_value(diffloss_cfg, "enabled", True)):
+            self.diffloss = None
+        else:
+            self.diffloss = DiffLoss(
+                target_channels=int(get_cfg_value(diffloss_cfg, "target_channels")),
+                z_channels=int(get_cfg_value(diffloss_cfg, "z_channels", self.vlm_hidden_size)),
+                depth=int(get_cfg_value(diffloss_cfg, "depth", 8)),
+                width=int(get_cfg_value(diffloss_cfg, "width", 2048)),
+                num_sampling_steps=get_cfg_value(diffloss_cfg, "num_sampling_steps", "100"),
+                grad_checkpointing=bool(get_cfg_value(diffloss_cfg, "grad_checkpointing", False)),
+                use_ddim_sampling=bool(get_cfg_value(diffloss_cfg, "use_ddim_sampling", True)),
+                use_flow_matching=bool(get_cfg_value(diffloss_cfg, "use_flow_matching", False)),
+                flow_sig_min=float(get_cfg_value(diffloss_cfg, "flow_sig_min", self.flow_sig_min)),
+                time_min_period=float(get_cfg_value(diffloss_cfg, "time_min_period", 0.004)),
+                time_max_period=float(get_cfg_value(diffloss_cfg, "time_max_period", 4.0)),
+                flow_sampling=get_cfg_value(diffloss_cfg, "flow_sampling", "beta"),
+                flow_alpha=float(get_cfg_value(diffloss_cfg, "flow_alpha", 1.5)),
+                flow_beta=float(get_cfg_value(diffloss_cfg, "flow_beta", 1.0)),
+                num_inference_steps=int(get_cfg_value(diffloss_cfg, "num_inference_steps", 10)),
             )
-
-        # Mixtures
-        self.joint_model = joint_model
-
-        # Diffusion loss
-        self.diffloss = diffloss
-        self.diffloss_micro_batch_size = cfg.get("diffloss_micro_batch_size", 4)
-        self.ar_action_noise_std = cfg.get("ar_action_noise_std", 0.02)
-        self.ar_action_chunk_size = cfg.get("ar_action_chunk_size", 4)
-
-        # RTC
-        self.use_rtc = cfg.use_rtc
-        self.rtc_delay_strategy = cfg.rtc_delay_strategy
-        self.rtc_max_delay = cfg.rtc_max_delay
-
-        # Action, time encoders
-        self.action_expert_adaptive_mode = cfg.action_expert_adaptive_mode
-        if self.action_expert_adaptive_mode:  # adaLN or adaLN-Zero
-            self.time_embedding = nn.Sequential(
-                SinusoidalPosEmb(cfg.time_hidden_size, cfg.time_min_period, cfg.time_max_period), 
-                TimeEncoder(cfg.time_hidden_size), 
-            )
-        else:  # matching pi0
-            self.time_embedding = SinusoidalPosEmb(
-                self.action_hidden_size, cfg.time_max_period
-            )
-        self.action_encoder = action_encoder
-        self.action_decoder = action_decoder
-
-        # Action/state encoder for continuous autoregressive modeling
-        self.action_encoder_ar = action_encoder_ar
-        # Latent condition projector for continuous autoregressive modeling
-        self.latent_condition_projector = latent_condition_projector
-
-        # optional text output
-        if self.use_lm_head:
-            self.lm_head = nn.Linear(
-                self.vlm_hidden_size,
-                self.vocab_size,
-                bias=False,
-            )
-            self.lm_head.weight = self.embed_tokens.weight  # tie weights
-
-        # Gemma2-specific: Final logit softcapping for numerical stability
-        self.final_logit_softcapping = cfg.get("final_logit_softcapping", None)
-
-        self.CELoss = nn.CrossEntropyLoss(ignore_index=cfg.ignore_index, reduction='sum')
-        self.ignore_index = cfg.ignore_index
-        self.loss_weights = cfg.loss_weights
-
-        # Build per-dimension loss weights for action dimensions
-        wrist_dim = shape_meta["obs"]["state"]["wrist"]["shape"][0]  # 18
-        action_dim = shape_meta["action"]["shape"][0]  # 48
-        wrist_trans_dim = 6  # 2 wrists * 3 xyz, fixed layout
-        adlw = cfg.get("action_dim_loss_weights", {})
-        w_trans = adlw.get("wrist_translation", 1.0)
-        w_rot = adlw.get("wrist_rotation", 1.0)
-        w_hand = adlw.get("hand", 1.0)
-
-        dim_weights = torch.ones(action_dim)
-        dim_weights[:wrist_trans_dim] = w_trans
-        dim_weights[wrist_trans_dim:wrist_dim] = w_rot
-        dim_weights[wrist_dim:] = w_hand
-        self.register_buffer('action_dim_weights', dim_weights)
-
-        # Tile for DiffLoss (chunk_size-step chunks flattened)
-        self.diffloss.set_dim_weights(dim_weights, self.ar_action_chunk_size)
-
-    def _apply_final_logit_softcapping(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        Apply final logit softcapping (Gemma2 feature).
-        
-        Limits the range of output logits to prevent extreme values that could cause
-        numerical instability during training or inference.
-        
-        Args:
-            logits (torch.Tensor): Raw logits from language model head
-        
-        Returns:
-            torch.Tensor: Softcapped logits (same shape as input)
-        """
-        if self.final_logit_softcapping is not None:
-            logits = logits / self.final_logit_softcapping
-            logits = torch.tanh(logits)
-            logits = logits * self.final_logit_softcapping
-        return logits
-
-    @property
-    def attn_weights(self):
-        """
-        Get all attention weights for the joint model.
-        """
-        return self.joint_model.attn_weights
-
-    @property
-    def action_expert_parameters(self):
-        """
-        Get all trainable parameters for the action experts.
-        
-        Returns:
-            List[torch.nn.Parameter]: Parameters from:
-                - Action encoder
-                - Action decoder  
-                - Action mixture
-        
-        """
-        return (
-            list(self.action_encoder.parameters())
-            + list(self.action_decoder.parameters())
-            + list(self.joint_model.mixtures["action"].parameters())
-            + list(self.time_embedding.parameters())
+        self.latent_condition_projector = MLPProjector(
+            input_dim=self.vlm_hidden_size,
+            output_dim=int(get_cfg_value(diffloss_cfg or {}, "z_channels", self.vlm_hidden_size)),
+            width=int(get_cfg_value(cfg, "latent_projector_width", self.vlm_hidden_size)),
+            depth=int(get_cfg_value(cfg, "latent_projector_depth", 2)),
+            final_layer_norm=False,
+            use_mlp_layer_norm=False,
         )
 
     @property
     def trainable_vlm_parameters(self):
-        """
-        Get all trainable parameters for the VLM components.
-        
-        Returns:
-            List[torch.nn.Parameter]: Parameters from:
-                - Vision tower (SigLIP)
-                - Multi-modal projector
-                - Trainable Gemma parameters
-        """
-        return (
-            list(self.vision_tower.parameters())
-            + list(self.multi_modal_projector.parameters())
-            + self.trainable_gemma_parameters
-            + self.trainable_depth_parameters
-        )
-
-    @property
-    def trainable_depth_parameters(self):
-        """
-        Get all trainable parameters for the depth encoder.
-        """
-        if not self.use_depth:
-            return []
-        return (
-            list(self.depth_encoder.parameters())
-            + [self.depth_missing_embeddings]
-        )
+        return [param for param in self.backbone.parameters() if param.requires_grad]
 
     @property
     def lora_trainable_vlm_parameters(self):
-        """
-        Get all LoRA trainable parameters for the VLM components.
-        
-        Returns:
-            List[torch.nn.Parameter]: LoRA parameters from:
-                - Vision tower (SigLIP)
-                - Multi-modal projector
-                - Gemma language model
-        """
-        params = []
-        for name, param in self.vision_tower.named_parameters():
-            if "lora_" in name:
-                params.append(param)
-        for name, param in self.multi_modal_projector.named_parameters():
-            if "lora_" in name:
-                params.append(param)
-        params.extend(self.trainable_lora_gemma_parameters)
-
-        params.extend(list(self.embed_tokens.parameters()))
-        return params
+        return self.trainable_vlm_parameters
 
     @property
-    def trainable_gemma_parameters(self):
-        """
-        Get all trainable parameters for the Gemma language model.
-        
-        Returns:
-            List[torch.nn.Parameter]: Trainable Gemma parameters
-        """
-        gemma_parameters = []
-        for name, param in self.joint_model.mixtures["vlm"].named_parameters():
-            gemma_parameters.append(param)
-        
-        gemma_parameters.extend(list(self.embed_tokens.parameters()))
-        return gemma_parameters
+    def action_expert_parameters(self):
+        modules = [
+            self.slot_state_encoder,
+            self.slot_action_encoder,
+            self.flow_action_encoder,
+            self.time_embedding,
+            self.flow_expert,
+            self.action_decoder,
+        ]
+        return [param for module in modules for param in module.parameters() if param.requires_grad]
 
-    @property
-    def trainable_lora_gemma_parameters(self):
-        """
-        Get all LoRA trainable parameters for the Gemma language model.
-        
-        Excludes unused parameters and only includes LoRA parameters.
-        
-        Returns:
-            List[torch.nn.Parameter]: Trainable LoRA Gemma parameters
-        """
-        gemma_parameters = []
-        for name, param in self.joint_model.mixtures["vlm"].named_parameters():
-            if "lora_" in name:
-                gemma_parameters.append(param)
-
-        gemma_parameters.extend(list(self.embed_tokens.parameters()))
-        return gemma_parameters
-    
     @property
     def diffloss_parameters(self):
-        """
-        Get all trainable parameters for the DiffLoss module.
-        
-        Returns:
-            List[torch.nn.Parameter]: Trainable DiffLoss parameters
-        """
-        return list(self.diffloss.parameters()) \
-            + list(self.action_encoder_ar.parameters()) \
-            + list(self.latent_condition_projector.parameters())
+        modules = [self.latent_condition_projector]
+        if self.diffloss is not None:
+            modules.append(self.diffloss)
+        return [param for module in modules for param in module.parameters() if param.requires_grad]
 
-    @torch.no_grad()
-    def init_motion_token_embeddings(self, motion_token_list):
-        """
-        Initialize the motion token embeddings.
+    def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
+        input_ids = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
+        answer_start_idx = batch.get("answer_start_idx")
+        action_mask = input_ids == self.action_token_index
+        has_action_tokens = action_mask.any(dim=1)
 
-        Args:
-            motion_token_list: List of motion token IDs
-        """
-        from src.policy.legendvla_utils import init_motion_token_embeddings as _init_motion_token_embeddings
-        _init_motion_token_embeddings(self.embed_tokens, self.vlm_hidden_size, motion_token_list)
+        if answer_start_idx is not None:
+            prefix_lengths = answer_start_idx.to(device=input_ids.device, dtype=torch.long)
+        elif attention_mask is not None:
+            prefix_lengths = attention_mask.to(dtype=torch.long).sum(dim=1)
+        else:
+            prefix_lengths = torch.full(
+                (input_ids.shape[0],),
+                input_ids.shape[1],
+                dtype=torch.long,
+                device=input_ids.device,
+            )
 
-    @log_execution_time(log)
+        if torch.any(has_action_tokens):
+            action_start_idx = action_mask.to(dtype=torch.long).argmax(dim=1)
+            prefix_lengths = torch.where(has_action_tokens, action_start_idx, prefix_lengths)
+        return prefix_lengths
+
+    def build_action_position_ids(
+        self,
+        batch: dict,
+        backbone_position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if "actions" not in batch:
+            raise ValueError("Action position ids require an `actions` tensor in the batch.")
+
+        n_actions = batch.get("n_actions")
+        if n_actions is None:
+            n_actions = torch.full(
+                (batch["actions"].shape[0],),
+                batch["actions"].shape[1],
+                dtype=torch.long,
+                device=batch["actions"].device,
+            )
+
+        gathered = gather_action_position_ids(
+            input_ids=batch["input_ids"],
+            action_token_id=self.action_token_index,
+            position_ids=backbone_position_ids,
+            n_actions=n_actions,
+        )
+        if gathered.numel() > 0:
+            return gathered
+
+        batch_size = batch["actions"].shape[0]
+        action_len = batch["actions"].shape[1]
+        device = batch["actions"].device
+        base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
+        positions = base + torch.arange(action_len, device=device).unsqueeze(0)
+        return positions.expand(batch_size, -1)
+
+    def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
+        slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None}
+        if "states" in batch:
+            state_embeds = self.slot_state_encoder(batch["states"]) / (self.vlm_hidden_size ** 0.5)
+            slot_embeds["state"] = state_embeds
+        if "actions" in batch:
+            action_input = batch["actions"]
+            if add_action_noise:
+                action_input = action_input + torch.randn_like(batch["actions"]) * self.ar_action_noise_std
+            action_embeds = self.slot_action_encoder(action_input) / (self.vlm_hidden_size ** 0.5)
+            slot_embeds["action"] = action_embeds
+        return slot_embeds
+
+    def forward_backbone_stream(self, batch: dict, slot_embeds: dict) -> BackboneStreamOutput:
+        embed_output = self.backbone.build_inputs_embeds(
+            input_ids=batch["input_ids"],
+            pixel_values=batch.get("pixel_values"),
+            image_grid_thw=batch.get("image_grid_thw"),
+            mm_token_type_ids=batch.get("mm_token_type_ids"),
+            state_slot_embeds=slot_embeds.get("state"),
+            action_slot_embeds=slot_embeds.get("action"),
+        )
+        position_ids = self.backbone.compute_position_ids(
+            input_ids=batch["input_ids"],
+            inputs_embeds=embed_output.inputs_embeds,
+            attention_mask=batch["attention_mask"],
+            image_grid_thw=batch.get("image_grid_thw"),
+            mm_token_type_ids=batch.get("mm_token_type_ids"),
+            past_key_values=None,
+        )
+        output = self.backbone.forward_language_model(
+            inputs_embeds=embed_output.inputs_embeds,
+            attention_mask=batch["attention_mask"],
+            position_ids=position_ids,
+            use_cache=True,
+            output_hidden_states=True,
+            visual_pos_masks=embed_output.visual_pos_masks,
+            deepstack_visual_embeds=embed_output.deepstack_visual_embeds,
+        )
+        output.prefix_cache = slice_prefix_cache_from_full_kv(
+            output.past_key_values_hf,
+            self.build_prefix_lengths(batch),
+        )
+        return output
+
+    def forward_flow_stream(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+        flow_inputs: dict,
+    ) -> dict[str, torch.Tensor | None]:
+        time_for_model = flow_inputs["time_for_model"]
+        if time_for_model.ndim == 2 and self.use_rtc:
+            time_cond = self.time_embedding(time_for_model.reshape(-1)).reshape(
+                time_for_model.shape[0],
+                time_for_model.shape[1],
+                -1,
+            )
+        else:
+            time_cond = self.time_embedding(time_for_model)
+        action_embeds = self.flow_action_encoder(flow_inputs["noisy_actions"]) / (self.action_hidden_size ** 0.5)
+        action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
+        action_position_ids = self.build_action_position_ids(batch, backbone_output.position_ids)
+        expert_hidden = self.flow_expert(
+            action_embeds=action_embeds,
+            prefix_cache=backbone_output.prefix_cache,
+            action_position_ids=action_position_ids,
+            time_cond=time_cond,
+            action_mask=action_mask,
+            mode="flow",
+        )
+        pred_v = self.action_decoder(expert_hidden)
+        return {
+            "time_cond": time_cond,
+            "action_hidden_states": expert_hidden,
+            "pred_v": pred_v,
+        }
+
+    def compute_loss(self, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
+        del kwargs
+        from src.policy.legendvla_loss import compute_total_loss
+
+        return compute_total_loss(self, batch)
+
+    def compute_ar_loss(self, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
+        del kwargs
+        from src.policy.legendvla_loss import compute_ar_only_loss
+
+        return compute_ar_only_loss(self, batch)
+
+    def compute_flow_loss(self, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
+        del kwargs
+        from src.policy.legendvla_loss import compute_flow_only_loss
+
+        return compute_flow_only_loss(self, batch)
+
     def load_pretrained_vlm_weights(self):
-        """
-        Load pre-trained weights from PaliGemma checkpoint.
+        raise NotImplementedError("Qwen3-VL LegendVLA does not support the legacy VLM weight loader.")
 
-        Loads weights for:
-        - Vision tower (SigLIP)
-        - Multi-modal projector
-        - Language model (Gemma)
-        - Text embeddings
-
-        The weights are loaded from safetensors files in the pretrained_model_path.
-        LoRA weights are preserved and not overwritten.
-        """
-        from src.policy.legendvla_utils import load_pretrained_vlm_weights as _load_pretrained_vlm_weights
-        _load_pretrained_vlm_weights(self)
-
-    @log_execution_time(log)
     def load_pretrained_pi05_weights(self):
-        """
-        Load pre-trained weights from Pi0.5 checkpoint.
-
-        Loads weights for:
-        - Vision tower (SigLIP)
-        - Multi-modal projector
-        - Language model (Gemma 2B) - VLM mixture
-        - Action expert (Gemma 300M) - Action mixture
-        - LM head
-        - Time embedding MLPs
-
-        Skips only:
-        - action_in_proj (action encoder, incompatible dimensions)
-        - action_out_proj (action decoder, incompatible dimensions)
-
-        The weights are loaded from safetensors file in the pretrained_model_path.
-        LoRA weights are preserved and not overwritten.
-        """
-        from src.policy.legendvla_utils import load_pretrained_pi05_weights as _load_pretrained_pi05_weights
-        _load_pretrained_pi05_weights(self)
+        raise NotImplementedError("Qwen3-VL LegendVLA does not support the legacy PI05 weight loader.")
 
     def freeze_non_lora_weights_in_vlm(self):
-        """
-        Freeze non-LoRA weights in VLM components while keeping LoRA weights trainable.
-
-        This method freezes:
-        - Vision tower weights (except LoRA)
-        - Multi-modal projector weights (except LoRA)
-        - Language model weights (except LoRA)
-        - Token embeddings
-
-        Only LoRA parameters remain trainable for efficient fine-tuning.
-        """
-        from src.policy.legendvla_utils import freeze_non_lora_weights_in_vlm as _freeze_non_lora_weights_in_vlm
-        _freeze_non_lora_weights_in_vlm(self.vision_tower, self.multi_modal_projector, self.joint_model, self.embed_tokens)
+        for param in self.backbone.parameters():
+            param.requires_grad = False
 
     def freeze_non_lora_weights_in_ae(self):
-        """
-        Freeze non-LoRA weights in VLM components while keeping LoRA weights trainable.
-
-        This method freezes:
-        - Action encoder weights (except LoRA)
-        - Action decoder weights (except LoRA)
-        - Action mixture weights (except LoRA)
-
-        Only LoRA parameters remain trainable for efficient fine-tuning.
-        """
-        from src.policy.legendvla_utils import freeze_non_lora_weights_in_ae as _freeze_non_lora_weights_in_ae
-        _freeze_non_lora_weights_in_ae(self.action_encoder, self.action_decoder, self.joint_model)
+        modules = [
+            self.flow_action_encoder,
+            self.time_embedding,
+            self.flow_expert,
+            self.action_decoder,
+        ]
+        for module in modules:
+            for param in module.parameters():
+                param.requires_grad = False
 
     def freeze_weights_in_depth(self):
-        """
-        Freeze weights in depth encoder and depth missing embeddings.
-        """
-        if self.use_depth:
-            from src.policy.legendvla_utils import freeze_weights_in_depth as _freeze_weights_in_depth
-            _freeze_weights_in_depth(self.depth_encoder, self.depth_missing_embeddings)
+        return
 
     def freeze_all_weights(self):
-        """
-        Freeze all trainable parameters in the model.
+        for param in self.parameters():
+            param.requires_grad = False
 
-        Sets requires_grad=False for all parameters, making the model non-trainable.
-        Useful for inference-only scenarios.
-        """
-        from src.policy.legendvla_utils import freeze_all_weights as _freeze_all_weights
-        _freeze_all_weights(self)
+    def infer_action(self, input: dict, **kwargs):
+        from src.policy.legendvla_inference import infer_flow_action
 
-    def build_text_cache(self):
-        """
-        Create a new KV cache for text generation.
+        return infer_flow_action(self, input, **kwargs)
 
-        Returns:
-            KVCache: Empty key-value cache for storing attention states during text generation
-        """
-        from src.policy.legendvla_utils import build_text_cache as _build_text_cache
-        return _build_text_cache()
+    def infer_vla(self, input: dict, **kwargs):
+        from src.policy.legendvla_inference import infer_ar_action
 
-    # ---------- Input preparation ---------- #
-    def build_causal_mask_and_position_ids(
-        self, attention_mask: torch.Tensor, answer_start_idx: torch.Tensor, n_actions: torch.Tensor, dtype: torch.dtype
-    ) -> Tuple[torch.FloatTensor, torch.LongTensor, torch.LongTensor]:
-        """
-        Build causal attention masks and position IDs for different token types.
-        Delegates to standalone function in legendvla_utils.
-        """
-        from src.policy.legendvla_utils import build_causal_mask_and_position_ids as _build_causal_mask_and_position_ids
-        return _build_causal_mask_and_position_ids(
-            attention_mask, answer_start_idx, n_actions, self.num_action_tokens, dtype
-        )
+        return infer_ar_action(self, input, **kwargs)
 
-    def split_full_mask_into_submasks(
-        self, causal_mask: torch.FloatTensor, max_vlm_tokens: int
-    ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
-        """
-        Split the full causal mask into separate masks for different model components.
-        Delegates to standalone function in legendvla_utils.
-        """
-        from src.policy.legendvla_utils import split_full_mask_into_submasks as _split_full_mask_into_submasks
-        return _split_full_mask_into_submasks(causal_mask, max_vlm_tokens, self.num_action_tokens)
+    def infer_vlm(self, input: dict, **kwargs):
+        from src.policy.legendvla_inference import infer_vlm_generation
 
-    def build_causal_mask_and_position_ids_for_text(
-        self,
-        q_len: int,
-        attention_mask: torch.Tensor,
-        kv_cache: Optional[KVCache] = None,
-        dtype: torch.dtype = torch.float32,
-    ) -> Tuple[torch.FloatTensor, torch.LongTensor]:
-        """
-        Build causal mask and position IDs for autoregressive generation.
-        Delegates to standalone function in legendvla_utils.
-        """
-        from src.policy.legendvla_utils import build_causal_mask_and_position_ids_for_text as _build_causal_mask_and_position_ids_for_text
-        return _build_causal_mask_and_position_ids_for_text(q_len, attention_mask, kv_cache, dtype)
+        return infer_vlm_generation(self, input, **kwargs)
 
-    # ---------- Inference ----------#
-    def _forward_siglip_and_text_embedding(
-        self,
-        input_ids: torch.LongTensor,
-        pixel_values: torch.FloatTensor = None,
-        depth_values: Optional[torch.FloatTensor] = None,
-        has_depth_values: Optional[torch.LongTensor] = None,
-        states: Optional[torch.FloatTensor] = None,
-        actions: Optional[torch.FloatTensor] = None,
-        n_states: Optional[torch.LongTensor] = None,
-        n_actions: Optional[torch.LongTensor] = None,
-        is_vla_data=None,
-        dtype: torch.dtype = torch.float32,
-    ) -> torch.FloatTensor:
-        """
-        Forward pass through SigLIP vision encoder and text embedding, then combine them.
-
-        Args:
-            input_ids (torch.LongTensor): [B, seq_len] Text token IDs including image tokens
-            pixel_values (torch.FloatTensor): [B, C, H, W] or [B, T, C, H, W] Image pixel values
-            depth_values (Optional[torch.FloatTensor]): [B, C, H, W] or [B, T, C, H, W] Depth images
-            has_depth_values (Optional[torch.LongTensor]): [B] Bool mask indicating valid depth
-            states: [B, state_len, state_dim]
-            actions: [B, action_len, action_dim]
-            n_states: [B]
-            n_actions: [B]
-            is_vla_data: [B]
-            dtype: torch.dtype
-
-        Returns:
-            torch.FloatTensor: [B, seq_len, hidden_size] Combined image and text embeddings
-        """
-        inputs_embeds = self.embed_tokens(input_ids)
-        _probe_non_finite("inputs_embeds (raw text embedding)", inputs_embeds)
-        device = inputs_embeds.device
-        bsz, seq_len = input_ids.shape
-
-        final_embedding = torch.zeros(
-            (bsz, seq_len, self.vlm_hidden_size), dtype=dtype, device=device
-        )
-        text_mask = (input_ids != self.image_token_index) & (input_ids != self.pad_token_id)
-        final_embedding = torch.where(
-            text_mask.unsqueeze(-1),
-            inputs_embeds.to(dtype),
-            final_embedding,
-        )
-
-        image_mask = input_ids == self.image_token_index
-        state_mask = input_ids == self.state_token_index
-        action_mask = input_ids == self.action_token_index
-        vla_mask = torch.ones(bsz, dtype=torch.bool, device=device)
-        if is_vla_data is not None:
-            vla_mask = is_vla_data.to(device=device, dtype=torch.bool)
-
-        assert (states is None) == (n_states is None), "states and n_states must be provided together"
-        assert (actions is None) == (n_actions is None), "actions and n_actions must be provided together"
-        if n_states is not None and not torch.compiler.is_compiling():
-            assert torch.all(n_states == state_mask.sum(dim=1))
-        if n_actions is not None and not torch.compiler.is_compiling():
-            assert torch.all(n_actions == action_mask.sum(dim=1))
-
-        if pixel_values is not None:
-            if getattr(self.vision_tower, "use_mem", False) and pixel_values.ndim == 4:
-                pixel_values = pixel_values[:, None, ...]
-            if pixel_values.ndim == 5:
-                batch_size, frame_count, channels, height, width = pixel_values.shape
-            else:
-                batch_size = pixel_values.shape[0]
-                frame_count = 1
-            rgb_image_features = self.vision_tower(pixel_values)
-            _probe_non_finite("rgb_image_features", rgb_image_features)
-            rgb_image_features = rgb_image_features.reshape(batch_size, -1, rgb_image_features.shape[-1])
-
-            # Determine effective frame count based on actual output shape
-            effective_frame_count = rgb_image_features.shape[1] // self.vision_tower.config.num_image_tokens
-            
-            paired_image_features = rgb_image_features
-            if self.use_depth:
-                depth_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
-                if has_depth_values is not None:
-                    depth_mask = has_depth_values.to(device=device, dtype=torch.bool)
-                
-                # Adjust missing_depth_features to match effective frame count
-                missing_depth_features = self.depth_missing_embeddings.repeat(effective_frame_count, 1)
-                missing_depth_features = missing_depth_features.unsqueeze(0).expand(batch_size, -1, -1)
-                
-                if depth_values is not None:
-                    _probe_non_finite("depth_values", depth_values)
-                    if getattr(self.vision_tower, "use_mem", False) and depth_values.ndim == 4:
-                        depth_values = depth_values[:, None, ...]
-                    if depth_values.ndim == 5:
-                        # [B, T, C, H, W]
-                        depth_batch, depth_frames, depth_channels, depth_height, depth_width = depth_values.shape
-                        
-                        # If RGB was compressed (T -> 1) but Depth has T frames, take the last frame
-                        if effective_frame_count == 1 and depth_frames > 1:
-                            depth_values = depth_values[:, -1, ...] # Take last frame
-                            depth_frames = 1
-                            
-                        depth_values = depth_values.reshape(depth_batch * depth_frames, depth_channels, depth_height, depth_width)
-                    
-                    depth_image_features = self.depth_encoder(depth_values)
-                    _probe_non_finite("depth_image_features", depth_image_features)
-                    depth_image_features = depth_image_features.reshape(batch_size, -1, depth_image_features.shape[-1])
-                else:
-                    depth_image_features = missing_depth_features
-                    depth_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
-                selected_depth_features = torch.where(
-                    depth_mask[:, None, None],
-                    depth_image_features,
-                    missing_depth_features,
-                )
-                _probe_non_finite("selected_depth_features", selected_depth_features)
-                paired_image_features = torch.cat((rgb_image_features, selected_depth_features), dim=-1)
-            _probe_non_finite("paired_image_features", paired_image_features)
-
-            projected_image_features = self.multi_modal_projector(paired_image_features)
-            _probe_non_finite("projected_image_features", projected_image_features)
-            projected_image_features = projected_image_features / (self.vlm_hidden_size ** 0.5)
-            image_token_counts = image_mask.sum(dim=1)
-            if not torch.compiler.is_compiling():
-                assert torch.all(image_token_counts == projected_image_features.shape[1])
-            image_slot = image_mask.long().cumsum(dim=1) - 1
-            aligned_image_features = _align_features_by_slot(
-                projected_image_features.to(dtype),
-                image_slot,
-            )
-            final_embedding = torch.where(
-                image_mask.unsqueeze(-1),
-                aligned_image_features,
-                final_embedding,
-            )
-
-        if states is not None:
-            _probe_non_finite("states", states)
-            state_features = self.action_encoder_ar(states)
-            _probe_non_finite("state_features", state_features)
-            state_features = state_features / (self.vlm_hidden_size ** 0.5)
-            state_slot = state_mask.long().cumsum(dim=1) - 1
-            valid_state_mask = state_mask & vla_mask[:, None] & (state_slot < n_states[:, None])
-            aligned_state_features = _align_features_by_slot(
-                state_features.to(dtype),
-                state_slot,
-            )
-            final_embedding = torch.where(
-                valid_state_mask.unsqueeze(-1),
-                aligned_state_features,
-                final_embedding,
-            )
-
-        if actions is not None:
-            _probe_non_finite("actions", actions)
-            actions_input = actions + torch.randn_like(actions) * self.ar_action_noise_std
-            _probe_non_finite("actions_input", actions_input)
-            action_features = self.action_encoder_ar(actions_input)
-            _probe_non_finite("action_features", action_features)
-            action_features = action_features / (self.vlm_hidden_size ** 0.5)
-            action_slot = action_mask.long().cumsum(dim=1) - 1
-            valid_action_mask = action_mask & vla_mask[:, None] & (action_slot < n_actions[:, None])
-            aligned_action_features = _align_features_by_slot(
-                action_features.to(dtype),
-                action_slot,
-            )
-            final_embedding = torch.where(
-                valid_action_mask.unsqueeze(-1),
-                aligned_action_features,
-                final_embedding,
-            )
-
-        return final_embedding
-
-    def infer_action(self, input: dict, return_attn_weights: bool = False,
-                     prev_action_chunk: torch.FloatTensor = None,
-                     inference_delay: int = 0) -> torch.FloatTensor:
-        from src.policy.legendvla_inference import infer_action as _infer_action
-        return _infer_action(self, input, return_attn_weights,
-                             prev_action_chunk=prev_action_chunk,
-                             inference_delay=inference_delay)
-
-    def infer_single_step(self, input: dict, kv_cache=None, dtype=torch.float32, return_attn_weights=False) -> dict:
-        from src.policy.legendvla_inference import infer_single_step as _infer_single_step
-        return _infer_single_step(self, input, kv_cache, dtype, return_attn_weights)
-
-    def infer_vlm(self, input: dict, max_new_tokens: int, temperature: float = 1.0,
-                  top_k: int = 10, top_p: float = 1.0, allowed_token_ids=None,
-                  eos_token_id=None, return_kv_cache: bool = False,
-                  return_attn_weights: bool = False) -> dict:
-        from src.policy.legendvla_inference import infer_vlm as _infer_vlm
-        return _infer_vlm(self, input, max_new_tokens, temperature, top_k, top_p,
-                          allowed_token_ids, eos_token_id, return_kv_cache, return_attn_weights)
-
-    def infer_vla(self, input: dict, max_new_tokens: int, temperature: float = 1.0,
-                  return_attn_weights: bool = False, cfg: float = 1.0, **kwargs) -> dict:
-        from src.policy.legendvla_inference import infer_vla as _infer_vla
-        return _infer_vla(self, input, max_new_tokens, temperature, return_attn_weights, cfg, **kwargs)
-
-    # ---------- Flow matching training ----------#
-    def psi_t(
-        self,
-        x: torch.FloatTensor,
-        x1: torch.FloatTensor,
-        t: torch.FloatTensor,
-    ) -> torch.FloatTensor:
-        from src.policy.legendvla_loss import psi_t as _psi_t
-        return _psi_t(x, x1, t, self.flow_sig_min)
-
-    # TODO: Deprecated method, to be updated
-    def compute_ar_loss(self, batch: dict, **kwargs) -> dict:
-        from src.policy.legendvla_loss import compute_ar_loss as _compute_ar_loss
-        return _compute_ar_loss(self, batch, **kwargs)
-
-    # TODO: Deprecated method, to be updated
-    def compute_flow_loss(self, batch: dict, **kwargs) -> dict:
-        from src.policy.legendvla_loss import compute_flow_loss as _compute_flow_loss
-        return _compute_flow_loss(self, batch, **kwargs)
-
-    @torch.compile
-    def compute_celoss(self, hidden_states: torch.FloatTensor, labels: torch.LongTensor) -> torch.FloatTensor:
-        from src.policy.legendvla_loss import compute_celoss as _compute_celoss
-        return _compute_celoss(
-            self.lm_head, self.final_logit_softcapping,
-            self.CELoss, self.ignore_index, hidden_states, labels
-        )
-
-    def compute_loss(self, batch: dict, **kwargs) -> dict:
-        from src.policy.legendvla_loss import compute_loss as _compute_loss
-        return _compute_loss(self, batch, **kwargs)
-
-    def forward(self, mode: str, batch: dict, **kwargs) -> dict:
+    def forward(self, mode: str, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
         if mode == "train":
             return self.compute_loss(batch, **kwargs)
-        elif mode == "train_ar":
+        if mode == "train_ar":
             return self.compute_ar_loss(batch, **kwargs)
-        elif mode == "train_flow":
+        if mode == "train_flow":
             return self.compute_flow_loss(batch, **kwargs)
-        elif mode == "infer_action":
+        if mode == "infer_action":
             return self.infer_action(batch, **kwargs)
-        elif mode == "infer_vla":
+        if mode == "infer_vla":
             return self.infer_vla(batch, **kwargs)
-        elif mode == "infer_vlm":
+        if mode == "infer_vlm":
             return self.infer_vlm(batch, **kwargs)
-        else:
-            raise ValueError(f"Invalid mode: {mode}")
-        
+        raise ValueError(f"Invalid mode: {mode}")
+
 
 class LegendVLAInference(nn.Module):
-    """
-    Implementation of the VLA inference logic.
-    This class is 'Device-Agnostic' - it focuses on the sequence of operations:
-    Observation -> Preprocessing -> State Normalization -> Model Forward -> Action Unnormalization.
-
-    Moved to src/policy/legendvla_inference.py. This import alias preserves backward compatibility.
-    """
     def __new__(cls, *args, **kwargs):
         from src.policy.legendvla_inference import LegendVLAInference as _LegendVLAInference
         return _LegendVLAInference(*args, **kwargs)
