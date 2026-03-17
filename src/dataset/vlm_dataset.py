@@ -2,12 +2,14 @@
 WebDataset-based VLM dataset for LegendVLA training.
 '''
 
+import warnings
 from typing import Dict, List, Optional
 import torch
 import numpy as np
 from torchvision import transforms
 from src.utils.pytorch_util import dict_apply
 from src.dataset.collator import LegendVLDataCollator
+from src.dataset.sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from src.dataset.wds_dataset import build_blended_dataset
 
 
@@ -80,6 +82,11 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
     def sample_to_data(self, sample):
         """Convert one WDS sample to model-ready fields."""
         meta = sample['meta.json']
+        sample_context = build_sample_context({
+            'dataset_name': meta.get('source', meta.get('dataset_name', 'unknown')),
+            'episode_index': meta.get('sample_idx', -1),
+            '__key__': sample.get('__key__'),
+        })
 
         image_keys = sorted([
             k for k in sample.keys()
@@ -121,12 +128,22 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             augmented_np = np.array(augmented_pil, dtype=np.uint8)
             augmented_images.append(augmented_np)
         images_to_process = np.stack(augmented_images, dtype=np.uint8)
+        ensure_mapping_finite(
+            {'images_to_process': images_to_process},
+            stage='vlm_after_image_augmentation',
+            context=sample_context,
+        )
 
         processed_results = self.preprocessor(
             images=images_to_process,
             text=question,
             target=answer,
             mode=self.mode,
+        )
+        ensure_mapping_finite(
+            processed_results,
+            stage='vlm_after_preprocessor',
+            context=sample_context,
         )
 
         data = {
@@ -143,6 +160,11 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             data['episode_index'] = np.array(
                 meta.get('sample_idx', -1), dtype=np.int32
             )
+        ensure_mapping_finite(
+            data,
+            stage='vlm_dataset_output',
+            context=sample_context,
+        )
         return data
 
     def build_pipeline(self):
@@ -155,16 +177,23 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             })
 
         def preprocess_fn(sample):
-            data = self.sample_to_data(sample)
-            torch_data = dict_apply(
-                data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
-            )
-            return torch_data
+            try:
+                data = self.sample_to_data(sample)
+                torch_data = dict_apply(
+                    data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+                )
+                return torch_data
+            except NonFiniteDataError:
+                raise
+            except Exception as e:
+                warnings.warn(f"Error in preprocess: {e}")
+                return None
 
         def strip_key(src):
             for sample in src:
-                sample.pop("__key__", None)
-                yield sample
+                if sample is not None:
+                    sample.pop("__key__", None)
+                    yield sample
 
         pipeline = build_blended_dataset(
             datasets_config=datasets_config,

@@ -13,6 +13,7 @@ from torchvision import transforms
 from src.model.common.normalizer import LinearNormalizer
 from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image
+from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from .collator import LegendVLDataCollator, ConcatDataCollator
 from .wds_dataset import (
     build_blended_dataset, build_wds_pipeline, WindowConfig, LOWDIM_SLICES,
@@ -108,6 +109,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
     def sample_to_data(self, sample):
         """Convert a WebDataset sample dict into model-ready tensors.
         """
+        sample_context = build_sample_context(sample)
         state, action = process_state_action(
             wrist_state=sample["wrist_state"].astype(np.float32),
             hand_state=sample["hand_state"].astype(np.float32),
@@ -119,11 +121,22 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             motion_type=self.motion_type,
             use_relative_action=self.use_relative_action,
         )
+        ensure_mapping_finite(
+            {"state": state, "action": action},
+            stage="vla_after_state_action",
+            context=sample_context,
+        )
+
         image, depth_images = process_image(
             sample["image"],
             sample.get("depth", None),
             self.aug_transform,
             self.depth_clip_range,
+        )
+        ensure_mapping_finite(
+            {"image": image, "depth_images": depth_images},
+            stage="vla_after_image_process",
+            context=sample_context,
         )
 
         intrinsic = sample["intrinsic"].astype(np.float32)
@@ -148,6 +161,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             objective=self.objective,
             depth_images=depth_images,
             mode=self.mode,
+        )
+        ensure_mapping_finite(
+            processed_results,
+            stage="vla_after_preprocessor",
+            context=sample_context,
         )
 
         state_pad = np.zeros(
@@ -182,6 +200,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         if self.return_dataset_info:
             data["dataset_name"] = sample["dataset_name"]
             data["episode_index"] = sample["episode_index"]
+        ensure_mapping_finite(
+            data,
+            stage="vla_dataset_output",
+            context=sample_context,
+        )
         return data
 
     def build_pipeline(self):
@@ -207,6 +230,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
                     if isinstance(x, np.ndarray) else x,
                 )
                 return torch_data
+            except NonFiniteDataError:
+                raise
             except Exception as e:
                 warnings.warn(f"Error in preprocess: {e}")
                 return None

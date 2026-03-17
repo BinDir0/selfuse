@@ -482,7 +482,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         if accelerator.sync_gradients and cfg.training.clipping.enabled:
                             total_norm = accelerator.clip_grad_norm_(
                                 self.model.parameters(),
-                                float('inf')
+                                cfg.training.clipping.max_grad_norm
                             )
 
                         # Standard training without DeepSpeed optimizer
