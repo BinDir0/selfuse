@@ -350,23 +350,24 @@ def run_mano_forward(mano_model, trans, root_orient, hand_pose, betas, device):
     return joints
 
 
-def build_mano_models(device):
+def build_mano_models(device, mano_dir=None):
     """Create right and left MANO models."""
     from lib.models.mano_wrapper import MANO
 
-    data_root = str(PROJECT_ROOT)
+    if mano_dir is None:
+        mano_dir = os.path.join(str(PROJECT_ROOT), "_DATA")
 
     mano_right = MANO(
-        data_dir=os.path.join(data_root, "_DATA/data/"),
-        model_path=os.path.join(data_root, "_DATA/data/mano"),
+        data_dir=os.path.join(mano_dir, "data/"),
+        model_path=os.path.join(mano_dir, "data/mano"),
         gender="neutral",
         num_hand_joints=15,
         create_body_pose=False,
     ).to(device)
 
     mano_left = MANO(
-        data_dir=os.path.join(data_root, "_DATA/data_left/"),
-        model_path=os.path.join(data_root, "_DATA/data_left/mano_left"),
+        data_dir=os.path.join(mano_dir, "data_left/"),
+        model_path=os.path.join(mano_dir, "data_left/mano_left"),
         gender="neutral",
         num_hand_joints=15,
         create_body_pose=False,
@@ -386,6 +387,9 @@ def main():
     parser.add_argument("--frames_per_shard", type=int, default=10000)
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--device", default="cuda:0", help="Device for MANO forward pass")
+    parser.add_argument("--mano_dir", default=None,
+                        help="Directory containing data/ and data_left/ for MANO models "
+                             "(default: PROJECT_ROOT/_DATA)")
     parser.add_argument("--rescan", action="store_true", help="Force rescan episodes (ignore cache)")
     args = parser.parse_args()
 
@@ -405,7 +409,7 @@ def main():
     # Build MANO models
     print("Loading MANO models...")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    mano_right, mano_left = build_mano_models(device)
+    mano_right, mano_left = build_mano_models(device, mano_dir=args.mano_dir)
     mano_right.eval()
     mano_left.eval()
 
