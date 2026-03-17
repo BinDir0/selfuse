@@ -611,9 +611,13 @@ class LegendVLA(nn.Module):
 
         return final_embedding
 
-    def infer_action(self, input: dict, return_attn_weights: bool = False) -> torch.FloatTensor:
+    def infer_action(self, input: dict, return_attn_weights: bool = False,
+                     prev_action_chunk: torch.FloatTensor = None,
+                     inference_delay: int = 0) -> torch.FloatTensor:
         from src.policy.legendvla_inference import infer_action as _infer_action
-        return _infer_action(self, input, return_attn_weights)
+        return _infer_action(self, input, return_attn_weights,
+                             prev_action_chunk=prev_action_chunk,
+                             inference_delay=inference_delay)
 
     def infer_single_step(self, input: dict, kv_cache=None, dtype=torch.float32, return_attn_weights=False) -> dict:
         from src.policy.legendvla_inference import infer_single_step as _infer_single_step

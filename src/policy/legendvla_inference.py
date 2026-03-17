@@ -30,15 +30,28 @@ def infer_action(
     model,
     input: dict,
     return_attn_weights: bool = False,
+    prev_action_chunk: torch.FloatTensor = None,
+    inference_delay: int = 0,
 ) -> torch.FloatTensor:
     """
     Inference function for action generation using flow matching.
+
+    Supports Real-Time Chunking (RTC) when ``prev_action_chunk`` and a
+    positive ``inference_delay`` are provided.  In RTC mode the first
+    ``inference_delay`` action tokens are pinned to the previously predicted
+    (and partially executed) actions at every Euler step, matching the
+    Kinetix hard-constraint strategy.
 
     Args:
         model: LegendVLA model instance
         input: Input dictionary containing input_ids, pixel_values, vlm_mask,
                action_mask, vlm_position_ids, action_position_ids
         return_attn_weights: Whether to return attention weights
+        prev_action_chunk: [B, horizon_steps, action_dim] Previously predicted
+            action chunk (in normalised space).  Required for RTC inference.
+        inference_delay: Number of leading action tokens to pin to
+            ``prev_action_chunk``.  Typically equals the number of actions
+            executed since the last prediction.
 
     Returns:
         torch.FloatTensor: [B, horizon_steps, action_dim] Generated action sequence
@@ -86,6 +99,16 @@ def infer_action(
         vlm_attn_weights = torch.stack(model.attn_weights, dim=0).detach().clone()
     action_expert_attn_weights = None
 
+    # ---- RTC setup ----
+    use_rtc = (prev_action_chunk is not None and inference_delay > 0)
+    if use_rtc:
+        inference_delay = min(inference_delay, model.horizon_steps)
+        # [1, H] boolean mask — True for prefix positions that should be pinned
+        prefix_mask = torch.arange(
+            model.horizon_steps, device=device,
+        ).unsqueeze(0) < inference_delay                          # [1, H]
+        prev_action_chunk = prev_action_chunk.to(dtype=dtype, device=device)
+
     # sample pure action noise
     action = torch.randn(
         (bsz, model.horizon_steps, model.action_dim), device=device, dtype=dtype
@@ -95,7 +118,26 @@ def infer_action(
     delta_t = 1.0 / model.num_inference_steps
     t = torch.zeros(bsz, device=device, dtype=dtype)
     for step_idx in range(model.num_inference_steps):
-        time_cond = model.time_embedding(t)
+
+        if use_rtc:
+            # Pin prefix tokens to the previously executed actions
+            action = torch.where(
+                prefix_mask.unsqueeze(-1),          # [1, H, 1]
+                prev_action_chunk,                  # [B, H, D]
+                action,                             # [B, H, D]
+            )
+            # Per-token time: prefix = 1.0 (clean), postfix = current ODE time
+            token_t = torch.where(
+                prefix_mask,                        # [1, H]
+                torch.ones(1, 1, device=device, dtype=dtype),
+                t[:, None].expand(-1, model.horizon_steps),
+            )                                       # [B, H]
+            time_cond = model.time_embedding(
+                token_t.reshape(-1)
+            ).reshape(bsz, model.horizon_steps, -1) # [B, H, D_time]
+        else:
+            time_cond = model.time_embedding(t)
+
         if model.action_expert_adaptive_mode:
             action_embeds = model.action_encoder(action)
         else:
@@ -120,6 +162,7 @@ def infer_action(
     if return_attn_weights:
         return action, vlm_attn_weights, action_expert_attn_weights
     return action
+
 
 
 def infer_single_step(
@@ -711,11 +754,30 @@ class LegendVLAInference(nn.Module):
             intrinsic = np.array([intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]])
         return intrinsic.reshape(-1)
 
-    def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Step 3: Actual model forward pass."""
+    def forward(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        prev_action_chunk: torch.FloatTensor = None,
+        inference_delay: int = 0,
+    ) -> torch.Tensor:
+        """Step 3: Actual model forward pass.
+
+        Args:
+            inputs: Model inputs built by ``build_model_inputs``.
+            prev_action_chunk: [B, H, D] Previously predicted action chunk
+                (in **normalised** space) for RTC inference.  Pass ``None``
+                to disable RTC.
+            inference_delay: Number of prefix action tokens to pin to
+                ``prev_action_chunk``.  Ignored when ``prev_action_chunk``
+                is ``None``.
+        """
         self.maybe_compile_model()
         if self.mode == "flow":
-            return self.model("infer_action", inputs)
+            return self.model(
+                "infer_action", inputs,
+                prev_action_chunk=prev_action_chunk,
+                inference_delay=inference_delay,
+            )
         else:
             return self.model("infer_vla", inputs, max_new_tokens=self.ar_max_new_tokens,
                               temperature=self.ar_temperature, cfg=self.ar_cfg)["generated_actions"]

@@ -293,8 +293,8 @@ policy:
     ar_action_noise_std: 0.02
     ar_action_chunk_size: 4 # should be less than or equal to total action chunk size
     use_rtc: True
-    rtc_delay_strategy: "uniform"
-    rtc_max_delay: null
+    rtc_delay_strategy: "exp" # "uniform" or "exp"
+    rtc_max_delay: 16 
     loss_weights:
       ce_loss_weight: 0.1
       diffusion_loss_weight: 20.0

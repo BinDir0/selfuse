@@ -93,6 +93,7 @@ def psi_t(
 
 def _sample_rtc_delay(
     valid_action_len: torch.LongTensor,
+    strategy: str = "uniform",
     max_delay: int | None = None,
     forced_delay: torch.LongTensor | None = None,
 ) -> torch.LongTensor:
@@ -106,6 +107,11 @@ def _sample_rtc_delay(
         valid_action_len:
             [B] Number of valid action steps for each sample. Values are expected
             to be in the range [0, horizon_steps].
+        strategy:
+            Delay sampling strategy. `uniform` samples all valid delays with
+            equal probability. `exp` matches the Kinetix RTC
+            implementation and biases toward smaller delays via
+            `exp(arange(upper)[::-1])`.
         max_delay:
             Optional upper bound for the sampled delay. When provided, the actual
             sampling upper bound becomes min(valid_action_len, max_delay) for each
@@ -130,8 +136,24 @@ def _sample_rtc_delay(
             torch.full_like(delay_upper, max_delay),
         )
     delay_upper = delay_upper.clamp(min=0)
-    random_delay = torch.rand(delay_upper.shape, device=valid_action_len.device, dtype=torch.float32)
-    return torch.floor(random_delay * delay_upper.to(torch.float32)).to(dtype=torch.long)
+    strategy = str(strategy).lower()
+
+    if strategy == "uniform":
+        random_delay = torch.rand(delay_upper.shape, device=valid_action_len.device, dtype=torch.float32)
+        return torch.floor(random_delay * delay_upper.to(torch.float32)).to(dtype=torch.long)
+
+    if strategy == "exp":
+        max_upper = delay_upper.max().item()
+        if max_upper <= 0:
+            return torch.zeros_like(delay_upper, device=valid_action_len.device, dtype=torch.long)
+        w = torch.exp(torch.arange(max_upper - 1, -1, -1, device=valid_action_len.device, dtype=torch.float32))
+        w = w / w.sum()
+        sampled = torch.multinomial(w.unsqueeze(0).expand(delay_upper.shape[0], -1), num_samples=1).squeeze(1)
+        sampled = sampled % delay_upper.clamp(min=1)
+        return sampled.to(dtype=torch.long)
+
+
+    raise ValueError(f"Unsupported RTC delay strategy: {strategy}")
 
 def _build_rtc_flow_inputs(
     *,
@@ -139,6 +161,7 @@ def _build_rtc_flow_inputs(
     actions_valid_mask: torch.Tensor,
     postfix_time: torch.FloatTensor,
     n_actions: torch.LongTensor | None,
+    rtc_delay_strategy: str = "uniform",
     rtc_max_delay: int | None = None,
     forced_delay: torch.LongTensor | None = None,
 ) -> tuple[torch.FloatTensor, torch.BoolTensor, torch.FloatTensor, torch.LongTensor]:
@@ -193,7 +216,12 @@ def _build_rtc_flow_inputs(
         valid_action_len = actions_valid_mask.reshape(batch_size, horizon_steps, -1).any(dim=-1).sum(dim=1)
     valid_action_len = valid_action_len.clamp(min=0, max=horizon_steps)
 
-    delay = _sample_rtc_delay(valid_action_len, rtc_max_delay, forced_delay)
+    delay = _sample_rtc_delay(
+        valid_action_len,
+        strategy=rtc_delay_strategy,
+        max_delay=rtc_max_delay,
+        forced_delay=forced_delay,
+    )
     positions = torch.arange(horizon_steps, device=device).unsqueeze(0)
     prefix_mask = positions < delay.unsqueeze(1)
     token_t = torch.where(prefix_mask, torch.ones_like(postfix_time[:, None]), postfix_time[:, None])
@@ -370,13 +398,12 @@ def compute_flow_loss(model, batch: dict, return_attn_weights: bool = False) -> 
     x1 = actions
     time_for_model = t
     if use_rtc:
-        if model.rtc_delay_strategy != "uniform":
-            raise ValueError(f"Unsupported RTC delay strategy: {model.rtc_delay_strategy}")
         time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
             actions=x1,
             actions_valid_mask=actions_valid_mask,
             postfix_time=t,
             n_actions=batch.get("n_actions"),
+            rtc_delay_strategy=model.rtc_delay_strategy,
             rtc_max_delay=model.rtc_max_delay,
         )
     psi_t_val = psi_t(x0, x1, time_for_model, model.flow_sig_min)
@@ -469,13 +496,12 @@ def compute_loss(model, batch: dict, return_attn_weights: bool = False) -> dict:
     rtc_mask = None
     time_for_model = t
     if use_rtc:
-        if model.rtc_delay_strategy != "uniform":
-            raise ValueError(f"Unsupported RTC delay strategy: {model.rtc_delay_strategy}")
         time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
             actions=x1,
             actions_valid_mask=actions_valid_mask,
             postfix_time=t,
             n_actions=n_actions,
+            rtc_delay_strategy=model.rtc_delay_strategy,
             rtc_max_delay=model.rtc_max_delay,
         )
     psi_t_val = psi_t(x0, x1, time_for_model, model.flow_sig_min)
