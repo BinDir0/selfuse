@@ -84,6 +84,7 @@ class BatchScheduler:
         chunk_batch_size: int,
         num_workers: int,
         metric3d_batch_size: int,
+        slam_stride: int,
         render_batch_size: int,
         detect_batch_size: int,
         detect_device: str,
@@ -107,6 +108,7 @@ class BatchScheduler:
         self.chunk_batch_size = chunk_batch_size
         self.num_workers = num_workers
         self.metric3d_batch_size = metric3d_batch_size
+        self.slam_stride = slam_stride
         self.render_batch_size = render_batch_size
         self.detect_batch_size = detect_batch_size
         self.detect_device = detect_device
@@ -187,6 +189,7 @@ class BatchScheduler:
         cmd.extend(["--chunk_batch_size", str(self.chunk_batch_size)])
         cmd.extend(["--num_workers", str(self.num_workers)])
         cmd.extend(["--metric3d_batch_size", str(self.metric3d_batch_size)])
+        cmd.extend(["--slam_stride", str(self.slam_stride)])
         cmd.extend(["--render_batch_size", str(self.render_batch_size)])
         cmd.extend(["--detect_batch_size", str(self.detect_batch_size)])
         cmd.extend(["--detect_io_workers", str(self.detect_io_workers)])
@@ -630,6 +633,7 @@ class BatchScheduler:
         task_ns.chunk_batch_size = self.chunk_batch_size
         task_ns.num_workers = self.num_workers
         task_ns.metric3d_batch_size = self.metric3d_batch_size
+        task_ns.slam_stride = self.slam_stride
 
         # Attach descriptor for WebDataset mode
         task = self.tasks.get(video_path)
@@ -1120,6 +1124,12 @@ def get_parser():
         help="Batch size for Metric3D depth estimation in SLAM stage",
     )
     parser.add_argument(
+        "--slam_stride",
+        type=int,
+        default=1,
+        help="Frame stride for DROID-SLAM (2=2x faster, 3=3x faster)",
+    )
+    parser.add_argument(
         "--render_batch_size",
         type=int,
         default=8,
@@ -1307,6 +1317,7 @@ def main():
         chunk_batch_size=args.chunk_batch_size,
         num_workers=args.num_workers,
         metric3d_batch_size=args.metric3d_batch_size,
+        slam_stride=args.slam_stride,
         render_batch_size=args.render_batch_size,
         detect_batch_size=args.detect_batch_size,
         detect_device=args.detect_device,

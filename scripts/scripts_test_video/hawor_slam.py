@@ -61,7 +61,7 @@ def build_metric3d_runner(weight_path=None):
     return metric
 
 
-def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size=32, droid_net=None, frame_source=None, seq_folder=None):
+def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size=32, droid_net=None, frame_source=None, seq_folder=None, slam_stride=1):
     import time
     timing = {}
     t_start = time.time()
@@ -109,7 +109,7 @@ def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size
 
     ##### Run SLAM #####
     t0 = time.time()
-    droid, traj = run_slam(frame_source, masks=masks, calib=calib, droid_net=droid_net)
+    droid, traj = run_slam(frame_source, masks=masks, calib=calib, droid_net=droid_net, stride=slam_stride)
     n = droid.video.counter.value
     tstamp = droid.video.tstamp.cpu().int().numpy()[:n]
     disps = droid.video.disps_up.cpu().numpy()[:n]
@@ -161,16 +161,26 @@ def hawor_slam(args, start_idx, end_idx, metric_runner=None, metric3d_batch_size
         slam_depth_list, pred_depths, sigma=0.5,
         masks=mask_list, near_thresh=min_threshold, far_thresh=max_threshold)
 
-    # Retry NaN entries with relaxed thresholds (rare edge cases)
+    # Retry NaN entries with relaxed thresholds (max 10 retries to avoid infinite loop)
     for i in range(n):
         if math.isnan(scales_[i]):
             nt, ft = min_threshold, max_threshold
-            while math.isnan(scales_[i]):
+            for _retry in range(10):
                 nt -= 0.1
                 ft += 0.1
                 scales_[i] = est_scale_hybrid(
                     slam_depth_list[i], pred_depths[i], sigma=0.5,
                     msk=mask_list[i], near_thresh=nt, far_thresh=ft)
+                if not math.isnan(scales_[i]):
+                    break
+
+    # Fallback: replace remaining NaN with median of valid scales
+    valid_scales = [s for s in scales_ if not math.isnan(s)]
+    if valid_scales:
+        fallback = np.median(valid_scales)
+        for i in range(n):
+            if math.isnan(scales_[i]):
+                scales_[i] = fallback
 
     median_s = np.median(scales_)
     vprint(f"estimated scale: {median_s}")
