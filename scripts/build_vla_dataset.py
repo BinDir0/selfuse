@@ -194,13 +194,17 @@ def process_episode(ep, mano_right, mano_left, device):
         print(f"  Skip {ep['episode_id']}: failed to load world_space_res.pth: {e}")
         return None
 
-    # Convert to tensors if needed
-    if not isinstance(pred_trans, torch.Tensor):
-        pred_trans = torch.tensor(pred_trans, dtype=torch.float32)
-        pred_rot = torch.tensor(pred_rot, dtype=torch.float32)
-        pred_hand_pose = torch.tensor(pred_hand_pose, dtype=torch.float32)
-        pred_betas = torch.tensor(pred_betas, dtype=torch.float32)
-        pred_valid = torch.tensor(pred_valid, dtype=torch.float32)
+    # Convert to tensors if needed (pred_valid kept as numpy for presence calc)
+    def _to_tensor(x):
+        if isinstance(x, torch.Tensor):
+            return x.float()
+        return torch.tensor(np.array(x), dtype=torch.float32)
+
+    pred_trans = _to_tensor(pred_trans)
+    pred_rot = _to_tensor(pred_rot)
+    pred_hand_pose = _to_tensor(pred_hand_pose)
+    pred_betas = _to_tensor(pred_betas)
+    # pred_valid stays as-is (handled later with numpy)
 
     T = pred_trans.shape[1]  # num frames
 
@@ -262,11 +266,15 @@ def process_episode(ep, mano_right, mano_left, device):
     if slam_files:
         try:
             slam_data = np.load(str(slam_files[0]), allow_pickle=True)
-            tstamps = slam_data["tstamp"]
+            tstamps = slam_data["tstamp"].astype(np.int64)
             traj = slam_data["traj"]
             scale = float(slam_data["scale"])
             img_focal = float(slam_data["img_focal"])
             img_center = slam_data["img_center"]
+
+            # traj may have all frames; tstamp indexes the keyframes
+            if len(traj) != len(tstamps):
+                traj = traj[tstamps]
 
             extrinsics = interpolate_extrinsics(tstamps, traj, scale, T)
             intrinsic = np.array([img_focal, img_focal, float(img_center[0]), float(img_center[1])], dtype=np.float32)
@@ -276,11 +284,13 @@ def process_episode(ep, mano_right, mano_left, device):
     extrinsics_flat = extrinsics.reshape(T, 16)
 
     # --- Compute presence ---
-    valid = pred_valid.float()  # (2, T)
-    if valid.dim() == 1:
-        # edge case: shape is (2,) not (2, T)
-        valid = valid.unsqueeze(1).expand(2, T)
-    presence_per_frame = (valid[0] > 0.5).int() | ((valid[1] > 0.5).int() << 1)  # 0/1/2/3
+    if isinstance(pred_valid, np.ndarray):
+        valid = pred_valid.astype(np.float32)
+    else:
+        valid = pred_valid.float().cpu().numpy()
+    if valid.ndim == 1:
+        valid = np.tile(valid[:, None], (1, T))
+    presence_per_frame = ((valid[0] > 0.5).astype(int)) | (((valid[1] > 0.5).astype(int)) << 1)
 
     # --- Convert to numpy ---
     wrist_state_np = wrist_state.cpu().numpy().astype(np.float32)
