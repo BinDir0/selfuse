@@ -355,19 +355,19 @@ def build_mano_models(device, mano_dir=None):
     from lib.models.mano_wrapper import MANO
 
     if mano_dir is None:
-        mano_dir = os.path.join(str(PROJECT_ROOT), "_DATA")
+        mano_dir = os.path.join(str(PROJECT_ROOT), "_DATA", "data", "mano")
 
     mano_right = MANO(
-        data_dir=os.path.join(mano_dir, "data/"),
-        model_path=os.path.join(mano_dir, "data/mano"),
+        data_dir=mano_dir,
+        model_path=mano_dir,
         gender="neutral",
         num_hand_joints=15,
         create_body_pose=False,
     ).to(device)
 
     mano_left = MANO(
-        data_dir=os.path.join(mano_dir, "data_left/"),
-        model_path=os.path.join(mano_dir, "data_left/mano_left"),
+        data_dir=mano_dir,
+        model_path=mano_dir,
         gender="neutral",
         num_hand_joints=15,
         create_body_pose=False,
@@ -388,8 +388,8 @@ def main():
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--device", default="cuda:0", help="Device for MANO forward pass")
     parser.add_argument("--mano_dir", default=None,
-                        help="Directory containing data/ and data_left/ for MANO models "
-                             "(default: PROJECT_ROOT/_DATA)")
+                        help="Directory containing MANO_RIGHT.pkl and MANO_LEFT.pkl "
+                             "(default: PROJECT_ROOT/_DATA/data/mano)")
     parser.add_argument("--rescan", action="store_true", help="Force rescan episodes (ignore cache)")
     args = parser.parse_args()
 
