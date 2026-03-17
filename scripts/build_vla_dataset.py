@@ -328,17 +328,19 @@ def build_mano_models(device):
     """Create right and left MANO models."""
     from lib.models.mano_wrapper import MANO
 
+    data_root = str(PROJECT_ROOT)
+
     mano_right = MANO(
-        data_dir="_DATA/data/",
-        model_path="_DATA/data/mano",
+        data_dir=os.path.join(data_root, "_DATA/data/"),
+        model_path=os.path.join(data_root, "_DATA/data/mano"),
         gender="neutral",
         num_hand_joints=15,
         create_body_pose=False,
     ).to(device)
 
     mano_left = MANO(
-        data_dir="_DATA/data_left/",
-        model_path="_DATA/data_left/mano_left",
+        data_dir=os.path.join(data_root, "_DATA/data_left/"),
+        model_path=os.path.join(data_root, "_DATA/data_left/mano_left"),
         gender="neutral",
         num_hand_joints=15,
         create_body_pose=False,
