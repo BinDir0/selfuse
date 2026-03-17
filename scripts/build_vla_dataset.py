@@ -102,11 +102,29 @@ def interpolate_extrinsics(tstamps, traj, scale, total_frames):
     return mats
 
 
-def discover_episodes(input_dir, episode_list=None, max_episodes=None):
+def discover_episodes(input_dir, episode_list=None, max_episodes=None, cache_file=None):
     """Discover episodes with world_space_res.pth.
 
+    Results are cached to a JSON file for fast reuse. Pass --rescan to force refresh.
     Returns list of dicts with keys: crop_dir, episode_id, episode_index.
     """
+    # Try loading from cache
+    if cache_file is None:
+        cache_file = os.path.join(input_dir, "_vla_episodes_cache.json")
+
+    if os.path.exists(cache_file):
+        print(f"Loading cached episode list from {cache_file}")
+        with open(cache_file) as f:
+            episodes = json.load(f)
+        for i, ep in enumerate(episodes):
+            ep["episode_index"] = i
+        if max_episodes:
+            episodes = episodes[:max_episodes]
+        print(f"  {len(episodes)} episodes from cache")
+        return episodes
+
+    # Scan
+    print("Scanning for episodes (first run, will be cached)...")
     episodes = []
 
     if episode_list and os.path.exists(episode_list):
@@ -136,6 +154,14 @@ def discover_episodes(input_dir, episode_list=None, max_episodes=None):
     # Assign episode indices
     for i, ep in enumerate(episodes):
         ep["episode_index"] = i
+
+    # Save cache
+    try:
+        with open(cache_file, "w") as f:
+            json.dump(episodes, f, ensure_ascii=False)
+        print(f"  Cached {len(episodes)} episodes to {cache_file}")
+    except OSError as e:
+        print(f"  Warning: failed to write cache: {e}")
 
     if max_episodes:
         episodes = episodes[:max_episodes]
@@ -360,12 +386,15 @@ def main():
     parser.add_argument("--frames_per_shard", type=int, default=10000)
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--device", default="cuda:0", help="Device for MANO forward pass")
+    parser.add_argument("--rescan", action="store_true", help="Force rescan episodes (ignore cache)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Discover episodes
-    print("Discovering episodes...")
+    cache_file = os.path.join(args.input_dir, "_vla_episodes_cache.json")
+    if args.rescan and os.path.exists(cache_file):
+        os.remove(cache_file)
     episodes = discover_episodes(args.input_dir, args.episode_list, args.max_episodes)
     print(f"Found {len(episodes)} episodes with world_space_res.pth")
 
