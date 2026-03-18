@@ -1,0 +1,54 @@
+# @package _global_
+defaults:
+  - legendvla_qwen3_vl
+  - _self_
+
+# Override workspace target (not used for serving, but keeps Hydra happy)
+_target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
+
+serving:
+  host: "0.0.0.0"
+  port: 8765
+  device: cuda
+  autocast: True
+  warmup_enabled: True
+  warmup_iters: 3
+  warmup_instruction: "pick up the object"
+  warmup_image_shape: [480, 640, 3]
+  warmup_depth_shape: [480, 640, 3]
+  warmup_intrinsic: [500.0, 500.0, 320.0, 240.0]
+  log_obs_details: False
+  record_enabled: False
+  record_root_dir: outputs/serving_records
+  profile_enabled: False
+  profile_dir: outputs/serving_profile
+  profile_steps: 20
+  profile_skip_first: 5
+
+# Inference policy wrapper
+# model_config_name refers to the Hydra experiment config to compose
+# (e.g. "legendvla_qwen3_vl"), NOT a raw file path.
+policy:
+  _target_: src.policy.legendvla_inference_wrapper.LegendVLAInference
+  model_config_name: legendvla_qwen3_vl
+  checkpoint_path: ???  # required: path to trained model checkpoint
+  mode: flow
+  use_mixed_precision: True
+  tokenizer_padding: longest
+  max_length: null
+  default_instruction: null
+  flow_sampling_steps: ${flow.num_inference_steps}
+  ar_max_new_tokens: null
+  ar_temperature: 1.0
+  ar_cfg: 1.0
+  normalizer_path: ${training.normalizer_path}
+  use_relative_action: True
+  compile: null
+
+env_wrapper:
+  enabled: True
+  image_key: image
+  depth_key: depth_image
+  intrinsic_key: camera_intrinsics
+  instruction_key: instruction
+  states_key: states

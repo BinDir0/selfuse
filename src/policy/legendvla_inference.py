@@ -185,6 +185,17 @@ def infer_ar_action(
         next_action = model.diffloss.sample(latent_condition, temperature=temperature, cfg=cfg)
         if next_action.ndim == 1:
             next_action = next_action.unsqueeze(0)
+        if next_action.ndim == 3:
+            next_action = next_action[:, 0, :]
+        elif next_action.shape[-1] == model.action_dim * model.ar_action_chunk_size:
+            next_action = next_action.view(next_action.shape[0], model.ar_action_chunk_size, model.action_dim)[:, 0, :]
+        elif next_action.shape[-1] != model.action_dim:
+            raise ValueError(
+                "DiffLoss AR inference must return either action_dim or "
+                "action_dim * ar_action_chunk_size channels. "
+                f"Got {next_action.shape[-1]} and expected {model.action_dim} or "
+                f"{model.action_dim * model.ar_action_chunk_size}."
+            )
         valid_step = action_step_mask[:, step_idx].unsqueeze(-1)
         generated_actions[:, step_idx] = torch.where(
             valid_step,
@@ -260,7 +271,5 @@ def infer_vlm_generation(
     }
 
 
-
-class LegendVLAInference:
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("The legacy inference wrapper has been removed. Use LegendVLA forward modes or the updated inference utilities directly.")
+# Re-export from new module for backward compatibility
+from src.policy.legendvla_inference_wrapper import LegendVLAInference  # noqa: E402,F401

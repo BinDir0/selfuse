@@ -18,12 +18,16 @@ logger = logging.getLogger(__name__)
 
 
 def _load_config() -> OmegaConf:
-    config_path = pathlib.Path(__file__).resolve().parents[1] / "config" / "experiment" / "inference.yaml"
-    logger.info("Loading inference config: %s", config_path)
-    cfg = OmegaConf.load(config_path)
-    OmegaConf.resolve(cfg)
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    config_dir = str(pathlib.Path(__file__).resolve().parents[1] / "config")
+    logger.info("Composing inference config from: %s", config_dir)
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="inference_config")
     assert "serving" in cfg and "policy" in cfg and "env_wrapper" in cfg, (
-        f"Missing policy/serving/env_wrapper config in: {config_path}"
+        "Missing policy/serving/env_wrapper config after Hydra compose"
     )
     return cfg
 
