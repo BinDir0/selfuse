@@ -2,6 +2,9 @@ import torch
 from torch import nn
 
 from src.policy.legendvla import LegendVLA
+from src.model.action.action_head import FourierActionEncoder, MLPProjector
+from src.model.action_expert.qwen_shared_kv_expert import ActionExpertDecoder
+from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput, gather_action_position_ids
 
 
@@ -151,42 +154,73 @@ def make_vlm_batch():
 
 
 def make_model(diffloss=None):
-    cfg = {
-        "ignore_index": -100,
-        "flow_sig_min": 0.001,
-        "num_inference_steps": 5,
-        "time_hidden_size": 32,
-        "time_min_period": 0.004,
-        "time_max_period": 4.0,
-        "ar_action_noise_std": 0.02,
-        "ar_action_chunk_size": 2,
-        "diffloss_micro_batch_size": 1,
-        "use_rtc": True,
-        "rtc_delay_strategy": "uniform",
-        "rtc_max_delay": 2,
-        "expert": {
-            "hidden_size": 32,
-            "intermediate_size": 64,
-            "num_layers": 4,
-            "rope_theta": 10000.0,
-        },
-        "diffloss": {
-            "enabled": diffloss is not None,
-            "z_channels": 32,
-            "target_channels": 48,
-            "num_inference_steps": 5,
-        },
-        "loss_weights": {
-            "ce_loss_weight": 0.1,
-            "diffusion_loss_weight": 1.0,
-            "flow_loss_weight": 1.0,
-        },
-    }
+    hidden_size = 32
+    action_dim = 48
+    state_dim = 48
+    action_hidden_size = 32
+    time_hidden_size = 32
+    num_heads = 4
+    num_kv_heads = 4
+    head_dim = 8
+
+    backbone = DummyBackbone(
+        hidden_size=hidden_size, vocab_size=128,
+        num_layers=8, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
+    )
+    state_encoder = FourierActionEncoder(
+        action_dim=state_dim, width=hidden_size,
+        time_cond=False, enable_fourier_embed=False, mlp_depth=2,
+        final_layer_norm=False, use_mlp_layer_norm=False,
+    )
+    ar_action_encoder = FourierActionEncoder(
+        action_dim=action_dim, width=hidden_size,
+        time_cond=False, enable_fourier_embed=False, mlp_depth=2,
+        final_layer_norm=False, use_mlp_layer_norm=False,
+    )
+    action_encoder = FourierActionEncoder(
+        action_dim=action_dim, width=action_hidden_size,
+        time_cond=False, enable_fourier_embed=False, mlp_depth=2,
+        final_layer_norm=False, use_mlp_layer_norm=False,
+    )
+    time_embedding = TimeEmbedding(time_hidden_size)
+    flow_expert = ActionExpertDecoder(
+        hidden_size=action_hidden_size, intermediate_size=64, num_layers=4,
+        time_hidden_size=time_hidden_size,
+        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
+    )
+    action_decoder = MLPProjector(
+        input_dim=action_hidden_size, output_dim=action_dim,
+        width=action_hidden_size, depth=2,
+        final_layer_norm=False, use_mlp_layer_norm=False,
+    )
+    latent_condition_projector = MLPProjector(
+        input_dim=hidden_size, output_dim=32,
+        width=hidden_size, depth=2,
+        final_layer_norm=False, use_mlp_layer_norm=False,
+    )
+
     shape_meta = {
         "obs": {"state": {"shape": [48], "horizon": 18}},
         "action": {"shape": [48], "horizon": 4},
     }
-    return LegendVLA(cfg=cfg, shape_meta=shape_meta, backbone=DummyBackbone(), diffloss=diffloss)
+    return LegendVLA(
+        backbone=backbone,
+        state_encoder=state_encoder,
+        ar_action_encoder=ar_action_encoder,
+        action_encoder=action_encoder,
+        time_embedding=time_embedding,
+        flow_expert=flow_expert,
+        action_decoder=action_decoder,
+        latent_condition_projector=latent_condition_projector,
+        shape_meta=shape_meta,
+        diffloss=diffloss,
+        action_hidden_size=action_hidden_size,
+        num_inference_steps=5,
+        ar_action_chunk_size=2,
+        diffloss_micro_batch_size=1,
+        rtc_delay_strategy="uniform",
+        rtc_max_delay=2,
+    )
 
 
 def test_gather_action_position_ids_uses_backbone_positions():
