@@ -390,6 +390,31 @@ def build_mano_models(device, mano_dir=None):
     return mano_right, mano_left
 
 
+def run_infill_for_episode(crop_dir, checkpoint, infiller_weight, device):
+    """Run infill stage for a single episode if world_space_res.pth is missing."""
+    from pathlib import Path
+    from scripts.batch_worker import WorkerRuntime
+
+    seq_folder = Path(crop_dir)
+    world_res = seq_folder / "world_space_res.pth"
+
+    if world_res.exists():
+        return True
+
+    print(f"  Running infill for {seq_folder.name}...")
+    try:
+        runtime = WorkerRuntime(
+            gpu=device.split(":")[-1] if ":" in device else "0",
+            checkpoint=checkpoint,
+            infiller_weight=infiller_weight,
+        )
+        runtime.run_stage("infiller", seq_folder)
+        return world_res.exists()
+    except Exception as e:
+        print(f"  Infill failed for {seq_folder.name}: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build VLA WebDataset from BuildAI + HaWoR")
     parser.add_argument("--input_dir", default="/share_data/lvjianan/datasets/BuildAI-processed/")
@@ -403,14 +428,59 @@ def main():
                         help="Directory containing MANO_RIGHT.pkl and MANO_LEFT.pkl "
                              "(default: PROJECT_ROOT/_DATA/data/mano)")
     parser.add_argument("--rescan", action="store_true", help="Force rescan episodes (ignore cache)")
+    parser.add_argument("--auto_infill", action="store_true",
+                        help="Automatically run infill for episodes missing world_space_res.pth")
+    parser.add_argument("--checkpoint", default=None,
+                        help="HaWoR checkpoint path (required if --auto_infill)")
+    parser.add_argument("--infiller_weight", default=None,
+                        help="Infiller weight path (required if --auto_infill)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Validate auto_infill requirements
+    if args.auto_infill:
+        if not args.checkpoint or not args.infiller_weight:
+            print("Error: --auto_infill requires --checkpoint and --infiller_weight")
+            return
+        if not os.path.exists(args.checkpoint):
+            print(f"Error: checkpoint not found: {args.checkpoint}")
+            return
+        if not os.path.exists(args.infiller_weight):
+            print(f"Error: infiller_weight not found: {args.infiller_weight}")
+            return
 
     # Discover episodes
     cache_file = os.path.join(args.input_dir, "_vla_episodes_cache.json")
     if args.rescan and os.path.exists(cache_file):
         os.remove(cache_file)
+
+    # First pass: discover all episodes (including those without world_space_res.pth if auto_infill)
+    if args.auto_infill:
+        print("Scanning for all episodes (including incomplete)...")
+        input_path = Path(args.input_dir)
+        all_episodes = []
+        for extracted_dir in sorted(input_path.glob("*/*/processed/*/extracted_images")):
+            crop_dir = str(extracted_dir.parent)
+            all_episodes.append({
+                "crop_dir": crop_dir,
+                "episode_id": Path(crop_dir).name,
+            })
+
+        # Run infill for missing episodes
+        print(f"Found {len(all_episodes)} total episodes")
+        missing_infill = [ep for ep in all_episodes
+                         if not os.path.exists(os.path.join(ep["crop_dir"], "world_space_res.pth"))]
+
+        if missing_infill:
+            print(f"Running infill for {len(missing_infill)} episodes...")
+            for ep in tqdm(missing_infill, desc="Infill"):
+                run_infill_for_episode(ep["crop_dir"], args.checkpoint, args.infiller_weight, args.device)
+
+        # Force rescan after infill
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+
     episodes = discover_episodes(args.input_dir, args.episode_list, args.max_episodes)
     print(f"Found {len(episodes)} episodes with world_space_res.pth")
 
