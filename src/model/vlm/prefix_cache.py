@@ -73,6 +73,18 @@ def get_hf_cache_layers(full_kv: Any) -> list[LayerKV]:
             for key_layer, value_layer in zip(full_kv.key_cache, full_kv.value_cache)
         ]
 
+    if hasattr(full_kv, "layers"):
+        layers: list[LayerKV] = []
+        for layer in full_kv.layers:
+            if hasattr(layer, "keys") and hasattr(layer, "values"):
+                layers.append(LayerKV(key=layer.keys, value=layer.values))
+                continue
+            if hasattr(layer, "key") and hasattr(layer, "value"):
+                layers.append(LayerKV(key=layer.key, value=layer.value))
+                continue
+            raise TypeError(f"Unsupported dynamic cache layer type: {type(layer)!r}")
+        return layers
+
     if isinstance(full_kv, (list, tuple)):
         layers: list[LayerKV] = []
         for layer in full_kv:
@@ -84,6 +96,9 @@ def get_hf_cache_layers(full_kv: Any) -> list[LayerKV]:
                 continue
             if hasattr(layer, "key") and hasattr(layer, "value"):
                 layers.append(LayerKV(key=layer.key, value=layer.value))
+                continue
+            if hasattr(layer, "keys") and hasattr(layer, "values"):
+                layers.append(LayerKV(key=layer.keys, value=layer.values))
                 continue
             raise TypeError(f"Unsupported cache layer type: {type(layer)!r}")
         return layers

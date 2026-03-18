@@ -96,7 +96,7 @@ class Qwen3VLProcessor:
             padding=self.tokenizer_padding,
             truncation=True,
             max_length=self.max_seq_len,
-            return_tensors="np",
+            return_tensors="pt",
         )
         return unwrap_batch_dimension(encoded)
 
@@ -157,7 +157,7 @@ class Qwen3VLVLAProcessor(Qwen3VLProcessor):
         image_prefix = self.build_image_prefix()
         return (
             f"{image_prefix}Task: {clean_text}, Camera intrinsic: {intrinsic_str}, "
-            f"States: {self.STATE_TOKEN * len(states)}"
+            f"States: {self.STATE_TOKEN * len(states)} "
             f"Actions: "
         )
 

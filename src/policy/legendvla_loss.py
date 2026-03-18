@@ -405,16 +405,29 @@ def _compute_flow_stream_loss(
     if "actions" not in batch or "actions_valid_mask" not in batch:
         return zero_loss(backbone_output.last_hidden_states), {}
 
-    flow_inputs = build_flow_inputs(model, batch)
+    flow_batch = dict(batch)
+    if "is_vla_data" in batch:
+        is_vla_data = batch["is_vla_data"].to(device=batch["actions_valid_mask"].device, dtype=torch.bool)
+        flow_batch["actions_valid_mask"] = batch["actions_valid_mask"] & is_vla_data[:, None, None]
+        if "n_actions" in batch:
+            flow_batch["n_actions"] = torch.where(
+                is_vla_data,
+                batch["n_actions"],
+                torch.zeros_like(batch["n_actions"]),
+            )
+        if not torch.any(flow_batch["actions_valid_mask"]):
+            return zero_loss(backbone_output.last_hidden_states), {}
+
+    flow_inputs = build_flow_inputs(model, flow_batch)
     flow_output = model.forward_flow_stream(
-        batch=batch,
+        batch=flow_batch,
         backbone_output=backbone_output,
         flow_inputs=flow_inputs,
     )
     flow_loss = _compute_flow_loss(
         model=model,
-        actions=batch["actions"],
-        actions_valid_mask=batch["actions_valid_mask"],
+        actions=flow_batch["actions"],
+        actions_valid_mask=flow_batch["actions_valid_mask"],
         pred_v_t=flow_output["pred_v"],
         noise=flow_inputs["noise"],
         rtc_mask=flow_inputs["rtc_mask"],
