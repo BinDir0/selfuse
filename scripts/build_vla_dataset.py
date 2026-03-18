@@ -211,11 +211,12 @@ def process_episode(ep, mano_right, mano_left, device):
     # --- Compute wrist_state (18) ---
     # pred_trans: (2, T, 3), pred_rot: (2, T, 3) axis-angle
     rot6d = axis_angle_to_rot6d(pred_rot.float())  # (2, T, 6)
-    # wrist_state layout: [left_trans(3), left_rot6d(6), right_trans(3), right_rot6d(6)]
+    # wrist_state layout: [left_trans(3), right_trans(3), left_rot6d(6), right_rot6d(6)]
+    # Match EgoDex format: [trans(6), rot6d(12)]
     wrist_state = torch.cat([
         pred_trans[0].float(),  # left trans (T, 3)
-        rot6d[0],               # left rot6d (T, 6)
         pred_trans[1].float(),  # right trans (T, 3)
+        rot6d[0],               # left rot6d (T, 6)
         rot6d[1],               # right rot6d (T, 6)
     ], dim=-1)  # (T, 18)
 
@@ -250,12 +251,13 @@ def process_episode(ep, mano_right, mano_left, device):
         right_tips[0].reshape(T, 15),
     ], dim=-1)  # (T, 30)
 
-    # --- Compute actions (frame diffs) ---
+    # --- Compute actions (next frame state, not diff) ---
+    # Match EgoDex format: action = next_state (not delta)
     wrist_action = torch.zeros_like(wrist_state)
-    wrist_action[:-1] = wrist_state[1:] - wrist_state[:-1]
+    wrist_action[:-1] = wrist_state[1:]
 
     hand_action = torch.zeros_like(hand_state)
-    hand_action[:-1] = hand_state[1:] - hand_state[:-1]
+    hand_action[:-1] = hand_state[1:]
 
     # --- Load SLAM extrinsic + intrinsic ---
     slam_dir = os.path.join(crop_dir, "SLAM")
