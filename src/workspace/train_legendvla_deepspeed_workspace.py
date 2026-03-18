@@ -153,7 +153,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             kwargs_handlers.append(profile_kwargs)
 
         self.is_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
-        self.is_deepspeed = False
 
         deepspeed_plugin = None
         if self.is_deepspeed:
@@ -207,11 +206,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         model = self.model
 
         # Load pretrained weights before optimizer setup
-        if cfg.training.load_pretrained_pi05_weights:
-            model.load_pretrained_pi05_weights()
-        elif cfg.training.load_pretrained_vlm_weights:
-            model.load_pretrained_vlm_weights()
-        elif cfg.training.finetune_checkpoint_path:
+        if cfg.training.finetune_checkpoint_path:
             state_dict = torch.load(cfg.training.finetune_checkpoint_path, map_location='cpu')
             # handle wrapping
             for key in ['module', 'model', 'model_state_dict']:
@@ -241,10 +236,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # VLM optimizer (if training VLM)
         if cfg.training.train_vlm:
-            if cfg.lora:
-                vlm_trained_parameters = model.lora_trainable_vlm_parameters
-            else:
-                vlm_trained_parameters = model.trainable_vlm_parameters
+            vlm_trained_parameters = model.trainable_vlm_parameters
             vlm_trainable_parameters = self.get_grouped_parameters(
                 vlm_trained_parameters,
                 cfg.optimizer.vlm,
@@ -462,7 +454,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             unwrapped_model = accelerator.unwrap_model(self.model)
                             part_params = {
                                 "action_expert": unwrapped_model.action_expert_parameters,
-                                "vlm": unwrapped_model.lora_trainable_vlm_parameters if cfg.lora else unwrapped_model.trainable_vlm_parameters,
+                                "vlm": unwrapped_model.trainable_vlm_parameters,
                                 "diffloss": unwrapped_model.diffloss_parameters,
                             }
                             def grad_stats_l2_norm(params):
@@ -554,11 +546,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         with torch.no_grad():
                             unwrapped_model = accelerator.unwrap_model(self.model)
                             if cfg.training.train_vlm:
-                                vlm_params = (
-                                    unwrapped_model.lora_trainable_vlm_parameters
-                                    if cfg.lora
-                                    else unwrapped_model.trainable_vlm_parameters
-                                )
+                                vlm_params = unwrapped_model.trainable_vlm_parameters
                                 step_log["weight_norm/vlm"] = params_l2_norm(vlm_params)
                             step_log["weight_norm/action"] = params_l2_norm(
                                 unwrapped_model.action_expert_parameters
@@ -627,56 +615,27 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         return t
 
     def preprocess_batch(self, batch, split_mask: bool = False, sample_fm_time: bool = True):
-        """Preprocess batch for training"""
+        del split_mask
         input_ids = batch["input_ids"]
-        bsz = input_ids.shape[0]
-        # Get unwrapped model for mask building
-        model = self.model
-        if hasattr(self.model, 'module'):
-            model = self.model.module
-        
-        # Build causal mask and position ids
-        # We need to move the new created tensors to the same device as the input prepared by the accelerate
-        causal_mask, vlm_position_ids, action_position_ids = (
-            model.build_causal_mask_and_position_ids(   
-                batch["attention_mask"], batch["answer_start_idx"], batch["n_actions"], self.dtype
-            )
-        )
-
         inputs = {
             "input_ids": input_ids,
+            "attention_mask": batch["attention_mask"],
             "pixel_values": batch["pixel_values"].to(self.dtype),
-            "vlm_position_ids": vlm_position_ids,
+            "image_grid_thw": batch["image_grid_thw"],
+            "mm_token_type_ids": batch["mm_token_type_ids"],
             "states": batch["states"].to(self.dtype),
             "answer_start_idx": batch["answer_start_idx"],
             "is_vla_data": batch["is_vla_data"],
             "n_states": batch["n_states"],
             "n_actions": batch["n_actions"],
-            "depth_values": batch["depth_values"].to(self.dtype) if "depth_values" in batch else None,
-            "has_depth_values": batch["has_depth_values"] if "has_depth_values" in batch else None,
         }
         if self.objective_func != "train_ar":
-            inputs["action_position_ids"] = action_position_ids
             inputs["actions"] = batch["actions"].to(self.dtype)
             inputs["actions_valid_mask"] = batch["actions_valid_mask"]
         if self.objective_func != "train_flow":
             inputs["labels"] = batch["labels"]
-
-        if split_mask:
-            max_vlm_tokens = input_ids.shape[-1]
-            vlm_mask, action_mask = (
-                model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
-            )
-            inputs["vlm_mask"] = vlm_mask
-            if self.objective_func != "train_ar":
-                inputs["action_mask"] = action_mask
-        inputs["causal_mask"] = causal_mask
-
-        # Sample flow matching timesteps
         if sample_fm_time:
-            # We need to move the new created tensors to the same device as the input prepared by the accelerate
             inputs["t"] = self.sample_fm_time(len(input_ids)).to(input_ids.device).to(self.dtype)
-
         return inputs
 
     def get_grouped_parameters(self, param_list, cfg):

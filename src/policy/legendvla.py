@@ -9,7 +9,7 @@ from torch import nn
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.action.diffloss import DiffLoss
 from src.model.action_expert.qwen_shared_kv_expert import ActionExpertDecoder
-from src.model.common.modules import SinusoidalPosEmb, TimeEncoder
+from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import (
     BackboneStreamOutput,
     gather_action_position_ids,
@@ -18,28 +18,39 @@ from src.model.vlm.prefix_cache import (
 from src.model.vlm.qwen3_vl_backbone import Qwen3VLBackboneWrapper
 
 
-def get_cfg_value(cfg: Any, name: str, default: Any = None) -> Any:
-    if isinstance(cfg, dict):
-        return cfg.get(name, default)
-    return getattr(cfg, name, default)
-
-
-def build_loss_weights(cfg: Any) -> SimpleNamespace:
-    loss_cfg = get_cfg_value(cfg, "loss_weights", {})
-    return SimpleNamespace(
-        ce_loss_weight=float(get_cfg_value(loss_cfg, "ce_loss_weight", 0.1)),
-        diffusion_loss_weight=float(get_cfg_value(loss_cfg, "diffusion_loss_weight", 1.0)),
-        flow_loss_weight=float(get_cfg_value(loss_cfg, "flow_loss_weight", 1.0)),
-    )
-
-
 class LegendVLA(nn.Module):
-    def __init__(self, cfg: Any, shape_meta: dict, backbone: nn.Module | None = None, diffloss: nn.Module | None = None):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        state_encoder: nn.Module,
+        ar_action_encoder: nn.Module,
+        action_encoder: nn.Module,
+        time_embedding: nn.Module,
+        flow_expert: nn.Module,
+        action_decoder: nn.Module,
+        latent_condition_projector: nn.Module,
+        shape_meta: dict,
+        diffloss: nn.Module | None = None,
+        ignore_index: int = -100,
+        action_hidden_size: int = 1024,
+        final_logit_softcapping: float | None = None,
+        flow_sig_min: float = 0.001,
+        num_inference_steps: int = 10,
+        ar_action_noise_std: float = 0.02,
+        ar_action_chunk_size: int = 4,
+        diffloss_micro_batch_size: int = 16,
+        use_rtc: bool = True,
+        rtc_delay_strategy: str = "exp",
+        rtc_max_delay: int = 16,
+        ce_loss_weight: float = 0.1,
+        diffusion_loss_weight: float = 1.0,
+        flow_loss_weight: float = 1.0,
+    ):
         super().__init__()
-        self.cfg = cfg
         self.shape_meta = shape_meta
 
-        self.backbone = backbone if backbone is not None else Qwen3VLBackboneWrapper(get_cfg_value(cfg, "backbone"))
+        # Backbone and derived attributes
+        self.backbone = backbone
         self.vlm_hidden_size = int(getattr(self.backbone, "hidden_size"))
         self.vocab_size = int(getattr(self.backbone, "vocab_size"))
         self.pad_token_id = int(getattr(self.backbone, "pad_token_id"))
@@ -47,124 +58,45 @@ class LegendVLA(nn.Module):
         self.state_token_index = int(getattr(self.backbone, "state_token_id"))
         self.action_token_index = int(getattr(self.backbone, "action_token_id"))
         self.lm_head = getattr(self.backbone, "lm_head")
-        self.final_logit_softcapping = get_cfg_value(cfg, "final_logit_softcapping", None)
-        self.ignore_index = int(get_cfg_value(cfg, "ignore_index", -100))
-        self.CELoss = nn.CrossEntropyLoss(reduction="sum", ignore_index=self.ignore_index)
+        self.eos_token_id = getattr(getattr(self.backbone, "tokenizer", None), "eos_token_id", None)
 
+        # Scalar config
+        self.final_logit_softcapping = final_logit_softcapping
+        self.ignore_index = ignore_index
+        self.CELoss = nn.CrossEntropyLoss(reduction="sum", ignore_index=ignore_index)
+        self.flow_sig_min = flow_sig_min
+        self.num_inference_steps = num_inference_steps
+        self.ar_action_noise_std = ar_action_noise_std
+        self.ar_action_chunk_size = ar_action_chunk_size
+        self.diffloss_micro_batch_size = diffloss_micro_batch_size
+        self.use_rtc = use_rtc
+        self.rtc_delay_strategy = rtc_delay_strategy
+        self.rtc_max_delay = rtc_max_delay
+        self.loss_weights = SimpleNamespace(
+            ce_loss_weight=ce_loss_weight,
+            diffusion_loss_weight=diffusion_loss_weight,
+            flow_loss_weight=flow_loss_weight,
+        )
+
+        # Shape meta derived
         self.action_dim = int(shape_meta["action"]["shape"][0])
         self.state_dim = int(shape_meta["obs"]["state"]["shape"][0])
         self.horizon_steps = int(shape_meta["action"]["horizon"])
         self.num_state_tokens = int(shape_meta["obs"]["state"]["horizon"])
         self.num_action_tokens = int(shape_meta["action"]["horizon"])
 
-        expert_cfg = get_cfg_value(cfg, "expert")
-        self.action_hidden_size = int(get_cfg_value(expert_cfg, "hidden_size"))
-        self.time_hidden_size = int(get_cfg_value(cfg, "time_hidden_size", self.action_hidden_size))
-        self.flow_sig_min = float(get_cfg_value(cfg, "flow_sig_min", 0.001))
-        diffloss_cfg = get_cfg_value(cfg, "diffloss", None)
-        self.num_inference_steps = int(
-            get_cfg_value(
-                cfg,
-                "num_inference_steps",
-                get_cfg_value(diffloss_cfg or {}, "num_inference_steps", 10),
-            )
-        )
-        self.ar_action_noise_std = float(get_cfg_value(cfg, "ar_action_noise_std", 0.02))
-        self.ar_action_chunk_size = int(get_cfg_value(cfg, "ar_action_chunk_size", 4))
-        self.diffloss_micro_batch_size = int(get_cfg_value(cfg, "diffloss_micro_batch_size", 1))
-        self.use_rtc = bool(get_cfg_value(cfg, "use_rtc", True))
-        self.rtc_delay_strategy = get_cfg_value(cfg, "rtc_delay_strategy", "exp")
-        self.rtc_max_delay = get_cfg_value(cfg, "rtc_max_delay", 16)
-        self.loss_weights = build_loss_weights(cfg)
-        self.eos_token_id = getattr(getattr(self.backbone, "tokenizer", None), "eos_token_id", None)
+        # Expert hidden size (explicit parameter, must match action_encoder output width)
+        self.action_hidden_size = action_hidden_size
 
-        self.slot_state_encoder = FourierActionEncoder(
-            action_dim=self.state_dim,
-            width=self.vlm_hidden_size,
-            time_cond=False,
-            enable_fourier_embed=False,
-            mlp_depth=2,
-            final_layer_norm=False,
-            use_mlp_layer_norm=False,
-        )
-        self.slot_action_encoder = FourierActionEncoder(
-            action_dim=self.action_dim,
-            width=self.vlm_hidden_size,
-            time_cond=False,
-            enable_fourier_embed=False,
-            mlp_depth=2,
-            final_layer_norm=False,
-            use_mlp_layer_norm=False,
-        )
-        self.flow_action_encoder = FourierActionEncoder(
-            action_dim=self.action_dim,
-            width=self.action_hidden_size,
-            time_cond=False,
-            enable_fourier_embed=False,
-            mlp_depth=2,
-            final_layer_norm=False,
-            use_mlp_layer_norm=False,
-        )
-        self.time_embedding = nn.Sequential(
-            SinusoidalPosEmb(
-                self.time_hidden_size,
-                min_period=float(get_cfg_value(cfg, "time_min_period", 0.004)),
-                max_period=float(get_cfg_value(cfg, "time_max_period", 4.0)),
-            ),
-            TimeEncoder(self.time_hidden_size),
-        )
-
-        expert_runtime_cfg = {
-            "hidden_size": self.action_hidden_size,
-            "intermediate_size": int(get_cfg_value(expert_cfg, "intermediate_size")),
-            "num_layers": int(get_cfg_value(expert_cfg, "num_layers")),
-            "time_hidden_size": self.time_hidden_size,
-            "num_heads": int(getattr(self.backbone, "num_heads")),
-            "num_kv_heads": int(getattr(self.backbone, "num_kv_heads")),
-            "head_dim": int(getattr(self.backbone, "head_dim")),
-            "rope_theta": float(get_cfg_value(expert_cfg, "rope_theta", 10000.0)),
-            "attention_bias": bool(get_cfg_value(expert_cfg, "attention_bias", False)),
-        }
-        self.flow_expert = ActionExpertDecoder(expert_runtime_cfg)
-        self.action_decoder = MLPProjector(
-            input_dim=self.action_hidden_size,
-            output_dim=self.action_dim,
-            width=int(get_cfg_value(cfg, "action_decoder_width", self.action_hidden_size)),
-            depth=int(get_cfg_value(cfg, "action_decoder_depth", 2)),
-            final_layer_norm=False,
-            use_mlp_layer_norm=False,
-        )
-
-        if diffloss is not None:
-            self.diffloss = diffloss
-        elif diffloss_cfg is None or not bool(get_cfg_value(diffloss_cfg, "enabled", True)):
-            self.diffloss = None
-        else:
-            self.diffloss = DiffLoss(
-                target_channels=int(get_cfg_value(diffloss_cfg, "target_channels")),
-                z_channels=int(get_cfg_value(diffloss_cfg, "z_channels", self.vlm_hidden_size)),
-                depth=int(get_cfg_value(diffloss_cfg, "depth", 8)),
-                width=int(get_cfg_value(diffloss_cfg, "width", 2048)),
-                num_sampling_steps=get_cfg_value(diffloss_cfg, "num_sampling_steps", "100"),
-                grad_checkpointing=bool(get_cfg_value(diffloss_cfg, "grad_checkpointing", False)),
-                use_ddim_sampling=bool(get_cfg_value(diffloss_cfg, "use_ddim_sampling", True)),
-                use_flow_matching=bool(get_cfg_value(diffloss_cfg, "use_flow_matching", False)),
-                flow_sig_min=float(get_cfg_value(diffloss_cfg, "flow_sig_min", self.flow_sig_min)),
-                time_min_period=float(get_cfg_value(diffloss_cfg, "time_min_period", 0.004)),
-                time_max_period=float(get_cfg_value(diffloss_cfg, "time_max_period", 4.0)),
-                flow_sampling=get_cfg_value(diffloss_cfg, "flow_sampling", "beta"),
-                flow_alpha=float(get_cfg_value(diffloss_cfg, "flow_alpha", 1.5)),
-                flow_beta=float(get_cfg_value(diffloss_cfg, "flow_beta", 1.0)),
-                num_inference_steps=int(get_cfg_value(diffloss_cfg, "num_inference_steps", 10)),
-            )
-        self.latent_condition_projector = MLPProjector(
-            input_dim=self.vlm_hidden_size,
-            output_dim=int(get_cfg_value(diffloss_cfg or {}, "z_channels", self.vlm_hidden_size)),
-            width=int(get_cfg_value(cfg, "latent_projector_width", self.vlm_hidden_size)),
-            depth=int(get_cfg_value(cfg, "latent_projector_depth", 2)),
-            final_layer_norm=False,
-            use_mlp_layer_norm=False,
-        )
+        # Submodules (all pre-instantiated by Hydra)
+        self.state_encoder = state_encoder
+        self.ar_action_encoder = ar_action_encoder
+        self.action_encoder = action_encoder
+        self.time_embedding = time_embedding
+        self.flow_expert = flow_expert
+        self.action_decoder = action_decoder
+        self.diffloss = diffloss
+        self.latent_condition_projector = latent_condition_projector
 
     @property
     def trainable_vlm_parameters(self):
@@ -177,9 +109,9 @@ class LegendVLA(nn.Module):
     @property
     def action_expert_parameters(self):
         modules = [
-            self.slot_state_encoder,
-            self.slot_action_encoder,
-            self.flow_action_encoder,
+            self.state_encoder,
+            self.ar_action_encoder,
+            self.action_encoder,
             self.time_embedding,
             self.flow_expert,
             self.action_decoder,
@@ -253,13 +185,13 @@ class LegendVLA(nn.Module):
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
         slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None}
         if "states" in batch:
-            state_embeds = self.slot_state_encoder(batch["states"]) / (self.vlm_hidden_size ** 0.5)
+            state_embeds = self.state_encoder(batch["states"]) / (self.vlm_hidden_size ** 0.5)
             slot_embeds["state"] = state_embeds
         if "actions" in batch:
             action_input = batch["actions"]
             if add_action_noise:
                 action_input = action_input + torch.randn_like(batch["actions"]) * self.ar_action_noise_std
-            action_embeds = self.slot_action_encoder(action_input) / (self.vlm_hidden_size ** 0.5)
+            action_embeds = self.ar_action_encoder(action_input) / (self.vlm_hidden_size ** 0.5)
             slot_embeds["action"] = action_embeds
         return slot_embeds
 
@@ -310,7 +242,7 @@ class LegendVLA(nn.Module):
             )
         else:
             time_cond = self.time_embedding(time_for_model)
-        action_embeds = self.flow_action_encoder(flow_inputs["noisy_actions"]) / (self.action_hidden_size ** 0.5)
+        action_embeds = self.action_encoder(flow_inputs["noisy_actions"]) / (self.action_hidden_size ** 0.5)
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
         action_position_ids = self.build_action_position_ids(batch, backbone_output.position_ids)
         expert_hidden = self.flow_expert(
@@ -346,19 +278,19 @@ class LegendVLA(nn.Module):
 
         return compute_flow_only_loss(self, batch)
 
-    def load_pretrained_vlm_weights(self):
-        raise NotImplementedError("Qwen3-VL LegendVLA does not support the legacy VLM weight loader.")
-
-    def load_pretrained_pi05_weights(self):
-        raise NotImplementedError("Qwen3-VL LegendVLA does not support the legacy PI05 weight loader.")
-
     def freeze_non_lora_weights_in_vlm(self):
+        freeze_method = getattr(self.backbone, "freeze_non_lora_parameters", None)
+        if callable(freeze_method):
+            freeze_method()
+            return
         for param in self.backbone.parameters():
             param.requires_grad = False
 
     def freeze_non_lora_weights_in_ae(self):
         modules = [
-            self.flow_action_encoder,
+            self.state_encoder,
+            self.ar_action_encoder,
+            self.action_encoder,
             self.time_embedding,
             self.flow_expert,
             self.action_decoder,
@@ -403,9 +335,3 @@ class LegendVLA(nn.Module):
         if mode == "infer_vlm":
             return self.infer_vlm(batch, **kwargs)
         raise ValueError(f"Invalid mode: {mode}")
-
-
-class LegendVLAInference(nn.Module):
-    def __new__(cls, *args, **kwargs):
-        from src.policy.legendvla_inference import LegendVLAInference as _LegendVLAInference
-        return _LegendVLAInference(*args, **kwargs)

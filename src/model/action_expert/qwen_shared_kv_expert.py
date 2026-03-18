@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -10,12 +9,6 @@ from torch import nn
 from src.model.common.modules import AdaLNZero
 from src.model.common.utils import apply_rotary_pos_emb, repeat_kv
 from src.model.vlm.prefix_cache import PrefixKVCache
-
-
-def get_cfg_value(cfg: Any, name: str, default: Any = None) -> Any:
-    if isinstance(cfg, dict):
-        return cfg.get(name, default)
-    return getattr(cfg, name, default)
 
 
 class RotaryEmbedding1D(nn.Module):
@@ -34,21 +27,29 @@ class RotaryEmbedding1D(nn.Module):
 
 
 class SharedPrefixAttention(nn.Module):
-    def __init__(self, cfg: Any):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rope_theta: float = 10000.0,
+        attention_bias: bool = False,
+    ):
         super().__init__()
-        self.hidden_size = int(get_cfg_value(cfg, "hidden_size"))
-        self.num_heads = int(get_cfg_value(cfg, "num_heads"))
-        self.num_kv_heads = int(get_cfg_value(cfg, "num_kv_heads", self.num_heads))
-        self.head_dim = int(get_cfg_value(cfg, "head_dim"))
-        self.attention_bias = bool(get_cfg_value(cfg, "attention_bias", False))
-        self.rope_theta = float(get_cfg_value(cfg, "rope_theta", 10000.0))
-        self.scale = self.head_dim ** -0.5
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.attention_bias = attention_bias
+        self.rope_theta = rope_theta
+        self.scale = head_dim ** -0.5
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=self.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=self.attention_bias)
-        self.rope = RotaryEmbedding1D(self.head_dim, self.rope_theta)
+        self.q_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=attention_bias)
+        self.k_proj = nn.Linear(hidden_size, num_kv_heads * head_dim, bias=attention_bias)
+        self.v_proj = nn.Linear(hidden_size, num_kv_heads * head_dim, bias=attention_bias)
+        self.o_proj = nn.Linear(num_heads * head_dim, hidden_size, bias=attention_bias)
+        self.rope = RotaryEmbedding1D(head_dim, rope_theta)
 
     def build_attention_mask(
         self,
@@ -118,19 +119,36 @@ class SharedPrefixAttention(nn.Module):
 
 
 class QwenAdaLNZeroDecoderLayer(nn.Module):
-    def __init__(self, cfg: Any):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        time_hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rope_theta: float = 10000.0,
+        attention_bias: bool = False,
+    ):
         super().__init__()
-        self.hidden_size = int(get_cfg_value(cfg, "hidden_size"))
-        self.intermediate_size = int(get_cfg_value(cfg, "intermediate_size"))
-        self.time_hidden_size = int(get_cfg_value(cfg, "time_hidden_size"))
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.time_hidden_size = time_hidden_size
 
-        self.self_attn = SharedPrefixAttention(cfg)
-        self.attn_modulation = AdaLNZero(self.hidden_size, self.time_hidden_size)
-        self.mlp_modulation = AdaLNZero(self.hidden_size, self.time_hidden_size)
+        self.self_attn = SharedPrefixAttention(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            rope_theta=rope_theta,
+            attention_bias=attention_bias,
+        )
+        self.attn_modulation = AdaLNZero(hidden_size, time_hidden_size)
+        self.mlp_modulation = AdaLNZero(hidden_size, time_hidden_size)
         self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_size, self.intermediate_size),
+            nn.Linear(hidden_size, intermediate_size),
             nn.SiLU(),
-            nn.Linear(self.intermediate_size, self.hidden_size),
+            nn.Linear(intermediate_size, hidden_size),
         )
 
     def forward(
@@ -163,13 +181,35 @@ class QwenAdaLNZeroDecoderLayer(nn.Module):
 
 
 class ActionExpertDecoder(nn.Module):
-    def __init__(self, cfg: Any):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        num_layers: int,
+        time_hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rope_theta: float = 10000.0,
+        attention_bias: bool = False,
+    ):
         super().__init__()
-        self.cfg = cfg
-        self.hidden_size = int(get_cfg_value(cfg, "hidden_size"))
-        self.num_layers = int(get_cfg_value(cfg, "num_layers"))
-        self.layers = nn.ModuleList([QwenAdaLNZeroDecoderLayer(cfg) for _ in range(self.num_layers)])
-        self.final_norm = nn.LayerNorm(self.hidden_size)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.layers = nn.ModuleList([
+            QwenAdaLNZeroDecoderLayer(
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                time_hidden_size=time_hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                rope_theta=rope_theta,
+                attention_bias=attention_bias,
+            )
+            for _ in range(num_layers)
+        ])
+        self.final_norm = nn.LayerNorm(hidden_size)
 
     def forward(
         self,

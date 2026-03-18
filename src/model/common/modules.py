@@ -5,8 +5,6 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from .lora import get_layer
-
 
 class GemmaRMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -74,18 +72,14 @@ class GemmaRotaryEmbedding(nn.Module):
 class GemmaMLP(nn.Module):
     def __init__(self, config, use_quantize=False, use_lora=False):
         super().__init__()
+        del use_quantize, use_lora
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
 
-        layer = get_layer(
-            use_quantize,
-            use_lora,
-            **config.lora if use_lora else {},
-        )
-        self.gate_proj = layer(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = layer(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = layer(self.intermediate_size, self.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
     def forward(self, x):
         # Equivalent to:
@@ -225,4 +219,18 @@ class AdaLNZero(nn.Module):
         if cond.ndim == 2:
             cond = rearrange(cond, "b d -> b 1 d")
         scale, shift, gate = self.modulation(cond).chunk(3, dim=-1)
-        return output * (1.0 + scale) + shift, gate 
+        return output * (1.0 + scale) + shift, gate
+
+
+class TimeEmbedding(nn.Module):
+    """Wrapper for SinusoidalPosEmb + TimeEncoder to support Hydra _target_ instantiation."""
+
+    def __init__(self, time_hidden_size: int, min_period: float = 0.004, max_period: float = 4.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            SinusoidalPosEmb(time_hidden_size, min_period=min_period, max_period=max_period),
+            TimeEncoder(time_hidden_size),
+        )
+
+    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        return self.net(x)

@@ -6,7 +6,7 @@ defaults:
 
 name: legendvla_qwen3_vl
 exp_name: legendvla_qwen3_vl
-_target_: src.workspace.train_unified_vla_workspace.TrainUnifiedVLAWorkspace
+_target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
 
 objective:
 lora: False
@@ -55,6 +55,18 @@ n_obs_state_stride: 10
 n_action_steps: 32
 n_action_stride: 1
 
+# Backbone geometry (Qwen3-VL-4B specific, update when switching backbone)
+vlm_hidden_size: 2560
+num_attention_heads: 32
+num_key_value_heads: 8
+head_dim: 80
+
+# Module dimensions
+action_hidden_size: 1024
+time_hidden_size: 1024
+diffloss_z_channels: 2048
+action_dim: 48
+state_dim: 48
 ignore_index: -100
 depth_clip_range: [0.0, 5.0]
 max_vlm_tokens: 768
@@ -154,8 +166,6 @@ training:
   train_vlm: True
   train_depth: False
   init_motion_token_embeddings: False
-  load_pretrained_vlm_weights: False
-  load_pretrained_pi05_weights: False
   resume_checkpoint_path:
   finetune_checkpoint_path:
   normalizer_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/normalizer/2026.03.16-relative-mixed/normalizer.pkl
@@ -193,55 +203,119 @@ training:
 
 policy:
   _target_: src.policy.legendvla.LegendVLA
-  cfg:
-    ignore_index: ${ignore_index}
-    final_logit_softcapping:
+  backbone:
+    _target_: src.model.vlm.qwen3_vl_backbone.Qwen3VLBackboneWrapper
+    model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
+    trust_remote_code: False
+    freeze_backbone: False
+    torch_dtype: bfloat16
+    state_token: <state>
+    action_token: <action>
+    use_lora: ${lora}
+    lora:
+      r: 16
+      lora_alpha: 32
+      lora_dropout: 0.05
+      bias: none
+      target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    use_quantization: ${quantize}
+    quantization:
+      load_in_4bit: True
+      load_in_8bit: False
+      bnb_4bit_quant_type: nf4
+      bnb_4bit_use_double_quant: True
+      bnb_4bit_compute_dtype: bfloat16
+  state_encoder:
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: ${state_dim}
+    width: ${vlm_hidden_size}
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  ar_action_encoder:
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: ${action_dim}
+    width: ${vlm_hidden_size}
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  action_encoder:
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: ${action_dim}
+    width: ${action_hidden_size}
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  time_embedding:
+    _target_: src.model.common.modules.TimeEmbedding
+    time_hidden_size: ${time_hidden_size}
+    min_period: 0.004
+    max_period: 4.0
+  flow_expert:
+    _target_: src.model.action_expert.qwen_shared_kv_expert.ActionExpertDecoder
+    hidden_size: ${action_hidden_size}
+    intermediate_size: 4096
+    num_layers: 8
+    time_hidden_size: ${time_hidden_size}
+    num_heads: ${num_attention_heads}
+    num_kv_heads: ${num_key_value_heads}
+    head_dim: ${head_dim}
+    rope_theta: 10000.0
+    attention_bias: False
+  action_decoder:
+    _target_: src.model.action.action_head.MLPProjector
+    input_dim: ${action_hidden_size}
+    output_dim: ${action_dim}
+    width: ${action_hidden_size}
+    depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  latent_condition_projector:
+    _target_: src.model.action.action_head.MLPProjector
+    input_dim: ${vlm_hidden_size}
+    output_dim: ${diffloss_z_channels}
+    width: ${vlm_hidden_size}
+    depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  diffloss:
+    _target_: src.model.action.diffloss.DiffLoss
+    target_channels: ${eval:'${action_dim}*4'}
+    z_channels: ${diffloss_z_channels}
+    depth: 8
+    width: 2048
+    num_sampling_steps: "100"
+    grad_checkpointing: False
+    use_ddim_sampling: True
+    use_flow_matching: False
     flow_sig_min: ${flow.sig_min}
-    num_inference_steps: ${flow.num_inference_steps}
-    time_hidden_size: 1024
     time_min_period: 0.004
     time_max_period: 4.0
-    ar_action_noise_std: 0.02
-    ar_action_chunk_size: 4
-    diffloss_micro_batch_size: 16
-    use_rtc: True
-    rtc_delay_strategy: exp
-    rtc_max_delay: 16
-    backbone:
-      model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
-      trust_remote_code: False
-      freeze_backbone: False
-      torch_dtype: bfloat16
-      state_token: <state>
-      action_token: <action>
-    expert:
-      hidden_size: 1024
-      intermediate_size: 4096
-      num_layers: 8
-      rope_theta: 10000.0
-      attention_bias: False
-    diffloss:
-      enabled: True
-      target_channels: ${eval:'48*4'}
-      z_channels: 2048
-      depth: 8
-      width: 2048
-      num_sampling_steps: "100"
-      grad_checkpointing: False
-      use_ddim_sampling: True
-      use_flow_matching: False
-      flow_sig_min: ${flow.sig_min}
-      time_min_period: 0.004
-      time_max_period: 4.0
-      flow_sampling: ${flow.sampling}
-      flow_alpha: ${flow.alpha}
-      flow_beta: ${flow.beta}
-      num_inference_steps: ${flow.num_inference_steps}
-    loss_weights:
-      ce_loss_weight: 0.1
-      diffusion_loss_weight: 20.0
-      flow_loss_weight: 1.0
+    flow_sampling: ${flow.sampling}
+    flow_alpha: ${flow.alpha}
+    flow_beta: ${flow.beta}
+    num_inference_steps: ${flow.num_inference_steps}
   shape_meta: ${shape_meta}
+  ignore_index: ${ignore_index}
+  action_hidden_size: ${action_hidden_size}
+  final_logit_softcapping:
+  flow_sig_min: ${flow.sig_min}
+  num_inference_steps: ${flow.num_inference_steps}
+  ar_action_noise_std: 0.02
+  ar_action_chunk_size: 4
+  diffloss_micro_batch_size: 16
+  use_rtc: True
+  rtc_delay_strategy: exp
+  rtc_max_delay: 16
+  ce_loss_weight: 0.1
+  diffusion_loss_weight: 20.0
+  flow_loss_weight: 1.0
 
 logging:
   project: unified-vla
