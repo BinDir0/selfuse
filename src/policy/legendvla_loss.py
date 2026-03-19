@@ -12,28 +12,9 @@ import torch
 from torch import nn
 
 
-def _apply_final_logit_softcapping(logits: torch.Tensor, final_logit_softcapping: float = None) -> torch.Tensor:
-    """
-    Apply final logit softcapping (Gemma2 feature). Pure function.
-
-    Args:
-        logits: Raw logits from language model head
-        final_logit_softcapping: Softcapping value. None means disabled (Gemma1).
-
-    Returns:
-        Softcapped logits (same shape as input)
-    """
-    if final_logit_softcapping is not None:
-        logits = logits / final_logit_softcapping
-        logits = torch.tanh(logits)
-        logits = logits * final_logit_softcapping
-    return logits
-
-
 @torch.compile
 def compute_celoss(
     lm_head: nn.Module,
-    final_logit_softcapping: float,
     ce_loss_fn: nn.Module,
     ignore_index: int,
     hidden_states: torch.FloatTensor,
@@ -44,7 +25,6 @@ def compute_celoss(
 
     Args:
         lm_head: Language model head module
-        final_logit_softcapping: Softcapping value (float or None)
         ce_loss_fn: Cross-entropy loss function (sum reduction)
         ignore_index: Label index to ignore in loss computation
         hidden_states: [B, seq_len, hidden_size] Hidden states from the language model
@@ -54,7 +34,6 @@ def compute_celoss(
         torch.FloatTensor: Normalized cross-entropy loss
     """
     logits = lm_head(hidden_states)
-    logits = _apply_final_logit_softcapping(logits, final_logit_softcapping)
     logits = logits[:, :-1, :].contiguous().view(-1, logits.shape[-1])
     labels = labels[:, 1:].contiguous().view(-1)
     ce_loss = ce_loss_fn(logits, labels)
@@ -324,7 +303,6 @@ def compute_ce_loss(model, hidden_states: torch.Tensor, labels: torch.Tensor, is
         return zero_loss(hidden_states)
     return compute_celoss(
         model.lm_head,
-        model.final_logit_softcapping,
         model.CELoss,
         model.ignore_index,
         hidden_states[non_vla_mask],

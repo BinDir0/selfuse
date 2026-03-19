@@ -33,7 +33,6 @@ class LegendVLA(nn.Module):
         diffloss: nn.Module | None = None,
         ignore_index: int = -100,
         action_hidden_size: int = 1024,
-        final_logit_softcapping: float | None = None,
         flow_sig_min: float = 0.001,
         num_inference_steps: int = 10,
         ar_action_noise_std: float = 0.02,
@@ -61,7 +60,6 @@ class LegendVLA(nn.Module):
         self.eos_token_id = getattr(getattr(self.backbone, "tokenizer", None), "eos_token_id", None)
 
         # Scalar config
-        self.final_logit_softcapping = final_logit_softcapping
         self.ignore_index = ignore_index
         self.CELoss = nn.CrossEntropyLoss(reduction="sum", ignore_index=ignore_index)
         self.flow_sig_min = flow_sig_min

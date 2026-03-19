@@ -9,16 +9,6 @@ from torch import nn
 from src.model.vlm.prefix_cache import BackboneStreamOutput
 
 
-def align_features_by_slot(features: torch.Tensor, slot: torch.LongTensor) -> torch.Tensor:
-    batch_size, seq_len = slot.shape
-    hidden_size = features.shape[-1]
-    if features.size(1) == 0:
-        return features.new_zeros((batch_size, seq_len, hidden_size))
-    safe_slot = slot.clamp(min=0, max=features.size(1) - 1)
-    gather_index = safe_slot.unsqueeze(-1).expand(-1, -1, hidden_size)
-    return torch.gather(features, dim=1, index=gather_index)
-
-
 @dataclass
 class BackboneEmbedOutput:
     inputs_embeds: torch.Tensor
@@ -229,16 +219,12 @@ class Qwen3VLBackboneWrapper(nn.Module):
         action_token_id = self.action_token_id if action_token_id is None else action_token_id
 
         if state_slot_embeds is not None:
-            state_mask = input_ids == state_token_id
-            state_slot = state_mask.long().cumsum(dim=1) - 1
-            aligned_state_embeds = align_features_by_slot(state_slot_embeds.to(inputs_embeds.dtype), state_slot)
-            inputs_embeds = torch.where(state_mask.unsqueeze(-1), aligned_state_embeds, inputs_embeds)
+            state_mask = (input_ids == state_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(state_mask, state_slot_embeds.to(inputs_embeds.dtype))
 
         if action_slot_embeds is not None:
-            action_mask = input_ids == action_token_id
-            action_slot = action_mask.long().cumsum(dim=1) - 1
-            aligned_action_embeds = align_features_by_slot(action_slot_embeds.to(inputs_embeds.dtype), action_slot)
-            inputs_embeds = torch.where(action_mask.unsqueeze(-1), aligned_action_embeds, inputs_embeds)
+            action_mask = (input_ids == action_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(action_mask, action_slot_embeds.to(inputs_embeds.dtype))
 
         return inputs_embeds
 

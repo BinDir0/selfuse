@@ -178,9 +178,9 @@ training:
   log_interval: 20
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5]
   save_eval_attn_weights: False
-  eval_every: 99999999
-  checkpoint_every: 99999999
-  ckpt_save_interval: 99999999
+  eval_every: 5000
+  checkpoint_every: 5000
+  ckpt_save_interval: 10000
   clipping:
     enabled: True
     max_grad_norm: 1.0
@@ -306,7 +306,6 @@ policy:
   shape_meta: ${shape_meta}
   ignore_index: ${ignore_index}
   action_hidden_size: ${action_hidden_size}
-  final_logit_softcapping:
   flow_sig_min: ${flow.sig_min}
   num_inference_steps: ${flow.num_inference_steps}
   ar_action_noise_std: 0.02

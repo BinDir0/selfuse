@@ -153,6 +153,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             kwargs_handlers.append(profile_kwargs)
 
         self.is_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
+        self.is_deepspeed = False
 
         deepspeed_plugin = None
         if self.is_deepspeed:
@@ -342,8 +343,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
         if cfg.training.max_train_steps is not None:
             max_train_steps = cfg.training.max_train_steps
-        max_train_steps = max_train_steps * accelerator.num_processes
-        num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
+        if self.is_deepspeed:
+            max_train_steps = max_train_steps 
+            num_warmup_steps = cfg.training.lr_warmup_steps 
+        else:
+            max_train_steps = max_train_steps * accelerator.num_processes
+            num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
         if accelerator.is_main_process:
             print(f"num_warmup_steps: {num_warmup_steps}, max_train_steps: {max_train_steps}")
         self.lr_scheduler = get_scheduler(
@@ -477,11 +482,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 cfg.training.clipping.max_grad_norm
                             )
 
-                        # Standard training without DeepSpeed optimizer
-                        self.optimizer.step()
-                        self.lr_scheduler.step()
-                        # Zero gradients
-                        self.optimizer.zero_grad(set_to_none=True)
+                        if self.is_deepspeed:
+                            # DeepSpeed handles optimizer.step() and zero_grad()
+                            # It also handles lr_scheduler.step() if prepared
+                            self.model.step()
+                        else:
+                            # Standard training
+                            self.optimizer.step()
+                            self.lr_scheduler.step()
+                            self.optimizer.zero_grad(set_to_none=True)
 
                     self.global_step += 1
                     if accelerator.sync_gradients:
@@ -509,7 +518,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     step_log = None
                     if should_record or should_eval or should_ckpt or should_interval_ckpt:
                         if self.is_deepspeed:
-                            current_lr = self.model.get_lr()[0]
+                            current_lr = self.optimizer.param_groups[0]["lr"]
                         else:
                             current_lr = self.lr_scheduler.get_last_lr()[0]
 
