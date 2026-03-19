@@ -367,7 +367,7 @@ def build_mano_models(device, mano_dir=None):
     from lib.models.mano_wrapper import MANO
 
     if mano_dir is None:
-        mano_dir = os.path.join(str(PROJECT_ROOT), "_DATA", "data", "mano")
+        mano_dir = "/share_data/guantianrui/manopth/mano/models/"
 
     mano_right = MANO(
         data_dir=mano_dir,
