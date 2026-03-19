@@ -21,6 +21,8 @@ import os
 import sys
 import tarfile
 import time
+from functools import partial
+from multiprocessing import Pool
 from pathlib import Path
 
 import joblib
@@ -178,6 +180,25 @@ def find_frame_path(extracted_dir, frame_idx):
     return None
 
 
+def build_frame_index(extracted_dir):
+    """Build a dict mapping frame_idx -> filepath for all images in a directory."""
+    index = {}
+    try:
+        files = os.listdir(extracted_dir)
+    except OSError:
+        return index
+    for f in files:
+        if not f.endswith('.jpg'):
+            continue
+        stem = f[:-4]  # remove .jpg
+        try:
+            idx = int(stem)
+            index[idx] = os.path.join(extracted_dir, f)
+        except ValueError:
+            continue
+    return index
+
+
 def process_episode(ep, mano_right, mano_left, device):
     """Process one episode, return list of (sample_key, image_bytes, lowdim, meta).
 
@@ -315,10 +336,11 @@ def process_episode(ep, mano_right, mano_left, device):
 
     # --- Collect per-frame samples ---
     extracted_dir = os.path.join(crop_dir, "extracted_images")
+    frame_index = build_frame_index(extracted_dir)
     samples = []
 
     for t in range(T):
-        frame_path = find_frame_path(extracted_dir, t)
+        frame_path = frame_index.get(t)
         if frame_path is None:
             continue
 
@@ -415,6 +437,24 @@ def run_infill_for_episode(crop_dir, checkpoint, infiller_weight, device):
         return False
 
 
+def _worker_init(device_str, mano_dir):
+    """Initialize MANO models in each worker process."""
+    global _worker_mano_right, _worker_mano_left, _worker_device
+    _worker_device = torch.device(device_str)
+    _worker_mano_right, _worker_mano_left = build_mano_models(_worker_device, mano_dir=mano_dir)
+    _worker_mano_right.eval()
+    _worker_mano_left.eval()
+
+
+def _worker_process_episode(ep):
+    """Wrapper for process_episode using worker-local MANO models."""
+    try:
+        return process_episode(ep, _worker_mano_right, _worker_mano_left, _worker_device)
+    except Exception as e:
+        print(f"  Error processing {ep['episode_id']}: {e}")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build VLA WebDataset from BuildAI + HaWoR")
     parser.add_argument("--input_dir", default="/share_data/lvjianan/datasets/BuildAI-processed/")
@@ -428,6 +468,8 @@ def main():
                         help="Directory containing MANO_RIGHT.pkl and MANO_LEFT.pkl "
                              "(default: PROJECT_ROOT/_DATA/data/mano)")
     parser.add_argument("--rescan", action="store_true", help="Force rescan episodes (ignore cache)")
+    parser.add_argument("--num_workers", type=int, default=8,
+                        help="Number of parallel workers for episode processing")
     parser.add_argument("--auto_infill", action="store_true",
                         help="Automatically run infill for episodes missing world_space_res.pth")
     parser.add_argument("--checkpoint", default=None,
@@ -491,9 +533,6 @@ def main():
     # Build MANO models
     print("Loading MANO models...")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    mano_right, mano_left = build_mano_models(device, mano_dir=args.mano_dir)
-    mano_right.eval()
-    mano_left.eval()
 
     # Process episodes and write shards
     shard_idx = 0
@@ -537,25 +576,56 @@ def main():
 
     open_new_shard()
 
-    for ep in tqdm(episodes, desc="Episodes"):
-        try:
-            samples = process_episode(ep, mano_right, mano_left, device)
-        except Exception as e:
-            print(f"  Error processing {ep['episode_id']}: {e}")
-            skipped += 1
-            continue
+    num_workers = args.num_workers
+    print(f"Processing {len(episodes)} episodes with {num_workers} workers...")
 
-        if samples is None:
-            skipped += 1
-            continue
+    if num_workers <= 1:
+        # Single-process fallback
+        mano_right, mano_left = build_mano_models(device, mano_dir=args.mano_dir)
+        mano_right.eval()
+        mano_left.eval()
+        for ep in tqdm(episodes, desc="Episodes"):
+            try:
+                samples = process_episode(ep, mano_right, mano_left, device)
+            except Exception as e:
+                print(f"  Error processing {ep['episode_id']}: {e}")
+                skipped += 1
+                continue
 
-        for key, image_bytes, lowdim, meta in samples:
-            if frame_count_in_shard >= args.frames_per_shard:
-                open_new_shard()
-            add_to_tar(key, image_bytes, lowdim, meta)
-            total_frames += 1
+            if samples is None:
+                skipped += 1
+                continue
 
-        total_episodes_written += 1
+            for key, image_bytes, lowdim, meta in samples:
+                if frame_count_in_shard >= args.frames_per_shard:
+                    open_new_shard()
+                add_to_tar(key, image_bytes, lowdim, meta)
+                total_frames += 1
+
+            total_episodes_written += 1
+    else:
+        # Multi-process: workers do CPU MANO + I/O, main process writes tar
+        with Pool(
+            num_workers,
+            initializer=_worker_init,
+            initargs=(str(device), args.mano_dir),
+        ) as pool:
+            for samples in tqdm(
+                pool.imap(_worker_process_episode, episodes),
+                total=len(episodes),
+                desc="Episodes",
+            ):
+                if samples is None:
+                    skipped += 1
+                    continue
+
+                for key, image_bytes, lowdim, meta in samples:
+                    if frame_count_in_shard >= args.frames_per_shard:
+                        open_new_shard()
+                    add_to_tar(key, image_bytes, lowdim, meta)
+                    total_frames += 1
+
+                total_episodes_written += 1
 
     if tar_writer is not None:
         tar_writer.close()
