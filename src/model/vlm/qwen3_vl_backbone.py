@@ -33,152 +33,130 @@ class Qwen3VLBackboneWrapper(nn.Module):
         low_cpu_mem_usage: bool = True,
     ):
         super().__init__()
-        self.model_name_or_path = model_name_or_path
-        self.trust_remote_code = trust_remote_code
-        self.freeze_backbone = freeze_backbone
-        self.state_token = state_token
-        self.action_token = action_token
-        self.torch_dtype_name = torch_dtype
-        self.use_lora = use_lora
-        self.use_quantization = use_quantization
-        self.lora_cfg = dict(lora or {})
-        self.quantization_cfg = dict(quantization or {})
-        self.device_map = device_map
-        self.low_cpu_mem_usage = low_cpu_mem_usage
-        self._lora_param_ids: set[int] = set()
-
         try:
             from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
         except ImportError as exc:
             raise ImportError(
-                "Qwen3-VL backbone requires a recent transformers installation. "
-                "Please install transformers with Qwen3-VL support before instantiating this model."
+                "Qwen3-VL backbone requires a recent transformers installation."
             ) from exc
 
+        # ── Tokenizer & processor ──
         processor = AutoProcessor.from_pretrained(
-            self.model_name_or_path,
-            trust_remote_code=self.trust_remote_code,
+            model_name_or_path, trust_remote_code=trust_remote_code,
         )
         tokenizer = processor.tokenizer
-        tokenizer.add_special_tokens({"additional_special_tokens": [self.state_token, self.action_token]})
+        tokenizer.add_special_tokens({"additional_special_tokens": [state_token, action_token]})
 
-        torch_dtype = self.resolve_torch_dtype(self.torch_dtype_name)
+        # ── Quantization config ──
+        resolved_dtype = self._resolve_torch_dtype(torch_dtype)
         quantization_config = None
-        if self.use_quantization:
-            quantization_kwargs = dict(self.quantization_cfg)
-            compute_dtype_name = quantization_kwargs.get("bnb_4bit_compute_dtype")
-            if compute_dtype_name is None:
-                quantization_kwargs["bnb_4bit_compute_dtype"] = torch_dtype or torch.bfloat16
-            else:
-                quantization_kwargs["bnb_4bit_compute_dtype"] = self.resolve_torch_dtype(compute_dtype_name)
-            quantization_config = BitsAndBytesConfig(**quantization_kwargs)
+        if use_quantization:
+            qkwargs = dict(quantization or {})
+            compute_dtype_name = qkwargs.get("bnb_4bit_compute_dtype")
+            qkwargs["bnb_4bit_compute_dtype"] = (
+                self._resolve_torch_dtype(compute_dtype_name)
+                if compute_dtype_name is not None
+                else (resolved_dtype or torch.bfloat16)
+            )
+            quantization_config = BitsAndBytesConfig(**qkwargs)
 
+        # ── Load model ──
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-            self.model_name_or_path,
-            trust_remote_code=self.trust_remote_code,
-            torch_dtype=torch_dtype,
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            torch_dtype=resolved_dtype,
             quantization_config=quantization_config,
-            device_map=self.device_map,
-            low_cpu_mem_usage=self.low_cpu_mem_usage,
+            device_map=device_map,
+            low_cpu_mem_usage=low_cpu_mem_usage,
         )
         self.model.resize_token_embeddings(len(tokenizer))
 
-        if self.use_lora:
-            self.apply_transformers_lora()
+        # ── Extract references BEFORE LoRA wrapping ──
+        # Qwen3VLForConditionalGeneration → .model (Qwen3VLModel) → .language_model (Qwen3VLTextModel)
+        text_config = self.model.config.text_config
+        self.language_model = self.model.model.language_model
+        self.lm_head = self.model.lm_head
 
-        self.base_model = self.resolve_base_model(self.model)
+        # ── LoRA (via PEFT) ──
+        self.use_lora = use_lora
+        if use_lora:
+            self._apply_lora(lora or {}, use_quantization)
+
+        # ── Public attributes ──
         self.tokenizer = tokenizer
         self.processor = processor
-        self.language_model = self.resolve_language_model(self.base_model)
-        self.hidden_size = self.base_model.config.text_config.hidden_size
+        self.hidden_size = text_config.hidden_size
         self.vocab_size = len(tokenizer)
         self.pad_token_id = tokenizer.pad_token_id
         self.image_token = getattr(processor, "image_token", "<|image_pad|>")
         self.image_token_id = tokenizer.convert_tokens_to_ids(self.image_token)
-        self.state_token_id = tokenizer.convert_tokens_to_ids(self.state_token)
-        self.action_token_id = tokenizer.convert_tokens_to_ids(self.action_token)
-        self.num_heads = self.base_model.config.text_config.num_attention_heads
-        self.num_kv_heads = self.base_model.config.text_config.num_key_value_heads
-        self.head_dim = int(getattr(self.base_model.config.text_config, "head_dim", self.hidden_size // self.num_heads))
-        self.lm_head = self.base_model.lm_head
+        self.state_token_id = tokenizer.convert_tokens_to_ids(state_token)
+        self.action_token_id = tokenizer.convert_tokens_to_ids(action_token)
+        self.num_heads = text_config.num_attention_heads
+        self.num_kv_heads = text_config.num_key_value_heads
+        self.head_dim = int(getattr(text_config, "head_dim", self.hidden_size // self.num_heads))
 
-        if self.freeze_backbone:
+        if freeze_backbone:
             self.freeze_non_lora_parameters()
 
+    # ------------------------------------------------------------------
+    # LoRA
+    # ------------------------------------------------------------------
+    def _apply_lora(self, lora_cfg: dict, use_quantization: bool) -> None:
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
+        model_for_peft = self.model
+        if use_quantization:
+            model_for_peft = prepare_model_for_kbit_training(model_for_peft, use_gradient_checkpointing=False)
+
+        kwargs = dict(lora_cfg)
+        # Ensure list type for PEFT
+        for key in ("target_modules", "modules_to_save"):
+            if isinstance(kwargs.get(key), tuple):
+                kwargs[key] = list(kwargs[key])
+
+        # get_peft_model automatically freezes non-LoRA parameters
+        self.model = get_peft_model(model_for_peft, LoraConfig(task_type="CAUSAL_LM", **kwargs))
+
+    def freeze_non_lora_parameters(self) -> None:
+        if self.use_lora:
+            # PEFT already handles requires_grad; re-freeze any that were unfrozen
+            base = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
+            for param in base.parameters():
+                param.requires_grad = False
+            # Re-enable LoRA params
+            for name, param in self.model.named_parameters():
+                if "lora_" in name:
+                    param.requires_grad = True
+        else:
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     @staticmethod
-    def resolve_torch_dtype(dtype_name: str | torch.dtype | None) -> torch.dtype | None:
+    def _resolve_torch_dtype(dtype_name: str | torch.dtype | None) -> torch.dtype | None:
         if dtype_name is None:
             return None
         if isinstance(dtype_name, torch.dtype):
             return dtype_name
         return getattr(torch, str(dtype_name))
 
-    def resolve_base_model(self, model: nn.Module) -> nn.Module:
-        if hasattr(model, "get_base_model"):
-            return model.get_base_model()
-        return model
-
-    def resolve_language_model(self, model: nn.Module) -> nn.Module:
-        if hasattr(model, "language_model"):
-            return model.language_model
-        if hasattr(model, "model") and hasattr(model.model, "language_model"):
-            return model.model.language_model
-        raise AttributeError("Unable to locate the Qwen3-VL language model module.")
-
-    def apply_transformers_lora(self) -> None:
-        try:
-            from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
-        except ImportError as exc:
-            raise ImportError(
-                "LoRA training now relies on the Hugging Face PEFT integration. "
-                "Please install `peft` to enable `use_lora=True`."
-            ) from exc
-
-        model_for_peft = self.model
-        if self.use_quantization:
-            model_for_peft = prepare_model_for_kbit_training(model_for_peft, use_gradient_checkpointing=False)
-
-        lora_kwargs = dict(self.lora_cfg)
-        task_type_value = str(lora_kwargs.pop("task_type", "CAUSAL_LM"))
-        target_modules = lora_kwargs.pop(
-            "target_modules",
-            ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        )
-        modules_to_save = lora_kwargs.pop("modules_to_save", None)
-        if isinstance(target_modules, tuple):
-            target_modules = list(target_modules)
-        if isinstance(modules_to_save, tuple):
-            modules_to_save = list(modules_to_save)
-
-        task_type = getattr(TaskType, task_type_value)
-        peft_config = LoraConfig(
-            task_type=task_type,
-            target_modules=target_modules,
-            modules_to_save=modules_to_save,
-            **lora_kwargs,
-        )
-        self.model = get_peft_model(model_for_peft, peft_config)
-        self._lora_param_ids = {
-            id(param)
-            for _, param in self.model.named_parameters()
-            if param.requires_grad
-        }
-
-    def freeze_non_lora_parameters(self) -> None:
-        if not self.use_lora:
-            for param in self.model.parameters():
-                param.requires_grad = False
-            return
-
-        for param in self.model.parameters():
-            param.requires_grad = id(param) in self._lora_param_ids
+    def get_base_model(self) -> nn.Module:
+        if hasattr(self.model, "get_base_model"):
+            return self.model.get_base_model()
+        return self.model
 
     def resize_token_embeddings(self, vocab_size: int) -> None:
-        self.base_model.resize_token_embeddings(vocab_size)
+        self.get_base_model().resize_token_embeddings(vocab_size)
         self.vocab_size = vocab_size
 
+    # ------------------------------------------------------------------
+    # Embedding construction
+    # ------------------------------------------------------------------
     def build_base_text_embeds(self, input_ids: torch.LongTensor) -> torch.Tensor:
-        return self.base_model.get_input_embeddings()(input_ids)
+        return self.get_base_model().get_input_embeddings()(input_ids)
 
     def encode_image_features(
         self,
@@ -190,13 +168,14 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if pixel_values is None:
             return inputs_embeds, None, None
 
-        image_outputs = self.base_model.get_image_features(
+        base_model = self.get_base_model()
+        image_outputs = base_model.get_image_features(
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
             return_dict=True,
         )
         image_embeds = torch.cat(image_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-        image_mask, _ = self.base_model.model.get_placeholder_mask(
+        image_mask, _ = base_model.model.get_placeholder_mask(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             image_features=image_embeds,
@@ -261,6 +240,9 @@ class Qwen3VLBackboneWrapper(nn.Module):
             deepstack_visual_embeds=deepstack_visual_embeds,
         )
 
+    # ------------------------------------------------------------------
+    # Position IDs & language model forward
+    # ------------------------------------------------------------------
     def compute_position_ids(
         self,
         input_ids: torch.LongTensor,
@@ -270,7 +252,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         mm_token_type_ids: torch.Tensor | None,
         past_key_values: Any = None,
     ) -> torch.Tensor | None:
-        return self.base_model.model.compute_3d_position_ids(
+        return self.get_base_model().model.compute_3d_position_ids(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             image_grid_thw=image_grid_thw,
