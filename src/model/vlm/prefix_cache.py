@@ -138,9 +138,12 @@ def gather_action_position_ids(
     action_token_id: int,
     position_ids: torch.Tensor | None,
     n_actions: torch.Tensor,
+    action_len: int | None = None,
 ) -> torch.Tensor:
     n_actions = n_actions.to(dtype=torch.long, device=input_ids.device)
     max_actions = int(n_actions.max().item()) if n_actions.numel() > 0 else 0
+    if action_len is not None:
+        max_actions = max(max_actions, action_len)
     if max_actions == 0:
         return torch.zeros(input_ids.shape[0], 0, dtype=torch.long, device=input_ids.device)
 

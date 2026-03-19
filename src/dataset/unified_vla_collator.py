@@ -35,10 +35,7 @@ class UnifiedVLACollator:
         batch["mm_token_type_ids"] = self.pad_token_sequence(mm_token_type_ids, 0)
 
         pixel_values = [item["pixel_values"] for item in features]
-        if pixel_values[0].ndim == 4 and pixel_values[0].shape[0] == 1:
-            batch["pixel_values"] = torch.cat(pixel_values, dim=0)
-        else:
-            batch["pixel_values"] = torch.stack(pixel_values)
+        batch["pixel_values"] = torch.cat(pixel_values, dim=0)
 
         image_grid_thw = [item["image_grid_thw"] for item in features]
         if image_grid_thw[0].ndim == 1:

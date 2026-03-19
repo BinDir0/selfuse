@@ -46,6 +46,8 @@ class Qwen3VLProcessor:
         self.trust_remote_code = bool(get_cfg_value(cfg, "trust_remote_code", False))
         self.single_image_only = bool(get_cfg_value(cfg, "single_image_only", True))
         self.lowercase_vla_text = bool(get_cfg_value(cfg, "lowercase_vla_text", True))
+        self.max_pixels = get_cfg_value(cfg, "max_pixels", 50176)
+        self.min_pixels = get_cfg_value(cfg, "min_pixels", 50176)
 
         try:
             from transformers import AutoProcessor
@@ -58,6 +60,8 @@ class Qwen3VLProcessor:
             self.model_name_or_path,
             trust_remote_code=self.trust_remote_code,
         )
+        self.processor.image_processor.max_pixels = int(self.max_pixels)
+        self.processor.image_processor.min_pixels = int(self.min_pixels)
         self.tokenizer = self.processor.tokenizer
         self.tokenizer.add_special_tokens({
             "additional_special_tokens": [self.STATE_TOKEN, self.ACTION_TOKEN],

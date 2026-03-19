@@ -9,7 +9,7 @@ deepspeed==0.17.5
 zarr  # legacy data build/conversion/visualization utilities
 tensorstore
 numba
-transformers>=4.57.0
+transformers==5.3.0
 peft
 einops
 ps3-torch

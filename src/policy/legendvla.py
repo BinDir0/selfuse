@@ -171,6 +171,7 @@ class LegendVLA(nn.Module):
             action_token_id=self.action_token_index,
             position_ids=backbone_position_ids,
             n_actions=n_actions,
+            action_len=batch["actions"].shape[1],
         )
         if gathered.numel() > 0:
             return gathered
