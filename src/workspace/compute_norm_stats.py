@@ -182,7 +182,8 @@ def main():
     print("\n1. Creating VLALowLevelWdsDataset...")
     vla_cfg = cfg.dataset.vla_dataset
     wds_datasets = OmegaConf.to_container(vla_cfg.wds_datasets, resolve=True)
-    shape_meta = OmegaConf.to_container(cfg.shape_meta, resolve=True)
+    shape_meta_cfg = cfg.data.shape_meta if "data" in cfg and "shape_meta" in cfg.data else cfg.shape_meta
+    shape_meta = OmegaConf.to_container(shape_meta_cfg, resolve=True)
     use_relative_action = vla_cfg.get("use_relative_action", False)
     history_pad_mode = vla_cfg.get("history_pad_mode", "repeat")
     future_pad_mode = vla_cfg.get("future_pad_mode", "repeat")

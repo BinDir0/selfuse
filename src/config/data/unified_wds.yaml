@@ -1,0 +1,107 @@
+# @package _global_
+
+data:
+  ignore_index: -100
+  max_vlm_tokens: 768
+  tokenizer_padding: max_length
+  depth_clip_range: [0.0, 5.0]
+  video_base_fps: 30.0
+  n_obs_image_steps: 1
+  n_obs_image_stride: 1
+  n_obs_state_steps: 18
+  n_obs_state_stride: 10
+  n_action_steps: 32
+  n_action_stride: 1
+  shape_meta:
+    obs:
+      rgb:
+        type: rgb
+        horizon: ${data.n_obs_image_steps}
+        stride: ${data.n_obs_image_stride}
+      depth:
+        shape: [224, 224]
+        type: depth
+        horizon: 0
+        stride: 1
+      state:
+        wrist:
+          shape: [18]
+        hand:
+          shape: [30]
+        shape:
+          - ${dims.state_dim}
+        type: fingertips
+        horizon: ${data.n_obs_state_steps}
+        stride: ${data.n_obs_state_stride}
+    action:
+      shape:
+        - ${dims.action_dim}
+      type: fingertips
+      horizon: ${data.n_action_steps}
+      stride: ${data.n_action_stride}
+
+dataset:
+  _target_: src.dataset.vla_dataset.UnifiedWdsDataset
+  vla_dataset:
+    _target_: src.dataset.vla_dataset.VLAWdsDataset
+    wds_datasets: ${vla_wds_datasets}
+    shape_meta: ${data.shape_meta}
+    objective: ${objective}
+    use_relative_action: True
+    depth_clip_range: ${data.depth_clip_range}
+    val_wds_datasets: ${val_vla_wds_datasets}
+    history_pad_mode: repeat
+    future_pad_mode: truncate
+    shuffle_buffer: 4096
+    video_base_fps: ${data.video_base_fps}
+  vlm_dataset:
+    _target_: src.dataset.vlm_dataset.VLMWdsDataset
+    wds_datasets: ${vlm_wds_datasets}
+    seed: 42
+    shuffle_buffer: 4096
+    weights: [0.5, 0.5, 0.5]
+    val_wds_datasets: ${val_vlm_wds_datasets}
+  vla_ratio: ${eval:'5/6'}
+  batch_size: ${dataloader.loader.batch_size}
+
+data_collator:
+  _target_: src.dataset.unified_vla_collator.UnifiedVLACollator
+  formatter:
+    _target_: src.dataset.qwen3_vl_batching.Qwen3VLChatFormatter
+    state_token: ${added_slot_tokens.state}
+    action_token: ${added_slot_tokens.action}
+    lowercase_vla_text: True
+  batch_processor:
+    _target_: src.dataset.qwen3_vl_batching.Qwen3VLBatchProcessor
+    model_name_or_path: ${pretrained.model_name_or_path}
+    processor_init_kwargs:
+      trust_remote_code: ${pretrained.trust_remote_code}
+      size:
+        shortest_edge: 65536
+        longest_edge: 307200
+    processor_call_kwargs:
+      padding: ${data.tokenizer_padding}
+      max_length: ${data.max_vlm_tokens}
+      return_tensors: pt
+    ignore_index: ${data.ignore_index}
+    padding_side: right
+    state_token: ${added_slot_tokens.state}
+    action_token: ${added_slot_tokens.action}
+
+dataloader:
+  loader:
+    batch_size: 8
+    num_workers: 4
+    pin_memory: True
+    persistent_workers: True
+    prefetch_factor: 16
+
+val_dataloader:
+  loader:
+    batch_size: 8
+    shuffle: False
+    drop_last: False
+    num_workers: 2
+    pin_memory: True
+    persistent_workers: True
+    prefetch_factor: 8

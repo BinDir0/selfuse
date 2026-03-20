@@ -1,19 +1,16 @@
 # @package _global_
 #
 # WebDataset shard paths for VLA training.
-# Each entry specifies shard_urls (glob pattern) and sampling weight.
-# This replaces vla_dataset_paths.yaml for WebDataset-based training.
 #
 
 wds_base_dir: /share_data/guantianrui/datasets/Webdataset
 val_wds_base_dir: /share_data/guantianrui/datasets/Webdataset_val
 
-# !!! Each subset will hold a shuffle buffer, so make sure the number of subset is not too large. 
+# !!! Each subset will hold a shuffle buffer, so make sure the number of subset is not too large.
 # Otherwise, the shuffle buffer will be too large, and the memory will exceed the limit.
 vla_wds_datasets:
-  # --- Human datasets ---
   - name: taco_oakink_holoassist
-    shard_urls: 
+    shard_urls:
       - ${wds_base_dir}/taco_train_filtered_v1/shard-*.tar
       - ${wds_base_dir}/oakink2_train_filtered_v1/shard-*.tar
       - ${wds_base_dir}/holoassist_filtered_v2_rechunked/shard-*.tar
@@ -22,7 +19,7 @@ vla_wds_datasets:
     shard_urls: ${wds_base_dir}/egodex_train_filtered_v2/shard-*.tar
     weight: 20
   - name: vitra
-    shard_urls: 
+    shard_urls:
       - ${wds_base_dir}/epic_train_rechunked/shard-*.tar
       - ${wds_base_dir}/ego4d_cooking_and_cleaning_train_rechunked/shard-*.tar
       - ${wds_base_dir}/ego4d_other_train_rechunked/shard-*.tar

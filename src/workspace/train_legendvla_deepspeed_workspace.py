@@ -204,7 +204,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     break
             model.load_state_dict(state_dict)
             print("Successfully loaded finetuning weights.")
-        if cfg.lora:
+        runtime_cfg = getattr(cfg, "runtime", None)
+        use_lora = bool(getattr(runtime_cfg, "use_lora", getattr(cfg, "lora", False)))
+        if use_lora:
             model.freeze_non_lora_weights_in_vlm()
 
         self.maybe_compile_model(accelerator)
@@ -370,9 +372,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if cfg.training.debug:
             cfg.training.num_epochs = 2
             cfg.training.max_train_steps = 3
-            cfg.training.max_val_steps = 3
+            cfg.training.max_eval_steps = 3
             cfg.training.checkpoint_every = 1
-            cfg.training.val_every = 1
+            cfg.training.eval_every = 1
 
         profile_context = nullcontext()
         if cfg.training.profile and accelerator.is_main_process:

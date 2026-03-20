@@ -75,7 +75,8 @@ class LegendVLAInference(nn.Module):
         self.state_horizon = int(self.model.shape_meta["obs"]["state"]["horizon"])
         self.state_dim = int(self.model.shape_meta["obs"]["state"]["shape"][0])
         self.image_stride = int(self.model.shape_meta["obs"]["rgb"].get("stride", 1))
-        self.video_base_fps = float(getattr(model_cfg, "video_base_fps", 30.0))
+        data_cfg = getattr(model_cfg, "data", None)
+        self.video_base_fps = float(getattr(data_cfg, "video_base_fps", getattr(model_cfg, "video_base_fps", 30.0)))
         self.ar_max_new_tokens = ar_max_new_tokens or self.action_horizon
         self.ar_temperature = ar_temperature
         self.ar_cfg = ar_cfg

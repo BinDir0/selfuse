@@ -59,7 +59,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.motion_type = shape_meta["obs"]["state"]["type"]
         self.hand_ndim = shape_meta["obs"]["state"]["hand"]["shape"][-1] // 2
         self.action_ndim = shape_meta["action"]["shape"][-1]
-        self.image_shape = shape_meta["obs"]["rgb"]["shape"]
         self.depth_image_shape = shape_meta["obs"]["depth"]["shape"]
         self.objective = objective
         self.use_relative_action = use_relative_action
