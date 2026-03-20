@@ -7,7 +7,7 @@
 - 模型主类：`src/policy/legendvla.py`
 - 训练配置：`src/config/experiment/legendvla_qwen3_vl.yaml`
 - 默认训练入口：`src/config/train_config.yaml`
-- VLA Processor：`src/dataset/qwen3_vl_processing.py`
+- Qwen3-VL batching：`src/dataset/qwen3_vl_batching.py`
 - Unified Collator：`src/dataset/unified_vla_collator.py`
 
 旧的 PaliGemma / MoE 模型实现已经移除，不再作为可用训练路径保留。
@@ -244,7 +244,7 @@ src/
 │   └── experiment/
 │       └── legendvla_qwen3_vl.yaml
 ├── dataset/
-│   ├── qwen3_vl_processing.py
+│   ├── qwen3_vl_batching.py
 │   ├── unified_vla_collator.py
 │   ├── vla_dataset.py
 │   └── vlm_dataset.py
