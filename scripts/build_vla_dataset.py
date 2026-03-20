@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 import tarfile
-from multiprocessing import Pool
+from multiprocessing import Pool, current_process
 from pathlib import Path
 
 import joblib
@@ -501,8 +501,27 @@ def run_infill_for_episode(crop_dir, checkpoint, infiller_weight, device):
     return world_res.exists()
 
 
-def _worker_init(device_str, mano_dir, rescan_frame_index):
+def normalize_mano_devices(mano_device, mano_gpus):
+    if mano_gpus:
+        devices = []
+        for gpu in mano_gpus.split(","):
+            gpu = gpu.strip()
+            if not gpu:
+                continue
+            if gpu.startswith("cuda:"):
+                devices.append(gpu)
+            else:
+                devices.append(f"cuda:{gpu}")
+        if devices:
+            return devices
+    return [mano_device]
+
+
+def _worker_init(device_specs, mano_dir, rescan_frame_index):
     global _worker_mano_right, _worker_mano_left, _worker_device, _worker_rescan_frame_index
+    identity = current_process()._identity
+    worker_idx = identity[0] - 1 if identity else 0
+    device_str = device_specs[worker_idx % len(device_specs)]
     _worker_device = torch.device(device_str)
     _worker_mano_right, _worker_mano_left = build_mano_models(_worker_device, mano_dir=mano_dir)
     _worker_mano_right.eval()
@@ -585,6 +604,7 @@ def main():
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--device", default="cuda:0", help="Deprecated alias for --mano_device")
     parser.add_argument("--mano_device", default=None, help="Device for MANO forward pass")
+    parser.add_argument("--mano_gpus", default=None, help="Comma-separated GPU ids for parallel MANO workers, e.g. 0,1,2,3")
     parser.add_argument("--mano_dir", default=None, help="Directory containing MANO_RIGHT.pkl and MANO_LEFT.pkl")
     parser.add_argument("--rescan", action="store_true", help="Force rescan episodes and frame indexes")
     parser.add_argument("--num_workers", type=int, default=8, help="Deprecated alias for --writer_workers")
@@ -660,27 +680,42 @@ def main():
         print(f"Wrote shard manifest to {args.shard_manifest_out}")
 
     mano_device = torch.device(args.mano_device if torch.cuda.is_available() else "cpu")
-    if mano_device.type == "cuda" and writer_workers > 1:
-        print(
-            f"MANO device {mano_device} is CUDA; capping shard workers from {writer_workers} to 1 "
-            "to avoid GPU contention. Use --mano_device cpu for CPU-only multi-process writing."
-        )
-        writer_workers = 1
+    mano_device_specs = normalize_mano_devices(str(mano_device), args.mano_gpus if mano_device.type == "cuda" else None)
+    if mano_device.type == "cuda":
+        if len(mano_device_specs) > 1:
+            if writer_workers > len(mano_device_specs):
+                print(
+                    f"Capping shard workers from {writer_workers} to {len(mano_device_specs)} "
+                    f"to match MANO GPU workers: {', '.join(mano_device_specs)}"
+                )
+                writer_workers = len(mano_device_specs)
+        elif writer_workers > 1:
+            print(
+                f"MANO device {mano_device} is CUDA with a single GPU worker; capping shard workers "
+                f"from {writer_workers} to 1 to avoid GPU contention. Use --mano_gpus for multi-GPU writing."
+            )
+            writer_workers = 1
 
     total_frames = 0
     total_shards = 0
     total_episodes_written = 0
     total_skipped = 0
 
-    print(f"Writing shards with {writer_workers} worker(s) on MANO device {mano_device}...")
+    if len(mano_device_specs) > 1:
+        print(
+            f"Writing shards with {writer_workers} worker(s) across MANO GPUs: "
+            f"{', '.join(mano_device_specs)}"
+        )
+    else:
+        print(f"Writing shards with {writer_workers} worker(s) on MANO device {mano_device_specs[0]}...")
     if writer_workers <= 1:
-        _worker_init(str(mano_device), args.mano_dir, args.rescan)
+        _worker_init(mano_device_specs, args.mano_dir, args.rescan)
         results_iter = (_worker_process_shard(task) for task in shard_tasks)
     else:
         pool = Pool(
             writer_workers,
             initializer=_worker_init,
-            initargs=(str(mano_device), args.mano_dir, args.rescan),
+            initargs=(mano_device_specs, args.mano_dir, args.rescan),
         )
         results_iter = pool.imap_unordered(_worker_process_shard, shard_tasks)
 
