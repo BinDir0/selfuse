@@ -8,8 +8,6 @@ import torch
 import numpy as np
 from torchvision import transforms
 from src.utils.pytorch_util import dict_apply
-from src.dataset.collator import LegendVLDataCollator
-from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.dataset.sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from src.dataset.wds_dataset import build_blended_dataset
 
@@ -36,7 +34,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         self.shuffle_buffer = shuffle_buffer
         self.return_dataset_info = return_dataset_info
         self.val_wds_datasets = val_wds_datasets
-        self.preprocessor = None
+        self.collator = None
 
         if self.mode == 'train':
             self.aug_transform = transforms.Compose([
@@ -50,25 +48,14 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         """WebDataset splitting is handled in build_wds_pipeline."""
         return
 
-    def set_preprocessor(self, preprocessor):
-        """Set the tokenizer/vision preprocessor."""
-        self.preprocessor = preprocessor
+    def set_collator(self, collator):
+        """Set the batch collator used to build model inputs."""
+        self.collator = collator
 
     def get_collator(self):
         """Build a data collator for batching."""
-        assert self.preprocessor is not None, "Preprocessor is not set"
-        padding_side = 'left' if self.mode == 'infer-ar' else 'right'
-        if hasattr(self.preprocessor, 'processor'):
-            return UnifiedVLACollator(
-                pad_token_id=self.preprocessor.tokenizer.pad_token_id,
-                ignore_index=self.preprocessor.ignore_index,
-                padding_side=padding_side,
-            )
-        return LegendVLDataCollator(
-            pad_token_id=self.preprocessor.tokenizer.pad_token_id,
-            ignore_index=self.preprocessor.ignore_index,
-            padding_side=padding_side,
-        )
+        assert self.collator is not None, "Collator is not set"
+        return self.collator.for_mode(self.mode)
 
     def get_validation_dataset(self):
         """Create a new WebDataset instance for validation."""
@@ -82,8 +69,8 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             return_dataset_info=self.return_dataset_info,
             val_wds_datasets=self.val_wds_datasets,
         )
-        if self.preprocessor is not None:
-            val_dataset.set_preprocessor(self.preprocessor)
+        if self.collator is not None:
+            val_dataset.set_collator(self.collator)
         return val_dataset
 
     def sample_to_data(self, sample):
@@ -141,30 +128,13 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             context=sample_context,
         )
 
-        processed_results = self.preprocessor(
-            images=images_to_process,
-            text=question,
-            target=answer,
-            mode=self.mode,
-        )
-        ensure_mapping_finite(
-            processed_results,
-            stage='vlm_after_preprocessor',
-            context=sample_context,
-        )
-
         data = {
-            'input_ids': processed_results['input_ids'],
-            'labels': processed_results['labels'],
-            'attention_mask': processed_results['attention_mask'],
-            'pixel_values': processed_results['pixel_values'],
-            'answer_start_idx': processed_results['answer_start_idx'],
+            'images': images_to_process,
+            'question': question,
+            'answer': answer,
+            'vision_type': 'image',
             'is_vla_data': np.array(False, dtype=bool),
         }
-        if 'image_grid_thw' in processed_results:
-            data['image_grid_thw'] = processed_results['image_grid_thw']
-        if 'mm_token_type_ids' in processed_results:
-            data['mm_token_type_ids'] = processed_results['mm_token_type_ids']
 
         if self.return_dataset_info:
             data['dataset_name'] = meta.get('source', meta.get('dataset_name', 'unknown'))
@@ -216,6 +186,5 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         return strip_key(pipeline)
 
     def __iter__(self):
-        assert self.preprocessor is not None, "Preprocessor is not set"
         pipeline = self.build_pipeline()
         return iter(pipeline)

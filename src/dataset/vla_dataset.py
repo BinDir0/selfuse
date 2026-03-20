@@ -13,9 +13,8 @@ from torchvision import transforms
 from src.model.common.normalizer import LinearNormalizer
 from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image
-from .unified_vla_collator import UnifiedVLACollator
 from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
-from .collator import LegendVLDataCollator, ConcatDataCollator
+from .collator import ConcatDataCollator
 from .wds_dataset import (
     build_blended_dataset, build_wds_pipeline, WindowConfig, LOWDIM_SLICES,
     expand_shard_patterns,
@@ -35,7 +34,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             ],
             shape_meta=shape_meta,
         )
-        dataset.set_preprocessor(processor)
+        dataset.set_collator(collator)
         dataset.set_normalizer(normalizer)
         dataloader = DataLoader(dataset, batch_size=20, num_workers=20)
     """
@@ -53,6 +52,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         lowdim_slices: Optional[Dict] = None,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
+        video_base_fps: float = 30.0,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -69,8 +69,9 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.wds_datasets = wds_datasets
         self.val_wds_datasets = val_wds_datasets
         self.return_dataset_info = return_dataset_info
-        
-        self.preprocessor = None
+        self.video_base_fps = float(video_base_fps)
+
+        self.collator = None
         self.normalizer = None
 
         # Sampling config from shape_meta
@@ -99,16 +100,33 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
                     kernel_size=(5, 5), sigma=(0.1, 2.0)),
             ])
 
-    def set_preprocessor(self, preprocessor):
-        """Set the tokenizer/vision preprocessor."""
-        self.preprocessor = preprocessor
+    def set_collator(self, collator):
+        """Set the batch collator used to build model inputs."""
+        self.collator = collator
 
     def set_normalizer(self, normalizer: LinearNormalizer):
         """Set the normalizer for state/action."""
         self.normalizer = normalizer
 
+    def build_raw_model_inputs(self, instruction, image, intrinsic):
+        return {
+            "images": image,
+            "instruction": instruction,
+            "intrinsic": intrinsic,
+            "vision_type": "video",
+            "video_fps": np.array(
+                self.video_base_fps / self.window_config.image_stride,
+                dtype=np.float32,
+            ),
+            "has_depth_values": np.array(False, dtype=bool),
+        }
+
     def sample_to_data(self, sample):
-        """Convert a WebDataset sample dict into model-ready tensors.
+        """Convert one WebDataset sample into the raw VLA sample schema used by the project.
+
+        This is the dataset-side producer contract for `UnifiedVLACollator`.
+        The returned mapping contains visual history, instruction text, intrinsic parameters, padded state/action
+        tensors, action-valid masks, and bookkeeping fields such as `n_states`, `n_actions`, and `is_vla_data`.
         """
         sample_context = build_sample_context(sample)
         state, action = process_state_action(
@@ -153,22 +171,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         if isinstance(instruction, list):
             instruction = instruction[idx]
 
-        processed_results = self.preprocessor(
-            text=instruction,
-            images=image,
-            states=state,
-            actions=action,
-            intrinsic=intrinsic,
-            objective=self.objective,
-            depth_images=depth_images,
-            mode=self.mode,
-        )
-        ensure_mapping_finite(
-            processed_results,
-            stage="vla_after_preprocessor",
-            context=sample_context,
-        )
-
         state_pad = np.zeros(
             (self.state_horizon, *state.shape[1:]), dtype=np.float32)
         state_pad[:state.shape[0]] = state
@@ -179,29 +181,20 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         action_pad[:action.shape[0]] = action
         actions_valid_mask[:action.shape[0]] = True
 
-        data = {
-            "input_ids": processed_results["input_ids"],
-            "answer_start_idx": processed_results["answer_start_idx"],
-            "attention_mask": processed_results["attention_mask"],
-            "pixel_values": processed_results["pixel_values"],
+        data = self.build_raw_model_inputs(
+            instruction=instruction,
+            image=image,
+            intrinsic=intrinsic,
+        )
+
+        data.update({
             "states": state_pad,
             "n_states": np.array(state.shape[0], dtype=np.int32),
             "actions": action_pad,
             "actions_valid_mask": actions_valid_mask,
             "n_actions": np.array(action.shape[0], dtype=np.int32),
             "is_vla_data": np.array(True, dtype=bool),
-        }
-        if "image_grid_thw" in processed_results:
-            data["image_grid_thw"] = processed_results["image_grid_thw"]
-        if "mm_token_type_ids" in processed_results:
-            data["mm_token_type_ids"] = processed_results["mm_token_type_ids"]
-        if "depth_values" in processed_results:
-            data["depth_values"] = processed_results["depth_values"]
-            data["has_depth_values"] = np.array(True, dtype=bool)
-        else: 
-            data["has_depth_values"] = np.array(False, dtype=bool)
-        if self.objective != "train_flow":
-            data["labels"] = processed_results["labels"]
+        })
         if self.return_dataset_info:
             data["dataset_name"] = sample["dataset_name"]
             data["episode_index"] = sample["episode_index"]
@@ -259,7 +252,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         return filter_none(pipeline)
 
     def __iter__(self):
-        assert self.preprocessor is not None, "Preprocessor not set"
         pipeline = self.build_pipeline()
         return iter(pipeline)
 
@@ -280,27 +272,16 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             lowdim_slices=self.lowdim_slices,
             return_dataset_info=self.return_dataset_info,
         )
-        if self.preprocessor is not None:
-            val_dataset.set_preprocessor(self.preprocessor)
+        if self.collator is not None:
+            val_dataset.set_collator(self.collator)
         if self.normalizer is not None:
             val_dataset.set_normalizer(self.normalizer)
         return val_dataset
 
     def get_collator(self):
         """Build a data collator for batching."""
-        assert self.preprocessor is not None, "Preprocessor not set"
-        padding_side = "left" if self.mode == "infer-ar" else "right"
-        if hasattr(self.preprocessor, "processor"):
-            return UnifiedVLACollator(
-                pad_token_id=self.preprocessor.tokenizer.pad_token_id,
-                ignore_index=self.preprocessor.ignore_index,
-                padding_side=padding_side,
-            )
-        return LegendVLDataCollator(
-            pad_token_id=self.preprocessor.tokenizer.pad_token_id,
-            ignore_index=self.preprocessor.ignore_index,
-            padding_side=padding_side,
-        )
+        assert self.collator is not None, "Collator not set"
+        return self.collator.for_mode(self.mode)
 
 
 class UnifiedWdsDataset(torch.utils.data.IterableDataset):

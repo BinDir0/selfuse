@@ -67,8 +67,7 @@ ignore_index: -100
 depth_clip_range: [0.0, 5.0]
 max_vlm_tokens: 768
 tokenizer_padding: max_length
-single_image_only: True
-
+video_base_fps: 30.0
 dataset:
   _target_: src.dataset.vla_dataset.UnifiedWdsDataset
   vla_dataset:
@@ -82,6 +81,7 @@ dataset:
     history_pad_mode: repeat
     future_pad_mode: truncate
     shuffle_buffer: 4096
+    video_base_fps: ${video_base_fps}
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
     wds_datasets: ${vlm_wds_datasets}
@@ -92,26 +92,29 @@ dataset:
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
 
-vla_processor:
-  _target_: src.dataset.qwen3_vl_processing.Qwen3VLVLAProcessor
-  model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
-  max_seq_len: ${max_vlm_tokens}
-  ignore_index: ${ignore_index}
-  tokenizer_padding: ${tokenizer_padding}
-  trust_remote_code: False
-  single_image_only: ${single_image_only}
-  max_pixels: 50176
-  min_pixels: 50176
-vlm_processor:
-  _target_: src.dataset.qwen3_vl_processing.Qwen3VLProcessor
-  model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
-  max_seq_len: ${max_vlm_tokens}
-  ignore_index: ${ignore_index}
-  tokenizer_padding: ${tokenizer_padding}
-  trust_remote_code: False
-  single_image_only: ${single_image_only}
-  max_pixels: 50176
-  min_pixels: 50176
+data_collator:
+  _target_: src.dataset.unified_vla_collator.UnifiedVLACollator
+  formatter:
+    _target_: src.dataset.qwen3_vl_batching.Qwen3VLChatFormatter
+    state_token: <state>
+    action_token: <action>
+    lowercase_vla_text: True
+  batch_processor:
+    _target_: src.dataset.qwen3_vl_batching.Qwen3VLBatchProcessor
+    model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
+    processor_init_kwargs:
+      trust_remote_code: False
+      size:
+        shortest_edge: 65536
+        longest_edge: 307200
+    processor_call_kwargs:
+      padding: ${tokenizer_padding}
+      max_length: ${max_vlm_tokens}
+      return_tensors: pt
+    ignore_index: ${ignore_index}
+    padding_side: right
+    state_token: <state>
+    action_token: <action>
 dataloader:
   loader:
     batch_size: 8
