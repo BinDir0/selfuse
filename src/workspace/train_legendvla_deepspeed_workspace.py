@@ -23,7 +23,7 @@ import math
 from datetime import timedelta
 from transformers import get_scheduler
 import accelerate
-from accelerate import Accelerator, DeepSpeedPlugin
+from accelerate import Accelerator
 from accelerate.utils import ProfileKwargs, InitProcessGroupKwargs
 
 from .base_workspace import BaseWorkspace
@@ -152,20 +152,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if cfg.training.profile:
             kwargs_handlers.append(profile_kwargs)
 
-        self.is_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
-        self.is_deepspeed = False
-
-        deepspeed_plugin = None
-        if self.is_deepspeed:
-            ds_config_file = os.environ.get(
-                "ACCELERATE_DEEPSPEED_CONFIG_FILE",
-                "src/config/ds_config.json"
-            )
-            deepspeed_plugin = DeepSpeedPlugin(hf_ds_config=ds_config_file)
-
         accelerator = Accelerator(
             log_with='wandb',
-            deepspeed_plugin=deepspeed_plugin,
             kwargs_handlers=kwargs_handlers
         )
 
@@ -291,11 +279,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         print("--> dataset instantiated")
         accelerator.wait_for_everyone()
 
-        self.vla_processor = hydra.utils.instantiate(cfg.vla_processor)
-        self.vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
-        dataset.vla_dataset.set_preprocessor(self.vla_processor)
+        data_collator = hydra.utils.instantiate(cfg.data_collator)
+        dataset.vla_dataset.set_collator(data_collator)
         if dataset.vlm_dataset is not None:
-            dataset.vlm_dataset.set_preprocessor(self.vlm_processor)
+            dataset.vlm_dataset.set_collator(data_collator)
 
         # Normalizer must be pre-computed for WebDataset
         print("Loading normalizer...")
@@ -343,12 +330,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
         if cfg.training.max_train_steps is not None:
             max_train_steps = cfg.training.max_train_steps
-        if self.is_deepspeed:
-            max_train_steps = max_train_steps 
-            num_warmup_steps = cfg.training.lr_warmup_steps 
-        else:
-            max_train_steps = max_train_steps * accelerator.num_processes
-            num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
+        max_train_steps = max_train_steps * accelerator.num_processes
+        num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
         if accelerator.is_main_process:
             print(f"num_warmup_steps: {num_warmup_steps}, max_train_steps: {max_train_steps}")
         self.lr_scheduler = get_scheduler(
@@ -368,14 +351,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
             self.model, self.optimizer, self.lr_scheduler
         )
-
-        if accelerator.is_main_process:
-            print(f"\nTraining with: {'DeepSpeed' if self.is_deepspeed else 'Accelerate (DDP/FSDP)'}")
-            if self.is_deepspeed:
-                print(f"  Model type: {type(self.model).__name__}")
-                print(f"  Has model.step(): {hasattr(self.model, 'step')}")
-                print(f"  Has model.backward(): {hasattr(self.model, 'backward')}")
-
+        
         # Resume training from checkpoint after accelerator prepare
         if cfg.training.resume_checkpoint_path:
             accelerator.load_state(cfg.training.resume_checkpoint_path)
@@ -437,10 +413,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         with accelerator.autocast():
                             raw_loss = self.model(self.objective_func, inputs)
 
-                        if self.is_deepspeed:
-                            self.model.backward(raw_loss["total_loss"])
-                        else:
-                            accelerator.backward(raw_loss["total_loss"])
+                        accelerator.backward(raw_loss["total_loss"])
                         if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
                             torch.cuda.empty_cache()
                             print(torch.cuda.memory_summary())
@@ -482,15 +455,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 cfg.training.clipping.max_grad_norm
                             )
 
-                        if self.is_deepspeed:
-                            # DeepSpeed handles optimizer.step() and zero_grad()
-                            # It also handles lr_scheduler.step() if prepared
-                            self.model.step()
-                        else:
-                            # Standard training
-                            self.optimizer.step()
-                            self.lr_scheduler.step()
-                            self.optimizer.zero_grad(set_to_none=True)
+                        # Standard training
+                        self.optimizer.step()
+                        self.lr_scheduler.step()
+                        self.optimizer.zero_grad(set_to_none=True)
 
                     self.global_step += 1
                     if accelerator.sync_gradients:
@@ -517,10 +485,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     step_log = None
                     if should_record or should_eval or should_ckpt or should_interval_ckpt:
-                        if self.is_deepspeed:
-                            current_lr = self.optimizer.param_groups[0]["lr"]
-                        else:
-                            current_lr = self.lr_scheduler.get_last_lr()[0]
+                        current_lr = self.lr_scheduler.get_last_lr()[0]
 
                         step_log = {
                             'global_step': self.global_step,
@@ -629,8 +594,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         inputs = {
             "input_ids": input_ids,
             "attention_mask": batch["attention_mask"],
-            "pixel_values": batch["pixel_values"].to(self.dtype),
+            "pixel_values": batch["pixel_values"].to(self.dtype)
+            if batch["pixel_values"] is not None else None,
             "image_grid_thw": batch["image_grid_thw"],
+            "pixel_values_videos": batch["pixel_values_videos"].to(self.dtype)
+            if batch["pixel_values_videos"] is not None else None,
+            "video_grid_thw": batch["video_grid_thw"],
             "mm_token_type_ids": batch["mm_token_type_ids"],
             "states": batch["states"].to(self.dtype),
             "answer_start_idx": batch["answer_start_idx"],
