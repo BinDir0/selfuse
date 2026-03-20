@@ -76,9 +76,8 @@ data_collator:
     model_name_or_path: ${pretrained.model_name_or_path}
     processor_init_kwargs:
       trust_remote_code: ${pretrained.trust_remote_code}
-      size:
-        shortest_edge: 65536
-        longest_edge: 307200
+      min_pixels: 65536
+      max_pixels: 307200
     processor_call_kwargs:
       padding: ${data.tokenizer_padding}
       max_length: ${data.max_vlm_tokens}
