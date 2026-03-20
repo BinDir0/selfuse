@@ -15,6 +15,7 @@ Usage:
     --max_episodes 5
 """
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -241,6 +242,11 @@ def repeat_episode_stats(episodes, repeat_count):
     return repeated
 
 
+def get_episode_feature_cache_path(ep, feature_cache_dir):
+    crop_hash = hashlib.md5(ep["crop_dir"].encode("utf-8")).hexdigest()
+    return os.path.join(feature_cache_dir, f"{crop_hash}.joblib")
+
+
 def plan_shards(episodes, frames_per_shard, output_dir):
     """Split valid episode frames into fixed-size shard tasks."""
     tasks = []
@@ -338,11 +344,28 @@ def build_mano_models(device, mano_dir=None):
     return mano_right, mano_left
 
 
-def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=False):
+def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=False, feature_cache_dir=None):
     """Load one episode and compute per-frame lowdim features."""
     crop_dir = ep["crop_dir"]
-    episode_idx = ep["episode_index"]
     world_res_path = os.path.join(crop_dir, "world_space_res.pth")
+    extracted_dir = os.path.join(crop_dir, "extracted_images")
+
+    if feature_cache_dir and not rescan_frame_index:
+        cache_path = get_episode_feature_cache_path(ep, feature_cache_dir)
+        if os.path.exists(cache_path):
+            try:
+                cached = joblib.load(cache_path)
+                if cached.get("cache_version") == 1 and cached.get("crop_dir") == crop_dir:
+                    frame_index = load_or_build_frame_index(extracted_dir, rescan=False)
+                    if frame_index:
+                        return {
+                            "frame_index": frame_index,
+                            "frame_ids": cached["frame_ids"],
+                            "lowdim_all": cached["lowdim_all"],
+                            "presence_per_frame": cached["presence_per_frame"],
+                        }
+            except Exception:
+                pass
 
     try:
         pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_res_path)
@@ -440,19 +463,37 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
     )
     assert lowdim_all.shape == (num_frames, 116), f"lowdim shape mismatch: {lowdim_all.shape}"
 
-    extracted_dir = os.path.join(crop_dir, "extracted_images")
     frame_index = load_or_build_frame_index(extracted_dir, rescan=rescan_frame_index)
     frame_ids = sorted(frame_idx for frame_idx in frame_index if frame_idx < num_frames)
     if not frame_ids:
         return None
 
-    return {
+    episode_data = {
         "frame_index": frame_index,
         "frame_ids": frame_ids,
         "lowdim_all": lowdim_all,
         "presence_per_frame": presence_per_frame,
-        "episode_index": episode_idx,
     }
+
+    if feature_cache_dir:
+        cache_path = get_episode_feature_cache_path(ep, feature_cache_dir)
+        cache_tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+        cache_payload = {
+            "cache_version": 1,
+            "crop_dir": crop_dir,
+            "frame_ids": frame_ids,
+            "lowdim_all": lowdim_all,
+            "presence_per_frame": presence_per_frame.astype(np.uint8),
+        }
+        try:
+            os.makedirs(feature_cache_dir, exist_ok=True)
+            joblib.dump(cache_payload, cache_tmp_path)
+            os.replace(cache_tmp_path, cache_path)
+        except OSError:
+            if os.path.exists(cache_tmp_path):
+                os.remove(cache_tmp_path)
+
+    return episode_data
 
 
 def iter_episode_samples(ep, episode_data, frame_start, frame_end):
@@ -539,8 +580,8 @@ def normalize_mano_devices(mano_device, mano_gpus):
     return [mano_device]
 
 
-def _worker_init(device_specs, mano_dir, rescan_frame_index):
-    global _worker_mano_right, _worker_mano_left, _worker_device, _worker_rescan_frame_index
+def _worker_init(device_specs, mano_dir, rescan_frame_index, feature_cache_dir):
+    global _worker_mano_right, _worker_mano_left, _worker_device, _worker_rescan_frame_index, _worker_feature_cache_dir, _worker_episode_cache
     identity = current_process()._identity
     worker_idx = identity[0] - 1 if identity else 0
     device_str = device_specs[worker_idx % len(device_specs)]
@@ -549,6 +590,8 @@ def _worker_init(device_specs, mano_dir, rescan_frame_index):
     _worker_mano_right.eval()
     _worker_mano_left.eval()
     _worker_rescan_frame_index = rescan_frame_index
+    _worker_feature_cache_dir = feature_cache_dir
+    _worker_episode_cache = {}
 
 
 def _worker_process_shard(task):
@@ -556,7 +599,6 @@ def _worker_process_shard(task):
     frames_written = 0
     skipped_episodes = 0
     touched_episodes = set()
-    episode_cache = {}
     tar_writer = None
     output_path = task["output_path"]
     tmp_path = task["tmp_path"]
@@ -564,16 +606,17 @@ def _worker_process_shard(task):
     try:
         for episode_slice in task["episode_slices"]:
             cache_key = episode_slice["crop_dir"]
-            if cache_key not in episode_cache:
-                episode_cache[cache_key] = load_episode_features(
+            if cache_key not in _worker_episode_cache:
+                _worker_episode_cache[cache_key] = load_episode_features(
                     episode_slice,
                     _worker_mano_right,
                     _worker_mano_left,
                     _worker_device,
                     rescan_frame_index=_worker_rescan_frame_index,
+                    feature_cache_dir=_worker_feature_cache_dir,
                 )
 
-            episode_data = episode_cache[cache_key]
+            episode_data = _worker_episode_cache[cache_key]
             if episode_data is None:
                 skipped_episodes += 1
                 continue
@@ -697,11 +740,15 @@ def main():
         return
 
     episode_stats = repeat_episode_stats(episode_stats, args.repeat_episodes)
+    feature_cache_dir = None
     if args.repeat_episodes > 1:
         print(
             f"Expanded dataset by repeating {len(episodes)} episodes x{args.repeat_episodes} "
             f"-> {len(episode_stats)} episode entries"
         )
+        feature_cache_dir = os.path.join(args.output_dir, "_episode_feature_cache")
+        os.makedirs(feature_cache_dir, exist_ok=True)
+        print(f"Episode feature cache enabled: {feature_cache_dir}")
 
     shard_tasks = plan_shards(episode_stats, args.frames_per_shard, args.output_dir)
     print(f"Planned {len(shard_tasks)} shards from {sum(ep['num_valid_frames'] for ep in episode_stats)} frames")
@@ -741,13 +788,13 @@ def main():
     else:
         print(f"Writing shards with {writer_workers} worker(s) on MANO device {mano_device_specs[0]}...")
     if writer_workers <= 1:
-        _worker_init(mano_device_specs, args.mano_dir, args.rescan)
+        _worker_init(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir)
         results_iter = (_worker_process_shard(task) for task in shard_tasks)
     else:
         pool = Pool(
             writer_workers,
             initializer=_worker_init,
-            initargs=(mano_device_specs, args.mano_dir, args.rescan),
+            initargs=(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir),
         )
         results_iter = pool.imap_unordered(_worker_process_shard, shard_tasks)
 
