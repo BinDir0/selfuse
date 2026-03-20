@@ -219,6 +219,28 @@ def discover_episode_stats(episodes, rescan_frame_index=False):
     return stats
 
 
+def repeat_episode_stats(episodes, repeat_count):
+    """Repeat episodes as [1..N, 1..N, ...] with fresh episode indices."""
+    if repeat_count <= 1:
+        repeated = []
+        for new_index, ep in enumerate(episodes):
+            ep_copy = dict(ep)
+            ep_copy["source_episode_index"] = ep["episode_index"]
+            ep_copy["episode_index"] = new_index
+            repeated.append(ep_copy)
+        return repeated
+
+    repeated = []
+    for repeat_idx in range(repeat_count):
+        for ep in episodes:
+            ep_copy = dict(ep)
+            ep_copy["source_episode_index"] = ep["episode_index"]
+            ep_copy["repeat_index"] = repeat_idx
+            ep_copy["episode_index"] = len(repeated)
+            repeated.append(ep_copy)
+    return repeated
+
+
 def plan_shards(episodes, frames_per_shard, output_dir):
     """Split valid episode frames into fixed-size shard tasks."""
     tasks = []
@@ -442,7 +464,7 @@ def iter_episode_samples(ep, episode_data, frame_start, frame_end):
             continue
         meta = {
             "dataset_name": "buildai",
-            "episode_index": episode_data["episode_index"],
+            "episode_index": ep["episode_index"],
             "instruction": [],
             "instruction_num": 0,
             "presence": int(episode_data["presence_per_frame"][frame_idx]),
@@ -601,6 +623,7 @@ def main():
     parser.add_argument("--output_dir", default="/share_data/guantianrui/datasets/BuildAI-VLA/")
     parser.add_argument("--episode_list", default=None, help="Text file with one episode path per line")
     parser.add_argument("--frames_per_shard", type=int, default=10000)
+    parser.add_argument("--repeat_episodes", type=int, default=1, help="Repeat the full episode list this many times in order")
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--device", default="cuda:0", help="Deprecated alias for --mano_device")
     parser.add_argument("--mano_device", default=None, help="Device for MANO forward pass")
@@ -617,6 +640,8 @@ def main():
 
     args.mano_device = args.mano_device or args.device
     writer_workers = args.writer_workers if args.writer_workers is not None else args.num_workers
+    if args.repeat_episodes < 1:
+        raise ValueError("--repeat_episodes must be >= 1")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -670,6 +695,13 @@ def main():
     if not episode_stats:
         print("No valid episodes with extracted frames found!")
         return
+
+    episode_stats = repeat_episode_stats(episode_stats, args.repeat_episodes)
+    if args.repeat_episodes > 1:
+        print(
+            f"Expanded dataset by repeating {len(episodes)} episodes x{args.repeat_episodes} "
+            f"-> {len(episode_stats)} episode entries"
+        )
 
     shard_tasks = plan_shards(episode_stats, args.frames_per_shard, args.output_dir)
     print(f"Planned {len(shard_tasks)} shards from {sum(ep['num_valid_frames'] for ep in episode_stats)} frames")
