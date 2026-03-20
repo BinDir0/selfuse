@@ -17,6 +17,8 @@ class BackboneEmbedOutput:
 
 
 class Qwen3VLBackboneWrapper(nn.Module):
+    """Wrap the HF Qwen3-VL backbone and expose the project-specific embedding pipeline."""
+
     def __init__(
         self,
         model_name_or_path: str,
@@ -31,6 +33,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         quantization: dict[str, Any] | None = None,
         device_map: Any = None,
         low_cpu_mem_usage: bool = True,
+        attn_implementation: str | None = None,
     ):
         super().__init__()
         try:
@@ -61,6 +64,8 @@ class Qwen3VLBackboneWrapper(nn.Module):
             quantization_config = BitsAndBytesConfig(**qkwargs)
 
         # ── Load model ──
+        if attn_implementation is not None and not isinstance(attn_implementation, str):
+            raise TypeError("attn_implementation must be a string or None.")
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name_or_path,
             trust_remote_code=trust_remote_code,
@@ -68,13 +73,15 @@ class Qwen3VLBackboneWrapper(nn.Module):
             quantization_config=quantization_config,
             device_map=device_map,
             low_cpu_mem_usage=low_cpu_mem_usage,
+            attn_implementation={"text_config": attn_implementation} if attn_implementation is not None else None,
         )
         self.model.resize_token_embeddings(len(tokenizer))
 
         # ── Extract references BEFORE LoRA wrapping ──
         # Qwen3VLForConditionalGeneration → .model (Qwen3VLModel) → .language_model (Qwen3VLTextModel)
         text_config = self.model.config.text_config
-        self.language_model = self.model.model.language_model
+        self.base_model = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
+        self.language_model = self.base_model.model.language_model
         self.lm_head = self.model.lm_head
 
         # ── LoRA (via PEFT) ──
@@ -89,7 +96,9 @@ class Qwen3VLBackboneWrapper(nn.Module):
         self.vocab_size = len(tokenizer)
         self.pad_token_id = tokenizer.pad_token_id
         self.image_token = getattr(processor, "image_token", "<|image_pad|>")
+        self.video_token = getattr(processor, "video_token", "<|video_pad|>")
         self.image_token_id = tokenizer.convert_tokens_to_ids(self.image_token)
+        self.video_token_id = tokenizer.convert_tokens_to_ids(self.video_token)
         self.state_token_id = tokenizer.convert_tokens_to_ids(state_token)
         self.action_token_id = tokenizer.convert_tokens_to_ids(action_token)
         self.num_heads = text_config.num_attention_heads
@@ -143,46 +152,76 @@ class Qwen3VLBackboneWrapper(nn.Module):
             return dtype_name
         return getattr(torch, str(dtype_name))
 
-    def get_base_model(self) -> nn.Module:
-        if hasattr(self.model, "get_base_model"):
-            return self.model.get_base_model()
-        return self.model
-
-    def resize_token_embeddings(self, vocab_size: int) -> None:
-        self.get_base_model().resize_token_embeddings(vocab_size)
-        self.vocab_size = vocab_size
-
     # ------------------------------------------------------------------
     # Embedding construction
     # ------------------------------------------------------------------
-    def build_base_text_embeds(self, input_ids: torch.LongTensor) -> torch.Tensor:
-        return self.get_base_model().get_input_embeddings()(input_ids)
-
-    def encode_image_features(
+    def encode_visual_features(
         self,
         input_ids: torch.LongTensor,
         inputs_embeds: torch.Tensor,
         pixel_values: torch.Tensor | None,
         image_grid_thw: torch.Tensor | None,
+        pixel_values_videos: torch.Tensor | None,
+        video_grid_thw: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor] | None]:
-        if pixel_values is None:
-            return inputs_embeds, None, None
+        base_model = self.base_model
+        image_mask = None
+        video_mask = None
+        deepstack_image_embeds = None
+        deepstack_video_embeds = None
 
-        base_model = self.get_base_model()
-        image_outputs = base_model.get_image_features(
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
-            return_dict=True,
-        )
-        image_embeds = torch.cat(image_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-        image_mask, _ = base_model.model.get_placeholder_mask(
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            image_features=image_embeds,
-        )
-        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-        visual_pos_masks = image_mask[..., 0]
-        deepstack_visual_embeds = image_outputs.deepstack_features
+        # Upstream-aligned block copied/adapted from transformers Qwen3-VL.
+        if pixel_values is not None:
+            image_outputs = base_model.get_image_features(
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                return_dict=True,
+            )
+            image_embeds = torch.cat(image_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            image_mask, _ = base_model.model.get_placeholder_mask(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                image_features=image_embeds,
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+            deepstack_image_embeds = image_outputs.deepstack_features
+
+        if pixel_values_videos is not None:
+            video_outputs = base_model.get_video_features(
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+                return_dict=True,
+            )
+            video_embeds = torch.cat(video_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            _, video_mask = base_model.model.get_placeholder_mask(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                video_features=video_embeds,
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+            deepstack_video_embeds = video_outputs.deepstack_features
+
+        visual_pos_masks = None
+        deepstack_visual_embeds = None
+        if image_mask is not None and video_mask is not None:
+            image_mask = image_mask[..., 0]
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = image_mask | video_mask
+            deepstack_visual_embeds = []
+            image_mask_joint = image_mask[visual_pos_masks]
+            video_mask_joint = video_mask[visual_pos_masks]
+            for image_embed, video_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
+                visual_embed = image_embed.new_zeros(visual_pos_masks.sum(), image_embed.shape[-1]).to(image_embed.device)
+                visual_embed[image_mask_joint, :] = image_embed
+                visual_embed[video_mask_joint, :] = video_embed
+                deepstack_visual_embeds.append(visual_embed)
+        elif image_mask is not None:
+            visual_pos_masks = image_mask[..., 0]
+            deepstack_visual_embeds = deepstack_image_embeds
+        elif video_mask is not None:
+            visual_pos_masks = video_mask[..., 0]
+            deepstack_visual_embeds = deepstack_video_embeds
+
         return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
 
     def replace_slot_embeddings(
@@ -212,19 +251,33 @@ class Qwen3VLBackboneWrapper(nn.Module):
         input_ids: torch.LongTensor,
         pixel_values: torch.Tensor | None,
         image_grid_thw: torch.Tensor | None,
+        pixel_values_videos: torch.Tensor | None,
+        video_grid_thw: torch.Tensor | None,
         mm_token_type_ids: torch.Tensor | None,
         state_slot_embeds: torch.Tensor | None,
         action_slot_embeds: torch.Tensor | None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
     ) -> BackboneEmbedOutput:
+        """Construct final language-model embeddings from project batch tensors.
+
+        The embedding pipeline is intentionally non-standard and happens in three stages:
+        - Start from token embeddings of `input_ids`.
+        - Replace Qwen image/video placeholder token positions with visual features from the HF vision tower.
+        - Replace project `<state>` and `<action>` placeholder token positions with learned slot embeddings.
+
+        `mm_token_type_ids` is kept for position-id computation later in the pipeline, but it does not directly
+        control embedding replacement in this function.
+        """
         del mm_token_type_ids
-        inputs_embeds = self.build_base_text_embeds(input_ids)
-        inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.encode_image_features(
+        inputs_embeds = self.base_model.get_input_embeddings()(input_ids)
+        inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.encode_visual_features(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
+            pixel_values_videos=pixel_values_videos,
+            video_grid_thw=video_grid_thw,
         )
         inputs_embeds = self.replace_slot_embeddings(
             input_ids=input_ids,
@@ -240,46 +293,53 @@ class Qwen3VLBackboneWrapper(nn.Module):
             deepstack_visual_embeds=deepstack_visual_embeds,
         )
 
-    # ------------------------------------------------------------------
-    # Position IDs & language model forward
-    # ------------------------------------------------------------------
-    def compute_position_ids(
+    def forward(
         self,
         input_ids: torch.LongTensor,
-        inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
+        pixel_values: torch.Tensor | None,
         image_grid_thw: torch.Tensor | None,
+        pixel_values_videos: torch.Tensor | None,
+        video_grid_thw: torch.Tensor | None,
         mm_token_type_ids: torch.Tensor | None,
+        state_slot_embeds: torch.Tensor | None,
+        action_slot_embeds: torch.Tensor | None,
+        state_token_id: int | None = None,
+        action_token_id: int | None = None,
+        use_cache: bool = True,
+        output_hidden_states: bool = True,
         past_key_values: Any = None,
-    ) -> torch.Tensor | None:
-        return self.get_base_model().model.compute_3d_position_ids(
+    ) -> BackboneStreamOutput:
+        embed_output = self.build_inputs_embeds(
             input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
+            pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
+            pixel_values_videos=pixel_values_videos,
+            video_grid_thw=video_grid_thw,
+            mm_token_type_ids=mm_token_type_ids,
+            state_slot_embeds=state_slot_embeds,
+            action_slot_embeds=action_slot_embeds,
+            state_token_id=state_token_id,
+            action_token_id=action_token_id,
+        )
+        position_ids = self.base_model.model.compute_3d_position_ids(
+            input_ids=input_ids,
+            inputs_embeds=embed_output.inputs_embeds,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             mm_token_type_ids=mm_token_type_ids,
         )
-
-    def forward_language_model(
-        self,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        position_ids: torch.Tensor | None,
-        use_cache: bool,
-        output_hidden_states: bool,
-        past_key_values: Any = None,
-        visual_pos_masks: torch.Tensor | None = None,
-        deepstack_visual_embeds: list[torch.Tensor] | None = None,
-    ) -> BackboneStreamOutput:
+        # Upstream-aligned block copied/adapted from transformers Qwen3-VL.
         outputs = self.language_model(
             input_ids=None,
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=embed_output.inputs_embeds,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
+            visual_pos_masks=embed_output.visual_pos_masks,
+            deepstack_visual_embeds=embed_output.deepstack_visual_embeds,
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             return_dict=True,

@@ -6,16 +6,11 @@ from typing import Any
 import torch
 from torch import nn
 
-from src.model.action.action_head import FourierActionEncoder, MLPProjector
-from src.model.action.diffloss import DiffLoss
-from src.model.action_expert.qwen_shared_kv_expert import ActionExpertDecoder
-from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import (
     BackboneStreamOutput,
     gather_action_position_ids,
     slice_prefix_cache_from_full_kv,
 )
-from src.model.vlm.qwen3_vl_backbone import Qwen3VLBackboneWrapper
 
 
 class LegendVLA(nn.Module):
@@ -195,30 +190,16 @@ class LegendVLA(nn.Module):
         return slot_embeds
 
     def forward_backbone_stream(self, batch: dict, slot_embeds: dict) -> BackboneStreamOutput:
-        embed_output = self.backbone.build_inputs_embeds(
+        output = self.backbone(
             input_ids=batch["input_ids"],
-            pixel_values=batch.get("pixel_values"),
-            image_grid_thw=batch.get("image_grid_thw"),
-            mm_token_type_ids=batch.get("mm_token_type_ids"),
+            attention_mask=batch["attention_mask"],
+            pixel_values=batch["pixel_values"],
+            image_grid_thw=batch["image_grid_thw"],
+            pixel_values_videos=batch["pixel_values_videos"],
+            video_grid_thw=batch["video_grid_thw"],
+            mm_token_type_ids=batch["mm_token_type_ids"],
             state_slot_embeds=slot_embeds.get("state"),
             action_slot_embeds=slot_embeds.get("action"),
-        )
-        position_ids = self.backbone.compute_position_ids(
-            input_ids=batch["input_ids"],
-            inputs_embeds=embed_output.inputs_embeds,
-            attention_mask=batch["attention_mask"],
-            image_grid_thw=batch.get("image_grid_thw"),
-            mm_token_type_ids=batch.get("mm_token_type_ids"),
-            past_key_values=None,
-        )
-        output = self.backbone.forward_language_model(
-            inputs_embeds=embed_output.inputs_embeds,
-            attention_mask=batch["attention_mask"],
-            position_ids=position_ids,
-            use_cache=True,
-            output_hidden_states=True,
-            visual_pos_masks=embed_output.visual_pos_masks,
-            deepstack_visual_embeds=embed_output.deepstack_visual_embeds,
         )
         output.prefix_cache = slice_prefix_cache_from_full_kv(
             output.past_key_values_hf,
@@ -321,6 +302,19 @@ class LegendVLA(nn.Module):
         return infer_vlm_generation(self, input, **kwargs)
 
     def forward(self, mode: str, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
+        """Dispatch the top-level LegendVLA execution modes.
+
+        Mode contract:
+        - `train`: full multitask loss on one collated batch.
+        - `train_ar`: autoregressive language/action loss only.
+        - `train_flow`: flow/diffusion action loss only.
+        - `infer_action`: continuous action inference from a prepared VLA batch.
+        - `infer_vla`: autoregressive action-token decoding from a prepared VLA batch.
+        - `infer_vlm`: general VLM text generation from a prepared multimodal batch.
+
+        All modes expect the batch schema produced by the collator and backbone wrappers in this repository rather
+        than raw Hugging Face model inputs alone.
+        """
         if mode == "train":
             return self.compute_loss(batch, **kwargs)
         if mode == "train_ar":
