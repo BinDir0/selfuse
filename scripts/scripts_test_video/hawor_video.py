@@ -80,7 +80,134 @@ def build_infiller_runner(weight_path, device=None):
         'model': filling_model,
         'device': device,
         'horizon': horizon,
+        'src_mask': torch.zeros((horizon, horizon), device=device, dtype=torch.bool),
     }
+
+
+def _load_or_build_cam_space_cache(seq_folder, frame_chunks_all, rebuild=False):
+    cache_path = os.path.join(seq_folder, "cam_space_cache.joblib")
+    if os.path.exists(cache_path) and not rebuild:
+        try:
+            return joblib.load(cache_path)
+        except Exception:
+            vprint(f"cam_space cache is invalid, rebuilding: {cache_path}")
+
+    cache = {0: {}, 1: {}}
+    for idx in [0, 1]:
+        for frame_ck in frame_chunks_all.get(idx, []):
+            frame_ck = np.asarray(frame_ck)
+            if frame_ck.size == 0:
+                continue
+            key = f"{int(frame_ck[0])}_{int(frame_ck[-1])}"
+            pred_path = os.path.join(seq_folder, "cam_space", str(idx), f"{key}.json")
+            with open(pred_path, "r") as f:
+                pred_dict = json.load(f)
+            cache[idx][key] = {name: np.asarray(value, dtype=np.float32) for name, value in pred_dict.items()}
+
+    joblib.dump(cache, cache_path)
+    return cache
+
+
+def _prepare_infiller_window(frame_ck, pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid, num_frames, filling_length):
+    start_shift = -1
+    while frame_ck[0] + start_shift >= 0 and pred_valid[:, frame_ck[0] + start_shift].sum() != 2:
+        start_shift -= 1
+
+    frame_start = int(frame_ck[0])
+    filling_net_start = max(0, frame_start + start_shift)
+    filling_net_end = min(num_frames - 1, filling_net_start + filling_length)
+    if filling_net_end <= filling_net_start:
+        return None
+
+    seq_valid = pred_valid[:, filling_net_start:filling_net_end]
+    filling_seq = {
+        "trans": pred_trans[:, filling_net_start:filling_net_end].numpy(),
+        "rot": pred_rot[:, filling_net_start:filling_net_end].numpy(),
+        "hand_pose": pred_hand_pose[:, filling_net_start:filling_net_end].numpy(),
+        "betas": pred_betas[:, filling_net_start:filling_net_end].numpy(),
+        "valid": seq_valid,
+    }
+    filling_input, transform_w_canon = filling_preprocess(filling_seq)
+    filling_input = np.asarray(filling_input, dtype=np.float32)
+
+    t_original = filling_input.shape[0]
+    if t_original == 0:
+        return None
+
+    if t_original < filling_length:
+        pad_length = filling_length - t_original
+        padding = np.repeat(filling_input[-1:, :], pad_length, axis=0)
+        filling_input = np.concatenate([filling_input, padding], axis=0)
+        seq_valid_padding = np.concatenate([seq_valid, np.ones((2, pad_length), dtype=bool)], axis=1)
+    else:
+        seq_valid_padding = seq_valid
+
+    return {
+        "filling_net_start": filling_net_start,
+        "filling_net_end": filling_net_end,
+        "seq_valid": seq_valid,
+        "seq_valid_padding": seq_valid_padding,
+        "filling_seq": filling_seq,
+        "filling_input": filling_input,
+        "transform_w_canon": transform_w_canon,
+        "t_original": t_original,
+    }
+
+
+def _flush_infiller_windows(
+    pending_windows,
+    filling_model,
+    src_mask,
+    device,
+    horizon,
+    pred_trans,
+    pred_rot,
+    pred_hand_pose,
+    pred_betas,
+    pred_valid,
+):
+    if not pending_windows:
+        return 0
+
+    batch_size = len(pending_windows)
+    batch_inputs = np.stack([window["filling_input"] for window in pending_windows], axis=1)
+    valid_both = np.stack([window["seq_valid_padding"].all(axis=0) for window in pending_windows], axis=1)
+
+    filling_input = torch.from_numpy(batch_inputs).to(device)
+    valid_tensor = torch.from_numpy(valid_both).to(device=device)
+
+    data_mask = torch.zeros((horizon, batch_size, 1), device=device, dtype=filling_input.dtype)
+    data_mask[valid_tensor] = 1
+
+    valid_atten = valid_tensor.transpose(0, 1).unsqueeze(1)
+    atten_mask = torch.ones((batch_size, 1, horizon, horizon), device=device, dtype=torch.bool)
+    atten_mask[valid_atten.unsqueeze(2).expand(-1, -1, horizon, -1)] = False
+
+    with torch.no_grad():
+        batch_output = filling_model(filling_input, src_mask, data_mask, atten_mask)
+
+    batch_output = batch_output.permute(1, 0, 2).cpu().detach()
+
+    for window_idx, window in enumerate(pending_windows):
+        output_ck = batch_output[window_idx, :window["t_original"]].reshape(window["t_original"], 2, -1)
+        filling_output = filling_postprocess(output_ck, window["transform_w_canon"])
+
+        filling_seq = window["filling_seq"]
+        seq_valid = window["seq_valid"]
+        filling_seq["trans"][~seq_valid] = filling_output["trans"][~seq_valid]
+        filling_seq["rot"][~seq_valid] = filling_output["rot"][~seq_valid]
+        filling_seq["hand_pose"][~seq_valid] = filling_output["hand_pose"][~seq_valid]
+        filling_seq["betas"][~seq_valid] = filling_output["betas"][~seq_valid]
+
+        start = window["filling_net_start"]
+        end = window["filling_net_end"]
+        pred_trans[:, start:end] = torch.from_numpy(filling_seq["trans"]).float()
+        pred_rot[:, start:end] = torch.from_numpy(filling_seq["rot"]).float()
+        pred_hand_pose[:, start:end] = torch.from_numpy(filling_seq["hand_pose"]).float()
+        pred_betas[:, start:end] = torch.from_numpy(filling_seq["betas"]).float()
+        pred_valid[:, start:end] = True
+
+    return batch_size
 
 
 def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=None, profiler=None, mano_models=None, prefetched_data=None, frame_source=None):
@@ -544,11 +671,15 @@ def hawor_motion_estimation(args, start_idx, end_idx, seq_folder, profiler=None)
 
 
 def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_runner=None, frame_source=None, seq_folder=None):
-    # load infiller
+    import time
+
     infiller_runner = infiller_runner or build_infiller_runner(args.infiller_weight)
     filling_model = infiller_runner['model']
     device = infiller_runner['device']
     horizon = infiller_runner['horizon']
+    src_mask = infiller_runner['src_mask']
+    window_batch_size = max(1, int(getattr(args, "infiller_window_batch_size", 64)))
+    rebuild_cam_space_cache = bool(getattr(args, "rebuild_cam_space_cache", False))
 
     if seq_folder is None:
         video_path = args.video_path
@@ -561,6 +692,13 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
 
     idx2hand = ['left', 'right']
     filling_length = 120
+    timing = {
+        "load_cam_space": 0.0,
+        "prepare_windows": 0.0,
+        "model_forward": 0.0,
+        "postprocess": 0.0,
+    }
+    total_windows = 0
 
     fpath = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
     R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(fpath)
@@ -574,7 +712,15 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
     max_slam_frames = min(pred_trans.shape[1], R_c2w_sla_all.shape[0], t_c2w_sla_all.shape[0])
 
     # camera space to world space
-    tid = [0, 1]            
+    t0 = time.time()
+    cam_space_cache = _load_or_build_cam_space_cache(
+        seq_folder,
+        frame_chunks_all,
+        rebuild=rebuild_cam_space_cache,
+    )
+    timing["load_cam_space"] += time.time() - t0
+
+    tid = [0, 1]
     for k, idx in enumerate(tid):
         frame_chunks = frame_chunks_all[idx]
 
@@ -588,12 +734,9 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
                 continue
             frame_ck = frame_ck[valid_frame_mask]
             vprint(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
-            pred_path = os.path.join(seq_folder, 'cam_space', str(idx), f"{frame_ck[0]}_{frame_ck[-1]}.json")
-            with open(pred_path, "r") as f:
-                pred_dict = json.load(f)
-            data_out = {
-                k:torch.tensor(v) for k, v in pred_dict.items()
-                }
+            cache_key = f"{int(frame_ck[0])}_{int(frame_ck[-1])}"
+            pred_dict = cam_space_cache[idx][cache_key]
+            data_out = {name: torch.from_numpy(value) for name, value in pred_dict.items()}
 
             R_c2w_sla = R_c2w_sla_all[frame_ck]
             t_c2w_sla = t_c2w_sla_all[frame_ck]
@@ -615,74 +758,78 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
 
         frame = frame_list[missing]
         frame_chunks = parse_chunks_hand_frame(frame)
+        pending_windows = []
 
         vprint(f"run infiller on {idx2hand[idx]} hand ...")
         for frame_ck in tqdm(frame_chunks, disable=QUIET_MODE):
-            start_shift = -1
-            while frame_ck[0] + start_shift >= 0 and pred_valid[:, frame_ck[0] + start_shift].sum() != 2:
-                start_shift -= 1  # Shift to find the previous valid frame as start
-            vprint(f"run infiller on frame {frame_ck[0] + start_shift} to frame {min(num_frames-1, frame_ck[0] + start_shift + filling_length)}")
+            t_window = time.time()
+            window = _prepare_infiller_window(
+                frame_ck,
+                pred_trans,
+                pred_rot,
+                pred_hand_pose,
+                pred_betas,
+                pred_valid,
+                num_frames,
+                filling_length,
+            )
+            timing["prepare_windows"] += time.time() - t_window
+            if window is None:
+                continue
 
-            frame_start = frame_ck[0]
-            filling_net_start = max(0, frame_start + start_shift)
-            filling_net_end = min(num_frames-1, filling_net_start + filling_length)
-            seq_valid = pred_valid[:, filling_net_start:filling_net_end]
-            filling_seq = {}
-            filling_seq['trans'] = pred_trans[:, filling_net_start:filling_net_end].numpy()
-            filling_seq['rot'] = pred_rot[:, filling_net_start:filling_net_end].numpy()
-            filling_seq['hand_pose'] = pred_hand_pose[:, filling_net_start:filling_net_end].numpy()
-            filling_seq['betas'] = pred_betas[:, filling_net_start:filling_net_end].numpy()
-            filling_seq['valid'] = seq_valid
-            # preprocess (convert to canonical + slerp)
-            filling_input, transform_w_canon = filling_preprocess(filling_seq)
-            src_mask = torch.zeros((filling_length, filling_length), device=device).type(torch.bool)
-            src_mask = src_mask.to(device)
-            filling_input = torch.from_numpy(filling_input).unsqueeze(0).to(device).permute(1,0,2) # (seq_len, B, in_dim)
-            T_original = len(filling_input)
-            filling_length = 120
-            if T_original < filling_length:
-                pad_length = filling_length - T_original
-                last_time_step = filling_input[-1, :, :]
-                padding = last_time_step.unsqueeze(0).repeat(pad_length, 1, 1)
-                filling_input = torch.cat([filling_input, padding], dim=0) 
-                seq_valid_padding = np.ones((2, filling_length - T_original))
-                seq_valid_padding = np.concatenate([seq_valid, seq_valid_padding], axis=1) 
-            else:
-                seq_valid_padding = seq_valid
-                
+            total_windows += 1
+            pending_windows.append(window)
+            vprint(
+                f"queue infiller window {window['filling_net_start']} to "
+                f"{min(num_frames - 1, window['filling_net_start'] + filling_length)}"
+            )
 
-            T, B, _ = filling_input.shape
+            if len(pending_windows) >= window_batch_size:
+                t_forward = time.time()
+                _flush_infiller_windows(
+                    pending_windows,
+                    filling_model,
+                    src_mask,
+                    device,
+                    horizon,
+                    pred_trans,
+                    pred_rot,
+                    pred_hand_pose,
+                    pred_betas,
+                    pred_valid,
+                )
+                elapsed = time.time() - t_forward
+                timing["model_forward"] += elapsed
+                timing["postprocess"] += 0.0
+                pending_windows = []
 
-            valid = torch.from_numpy(seq_valid_padding).unsqueeze(0).all(dim=1).permute(1, 0) # (T,B)
-            valid_atten = torch.from_numpy(seq_valid_padding).unsqueeze(0).all(dim=1).unsqueeze(1) # (B,1,T)
-            data_mask = torch.zeros((horizon, B, 1), device=device, dtype=filling_input.dtype)
-            data_mask[valid] = 1
-            atten_mask = torch.ones((B, 1, horizon),
-                        device=device, dtype=torch.bool)
-            atten_mask[valid_atten] = False
-            atten_mask = atten_mask.unsqueeze(2).repeat(1, 1, T, 1) # (B,1,T,T)
+        if pending_windows:
+            t_forward = time.time()
+            _flush_infiller_windows(
+                pending_windows,
+                filling_model,
+                src_mask,
+                device,
+                horizon,
+                pred_trans,
+                pred_rot,
+                pred_hand_pose,
+                pred_betas,
+                pred_valid,
+            )
+            elapsed = time.time() - t_forward
+            timing["model_forward"] += elapsed
+            timing["postprocess"] += 0.0
 
-            output_ck = filling_model(filling_input, src_mask, data_mask, atten_mask)
-
-            output_ck = output_ck.permute(1,0,2).reshape(T, 2, -1).cpu().detach() #  two hands
-
-            output_ck = output_ck[:T_original]
-
-            filling_output = filling_postprocess(output_ck, transform_w_canon)
-
-            # repalce the missing prediciton with infiller output
-            filling_seq['trans'][~seq_valid] = filling_output['trans'][~seq_valid]
-            filling_seq['rot'][~seq_valid] = filling_output['rot'][~seq_valid]
-            filling_seq['hand_pose'][~seq_valid] = filling_output['hand_pose'][~seq_valid]
-            filling_seq['betas'][~seq_valid] = filling_output['betas'][~seq_valid]
-
-            pred_trans[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['trans'][:])
-            pred_rot[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['rot'][:])
-            pred_hand_pose[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['hand_pose'][:])
-            pred_betas[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['betas'][:])
-            pred_valid[:, filling_net_start:filling_net_end] = 1
     save_path = os.path.join(seq_folder, "world_space_res.pth")
     joblib.dump([pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid], save_path)
+    print(
+        f"[infiller] {os.path.basename(seq_folder)} windows={total_windows} "
+        f"batch_size={window_batch_size} "
+        f"load_cam_space={timing['load_cam_space']:.2f}s "
+        f"prepare={timing['prepare_windows']:.2f}s "
+        f"forward={timing['model_forward']:.2f}s"
+    )
     return pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid
 
 

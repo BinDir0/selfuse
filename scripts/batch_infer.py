@@ -85,10 +85,12 @@ class BatchScheduler:
         num_workers: int,
         metric3d_batch_size: int,
         render_batch_size: int,
+        infiller_window_batch_size: int,
         detect_batch_size: int,
         detect_device: str,
         detect_half_precision: bool,
         detect_io_workers: int,
+        rebuild_cam_space_cache: bool,
         scheduler_mode: str,
         persistent_worker: bool,
         max_stage_retries: int,
@@ -108,10 +110,12 @@ class BatchScheduler:
         self.num_workers = num_workers
         self.metric3d_batch_size = metric3d_batch_size
         self.render_batch_size = render_batch_size
+        self.infiller_window_batch_size = infiller_window_batch_size
         self.detect_batch_size = detect_batch_size
         self.detect_device = detect_device
         self.detect_half_precision = detect_half_precision
         self.detect_io_workers = detect_io_workers
+        self.rebuild_cam_space_cache = rebuild_cam_space_cache
         self.scheduler_mode = scheduler_mode
         self.persistent_worker = persistent_worker
         self.max_stage_retries = max_stage_retries
@@ -188,9 +192,12 @@ class BatchScheduler:
         cmd.extend(["--num_workers", str(self.num_workers)])
         cmd.extend(["--metric3d_batch_size", str(self.metric3d_batch_size)])
         cmd.extend(["--render_batch_size", str(self.render_batch_size)])
+        cmd.extend(["--infiller_window_batch_size", str(self.infiller_window_batch_size)])
         cmd.extend(["--detect_batch_size", str(self.detect_batch_size)])
         cmd.extend(["--detect_io_workers", str(self.detect_io_workers)])
         cmd.extend(["--detect_device", self.detect_device])
+        if self.rebuild_cam_space_cache:
+            cmd.append("--rebuild_cam_space_cache")
         if self.detect_half_precision:
             cmd.append("--detect_half_precision")
         else:
@@ -243,10 +250,21 @@ class BatchScheduler:
             "--chunk_batch_size", str(self.chunk_batch_size),
             "--num_workers", str(self.num_workers),
             "--render_batch_size", str(self.render_batch_size),
+            "--metric3d_batch_size", str(self.metric3d_batch_size),
+            "--infiller_window_batch_size", str(self.infiller_window_batch_size),
+            "--detect_batch_size", str(self.detect_batch_size),
+            "--detect_io_workers", str(self.detect_io_workers),
+            "--detect_device", self.detect_device,
         ]
         if self.img_focal is not None:
             cmd.extend(["--img_focal", str(self.img_focal)])
         cmd.extend(["--run_dir", str(self.run_dir)])
+        if self.rebuild_cam_space_cache:
+            cmd.append("--rebuild_cam_space_cache")
+        if self.detect_half_precision:
+            cmd.append("--detect_half_precision")
+        else:
+            cmd.append("--no-detect_half_precision")
         if self.enable_profiler:
             cmd.append("--enable_profiler")
         if self.resume:
@@ -554,6 +572,8 @@ class BatchScheduler:
             metric3d_batch_size=self.metric3d_batch_size,
             detect_batch_size=self.detect_batch_size,
             detect_io_workers=self.detect_io_workers,
+            infiller_window_batch_size=self.infiller_window_batch_size,
+            rebuild_cam_space_cache=self.rebuild_cam_space_cache,
         )
 
         # Ensure stage models are loaded
@@ -630,6 +650,8 @@ class BatchScheduler:
         task_ns.chunk_batch_size = self.chunk_batch_size
         task_ns.num_workers = self.num_workers
         task_ns.metric3d_batch_size = self.metric3d_batch_size
+        task_ns.infiller_window_batch_size = self.infiller_window_batch_size
+        task_ns.rebuild_cam_space_cache = self.rebuild_cam_space_cache
 
         # Attach descriptor for WebDataset mode
         task = self.tasks.get(video_path)
@@ -1126,6 +1148,12 @@ def get_parser():
         help="Batch size for rendering phase in motion stage (Phase 3). Higher = faster but more GPU memory. Default: 8",
     )
     parser.add_argument(
+        "--infiller_window_batch_size",
+        type=int,
+        default=64,
+        help="Number of infiller windows to batch per forward pass",
+    )
+    parser.add_argument(
         "--detect_batch_size",
         type=int,
         default=128,
@@ -1159,6 +1187,11 @@ def get_parser():
         "--enable_profiler",
         action="store_true",
         help="Enable torch profiler to diagnose performance bottlenecks (generates trace files)",
+    )
+    parser.add_argument(
+        "--rebuild_cam_space_cache",
+        action="store_true",
+        help="Rebuild cached cam_space tensors before running infiller",
     )
     parser.add_argument(
         "--start",
@@ -1290,6 +1323,7 @@ def main():
     print(f"Detect I/O workers: {args.detect_io_workers}")
     print(f"Chunk batch size (motion): {args.chunk_batch_size}")
     print(f"Metric3D batch size (slam): {args.metric3d_batch_size}")
+    print(f"Infiller window batch size: {args.infiller_window_batch_size}")
     print(f"Resume: {args.resume}")
     print(f"Run directory: {run_dir}")
     print()
@@ -1308,10 +1342,12 @@ def main():
         num_workers=args.num_workers,
         metric3d_batch_size=args.metric3d_batch_size,
         render_batch_size=args.render_batch_size,
+        infiller_window_batch_size=args.infiller_window_batch_size,
         detect_batch_size=args.detect_batch_size,
         detect_device=args.detect_device,
         detect_half_precision=args.detect_half_precision,
         detect_io_workers=args.detect_io_workers,
+        rebuild_cam_space_cache=args.rebuild_cam_space_cache,
         scheduler_mode=args.scheduler_mode,
         persistent_worker=args.persistent_worker,
         max_stage_retries=args.max_stage_retries,
@@ -1325,4 +1361,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

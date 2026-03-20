@@ -271,6 +271,8 @@ class WorkerRuntime:
         metric3d_batch_size: int = 8,
         detect_batch_size: int = 256,
         detect_io_workers: int = 16,
+        infiller_window_batch_size: int = 64,
+        rebuild_cam_space_cache: bool = False,
     ):
         self.gpu = gpu
         self.checkpoint = checkpoint
@@ -283,6 +285,8 @@ class WorkerRuntime:
         self.metric3d_batch_size = metric3d_batch_size
         self.detect_batch_size = detect_batch_size
         self.detect_io_workers = detect_io_workers
+        self.infiller_window_batch_size = infiller_window_batch_size
+        self.rebuild_cam_space_cache = rebuild_cam_space_cache
 
         self.detector_runner = None
         self.motion_runner = None
@@ -311,6 +315,8 @@ class WorkerRuntime:
         args.metric3d_batch_size = self.metric3d_batch_size
         args.detect_batch_size = self.detect_batch_size
         args.detect_io_workers = self.detect_io_workers
+        args.infiller_window_batch_size = self.infiller_window_batch_size
+        args.rebuild_cam_space_cache = self.rebuild_cam_space_cache
         args.vis_mode = "world"
         args.skip_vis = True
         return args
@@ -377,6 +383,8 @@ def build_stage_args(ns):
     args.checkpoint = ns.checkpoint
     args.infiller_weight = ns.infiller_weight
     args.chunk_batch_size = ns.chunk_batch_size
+    args.infiller_window_batch_size = ns.infiller_window_batch_size
+    args.rebuild_cam_space_cache = ns.rebuild_cam_space_cache
     args.vis_mode = "world"
     args.skip_vis = True
     return args
@@ -492,6 +500,8 @@ def worker_runtime_loop(ns):
         num_workers=getattr(ns, 'num_workers', 16),
         render_batch_size=getattr(ns, 'render_batch_size', 8),
         detect_io_workers=getattr(ns, 'detect_io_workers', 8),
+        infiller_window_batch_size=getattr(ns, 'infiller_window_batch_size', 64),
+        rebuild_cam_space_cache=getattr(ns, 'rebuild_cam_space_cache', False),
     )
 
     with open(ns.video_list) as f:
@@ -672,6 +682,8 @@ def get_parser():
     parser.add_argument("--metric3d_batch_size", type=int, default=32, help="Batch size for Metric3D depth estimation")
     parser.add_argument("--detect_batch_size", type=int, default=128, help="Batch size for YOLO detection (default 128)")
     parser.add_argument("--detect_io_workers", type=int, default=8, help="Number of DataLoader workers for parallel frame loading")
+    parser.add_argument("--infiller_window_batch_size", type=int, default=64, help="Number of infiller windows to batch per forward pass")
+    parser.add_argument("--rebuild_cam_space_cache", action="store_true", help="Rebuild cached cam_space tensors before running infiller")
     parser.add_argument("--detect_device", type=str, default="cuda:0", help="Device for YOLO detector (e.g., cuda:0)")
     parser.add_argument("--detect_half_precision", action="store_true", default=True, help="Use FP16 for YOLO detector (2x faster)")
     parser.add_argument("--no-detect_half_precision", dest="detect_half_precision", action="store_false", help="Disable FP16 for YOLO")
