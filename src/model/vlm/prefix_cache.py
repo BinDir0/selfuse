@@ -37,6 +37,21 @@ class PrefixKVCache:
             lengths=self.lengths.to(device=device),
         )
 
+    def detach(self) -> "PrefixKVCache":
+        detached_layers = []
+        for layer in self.layers:
+            detached_layers.append(
+                LayerKV(
+                    key=layer.key.detach(),
+                    value=layer.value.detach(),
+                )
+            )
+        return PrefixKVCache(
+            layers=detached_layers,
+            mask=self.mask.detach(),
+            lengths=self.lengths.detach(),
+        )
+
 
 @dataclass
 class BackboneStreamOutput:

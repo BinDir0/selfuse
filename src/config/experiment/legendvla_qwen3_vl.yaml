@@ -11,6 +11,11 @@ _target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorksp
 objective:
 lora: False
 quantize: False
+# Attention backend used by the Qwen3-VL text tower and the Qwen3 action expert.
+# Valid values in transformers 5.3.0: eager, sdpa, flash_attention_2, flash_attention_3.
+# Use `sdpa` as the safe default. Switch to `flash_attention_x` after installing `flash-attn`.
+# `flash_attention_3` is mainly intended for Hopper-class GPUs and may require a separate setup.
+attn_implementation: sdpa
 
 vision_resolution: 224
 image_shape:
@@ -196,11 +201,11 @@ training:
       freq: 100000
       device:
   compile:
-    enabled: False
-    fullgraph: True
-    backend: inductor
-    mode: default
-    dynamic:
+    enabled: False  # Set True to wrap the full training model with torch.compile.
+    fullgraph: False  # Start with False for dynamic multimodal training workloads.
+    backend: inductor  # Default PyTorch compiler backend for CUDA workloads.
+    mode: default  # Good starting point. Try reduce-overhead mainly for stable inference-like shapes.
+    dynamic:  # Leave null for the PyTorch default. Set True only when variable shapes cause recompiles.
 
 policy:
   _target_: src.policy.legendvla.LegendVLA
@@ -220,6 +225,7 @@ policy:
       bias: none
       target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
     use_quantization: ${quantize}
+    attn_implementation: ${attn_implementation}
     quantization:
       load_in_4bit: True
       load_in_8bit: False
@@ -261,11 +267,11 @@ policy:
   flow_expert:
     _target_: src.model.action_expert.qwen3_action_expert.Qwen3ActionExpert
     model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
-    num_layers: 8
     time_hidden_size: ${time_hidden_size}
     hidden_size: ${action_hidden_size}
     intermediate_size: 4096
     num_heads: 32
+    attn_implementation: ${attn_implementation}
   action_decoder:
     _target_: src.model.action.action_head.MLPProjector
     input_dim: ${action_hidden_size}
@@ -309,7 +315,8 @@ policy:
   diffloss_micro_batch_size: 16
   use_rtc: True
   rtc_delay_strategy: exp
-  rtc_max_delay: 16
+  rtc_max_delay: 8
+  knowledge_insulation: True
   ce_loss_weight: 0.1
   diffusion_loss_weight: 20.0
   flow_loss_weight: 1.0

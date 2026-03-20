@@ -73,7 +73,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             quantization_config=quantization_config,
             device_map=device_map,
             low_cpu_mem_usage=low_cpu_mem_usage,
-            attn_implementation={"text_config": attn_implementation} if attn_implementation is not None else None,
+            attn_implementation=attn_implementation,
         )
         self.model.resize_token_embeddings(len(tokenizer))
 

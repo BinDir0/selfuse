@@ -39,6 +39,7 @@ class LegendVLA(nn.Module):
         ce_loss_weight: float = 0.1,
         diffusion_loss_weight: float = 1.0,
         flow_loss_weight: float = 1.0,
+        knowledge_insulation: bool = True,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -65,6 +66,7 @@ class LegendVLA(nn.Module):
         self.use_rtc = use_rtc
         self.rtc_delay_strategy = rtc_delay_strategy
         self.rtc_max_delay = rtc_max_delay
+        self.knowledge_insulation = knowledge_insulation
         self.loss_weights = SimpleNamespace(
             ce_loss_weight=ce_loss_weight,
             diffusion_loss_weight=diffusion_loss_weight,
@@ -225,9 +227,12 @@ class LegendVLA(nn.Module):
         action_embeds = self.action_encoder(flow_inputs["noisy_actions"]) / (self.action_hidden_size ** 0.5)
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
         action_position_ids = self.build_action_position_ids(batch, backbone_output.position_ids)
+        prefix_cache = backbone_output.prefix_cache
+        if self.knowledge_insulation and prefix_cache is not None:
+            prefix_cache = prefix_cache.detach()
         expert_hidden = self.flow_expert(
             action_embeds=action_embeds,
-            prefix_cache=backbone_output.prefix_cache,
+            prefix_cache=prefix_cache,
             action_position_ids=action_position_ids,
             time_cond=time_cond,
             action_mask=action_mask,

@@ -1,5 +1,10 @@
 #!/bin/bash
 
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # Install system dependencies
 echo "Installing system dependencies..."
 sudo apt-get update
@@ -19,27 +24,21 @@ rm -f cuda-keyring_1.0-1_all.deb
 # Install pdsh for deepspeed
 sudo apt-get install -y pdsh
 
-conda create -n legendvla python=3.10
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda create -y -n legendvla python=3.10
 conda activate legendvla
 
-# install VILA
-git clone https://github.com/Ivan-Zhong/VILA.git
-cd VILA
-./environment_setup.sh
-pip install -e .
-
-# install manopth
-cd ..
-git clone https://github.com/hassony2/manopth
-cd manopth
-conda env update -n legendvla -f environment.yml 
-pip install -e .
-
-# install legendvla
-cd ..
+# Install LegendVLA dependencies inside the repository root.
+cd "${ROOT_DIR}"
 pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 \
     torch-tensorrt==2.8.0+cu128 tensorrt-cu12==10.12.0.36 \
     -i https://pypi.tuna.tsinghua.edu.cn/simple \
     -f https://mirrors.aliyun.com/pytorch-wheels/cu128/ \
     --extra-index-url https://download.pytorch.org/whl/cu128
+
+# Install FlashAttention after PyTorch so it can build against the active torch/CUDA toolchain.
+# Keep it out of requirements.txt because this dependency usually needs an environment-specific build step.
+pip install packaging ninja
+pip install flash-attn --no-build-isolation
+
 pip install -r requirements.txt
