@@ -1,8 +1,7 @@
 """
 Unit tests for Qwen3-VL migration components.
 
-Covers: UnifiedVLACollator, prefix cache utilities, SharedPrefixAttention
-mask behavior, and processor prompt building.
+Covers: UnifiedVLACollator, prefix cache utilities, and processor prompt building.
 
 These tests do NOT require downloading the Qwen3-VL model weights.
 """
@@ -11,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from src.dataset.qwen3_vl_batching import Qwen3VLBatchProcessor, Qwen3VLChatFormatter
 from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.model.vlm.prefix_cache import (
     LayerKV,
@@ -20,7 +20,6 @@ from src.model.vlm.prefix_cache import (
     get_hf_cache_layers,
     slice_prefix_cache_from_full_kv,
 )
-from src.model.action_expert.qwen_shared_kv_expert import SharedPrefixAttention
 
 
 # ======================================================================
@@ -28,107 +27,223 @@ from src.model.action_expert.qwen_shared_kv_expert import SharedPrefixAttention
 # ======================================================================
 
 
-def make_vla_sample(seq_len, n_states, n_actions, action_horizon=4, action_dim=48):
-    """Build a minimal VLA sample dict like VLAWdsDataset.sample_to_data() returns."""
-    actions_valid_mask = np.zeros((action_horizon, action_dim), dtype=bool)
-    actions_valid_mask[:n_actions] = True
-    return {
-        "input_ids": torch.randint(1, 100, (seq_len,)),
-        "attention_mask": torch.ones(seq_len, dtype=torch.long),
-        "labels": torch.randint(-100, 100, (seq_len,)),
-        "mm_token_type_ids": torch.zeros(seq_len, dtype=torch.long),
-        "pixel_values": torch.randn(1, 3, 16, 16),
-        "image_grid_thw": torch.tensor([1, 4, 4], dtype=torch.long),
-        "states": torch.randn(18, action_dim),
-        "actions": torch.randn(action_horizon, action_dim),
-        "actions_valid_mask": torch.from_numpy(actions_valid_mask),
-        "n_states": torch.tensor(n_states, dtype=torch.int32),
-        "n_actions": torch.tensor(n_actions, dtype=torch.int32),
-        "answer_start_idx": torch.tensor(seq_len - n_actions, dtype=torch.int64),
-        "is_vla_data": torch.tensor(True, dtype=torch.bool),
-    }
+class DummyBatchProcessor:
+    def __init__(self):
+        self.ignore_index = -100
+        self.padding_side = "right"
+        self.state_token = "<state>"
+        self.action_token = "<action>"
+        self.action_token_id = 102
+
+    def encode_messages(self, messages_batch, batch_samples, add_generation_prompt):
+        del messages_batch
+        if add_generation_prompt:
+            batch_size = len(batch_samples)
+            return {
+                "input_ids": torch.tensor([[10, 11]] * batch_size, dtype=torch.long),
+                "attention_mask": torch.tensor([[1, 1]] * batch_size, dtype=torch.long),
+                "pixel_values": torch.randn(batch_size, 3, 8, 8),
+                "image_grid_thw": torch.tensor([[1, 2, 2]] * batch_size, dtype=torch.long),
+                "pixel_values_videos": None,
+                "video_grid_thw": None,
+                "mm_token_type_ids": torch.zeros(batch_size, 2, dtype=torch.long),
+            }
+
+        return {
+            "input_ids": torch.tensor([
+                [1, 2, 102, 102, 0],
+                [10, 11, 12, 13, 14],
+            ], dtype=torch.long),
+            "attention_mask": torch.tensor([
+                [1, 1, 1, 1, 0],
+                [1, 1, 1, 1, 1],
+            ], dtype=torch.long),
+            "pixel_values": torch.randn(2, 3, 8, 8),
+            "image_grid_thw": torch.tensor([[1, 2, 2], [1, 2, 2]], dtype=torch.long),
+            "pixel_values_videos": None,
+            "video_grid_thw": None,
+            "mm_token_type_ids": torch.zeros(2, 5, dtype=torch.long),
+        }
+
+    def build_labels(self, input_ids, attention_mask, answer_start_idx):
+        labels = input_ids.clone()
+        labels = labels.masked_fill(attention_mask == 0, self.ignore_index)
+        positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+        labels = labels.masked_fill(positions < answer_start_idx.unsqueeze(1), self.ignore_index)
+        return labels
+
+    def find_first_token_positions(self, input_ids, token_id, fallback):
+        token_mask = input_ids == token_id
+        first_positions = token_mask.to(dtype=torch.long).argmax(dim=1)
+        has_token = token_mask.any(dim=1)
+        return torch.where(has_token, first_positions, fallback)
 
 
-def make_vlm_sample(seq_len, action_horizon=4, action_dim=48):
-    """Build a minimal VLM sample dict like UnifiedWdsDataset.pad_vlm_sample()."""
-    return {
-        "input_ids": torch.randint(1, 100, (seq_len,)),
-        "attention_mask": torch.ones(seq_len, dtype=torch.long),
-        "labels": torch.randint(-100, 100, (seq_len,)),
-        "mm_token_type_ids": torch.zeros(seq_len, dtype=torch.long),
-        "pixel_values": torch.randn(1, 3, 16, 16),
-        "image_grid_thw": torch.tensor([1, 4, 4], dtype=torch.long),
-        "states": torch.zeros(18, action_dim),
-        "actions": torch.zeros(action_horizon, action_dim),
-        "actions_valid_mask": torch.zeros(action_horizon, action_dim, dtype=torch.bool),
-        "n_states": torch.tensor(0, dtype=torch.int32),
-        "n_actions": torch.tensor(0, dtype=torch.int32),
-        "answer_start_idx": torch.tensor(seq_len, dtype=torch.int64),
-        "is_vla_data": torch.tensor(False, dtype=torch.bool),
-    }
+class DummyTokenizerForBatchProcessor:
+    def add_special_tokens(self, _tokens):
+        return 0
+
+    def convert_tokens_to_ids(self, token):
+        if token == "<action>":
+            return 102
+        return 0
 
 
-class TestUnifiedVLACollator:
-    """Verify padding and batching of VLA/VLM samples."""
+class DummyProcessorForBatchProcessor:
+    def __init__(self):
+        self.tokenizer = DummyTokenizerForBatchProcessor()
 
-    def test_uniform_length_no_padding_needed(self):
-        """Same-length samples should not require any padding."""
-        collator = UnifiedVLACollator(pad_token_id=0, ignore_index=-100)
-        samples = [make_vla_sample(10, 2, 4), make_vla_sample(10, 3, 4)]
-        batch = collator(samples)
-        assert batch["input_ids"].shape == (2, 10)
-        assert batch["attention_mask"].shape == (2, 10)
-        assert batch["labels"].shape == (2, 10)
 
-    def test_variable_length_padding(self):
-        """Different-length samples should be padded to the max length."""
-        collator = UnifiedVLACollator(pad_token_id=0, ignore_index=-100)
-        samples = [make_vla_sample(8, 2, 4), make_vla_sample(12, 3, 4)]
-        batch = collator(samples)
-        assert batch["input_ids"].shape == (2, 12)
-        assert batch["attention_mask"].shape == (2, 12)
-        # Shorter sample should be padded with pad_token_id
-        assert batch["input_ids"][0, 8:].sum() == 0
-        # Shorter sample attention_mask should be 0 in padded region
-        assert batch["attention_mask"][0, 8:].sum() == 0
-        # Labels should be padded with ignore_index
-        assert (batch["labels"][0, 8:] == -100).all()
+class TestQwen3VLBatchProcessor:
+    def test_build_vision_inputs_mixes_image_and_video(self):
+        batch_processor = Qwen3VLBatchProcessor(
+            model_name_or_path="demo",
+            processor_call_kwargs={"padding": "longest", "max_length": 32},
+            processor=DummyProcessorForBatchProcessor(),
+        )
+        batch_inputs = batch_processor.build_vision_inputs([
+            {
+                "vision_type": "video",
+                "images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
+                "video_fps": torch.tensor(15.0),
+            },
+            {
+                "vision_type": "image",
+                "images": torch.zeros(2, 8, 8, 3, dtype=torch.uint8),
+            },
+        ])
 
-    def test_mixed_vla_vlm_batch(self):
-        """VLA and VLM samples should be collated together."""
-        collator = UnifiedVLACollator(pad_token_id=0, ignore_index=-100)
-        samples = [make_vla_sample(10, 2, 4), make_vlm_sample(8)]
-        batch = collator(samples)
-        assert batch["input_ids"].shape == (2, 10)
-        assert batch["is_vla_data"].tolist() == [True, False]
-        assert batch["n_states"].tolist() == [2, 0]
-        assert batch["n_actions"].tolist() == [4, 0]
+        assert batch_inputs["do_sample_frames"] is False
+        assert len(batch_inputs["videos"]) == 1
+        assert batch_inputs["videos"][0].shape == (3, 8, 8, 3)
+        assert len(batch_inputs["video_metadata"]) == 1
+        assert batch_inputs["video_metadata"][0]["fps"] == 15.0
+        assert len(batch_inputs["images"]) == 1
+        assert len(batch_inputs["images"][0]) == 2
 
-    def test_pixel_values_batching(self):
-        """pixel_values with batch dim 1 should be cat'd, not stacked."""
-        collator = UnifiedVLACollator(pad_token_id=0, ignore_index=-100)
-        samples = [make_vla_sample(10, 2, 4), make_vla_sample(10, 2, 4)]
-        batch = collator(samples)
+    def test_build_vision_inputs_normalizes_single_and_multi_image_samples(self):
+        batch_processor = Qwen3VLBatchProcessor(
+            model_name_or_path="demo",
+            processor_call_kwargs={"padding": "longest", "max_length": 32},
+            processor=DummyProcessorForBatchProcessor(),
+        )
+        batch_inputs = batch_processor.build_vision_inputs([
+            {
+                "vision_type": "image",
+                "images": torch.zeros(8, 8, 3, dtype=torch.uint8),
+            },
+            {
+                "vision_type": "video",
+                "images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
+                "video_fps": torch.tensor(15.0),
+            },
+            {
+                "vision_type": "image",
+                "images": torch.zeros(2, 8, 8, 3, dtype=torch.uint8),
+            },
+        ])
+
+        assert len(batch_inputs["images"]) == 2
+        assert all(isinstance(sample_images, list) for sample_images in batch_inputs["images"])
+        assert len(batch_inputs["images"][0]) == 1
+        assert len(batch_inputs["images"][1]) == 2
+        assert len(batch_inputs["videos"]) == 1
+        assert len(batch_inputs["video_metadata"]) == 1
+
+    def test_build_vision_inputs_rejects_non_uint8_images(self):
+        batch_processor = Qwen3VLBatchProcessor(
+            model_name_or_path="demo",
+            processor_call_kwargs={"padding": "longest", "max_length": 32},
+            processor=DummyProcessorForBatchProcessor(),
+        )
+
+        with pytest.raises(ValueError, match=r"images must use dtype torch\.uint8"):
+            batch_processor.build_vision_inputs([
+                {
+                    "vision_type": "image",
+                    "images": torch.rand(2, 8, 8, 3, dtype=torch.float32),
+                }
+            ])
+
+    def test_build_vision_inputs_rejects_non_uint8_videos(self):
+        batch_processor = Qwen3VLBatchProcessor(
+            model_name_or_path="demo",
+            processor_call_kwargs={"padding": "longest", "max_length": 32},
+            processor=DummyProcessorForBatchProcessor(),
+        )
+
+        with pytest.raises(ValueError, match=r"video must use dtype torch\.uint8"):
+            batch_processor.build_vision_inputs([
+                {
+                    "vision_type": "video",
+                    "images": torch.rand(3, 8, 8, 3, dtype=torch.float32),
+                    "video_fps": torch.tensor(15.0),
+                }
+            ])
+
+
+class TestUnifiedVLACollatorRaw:
+    @staticmethod
+    def make_raw_vla_sample():
+        return {
+            "images": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
+            "instruction": "Pick the cup",
+            "intrinsic": torch.tensor([1.0, 1.0, 0.5, 0.5]),
+            "vision_type": "video",
+            "video_fps": torch.tensor(15.0),
+            "states": torch.randn(4, 48),
+            "actions": torch.randn(4, 48),
+            "actions_valid_mask": torch.ones(4, 48, dtype=torch.bool),
+            "n_states": torch.tensor(4, dtype=torch.int32),
+            "n_actions": torch.tensor(2, dtype=torch.int32),
+            "is_vla_data": torch.tensor(True),
+            "has_depth_values": torch.tensor(False),
+        }
+
+    @staticmethod
+    def make_raw_vlm_sample():
+        return {
+            "images": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
+            "question": "What is in the image?",
+            "answer": "A cup.",
+            "vision_type": "image",
+            "states": torch.zeros(4, 48),
+            "actions": torch.zeros(4, 48),
+            "actions_valid_mask": torch.zeros(4, 48, dtype=torch.bool),
+            "n_states": torch.tensor(0, dtype=torch.int32),
+            "n_actions": torch.tensor(0, dtype=torch.int32),
+            "is_vla_data": torch.tensor(False),
+            "has_depth_values": torch.tensor(False),
+        }
+
+    def test_raw_batch_uses_formatter_and_batch_processor(self):
+        collator = UnifiedVLACollator(
+            formatter=Qwen3VLChatFormatter(),
+            batch_processor=DummyBatchProcessor(),
+        )
+        batch = collator([self.make_raw_vla_sample(), self.make_raw_vlm_sample()])
+
+        assert batch["input_ids"].shape == (2, 5)
         assert batch["pixel_values"].shape[0] == 2
+        assert batch["answer_start_idx"].tolist() == [2, 2]
+        assert (batch["labels"][0] == -100).all()
+        assert batch["labels"][1, :2].tolist() == [-100, -100]
+        assert batch["labels"][1, 2:].tolist() == [12, 13, 14]
+        assert batch["is_vla_data"].tolist() == [True, False]
+        assert batch["states"].shape == (2, 4, 48)
+        assert batch["actions"].shape == (2, 4, 48)
 
-    def test_image_grid_thw_batching(self):
-        """1D image_grid_thw should be stacked into [B, 3]."""
-        collator = UnifiedVLACollator(pad_token_id=0, ignore_index=-100)
-        samples = [make_vla_sample(10, 2, 4), make_vla_sample(10, 2, 4)]
-        batch = collator(samples)
-        assert batch["image_grid_thw"].shape == (2, 3)
+    def test_for_mode_updates_batch_processor_padding_side(self):
+        collator = UnifiedVLACollator(
+            formatter=Qwen3VLChatFormatter(),
+            batch_processor=DummyBatchProcessor(),
+        )
 
-    def test_left_padding_side(self):
-        """Left padding should prepend pad tokens instead of appending."""
-        collator = UnifiedVLACollator(pad_token_id=0, ignore_index=-100, padding_side="left")
-        s1 = make_vla_sample(8, 2, 4)
-        s1["input_ids"][0] = 42
-        s2 = make_vla_sample(10, 2, 4)
-        batch = collator([s1, s2])
-        # s1 is padded on the left: first 2 tokens should be padding
-        assert batch["input_ids"][0, 0].item() == 0
-        assert batch["input_ids"][0, 1].item() == 0
-        assert batch["input_ids"][0, 2].item() == 42
+        infer_ar_collator = collator.for_mode("infer-ar")
+
+        assert collator.batch_processor.padding_side == "right"
+        assert infer_ar_collator.batch_processor.padding_side == "left"
+
 
 
 # ======================================================================
@@ -272,110 +387,7 @@ class TestGatherActionPositionIds:
 
 
 # ======================================================================
-# Module 3: SharedPrefixAttention mask behavior
-# ======================================================================
-
-
-class TestSharedPrefixAttentionMask:
-    """Verify attention mask construction for flow and ar modes."""
-
-    @pytest.fixture()
-    def attn_module(self):
-        return SharedPrefixAttention(
-            hidden_size=32,
-            num_heads=4,
-            num_kv_heads=4,
-            head_dim=8,
-            rope_theta=10000.0,
-            attention_bias=False,
-        )
-
-    def test_flow_mask_is_bidirectional_in_suffix(self, attn_module):
-        """In flow mode, all suffix tokens should attend to each other."""
-        prefix_mask = torch.tensor([[True, True, True, False]])
-        action_mask = torch.tensor([[True, True, True]])
-        mask = attn_module.build_attention_mask(prefix_mask, action_mask, mode="flow")
-
-        # mask shape: [B=1, 1, A=3, Lp+A=4+3=7]
-        assert mask.shape == (1, 1, 3, 7)
-        suffix_part = mask[0, 0, :, 4:]  # suffix-to-suffix part
-        # All valid suffix tokens should see each other
-        expected_suffix = torch.ones(3, 3, dtype=torch.bool)
-        assert suffix_part.equal(expected_suffix)
-
-    def test_ar_mask_is_causal_in_suffix(self, attn_module):
-        """In ar mode, suffix tokens should attend causally."""
-        prefix_mask = torch.tensor([[True, True]])
-        action_mask = torch.tensor([[True, True, True]])
-        mask = attn_module.build_attention_mask(prefix_mask, action_mask, mode="ar")
-
-        suffix_part = mask[0, 0, :, 2:]  # suffix-to-suffix
-        expected_suffix = torch.tensor([
-            [True, False, False],
-            [True, True, False],
-            [True, True, True],
-        ])
-        assert suffix_part.equal(expected_suffix)
-
-    def test_prefix_always_visible(self, attn_module):
-        """All suffix tokens should see all valid prefix positions."""
-        prefix_mask = torch.tensor([[True, True, True, False, False]])
-        action_mask = torch.tensor([[True, True]])
-
-        for mode in ["flow", "ar"]:
-            mask = attn_module.build_attention_mask(prefix_mask, action_mask, mode=mode)
-            prefix_part = mask[0, 0, :, :5]  # suffix-to-prefix
-            expected_prefix = torch.tensor([
-                [True, True, True, False, False],
-                [True, True, True, False, False],
-            ])
-            assert prefix_part.equal(expected_prefix), f"Failed for mode={mode}"
-
-    def test_invalid_action_tokens_masked_out(self, attn_module):
-        """Action tokens with mask=False should not attend or be attended to."""
-        prefix_mask = torch.tensor([[True, True]])
-        action_mask = torch.tensor([[True, False, True]])
-        mask = attn_module.build_attention_mask(prefix_mask, action_mask, mode="flow")
-
-        # Row for invalid token (index 1) should be all False
-        assert not mask[0, 0, 1, :].any()
-
-
-class TestSharedPrefixAttentionForward:
-    """Verify SharedPrefixAttention forward pass shape correctness."""
-
-    def test_output_shape(self):
-        attn = SharedPrefixAttention(
-            hidden_size=32,
-            num_heads=4,
-            num_kv_heads=4,
-            head_dim=8,
-            rope_theta=10000.0,
-            attention_bias=False,
-        )
-        batch_size, prefix_len, action_len = 2, 5, 3
-        hidden = torch.randn(batch_size, action_len, 32)
-        prefix_k = torch.randn(batch_size, 4, prefix_len, 8)
-        prefix_v = torch.randn(batch_size, 4, prefix_len, 8)
-        prefix_mask = torch.ones(batch_size, prefix_len, dtype=torch.bool)
-        action_mask = torch.ones(batch_size, action_len, dtype=torch.bool)
-        position_ids = torch.arange(action_len).unsqueeze(0).expand(batch_size, -1)
-
-        for mode in ["flow", "ar"]:
-            output = attn(
-                hidden_states=hidden,
-                prefix_k=prefix_k,
-                prefix_v=prefix_v,
-                prefix_mask=prefix_mask,
-                action_mask=action_mask,
-                action_position_ids=position_ids,
-                mode=mode,
-            )
-            assert output.shape == (batch_size, action_len, 32)
-
-
-# ======================================================================
-# Module 4: Processor prompt building (no model download required)
+# Module 3: Processor prompt building (no model download required)
 # ======================================================================
 
 

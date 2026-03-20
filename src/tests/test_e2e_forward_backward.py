@@ -11,9 +11,9 @@ from torch import nn
 
 from src.policy.legendvla import LegendVLA
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
-from src.model.action_expert.qwen_shared_kv_expert import ActionExpertDecoder
 from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput
+from src.tests.dummy_flow_expert import DummyFlowExpert
 
 
 # ======================================================================
@@ -41,9 +41,26 @@ class DummyBackbone(nn.Module):
         self.hidden_proj = nn.Linear(hidden_size, hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
 
-    def build_inputs_embeds(self, input_ids, pixel_values, image_grid_thw,
-                            mm_token_type_ids, state_slot_embeds, action_slot_embeds):
-        del pixel_values, image_grid_thw, mm_token_type_ids
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        pixel_values,
+        image_grid_thw,
+        pixel_values_videos,
+        video_grid_thw,
+        mm_token_type_ids,
+        state_slot_embeds,
+        action_slot_embeds,
+        state_token_id=None,
+        action_token_id=None,
+        use_cache=True,
+        output_hidden_states=True,
+        past_key_values=None,
+    ):
+        del pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw, mm_token_type_ids
+        del state_token_id, action_token_id, use_cache, output_hidden_states, past_key_values
+
         embeds = self.embed(input_ids)
         if state_slot_embeds is not None:
             mask = input_ids == self.state_token_id
@@ -55,23 +72,12 @@ class DummyBackbone(nn.Module):
             slot = mask.long().cumsum(dim=1) - 1
             idx = slot.clamp(min=0, max=action_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             embeds = torch.where(mask.unsqueeze(-1), torch.gather(action_slot_embeds, 1, idx), embeds)
-        return type("O", (), {
-            "inputs_embeds": embeds, "visual_pos_masks": None, "deepstack_visual_embeds": None,
-        })
 
-    def compute_position_ids(self, input_ids, inputs_embeds, attention_mask,
-                             image_grid_thw, mm_token_type_ids, past_key_values=None):
-        del input_ids, inputs_embeds, image_grid_thw, mm_token_type_ids, past_key_values
-        pos = attention_mask.long().cumsum(-1) - 1
-        pos = pos.masked_fill(attention_mask == 0, 0)
-        return pos.unsqueeze(0).expand(3, -1, -1)
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids = position_ids.masked_fill(attention_mask == 0, 0)
+        position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-    def forward_language_model(self, inputs_embeds, attention_mask, position_ids,
-                               use_cache, output_hidden_states, past_key_values=None,
-                               visual_pos_masks=None, deepstack_visual_embeds=None):
-        del attention_mask, use_cache, output_hidden_states
-        del past_key_values, visual_pos_masks, deepstack_visual_embeds
-        hidden = self.hidden_proj(inputs_embeds)
+        hidden = self.hidden_proj(embeds)
         B, L, _ = hidden.shape
         cache = []
         for _ in range(self.num_layers):
@@ -118,7 +124,7 @@ SD = 48         # state dim
 LAYERS = 4
 
 
-def build_model(with_diffloss=False):
+def build_model(with_diffloss=False, knowledge_insulation=True):
     backbone = DummyBackbone(hidden_size=H, num_layers=LAYERS,
                              num_heads=NH, num_kv_heads=NKV, head_dim=HD)
     diffloss = DummyDiffLoss(target_channels=AD * 2, z_channels=AH) if with_diffloss else None
@@ -135,8 +141,7 @@ def build_model(with_diffloss=False):
                                             enable_fourier_embed=False, mlp_depth=2,
                                             final_layer_norm=False, use_mlp_layer_norm=False),
         time_embedding=TimeEmbedding(TH),
-        flow_expert=ActionExpertDecoder(hidden_size=AH, intermediate_size=64, num_layers=LAYERS,
-                                        time_hidden_size=TH, num_heads=NH, num_kv_heads=NKV, head_dim=HD),
+        flow_expert=DummyFlowExpert(hidden_size=AH, time_hidden_size=TH),
         action_decoder=MLPProjector(input_dim=AH, output_dim=AD, width=AH, depth=2,
                                     final_layer_norm=False, use_mlp_layer_norm=False),
         latent_condition_projector=MLPProjector(input_dim=H, output_dim=AH, width=H, depth=2,
@@ -147,6 +152,7 @@ def build_model(with_diffloss=False):
         num_inference_steps=3,
         ar_action_chunk_size=2,
         diffloss_micro_batch_size=1,
+        knowledge_insulation=knowledge_insulation,
     )
 
 
@@ -178,6 +184,8 @@ def build_batch(batch_size=2):
         "labels": labels,
         "pixel_values": torch.randn(batch_size, 3, 16, 16),
         "image_grid_thw": torch.ones(batch_size, 3, dtype=torch.long),
+        "pixel_values_videos": None,
+        "video_grid_thw": None,
         "mm_token_type_ids": torch.zeros(batch_size, input_ids.shape[1], dtype=torch.long),
         "states": states,
         "actions": actions,
@@ -265,6 +273,33 @@ class TestEndToEndForwardBackward:
                               for p in model.flow_expert.parameters())
         assert expert_has_grad, "No gradient reached flow expert in train_flow mode"
 
+    def test_train_flow_mode_knowledge_insulation_blocks_backbone_gradients(self):
+        """Knowledge insulation should stop flow gradients from reaching the backbone through prefix KV."""
+        batch = build_batch(batch_size=1)
+
+        model_without_insulation = build_model(with_diffloss=False, knowledge_insulation=False)
+        output_without_insulation = model_without_insulation("train_flow", batch)
+        output_without_insulation["total_loss"].backward()
+        has_backbone_grad_without_insulation = any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in model_without_insulation.trainable_vlm_parameters
+        )
+        assert has_backbone_grad_without_insulation, (
+            "Expected train_flow gradients to reach backbone without knowledge insulation"
+        )
+
+        insulated_batch = build_batch(batch_size=1)
+        model_with_insulation = build_model(with_diffloss=False, knowledge_insulation=True)
+        output_with_insulation = model_with_insulation("train_flow", insulated_batch)
+        output_with_insulation["total_loss"].backward()
+        has_backbone_grad_with_insulation = any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in model_with_insulation.trainable_vlm_parameters
+        )
+        assert not has_backbone_grad_with_insulation, (
+            "Knowledge insulation should block train_flow gradients from reaching backbone"
+        )
+
     def test_gradient_isolation_between_groups(self):
         """Verify parameter group isolation: freezing one group doesn't kill gradients in others."""
         model = build_model(with_diffloss=False)
@@ -338,6 +373,8 @@ class TestEndToEndInference:
             "labels": torch.tensor([[100, 10, 11, 12]], dtype=torch.long),
             "pixel_values": torch.randn(1, 3, 16, 16),
             "image_grid_thw": torch.ones(1, 3, dtype=torch.long),
+            "pixel_values_videos": None,
+            "video_grid_thw": None,
             "mm_token_type_ids": torch.zeros(1, 4, dtype=torch.long),
             "answer_start_idx": torch.tensor([4], dtype=torch.long),
             "is_vla_data": torch.tensor([False]),

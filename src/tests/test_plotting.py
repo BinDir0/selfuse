@@ -28,7 +28,7 @@ def main():
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
-    processor = instantiate(cfg.vla_processor)
+    processor = instantiate(cfg.data_collator).batch_processor
     image_token_id = processor.image_token_id
     state_token_id = processor.state_token_id
     action_token_id = processor.action_token_id

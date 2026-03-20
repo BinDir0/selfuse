@@ -10,26 +10,6 @@ from PIL import Image
 from src.dataset.vlm_dataset import VLMWdsDataset
 
 
-class DummyTokenizer:
-    pad_token_id = 0
-
-
-class DummyPreprocessor:
-    def __init__(self):
-        self.tokenizer = DummyTokenizer()
-        self.ignore_index = -100
-
-    def __call__(self, images, text, target, mode):
-        n_img = images.shape[0]
-        return {
-            "input_ids": np.array([1, 2, 3], dtype=np.int64),
-            "labels": np.array([4, 5, 6], dtype=np.int64),
-            "attention_mask": np.array([1, 1, 1], dtype=np.int64),
-            "pixel_values": np.zeros((n_img, 3, 4, 4), dtype=np.float32),
-            "answer_start_idx": np.array(1, dtype=np.int64),
-        }
-
-
 def make_sample():
     meta = {
         "dataset_name": "demo",
@@ -55,13 +35,13 @@ def test_sample_to_data():
         mode="val",
         return_dataset_info=True,
     )
-    ds.set_preprocessor(DummyPreprocessor())
 
     data = ds.sample_to_data(make_sample())
 
-    assert data["input_ids"].shape[0] == 3
-    assert data["labels"].shape[0] == 3
-    assert data["pixel_values"].shape[0] == 2
+    assert data["images"].shape[0] == 2
+    assert data["question"] == "q"
+    assert data["answer"] == "a"
+    assert data["vision_type"] == "image"
     assert bool(data["is_vla_data"]) is False
     assert data["dataset_name"] == "demo_src"
     assert data["episode_index"].item() == 7
@@ -72,8 +52,6 @@ def test_build_pipeline_no_sliding_window():
         wds_datasets=[{"name": "demo", "shard_urls": "/tmp/fake/shard-*.tar", "weight": 1.0}],
         mode="train",
     )
-    ds.set_preprocessor(DummyPreprocessor())
-
     with patch("src.dataset.vlm_dataset.build_blended_dataset") as mock_build:
         mock_build.return_value = [{"__key__": "k0", "x": 1}]
         out = list(ds.build_pipeline())
@@ -89,12 +67,31 @@ def test_get_validation_dataset_uses_val_wds():
         val_wds_datasets=[{"name": "val", "shard_urls": "/tmp/val/shard-*.tar"}],
         mode="train",
     )
-    ds.set_preprocessor(DummyPreprocessor())
+    sentinel_collator = object()
+    ds.set_collator(sentinel_collator)
 
     val_ds = ds.get_validation_dataset()
     assert val_ds.mode == "val"
     assert val_ds.wds_datasets[0]["name"] == "val"
-    assert val_ds.preprocessor is ds.preprocessor
+    assert val_ds.collator is sentinel_collator
+
+
+def test_sample_to_data_returns_raw_fields_when_collator_is_set():
+    ds = VLMWdsDataset(
+        wds_datasets=[{"shard_urls": "/tmp/fake/shard-*.tar"}],
+        mode="val",
+        return_dataset_info=True,
+    )
+    ds.set_collator(object())
+
+    data = ds.sample_to_data(make_sample())
+
+    assert "input_ids" not in data
+    assert data["images"].shape == (2, 8, 8, 3)
+    assert data["question"] == "q"
+    assert data["answer"] == "a"
+    assert data["vision_type"] == "image"
+    assert bool(data["is_vla_data"]) is False
 
 
 def main():

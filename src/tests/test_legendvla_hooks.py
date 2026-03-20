@@ -561,11 +561,10 @@ if __name__ == "__main__":
             _load_deepspeed_checkpoint(resume_ckpt_dir)
 
         dataset = hydra.utils.instantiate(cfg.dataset)
-        vla_processor = hydra.utils.instantiate(cfg.vla_processor)
-        vlm_processor = hydra.utils.instantiate(cfg.vlm_processor)
-        dataset.vla_dataset.set_preprocessor(vla_processor)
+        data_collator = hydra.utils.instantiate(cfg.data_collator)
+        dataset.vla_dataset.set_collator(data_collator)
         if dataset.vlm_dataset is not None:
-            dataset.vlm_dataset.set_preprocessor(vlm_processor)
+            dataset.vlm_dataset.set_collator(data_collator)
 
         normalizer_path = getattr(cfg.training, "normalizer_path", None)
         if normalizer_path:

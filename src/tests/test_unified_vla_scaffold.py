@@ -3,9 +3,9 @@ from torch import nn
 
 from src.policy.legendvla import LegendVLA
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
-from src.model.action_expert.qwen_shared_kv_expert import ActionExpertDecoder
 from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput, gather_action_position_ids
+from src.tests.dummy_flow_expert import DummyFlowExpert
 
 
 class DummyBackbone(nn.Module):
@@ -26,16 +26,26 @@ class DummyBackbone(nn.Module):
         self.hidden_proj = nn.Linear(hidden_size, hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
 
-    def build_inputs_embeds(
+    def forward(
         self,
         input_ids,
+        attention_mask,
         pixel_values,
         image_grid_thw,
+        pixel_values_videos,
+        video_grid_thw,
         mm_token_type_ids,
         state_slot_embeds,
         action_slot_embeds,
+        state_token_id=None,
+        action_token_id=None,
+        use_cache=True,
+        output_hidden_states=True,
+        past_key_values=None,
     ):
-        del pixel_values, image_grid_thw, mm_token_type_ids
+        del pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw, mm_token_type_ids
+        del state_token_id, action_token_id, use_cache, output_hidden_states, past_key_values
+
         embeds = self.embed(input_ids)
         if state_slot_embeds is not None:
             state_mask = input_ids == self.state_token_id
@@ -49,31 +59,12 @@ class DummyBackbone(nn.Module):
             gather_index = action_slot.clamp(min=0, max=action_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             action_values = torch.gather(action_slot_embeds, dim=1, index=gather_index)
             embeds = torch.where(action_mask.unsqueeze(-1), action_values, embeds)
-        return type("BackboneEmbedOutput", (), {
-            "inputs_embeds": embeds,
-            "visual_pos_masks": None,
-            "deepstack_visual_embeds": None,
-        })
 
-    def compute_position_ids(self, input_ids, inputs_embeds, attention_mask, image_grid_thw, mm_token_type_ids, past_key_values=None):
-        del input_ids, inputs_embeds, image_grid_thw, mm_token_type_ids, past_key_values
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
-        return position_ids.unsqueeze(0).expand(3, -1, -1)
+        position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-    def forward_language_model(
-        self,
-        inputs_embeds,
-        attention_mask,
-        position_ids,
-        use_cache,
-        output_hidden_states,
-        past_key_values=None,
-        visual_pos_masks=None,
-        deepstack_visual_embeds=None,
-    ):
-        del attention_mask, use_cache, output_hidden_states, past_key_values, visual_pos_masks, deepstack_visual_embeds
-        hidden = self.hidden_proj(inputs_embeds)
+        hidden = self.hidden_proj(embeds)
         batch_size, seq_len, _ = hidden.shape
         cache = []
         for _ in range(self.num_layers):
@@ -124,6 +115,8 @@ def make_vla_batch(batch_size=2, action_horizon=4, action_dim=48):
         "labels": labels,
         "pixel_values": torch.randn(batch_size, 3, 16, 16),
         "image_grid_thw": torch.ones(batch_size, 3, dtype=torch.long),
+        "pixel_values_videos": None,
+        "video_grid_thw": None,
         "mm_token_type_ids": torch.zeros(batch_size, input_ids.shape[1], dtype=torch.long),
         "states": states,
         "actions": actions,
@@ -145,6 +138,8 @@ def make_vlm_batch():
         "labels": input_ids.clone(),
         "pixel_values": torch.randn(1, 3, 16, 16),
         "image_grid_thw": torch.ones(1, 3, dtype=torch.long),
+        "pixel_values_videos": None,
+        "video_grid_thw": None,
         "mm_token_type_ids": torch.zeros_like(input_ids),
         "answer_start_idx": torch.tensor([4], dtype=torch.long),
         "is_vla_data": torch.tensor([False]),
@@ -183,11 +178,7 @@ def make_model(diffloss=None):
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
     time_embedding = TimeEmbedding(time_hidden_size)
-    flow_expert = ActionExpertDecoder(
-        hidden_size=action_hidden_size, intermediate_size=64, num_layers=4,
-        time_hidden_size=time_hidden_size,
-        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
-    )
+    flow_expert = DummyFlowExpert(hidden_size=action_hidden_size, time_hidden_size=time_hidden_size)
     action_decoder = MLPProjector(
         input_dim=action_hidden_size, output_dim=action_dim,
         width=action_hidden_size, depth=2,

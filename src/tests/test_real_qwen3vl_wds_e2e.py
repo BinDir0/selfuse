@@ -10,16 +10,17 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from src.dataset.qwen3_vl_processing import Qwen3VLProcessor, Qwen3VLVLAProcessor
+from src.dataset.qwen3_vl_batching import Qwen3VLBatchProcessor, Qwen3VLChatFormatter
+from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.dataset.vla_dataset import UnifiedWdsDataset, VLAWdsDataset
 from src.dataset.vlm_dataset import VLMWdsDataset
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.action.diffloss import DiffLoss
-from src.model.action_expert.qwen_shared_kv_expert import ActionExpertDecoder
 from src.model.common.modules import TimeEmbedding
 from src.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from src.model.vlm.qwen3_vl_backbone import Qwen3VLBackboneWrapper
 from src.policy.legendvla import LegendVLA
+from src.tests.dummy_flow_expert import DummyFlowExpert
 
 
 MODEL_NAME = os.environ.get("LEGENDVLA_REAL_MODEL", "Qwen/Qwen3-VL-4B-Instruct")
@@ -198,15 +199,7 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
             use_mlp_layer_norm=False,
         ),
         time_embedding=TimeEmbedding(time_hidden_size),
-        flow_expert=ActionExpertDecoder(
-            hidden_size=action_hidden_size,
-            intermediate_size=256,
-            num_layers=2,
-            time_hidden_size=time_hidden_size,
-            num_heads=backbone.num_heads,
-            num_kv_heads=backbone.num_kv_heads,
-            head_dim=backbone.head_dim,
-        ),
+        flow_expert=DummyFlowExpert(hidden_size=action_hidden_size, time_hidden_size=time_hidden_size),
         action_decoder=MLPProjector(
             input_dim=action_hidden_size,
             output_dim=48,
@@ -272,8 +265,14 @@ def preprocess_batch(batch: dict[str, torch.Tensor], dtype: torch.dtype, device:
     inputs = {
         "input_ids": batch["input_ids"].to(device=device),
         "attention_mask": batch["attention_mask"].to(device=device),
-        "pixel_values": batch["pixel_values"].to(device=device, dtype=dtype),
-        "image_grid_thw": batch["image_grid_thw"].to(device=device),
+        "pixel_values": batch["pixel_values"].to(device=device, dtype=dtype)
+        if batch["pixel_values"] is not None else None,
+        "image_grid_thw": batch["image_grid_thw"].to(device=device)
+        if batch["image_grid_thw"] is not None else None,
+        "pixel_values_videos": batch["pixel_values_videos"].to(device=device, dtype=dtype)
+        if batch["pixel_values_videos"] is not None else None,
+        "video_grid_thw": batch["video_grid_thw"].to(device=device)
+        if batch["video_grid_thw"] is not None else None,
         "mm_token_type_ids": batch["mm_token_type_ids"].to(device=device),
         "states": batch["states"].to(device=device, dtype=dtype),
         "answer_start_idx": batch["answer_start_idx"].to(device=device),
@@ -311,24 +310,23 @@ def build_real_dataloader(root: Path) -> DataLoader:
         shuffle_buffer=1,
     )
 
-    vla_processor = Qwen3VLVLAProcessor(
-        model_name_or_path=MODEL_NAME,
-        max_seq_len=96,
-        ignore_index=-100,
-        tokenizer_padding="max_length",
-        trust_remote_code=False,
-        single_image_only=True,
+    data_collator = UnifiedVLACollator(
+        formatter=Qwen3VLChatFormatter(),
+        batch_processor=Qwen3VLBatchProcessor(
+            model_name_or_path=MODEL_NAME,
+            processor_init_kwargs={
+                "trust_remote_code": False,
+                "size": {"shortest_edge": 50176, "longest_edge": 50176},
+            },
+            processor_call_kwargs={
+                "padding": "longest",
+                "return_tensors": "pt",
+            },
+            ignore_index=-100,
+        ),
     )
-    vlm_processor = Qwen3VLProcessor(
-        model_name_or_path=MODEL_NAME,
-        max_seq_len=96,
-        ignore_index=-100,
-        tokenizer_padding="max_length",
-        trust_remote_code=False,
-        single_image_only=True,
-    )
-    vla_dataset.set_preprocessor(vla_processor)
-    vlm_dataset.set_preprocessor(vlm_processor)
+    vla_dataset.set_collator(data_collator)
+    vlm_dataset.set_collator(data_collator)
     vla_dataset.set_normalizer(make_identity_normalizer())
 
     unified_dataset = UnifiedWdsDataset(
