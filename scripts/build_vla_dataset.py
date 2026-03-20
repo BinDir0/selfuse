@@ -94,6 +94,41 @@ def interpolate_extrinsics(tstamps, traj, scale, total_frames):
     return mats
 
 
+def normalize_slam_keyframes(tstamps, traj):
+    """Align SLAM keyframe timestamps with trajectory rows, tolerating dirty data."""
+    tstamps = np.asarray(tstamps, dtype=np.int64).reshape(-1)
+    traj = np.asarray(traj)
+
+    if len(tstamps) == 0 or len(traj) == 0:
+        return tstamps[:0], traj[:0]
+
+    if len(traj) == len(tstamps):
+        aligned_tstamps = tstamps
+        aligned_traj = traj
+    else:
+        zero_based_valid = (tstamps >= 0) & (tstamps < len(traj))
+        one_based = tstamps - 1
+        one_based_valid = (one_based >= 0) & (one_based < len(traj))
+
+        if not zero_based_valid.all() and one_based_valid.all():
+            aligned_tstamps = tstamps
+            aligned_traj = traj[one_based]
+        else:
+            aligned_tstamps = tstamps[zero_based_valid]
+            aligned_traj = traj[aligned_tstamps]
+
+    if len(aligned_tstamps) == 0:
+        return aligned_tstamps, aligned_traj
+
+    order = np.argsort(aligned_tstamps, kind="stable")
+    aligned_tstamps = aligned_tstamps[order]
+    aligned_traj = aligned_traj[order]
+
+    keep = np.ones(len(aligned_tstamps), dtype=bool)
+    keep[1:] = aligned_tstamps[1:] != aligned_tstamps[:-1]
+    return aligned_tstamps[keep], aligned_traj[keep]
+
+
 def discover_episodes(input_dir, episode_list=None, max_episodes=None, cache_file=None, require_world_res=True):
     """Discover episode directories under BuildAI processed output."""
     if cache_file is None:
@@ -433,8 +468,9 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
             scale = float(slam_data["scale"])
             img_focal = float(slam_data["img_focal"])
             img_center = slam_data["img_center"]
-            if len(traj) != len(tstamps):
-                traj = traj[tstamps]
+            tstamps, traj = normalize_slam_keyframes(tstamps, traj)
+            if len(tstamps) == 0:
+                raise ValueError("no valid SLAM keyframes after alignment")
             extrinsics = interpolate_extrinsics(tstamps, traj, scale, num_frames)
             intrinsic = np.array(
                 [img_focal, img_focal, float(img_center[0]), float(img_center[1])],
