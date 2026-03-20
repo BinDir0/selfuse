@@ -248,7 +248,7 @@ def get_episode_feature_cache_path(ep, feature_cache_dir):
 
 
 def plan_shards(episodes, frames_per_shard, output_dir):
-    """Split valid episode frames into fixed-size shard tasks."""
+    """Pack whole episodes into shards near the target frame count."""
     tasks = []
     shard_slices = []
     shard_frame_count = 0
@@ -275,23 +275,23 @@ def plan_shards(episodes, frames_per_shard, output_dir):
 
     for ep in episodes:
         num_frames = ep["num_valid_frames"]
-        start = 0
-        while start < num_frames:
-            remain = frames_per_shard - shard_frame_count
-            take = min(remain, num_frames - start)
-            shard_slices.append(
-                {
-                    "crop_dir": ep["crop_dir"],
-                    "episode_id": ep["episode_id"],
-                    "episode_index": ep["episode_index"],
-                    "frame_start": start,
-                    "frame_end": start + take,
-                }
-            )
-            shard_frame_count += take
-            start += take
-            if shard_frame_count >= frames_per_shard:
-                flush_current()
+        if shard_slices and shard_frame_count + num_frames > frames_per_shard:
+            flush_current()
+
+        shard_slices.append(
+            {
+                "crop_dir": ep["crop_dir"],
+                "episode_id": ep["episode_id"],
+                "episode_index": ep["episode_index"],
+                "frame_start": 0,
+                "frame_end": num_frames,
+            }
+        )
+        shard_frame_count += num_frames
+
+        # Keep oversized episodes intact in their own shard.
+        if shard_frame_count >= frames_per_shard:
+            flush_current()
 
     flush_current()
     return tasks
