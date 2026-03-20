@@ -11,11 +11,8 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
-from src.utils.pytorch_util import dict_apply
-
 log = logging.getLogger(__name__)
 
-# Resolved once at import time
 _CONFIG_DIR = str(pathlib.Path(__file__).resolve().parents[1] / "config")
 
 
@@ -47,7 +44,6 @@ class LegendVLAInference(nn.Module):
         super().__init__()
         self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
 
-        # Use Hydra compose API to properly resolve defaults and interpolations
         model_cfg = self.compose_model_config(model_config_name)
 
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
@@ -63,11 +59,11 @@ class LegendVLAInference(nn.Module):
             if self.model.diffloss is not None:
                 self.model.diffloss.num_inference_steps = flow_sampling_steps
 
-        self.processor = hydra.utils.instantiate(model_cfg.vla_processor)
-        if hasattr(self.processor, "tokenizer_padding"):
-            self.processor.tokenizer_padding = tokenizer_padding
-        if max_length is not None and hasattr(self.processor, "max_seq_len"):
-            self.processor.max_seq_len = max_length
+        collator_mode = "infer" if mode == "flow" else "infer-ar"
+        self.data_collator = hydra.utils.instantiate(model_cfg.data_collator).for_mode(collator_mode)
+        self.data_collator.batch_processor.processor_call_kwargs["padding"] = tokenizer_padding
+        if max_length is not None:
+            self.data_collator.batch_processor.processor_call_kwargs["max_length"] = max_length
 
         self.normalizer = self.load_normalizer(normalizer_path) if normalizer_path else None
         self.use_relative_action = use_relative_action
@@ -78,6 +74,8 @@ class LegendVLAInference(nn.Module):
         self.action_dim = int(self.model.shape_meta["action"]["shape"][0])
         self.state_horizon = int(self.model.shape_meta["obs"]["state"]["horizon"])
         self.state_dim = int(self.model.shape_meta["obs"]["state"]["shape"][0])
+        self.image_stride = int(self.model.shape_meta["obs"]["rgb"].get("stride", 1))
+        self.video_base_fps = float(getattr(model_cfg, "video_base_fps", 30.0))
         self.ar_max_new_tokens = ar_max_new_tokens or self.action_horizon
         self.ar_temperature = ar_temperature
         self.ar_cfg = ar_cfg
@@ -179,58 +177,68 @@ class LegendVLAInference(nn.Module):
         return np.concatenate([states, padding], axis=0)
 
     def prepare_process(self, obs: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert raw observation into processor inputs."""
+        """Convert one runtime observation into the single-sample schema expected by the collator.
+
+        Input contract:
+        - `obs["image"]` is the already stacked visual history used as one Qwen video sample.
+        - `obs["states"]` is shaped `[T, D]` before padding/truncation.
+        - `obs["intrinsic"]` is either a flattened camera intrinsic vector or a matrix that can be reduced to
+          `[fx, fy, cx, cy]`.
+        - `obs["instruction"]` is optional when `default_instruction` is configured.
+
+        Output contract:
+        - The returned `sample` matches the VLA-side raw sample schema that `UnifiedVLACollator` consumes during
+          training, so inference reuses the exact same batching path.
+        """
         instruction = obs.get("instruction") or self.default_instruction
-        images = obs["image"]
-        states = obs["states"]
-        n_states = torch.full((1,), states.shape[0], dtype=torch.int32)
-        intrinsic = self.extract_intrinsic(obs["intrinsic"])
+        if instruction is None:
+            raise ValueError("Inference requires an instruction.")
 
-        processor_mode = "infer" if self.mode == "flow" else "infer-ar"
-        processed = self.processor(
-            text=instruction,
-            images=images,
-            states=states,
-            actions=np.zeros((self.action_horizon, self.action_dim), dtype=np.float32),
-            intrinsic=intrinsic,
-            depth_images=obs.get("depth"),
-            mode=processor_mode,
-        )
-        processed = dict_apply(processed, lambda x: torch.from_numpy(x)[None, ...])
-
+        states = np.asarray(obs["states"], dtype=np.float32)
         if self.normalizer is not None:
             key = "states" if self.use_relative_action else "motions"
             states = self.normalizer[key](states)
-        states = self.pad_states(states)
-        states = torch.from_numpy(states)[None, ...]
-        return {"processed": processed, "states": states, "n_states": n_states}
+
+        sample = {
+            "images": torch.as_tensor(obs["image"]),
+            "instruction": instruction,
+            "intrinsic": torch.from_numpy(self.extract_intrinsic(obs["intrinsic"])),
+            "vision_type": "video",
+            "video_fps": torch.tensor(self.video_base_fps / self.image_stride, dtype=torch.float32),
+            "states": torch.from_numpy(self.pad_states(states)),
+            "n_states": torch.tensor(min(states.shape[0], self.state_horizon), dtype=torch.int32),
+            "actions": torch.zeros((self.action_horizon, self.action_dim), dtype=torch.float32),
+            "actions_valid_mask": torch.ones((self.action_horizon, self.action_dim), dtype=torch.bool),
+            "n_actions": torch.tensor(self.action_horizon, dtype=torch.int32),
+            "is_vla_data": torch.tensor(True, dtype=torch.bool),
+        }
+        batch = self.data_collator([sample])
+        return {"batch": batch}
 
     def build_model_inputs(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
-        """Construct model input tensors from preprocessed data."""
-        processed = prepared["processed"]
-        input_ids = processed["input_ids"]
-        batch_size = input_ids.shape[0]
+        """Construct model input tensors from one collated sample."""
+        batch = prepared["batch"]
 
         inputs: dict[str, Any] = {
-            "input_ids": input_ids,
-            "attention_mask": processed["attention_mask"],
-            "pixel_values": processed["pixel_values"].to(self.dtype),
-            "image_grid_thw": processed["image_grid_thw"],
-            "mm_token_type_ids": processed["mm_token_type_ids"],
-            "states": prepared["states"].to(self.dtype),
-            "n_states": prepared["n_states"],
-            "is_vla_data": torch.ones(batch_size, dtype=torch.bool),
+            "input_ids": batch["input_ids"],
+            "attention_mask": batch["attention_mask"],
+            "pixel_values": batch["pixel_values"].to(self.dtype)
+            if batch["pixel_values"] is not None else None,
+            "image_grid_thw": batch["image_grid_thw"],
+            "pixel_values_videos": batch["pixel_values_videos"].to(self.dtype)
+            if batch["pixel_values_videos"] is not None else None,
+            "video_grid_thw": batch["video_grid_thw"],
+            "mm_token_type_ids": batch["mm_token_type_ids"],
+            "states": batch["states"].to(self.dtype),
+            "n_states": batch["n_states"],
+            "n_actions": batch["n_actions"].to(dtype=torch.long),
+            "is_vla_data": batch["is_vla_data"],
         }
 
         if self.mode == "flow":
-            inputs["n_actions"] = torch.full((batch_size,), self.action_horizon, dtype=torch.long)
-            inputs["answer_start_idx"] = processed["answer_start_idx"]
-            inputs["actions"] = torch.zeros(
-                batch_size, self.action_horizon, self.action_dim, dtype=self.dtype,
-            )
-            inputs["actions_valid_mask"] = torch.ones(
-                batch_size, self.action_horizon, self.action_dim, dtype=torch.bool,
-            )
+            inputs["answer_start_idx"] = batch["answer_start_idx"]
+            inputs["actions"] = batch["actions"].to(self.dtype)
+            inputs["actions_valid_mask"] = batch["actions_valid_mask"].to(dtype=torch.bool)
 
         return inputs
 
@@ -254,10 +262,9 @@ class LegendVLAInference(nn.Module):
                 prev_action_chunk=prev_action_chunk,
                 inference_delay=inference_delay,
             )
-        else:
-            return self.model(
-                "infer_vla", inputs,
-                max_new_tokens=self.ar_max_new_tokens,
-                temperature=self.ar_temperature,
-                cfg=self.ar_cfg,
-            )["generated_actions"]
+        return self.model(
+            "infer_vla", inputs,
+            max_new_tokens=self.ar_max_new_tokens,
+            temperature=self.ar_temperature,
+            cfg=self.ar_cfg,
+        )["generated_actions"]
