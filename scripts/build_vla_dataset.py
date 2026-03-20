@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 import tarfile
-from multiprocessing import Pool, current_process
+from multiprocessing import Pool, current_process, get_context
 from pathlib import Path
 
 import joblib
@@ -791,7 +791,8 @@ def main():
         _worker_init(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir)
         results_iter = (_worker_process_shard(task) for task in shard_tasks)
     else:
-        pool = Pool(
+        mp_context = get_context("spawn") if mano_device.type == "cuda" else get_context()
+        pool = mp_context.Pool(
             writer_workers,
             initializer=_worker_init,
             initargs=(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir),
