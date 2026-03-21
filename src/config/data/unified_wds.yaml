@@ -79,9 +79,11 @@ data_collator:
       min_pixels: 65536
       max_pixels: 307200
     processor_call_kwargs:
-      padding: ${data.tokenizer_padding}
-      max_length: ${data.max_vlm_tokens}
-      return_tensors: pt
+      text_kwargs:
+        padding: ${data.tokenizer_padding}
+        max_length: ${data.max_vlm_tokens}
+        truncation: True
+        return_tensors: pt
     ignore_index: ${data.ignore_index}
     padding_side: right
     state_token: ${added_slot_tokens.state}

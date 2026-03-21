@@ -165,7 +165,6 @@ class Qwen3VLBatchProcessor:
         self.model_name_or_path = model_name_or_path
         self.processor_init_kwargs = dict(processor_init_kwargs or {})
         self.processor_call_kwargs = dict(processor_call_kwargs or {})
-        self.processor_call_kwargs.setdefault("return_tensors", "pt")
         self.ignore_index = int(ignore_index)
         self.padding_side = padding_side
         self.state_token = state_token

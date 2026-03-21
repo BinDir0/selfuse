@@ -146,6 +146,39 @@ class Qwen3ActionExpert(nn.Module):
         )
         self.norm = Qwen3VLTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def build_attention_mask(
+        self,
+        prefix_mask: torch.Tensor,
+        action_mask: torch.Tensor,
+        mode: str,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Build a prefix-aware 4D additive mask for action queries.
+
+        Query positions always come from the action stream. Keys come from the
+        concatenation of `[prefix cache | action states]`.
+        """
+        prefix_mask = prefix_mask.to(device=action_mask.device, dtype=torch.bool)
+        action_mask = action_mask.to(dtype=torch.bool)
+
+        batch_size, action_len = action_mask.shape
+        prefix_len = prefix_mask.shape[1]
+        device = action_mask.device
+
+        prefix_visible = prefix_mask[:, None, None, :].expand(batch_size, 1, action_len, prefix_len)
+        action_visible = action_mask[:, None, None, :].expand(batch_size, 1, action_len, action_len)
+
+        if mode == "ar":
+            causal = torch.tril(torch.ones(action_len, action_len, dtype=torch.bool, device=device))
+            action_visible = action_visible & causal[None, None, :, :]
+        elif mode != "flow":
+            raise ValueError(f"Unsupported action expert mode: {mode}")
+
+        keep_mask = torch.cat([prefix_visible, action_visible], dim=-1)
+        fill_value = torch.finfo(dtype).min
+        attention_mask = torch.zeros_like(keep_mask, dtype=dtype)
+        return attention_mask.masked_fill(~keep_mask, fill_value)
+
     def forward(
         self,
         action_embeds: torch.Tensor,
@@ -168,33 +201,13 @@ class Qwen3ActionExpert(nn.Module):
         for layer_idx, layer_kv in enumerate(prefix_cache.layers[:self.num_layers]):
             past_key_values.update(layer_kv.key, layer_kv.value, layer_idx)
 
-        full_attention_mask = torch.cat(
-            [
-                prefix_cache.mask.to(device=action_mask.device, dtype=torch.bool),
-                action_mask.to(dtype=torch.bool),
-            ],
-            dim=-1,
+        attention_mask = self.build_attention_mask(
+            prefix_mask=prefix_cache.mask,
+            action_mask=action_mask,
+            mode=mode,
+            dtype=hidden_states.dtype,
         )
-        from transformers.masking_utils import create_bidirectional_mask, create_causal_mask
-
-        if mode == "ar":
-            attention_mask = create_causal_mask(
-                config=self.config,
-                inputs_embeds=hidden_states,
-                attention_mask=full_attention_mask,
-                past_key_values=past_key_values,
-            )
-            is_causal = True
-        elif mode == "flow":
-            attention_mask = create_bidirectional_mask(
-                config=self.config,
-                inputs_embeds=hidden_states,
-                attention_mask=full_attention_mask,
-                past_key_values=past_key_values,
-            )
-            is_causal = False
-        else:
-            raise ValueError(f"Unsupported action expert mode: {mode}")
+        is_causal = mode == "ar"
 
         if action_position_ids.ndim == 3:
             action_position_ids = action_position_ids[0]
