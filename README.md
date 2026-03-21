@@ -131,6 +131,20 @@ python scripts/batch_infer.py \
   --run_dir batch_runs/20260301_120000  # specify existing run directory
 ```
 
+## Repository Layout
+
+The repository is organized so CLI entrypoints stay stable while reusable pipeline logic lives under `lib/pipeline`.
+
+- `lib/pipeline/stages/`: canonical implementations for `detect_track`, `motion`, `infiller`, and `slam`
+- `lib/pipeline/stage_api.py`: shared task/config/validation layer for batch and pipeline orchestration
+- `lib/pipeline/exporters/`: dataset/export code, including the WebDataset builder
+- `scripts/`: user-facing entrypoints such as `batch_infer.py`, `batch_worker.py`, and `build_vla_dataset.py`
+- `scripts/scripts_test_video/`: compatibility wrappers for older script paths
+- `deprecated/`: older experiments and non-primary pipeline variants
+
+For future integration work, prefer importing from `lib.pipeline...` instead of `scripts/scripts_test_video...`.
+More detail is documented in [`docs/pipeline_structure.md`](docs/pipeline_structure.md).
+
 ## Training
 The training code will be released soon. 
 

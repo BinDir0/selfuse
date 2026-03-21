@@ -28,9 +28,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from lib.eval_utils.custom_utils import load_slam_cam
-from scripts.scripts_test_video.detect_track_video import detect_track_video
-from scripts.scripts_test_video.hawor_slam import hawor_slam
-from scripts.scripts_test_video.hawor_video import hawor_infiller, hawor_motion_estimation
+from lib.pipeline.stages.detect_track import detect_track_video
+from lib.pipeline.stages.slam import hawor_slam
+from lib.pipeline.stages.hawor_video import hawor_infiller, hawor_motion_estimation
 
 
 def project_3d_to_2d(vertices, camera_pose, focal_length, width, height):

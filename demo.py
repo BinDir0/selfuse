@@ -6,9 +6,9 @@ import torch
 sys.path.insert(0, os.path.dirname(__file__))
 import numpy as np
 import joblib
-from scripts.scripts_test_video.detect_track_video import detect_track_video
-from scripts.scripts_test_video.hawor_video import hawor_motion_estimation, hawor_infiller
-from scripts.scripts_test_video.hawor_slam import hawor_slam
+from lib.pipeline.stages.detect_track import detect_track_video
+from lib.pipeline.stages.hawor_video import hawor_motion_estimation, hawor_infiller
+from lib.pipeline.stages.slam import hawor_slam
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from lib.eval_utils.custom_utils import load_slam_cam
 from lib.vis.run_vis2 import run_vis2_on_video, run_vis2_on_video_cam
@@ -117,6 +117,5 @@ if __name__ == '__main__':
             print(f"Video saved to: {video_path}")
 
     print("finish")
-
 
 

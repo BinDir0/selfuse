@@ -10,8 +10,6 @@ import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
-import joblib
-import numpy as np
 import torch
 
 # Suppress common warnings to reduce output noise
@@ -25,8 +23,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lib.pipeline.stage_api import (
+    STAGES,
+    PipelineVideoTask,
+    StageExecutionConfig,
+    get_seq_folder,
+    get_track_range,
+    is_stage_complete,
+    run_pipeline_stage,
+)
 from lib.pipeline.video_index import VideoDescriptor
-from lib.pipeline.frame_source import ShardVideoFrameSource
 
 # Set temporary directory to shared storage instead of local /tmp
 # IMPORTANT: Set this AFTER importing torch to avoid library loading issues
@@ -41,11 +47,10 @@ tempfile.tempdir = str(SHARED_TMP_DIR)
 os.environ["HAWOR_QUIET"] = "1"
 
 
-STAGES = ["detect_track", "motion", "slam", "infiller"]
-
-
 def set_determinism(seed: int):
     random.seed(seed)
+    import numpy as np
+
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -53,208 +58,6 @@ def set_determinism(seed: int):
     # benchmark=True: safe because input sizes are fixed (256x256 crops),
     # gives 5-15% speedup on convolutions via cuDNN auto-tuning
     torch.backends.cudnn.benchmark = True
-
-
-def get_seq_folder(video_path: str = None, descriptor: VideoDescriptor = None) -> Path:
-    if descriptor is not None:
-        return Path(descriptor.seq_folder)
-    video_path = Path(video_path)
-    return video_path.parent / video_path.stem
-
-
-def get_track_range(seq_folder: Path, fast=False):
-    """
-    Get track range from seq_folder.
-
-    Args:
-        seq_folder: Sequence folder path
-        fast: If True, use ultra-fast method (read from cache file)
-    """
-    if fast:
-        # Ultra-fast mode: read from .track_range cache file
-        cache_file = seq_folder / ".track_range"
-        if cache_file.exists():
-            try:
-                content = cache_file.read_text().strip()
-                start_idx, end_idx = map(int, content.split(","))
-                return start_idx, end_idx
-            except:
-                pass  # Fallback to directory scan
-
-        # Fast mode: assume standard naming tracks_0_N
-        # Try to find it without full iteration
-        for p in seq_folder.iterdir():
-            if p.is_dir() and p.name.startswith("tracks_0_"):
-                parts = p.name.split("_")
-                if len(parts) == 3:
-                    try:
-                        start_idx = int(parts[1])
-                        end_idx = int(parts[2])
-                        # Cache for next time
-                        cache_file.write_text(f"{start_idx},{end_idx}")
-                        return start_idx, end_idx
-                    except ValueError:
-                        pass
-        # Fallback to slow method if fast fails
-
-    # Slow method: glob all tracks_*_* directories
-    track_dirs = []
-    for p in seq_folder.glob("tracks_*_*"):
-        parts = p.name.split("_")
-        if len(parts) != 3:
-            continue
-        try:
-            start_idx = int(parts[1])
-            end_idx = int(parts[2])
-        except ValueError:
-            continue
-
-        # Check if directory is empty (from previous failures)
-        # Empty tracks directories should be cleaned up
-        if p.is_dir():
-            contents = list(p.iterdir())
-            if len(contents) == 0:
-                # Empty directory - remove it
-                try:
-                    p.rmdir()
-                    continue  # Skip this directory
-                except:
-                    pass  # If removal fails, keep it in the list
-
-        track_dirs.append((start_idx, end_idx, p))
-
-    if not track_dirs:
-        raise FileNotFoundError(f"No tracks_*_* folder found under {seq_folder}")
-
-    track_dirs.sort(key=lambda x: (x[1], x[0]))
-    start_idx, end_idx, _ = track_dirs[-1]
-
-    # Cache the result
-    cache_file = seq_folder / ".track_range"
-    cache_file.write_text(f"{start_idx},{end_idx}")
-
-    return start_idx, end_idx
-
-
-def validate_stage_output(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
-    tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-
-    if stage == "detect_track":
-        assert (tracks_dir / "model_boxes.npy").exists(), "model_boxes.npy missing"
-        assert (tracks_dir / "model_tracks.npy").exists(), "model_tracks.npy missing"
-        return
-
-    if stage == "motion":
-        # Check for incomplete outputs and auto-fix
-        frame_chunks_file = tracks_dir / "frame_chunks_all.npy"
-        model_masks_file = tracks_dir / "model_masks.npy"
-
-        if frame_chunks_file.exists() and not model_masks_file.exists():
-            # Incomplete output detected - remove to force re-run
-            import sys
-            print(f"Warning: Incomplete motion output detected for {seq_folder}", file=sys.stderr)
-            print(f"  - frame_chunks_all.npy exists but model_masks.npy missing", file=sys.stderr)
-            print(f"  - Removing incomplete output to force re-run", file=sys.stderr)
-            frame_chunks_file.unlink()
-            raise AssertionError("Incomplete motion output - removed and will retry")
-
-        assert frame_chunks_file.exists(), "frame_chunks_all.npy missing"
-        assert model_masks_file.exists(), "model_masks.npy missing"
-        # Read only the npy header (~200 bytes) instead of loading 264-622 MB
-        with open(model_masks_file, 'rb') as f:
-            version = np.lib.format.read_magic(f)
-            shape, fortran, dtype = np.lib.format._read_array_header(f, version)
-        assert len(shape) == 3, f"model_masks should be (T,H,W), got shape {shape}"
-        return
-
-    if stage == "slam":
-        slam_file = seq_folder / "SLAM" / f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
-        assert slam_file.exists(), "SLAM npz missing"
-        data = np.load(slam_file, allow_pickle=True)
-        assert "traj" in data and "scale" in data, "invalid SLAM npz keys"
-        return
-
-    if stage == "infiller":
-        world_file = seq_folder / "world_space_res.pth"
-        assert world_file.exists(), "world_space_res.pth missing"
-        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_file)
-        assert pred_trans.shape[0] == 2 and pred_trans.shape[-1] == 3, "pred_trans shape invalid"
-        assert pred_rot.shape[0] == 2 and pred_rot.shape[-1] == 3, "pred_rot shape invalid"
-        assert pred_hand_pose.shape[0] == 2 and pred_hand_pose.shape[-1] == 45, "pred_hand_pose shape invalid"
-        assert pred_betas.shape[0] == 2 and pred_betas.shape[-1] == 10, "pred_betas shape invalid"
-        assert pred_valid.shape[0] == 2, "pred_valid shape invalid"
-        return
-
-    raise ValueError(f"Unknown stage: {stage}")
-
-
-def is_stage_complete(stage: str, seq_folder: Path, fast_check=False):
-    """
-    Check if a stage is complete.
-
-    Args:
-        stage: Stage name
-        seq_folder: Sequence folder path
-        fast_check: If True, use ultra-fast check (only check .done marker file)
-    """
-    # Check if seq_folder exists first
-    if not seq_folder.exists():
-        return False
-
-    if fast_check:
-        # Ultra-fast check: only check .done marker file
-        done_marker = seq_folder / f".{stage}.done"
-        if done_marker.exists():
-            return True
-        # If no marker, fall through to file existence check
-
-    try:
-        start_idx, end_idx = get_track_range(seq_folder, fast=fast_check)
-
-        if fast_check:
-            # Fast check: only verify files exist, don't load them
-            result = validate_stage_output_fast(stage, seq_folder, start_idx, end_idx)
-            # Create .done marker for next time
-            if result:
-                done_marker = seq_folder / f".{stage}.done"
-                done_marker.touch()
-            return result
-        else:
-            # Full validation: load and check content
-            validate_stage_output(stage, seq_folder, start_idx, end_idx)
-            # Create .done marker
-            done_marker = seq_folder / f".{stage}.done"
-            done_marker.touch()
-            return True
-    except Exception:
-        return False
-
-
-def validate_stage_output_fast(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
-    """Fast validation: only check if required files exist."""
-    tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-
-    if stage == "detect_track":
-        return (
-            (tracks_dir / "model_boxes.npy").exists() and
-            (tracks_dir / "model_tracks.npy").exists()
-        )
-
-    if stage == "motion":
-        return (
-            (tracks_dir / "frame_chunks_all.npy").exists() and
-            (tracks_dir / "model_masks.npy").exists()
-        )
-
-    if stage == "slam":
-        slam_file = seq_folder / "SLAM" / f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
-        return slam_file.exists()
-
-    if stage == "infiller":
-        world_res = seq_folder / "world_space_res.pth"
-        return world_res.exists()
-
-    return False
 
 
 class WorkerRuntime:
@@ -271,6 +74,8 @@ class WorkerRuntime:
         metric3d_batch_size: int = 8,
         detect_batch_size: int = 256,
         detect_io_workers: int = 16,
+        detect_device: str = "cuda:0",
+        detect_half_precision: bool = True,
         infiller_window_batch_size: int = 64,
         rebuild_cam_space_cache: bool = False,
     ):
@@ -285,8 +90,26 @@ class WorkerRuntime:
         self.metric3d_batch_size = metric3d_batch_size
         self.detect_batch_size = detect_batch_size
         self.detect_io_workers = detect_io_workers
+        self.detect_device = detect_device
+        self.detect_half_precision = detect_half_precision
         self.infiller_window_batch_size = infiller_window_batch_size
         self.rebuild_cam_space_cache = rebuild_cam_space_cache
+        self.stage_config = StageExecutionConfig(
+            img_focal=img_focal,
+            input_type=input_type,
+            checkpoint=checkpoint,
+            infiller_weight=infiller_weight,
+            chunk_batch_size=chunk_batch_size,
+            num_workers=num_workers,
+            render_batch_size=render_batch_size,
+            metric3d_batch_size=metric3d_batch_size,
+            detect_batch_size=detect_batch_size,
+            detect_io_workers=detect_io_workers,
+            infiller_window_batch_size=infiller_window_batch_size,
+            rebuild_cam_space_cache=rebuild_cam_space_cache,
+            detect_device=detect_device,
+            detect_half_precision=detect_half_precision,
+        )
 
         self.detector_runner = None
         self.motion_runner = None
@@ -299,28 +122,6 @@ class WorkerRuntime:
         if self.gpu is not None and self.gpu != "":
             os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu)
 
-    def build_stage_args(self, video_path: str):
-        class StageArgs:
-            pass
-
-        args = StageArgs()
-        args.img_focal = self.img_focal
-        args.video_path = video_path
-        args.input_type = self.input_type
-        args.checkpoint = self.checkpoint
-        args.infiller_weight = self.infiller_weight
-        args.chunk_batch_size = self.chunk_batch_size
-        args.num_workers = self.num_workers
-        args.render_batch_size = self.render_batch_size
-        args.metric3d_batch_size = self.metric3d_batch_size
-        args.detect_batch_size = self.detect_batch_size
-        args.detect_io_workers = self.detect_io_workers
-        args.infiller_window_batch_size = self.infiller_window_batch_size
-        args.rebuild_cam_space_cache = self.rebuild_cam_space_cache
-        args.vis_mode = "world"
-        args.skip_vis = True
-        return args
-
     def ensure_runner(self, stage: str):
         if stage == "detect_track" and self.detector_runner is None:
             from ultralytics import YOLO
@@ -328,7 +129,7 @@ class WorkerRuntime:
             self.detector_runner = YOLO('./weights/external/detector.pt')
 
         if stage == "motion" and self.motion_runner is None:
-            from scripts.scripts_test_video.hawor_video import build_motion_runner
+            from lib.pipeline.stages.motion import build_motion_runner
 
             self.motion_runner = build_motion_runner(self.checkpoint)
 
@@ -356,7 +157,7 @@ class WorkerRuntime:
             self.mano_left.shapedirs[:, 0, :] *= -1
 
         if stage == "slam" and self.metric_runner is None:
-            from scripts.scripts_test_video.hawor_slam import build_metric3d_runner
+            from lib.pipeline.stages.slam import build_metric3d_runner
 
             self.metric_runner = build_metric3d_runner()
 
@@ -366,126 +167,21 @@ class WorkerRuntime:
             self.droid_net = build_droid_net()
 
         if stage == "infiller" and self.infiller_runner is None:
-            from scripts.scripts_test_video.hawor_video import build_infiller_runner
+            from lib.pipeline.stages.infiller import build_infiller_runner
 
             self.infiller_runner = build_infiller_runner(self.infiller_weight)
 
-
-
-def build_stage_args(ns):
-    class StageArgs:
-        pass
-
-    args = StageArgs()
-    args.img_focal = ns.img_focal
-    args.video_path = ns.video_path
-    args.input_type = ns.input_type
-    args.checkpoint = ns.checkpoint
-    args.infiller_weight = ns.infiller_weight
-    args.chunk_batch_size = ns.chunk_batch_size
-    args.infiller_window_batch_size = ns.infiller_window_batch_size
-    args.rebuild_cam_space_cache = ns.rebuild_cam_space_cache
-    args.vis_mode = "world"
-    args.skip_vis = True
-    return args
-
-
 def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
-    # Determine frame_source and seq_folder from descriptor or video_path
-    descriptor = getattr(ns, '_descriptor', None)
-    if descriptor is not None:
-        seq_folder = Path(descriptor.seq_folder)
-        frame_source = ShardVideoFrameSource(descriptor.shard_path, descriptor.frame_names, frame_offsets=descriptor.frame_offsets)
-        stage_args = runtime.build_stage_args(descriptor.video_key)
-        # Set a dummy video_path on stage_args for legacy code paths
-        stage_args.video_path = descriptor.video_key
-    else:
-        seq_folder = get_seq_folder(ns.video_path)
-        frame_source = None
-        stage_args = runtime.build_stage_args(ns.video_path)
-
-    if ns.resume and not ns.force and is_stage_complete(ns.stage, seq_folder, fast_check=True):
-        return {
-            "status": "skipped",
-            "reason": "existing_valid_output",
-        }
-
-    from scripts.scripts_test_video.detect_track_video import detect_track_video
-    from scripts.scripts_test_video.hawor_slam import hawor_slam
-    from scripts.scripts_test_video.hawor_video import run_infiller_for_video, run_motion_for_video
-
-    runtime.ensure_runner(ns.stage)
-
-    if ns.stage == "detect_track":
-        start_idx, end_idx, _, _ = detect_track_video(
-            stage_args,
-            detector_runner=runtime.detector_runner,
-            force=ns.force,
-            detect_batch_size=ns.detect_batch_size,
-            num_io_workers=ns.detect_io_workers,
-            device=ns.detect_device,
-            half_precision=ns.detect_half_precision,
-            frame_source=frame_source,
-            seq_folder=str(seq_folder),
-        )
-    else:
-        start_idx, end_idx = get_track_range(seq_folder, fast=True)
-        # Verify the tracks directory actually exists
-        tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-        if not tracks_dir.exists():
-            # Cache was stale, invalidate and retry
-            cache_file = seq_folder / ".track_range"
-            if cache_file.exists():
-                cache_file.unlink()
-            start_idx, end_idx = get_track_range(seq_folder, fast=False)
-            tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-            if not tracks_dir.exists():
-                raise FileNotFoundError(f"Tracks directory not found: {tracks_dir}")
-
-    if ns.stage == "motion":
-        mano_models = None
-        if runtime.mano_right is not None and runtime.mano_left is not None:
-            mano_models = {'right': runtime.mano_right, 'left': runtime.mano_left}
-        run_motion_for_video(
-            stage_args,
-            start_idx,
-            end_idx,
-            str(seq_folder),
-            motion_runner=runtime.motion_runner,
-            mano_models=mano_models,
-            prefetched_data=prefetched_data,
-            frame_source=frame_source,
-        )
-    elif ns.stage == "slam":
-        hawor_slam(stage_args, start_idx, end_idx, metric_runner=runtime.metric_runner, metric3d_batch_size=ns.metric3d_batch_size, droid_net=runtime.droid_net, frame_source=frame_source, seq_folder=str(seq_folder))
-    elif ns.stage == "infiller":
-        tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-        frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
-        run_infiller_for_video(
-            stage_args,
-            start_idx,
-            end_idx,
-            frame_chunks_all,
-            infiller_runner=runtime.infiller_runner,
-            frame_source=frame_source,
-            seq_folder=str(seq_folder),
-        )
-    elif ns.stage == "detect_track":
-        pass
-    else:
-        raise ValueError(f"Unknown stage: {ns.stage}")
-
-    validate_stage_output(ns.stage, seq_folder, start_idx, end_idx)
-
-    # Create .done marker after successful validation
-    done_marker = seq_folder / f".{ns.stage}.done"
-    done_marker.touch()
-
-    return {
-        "status": "success",
-        "start_idx": start_idx,
-        "end_idx": end_idx,
-    }
+    task = PipelineVideoTask.from_namespace(ns)
+    return run_pipeline_stage(
+        ns.stage,
+        task,
+        runtime.stage_config,
+        runtime=runtime,
+        prefetched_data=prefetched_data,
+        resume=ns.resume,
+        force=ns.force,
+    )
 
 
 def worker_runtime_loop(ns):
@@ -499,7 +195,10 @@ def worker_runtime_loop(ns):
         chunk_batch_size=ns.chunk_batch_size,
         num_workers=getattr(ns, 'num_workers', 16),
         render_batch_size=getattr(ns, 'render_batch_size', 8),
+        metric3d_batch_size=getattr(ns, 'metric3d_batch_size', 32),
         detect_io_workers=getattr(ns, 'detect_io_workers', 8),
+        detect_device=getattr(ns, 'detect_device', "cuda:0"),
+        detect_half_precision=bool(getattr(ns, 'detect_half_precision', True)),
         infiller_window_batch_size=getattr(ns, 'infiller_window_batch_size', 64),
         rebuild_cam_space_cache=getattr(ns, 'rebuild_cam_space_cache', False),
     )
@@ -577,93 +276,50 @@ def run_stage(ns):
         os.environ["CUDA_VISIBLE_DEVICES"] = str(ns.gpu)
 
     set_determinism(ns.seed)
+    task = PipelineVideoTask.from_namespace(ns)
+    config = StageExecutionConfig.from_namespace(ns)
 
-    stage_args = build_stage_args(ns)
-    seq_folder = get_seq_folder(ns.video_path)
+    profiler = None
+    if ns.stage == "motion" and getattr(ns, 'enable_profiler', False):
+        from torch.profiler import profile, ProfilerActivity, schedule
 
-    if ns.resume and not ns.force and is_stage_complete(ns.stage, seq_folder, fast_check=True):
-        return {
-            "status": "skipped",
-            "reason": "existing_valid_output",
-        }
-
-    from scripts.scripts_test_video.detect_track_video import detect_track_video
-    from scripts.scripts_test_video.hawor_slam import hawor_slam
-    from scripts.scripts_test_video.hawor_video import hawor_infiller, hawor_motion_estimation
-
-    if ns.stage == "detect_track":
-        start_idx, end_idx, _, _ = detect_track_video(
-            stage_args,
-            detect_batch_size=ns.detect_batch_size,
-            num_io_workers=ns.detect_io_workers,
-            device=ns.detect_device,
-            half_precision=ns.detect_half_precision,
-        )
-    else:
-        start_idx, end_idx = get_track_range(seq_folder, fast=True)
-        # Verify the tracks directory actually exists
-        tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-        if not tracks_dir.exists():
-            # Cache was stale, invalidate and retry
-            cache_file = seq_folder / ".track_range"
-            if cache_file.exists():
-                cache_file.unlink()
-            start_idx, end_idx = get_track_range(seq_folder, fast=False)
-            tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-            if not tracks_dir.exists():
-                raise FileNotFoundError(f"Tracks directory not found: {tracks_dir}")
-
-    if ns.stage == "motion":
-        # Enable profiling if requested
-        if getattr(ns, 'enable_profiler', False):
-            from torch.profiler import profile, ProfilerActivity, schedule
-            # Save profiler traces in batch run directory if available
-            if getattr(ns, 'run_dir', None):
-                profiler_output_dir = Path(ns.run_dir) / "profiler_traces"
-            else:
-                # Fallback for standalone usage (not called from batch_infer.py)
-                profiler_output_dir = seq_folder.parent / "profiler_traces"
-            profiler_output_dir.mkdir(parents=True, exist_ok=True)
-
-            print(f"[PROFILER] Enabled. Output dir: {profiler_output_dir}")
-            print(f"[PROFILER] Video: {Path(ns.video_path).stem}")
-
-            with profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                schedule=schedule(wait=0, warmup=1, active=3, repeat=1),
-                on_trace_ready=lambda p: (
-                    print(f"[PROFILER] Trace ready, exporting to {profiler_output_dir / f'motion_trace_{Path(ns.video_path).stem}.json'}"),
-                    p.export_chrome_trace(str(profiler_output_dir / f"motion_trace_{Path(ns.video_path).stem}.json"))
-                ),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-            ) as prof:
-                hawor_motion_estimation(stage_args, start_idx, end_idx, str(seq_folder), profiler=prof)
+        if getattr(ns, 'run_dir', None):
+            profiler_output_dir = Path(ns.run_dir) / "profiler_traces"
         else:
-            hawor_motion_estimation(stage_args, start_idx, end_idx, str(seq_folder))
-    elif ns.stage == "slam":
-        hawor_slam(stage_args, start_idx, end_idx, metric3d_batch_size=ns.metric3d_batch_size)
-    elif ns.stage == "infiller":
-        tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
-        frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
-        hawor_infiller(stage_args, start_idx, end_idx, frame_chunks_all)
-    elif ns.stage == "detect_track":
-        pass
-    else:
-        raise ValueError(f"Unknown stage: {ns.stage}")
+            profiler_output_dir = task.seq_folder.parent / "profiler_traces"
+        profiler_output_dir.mkdir(parents=True, exist_ok=True)
 
-    validate_stage_output(ns.stage, seq_folder, start_idx, end_idx)
+        print(f"[PROFILER] Enabled. Output dir: {profiler_output_dir}")
+        print(f"[PROFILER] Video: {Path(ns.video_path).stem}")
 
-    # Create .done marker after successful validation
-    done_marker = seq_folder / f".{ns.stage}.done"
-    done_marker.touch()
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=schedule(wait=0, warmup=1, active=3, repeat=1),
+            on_trace_ready=lambda p: (
+                print(f"[PROFILER] Trace ready, exporting to {profiler_output_dir / f'motion_trace_{Path(ns.video_path).stem}.json'}"),
+                p.export_chrome_trace(str(profiler_output_dir / f"motion_trace_{Path(ns.video_path).stem}.json"))
+            ),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        ) as prof:
+            return run_pipeline_stage(
+                ns.stage,
+                task,
+                config,
+                profiler=prof,
+                resume=ns.resume,
+                force=ns.force,
+            )
 
-    return {
-        "status": "success",
-        "start_idx": start_idx,
-        "end_idx": end_idx,
-    }
+    return run_pipeline_stage(
+        ns.stage,
+        task,
+        config,
+        profiler=profiler,
+        resume=ns.resume,
+        force=ns.force,
+    )
 
 
 def get_parser():

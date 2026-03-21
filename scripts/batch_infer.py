@@ -37,12 +37,12 @@ os.environ["TMP"] = str(SHARED_TMP_DIR)
 tempfile.tempdir = str(SHARED_TMP_DIR)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-STAGES = ["detect_track", "motion", "slam", "infiller"]
 
 # Add project root to path for imports
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lib.pipeline.stage_api import STAGES
 from lib.pipeline.video_index import VideoDescriptor, collect_videos_from_factory, collect_videos_from_factories
 
 
@@ -572,6 +572,8 @@ class BatchScheduler:
             metric3d_batch_size=self.metric3d_batch_size,
             detect_batch_size=self.detect_batch_size,
             detect_io_workers=self.detect_io_workers,
+            detect_device=self.detect_device,
+            detect_half_precision=self.detect_half_precision,
             infiller_window_batch_size=self.infiller_window_batch_size,
             rebuild_cam_space_cache=self.rebuild_cam_space_cache,
         )
