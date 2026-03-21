@@ -94,11 +94,7 @@ def _stage_worker_main(gpu: int, stage: str, video_queue: mp.Queue, result_queue
 
     with ThreadPoolExecutor(max_workers=1) as prefetcher:
         prefetch_future = None
-
-        try:
-            video_path = video_queue.get(timeout=1)
-        except Empty:
-            video_path = None
+        video_path = video_queue.get()
 
         while video_path is not None:
             prefetched_data = None
@@ -108,10 +104,7 @@ def _stage_worker_main(gpu: int, stage: str, video_queue: mp.Queue, result_queue
                 except Exception:
                     prefetched_data = None
 
-            try:
-                next_video = video_queue.get(timeout=0)
-            except Empty:
-                next_video = None
+            next_video = video_queue.get()
 
             next_prefetch_future = None
             if next_video is not None:
