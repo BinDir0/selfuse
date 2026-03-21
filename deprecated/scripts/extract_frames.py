@@ -8,13 +8,13 @@ video decoding overhead and I/O contention.
 
 Usage:
     # Single video
-    python scripts/extract_frames.py --video_path path/to/video.mp4
+    python deprecated/scripts/extract_frames.py --video_path path/to/video.mp4
 
     # Batch processing
-    python scripts/extract_frames.py --video_list videos.txt --num_workers 8
+    python deprecated/scripts/extract_frames.py --video_list videos.txt --num_workers 8
 
     # Custom output directory and quality
-    python scripts/extract_frames.py --video_path video.mp4 --output_dir ./frames --quality 95
+    python deprecated/scripts/extract_frames.py --video_path video.mp4 --output_dir ./frames --quality 95
 """
 
 import argparse

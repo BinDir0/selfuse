@@ -32,14 +32,14 @@
 - `scripts/batch_worker.py` - 单阶段执行器
 
 ### 测试脚本
-- `scripts/setup_and_test_batch.sh` - 一键测试脚本
-- `scripts/test_batch_inference.py` - 完整测试套件
-- `scripts/test_smoke.sh` - 烟雾测试（原有）
+- `deprecated/scripts/setup_and_test_batch.sh` - 一键测试脚本
+- `deprecated/scripts/test_batch_inference.py` - 完整测试套件
+- `deprecated/scripts/test_smoke.sh` - 烟雾测试（原有）
 
 ### 文档
-- `BATCH_README.md` - 快速参考指南
+- `deprecated/BATCH_README.md` - 快速参考指南
 - `docs/QUICKSTART_BATCH.md` - 快速开始指南
-- `docs/BATCH_INFERENCE.md` - 完整技术文档
+- `deprecated/BATCH_INFERENCE.md` - 完整技术文档
 - `DEPLOYMENT_CHECKLIST.md` - 部署检查清单
 - `IMPLEMENTATION_SUMMARY.md` - 实现总结
 - `BUGFIX_RESUME_VALIDATION.md` - Bug 修复说明
@@ -52,10 +52,10 @@
 cd /path/to/HaWoR
 
 # 方法 1：使用一键测试脚本（推荐）
-bash scripts/setup_and_test_batch.sh
+bash deprecated/scripts/setup_and_test_batch.sh
 
 # 方法 2：使用原有的烟雾测试
-bash scripts/test_smoke.sh /path/to/test_videos 0,1
+bash deprecated/scripts/test_smoke.sh /path/to/test_videos 0,1
 ```
 
 ### 2. 生产环境使用
@@ -142,7 +142,7 @@ cat batch_runs/<timestamp>/logs/<video_name>_<stage>.log
 系统现在已经**生产就绪**，可以立即部署：
 
 1. 将代码复制到有 GPU 和 conda 环境的机器
-2. 运行 `bash scripts/setup_and_test_batch.sh` 验证
+2. 运行 `bash deprecated/scripts/setup_and_test_batch.sh` 验证
 3. 使用 `python scripts/batch_infer.py` 处理完整数据集
 
 如有问题，请参考相应的文档或检查日志文件。

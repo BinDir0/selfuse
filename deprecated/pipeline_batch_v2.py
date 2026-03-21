@@ -24,7 +24,7 @@ def detection_worker(gpu_id, input_queue, output_queue, stats):
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
     sys.path.insert(0, os.path.dirname(__file__))
-    from scripts.scripts_test_video.detect_track_video import detect_track_video
+    from deprecated.scripts_test_video.detect_track_video import detect_track_video
 
     print(f"[Detection-GPU{gpu_id}] Worker started")
 
@@ -69,7 +69,7 @@ def motion_worker(gpu_id, input_queue, output_queue, stats, checkpoint_path):
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
     sys.path.insert(0, os.path.dirname(__file__))
-    from scripts.scripts_test_video.hawor_video import hawor_motion_estimation, load_hawor
+    from deprecated.scripts_test_video.hawor_video import hawor_motion_estimation, load_hawor
     from glob import glob
     from natsort import natsorted
     import torch
@@ -130,7 +130,7 @@ def slam_worker(gpu_id, input_queue, output_queue, stats):
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
     sys.path.insert(0, os.path.dirname(__file__))
-    from scripts.scripts_test_video.hawor_slam import hawor_slam
+    from deprecated.scripts_test_video.hawor_slam import hawor_slam
     from glob import glob
     from natsort import natsorted
 
@@ -189,7 +189,7 @@ def infiller_worker(gpu_id, input_queue, output_queue, stats, infiller_weight):
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
     sys.path.insert(0, os.path.dirname(__file__))
-    from scripts.scripts_test_video.hawor_video import hawor_infiller
+    from deprecated.scripts_test_video.hawor_video import hawor_infiller
     from glob import glob
     from natsort import natsorted
     import joblib

@@ -30,7 +30,7 @@ def process_detection_optimized(video_path, gpu_id, stats, frame_batch_size=32):
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
     try:
-        from scripts.scripts_test_video.detect_track_video import detect_track_video
+        from deprecated.scripts_test_video.detect_track_video import detect_track_video
         from glob import glob
         from natsort import natsorted
         import cv2

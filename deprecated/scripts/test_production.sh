@@ -10,7 +10,7 @@ echo ""
 # Configuration
 VIDEO_LIST="${1:-videos.txt}"
 GPUS="${2:-0,1,2,3,4,5,6,7}"
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 if [ ! -f "$VIDEO_LIST" ]; then
     echo "Error: Video list file not found: $VIDEO_LIST"

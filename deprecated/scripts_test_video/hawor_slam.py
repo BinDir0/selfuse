@@ -1,8 +1,8 @@
 """Deprecated wrapper for the SLAM stage implementation."""
 
-from lib.pipeline.stages.slam import build_metric3d_runner, hawor_slam
+from lib.pipeline.stages.slam import build_metric3d_runner, get_dimention, hawor_slam
 
-__all__ = ["build_metric3d_runner", "hawor_slam"]
+__all__ = ["build_metric3d_runner", "get_dimention", "hawor_slam"]
 
 
 if __name__ == "__main__":

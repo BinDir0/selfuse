@@ -372,6 +372,7 @@ def run_pipeline_stage(
             mano_models=mano_models,
             prefetched_data=prefetched_data,
             frame_source=frame_source,
+            force=force,
         )
     elif stage == "slam":
         hawor_slam(

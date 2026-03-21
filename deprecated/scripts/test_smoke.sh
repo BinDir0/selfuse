@@ -10,7 +10,7 @@ echo ""
 # Configuration
 TEST_VIDEOS_DIR="${1:-./test_videos}"
 GPUS="${2:-0,1}"
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 if [ ! -d "$TEST_VIDEOS_DIR" ]; then
     echo "Error: Test videos directory not found: $TEST_VIDEOS_DIR"

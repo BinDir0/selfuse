@@ -139,10 +139,10 @@ The repository is organized so CLI entrypoints stay stable while reusable pipeli
 - `lib/pipeline/stage_api.py`: shared task/config/validation layer for batch and pipeline orchestration
 - `lib/pipeline/exporters/`: dataset/export code, including the WebDataset builder
 - `scripts/`: user-facing entrypoints such as `batch_infer.py`, `batch_worker.py`, and `build_vla_dataset.py`
-- `scripts/scripts_test_video/`: compatibility wrappers for older script paths
+- `deprecated/scripts_test_video/`: compatibility wrappers for older script paths
 - `deprecated/`: older experiments and non-primary pipeline variants
 
-For future integration work, prefer importing from `lib.pipeline...` instead of `scripts/scripts_test_video...`.
+For future integration work, prefer importing from `lib.pipeline...` instead of `deprecated/scripts_test_video...`.
 More detail is documented in [`docs/pipeline_structure.md`](docs/pipeline_structure.md).
 
 ## Training

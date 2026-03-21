@@ -2,7 +2,7 @@
 """Verify that est_scale_hybrid_batch produces identical results to per-keyframe est_scale_hybrid.
 
 Usage:
-    python scripts/test_scale_correctness.py
+    python deprecated/scripts/test_scale_correctness.py
 
 Generates synthetic depth data mimicking real SLAM keyframes, then compares
 batch vs per-keyframe scale estimation. Prints per-keyframe differences and
@@ -10,7 +10,7 @@ reports PASS/FAIL based on max absolute difference.
 """
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import numpy as np
 import torch

@@ -20,7 +20,7 @@ Use this checklist when deploying the batch inference system on your production 
 
 - [ ] Copy HaWoR repository to production machine
 - [ ] Place 2-3 short test videos in `example/` directory
-- [ ] Run one-click test: `bash scripts/setup_and_test_batch.sh`
+- [ ] Run one-click test: `bash deprecated/scripts/setup_and_test_batch.sh`
 - [ ] Verify test outputs:
   - [ ] All test videos completed successfully
   - [ ] `world_space_res.pth` exists for each video

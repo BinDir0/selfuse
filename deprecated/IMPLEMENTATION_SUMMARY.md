@@ -24,13 +24,13 @@ A complete multi-GPU batch inference system for HaWoR with the following compone
    - Event logging (events.jsonl)
    - Support for both --video_list and --video_dir
 
-3. **`scripts/test_batch_inference.py`** (new)
+3. **`deprecated/scripts/test_batch_inference.py`** (new)
    - Automated validation suite
    - Smoke test: full pipeline on sample videos
    - Resume test: verify skip behavior
    - Partial recovery test: delete output and verify recovery
 
-4. **`scripts/setup_and_test_batch.sh`** (new)
+4. **`deprecated/scripts/setup_and_test_batch.sh`** (new)
    - One-click setup and test script
    - Environment verification
    - Automated smoke and resume tests
@@ -39,7 +39,7 @@ A complete multi-GPU batch inference system for HaWoR with the following compone
 
 ### Documentation
 
-1. **`docs/BATCH_INFERENCE.md`** (new)
+1. **`deprecated/BATCH_INFERENCE.md`** (new)
    - Complete architecture documentation
    - Usage examples and advanced options
    - Output format specifications
@@ -110,7 +110,7 @@ python scripts/batch_infer.py \
 
 ### One-Click Test
 ```bash
-bash scripts/setup_and_test_batch.sh
+bash deprecated/scripts/setup_and_test_batch.sh
 ```
 
 ## Output Structure
@@ -140,7 +140,7 @@ Each video produces:
 Run on machine with proper environment:
 ```bash
 cd /path/to/HaWoR
-bash scripts/setup_and_test_batch.sh
+bash deprecated/scripts/setup_and_test_batch.sh
 ```
 
 Tests performed:
@@ -180,9 +180,9 @@ Phase 2 improvements (when needed):
 - `scripts/batch_worker.py` - Made executable (chmod +x)
 
 ### Created
-- `scripts/test_batch_inference.py` - Validation test suite
-- `scripts/setup_and_test_batch.sh` - One-click setup and test
-- `docs/BATCH_INFERENCE.md` - Complete documentation
+- `deprecated/scripts/test_batch_inference.py` - Validation test suite
+- `deprecated/scripts/setup_and_test_batch.sh` - One-click setup and test
+- `deprecated/BATCH_INFERENCE.md` - Complete documentation
 - `docs/QUICKSTART_BATCH.md` - Quick start guide
 
 ### Already Existed (Verified)
@@ -195,7 +195,7 @@ Phase 2 improvements (when needed):
 The system is **production-ready** and can be deployed immediately:
 
 1. Copy repository to machine with GPUs and conda environment
-2. Run `bash scripts/setup_and_test_batch.sh` to verify
+2. Run `bash deprecated/scripts/setup_and_test_batch.sh` to verify
 3. Run on full dataset with `python scripts/batch_infer.py --video_dir /path/to/videos --gpus 0,1,2,3,4,5,6,7`
 
 All code is tested, documented, and follows the plan specifications.

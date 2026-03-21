@@ -234,6 +234,8 @@ class BatchScheduler:
             cmd.append("--enable_profiler")
         if self.resume:
             cmd.append("--resume")
+        else:
+            cmd.append("--force")
 
         with open(log_file, "w") as f:
             proc = subprocess.Popen(
@@ -297,6 +299,8 @@ class BatchScheduler:
             cmd.append("--enable_profiler")
         if self.resume:
             cmd.append("--resume")
+        else:
+            cmd.append("--force")
 
         with open(log_file, "w") as f:
             proc = subprocess.Popen(
@@ -380,6 +384,14 @@ class BatchScheduler:
                     continue
 
             candidates.append(vp)
+
+        if not self.resume:
+            total = len(self.video_paths)
+            print(f"  [{stage}] Eligibility: total={total} scheduled={len(candidates)} "
+                  f"excluded_completed={excluded_completed} excluded_running={excluded_running} "
+                  f"excluded_prev_stage={excluded_prev_stage} excluded_done=0 "
+                  f"excluded_other={excluded_other}")
+            return candidates
 
         # Then filter by on-disk outputs using the shared stage API.
         pending = []
@@ -526,7 +538,7 @@ class BatchScheduler:
             # Check if output already exists (skip check)
             frame_chunks_file = tracks_dir / "frame_chunks_all.npy"
             model_masks_file = tracks_dir / "model_masks.npy"
-            if frame_chunks_file.exists() and model_masks_file.exists():
+            if self.resume and frame_chunks_file.exists() and model_masks_file.exists():
                 return None
 
             # Prefetch frame source and tracks (IO-bound operations)
@@ -630,7 +642,7 @@ class BatchScheduler:
                 runtime=runtime,
                 prefetched_data=prefetched_data,
                 resume=self.resume,
-                force=False,
+                force=not self.resume,
             )
             success = result.get("status") in ("success", "skipped")
             if not success:
@@ -769,14 +781,15 @@ class BatchScheduler:
             print()
 
         # Initialize tasks that still carry the default all-pending state from on-disk outputs.
-        for vp in self.video_paths:
-            task = self.tasks[vp]
+        if self.resume:
+            for vp in self.video_paths:
+                task = self.tasks[vp]
 
-            if all(task.stage_status.get(stage) == "pending" for stage in self.stages):
-                seq_folder = self._get_seq_folder(vp)
-                for stage in self.stages:
-                    if is_stage_complete(stage, seq_folder, fast_check=True):
-                        task.stage_status[stage] = "completed"
+                if all(task.stage_status.get(stage) == "pending" for stage in self.stages):
+                    seq_folder = self._get_seq_folder(vp)
+                    for stage in self.stages:
+                        if is_stage_complete(stage, seq_folder, fast_check=True):
+                            task.stage_status[stage] = "completed"
 
         self.emit_event("batch_start", total_videos=len(self.video_paths), gpus=self.gpus, mode="wave")
 

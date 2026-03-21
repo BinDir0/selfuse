@@ -5,7 +5,7 @@
 On a machine with GPUs and conda environment:
 
 ```bash
-bash scripts/setup_and_test_batch.sh
+bash deprecated/scripts/setup_and_test_batch.sh
 ```
 
 This will automatically verify everything and run tests.
@@ -15,7 +15,7 @@ This will automatically verify everything and run tests.
 | Document | Purpose |
 |----------|---------|
 | **[QUICKSTART_BATCH.md](docs/QUICKSTART_BATCH.md)** | Quick start guide for testing |
-| **[BATCH_INFERENCE.md](docs/BATCH_INFERENCE.md)** | Complete technical documentation |
+| **[BATCH_INFERENCE.md](BATCH_INFERENCE.md)** | Complete technical documentation |
 | **[DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md)** | Step-by-step deployment guide |
 | **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** | What was implemented and why |
 
@@ -23,7 +23,7 @@ This will automatically verify everything and run tests.
 
 ### Test with sample videos
 ```bash
-bash scripts/setup_and_test_batch.sh
+bash deprecated/scripts/setup_and_test_batch.sh
 ```
 
 ### Process videos from directory (8 GPUs)
@@ -53,12 +53,12 @@ python scripts/batch_infer.py \
 ### Scripts
 - `scripts/batch_infer.py` - Main batch scheduler
 - `scripts/batch_worker.py` - Single-stage executor
-- `scripts/setup_and_test_batch.sh` - One-click test script
-- `scripts/test_batch_inference.py` - Validation test suite
+- `deprecated/scripts/setup_and_test_batch.sh` - One-click test script
+- `deprecated/scripts/test_batch_inference.py` - Validation test suite
 
 ### Documentation
 - `docs/QUICKSTART_BATCH.md` - Start here for testing
-- `docs/BATCH_INFERENCE.md` - Full technical docs
+- `deprecated/BATCH_INFERENCE.md` - Full technical docs
 - `DEPLOYMENT_CHECKLIST.md` - Production deployment guide
 - `IMPLEMENTATION_SUMMARY.md` - Implementation details
 
@@ -94,7 +94,7 @@ cat batch_runs/<timestamp>/status.json | jq
 
 ## 🐛 Troubleshooting
 
-See [BATCH_INFERENCE.md](docs/BATCH_INFERENCE.md#troubleshooting) for detailed troubleshooting guide.
+See [BATCH_INFERENCE.md](BATCH_INFERENCE.md#troubleshooting) for detailed troubleshooting guide.
 
 Quick checks:
 ```bash
@@ -111,12 +111,12 @@ cat batch_runs/<timestamp>/status.json | jq -r '.tasks | to_entries[] | select(.
 ## 📞 Support
 
 For issues or questions:
-1. Check [BATCH_INFERENCE.md](docs/BATCH_INFERENCE.md) troubleshooting section
+1. Check [BATCH_INFERENCE.md](BATCH_INFERENCE.md) troubleshooting section
 2. Review log files in `batch_runs/<timestamp>/logs/`
 3. Check GitHub issues
 
 ## 🎓 Learn More
 
 - **Architecture**: See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for design decisions
-- **API Reference**: See [BATCH_INFERENCE.md](docs/BATCH_INFERENCE.md) for all options
+- **API Reference**: See [BATCH_INFERENCE.md](BATCH_INFERENCE.md) for all options
 - **Deployment**: Follow [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md) step-by-step

@@ -98,7 +98,7 @@ class DetectionStage(PipelineStage):
 
         # Import here to avoid loading models in main process
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.detect_track_video import detect_track_video
+        from deprecated.scripts_test_video.detect_track_video import detect_track_video
 
         class Args:
             def __init__(self, video_path):
@@ -122,7 +122,7 @@ class MotionEstimationStage(PipelineStage):
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.hawor_video import hawor_motion_estimation
+        from deprecated.scripts_test_video.hawor_video import hawor_motion_estimation
         from glob import glob
         from natsort import natsorted
 
@@ -153,7 +153,7 @@ class SLAMStage(PipelineStage):
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.hawor_slam import hawor_slam
+        from deprecated.scripts_test_video.hawor_slam import hawor_slam
         from glob import glob
         from natsort import natsorted
 
@@ -192,7 +192,7 @@ class InfillerStage(PipelineStage):
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.hawor_video import hawor_infiller
+        from deprecated.scripts_test_video.hawor_video import hawor_infiller
         from glob import glob
         from natsort import natsorted
         import joblib
@@ -351,4 +351,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

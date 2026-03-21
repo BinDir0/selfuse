@@ -13,7 +13,7 @@ Run the automated setup and test script:
 
 ```bash
 cd /path/to/HaWoR
-bash scripts/setup_and_test_batch.sh
+bash deprecated/scripts/setup_and_test_batch.sh
 ```
 
 This script will:
@@ -153,7 +153,7 @@ Stage breakdown (approximate):
 
 ## Next Steps
 
-See `docs/BATCH_INFERENCE.md` for detailed documentation on:
+See `deprecated/BATCH_INFERENCE.md` for detailed documentation on:
 - Architecture and design decisions
 - Advanced configuration options
 - Output format specifications

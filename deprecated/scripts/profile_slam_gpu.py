@@ -2,7 +2,7 @@
 """Profile SLAM stage GPU utilization with fine-grained timing.
 
 Usage:
-    python scripts/profile_slam_gpu.py --video_path /path/to/video.mp4
+    python deprecated/scripts/profile_slam_gpu.py --video_path /path/to/video.mp4
 
 Runs the full SLAM stage on a single video and outputs:
   - Per-substep wall-clock timing
@@ -24,7 +24,7 @@ from pathlib import Path
 
 warnings.filterwarnings('ignore')
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
@@ -132,7 +132,7 @@ def main():
     frame_source = build_frame_source(file)
 
     # Detect track range
-    from scripts.scripts_test_video.detect_track_video import detect_track_video
+    from deprecated.scripts_test_video.detect_track_video import detect_track_video
     start_idx, end_idx, _, _ = detect_track_video(args)
 
     # Load masks
@@ -176,7 +176,7 @@ def main():
     print(f"  DROID-SLAM:      {t1-t0:7.2f}s  ({n} keyframes)")
 
     # ---- Phase 2: Metric3D depth prediction ----
-    from scripts.scripts_test_video.hawor_slam import get_dimention
+    from deprecated.scripts_test_video.hawor_slam import get_dimention
     from concurrent.futures import ThreadPoolExecutor
     import cv2
 

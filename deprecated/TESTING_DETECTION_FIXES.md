@@ -184,7 +184,7 @@ python demo_offline.py \
 如果结果仍然不理想，可以调整参数：
 
 #### 调整置信度阈值
-编辑 `scripts/scripts_test_video/detect_track_video.py`:
+编辑 `deprecated/scripts_test_video/detect_track_video.py`:
 ```python
 # 第 58 行
 boxes_, tracks_ = detect_track(imgfiles, thresh=0.3)  # 提高到 0.3
@@ -225,7 +225,7 @@ rm -rf $OUTPUT_DIR/tracks_0_*/model_boxes.npy
 rm -rf $OUTPUT_DIR/tracks_0_*/model_tracks.npy
 
 # 重新运行
-python scripts/scripts_test_video/detect_track_video.py \
+python deprecated/scripts_test_video/detect_track_video.py \
     --video $VIDEO_PATH \
     --seq_folder $OUTPUT_DIR
 ```

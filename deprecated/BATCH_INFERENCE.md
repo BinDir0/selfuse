@@ -160,7 +160,7 @@ Each stage produces specific outputs that are validated before marking as comple
 
 Run validation tests:
 ```bash
-python scripts/test_batch_inference.py \
+python deprecated/scripts/test_batch_inference.py \
   --video_list test_videos.txt \
   --gpus 0,1
 ```

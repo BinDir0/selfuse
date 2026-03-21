@@ -26,7 +26,7 @@ mkdir -p test_videos
 # 将 2-3 个短视频复制到 test_videos/
 
 # 运行烟雾测试
-bash scripts/test_smoke.sh test_videos 0,1
+bash deprecated/scripts/test_smoke.sh test_videos 0,1
 ```
 
 测试内容：
@@ -43,7 +43,7 @@ bash scripts/test_smoke.sh test_videos 0,1
 find /path/to/videos -name "*.mp4" > videos.txt
 
 # 运行生产测试（会实时监控进度）
-bash scripts/test_production.sh videos.txt 0,1,2,3,4,5,6,7
+bash deprecated/scripts/test_production.sh videos.txt 0,1,2,3,4,5,6,7
 ```
 
 测试内容：

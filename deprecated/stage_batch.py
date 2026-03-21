@@ -68,7 +68,7 @@ def process_detection(video_path, gpu_id, stats):
         start_time = time.time()
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.detect_track_video import detect_track_video
+        from deprecated.scripts_test_video.detect_track_video import detect_track_video
 
         class Args:
             def __init__(self, video_path):
@@ -106,7 +106,7 @@ def process_motion(video_path, gpu_id, stats, checkpoint_path):
         start_time = time.time()
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.hawor_video import hawor_motion_estimation
+        from deprecated.scripts_test_video.hawor_video import hawor_motion_estimation
         from glob import glob
         from natsort import natsorted
 
@@ -154,7 +154,7 @@ def process_slam(video_path, gpu_id, stats):
         start_time = time.time()
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.hawor_slam import hawor_slam
+        from deprecated.scripts_test_video.hawor_slam import hawor_slam
         from glob import glob
         from natsort import natsorted
 
@@ -201,7 +201,7 @@ def process_infiller(video_path, gpu_id, stats, infiller_weight):
         start_time = time.time()
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from scripts.scripts_test_video.hawor_video import hawor_infiller
+        from deprecated.scripts_test_video.hawor_video import hawor_infiller
         from glob import glob
         from natsort import natsorted
         import joblib

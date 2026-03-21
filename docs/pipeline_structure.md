@@ -20,7 +20,7 @@ This repository now separates pipeline code into three layers so later integrati
 - `scripts/`
   - User-facing entrypoints and batch orchestration.
   - `batch_infer.py`, `batch_worker.py`, and `build_vla_dataset.py` should remain valid stable CLI entrypoints.
-- `scripts/scripts_test_video/`
+- `deprecated/scripts_test_video/`
   - Compatibility wrappers for older paths.
   - They re-export the new implementations so old automation does not break immediately.
 - `deprecated/`
@@ -39,7 +39,7 @@ from lib.pipeline.stages.slam import hawor_slam
 from lib.pipeline.exporters.webdataset import main
 ```
 
-Avoid introducing new dependencies on `scripts/scripts_test_video/*` unless the goal is temporary backward compatibility.
+Avoid introducing new dependencies on `deprecated/scripts_test_video/*` unless the goal is temporary backward compatibility.
 
 ## Entry Point Rules
 

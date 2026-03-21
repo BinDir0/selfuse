@@ -12,7 +12,7 @@ echo ""
 # Configuration
 CONDA_ENV="hawor"
 TEST_GPUS="0,1"  # Modify based on available GPUs
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 cd "$PROJECT_ROOT"
 

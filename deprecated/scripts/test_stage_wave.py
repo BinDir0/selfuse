@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def run_batch_infer(video_list, gpus, mode, run_dir, force=False):

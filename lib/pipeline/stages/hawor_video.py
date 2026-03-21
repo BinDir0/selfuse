@@ -393,7 +393,7 @@ def _flush_infiller_windows(
     return batch_size
 
 
-def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=None, profiler=None, mano_models=None, prefetched_data=None, frame_source=None):
+def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=None, profiler=None, mano_models=None, prefetched_data=None, frame_source=None, force=False):
     import time
     timing = {}
     t_start_total = time.time()
@@ -406,7 +406,7 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
         vprint(f"Warning: Incomplete output detected. Removing {frame_chunks_file} to force re-run")
         os.remove(frame_chunks_file)
 
-    if os.path.exists(frame_chunks_file) and os.path.exists(model_masks_file):
+    if (not force) and os.path.exists(frame_chunks_file) and os.path.exists(model_masks_file):
         vprint("skip hawor motion estimation")
         # Need to load img_focal for return value
         img_focal = args.img_focal

@@ -257,7 +257,7 @@ def batch_motion_estimation(video_paths, gpu_ids, checkpoint_path, batch_size=4)
     device = torch.device('cuda:0')
 
     # Load model once
-    from scripts.scripts_test_video.hawor_video import load_hawor
+    from deprecated.scripts_test_video.hawor_video import load_hawor
     model, model_cfg = load_hawor(checkpoint_path)
     model = model.to(device)
     model.eval()
