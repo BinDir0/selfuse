@@ -17,7 +17,6 @@ STAGES = ["detect_track", "motion", "slam", "infiller"]
 @dataclass(frozen=True)
 class StageExecutionConfig:
     img_focal: Optional[float] = None
-    input_type: str = "file"
     checkpoint: str = "./weights/hawor/checkpoints/hawor.ckpt"
     infiller_weight: str = "./weights/hawor/checkpoints/infiller.pt"
     chunk_batch_size: int = 64
@@ -37,7 +36,6 @@ class StageExecutionConfig:
     def from_namespace(cls, ns):
         return cls(
             img_focal=getattr(ns, "img_focal", None),
-            input_type=getattr(ns, "input_type", "file"),
             checkpoint=getattr(ns, "checkpoint", "./weights/hawor/checkpoints/hawor.ckpt"),
             infiller_weight=getattr(ns, "infiller_weight", "./weights/hawor/checkpoints/infiller.pt"),
             chunk_batch_size=getattr(ns, "chunk_batch_size", 64),
@@ -56,7 +54,6 @@ class StageExecutionConfig:
         return argparse.Namespace(
             img_focal=self.img_focal,
             video_path=video_path,
-            input_type=self.input_type,
             checkpoint=self.checkpoint,
             infiller_weight=self.infiller_weight,
             chunk_batch_size=self.chunk_batch_size,
@@ -142,32 +139,32 @@ def get_stage_done_marker(seq_folder: Path, stage: str) -> Path:
     return seq_folder / f".{stage}.done"
 
 
-def get_track_range(seq_folder: Path, fast=False):
-    if fast:
-        cache_file = seq_folder / ".track_range"
-        if cache_file.exists():
-            try:
-                content = cache_file.read_text().strip()
-                start_idx, end_idx = map(int, content.split(","))
-                return start_idx, end_idx
-            except Exception:
-                pass
+def _get_track_range_cache_file(seq_folder: Path) -> Path:
+    return seq_folder / ".track_range"
 
-        for p in seq_folder.iterdir():
-            if p.is_dir() and p.name.startswith("tracks_0_"):
-                parts = p.name.split("_")
-                if len(parts) == 3:
-                    try:
-                        start_idx = int(parts[1])
-                        end_idx = int(parts[2])
-                        cache_file.write_text(f"{start_idx},{end_idx}")
-                        return start_idx, end_idx
-                    except ValueError:
-                        pass
 
-    track_dirs = []
-    for p in seq_folder.glob("tracks_*_*"):
-        parts = p.name.split("_")
+def _read_cached_track_range(seq_folder: Path):
+    cache_file = _get_track_range_cache_file(seq_folder)
+    if not cache_file.exists():
+        return None
+
+    try:
+        content = cache_file.read_text().strip()
+        start_idx, end_idx = map(int, content.split(","))
+        return start_idx, end_idx
+    except Exception:
+        return None
+
+
+def _write_cached_track_range(seq_folder: Path, start_idx: int, end_idx: int):
+    _get_track_range_cache_file(seq_folder).write_text(f"{start_idx},{end_idx}")
+
+
+def _discover_fast_track_range(seq_folder: Path):
+    for track_dir in seq_folder.iterdir():
+        if not track_dir.is_dir() or not track_dir.name.startswith("tracks_0_"):
+            continue
+        parts = track_dir.name.split("_")
         if len(parts) != 3:
             continue
         try:
@@ -175,26 +172,59 @@ def get_track_range(seq_folder: Path, fast=False):
             end_idx = int(parts[2])
         except ValueError:
             continue
+        _write_cached_track_range(seq_folder, start_idx, end_idx)
+        return start_idx, end_idx
+    return None
 
-        if p.is_dir():
-            contents = list(p.iterdir())
+
+def _parse_track_dir(track_dir: Path):
+    parts = track_dir.name.split("_")
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+
+
+def _collect_track_dirs(seq_folder: Path):
+    track_dirs = []
+    for track_dir in seq_folder.glob("tracks_*_*"):
+        parsed = _parse_track_dir(track_dir)
+        if parsed is None:
+            continue
+        start_idx, end_idx = parsed
+
+        if track_dir.is_dir():
+            contents = list(track_dir.iterdir())
             if len(contents) == 0:
                 try:
-                    p.rmdir()
+                    track_dir.rmdir()
                     continue
                 except OSError:
                     pass
 
-        track_dirs.append((start_idx, end_idx, p))
+        track_dirs.append((start_idx, end_idx, track_dir))
+    return track_dirs
 
+
+def get_track_range(seq_folder: Path, fast=False):
+    if fast:
+        cached_range = _read_cached_track_range(seq_folder)
+        if cached_range is not None:
+            return cached_range
+
+        discovered_range = _discover_fast_track_range(seq_folder)
+        if discovered_range is not None:
+            return discovered_range
+
+    track_dirs = _collect_track_dirs(seq_folder)
     if not track_dirs:
         raise FileNotFoundError(f"No tracks_*_* folder found under {seq_folder}")
 
-    track_dirs.sort(key=lambda x: (x[1], x[0]))
+    track_dirs.sort(key=lambda item: (item[1], item[0]))
     start_idx, end_idx, _ = track_dirs[-1]
-
-    cache_file = seq_folder / ".track_range"
-    cache_file.write_text(f"{start_idx},{end_idx}")
+    _write_cached_track_range(seq_folder, start_idx, end_idx)
     return start_idx, end_idx
 
 
@@ -211,107 +241,252 @@ def _cleanup_incomplete_motion_output(seq_folder: Path, start_idx: int, end_idx:
         raise AssertionError("Incomplete motion output - removed and will retry")
 
 
-def validate_stage_output(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
+def _validate_detect_track_output(seq_folder: Path, start_idx: int, end_idx: int):
     tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
+    assert (tracks_dir / "model_boxes.npy").exists(), "model_boxes.npy missing"
+    assert (tracks_dir / "model_tracks.npy").exists(), "model_tracks.npy missing"
 
-    if stage == "detect_track":
-        assert (tracks_dir / "model_boxes.npy").exists(), "model_boxes.npy missing"
-        assert (tracks_dir / "model_tracks.npy").exists(), "model_tracks.npy missing"
-        return
 
-    if stage == "motion":
-        _cleanup_incomplete_motion_output(seq_folder, start_idx, end_idx)
+def _validate_motion_output(seq_folder: Path, start_idx: int, end_idx: int):
+    _cleanup_incomplete_motion_output(seq_folder, start_idx, end_idx)
 
-        frame_chunks_file = tracks_dir / "frame_chunks_all.npy"
-        model_masks_file = tracks_dir / "model_masks.npy"
-        assert frame_chunks_file.exists(), "frame_chunks_all.npy missing"
-        assert model_masks_file.exists(), "model_masks.npy missing"
-        with open(model_masks_file, "rb") as f:
-            version = np.lib.format.read_magic(f)
-            shape, _fortran, _dtype = np.lib.format._read_array_header(f, version)
-        assert len(shape) == 3, f"model_masks should be (T,H,W), got shape {shape}"
-        return
+    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
+    frame_chunks_file = tracks_dir / "frame_chunks_all.npy"
+    model_masks_file = tracks_dir / "model_masks.npy"
+    assert frame_chunks_file.exists(), "frame_chunks_all.npy missing"
+    assert model_masks_file.exists(), "model_masks.npy missing"
+    with open(model_masks_file, "rb") as handle:
+        version = np.lib.format.read_magic(handle)
+        shape, _fortran, _dtype = np.lib.format._read_array_header(handle, version)
+    assert len(shape) == 3, f"model_masks should be (T,H,W), got shape {shape}"
 
-    if stage == "slam":
-        slam_file = seq_folder / "SLAM" / f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
-        assert slam_file.exists(), "SLAM npz missing"
-        data = np.load(slam_file, allow_pickle=True)
-        assert "traj" in data and "scale" in data, "invalid SLAM npz keys"
-        return
 
-    if stage == "infiller":
-        world_file = seq_folder / "world_space_res.pth"
-        assert world_file.exists(), "world_space_res.pth missing"
-        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_file)
-        assert pred_trans.shape[0] == 2 and pred_trans.shape[-1] == 3, "pred_trans shape invalid"
-        assert pred_rot.shape[0] == 2 and pred_rot.shape[-1] == 3, "pred_rot shape invalid"
-        assert pred_hand_pose.shape[0] == 2 and pred_hand_pose.shape[-1] == 45, "pred_hand_pose shape invalid"
-        assert pred_betas.shape[0] == 2 and pred_betas.shape[-1] == 10, "pred_betas shape invalid"
-        assert pred_valid.shape[0] == 2, "pred_valid shape invalid"
-        return
+def _validate_slam_output(seq_folder: Path, start_idx: int, end_idx: int):
+    slam_file = seq_folder / "SLAM" / f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
+    assert slam_file.exists(), "SLAM npz missing"
+    data = np.load(slam_file, allow_pickle=True)
+    assert "traj" in data and "scale" in data, "invalid SLAM npz keys"
 
-    raise ValueError(f"Unknown stage: {stage}")
+
+def _validate_infiller_output(seq_folder: Path, _start_idx: int, _end_idx: int):
+    world_file = seq_folder / "world_space_res.pth"
+    assert world_file.exists(), "world_space_res.pth missing"
+    pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_file)
+    assert pred_trans.shape[0] == 2 and pred_trans.shape[-1] == 3, "pred_trans shape invalid"
+    assert pred_rot.shape[0] == 2 and pred_rot.shape[-1] == 3, "pred_rot shape invalid"
+    assert pred_hand_pose.shape[0] == 2 and pred_hand_pose.shape[-1] == 45, "pred_hand_pose shape invalid"
+    assert pred_betas.shape[0] == 2 and pred_betas.shape[-1] == 10, "pred_betas shape invalid"
+    assert pred_valid.shape[0] == 2, "pred_valid shape invalid"
+
+
+def _validate_detect_track_output_fast(seq_folder: Path, start_idx: int, end_idx: int):
+    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
+    return (tracks_dir / "model_boxes.npy").exists() and (tracks_dir / "model_tracks.npy").exists()
+
+
+def _validate_motion_output_fast(seq_folder: Path, start_idx: int, end_idx: int):
+    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
+    return (tracks_dir / "frame_chunks_all.npy").exists() and (tracks_dir / "model_masks.npy").exists()
+
+
+def _validate_slam_output_fast(seq_folder: Path, start_idx: int, end_idx: int):
+    slam_file = seq_folder / "SLAM" / f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
+    return slam_file.exists()
+
+
+def _validate_infiller_output_fast(seq_folder: Path, _start_idx: int, _end_idx: int):
+    return (seq_folder / "world_space_res.pth").exists()
+
+
+_STAGE_VALIDATORS = {
+    "detect_track": _validate_detect_track_output,
+    "motion": _validate_motion_output,
+    "slam": _validate_slam_output,
+    "infiller": _validate_infiller_output,
+}
+
+_FAST_STAGE_VALIDATORS = {
+    "detect_track": _validate_detect_track_output_fast,
+    "motion": _validate_motion_output_fast,
+    "slam": _validate_slam_output_fast,
+    "infiller": _validate_infiller_output_fast,
+}
+
+
+def validate_stage_output(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
+    validator = _STAGE_VALIDATORS.get(stage)
+    if validator is None:
+        raise ValueError(f"Unknown stage: {stage}")
+    validator(seq_folder, start_idx, end_idx)
 
 
 def validate_stage_output_fast(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
-    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
+    validator = _FAST_STAGE_VALIDATORS.get(stage)
+    if validator is None:
+        return False
+    return validator(seq_folder, start_idx, end_idx)
 
-    if stage == "detect_track":
-        return (tracks_dir / "model_boxes.npy").exists() and (tracks_dir / "model_tracks.npy").exists()
 
-    if stage == "motion":
-        return (tracks_dir / "frame_chunks_all.npy").exists() and (tracks_dir / "model_masks.npy").exists()
+def _mark_stage_done(seq_folder: Path, stage: str):
+    get_stage_done_marker(seq_folder, stage).touch()
 
-    if stage == "slam":
-        slam_file = seq_folder / "SLAM" / f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
-        return slam_file.exists()
 
-    if stage == "infiller":
-        return (seq_folder / "world_space_res.pth").exists()
+def _run_fast_stage_check(stage: str, seq_folder: Path):
+    start_idx, end_idx = get_track_range(seq_folder, fast=True)
+    result = validate_stage_output_fast(stage, seq_folder, start_idx, end_idx)
+    if result:
+        _mark_stage_done(seq_folder, stage)
+    return result
 
-    return False
+
+def _run_full_stage_check(stage: str, seq_folder: Path):
+    start_idx, end_idx = get_track_range(seq_folder, fast=False)
+    validate_stage_output(stage, seq_folder, start_idx, end_idx)
+    _mark_stage_done(seq_folder, stage)
+    return True
 
 
 def is_stage_complete(stage: str, seq_folder: Path, fast_check=False):
     if not seq_folder.exists():
         return False
 
-    if fast_check:
-        done_marker = get_stage_done_marker(seq_folder, stage)
-        if done_marker.exists():
-            return True
+    if fast_check and get_stage_done_marker(seq_folder, stage).exists():
+        return True
 
     try:
-        start_idx, end_idx = get_track_range(seq_folder, fast=fast_check)
         if fast_check:
-            result = validate_stage_output_fast(stage, seq_folder, start_idx, end_idx)
-            if result:
-                get_stage_done_marker(seq_folder, stage).touch()
-            return result
-
-        validate_stage_output(stage, seq_folder, start_idx, end_idx)
-        get_stage_done_marker(seq_folder, stage).touch()
-        return True
+            return _run_fast_stage_check(stage, seq_folder)
+        return _run_full_stage_check(stage, seq_folder)
     except Exception:
         return False
 
 
-def resolve_stage_artifacts(stage: str, seq_folder: Path) -> StageArtifacts:
-    if stage == "detect_track":
-        return StageArtifacts(start_idx=0, end_idx=0, seq_folder=seq_folder, stage_name=stage)
+def _reset_track_range_cache(seq_folder: Path):
+    cache_file = _get_track_range_cache_file(seq_folder)
+    if cache_file.exists():
+        cache_file.unlink()
 
+
+def _resolve_non_detect_track_artifacts(stage: str, seq_folder: Path) -> StageArtifacts:
     start_idx, end_idx = get_track_range(seq_folder, fast=True)
     tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
     if not tracks_dir.exists():
-        cache_file = seq_folder / ".track_range"
-        if cache_file.exists():
-            cache_file.unlink()
+        _reset_track_range_cache(seq_folder)
         start_idx, end_idx = get_track_range(seq_folder, fast=False)
         tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
         if not tracks_dir.exists():
             raise FileNotFoundError(f"Tracks directory not found: {tracks_dir}")
 
     return StageArtifacts(start_idx=start_idx, end_idx=end_idx, seq_folder=seq_folder, stage_name=stage)
+
+
+def resolve_stage_artifacts(stage: str, seq_folder: Path) -> StageArtifacts:
+    if stage == "detect_track":
+        return StageArtifacts(start_idx=0, end_idx=0, seq_folder=seq_folder, stage_name=stage)
+    return _resolve_non_detect_track_artifacts(stage, seq_folder)
+
+
+def _ensure_runtime_for_stage(runtime, stage: str):
+    if runtime is not None and hasattr(runtime, "ensure_runner"):
+        runtime.ensure_runner(stage)
+
+
+def _build_motion_mano_models(runtime):
+    if getattr(runtime, "mano_right", None) is None or getattr(runtime, "mano_left", None) is None:
+        return None
+    return {"right": runtime.mano_right, "left": runtime.mano_left}
+
+
+def _run_detect_track_stage(task, stage_args, config, runtime, frame_source, force):
+    from lib.pipeline.stages.detect_track import detect_track_video
+
+    start_idx, end_idx, _, _ = detect_track_video(
+        stage_args,
+        detector_runner=getattr(runtime, "detector_runner", None),
+        force=force,
+        detect_batch_size=config.detect_batch_size,
+        num_io_workers=config.detect_io_workers,
+        device=config.detect_device,
+        half_precision=config.detect_half_precision,
+        frame_source=frame_source,
+        seq_folder=str(task.seq_folder),
+    )
+    return start_idx, end_idx
+
+
+def _run_motion_stage(task, stage_args, config, runtime, frame_source, profiler, prefetched_data, force, start_idx, end_idx):
+    from lib.pipeline.stages.hawor_video import run_motion_for_video
+
+    run_motion_for_video(
+        stage_args,
+        start_idx,
+        end_idx,
+        str(task.seq_folder),
+        motion_runner=getattr(runtime, "motion_runner", None),
+        profiler=profiler,
+        mano_models=_build_motion_mano_models(runtime),
+        prefetched_data=prefetched_data,
+        frame_source=frame_source,
+        force=force,
+    )
+
+
+def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, end_idx):
+    from lib.pipeline.stages.slam import hawor_slam
+
+    hawor_slam(
+        stage_args,
+        start_idx,
+        end_idx,
+        metric_runner=getattr(runtime, "metric_runner", None),
+        metric3d_batch_size=config.metric3d_batch_size,
+        droid_net=getattr(runtime, "droid_net", None),
+        frame_source=frame_source,
+        seq_folder=str(task.seq_folder),
+    )
+
+
+def _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_idx):
+    from lib.pipeline.stages.hawor_video import run_infiller_for_video
+
+    tracks_dir = get_tracks_dir(task.seq_folder, start_idx, end_idx)
+    frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
+    run_infiller_for_video(
+        stage_args,
+        start_idx,
+        end_idx,
+        frame_chunks_all,
+        infiller_runner=getattr(runtime, "infiller_runner", None),
+        frame_source=frame_source,
+        seq_folder=str(task.seq_folder),
+    )
+
+
+def _run_non_detect_stage(stage, task, stage_args, config, runtime, frame_source, profiler, prefetched_data, force):
+    artifacts = resolve_stage_artifacts(stage, task.seq_folder)
+    start_idx = artifacts.start_idx
+    end_idx = artifacts.end_idx
+
+    if stage == "motion":
+        _run_motion_stage(task, stage_args, config, runtime, frame_source, profiler, prefetched_data, force, start_idx, end_idx)
+    elif stage == "slam":
+        _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, end_idx)
+    elif stage == "infiller":
+        _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_idx)
+    else:
+        raise ValueError(f"Unknown stage: {stage}")
+
+    return start_idx, end_idx
+
+
+def _finalize_stage_run(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
+    validate_stage_output(stage, seq_folder, start_idx, end_idx)
+    _mark_stage_done(seq_folder, stage)
+    return {
+        "status": "success",
+        "start_idx": start_idx,
+        "end_idx": end_idx,
+    }
 
 
 def run_pipeline_stage(
@@ -331,81 +506,24 @@ def run_pipeline_stage(
             "reason": "existing_valid_output",
         }
 
-    if runtime is not None and hasattr(runtime, "ensure_runner"):
-        runtime.ensure_runner(stage)
-
-    from lib.pipeline.stages.detect_track import detect_track_video
-    from lib.pipeline.stages.hawor_video import run_infiller_for_video, run_motion_for_video
-    from lib.pipeline.stages.slam import hawor_slam
+    _ensure_runtime_for_stage(runtime, stage)
 
     frame_source = task.build_frame_source()
     stage_args = config.to_stage_args(task.video_path)
 
     if stage == "detect_track":
-        start_idx, end_idx, _, _ = detect_track_video(
-            stage_args,
-            detector_runner=getattr(runtime, "detector_runner", None),
-            force=force,
-            detect_batch_size=config.detect_batch_size,
-            num_io_workers=config.detect_io_workers,
-            device=config.detect_device,
-            half_precision=config.detect_half_precision,
-            frame_source=frame_source,
-            seq_folder=str(task.seq_folder),
-        )
+        start_idx, end_idx = _run_detect_track_stage(task, stage_args, config, runtime, frame_source, force)
     else:
-        artifacts = resolve_stage_artifacts(stage, task.seq_folder)
-        start_idx = artifacts.start_idx
-        end_idx = artifacts.end_idx
+        start_idx, end_idx = _run_non_detect_stage(
+            stage,
+            task,
+            stage_args,
+            config,
+            runtime,
+            frame_source,
+            profiler,
+            prefetched_data,
+            force,
+        )
 
-    if stage == "motion":
-        mano_models = None
-        if getattr(runtime, "mano_right", None) is not None and getattr(runtime, "mano_left", None) is not None:
-            mano_models = {"right": runtime.mano_right, "left": runtime.mano_left}
-        run_motion_for_video(
-            stage_args,
-            start_idx,
-            end_idx,
-            str(task.seq_folder),
-            motion_runner=getattr(runtime, "motion_runner", None),
-            profiler=profiler,
-            mano_models=mano_models,
-            prefetched_data=prefetched_data,
-            frame_source=frame_source,
-            force=force,
-        )
-    elif stage == "slam":
-        hawor_slam(
-            stage_args,
-            start_idx,
-            end_idx,
-            metric_runner=getattr(runtime, "metric_runner", None),
-            metric3d_batch_size=config.metric3d_batch_size,
-            droid_net=getattr(runtime, "droid_net", None),
-            frame_source=frame_source,
-            seq_folder=str(task.seq_folder),
-        )
-    elif stage == "infiller":
-        tracks_dir = get_tracks_dir(task.seq_folder, start_idx, end_idx)
-        frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
-        run_infiller_for_video(
-            stage_args,
-            start_idx,
-            end_idx,
-            frame_chunks_all,
-            infiller_runner=getattr(runtime, "infiller_runner", None),
-            frame_source=frame_source,
-            seq_folder=str(task.seq_folder),
-        )
-    elif stage == "detect_track":
-        pass
-    else:
-        raise ValueError(f"Unknown stage: {stage}")
-
-    validate_stage_output(stage, task.seq_folder, start_idx, end_idx)
-    get_stage_done_marker(task.seq_folder, stage).touch()
-    return {
-        "status": "success",
-        "start_idx": start_idx,
-        "end_idx": end_idx,
-    }
+    return _finalize_stage_run(stage, task.seq_folder, start_idx, end_idx)

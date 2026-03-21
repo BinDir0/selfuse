@@ -144,7 +144,6 @@ def get_parser():
         default="detect_track,motion,slam,infiller",
         help="Comma-separated stage names",
     )
-    parser.add_argument("--retries", type=int, default=2, help="Fallback retry budget for stage waves")
     parser.add_argument("--resume", dest="resume", action="store_true", default=True, help="Resume from existing outputs")
     parser.add_argument("--no-resume", dest="resume", action="store_false", help="Ignore existing outputs and rerun all stages")
     parser.add_argument("--run_dir", type=str, help="Custom run directory (default: batch_runs/<timestamp>)")
@@ -191,40 +190,16 @@ def get_parser():
     parser.add_argument("--start", type=int, default=0, help="Start index of video list (inclusive, 0-based)")
     parser.add_argument("--end", type=int, default=None, help="End index of video list (exclusive, None means process all)")
     parser.add_argument(
-        "--scheduler_mode",
-        type=str,
-        default="wave",
-        choices=["wave", "legacy"],
-        help="Batch scheduler mode. Only 'wave' remains supported; 'legacy' now errors explicitly.",
-    )
-    parser.add_argument(
-        "--persistent_worker",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--max_stage_retries",
         type=int,
-        default=None,
-        help="Max retries per stage wave. Defaults to --retries when omitted.",
+        default=2,
+        help="Max retries per stage wave.",
     )
     return parser
 
 
 def main():
     args = get_parser().parse_args()
-
-    if args.scheduler_mode != "wave":
-        print(
-            "Error: legacy batch scheduling has been removed. "
-            "Use the default wave scheduler instead.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    if args.persistent_worker:
-        print("Warning: --persistent_worker is now an internal detail and is ignored by batch_infer.", file=sys.stderr)
 
     try:
         video_paths, descriptors, total_videos, start_idx, end_idx = resolve_inputs(args)

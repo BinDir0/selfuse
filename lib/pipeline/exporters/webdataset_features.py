@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import joblib
@@ -66,6 +67,207 @@ def build_mano_models(device, mano_dir=None):
     return mano_right, mano_left
 
 
+def _to_float_tensor(value):
+    if isinstance(value, torch.Tensor):
+        return value.float()
+    return torch.tensor(np.array(value), dtype=torch.float32)
+
+
+def _load_cached_episode_features(ep, extracted_dir, feature_cache_dir):
+    if not feature_cache_dir:
+        return None
+
+    cache_path = get_episode_feature_cache_path(ep, feature_cache_dir)
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        cached = joblib.load(cache_path)
+    except Exception:
+        return None
+
+    if cached.get("cache_version") != 1 or cached.get("crop_dir") != ep["crop_dir"]:
+        return None
+
+    frame_index = load_or_build_frame_index(extracted_dir, rescan=False)
+    if not frame_index:
+        return None
+
+    return {
+        "frame_index": frame_index,
+        "frame_ids": cached["frame_ids"],
+        "lowdim_all": cached["lowdim_all"],
+        "presence_per_frame": cached["presence_per_frame"],
+    }
+
+
+def _load_world_space_prediction(ep, world_res_path):
+    try:
+        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_res_path)
+    except Exception as error:
+        print(f"  Skip {ep['episode_id']}: failed to load world_space_res.pth: {error}")
+        return None
+
+    return {
+        "pred_trans": _to_float_tensor(pred_trans),
+        "pred_rot": _to_float_tensor(pred_rot),
+        "pred_hand_pose": _to_float_tensor(pred_hand_pose),
+        "pred_betas": _to_float_tensor(pred_betas),
+        "pred_valid": pred_valid,
+    }
+
+
+def _compute_wrist_state(pred_trans, pred_rot):
+    rot6d = axis_angle_to_rot6d(pred_rot.float())
+    return torch.cat(
+        [pred_trans[0].float(), pred_trans[1].float(), rot6d[0], rot6d[1]],
+        dim=-1,
+    )
+
+
+def _compute_hand_tips(mano_model, pred_trans, pred_rot, pred_hand_pose, pred_betas, hand_index, device):
+    num_frames = int(pred_trans.shape[1])
+    hand_pose = pred_hand_pose[hand_index].float().reshape(1, num_frames, 15, 3)
+    output = run_mano_forward(
+        mano_model,
+        pred_trans[hand_index].float().unsqueeze(0),
+        pred_rot[hand_index].float().unsqueeze(0),
+        hand_pose,
+        pred_betas[hand_index].float().unsqueeze(0),
+        device,
+    )
+    return output[:, :, FINGERTIP_INDICES, :]
+
+
+def _compute_hand_state(pred_trans, pred_rot, pred_hand_pose, pred_betas, mano_right, mano_left, device):
+    num_frames = int(pred_trans.shape[1])
+    right_tips = _compute_hand_tips(
+        mano_right,
+        pred_trans,
+        pred_rot,
+        pred_hand_pose,
+        pred_betas,
+        hand_index=1,
+        device=device,
+    )
+    left_tips = _compute_hand_tips(
+        mano_left,
+        pred_trans,
+        pred_rot,
+        pred_hand_pose,
+        pred_betas,
+        hand_index=0,
+        device=device,
+    )
+    return torch.cat(
+        [left_tips[0].reshape(num_frames, 15), right_tips[0].reshape(num_frames, 15)],
+        dim=-1,
+    )
+
+
+def _shift_next_frame_action(state):
+    action = torch.zeros_like(state)
+    action[:-1] = state[1:]
+    return action
+
+
+def _load_episode_camera_features(ep, num_frames):
+    slam_dir = os.path.join(ep["crop_dir"], "SLAM")
+    extrinsics = np.tile(np.eye(4, dtype=np.float32), (num_frames, 1, 1))
+    intrinsic = DEFAULT_INTRINSIC.copy()
+
+    slam_files = sorted(Path(slam_dir).glob("hawor_slam_w_scale_*.npz")) if os.path.isdir(slam_dir) else []
+    if not slam_files:
+        return extrinsics, intrinsic
+
+    try:
+        slam_data = np.load(str(slam_files[0]), allow_pickle=True)
+        tstamps = slam_data["tstamp"].astype(np.int64)
+        traj = slam_data["traj"]
+        scale = float(slam_data["scale"])
+        img_focal = float(slam_data["img_focal"])
+        img_center = slam_data["img_center"]
+        tstamps, traj = normalize_slam_keyframes(tstamps, traj)
+        if len(tstamps) == 0:
+            raise ValueError("no valid SLAM keyframes after alignment")
+
+        extrinsics = interpolate_extrinsics(tstamps, traj, scale, num_frames)
+        intrinsic = np.array(
+            [img_focal, img_focal, float(img_center[0]), float(img_center[1])],
+            dtype=np.float32,
+        )
+    except Exception as error:
+        print(f"  Warning: SLAM load failed for {ep['episode_id']}: {error}")
+
+    return extrinsics, intrinsic
+
+
+def _compute_presence_per_frame(pred_valid, num_frames):
+    if isinstance(pred_valid, np.ndarray):
+        valid = pred_valid.astype(np.float32)
+    else:
+        valid = pred_valid.float().cpu().numpy()
+    if valid.ndim == 1:
+        valid = np.tile(valid[:, None], (1, num_frames))
+    return ((valid[0] > 0.5).astype(int)) | (((valid[1] > 0.5).astype(int)) << 1)
+
+
+def _build_lowdim_features(wrist_state, hand_state, extrinsics, intrinsic):
+    wrist_action = _shift_next_frame_action(wrist_state)
+    hand_action = _shift_next_frame_action(hand_state)
+    num_frames = int(wrist_state.shape[0])
+
+    lowdim_all = np.concatenate(
+        [
+            wrist_state.cpu().numpy().astype(np.float32),
+            hand_state.cpu().numpy().astype(np.float32),
+            wrist_action.cpu().numpy().astype(np.float32),
+            hand_action.cpu().numpy().astype(np.float32),
+            extrinsics.reshape(num_frames, 16),
+            np.tile(intrinsic, (num_frames, 1)),
+        ],
+        axis=-1,
+    )
+    assert lowdim_all.shape == (num_frames, LOWDIM_SIZE), f"lowdim shape mismatch: {lowdim_all.shape}"
+    return lowdim_all
+
+
+def _build_episode_data(extracted_dir, num_frames, lowdim_all, presence_per_frame, rescan_frame_index):
+    frame_index = load_or_build_frame_index(extracted_dir, rescan=rescan_frame_index)
+    frame_ids = sorted(frame_idx for frame_idx in frame_index if frame_idx < num_frames)
+    if not frame_ids:
+        return None
+
+    return {
+        "frame_index": frame_index,
+        "frame_ids": frame_ids,
+        "lowdim_all": lowdim_all,
+        "presence_per_frame": presence_per_frame,
+    }
+
+
+def _write_episode_feature_cache(ep, feature_cache_dir, episode_data):
+    if not feature_cache_dir:
+        return
+
+    cache_path = get_episode_feature_cache_path(ep, feature_cache_dir)
+    cache_tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+    cache_payload = {
+        "cache_version": 1,
+        "crop_dir": ep["crop_dir"],
+        "frame_ids": episode_data["frame_ids"],
+        "lowdim_all": episode_data["lowdim_all"],
+        "presence_per_frame": episode_data["presence_per_frame"].astype(np.uint8),
+    }
+    try:
+        os.makedirs(feature_cache_dir, exist_ok=True)
+        joblib.dump(cache_payload, cache_tmp_path)
+        os.replace(cache_tmp_path, cache_path)
+    except OSError:
+        if os.path.exists(cache_tmp_path):
+            os.remove(cache_tmp_path)
+
+
 def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=False, feature_cache_dir=None):
     """Load one episode and compute per-frame lowdim features."""
     crop_dir = ep["crop_dir"]
@@ -73,149 +275,46 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
     extracted_dir = os.path.join(crop_dir, "extracted_images")
 
     if feature_cache_dir and not rescan_frame_index:
-        cache_path = get_episode_feature_cache_path(ep, feature_cache_dir)
-        if os.path.exists(cache_path):
-            try:
-                cached = joblib.load(cache_path)
-                if cached.get("cache_version") == 1 and cached.get("crop_dir") == crop_dir:
-                    frame_index = load_or_build_frame_index(extracted_dir, rescan=False)
-                    if frame_index:
-                        return {
-                            "frame_index": frame_index,
-                            "frame_ids": cached["frame_ids"],
-                            "lowdim_all": cached["lowdim_all"],
-                            "presence_per_frame": cached["presence_per_frame"],
-                        }
-            except Exception:
-                pass
+        cached = _load_cached_episode_features(ep, extracted_dir, feature_cache_dir)
+        if cached is not None:
+            return cached
 
-    try:
-        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_res_path)
-    except Exception as e:
-        print(f"  Skip {ep['episode_id']}: failed to load world_space_res.pth: {e}")
+    prediction = _load_world_space_prediction(ep, world_res_path)
+    if prediction is None:
         return None
 
-    def _to_tensor(x):
-        if isinstance(x, torch.Tensor):
-            return x.float()
-        return torch.tensor(np.array(x), dtype=torch.float32)
-
-    pred_trans = _to_tensor(pred_trans)
-    pred_rot = _to_tensor(pred_rot)
-    pred_hand_pose = _to_tensor(pred_hand_pose)
-    pred_betas = _to_tensor(pred_betas)
+    pred_trans = prediction["pred_trans"]
+    pred_rot = prediction["pred_rot"]
+    pred_hand_pose = prediction["pred_hand_pose"]
+    pred_betas = prediction["pred_betas"]
+    pred_valid = prediction["pred_valid"]
     num_frames = int(pred_trans.shape[1])
 
-    rot6d = axis_angle_to_rot6d(pred_rot.float())
-    wrist_state = torch.cat(
-        [pred_trans[0].float(), pred_trans[1].float(), rot6d[0], rot6d[1]],
-        dim=-1,
-    )
-
-    right_pose = pred_hand_pose[1].float().reshape(1, num_frames, 15, 3)
-    right_output = run_mano_forward(
+    wrist_state = _compute_wrist_state(pred_trans, pred_rot)
+    hand_state = _compute_hand_state(
+        pred_trans,
+        pred_rot,
+        pred_hand_pose,
+        pred_betas,
         mano_right,
-        pred_trans[1].float().unsqueeze(0),
-        pred_rot[1].float().unsqueeze(0),
-        right_pose,
-        pred_betas[1].float().unsqueeze(0),
-        device,
-    )
-    right_tips = right_output[:, :, FINGERTIP_INDICES, :]
-
-    left_pose = pred_hand_pose[0].float().reshape(1, num_frames, 15, 3)
-    left_output = run_mano_forward(
         mano_left,
-        pred_trans[0].float().unsqueeze(0),
-        pred_rot[0].float().unsqueeze(0),
-        left_pose,
-        pred_betas[0].float().unsqueeze(0),
         device,
     )
-    left_tips = left_output[:, :, FINGERTIP_INDICES, :]
+    extrinsics, intrinsic = _load_episode_camera_features(ep, num_frames)
+    presence_per_frame = _compute_presence_per_frame(pred_valid, num_frames)
+    lowdim_all = _build_lowdim_features(wrist_state, hand_state, extrinsics, intrinsic)
 
-    hand_state = torch.cat([left_tips[0].reshape(num_frames, 15), right_tips[0].reshape(num_frames, 15)], dim=-1)
-
-    wrist_action = torch.zeros_like(wrist_state)
-    wrist_action[:-1] = wrist_state[1:]
-
-    hand_action = torch.zeros_like(hand_state)
-    hand_action[:-1] = hand_state[1:]
-
-    slam_dir = os.path.join(crop_dir, "SLAM")
-    extrinsics = np.tile(np.eye(4, dtype=np.float32), (num_frames, 1, 1))
-    intrinsic = DEFAULT_INTRINSIC.copy()
-
-    slam_files = sorted(Path(slam_dir).glob("hawor_slam_w_scale_*.npz")) if os.path.isdir(slam_dir) else []
-    if slam_files:
-        try:
-            slam_data = np.load(str(slam_files[0]), allow_pickle=True)
-            tstamps = slam_data["tstamp"].astype(np.int64)
-            traj = slam_data["traj"]
-            scale = float(slam_data["scale"])
-            img_focal = float(slam_data["img_focal"])
-            img_center = slam_data["img_center"]
-            tstamps, traj = normalize_slam_keyframes(tstamps, traj)
-            if len(tstamps) == 0:
-                raise ValueError("no valid SLAM keyframes after alignment")
-            extrinsics = interpolate_extrinsics(tstamps, traj, scale, num_frames)
-            intrinsic = np.array(
-                [img_focal, img_focal, float(img_center[0]), float(img_center[1])],
-                dtype=np.float32,
-            )
-        except Exception as e:
-            print(f"  Warning: SLAM load failed for {ep['episode_id']}: {e}")
-
-    if isinstance(pred_valid, np.ndarray):
-        valid = pred_valid.astype(np.float32)
-    else:
-        valid = pred_valid.float().cpu().numpy()
-    if valid.ndim == 1:
-        valid = np.tile(valid[:, None], (1, num_frames))
-    presence_per_frame = ((valid[0] > 0.5).astype(int)) | (((valid[1] > 0.5).astype(int)) << 1)
-
-    wrist_state_np = wrist_state.cpu().numpy().astype(np.float32)
-    hand_state_np = hand_state.cpu().numpy().astype(np.float32)
-    wrist_action_np = wrist_action.cpu().numpy().astype(np.float32)
-    hand_action_np = hand_action.cpu().numpy().astype(np.float32)
-    extrinsics_flat = extrinsics.reshape(num_frames, 16)
-    intrinsic_tiled = np.tile(intrinsic, (num_frames, 1))
-    lowdim_all = np.concatenate(
-        [wrist_state_np, hand_state_np, wrist_action_np, hand_action_np, extrinsics_flat, intrinsic_tiled],
-        axis=-1,
+    episode_data = _build_episode_data(
+        extracted_dir,
+        num_frames,
+        lowdim_all,
+        presence_per_frame,
+        rescan_frame_index=rescan_frame_index,
     )
-    assert lowdim_all.shape == (num_frames, LOWDIM_SIZE), f"lowdim shape mismatch: {lowdim_all.shape}"
-
-    frame_index = load_or_build_frame_index(extracted_dir, rescan=rescan_frame_index)
-    frame_ids = sorted(frame_idx for frame_idx in frame_index if frame_idx < num_frames)
-    if not frame_ids:
+    if episode_data is None:
         return None
 
-    episode_data = {
-        "frame_index": frame_index,
-        "frame_ids": frame_ids,
-        "lowdim_all": lowdim_all,
-        "presence_per_frame": presence_per_frame,
-    }
-
-    if feature_cache_dir:
-        cache_path = get_episode_feature_cache_path(ep, feature_cache_dir)
-        cache_tmp_path = f"{cache_path}.tmp.{os.getpid()}"
-        cache_payload = {
-            "cache_version": 1,
-            "crop_dir": crop_dir,
-            "frame_ids": frame_ids,
-            "lowdim_all": lowdim_all,
-            "presence_per_frame": presence_per_frame.astype(np.uint8),
-        }
-        try:
-            os.makedirs(feature_cache_dir, exist_ok=True)
-            joblib.dump(cache_payload, cache_tmp_path)
-            os.replace(cache_tmp_path, cache_path)
-        except OSError:
-            if os.path.exists(cache_tmp_path):
-                os.remove(cache_tmp_path)
-
+    _write_episode_feature_cache(ep, feature_cache_dir, episode_data)
     return episode_data
 
 
@@ -227,13 +326,17 @@ def run_infill_for_episode(crop_dir, checkpoint, infiller_weight, device):
         return True
 
     gpu = "" if str(device).startswith("cpu") else (device.split(":")[-1] if ":" in device else device)
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
+        handle.write(f"{seq_folder}\n")
+        video_list_path = handle.name
+
     cmd = [
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "batch_worker.py"),
         "--stage",
         "infiller",
-        "--video_path",
-        str(seq_folder),
+        "--video_list",
+        video_list_path,
         "--gpu",
         str(gpu),
         "--checkpoint",
@@ -241,7 +344,11 @@ def run_infill_for_episode(crop_dir, checkpoint, infiller_weight, device):
         "--infiller_weight",
         infiller_weight,
     ]
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        result = subprocess.run(cmd, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    finally:
+        if os.path.exists(video_list_path):
+            os.remove(video_list_path)
     if result.returncode != 0:
         print(f"  Infill failed for {seq_folder.name}:\n{result.stdout}")
     return world_res.exists()

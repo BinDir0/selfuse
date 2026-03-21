@@ -27,7 +27,6 @@ def _build_runtime(config: BatchRunConfig, gpu: int) -> WorkerRuntime:
         checkpoint=config.checkpoint,
         infiller_weight=config.infiller_weight,
         img_focal=config.img_focal,
-        input_type="file",
         chunk_batch_size=config.chunk_batch_size,
         num_workers=config.num_workers,
         render_batch_size=config.render_batch_size,

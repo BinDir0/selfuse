@@ -82,13 +82,11 @@ def build_parser():
     parser.add_argument("--frames_per_shard", type=int, default=10000)
     parser.add_argument("--repeat_episodes", type=int, default=1, help="Repeat the full episode list this many times in order")
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
-    parser.add_argument("--device", default="cuda:0", help="Deprecated alias for --mano_device")
-    parser.add_argument("--mano_device", default=None, help="Device for MANO forward pass")
+    parser.add_argument("--mano_device", default="cuda:0", help="Device for MANO forward pass")
     parser.add_argument("--mano_gpus", default=None, help="Comma-separated GPU ids for parallel MANO workers, e.g. 0,1,2,3")
     parser.add_argument("--mano_dir", default=None, help="Directory containing MANO_RIGHT.pkl and MANO_LEFT.pkl")
     parser.add_argument("--rescan", action="store_true", help="Force rescan episodes and frame indexes")
-    parser.add_argument("--num_workers", type=int, default=8, help="Deprecated alias for --writer_workers")
-    parser.add_argument("--writer_workers", type=int, default=None, help="Number of parallel shard writers")
+    parser.add_argument("--writer_workers", type=int, default=8, help="Number of parallel shard writers")
     parser.add_argument("--shard_manifest_out", default=None, help="Optional JSON manifest of planned shards")
     parser.add_argument("--auto_infill", action="store_true", help="Run infill for missing world_space_res.pth")
     parser.add_argument("--checkpoint", default=None, help="HaWoR checkpoint path (required if --auto_infill)")
@@ -98,11 +96,9 @@ def build_parser():
 
 def normalize_args(args):
     """Normalize deprecated aliases and validate simple invariants."""
-    args.mano_device = args.mano_device or args.device
-    writer_workers = args.writer_workers if args.writer_workers is not None else args.num_workers
     if args.repeat_episodes < 1:
         raise ValueError("--repeat_episodes must be >= 1")
-    return writer_workers
+    return args.writer_workers
 
 
 def validate_auto_infill_args(args):

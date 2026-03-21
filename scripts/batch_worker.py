@@ -11,128 +11,32 @@ from pathlib import Path
 
 import torch
 
-# Suppress common warnings to reduce output noise
-warnings.filterwarnings('ignore', category=FutureWarning)
-warnings.filterwarnings('ignore', category=UserWarning)
-warnings.filterwarnings('ignore', message='.*pkg_resources.*')
-warnings.filterwarnings('ignore', message='.*timm.models.layers.*')
-warnings.filterwarnings('ignore', message='.*torch.cuda.amp.autocast.*')
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.pipeline.stage_api import (
-    STAGES,
-    PipelineVideoTask,
-    StageExecutionConfig,
-    run_pipeline_stage,
-)
-from lib.pipeline.runtime import WorkerRuntime, set_determinism
-from lib.pipeline.video_index import VideoDescriptor
 
-# Set temporary directory to shared storage instead of local /tmp
-# IMPORTANT: Set this AFTER importing torch to avoid library loading issues
-SHARED_TMP_DIR = Path("/share_data/guantianrui/tmp")
-SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
-os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
-os.environ["TEMP"] = str(SHARED_TMP_DIR)
-os.environ["TMP"] = str(SHARED_TMP_DIR)
-tempfile.tempdir = str(SHARED_TMP_DIR)
+def _configure_process_environment():
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", message=".*pkg_resources.*")
+    warnings.filterwarnings("ignore", message=".*timm.models.layers.*")
+    warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
 
-# Suppress verbose output from stage scripts
-os.environ["HAWOR_QUIET"] = "1"
-
-def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
-    task = PipelineVideoTask.from_namespace(ns)
-    return run_pipeline_stage(
-        ns.stage,
-        task,
-        runtime.stage_config,
-        runtime=runtime,
-        prefetched_data=prefetched_data,
-        resume=ns.resume,
-        force=ns.force,
-    )
+    shared_tmp_dir = Path("/share_data/guantianrui/tmp")
+    shared_tmp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(shared_tmp_dir)
+    os.environ["TEMP"] = str(shared_tmp_dir)
+    os.environ["TMP"] = str(shared_tmp_dir)
+    tempfile.tempdir = str(shared_tmp_dir)
+    os.environ["HAWOR_QUIET"] = "1"
 
 
-def worker_runtime_loop(ns):
-    set_determinism(ns.seed)
-    runtime = WorkerRuntime(
-        gpu=ns.gpu,
-        checkpoint=ns.checkpoint,
-        infiller_weight=ns.infiller_weight,
-        img_focal=ns.img_focal,
-        input_type=ns.input_type,
-        chunk_batch_size=ns.chunk_batch_size,
-        num_workers=getattr(ns, 'num_workers', 16),
-        render_batch_size=getattr(ns, 'render_batch_size', 8),
-        metric3d_batch_size=getattr(ns, 'metric3d_batch_size', 32),
-        detect_batch_size=getattr(ns, 'detect_batch_size', 128),
-        detect_io_workers=getattr(ns, 'detect_io_workers', 8),
-        detect_device=getattr(ns, 'detect_device', "cuda:0"),
-        detect_half_precision=bool(getattr(ns, 'detect_half_precision', True)),
-        infiller_window_batch_size=getattr(ns, 'infiller_window_batch_size', 64),
-        rebuild_cam_space_cache=getattr(ns, 'rebuild_cam_space_cache', False),
-    )
+_configure_process_environment()
 
-    with open(ns.video_list) as f:
-        lines = [line.strip() for line in f if line.strip()]
-
-    # Detect format: JSON Lines (descriptor) or plain paths
-    descriptors = []
-    for line in lines:
-        if line.startswith('{'):
-            descriptors.append(VideoDescriptor.from_json(line))
-        else:
-            descriptors.append(None)  # plain video_path mode
-
-    overall_success = True
-    for i, line in enumerate(lines):
-        task_ns = argparse.Namespace(**vars(ns))
-        desc = descriptors[i]
-        if desc is not None:
-            task_ns._descriptor = desc
-            task_ns.video_path = desc.video_key
-            video_label = desc.video_key
-        else:
-            task_ns._descriptor = None
-            task_ns.video_path = line
-            video_label = line
-
-        common_fields = {
-            "video": video_label,
-            "stage": task_ns.stage,
-            "gpu": task_ns.gpu,
-        }
-        started_at = time.time()
-        emit_event("stage_start", **common_fields)
-        try:
-            result = run_stage_with_runtime(runtime, task_ns)
-            emit_event(
-                "stage_end",
-                **common_fields,
-                status=result.get("status", "success"),
-                elapsed_sec=round(time.time() - started_at, 3),
-                reason=result.get("reason"),
-                start_idx=result.get("start_idx"),
-                end_idx=result.get("end_idx"),
-            )
-        except Exception as err:
-            overall_success = False
-            emit_event(
-                "stage_end",
-                **common_fields,
-                status="failed",
-                elapsed_sec=round(time.time() - started_at, 3),
-                error=str(err),
-            )
-            traceback.print_exc()
-
-        # Free GPU memory between videos to prevent fragmentation
-        torch.cuda.empty_cache()
-
-    return overall_success
+from lib.pipeline.runtime import WorkerRuntime, set_determinism  # noqa: E402
+from lib.pipeline.stage_api import STAGES, PipelineVideoTask, run_pipeline_stage  # noqa: E402
+from lib.pipeline.video_index import VideoDescriptor  # noqa: E402
 
 
 def emit_event(event: str, **kwargs):
@@ -144,64 +48,168 @@ def emit_event(event: str, **kwargs):
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-def run_stage(ns):
-    if ns.gpu is not None and ns.gpu != "":
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(ns.gpu)
-
+def _build_runtime_from_args(ns):
     set_determinism(ns.seed)
-    task = PipelineVideoTask.from_namespace(ns)
-    config = StageExecutionConfig.from_namespace(ns)
+    return WorkerRuntime(
+        gpu=ns.gpu,
+        checkpoint=ns.checkpoint,
+        infiller_weight=ns.infiller_weight,
+        img_focal=ns.img_focal,
+        chunk_batch_size=ns.chunk_batch_size,
+        num_workers=ns.num_workers,
+        render_batch_size=ns.render_batch_size,
+        metric3d_batch_size=ns.metric3d_batch_size,
+        detect_batch_size=ns.detect_batch_size,
+        detect_io_workers=ns.detect_io_workers,
+        detect_device=ns.detect_device,
+        detect_half_precision=ns.detect_half_precision,
+        infiller_window_batch_size=ns.infiller_window_batch_size,
+        rebuild_cam_space_cache=ns.rebuild_cam_space_cache,
+    )
 
-    profiler = None
-    if ns.stage == "motion" and getattr(ns, 'enable_profiler', False):
-        from torch.profiler import profile, ProfilerActivity, schedule
 
-        if getattr(ns, 'run_dir', None):
-            profiler_output_dir = Path(ns.run_dir) / "profiler_traces"
-        else:
-            profiler_output_dir = task.seq_folder.parent / "profiler_traces"
-        profiler_output_dir.mkdir(parents=True, exist_ok=True)
+def _parse_video_list_entry(line: str):
+    if line.startswith("{"):
+        descriptor = VideoDescriptor.from_json(line)
+        return {
+            "descriptor": descriptor,
+            "video_path": descriptor.video_key,
+            "video_label": descriptor.video_key,
+        }
 
-        print(f"[PROFILER] Enabled. Output dir: {profiler_output_dir}")
-        print(f"[PROFILER] Video: {Path(ns.video_path).stem}")
+    return {
+        "descriptor": None,
+        "video_path": line,
+        "video_label": line,
+    }
 
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            schedule=schedule(wait=0, warmup=1, active=3, repeat=1),
-            on_trace_ready=lambda p: (
-                print(f"[PROFILER] Trace ready, exporting to {profiler_output_dir / f'motion_trace_{Path(ns.video_path).stem}.json'}"),
-                p.export_chrome_trace(str(profiler_output_dir / f"motion_trace_{Path(ns.video_path).stem}.json"))
-            ),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-        ) as prof:
-            return run_pipeline_stage(
-                ns.stage,
-                task,
-                config,
-                profiler=prof,
-                resume=ns.resume,
-                force=ns.force,
-            )
+
+def _load_video_tasks(video_list_path: str):
+    with open(video_list_path) as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    return [_parse_video_list_entry(line) for line in lines]
+
+
+def _build_task_namespace(base_ns, task_entry):
+    task_ns = argparse.Namespace(**vars(base_ns))
+    task_ns._descriptor = task_entry["descriptor"]
+    task_ns.video_path = task_entry["video_path"]
+    return task_ns
+
+
+def _build_common_event_fields(task_ns, video_label):
+    return {
+        "video": video_label,
+        "stage": task_ns.stage,
+        "gpu": task_ns.gpu,
+    }
+
+
+def _build_profiler_output_dir(task_ns, task: PipelineVideoTask):
+    if getattr(task_ns, "run_dir", None):
+        profiler_output_dir = Path(task_ns.run_dir) / "profiler_traces"
+    else:
+        profiler_output_dir = task.seq_folder.parent / "profiler_traces"
+    profiler_output_dir.mkdir(parents=True, exist_ok=True)
+    return profiler_output_dir
+
+
+def _run_stage_with_profiler(runtime: WorkerRuntime, task_ns, task: PipelineVideoTask):
+    from torch.profiler import ProfilerActivity, profile, schedule
+
+    profiler_output_dir = _build_profiler_output_dir(task_ns, task)
+    trace_path = profiler_output_dir / f"motion_trace_{Path(task_ns.video_path).stem}.json"
+
+    print(f"[PROFILER] Enabled. Output dir: {profiler_output_dir}")
+    print(f"[PROFILER] Video: {Path(task_ns.video_path).stem}")
+
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=schedule(wait=0, warmup=1, active=3, repeat=1),
+        on_trace_ready=lambda profiler: (
+            print(f"[PROFILER] Trace ready, exporting to {trace_path}"),
+            profiler.export_chrome_trace(str(trace_path)),
+        ),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    ) as profiler:
+        return run_pipeline_stage(
+            task_ns.stage,
+            task,
+            runtime.stage_config,
+            runtime=runtime,
+            profiler=profiler,
+            resume=task_ns.resume,
+            force=task_ns.force,
+        )
+
+
+def _run_stage_with_runtime(runtime: WorkerRuntime, task_ns):
+    task = PipelineVideoTask.from_namespace(task_ns)
+    if task_ns.stage == "motion" and getattr(task_ns, "enable_profiler", False):
+        return _run_stage_with_profiler(runtime, task_ns, task)
 
     return run_pipeline_stage(
-        ns.stage,
+        task_ns.stage,
         task,
-        config,
-        profiler=profiler,
-        resume=ns.resume,
-        force=ns.force,
+        runtime.stage_config,
+        runtime=runtime,
+        resume=task_ns.resume,
+        force=task_ns.force,
     )
+
+
+def _execute_task(runtime: WorkerRuntime, task_ns, video_label: str):
+    common_fields = _build_common_event_fields(task_ns, video_label)
+    started_at = time.time()
+    emit_event("stage_start", **common_fields)
+
+    try:
+        result = _run_stage_with_runtime(runtime, task_ns)
+        emit_event(
+            "stage_end",
+            **common_fields,
+            status=result.get("status", "success"),
+            elapsed_sec=round(time.time() - started_at, 3),
+            reason=result.get("reason"),
+            start_idx=result.get("start_idx"),
+            end_idx=result.get("end_idx"),
+        )
+        return True
+    except Exception as error:
+        emit_event(
+            "stage_end",
+            **common_fields,
+            status="failed",
+            elapsed_sec=round(time.time() - started_at, 3),
+            error=str(error),
+        )
+        traceback.print_exc()
+        return False
+    finally:
+        torch.cuda.empty_cache()
+
+
+def worker_runtime_loop(ns):
+    runtime = _build_runtime_from_args(ns)
+    runtime.ensure_runner(ns.stage)
+
+    overall_success = True
+    for task_entry in _load_video_tasks(ns.video_list):
+        task_ns = _build_task_namespace(ns, task_entry)
+        if not _execute_task(runtime, task_ns, task_entry["video_label"]):
+            overall_success = False
+
+    return overall_success
 
 
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", required=True, choices=STAGES)
-    parser.add_argument("--video_path", type=str)
+    parser.add_argument("--video_list", required=True, help="Path to text file with one video path per line or descriptor JSON Lines")
     parser.add_argument("--gpu", default="", type=str)
     parser.add_argument("--img_focal", type=float)
-    parser.add_argument("--input_type", type=str, default="file")
     parser.add_argument("--checkpoint", type=str, default="./weights/hawor/checkpoints/hawor.ckpt")
     parser.add_argument("--infiller_weight", type=str, default="./weights/hawor/checkpoints/infiller.pt")
     parser.add_argument("--seed", type=int, default=42)
@@ -219,58 +227,16 @@ def get_parser():
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     parser.add_argument("--force", action="store_true", help="Ignore existing outputs and rerun this stage")
-    parser.add_argument("--video_list", type=str, help="Optional file with one video path per line (or JSON Lines for WebDataset) for persistent worker mode")
-    parser.add_argument("--persistent_worker", action="store_true", help="Run as long-lived stage worker for multiple videos")
-    parser.add_argument("--video_descriptor", type=str, help="JSON VideoDescriptor for WebDataset mode (alternative to --video_path)")
     parser.add_argument("--enable_profiler", action="store_true", help="Enable torch profiler to diagnose performance bottlenecks")
     parser.add_argument("--run_dir", type=str, help="Batch run directory for output organization")
     return parser
 
 
-if __name__ == "__main__":
+def main():
     args = get_parser().parse_args()
+    success = worker_runtime_loop(args)
+    sys.exit(0 if success else 1)
 
-    # Parse video_descriptor if provided
-    if args.video_descriptor:
-        args._descriptor = VideoDescriptor.from_json(args.video_descriptor)
-        if not args.video_path:
-            args.video_path = args._descriptor.video_key
-    else:
-        args._descriptor = None
 
-    if args.persistent_worker:
-        if not args.video_list:
-            raise ValueError("--video_list is required when --persistent_worker is set")
-        success = worker_runtime_loop(args)
-        sys.exit(0 if success else 1)
-
-    started_at = time.time()
-    common_fields = {
-        "video": args.video_path,
-        "stage": args.stage,
-        "gpu": args.gpu,
-    }
-
-    emit_event("stage_start", **common_fields)
-    try:
-        result = run_stage(args)
-        emit_event(
-            "stage_end",
-            **common_fields,
-            status=result.get("status", "success"),
-            elapsed_sec=round(time.time() - started_at, 3),
-            reason=result.get("reason"),
-            start_idx=result.get("start_idx"),
-            end_idx=result.get("end_idx"),
-        )
-        sys.exit(0)
-    except Exception as err:
-        emit_event(
-            "stage_end",
-            **common_fields,
-            status="failed",
-            elapsed_sec=round(time.time() - started_at, 3),
-            error=str(err),
-        )
-        traceback.print_exc()
-        sys.exit(1)
+if __name__ == "__main__":
+    main()

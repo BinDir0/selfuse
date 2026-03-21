@@ -27,7 +27,6 @@ class WorkerRuntime:
         checkpoint: str,
         infiller_weight: str,
         img_focal: float = None,
-        input_type: str = "file",
         chunk_batch_size: int = 8,
         num_workers: int = 16,
         render_batch_size: int = 8,
@@ -42,7 +41,6 @@ class WorkerRuntime:
         self.gpu = gpu
         self.stage_config = StageExecutionConfig(
             img_focal=img_focal,
-            input_type=input_type,
             checkpoint=checkpoint,
             infiller_weight=infiller_weight,
             chunk_batch_size=chunk_batch_size,

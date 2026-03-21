@@ -39,17 +39,6 @@ class BatchRunConfig:
 
     @classmethod
     def from_args(cls, args, *, video_paths: List[str], descriptors: Optional[List["VideoDescriptor"]], run_dir: Path):
-        scheduler_mode = getattr(args, "scheduler_mode", "wave")
-        if scheduler_mode != "wave":
-            raise ValueError(
-                f"Unsupported --scheduler_mode={scheduler_mode!r}. "
-                "Only 'wave' is supported after the batch infer refactor."
-            )
-
-        stage_retry_limit = getattr(args, "max_stage_retries", None)
-        if stage_retry_limit is None:
-            stage_retry_limit = getattr(args, "retries", 2)
-
         raw_stages = [part.strip() for part in args.stages.split(",") if part.strip()]
         stages = [STAGE_ALIASES.get(stage, stage) for stage in raw_stages]
         invalid = [stage for stage in stages if stage not in VALID_BATCH_STAGES]
@@ -80,7 +69,7 @@ class BatchRunConfig:
             detect_half_precision=args.detect_half_precision,
             detect_io_workers=args.detect_io_workers,
             rebuild_cam_space_cache=args.rebuild_cam_space_cache,
-            max_stage_retries=stage_retry_limit,
+            max_stage_retries=args.max_stage_retries,
             enable_profiler=args.enable_profiler,
         )
 
