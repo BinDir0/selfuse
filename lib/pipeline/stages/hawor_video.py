@@ -27,6 +27,23 @@ from infiller.lib.model.network import TransformerModel
 # Check if we should suppress verbose output
 QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
 
+MANO_FACE_EXTRA = np.array([
+    [92, 38, 234],
+    [234, 38, 239],
+    [38, 122, 239],
+    [239, 122, 279],
+    [122, 118, 279],
+    [279, 118, 215],
+    [118, 117, 215],
+    [215, 117, 214],
+    [117, 119, 214],
+    [214, 119, 121],
+    [119, 120, 121],
+    [121, 120, 78],
+    [120, 108, 78],
+    [78, 108, 79],
+], dtype=np.int32)
+
 def vprint(*args, **kwargs):
     """Print only if not in quiet mode."""
     if not QUIET_MODE:
@@ -86,6 +103,168 @@ def build_infiller_runner(weight_path, device=None):
         'horizon': horizon,
         'src_mask': torch.zeros((horizon, horizon), device=device, dtype=torch.bool),
     }
+
+
+def _resolve_img_focal(args, seq_folder):
+    img_focal = args.img_focal
+    if img_focal is not None:
+        return img_focal
+
+    try:
+        with open(os.path.join(seq_folder, "est_focal.txt"), "r") as f:
+            return float(f.read())
+    except Exception:
+        img_focal = 600
+        vprint(f"No focal length provided, use default {img_focal}")
+        with open(os.path.join(seq_folder, "est_focal.txt"), "w") as f:
+            f.write(str(img_focal))
+        return img_focal
+
+
+def _get_tracks_dir(seq_folder, start_idx, end_idx):
+    return os.path.join(seq_folder, f"tracks_{start_idx}_{end_idx}")
+
+
+def _get_motion_output_paths(seq_folder, start_idx, end_idx):
+    tracks_dir = _get_tracks_dir(seq_folder, start_idx, end_idx)
+    return (
+        tracks_dir,
+        os.path.join(tracks_dir, "frame_chunks_all.npy"),
+        os.path.join(tracks_dir, "model_masks.npy"),
+    )
+
+
+def _load_motion_inputs(args, seq_folder, start_idx, end_idx, prefetched_data=None, frame_source=None):
+    if prefetched_data is not None:
+        return prefetched_data["frame_source"], prefetched_data["tracks"]
+
+    if frame_source is None:
+        frame_source = build_frame_source(args.video_path)
+    tracks_dir = _get_tracks_dir(seq_folder, start_idx, end_idx)
+    tracks = np.load(os.path.join(tracks_dir, "model_tracks.npy"), allow_pickle=True).item()
+    return frame_source, tracks
+
+
+def _sanitize_tracks_for_available_frames(tracks, num_frames):
+    if len(tracks) == 0:
+        return tracks
+
+    try:
+        max_frame_in_tracks = max(
+            max(t["frame"] for t in track_data)
+            for track_data in tracks.values()
+            if len(track_data) > 0
+        )
+    except ValueError:
+        return tracks
+
+    if max_frame_in_tracks < num_frames:
+        return tracks
+
+    vprint(f"WARNING: Track data references frame {max_frame_in_tracks} but only {num_frames} frames available.")
+    vprint("         This usually means extracted_images is incomplete.")
+    vprint(f"         Auto-fixing: Filtering out track entries with frame >= {num_frames}")
+
+    fixed_tracks = {}
+    total_removed = 0
+    for track_id, track_data in tracks.items():
+        original_len = len(track_data)
+        filtered_track = [t for t in track_data if t["frame"] < num_frames]
+        total_removed += original_len - len(filtered_track)
+        if len(filtered_track) >= 5:
+            fixed_tracks[track_id] = filtered_track
+
+    vprint(f"         Removed {total_removed} track entries referencing unavailable frames")
+    vprint(f"         {len(tracks) - len(fixed_tracks)} tracks dropped (too short after filtering)")
+    vprint(f"         {len(fixed_tracks)} tracks remain")
+    return fixed_tracks
+
+
+def _split_tracks_by_hand(tracks):
+    left_trk = []
+    right_trk = []
+
+    for track_id in np.array([track_key for track_key in tracks]):
+        trk = tracks[track_id]
+        if len(trk) < 5:
+            continue
+
+        confs = [t["det_box"][0, 4] for t in trk if t["det"]]
+        if len(confs) == 0 or np.mean(confs) < 0.3:
+            continue
+
+        if "is_near_edge" in trk[0]:
+            edge_ratio = sum(1 for t in trk if t.get("is_near_edge", False)) / len(trk)
+            if edge_ratio > 0.7:
+                continue
+
+        valid = np.array([t["det"] for t in trk])
+        is_right = np.concatenate([t["det_handedness"] for t in trk])[valid]
+        if is_right.sum() / len(is_right) < 0.5:
+            left_trk.extend(trk)
+        else:
+            right_trk.extend(trk)
+
+    return {
+        0: sorted(left_trk, key=lambda x: x["frame"]),
+        1: sorted(right_trk, key=lambda x: x["frame"]),
+    }
+
+
+def _build_hand_faces():
+    faces = get_mano_faces()
+    faces_right = np.concatenate([faces, MANO_FACE_EXTRA], axis=0)
+    faces_left = faces_right[:, [0, 2, 1]]
+    return faces_right, faces_left
+
+
+def _save_cam_space_json(data_out_cpu, seq_folder, idx, frame_ck_first, frame_ck_last):
+    pred_dict = {k: v.tolist() for k, v in data_out_cpu.items()}
+    pred_path = os.path.join(seq_folder, "cam_space", str(idx), f"{frame_ck_first}_{frame_ck_last}.json")
+    cam_dir = os.path.join(seq_folder, "cam_space", str(idx))
+    if not os.path.exists(cam_dir):
+        os.makedirs(cam_dir)
+    with open(pred_path, "w") as f:
+        json.dump(pred_dict, f, indent=1)
+
+
+def _save_motion_outputs(model_masks, frame_chunks_all, model_masks_file, frame_chunks_file, output_dir):
+    def _save_masks():
+        np.save(model_masks_file, model_masks)
+        if not os.path.exists(model_masks_file):
+            raise IOError(f"File not found after save: {model_masks_file}")
+        file_size = os.path.getsize(model_masks_file)
+        if file_size == 0:
+            raise IOError(f"File is empty after save: {model_masks_file}")
+        vprint(f"✓ Saved model_masks.npy ({model_masks.shape}, {model_masks.dtype}, {file_size} bytes)")
+
+    def _save_chunks():
+        joblib.dump(frame_chunks_all, frame_chunks_file)
+        if not os.path.exists(frame_chunks_file):
+            raise IOError(f"File not found after save: {frame_chunks_file}")
+        file_size = os.path.getsize(frame_chunks_file)
+        if file_size == 0:
+            raise IOError(f"File is empty after save: {frame_chunks_file}")
+        vprint(f"✓ Saved frame_chunks_all.npy ({file_size} bytes)")
+
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    with _TPE(max_workers=2) as save_pool:
+        mask_future = save_pool.submit(_save_masks)
+        chunks_future = save_pool.submit(_save_chunks)
+        try:
+            mask_future.result()
+        except Exception as e:
+            print(f"ERROR: Failed to save model_masks.npy: {e}", file=sys.stderr)
+            print(f"  Path: {model_masks_file}", file=sys.stderr)
+            print(f"  Directory exists: {os.path.exists(output_dir)}", file=sys.stderr)
+            raise
+        try:
+            chunks_future.result()
+        except Exception as e:
+            print(f"ERROR: Failed to save frame_chunks_all.npy: {e}", file=sys.stderr)
+            print(f"  Path: {frame_chunks_file}", file=sys.stderr)
+            raise
 
 
 def _load_or_build_cam_space_cache(seq_folder, frame_chunks_all, rebuild=False):
@@ -220,8 +399,7 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
     t_start_total = time.time()
 
     # Early skip check - before any expensive operations
-    frame_chunks_file = f'{seq_folder}/tracks_{start_idx}_{end_idx}/frame_chunks_all.npy'
-    model_masks_file = f'{seq_folder}/tracks_{start_idx}_{end_idx}/model_masks.npy'
+    output_dir, frame_chunks_file, model_masks_file = _get_motion_output_paths(seq_folder, start_idx, end_idx)
 
     # Auto-fix incomplete outputs: if frame_chunks exists but model_masks doesn't, remove frame_chunks
     if os.path.exists(frame_chunks_file) and not os.path.exists(model_masks_file):
@@ -264,128 +442,33 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
 
     video_path = args.video_path
 
-    # Use prefetched data if available, then explicit frame_source, otherwise load fresh
-    if prefetched_data is not None:
-        frame_source = prefetched_data['frame_source']
-        tracks = prefetched_data['tracks']
-    else:
-        if frame_source is None:
-            frame_source = build_frame_source(args.video_path)
-        tracks = np.load(f'{seq_folder}/tracks_{start_idx}_{end_idx}/model_tracks.npy', allow_pickle=True).item()
-
-    # Validate and auto-fix tracks that reference frames beyond available frames
+    frame_source, tracks = _load_motion_inputs(
+        args,
+        seq_folder,
+        start_idx,
+        end_idx,
+        prefetched_data=prefetched_data,
+        frame_source=frame_source,
+    )
     num_frames = len(frame_source)
-    if len(tracks) > 0:
-        try:
-            max_frame_in_tracks = max(
-                max(t['frame'] for t in track_data)
-                for track_data in tracks.values()
-                if len(track_data) > 0
-            )
-            if max_frame_in_tracks >= num_frames:
-                vprint(f"WARNING: Track data references frame {max_frame_in_tracks} but only {num_frames} frames available.")
-                vprint(f"         This usually means extracted_images is incomplete.")
-                vprint(f"         Auto-fixing: Filtering out track entries with frame >= {num_frames}")
+    tracks = _sanitize_tracks_for_available_frames(tracks, num_frames)
 
-                # Auto-fix: Remove track entries that reference unavailable frames
-                fixed_tracks = {}
-                total_removed = 0
-                for track_id, track_data in tracks.items():
-                    original_len = len(track_data)
-                    filtered_track = [t for t in track_data if t['frame'] < num_frames]
-                    total_removed += original_len - len(filtered_track)
-
-                    # Keep track only if it has at least 5 valid frames (same threshold as line 183)
-                    if len(filtered_track) >= 5:
-                        fixed_tracks[track_id] = filtered_track
-
-                vprint(f"         Removed {total_removed} track entries referencing unavailable frames")
-                vprint(f"         {len(tracks) - len(fixed_tracks)} tracks dropped (too short after filtering)")
-                vprint(f"         {len(fixed_tracks)} tracks remain")
-
-                tracks = fixed_tracks
-        except ValueError:
-            # All tracks are empty, skip validation
-            pass
-
-    img_focal = args.img_focal
+    img_focal = _resolve_img_focal(args, seq_folder)
     timing['1_load_data'] = time.time() - t0
-    if img_focal is None:
-        try:
-            with open(os.path.join(seq_folder, 'est_focal.txt'), 'r') as f:
-                img_focal = f.read()
-                img_focal = float(img_focal)
-        except:
-            img_focal = 600
-            vprint(f'No focal length provided, use default {img_focal}')
-            with open(os.path.join(seq_folder, 'est_focal.txt'), 'w') as f:
-                f.write(str(img_focal))
-
-    tid = np.array([tr for tr in tracks])
 
     vprint(f'Running hawor on {os.path.basename(video_path)} ...')
 
     t0 = time.time()
-    left_trk = []
-    right_trk = []
-    for k, idx in enumerate(tid):
-        trk = tracks[idx]
-
-        # Filter out very short tracks (likely false positives)
-        if len(trk) < 5:  # Require at least 5 frames
-            continue
-
-        # Check average confidence
-        confs = [t['det_box'][0, 4] for t in trk if t['det']]
-        if len(confs) == 0 or np.mean(confs) < 0.3:  # Require avg confidence >= 0.3
-            continue
-
-        # Check if track is mostly near edges (likely hand leaving/entering frame)
-        if 'is_near_edge' in trk[0]:
-            edge_ratio = sum(1 for t in trk if t.get('is_near_edge', False)) / len(trk)
-            if edge_ratio > 0.7:  # If >70% detections are near edge, likely unstable
-                continue
-
-        valid = np.array([t['det'] for t in trk])
-        is_right = np.concatenate([t['det_handedness'] for t in trk])[valid]
-
-        if is_right.sum() / len(is_right) < 0.5:
-            left_trk.extend(trk)
-        else:
-            right_trk.extend(trk)
-    left_trk = sorted(left_trk, key=lambda x: x['frame'])
-    right_trk = sorted(right_trk, key=lambda x: x['frame'])
-    final_tracks = {
-        0: left_trk,
-        1: right_trk
-    }
+    final_tracks = _split_tracks_by_hand(tracks)
     tid = [0, 1]
 
     img = frame_source.get_frame(0, rgb=False)
     img_center = [img.shape[1] / 2, img.shape[0] / 2]# w/2, h/2
     H, W = img.shape[:2]
 
-    # Use GPU tensor for model_masks to avoid CPU-GPU transfers
-    model_masks_gpu = torch.zeros((len(frame_source), H, W), device='cuda', dtype=torch.bool)
+    model_masks_tensor = torch.zeros((len(frame_source), H, W), device=device, dtype=torch.bool)
 
-    # get faces
-    faces = get_mano_faces()
-    faces_new = np.array([[92, 38, 234],
-            [234, 38, 239],
-            [38, 122, 239],
-            [239, 122, 279],
-            [122, 118, 279],
-            [279, 118, 215],
-            [118, 117, 215],
-            [215, 117, 214],
-            [117, 119, 214],
-            [214, 119, 121],
-            [119, 120, 121],
-            [121, 120, 78],
-            [120, 108, 78],
-            [78, 108, 79]])
-    faces_right = np.concatenate([faces, faces_new], axis=0)
-    faces_left = faces_right[:,[0,2,1]]
+    faces_right, faces_left = _build_hand_faces()
 
     timing['2_setup'] = time.time() - t0
 
@@ -399,16 +482,6 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
     from concurrent.futures import ThreadPoolExecutor
     save_executor = ThreadPoolExecutor(max_workers=1)
     save_futures = []
-
-    def _save_cam_space_json(data_out_cpu, seq_folder, idx, frame_ck_first, frame_ck_last):
-        """Serialize data_out to JSON and save to disk (CPU/IO-bound)."""
-        pred_dict = {k: v.tolist() for k, v in data_out_cpu.items()}
-        pred_path = os.path.join(seq_folder, 'cam_space', str(idx), f"{frame_ck_first}_{frame_ck_last}.json")
-        cam_dir = os.path.join(seq_folder, 'cam_space', str(idx))
-        if not os.path.exists(cam_dir):
-            os.makedirs(cam_dir)
-        with open(pred_path, "w") as f:
-            json.dump(pred_dict, f, indent=1)
 
     for idx in tid:
         vprint(f"tracklet {idx}:")
@@ -561,10 +634,10 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
             for i, fi in enumerate(frame_ck):
                 tris = verts_2d_np[i][faces_np]  # (F, 3, 2)
                 cv2.fillPoly(batch_masks[i], tris, 1)
-            batch_masks_gpu = torch.from_numpy(batch_masks.view(np.bool_)).cuda()
+            batch_masks_tensor = torch.from_numpy(batch_masks.view(np.bool_)).to(device=device)
             for i, fi in enumerate(frame_ck):
-                model_masks_gpu[fi] |= batch_masks_gpu[i]
-            del batch_masks_gpu
+                model_masks_tensor[fi] |= batch_masks_tensor[i]
+            del batch_masks_tensor
 
             timing_render += time.time() - t_rend
         timing_postprocess += time.time() - t_post
@@ -586,51 +659,14 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
 
     t0 = time.time()
     # Transfer to CPU only once at the end
-    model_masks = model_masks_gpu.cpu().numpy()  # bool tensor to numpy
-    del model_masks_gpu
+    model_masks = model_masks_tensor.cpu().numpy()
+    del model_masks_tensor
     torch.cuda.empty_cache()
 
     # Ensure output directory exists
-    output_dir = f'{seq_folder}/tracks_{start_idx}_{end_idx}'
     os.makedirs(output_dir, exist_ok=True)
 
-    # Save model_masks and frame_chunks in parallel (both are independent IO operations)
-    def _save_masks():
-        np.save(model_masks_file, model_masks)
-        if not os.path.exists(model_masks_file):
-            raise IOError(f"File not found after save: {model_masks_file}")
-        file_size = os.path.getsize(model_masks_file)
-        if file_size == 0:
-            raise IOError(f"File is empty after save: {model_masks_file}")
-        vprint(f"✓ Saved model_masks.npy ({model_masks.shape}, {model_masks.dtype}, {file_size} bytes)")
-
-    def _save_chunks():
-        joblib.dump(frame_chunks_all, frame_chunks_file)
-        if not os.path.exists(frame_chunks_file):
-            raise IOError(f"File not found after save: {frame_chunks_file}")
-        file_size = os.path.getsize(frame_chunks_file)
-        if file_size == 0:
-            raise IOError(f"File is empty after save: {frame_chunks_file}")
-        vprint(f"✓ Saved frame_chunks_all.npy ({file_size} bytes)")
-
-    from concurrent.futures import ThreadPoolExecutor as _TPE
-    with _TPE(max_workers=2) as save_pool:
-        mask_future = save_pool.submit(_save_masks)
-        chunks_future = save_pool.submit(_save_chunks)
-        # Wait for both, propagate any errors
-        try:
-            mask_future.result()
-        except Exception as e:
-            print(f"ERROR: Failed to save model_masks.npy: {e}", file=sys.stderr)
-            print(f"  Path: {model_masks_file}", file=sys.stderr)
-            print(f"  Directory exists: {os.path.exists(output_dir)}", file=sys.stderr)
-            raise
-        try:
-            chunks_future.result()
-        except Exception as e:
-            print(f"ERROR: Failed to save frame_chunks_all.npy: {e}", file=sys.stderr)
-            print(f"  Path: {frame_chunks_file}", file=sys.stderr)
-            raise
+    _save_motion_outputs(model_masks, frame_chunks_all, model_masks_file, frame_chunks_file, output_dir)
 
     timing['4_save_results'] = time.time() - t0
 

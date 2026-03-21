@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import random
 import sys
 import tempfile
 import time
@@ -27,11 +26,9 @@ from lib.pipeline.stage_api import (
     STAGES,
     PipelineVideoTask,
     StageExecutionConfig,
-    get_seq_folder,
-    get_track_range,
-    is_stage_complete,
     run_pipeline_stage,
 )
+from lib.pipeline.runtime import WorkerRuntime, set_determinism
 from lib.pipeline.video_index import VideoDescriptor
 
 # Set temporary directory to shared storage instead of local /tmp
@@ -45,118 +42,6 @@ tempfile.tempdir = str(SHARED_TMP_DIR)
 
 # Suppress verbose output from stage scripts
 os.environ["HAWOR_QUIET"] = "1"
-
-
-def set_determinism(seed: int):
-    random.seed(seed)
-    import numpy as np
-
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    # benchmark=True: safe because input sizes are fixed (256x256 crops),
-    # gives 5-15% speedup on convolutions via cuDNN auto-tuning
-    torch.backends.cudnn.benchmark = True
-
-
-class WorkerRuntime:
-    def __init__(
-        self,
-        gpu: str,
-        checkpoint: str,
-        infiller_weight: str,
-        img_focal: float = None,
-        input_type: str = "file",
-        chunk_batch_size: int = 8,
-        num_workers: int = 16,
-        render_batch_size: int = 8,
-        metric3d_batch_size: int = 8,
-        detect_batch_size: int = 256,
-        detect_io_workers: int = 16,
-        detect_device: str = "cuda:0",
-        detect_half_precision: bool = True,
-        infiller_window_batch_size: int = 64,
-        rebuild_cam_space_cache: bool = False,
-    ):
-        self.gpu = gpu
-        self.checkpoint = checkpoint
-        self.infiller_weight = infiller_weight
-        self.img_focal = img_focal
-        self.input_type = input_type
-        self.chunk_batch_size = chunk_batch_size
-        self.num_workers = num_workers
-        self.render_batch_size = render_batch_size
-        self.metric3d_batch_size = metric3d_batch_size
-        self.detect_batch_size = detect_batch_size
-        self.detect_io_workers = detect_io_workers
-        self.detect_device = detect_device
-        self.detect_half_precision = detect_half_precision
-        self.infiller_window_batch_size = infiller_window_batch_size
-        self.rebuild_cam_space_cache = rebuild_cam_space_cache
-        self.stage_config = StageExecutionConfig(
-            img_focal=img_focal,
-            input_type=input_type,
-            checkpoint=checkpoint,
-            infiller_weight=infiller_weight,
-            chunk_batch_size=chunk_batch_size,
-            num_workers=num_workers,
-            render_batch_size=render_batch_size,
-            metric3d_batch_size=metric3d_batch_size,
-            detect_batch_size=detect_batch_size,
-            detect_io_workers=detect_io_workers,
-            infiller_window_batch_size=infiller_window_batch_size,
-            rebuild_cam_space_cache=rebuild_cam_space_cache,
-            detect_device=detect_device,
-            detect_half_precision=detect_half_precision,
-        )
-
-        self.detector_runner = None
-        self.motion_runner = None
-        self.metric_runner = None
-        self.infiller_runner = None
-        self.droid_net = None
-        self.mano_right = None
-        self.mano_left = None
-
-        if self.gpu is not None and self.gpu != "":
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu)
-
-    def ensure_runner(self, stage: str):
-        if stage == "detect_track" and self.detector_runner is None:
-            from ultralytics import YOLO
-
-            self.detector_runner = YOLO('./weights/external/detector.pt')
-
-        if stage == "motion" and self.motion_runner is None:
-            from lib.pipeline.stages.motion import build_motion_runner
-            from hawor.utils.process import get_mano_cfg
-
-            self.motion_runner = build_motion_runner(self.checkpoint)
-
-            # Cache MANO models (created once per worker, reused across videos)
-            from lib.models.mano_wrapper import MANO
-            device = self.motion_runner['device']
-
-            self.mano_right = MANO(**get_mano_cfg(is_right=True)).to(device)
-            self.mano_left = MANO(**get_mano_cfg(is_right=False)).to(device)
-            # Fix MANO shapedirs of the left hand bug
-            self.mano_left.shapedirs[:, 0, :] *= -1
-
-        if stage == "slam" and self.metric_runner is None:
-            from lib.pipeline.stages.slam import build_metric3d_runner
-
-            self.metric_runner = build_metric3d_runner()
-
-        if stage == "slam" and self.droid_net is None:
-            from lib.pipeline.masked_droid_slam import build_droid_net
-
-            self.droid_net = build_droid_net()
-
-        if stage == "infiller" and self.infiller_runner is None:
-            from lib.pipeline.stages.infiller import build_infiller_runner
-
-            self.infiller_runner = build_infiller_runner(self.infiller_weight)
 
 def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
     task = PipelineVideoTask.from_namespace(ns)
@@ -183,6 +68,7 @@ def worker_runtime_loop(ns):
         num_workers=getattr(ns, 'num_workers', 16),
         render_batch_size=getattr(ns, 'render_batch_size', 8),
         metric3d_batch_size=getattr(ns, 'metric3d_batch_size', 32),
+        detect_batch_size=getattr(ns, 'detect_batch_size', 128),
         detect_io_workers=getattr(ns, 'detect_io_workers', 8),
         detect_device=getattr(ns, 'detect_device', "cuda:0"),
         detect_half_precision=bool(getattr(ns, 'detect_half_precision', True)),

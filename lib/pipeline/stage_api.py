@@ -116,16 +116,15 @@ class StageArtifacts:
     start_idx: int
     end_idx: int
     seq_folder: Path
+    stage_name: str = ""
 
     @property
     def tracks_dir(self) -> Path:
-        return self.seq_folder / f"tracks_{self.start_idx}_{self.end_idx}"
+        return get_tracks_dir(self.seq_folder, self.start_idx, self.end_idx)
 
     @property
     def done_marker(self) -> Path:
-        return self.seq_folder / f".{self.stage_name}.done"
-
-    stage_name: str = ""
+        return get_stage_done_marker(self.seq_folder, self.stage_name)
 
 
 def get_seq_folder(video_path: str = None, descriptor: VideoDescriptor = None) -> Path:
@@ -133,6 +132,14 @@ def get_seq_folder(video_path: str = None, descriptor: VideoDescriptor = None) -
         return Path(descriptor.seq_folder)
     video_path = Path(video_path)
     return video_path.parent / video_path.stem
+
+
+def get_tracks_dir(seq_folder: Path, start_idx: int, end_idx: int) -> Path:
+    return seq_folder / f"tracks_{start_idx}_{end_idx}"
+
+
+def get_stage_done_marker(seq_folder: Path, stage: str) -> Path:
+    return seq_folder / f".{stage}.done"
 
 
 def get_track_range(seq_folder: Path, fast=False):
@@ -191,8 +198,21 @@ def get_track_range(seq_folder: Path, fast=False):
     return start_idx, end_idx
 
 
+def _cleanup_incomplete_motion_output(seq_folder: Path, start_idx: int, end_idx: int):
+    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
+    frame_chunks_file = tracks_dir / "frame_chunks_all.npy"
+    model_masks_file = tracks_dir / "model_masks.npy"
+
+    if frame_chunks_file.exists() and not model_masks_file.exists():
+        print(f"Warning: Incomplete motion output detected for {seq_folder}", file=sys.stderr)
+        print("  - frame_chunks_all.npy exists but model_masks.npy missing", file=sys.stderr)
+        print("  - Removing incomplete output to force re-run", file=sys.stderr)
+        frame_chunks_file.unlink()
+        raise AssertionError("Incomplete motion output - removed and will retry")
+
+
 def validate_stage_output(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
-    tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
+    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
 
     if stage == "detect_track":
         assert (tracks_dir / "model_boxes.npy").exists(), "model_boxes.npy missing"
@@ -200,16 +220,10 @@ def validate_stage_output(stage: str, seq_folder: Path, start_idx: int, end_idx:
         return
 
     if stage == "motion":
+        _cleanup_incomplete_motion_output(seq_folder, start_idx, end_idx)
+
         frame_chunks_file = tracks_dir / "frame_chunks_all.npy"
         model_masks_file = tracks_dir / "model_masks.npy"
-
-        if frame_chunks_file.exists() and not model_masks_file.exists():
-            print(f"Warning: Incomplete motion output detected for {seq_folder}", file=sys.stderr)
-            print("  - frame_chunks_all.npy exists but model_masks.npy missing", file=sys.stderr)
-            print("  - Removing incomplete output to force re-run", file=sys.stderr)
-            frame_chunks_file.unlink()
-            raise AssertionError("Incomplete motion output - removed and will retry")
-
         assert frame_chunks_file.exists(), "frame_chunks_all.npy missing"
         assert model_masks_file.exists(), "model_masks.npy missing"
         with open(model_masks_file, "rb") as f:
@@ -240,7 +254,7 @@ def validate_stage_output(stage: str, seq_folder: Path, start_idx: int, end_idx:
 
 
 def validate_stage_output_fast(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
-    tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
+    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
 
     if stage == "detect_track":
         return (tracks_dir / "model_boxes.npy").exists() and (tracks_dir / "model_tracks.npy").exists()
@@ -263,7 +277,7 @@ def is_stage_complete(stage: str, seq_folder: Path, fast_check=False):
         return False
 
     if fast_check:
-        done_marker = seq_folder / f".{stage}.done"
+        done_marker = get_stage_done_marker(seq_folder, stage)
         if done_marker.exists():
             return True
 
@@ -272,11 +286,11 @@ def is_stage_complete(stage: str, seq_folder: Path, fast_check=False):
         if fast_check:
             result = validate_stage_output_fast(stage, seq_folder, start_idx, end_idx)
             if result:
-                (seq_folder / f".{stage}.done").touch()
+                get_stage_done_marker(seq_folder, stage).touch()
             return result
 
         validate_stage_output(stage, seq_folder, start_idx, end_idx)
-        (seq_folder / f".{stage}.done").touch()
+        get_stage_done_marker(seq_folder, stage).touch()
         return True
     except Exception:
         return False
@@ -287,13 +301,13 @@ def resolve_stage_artifacts(stage: str, seq_folder: Path) -> StageArtifacts:
         return StageArtifacts(start_idx=0, end_idx=0, seq_folder=seq_folder, stage_name=stage)
 
     start_idx, end_idx = get_track_range(seq_folder, fast=True)
-    tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
+    tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
     if not tracks_dir.exists():
         cache_file = seq_folder / ".track_range"
         if cache_file.exists():
             cache_file.unlink()
         start_idx, end_idx = get_track_range(seq_folder, fast=False)
-        tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
+        tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
         if not tracks_dir.exists():
             raise FileNotFoundError(f"Tracks directory not found: {tracks_dir}")
 
@@ -371,7 +385,7 @@ def run_pipeline_stage(
             seq_folder=str(task.seq_folder),
         )
     elif stage == "infiller":
-        tracks_dir = task.seq_folder / f"tracks_{start_idx}_{end_idx}"
+        tracks_dir = get_tracks_dir(task.seq_folder, start_idx, end_idx)
         frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
         run_infiller_for_video(
             stage_args,
@@ -388,7 +402,7 @@ def run_pipeline_stage(
         raise ValueError(f"Unknown stage: {stage}")
 
     validate_stage_output(stage, task.seq_folder, start_idx, end_idx)
-    (task.seq_folder / f".{stage}.done").touch()
+    get_stage_done_marker(task.seq_folder, stage).touch()
     return {
         "status": "success",
         "start_idx": start_idx,

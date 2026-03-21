@@ -42,7 +42,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.pipeline.stage_api import STAGES
+from lib.pipeline.frame_source import build_frame_source
+from lib.pipeline.runtime import WorkerRuntime, set_determinism
+from lib.pipeline.stage_api import (
+    STAGES,
+    PipelineVideoTask,
+    get_stage_done_marker,
+    get_track_range,
+    get_tracks_dir,
+    is_stage_complete,
+    run_pipeline_stage,
+)
 from lib.pipeline.video_index import VideoDescriptor, collect_videos_from_factory, collect_videos_from_factories
 
 
@@ -136,6 +146,14 @@ class BatchScheduler:
             task = VideoTask(vp, run_dir.name, self.log_dir, descriptor=desc)
             self.tasks[vp] = task
 
+    def _build_pipeline_task(self, video_path: str) -> PipelineVideoTask:
+        task = self.tasks.get(video_path)
+        descriptor = task.descriptor if task else None
+        return PipelineVideoTask.from_inputs(video_path=video_path, descriptor=descriptor)
+
+    def _get_seq_folder(self, video_path: str) -> Path:
+        return self._build_pipeline_task(video_path).seq_folder
+
     def emit_event(self, event: str, **kwargs):
         payload = {
             "time": datetime.now(timezone.utc).isoformat(),
@@ -144,6 +162,16 @@ class BatchScheduler:
         }
         with open(self.events_file, "a") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _update_progress_bar(pbar, stage_results: Dict[str, bool]):
+        if not pbar:
+            return
+        pbar.update(1)
+        pbar.set_postfix({
+            "success": sum(1 for ok in stage_results.values() if ok),
+            "failed": sum(1 for ok in stage_results.values() if not ok),
+        })
 
     def save_status(self):
         with self.lock:
@@ -302,18 +330,7 @@ class BatchScheduler:
     def verify_stage_complete(self, video_path: str, stage: str) -> bool:
         """Verify that stage output actually exists on disk (fast check)."""
         try:
-            task = self.tasks.get(video_path)
-            if task and task.descriptor:
-                seq_folder = Path(task.descriptor.seq_folder)
-            else:
-                video_path_obj = Path(video_path)
-                seq_folder = video_path_obj.parent / video_path_obj.stem
-
-            # Import validation function from batch_worker
-            sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-            from batch_worker import is_stage_complete
-
-            # Use fast_check=True for resume to avoid loading files
+            seq_folder = self._get_seq_folder(video_path)
             return is_stage_complete(stage, seq_folder, fast_check=True)
         except Exception:
             return False
@@ -364,16 +381,11 @@ class BatchScheduler:
 
             candidates.append(vp)
 
-        # Then filter by .done markers (fast disk check)
-        # This avoids queueing videos that are already complete
-        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-        from batch_worker import get_seq_folder
-
+        # Then filter by on-disk outputs using the shared stage API.
         pending = []
         for vp in candidates:
-            seq_folder = get_seq_folder(vp)
-            done_marker = seq_folder / f".{stage}.done"
-            if done_marker.exists():
+            seq_folder = self._get_seq_folder(vp)
+            if is_stage_complete(stage, seq_folder, fast_check=True):
                 excluded_done_marker += 1
                 continue
             pending.append(vp)
@@ -452,10 +464,7 @@ class BatchScheduler:
             stage_results[video_path] = success
             completed += 1
 
-            # Update progress bar immediately
-            if pbar:
-                pbar.update(1)
-                pbar.set_postfix({"success": sum(1 for ok in stage_results.values() if ok), "failed": sum(1 for ok in stage_results.values() if not ok)})
+            self._update_progress_bar(pbar, stage_results)
 
             # Drain any additional results that are already in the queue (no blocking)
             while not result_queue.empty():
@@ -475,9 +484,7 @@ class BatchScheduler:
                     self.emit_event("stage_failure", video=video_path, stage=stage, gpu=gpu)
                 stage_results[video_path] = success
                 completed += 1
-                if pbar:
-                    pbar.update(1)
-                    pbar.set_postfix({"success": sum(1 for ok in stage_results.values() if ok), "failed": sum(1 for ok in stage_results.values() if not ok)})
+                self._update_progress_bar(pbar, stage_results)
 
             # Save status periodically (not every single video — reduces I/O)
             if completed - last_save >= 10 or completed >= total:
@@ -506,30 +513,15 @@ class BatchScheduler:
             return None
 
         try:
-            sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-            from batch_worker import get_track_range, is_stage_complete
-
-            # Determine seq_folder and frame_source based on mode
-            task = self.tasks.get(video_path)
-            if task and task.descriptor:
-                from lib.pipeline.frame_source import ShardVideoFrameSource
-                seq_folder = Path(task.descriptor.seq_folder)
-                frame_source_factory = lambda: ShardVideoFrameSource(
-                    task.descriptor.shard_path, task.descriptor.frame_names,
-                    frame_offsets=task.descriptor.frame_offsets,
-                )
-            else:
-                from batch_worker import get_seq_folder
-                from lib.pipeline.frame_source import build_frame_source
-                seq_folder = get_seq_folder(video_path)
-                frame_source_factory = lambda: build_frame_source(video_path)
+            pipeline_task = self._build_pipeline_task(video_path)
+            seq_folder = pipeline_task.seq_folder
 
             # Skip if already complete (no need to prefetch)
             if self.resume and is_stage_complete(stage, seq_folder, fast_check=True):
                 return None
 
             start_idx, end_idx = get_track_range(seq_folder)
-            tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
+            tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
 
             # Check if output already exists (skip check)
             frame_chunks_file = tracks_dir / "frame_chunks_all.npy"
@@ -538,14 +530,14 @@ class BatchScheduler:
                 return None
 
             # Prefetch frame source and tracks (IO-bound operations)
-            frame_source = frame_source_factory()
+            frame_source = pipeline_task.build_frame_source() or build_frame_source(video_path)
             tracks = np.load(tracks_dir / "model_tracks.npy", allow_pickle=True).item()
 
             return {
                 'frame_source': frame_source,
                 'tracks': tracks,
             }
-        except Exception as e:
+        except Exception:
             # Prefetch failure is non-fatal; data will be loaded normally
             return None
 
@@ -553,10 +545,6 @@ class BatchScheduler:
         """Worker process that pulls videos from queue and processes them with model reuse."""
         # Set GPU for this worker
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
-
-        # Import here to avoid issues in main process
-        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-        from batch_worker import WorkerRuntime, set_determinism
 
         # Initialize runtime once for this worker
         set_determinism(42)
@@ -633,37 +621,20 @@ class BatchScheduler:
 
     def run_single_video_with_runtime(self, video_path: str, stage: str, gpu: int, runtime, prefetched_data=None) -> bool:
         """Run a single stage for a single video using existing runtime."""
-        import argparse
-        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-        from batch_worker import run_stage_with_runtime, get_seq_folder, is_stage_complete
-
-        # Build args namespace
-        task_ns = argparse.Namespace()
-        task_ns.video_path = video_path
-        task_ns.stage = stage
-        task_ns.gpu = str(gpu)
-        task_ns.resume = self.resume
-        task_ns.force = False
-        task_ns.seed = 42
-        task_ns.detect_batch_size = self.detect_batch_size
-        task_ns.detect_io_workers = self.detect_io_workers
-        task_ns.detect_device = self.detect_device
-        task_ns.detect_half_precision = self.detect_half_precision
-        task_ns.chunk_batch_size = self.chunk_batch_size
-        task_ns.num_workers = self.num_workers
-        task_ns.metric3d_batch_size = self.metric3d_batch_size
-        task_ns.infiller_window_batch_size = self.infiller_window_batch_size
-        task_ns.rebuild_cam_space_cache = self.rebuild_cam_space_cache
-
-        # Attach descriptor for WebDataset mode
-        task = self.tasks.get(video_path)
-        task_ns._descriptor = task.descriptor if task else None
-
         try:
-            result = run_stage_with_runtime(runtime, task_ns, prefetched_data=prefetched_data)
+            pipeline_task = self._build_pipeline_task(video_path)
+            result = run_pipeline_stage(
+                stage,
+                pipeline_task,
+                runtime.stage_config,
+                runtime=runtime,
+                prefetched_data=prefetched_data,
+                resume=self.resume,
+                force=False,
+            )
             success = result.get("status") in ("success", "skipped")
             if not success:
-                print(f"WARNING: run_stage_with_runtime returned unexpected status: {result.get('status')}")
+                print(f"WARNING: run_pipeline_stage returned unexpected status: {result.get('status')}")
             return success
         except Exception as e:
             print(f"Error processing {video_path} on GPU {gpu}: {e}")
@@ -744,19 +715,16 @@ class BatchScheduler:
         1. Stale 'running' states from interrupted processes
         2. Mismatch between .done markers and in-memory status
         """
-        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-        from batch_worker import get_seq_folder
-
         # Track normalization counts for logging
         reconciled_done = defaultdict(int)
         normalized_running = defaultdict(int)
 
         for vp in self.video_paths:
             task = self.tasks[vp]
-            seq_folder = get_seq_folder(vp)
+            seq_folder = self._get_seq_folder(vp)
 
             for stage in self.stages:
-                done_marker = seq_folder / f".{stage}.done"
+                done_marker = get_stage_done_marker(seq_folder, stage)
                 current_status = task.stage_status.get(stage, "pending")
 
                 # Priority 1: .done marker exists → force to completed
@@ -800,24 +768,15 @@ class BatchScheduler:
                 print(", ".join(f"{status}={count}" for status, count in sorted(status_counts.items())))
             print()
 
-        # Initialize stage status for new videos (those without status yet)
-        # For resume mode, we check .done markers only for videos with empty status
-        # This avoids O(N) filesystem operations for videos that already have status
-        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
-        from batch_worker import get_seq_folder
-
+        # Initialize tasks that still carry the default all-pending state from on-disk outputs.
         for vp in self.video_paths:
             task = self.tasks[vp]
 
-            # If this video has no stage status yet, initialize from .done markers
-            if not task.stage_status:
-                seq_folder = get_seq_folder(vp)
+            if all(task.stage_status.get(stage) == "pending" for stage in self.stages):
+                seq_folder = self._get_seq_folder(vp)
                 for stage in self.stages:
-                    done_marker = seq_folder / f".{stage}.done"
-                    if done_marker.exists():
+                    if is_stage_complete(stage, seq_folder, fast_check=True):
                         task.stage_status[stage] = "completed"
-                    else:
-                        task.stage_status[stage] = "pending"
 
         self.emit_event("batch_start", total_videos=len(self.video_paths), gpus=self.gpus, mode="wave")
 
