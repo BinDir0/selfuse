@@ -146,30 +146,55 @@ class StageWorkerPool:
         self.config = config
         self.descriptor_map = config.descriptor_map
 
+    def _estimate_video_work(self, video_path: str, stage: str) -> int:
+        descriptor = self.descriptor_map.get(video_path)
+        if descriptor is not None:
+            return len(descriptor.frame_names)
+
+        if stage != "detect_track":
+            try:
+                seq_folder = _build_pipeline_task(video_path, self.descriptor_map).seq_folder
+                start_idx, end_idx = get_track_range(seq_folder, fast=True)
+                return end_idx - start_idx
+            except Exception:
+                pass
+
+        try:
+            return os.path.getsize(video_path)
+        except OSError:
+            return 0
+
+    def _prioritize_videos(self, video_paths: List[str], stage: str) -> List[str]:
+        return sorted(video_paths, key=lambda video_path: self._estimate_video_work(video_path, stage), reverse=True)
+
     def run_stage(self, stage: str, video_paths: List[str], on_result) -> Dict[str, bool]:
         if not video_paths:
             return {}
 
+        prioritized_videos = self._prioritize_videos(video_paths, stage)
         video_queue = mp.Queue()
         result_queue = mp.Queue()
 
-        for video_path in video_paths:
+        for video_path in prioritized_videos:
             video_queue.put(video_path)
-        for _ in self.config.gpus:
+        worker_count_per_gpu = self.config.worker_count_for_stage(stage)
+        total_workers = len(self.config.gpus) * worker_count_per_gpu
+        for _ in range(total_workers):
             video_queue.put(None)
 
         workers = []
         for gpu in self.config.gpus:
-            process = mp.Process(
-                target=_stage_worker_main,
-                args=(gpu, stage, video_queue, result_queue, self.descriptor_map, self.config),
-            )
-            process.start()
-            workers.append(process)
+            for _ in range(worker_count_per_gpu):
+                process = mp.Process(
+                    target=_stage_worker_main,
+                    args=(gpu, stage, video_queue, result_queue, self.descriptor_map, self.config),
+                )
+                process.start()
+                workers.append(process)
 
         stage_results = {}
         completed = 0
-        total = len(video_paths)
+        total = len(prioritized_videos)
 
         while completed < total:
             try:
@@ -187,7 +212,7 @@ class StageWorkerPool:
         for worker in workers:
             worker.join()
 
-        missing = [video_path for video_path in video_paths if video_path not in stage_results]
+        missing = [video_path for video_path in prioritized_videos if video_path not in stage_results]
         for video_path in missing:
             synthetic_result = {"video": video_path, "success": False, "gpu": None, "error": "worker_exited_without_result"}
             stage_results[video_path] = False

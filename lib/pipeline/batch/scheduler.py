@@ -49,6 +49,12 @@ class BatchScheduler:
             if not pending_videos:
                 break
 
+            worker_count_per_gpu = self.config.worker_count_for_stage(stage)
+            total_workers = len(self.config.gpus) * worker_count_per_gpu
+            print(
+                f"  [{stage}] Worker slots: {worker_count_per_gpu}/GPU, total={total_workers}"
+            )
+
             for video_path in pending_videos:
                 self.state.record_retry(video_path, stage, attempt)
                 self.state.mark_stage_running(video_path, stage)

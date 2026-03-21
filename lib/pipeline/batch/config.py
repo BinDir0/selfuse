@@ -35,6 +35,11 @@ class BatchRunConfig:
     detect_io_workers: int
     rebuild_cam_space_cache: bool
     max_stage_retries: int
+    workers_per_gpu: int
+    detect_track_workers_per_gpu: Optional[int]
+    motion_workers_per_gpu: Optional[int]
+    slam_workers_per_gpu: Optional[int]
+    infiller_workers_per_gpu: Optional[int]
     enable_profiler: bool = False
 
     @classmethod
@@ -48,6 +53,17 @@ class BatchRunConfig:
         gpus = [int(gpu.strip()) for gpu in args.gpus.split(",") if gpu.strip()]
         if not gpus:
             raise ValueError("At least one GPU must be specified via --gpus")
+
+        worker_counts = {
+            "workers_per_gpu": args.workers_per_gpu,
+            "detect_track_workers_per_gpu": args.detect_track_workers_per_gpu,
+            "motion_workers_per_gpu": args.motion_workers_per_gpu,
+            "slam_workers_per_gpu": args.slam_workers_per_gpu,
+            "infiller_workers_per_gpu": args.infiller_workers_per_gpu,
+        }
+        invalid_counts = {name: value for name, value in worker_counts.items() if value is not None and value < 1}
+        if invalid_counts:
+            raise ValueError(f"Worker counts must be >= 1: {invalid_counts}")
 
         return cls(
             video_paths=video_paths,
@@ -70,6 +86,11 @@ class BatchRunConfig:
             detect_io_workers=args.detect_io_workers,
             rebuild_cam_space_cache=args.rebuild_cam_space_cache,
             max_stage_retries=args.max_stage_retries,
+            workers_per_gpu=args.workers_per_gpu,
+            detect_track_workers_per_gpu=args.detect_track_workers_per_gpu,
+            motion_workers_per_gpu=args.motion_workers_per_gpu,
+            slam_workers_per_gpu=args.slam_workers_per_gpu,
+            infiller_workers_per_gpu=args.infiller_workers_per_gpu,
             enable_profiler=args.enable_profiler,
         )
 
@@ -78,3 +99,12 @@ class BatchRunConfig:
         if not self.descriptors:
             return {}
         return {descriptor.video_key: descriptor for descriptor in self.descriptors}
+
+    def worker_count_for_stage(self, stage: str) -> int:
+        overrides = {
+            "detect_track": self.detect_track_workers_per_gpu,
+            "motion": self.motion_workers_per_gpu,
+            "slam": self.slam_workers_per_gpu,
+            "infiller": self.infiller_workers_per_gpu,
+        }
+        return overrides.get(stage) or self.workers_per_gpu

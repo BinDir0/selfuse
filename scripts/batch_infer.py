@@ -185,6 +185,11 @@ def get_parser():
     parser.add_argument("--detect_device", type=str, default="cuda:0", help="Device for YOLO detector in detect_track stage")
     parser.add_argument("--detect_half_precision", action="store_true", default=True, help="Use FP16 for YOLO detector")
     parser.add_argument("--no-detect_half_precision", dest="detect_half_precision", action="store_false", help="Disable FP16 for YOLO detector")
+    parser.add_argument("--workers_per_gpu", type=int, default=1, help="Default number of parallel worker processes per GPU in wave mode")
+    parser.add_argument("--detect_track_workers_per_gpu", type=int, help="Override workers per GPU for detect_track stage")
+    parser.add_argument("--motion_workers_per_gpu", type=int, help="Override workers per GPU for motion stage")
+    parser.add_argument("--slam_workers_per_gpu", type=int, help="Override workers per GPU for slam stage")
+    parser.add_argument("--infiller_workers_per_gpu", type=int, help="Override workers per GPU for infiller stage")
     parser.add_argument("--enable_profiler", action="store_true", help="Enable torch profiler to diagnose performance bottlenecks")
     parser.add_argument("--rebuild_cam_space_cache", action="store_true", help="Rebuild cached cam_space tensors before running infiller")
     parser.add_argument("--start", type=int, default=0, help="Start index of video list (inclusive, 0-based)")
@@ -228,6 +233,14 @@ def main():
     print(f"Chunk batch size (motion): {config.chunk_batch_size}")
     print(f"Metric3D batch size (slam): {config.metric3d_batch_size}")
     print(f"Infiller window batch size: {config.infiller_window_batch_size}")
+    print(
+        "Workers per GPU: "
+        f"default={config.workers_per_gpu}, "
+        f"detect_track={config.worker_count_for_stage('detect_track')}, "
+        f"motion={config.worker_count_for_stage('motion')}, "
+        f"slam={config.worker_count_for_stage('slam')}, "
+        f"infiller={config.worker_count_for_stage('infiller')}"
+    )
     print(f"Resume: {config.resume}")
     print(f"Run directory: {run_dir}")
     print()
