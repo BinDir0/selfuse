@@ -72,3 +72,8 @@ ipython_config.py
 
 vis.mp4
 imgui.ini
+lc
+videos.txt
+videos_10.txt
+test_multivideo_batch.py
+test_profiler.py
