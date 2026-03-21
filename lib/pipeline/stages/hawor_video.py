@@ -20,7 +20,7 @@ from lib.eval_utils.custom_utils import cam2world_convert, load_slam_cam
 from lib.eval_utils.custom_utils import interpolate_bboxes, validate_motion_velocity
 from lib.eval_utils.filling_utils import filling_postprocess, filling_preprocess
 import cv2
-from hawor.utils.process import get_mano_cfg, get_mano_faces, run_mano, run_mano_left
+from hawor.utils.process import get_mano_cfg, get_mano_faces, resolve_mano_model_dir, run_mano, run_mano_left
 from hawor.utils.rotation import angle_axis_to_rotation_matrix, rotation_matrix_to_angle_axis
 from infiller.lib.model.network import TransformerModel
 
@@ -53,6 +53,14 @@ def load_hawor(checkpoint_path):
     from hawor.configs import get_config
     model_cfg = str(Path(checkpoint_path).parent.parent / 'model_config.yaml')
     model_cfg = get_config(model_cfg, update_cachedir=True)
+
+    # The training config may still point at legacy MANO paths under _DATA/.
+    # Override them with the same auto-resolution used by the runtime MANO helpers.
+    resolved_mano_dir = resolve_mano_model_dir(is_right=True)
+    model_cfg.defrost()
+    model_cfg.MANO.MODEL_PATH = str(resolved_mano_dir)
+    model_cfg.MANO.DATA_DIR = str(resolved_mano_dir.parent)
+    model_cfg.freeze()
 
     # Override some config values, to crop bbox correctly
     if (model_cfg.MODEL.BACKBONE.TYPE == 'vit') and ('BBOX_SHAPE' not in model_cfg.MODEL):
