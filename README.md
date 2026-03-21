@@ -92,8 +92,7 @@ python scripts/batch_infer.py \
 # Process videos from a list file (decord on-the-fly decode, fallback to opencv if decord unavailable)
 python scripts/batch_infer.py \
   --video_list videos.txt \
-  --gpus 0,1,2,3,4,5,6,7 \
-  --frame_backend decord
+  --gpus 0,1,2,3,4,5,6,7
 
 # Custom configuration with retries
 python scripts/batch_infer.py \
@@ -104,13 +103,12 @@ python scripts/batch_infer.py \
 ```
 
 **Key features:**
-- Parallel processing across multiple GPUs (1 video per GPU)
-- Unified on-the-fly frame decode (no `extracted_images/*.jpg` dependency)
-- Selectable decode backend via `--frame_backend {decord|opencv}` (default: `decord`)
+- Stage-wave scheduling across multiple GPUs with long-lived per-GPU runtimes
+- Dynamic load balancing within each stage wave
 - Automatic resume from existing outputs (use `--no-resume` to force rerun)
-- Per-stage retry logic (default: 2 retries)
+- Per-stage retry logic (default: `--retries`, or `--max_stage_retries` if set)
 - Structured logging and progress tracking in `batch_runs/<timestamp>/`
-- Each video processes stages sequentially: `detect_track → motion → slam → infiller`
+- Stable stage order: `detect_track → motion → slam → infiller`
 
 **Output structure:**
 ```
@@ -136,6 +134,7 @@ python scripts/batch_infer.py \
 The repository is organized so CLI entrypoints stay stable while reusable pipeline logic lives under `lib/pipeline`.
 
 - `lib/pipeline/stages/`: canonical implementations for `detect_track`, `motion`, `infiller`, and `slam`
+- `lib/pipeline/batch/`: batch-inference scheduler, state tracking, events, and worker orchestration
 - `lib/pipeline/stage_api.py`: shared task/config/validation layer for batch and pipeline orchestration
 - `lib/pipeline/exporters/`: dataset/export code, including the WebDataset builder
 - `scripts/`: user-facing entrypoints such as `batch_infer.py`, `batch_worker.py`, and `build_vla_dataset.py`

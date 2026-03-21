@@ -14,6 +14,9 @@ This repository now separates pipeline code into three layers so later integrati
 - `lib/pipeline/exporters/`
   - Dataset/export logic.
   - `webdataset.py` is the canonical WebDataset builder implementation.
+- `lib/pipeline/batch/`
+  - Batch inference orchestration.
+  - Holds the stage-wave scheduler, persisted run state, event logging, and worker pool logic.
 - `lib/pipeline/stage_api.py`
   - Shared batch/pipeline orchestration surface.
   - Holds common stage config, task resolution, output validation, and unified stage dispatch.
@@ -33,6 +36,7 @@ Prefer importing from `lib.pipeline` in new code:
 
 ```python
 from lib.pipeline.stage_api import PipelineVideoTask, StageExecutionConfig, run_pipeline_stage
+from lib.pipeline.batch.scheduler import BatchScheduler
 from lib.pipeline.stages.detect_track import detect_track_video
 from lib.pipeline.stages.hawor_video import hawor_motion_estimation, hawor_infiller
 from lib.pipeline.stages.slam import hawor_slam

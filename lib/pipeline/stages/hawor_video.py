@@ -299,6 +299,26 @@ def _load_or_build_cam_space_cache(seq_folder, frame_chunks_all, rebuild=False):
     return cache
 
 
+def _invalidate_cam_space_cache(seq_folder):
+    cache_path = os.path.join(seq_folder, "cam_space_cache.joblib")
+    if os.path.exists(cache_path):
+        os.remove(cache_path)
+
+
+def _slice_cam_space_pred_dict(pred_dict, valid_frame_mask):
+    if valid_frame_mask is None or bool(np.all(valid_frame_mask)):
+        return pred_dict
+
+    sliced = {}
+    for name, value in pred_dict.items():
+        value = np.asarray(value)
+        if value.ndim >= 2 and value.shape[1] == len(valid_frame_mask):
+            sliced[name] = value[:, valid_frame_mask]
+        else:
+            sliced[name] = value
+    return sliced
+
+
 def _prepare_infiller_window(frame_ck, pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid, num_frames, filling_length):
     start_shift = -1
     while frame_ck[0] + start_shift >= 0 and pred_valid[:, frame_ck[0] + start_shift].sum() != 2:
@@ -428,6 +448,8 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
         return frame_chunks_all, img_focal
 
     # If not skipping, proceed with full initialization
+    _invalidate_cam_space_cache(seq_folder)
+
     t0 = time.time()
     motion_runner = motion_runner or build_motion_runner(args.checkpoint)
     model = motion_runner['model']
@@ -759,13 +781,14 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
 
         for frame_ck in frame_chunks:
             frame_ck = np.asarray(frame_ck)
+            original_key = f"{int(frame_ck[0])}_{int(frame_ck[-1])}"
             valid_frame_mask = frame_ck < max_slam_frames
             if valid_frame_mask.sum() == 0:
                 continue
+            pred_dict = cam_space_cache[idx][original_key]
+            pred_dict = _slice_cam_space_pred_dict(pred_dict, valid_frame_mask)
             frame_ck = frame_ck[valid_frame_mask]
             vprint(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
-            cache_key = f"{int(frame_ck[0])}_{int(frame_ck[-1])}"
-            pred_dict = cam_space_cache[idx][cache_key]
             data_out = {name: torch.from_numpy(value) for name, value in pred_dict.items()}
 
             R_c2w_sla = R_c2w_sla_all[frame_ck]
