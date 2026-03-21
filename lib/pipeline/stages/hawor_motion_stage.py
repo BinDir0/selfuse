@@ -168,17 +168,7 @@ def _build_mano_models(device, mano_models=None):
     return mano_right, mano_left
 
 
-def _prepare_motion_runtime(
-    args,
-    seq_folder,
-    start_idx,
-    end_idx,
-    motion_runner=None,
-    mano_models=None,
-    prefetched_data=None,
-    frame_source=None,
-    force=False,
-):
+def _resolve_cached_motion_output(args, seq_folder, start_idx, end_idx, force=False):
     output_dir, frame_chunks_file, model_masks_file = _get_motion_output_paths(seq_folder, start_idx, end_idx)
     if os.path.exists(frame_chunks_file) and not os.path.exists(model_masks_file):
         vprint(f"Warning: Incomplete output detected. Removing {frame_chunks_file} to force re-run")
@@ -194,7 +184,24 @@ def _prepare_motion_runtime(
             except Exception:
                 img_focal = 600
         frame_chunks_all = joblib.load(frame_chunks_file)
-        return None, frame_chunks_all, img_focal
+        return output_dir, frame_chunks_file, model_masks_file, frame_chunks_all, img_focal
+
+    return output_dir, frame_chunks_file, model_masks_file, None, None
+
+
+def _build_motion_context(
+    args,
+    seq_folder,
+    start_idx,
+    end_idx,
+    output_dir,
+    frame_chunks_file,
+    model_masks_file,
+    motion_runner=None,
+    mano_models=None,
+    prefetched_data=None,
+    frame_source=None,
+):
 
     _invalidate_cam_space_cache(seq_folder)
 
@@ -243,7 +250,7 @@ def _prepare_motion_runtime(
         frame_chunks_file=frame_chunks_file,
         model_masks_file=model_masks_file,
     )
-    return context, None, img_focal
+    return context
 
 
 def _render_chunk_masks(context, frame_ck, data_out, do_flip):
@@ -280,10 +287,10 @@ def _render_chunk_masks(context, frame_ck, data_out, do_flip):
         context.model_masks_tensor[frame_idx] |= batch_masks_tensor[mask_index]
 
 
-def _process_hand_track(args, idx, track, context, profiler=None):
+def _prepare_track_inference_inputs(track):
     valid = np.array([item["det"] for item in track])
     if valid.sum() < 2:
-        return [], 0.0, 0.0, 0.0
+        return None
 
     boxes = np.concatenate([item["det_box"] for item in track])
     non_zero_indices = np.where(np.any(boxes != 0, axis=1))[0]
@@ -305,9 +312,8 @@ def _process_hand_track(args, idx, track, context, profiler=None):
 
     frame_chunks, boxes_chunks = parse_chunks(frame, boxes, min_len=1)
     if len(frame_chunks) == 0:
-        return frame_chunks, 0.0, 0.0, 0.0
+        return None
 
-    do_flip = bool(is_right[0] <= 0)
     all_frame_indices = []
     all_boxes_list = []
     chunk_boundaries = [0]
@@ -317,15 +323,67 @@ def _process_hand_track(args, idx, track, context, profiler=None):
         chunk_boundaries.append(len(all_frame_indices))
 
     if len(all_frame_indices) == 0:
-        return frame_chunks, 0.0, 0.0, 0.0
+        return None
+
+    return {
+        "frame_chunks": frame_chunks,
+        "all_frame_indices": np.array(all_frame_indices, dtype=np.int64),
+        "all_boxes": np.concatenate(all_boxes_list, axis=0) if len(all_boxes_list) > 1 else all_boxes_list[0],
+        "chunk_boundaries": chunk_boundaries,
+        "do_flip": bool(is_right[0] <= 0),
+    }
+
+
+def _save_and_render_chunk(context, idx, frame_ck, chunk_results, do_flip):
+    data_out = {
+        "init_root_orient": chunk_results["pred_rotmat"][None, :, 0],
+        "init_hand_pose": chunk_results["pred_rotmat"][None, :, 1:],
+        "init_trans": chunk_results["pred_trans"][None, :, 0],
+        "init_betas": chunk_results["pred_shape"][None, :],
+    }
+
+    init_root = rotation_matrix_to_angle_axis(data_out["init_root_orient"])
+    init_hand_pose = rotation_matrix_to_angle_axis(data_out["init_hand_pose"])
+    if do_flip:
+        init_root[..., 1] *= -1
+        init_root[..., 2] *= -1
+        init_hand_pose[..., 1] *= -1
+        init_hand_pose[..., 2] *= -1
+    data_out["init_root_orient"] = angle_axis_to_rotation_matrix(init_root)
+    data_out["init_hand_pose"] = angle_axis_to_rotation_matrix(init_hand_pose)
+
+    data_out_for_save = {key: value.clone().cpu() for key, value in data_out.items()}
+    context.save_futures.append(
+        context.save_executor.submit(
+            _save_cam_space_json,
+            data_out_for_save,
+            context.seq_folder,
+            idx,
+            frame_ck[0],
+            frame_ck[-1],
+        )
+    )
+
+    data_out["init_root_orient"] = rotation_matrix_to_angle_axis(data_out["init_root_orient"])
+    data_out["init_hand_pose"] = rotation_matrix_to_angle_axis(data_out["init_hand_pose"])
+    _render_chunk_masks(context, frame_ck, data_out, do_flip=do_flip)
+
+
+def _process_hand_track(args, idx, track, context, profiler=None):
+    track_inputs = _prepare_track_inference_inputs(track)
+    if track_inputs is None:
+        return [], 0.0, 0.0, 0.0
+
+    frame_chunks = track_inputs["frame_chunks"]
+    all_frame_indices = track_inputs["all_frame_indices"]
+    all_boxes = track_inputs["all_boxes"]
+    chunk_boundaries = track_inputs["chunk_boundaries"]
+    do_flip = track_inputs["do_flip"]
 
     vprint(
         f"inference from frame {all_frame_indices[0]} to {all_frame_indices[-1]} "
         f"({len(frame_chunks)} chunks merged)"
     )
-
-    all_frame_indices = np.array(all_frame_indices, dtype=np.int64)
-    all_boxes = np.concatenate(all_boxes_list, axis=0) if len(all_boxes_list) > 1 else all_boxes_list[0]
 
     inference_time = 0.0
     postprocess_time = 0.0
@@ -351,8 +409,7 @@ def _process_hand_track(args, idx, track, context, profiler=None):
     inference_time += time.time() - t_inference
 
     t_post = time.time()
-    for chunk_idx, frame_box_pair in enumerate(zip(frame_chunks, boxes_chunks)):
-        frame_ck, _boxes_ck = frame_box_pair
+    for chunk_idx, frame_ck in enumerate(frame_chunks):
         start_idx = chunk_boundaries[chunk_idx]
         end_idx = chunk_boundaries[chunk_idx + 1]
         chunk_results = {
@@ -360,39 +417,8 @@ def _process_hand_track(args, idx, track, context, profiler=None):
             "pred_trans": results["pred_trans"][start_idx:end_idx],
             "pred_shape": results["pred_shape"][start_idx:end_idx],
         }
-        data_out = {
-            "init_root_orient": chunk_results["pred_rotmat"][None, :, 0],
-            "init_hand_pose": chunk_results["pred_rotmat"][None, :, 1:],
-            "init_trans": chunk_results["pred_trans"][None, :, 0],
-            "init_betas": chunk_results["pred_shape"][None, :],
-        }
-
-        init_root = rotation_matrix_to_angle_axis(data_out["init_root_orient"])
-        init_hand_pose = rotation_matrix_to_angle_axis(data_out["init_hand_pose"])
-        if do_flip:
-            init_root[..., 1] *= -1
-            init_root[..., 2] *= -1
-            init_hand_pose[..., 1] *= -1
-            init_hand_pose[..., 2] *= -1
-        data_out["init_root_orient"] = angle_axis_to_rotation_matrix(init_root)
-        data_out["init_hand_pose"] = angle_axis_to_rotation_matrix(init_hand_pose)
-
-        data_out_for_save = {key: value.clone().cpu() for key, value in data_out.items()}
-        context.save_futures.append(
-            context.save_executor.submit(
-                _save_cam_space_json,
-                data_out_for_save,
-                context.seq_folder,
-                idx,
-                frame_ck[0],
-                frame_ck[-1],
-            )
-        )
-
         t_render = time.time()
-        data_out["init_root_orient"] = rotation_matrix_to_angle_axis(data_out["init_root_orient"])
-        data_out["init_hand_pose"] = rotation_matrix_to_angle_axis(data_out["init_hand_pose"])
-        _render_chunk_masks(context, frame_ck, data_out, do_flip=do_flip)
+        _save_and_render_chunk(context, idx, frame_ck, chunk_results, do_flip)
         render_time += time.time() - t_render
 
     postprocess_time += time.time() - t_post
@@ -437,19 +463,29 @@ def run_motion_for_video(
     timing = {}
     t_start_total = time.time()
 
-    context, cached_frame_chunks_all, img_focal = _prepare_motion_runtime(
+    output_dir, frame_chunks_file, model_masks_file, cached_frame_chunks_all, img_focal = _resolve_cached_motion_output(
         args,
         seq_folder,
         start_idx,
         end_idx,
+        force=force,
+    )
+    if cached_frame_chunks_all is not None:
+        return cached_frame_chunks_all, img_focal
+
+    context = _build_motion_context(
+        args,
+        seq_folder,
+        start_idx,
+        end_idx,
+        output_dir,
+        frame_chunks_file,
+        model_masks_file,
         motion_runner=motion_runner,
         mano_models=mano_models,
         prefetched_data=prefetched_data,
         frame_source=frame_source,
-        force=force,
     )
-    if context is None:
-        return cached_frame_chunks_all, img_focal
 
     timing["1_load_data"] = time.time() - t_start_total
 

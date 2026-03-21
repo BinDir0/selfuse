@@ -57,24 +57,35 @@ class BatchRunState:
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         self.status_file = config.run_dir / "status.json"
-        self.tasks = {}
         descriptor_map = config.descriptor_map
-        for video_path in config.video_paths:
-            descriptor = descriptor_map.get(video_path)
-            self.tasks[video_path] = VideoTaskState.create(
+        self.tasks = {
+            video_path: VideoTaskState.create(
                 video_path=video_path,
                 stages=config.stages,
                 run_id=config.run_dir.name,
                 log_dir=self.log_dir,
-                descriptor=descriptor,
+                descriptor=descriptor_map.get(video_path),
             )
+            for video_path in config.video_paths
+        }
+
+    def _task_seq_folder(self, task: VideoTaskState) -> Path:
+        if task.descriptor is not None:
+            return Path(task.descriptor.seq_folder)
+        return Path(task.video_path).parent / Path(task.video_path).stem
+
+    def _first_incomplete_stage(self, task: VideoTaskState) -> str:
+        return next(
+            (stage for stage in self.config.stages if task.stage_status.get(stage) != "completed"),
+            "unknown",
+        )
 
     def build_pipeline_task(self, video_path: str) -> PipelineVideoTask:
         task = self.tasks[video_path]
         return PipelineVideoTask.from_inputs(video_path=video_path, descriptor=task.descriptor)
 
     def get_seq_folder(self, video_path: str) -> Path:
-        return self.build_pipeline_task(video_path).seq_folder
+        return self._task_seq_folder(self.tasks[video_path])
 
     def save(self):
         status_data = {
@@ -112,8 +123,8 @@ class BatchRunState:
         reconciled_done = defaultdict(int)
         normalized_running = defaultdict(int)
 
-        for video_path, task in self.tasks.items():
-            seq_folder = self.get_seq_folder(video_path)
+        for task in self.tasks.values():
+            seq_folder = self._task_seq_folder(task)
             for stage in self.config.stages:
                 done_marker = get_stage_done_marker(seq_folder, stage)
                 current_status = task.stage_status.get(stage, "pending")
@@ -136,10 +147,10 @@ class BatchRunState:
             print()
 
     def _initialize_completed_from_disk(self):
-        for video_path, task in self.tasks.items():
+        for task in self.tasks.values():
             if not all(task.stage_status.get(stage) == "pending" for stage in self.config.stages):
                 continue
-            seq_folder = self.get_seq_folder(video_path)
+            seq_folder = self._task_seq_folder(task)
             for stage in self.config.stages:
                 if is_stage_complete(stage, seq_folder, fast_check=True):
                     task.stage_status[stage] = "completed"
@@ -183,16 +194,13 @@ class BatchRunState:
                 completed.append(video_path)
             else:
                 fail_count += 1
-                failed_stage = next(
-                    (stage for stage in self.config.stages if task.stage_status.get(stage) != "completed"),
-                    "unknown",
-                )
-                failed.append((video_path, failed_stage))
+                failed.append((video_path, self._first_incomplete_stage(task)))
 
         return success_count, fail_count, completed, failed
 
     def get_stage_pending_videos(self, stage: str):
         stage_idx = self.config.stages.index(stage)
+        prev_stage = self.config.stages[stage_idx - 1] if stage_idx > 0 else None
         excluded_completed = 0
         excluded_running = 0
         excluded_other = 0
@@ -204,8 +212,7 @@ class BatchRunState:
             task = self.tasks[video_path]
             current_status = task.stage_status.get(stage, "pending")
 
-            if stage_idx > 0:
-                prev_stage = self.config.stages[stage_idx - 1]
+            if prev_stage is not None:
                 prev_status = task.stage_status.get(prev_stage, "pending")
                 if prev_status != "completed":
                     excluded_prev_stage += 1
@@ -236,7 +243,7 @@ class BatchRunState:
 
         pending = []
         for video_path in candidates:
-            seq_folder = self.get_seq_folder(video_path)
+            seq_folder = self._task_seq_folder(self.tasks[video_path])
             if is_stage_complete(stage, seq_folder, fast_check=True):
                 excluded_done_marker += 1
                 continue
