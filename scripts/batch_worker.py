@@ -130,6 +130,7 @@ class WorkerRuntime:
 
         if stage == "motion" and self.motion_runner is None:
             from lib.pipeline.stages.motion import build_motion_runner
+            from hawor.utils.process import get_mano_cfg
 
             self.motion_runner = build_motion_runner(self.checkpoint)
 
@@ -137,22 +138,8 @@ class WorkerRuntime:
             from lib.models.mano_wrapper import MANO
             device = self.motion_runner['device']
 
-            self.mano_right = MANO(
-                data_dir='_DATA/data/',
-                model_path='_DATA/data/mano',
-                gender='neutral',
-                num_hand_joints=15,
-                create_body_pose=False,
-            ).to(device)
-
-            self.mano_left = MANO(
-                data_dir='_DATA/data_left/',
-                model_path='_DATA/data_left/mano_left',
-                gender='neutral',
-                num_hand_joints=15,
-                create_body_pose=False,
-                is_rhand=False,
-            ).to(device)
+            self.mano_right = MANO(**get_mano_cfg(is_right=True)).to(device)
+            self.mano_left = MANO(**get_mano_cfg(is_right=False)).to(device)
             # Fix MANO shapedirs of the left hand bug
             self.mano_left.shapedirs[:, 0, :] *= -1
 

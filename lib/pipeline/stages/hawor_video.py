@@ -20,7 +20,7 @@ from lib.eval_utils.custom_utils import cam2world_convert, load_slam_cam
 from lib.eval_utils.custom_utils import interpolate_bboxes, validate_motion_velocity
 from lib.eval_utils.filling_utils import filling_postprocess, filling_preprocess
 import cv2
-from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
+from hawor.utils.process import get_mano_cfg, get_mano_faces, run_mano, run_mano_left
 from hawor.utils.rotation import angle_axis_to_rotation_matrix, rotation_matrix_to_angle_axis
 from infiller.lib.model.network import TransformerModel
 
@@ -257,26 +257,8 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
         # Create MANO models (standalone/backward-compatible path)
         from lib.models.mano_wrapper import MANO
 
-        # Right hand MANO model
-        MANO_cfg_right = {
-            'data_dir': '_DATA/data/',
-            'model_path': '_DATA/data/mano',
-            'gender': 'neutral',
-            'num_hand_joints': 15,
-            'create_body_pose': False
-        }
-        mano_right = MANO(**MANO_cfg_right).to(device)
-
-        # Left hand MANO model
-        MANO_cfg_left = {
-            'data_dir': '_DATA/data_left/',
-            'model_path': '_DATA/data_left/mano_left',
-            'gender': 'neutral',
-            'num_hand_joints': 15,
-            'create_body_pose': False,
-            'is_rhand': False
-        }
-        mano_left = MANO(**MANO_cfg_left).to(device)
+        mano_right = MANO(**get_mano_cfg(is_right=True)).to(device)
+        mano_left = MANO(**get_mano_cfg(is_right=False)).to(device)
         # Fix MANO shapedirs of the left hand bug
         mano_left.shapedirs[:, 0, :] *= -1
 

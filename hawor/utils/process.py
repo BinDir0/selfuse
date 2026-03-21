@@ -4,6 +4,7 @@ from hawor.utils.geometry import aa_to_rotmat
 import numpy as np
 import sys
 import os
+from pathlib import Path
 
 def block_print():
     sys.stdout = open(os.devnull, 'w')
@@ -11,16 +12,57 @@ def block_print():
 def enable_print():
     sys.stdout = sys.__stdout__
 
+
+def _shared_mano_dir_candidates():
+    share_data_root = Path("/share_data")
+    if not share_data_root.exists():
+        return []
+    return sorted(share_data_root.glob("*/manopth/mano/models"))
+
+
+def resolve_mano_model_dir(is_right=True):
+    filename = "MANO_RIGHT.pkl" if is_right else "MANO_LEFT.pkl"
+    legacy_dir = Path("_DATA/data/mano") if is_right else Path("_DATA/data_left/mano_left")
+
+    candidates = []
+    env_dir = os.environ.get("HAWOR_MANO_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    candidates.extend(_shared_mano_dir_candidates())
+    candidates.append(legacy_dir)
+
+    seen = set()
+    for candidate in candidates:
+        candidate = candidate.resolve() if candidate.exists() else candidate
+        candidate_key = str(candidate)
+        if candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+        if (candidate / filename).exists():
+            return candidate
+
+    tried = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(
+        f"Could not locate {filename}. Set HAWOR_MANO_DIR or place MANO files in one of: {tried}"
+    )
+
+
+def get_mano_cfg(is_right=True):
+    model_dir = resolve_mano_model_dir(is_right=is_right)
+    cfg = {
+        "data_dir": str(model_dir),
+        "model_path": str(model_dir),
+        "gender": "neutral",
+        "num_hand_joints": 15,
+        "create_body_pose": False,
+    }
+    if not is_right:
+        cfg["is_rhand"] = False
+    return cfg
+
 def get_mano_faces():
     block_print()
-    MANO_cfg = {
-        'DATA_DIR': '_DATA/data/',
-        'MODEL_PATH': '_DATA/data/mano',
-        'GENDER': 'neutral',
-        'NUM_HAND_JOINTS': 15,
-        'CREATE_BODY_POSE': False
-    }
-    mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
+    mano_cfg = get_mano_cfg(is_right=True)
     mano = MANO(**mano_cfg)
     enable_print()
     return mano.faces
@@ -41,14 +83,7 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
 
     if mano_model is None:
         # Create new model if not provided (backward compatibility)
-        MANO_cfg = {
-            'DATA_DIR': '_DATA/data/',
-            'MODEL_PATH': '_DATA/data/mano',
-            'GENDER': 'neutral',
-            'NUM_HAND_JOINTS': 15,
-            'CREATE_BODY_POSE': False
-        }
-        mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
+        mano_cfg = get_mano_cfg(is_right=True)
         mano = MANO(**mano_cfg)
         if use_cuda:
             mano = mano.cuda()
@@ -126,15 +161,7 @@ def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_
 
     if mano_model is None:
         # Create new model if not provided (backward compatibility)
-        MANO_cfg = {
-            'DATA_DIR': '_DATA/data_left/',
-            'MODEL_PATH': '_DATA/data_left/mano_left',
-            'GENDER': 'neutral',
-            'NUM_HAND_JOINTS': 15,
-            'CREATE_BODY_POSE': False,
-            'is_rhand': False
-        }
-        mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
+        mano_cfg = get_mano_cfg(is_right=False)
         mano = MANO(**mano_cfg)
         if use_cuda:
             mano = mano.cuda()
