@@ -1,8 +1,8 @@
 """统计 factory range 内的视频总数和总帧数。
 
 用法:
-  python scripts/check_factory_stats.py --start 1 --end 238
-  python scripts/check_factory_stats.py --start 1 --end 238 --build   # 自动为缺失索引的 factory 建索引
+  python tools/dataset/check_factory_stats.py --start 1 --end 238
+  python tools/dataset/check_factory_stats.py --start 1 --end 238 --build   # 自动为缺失索引的 factory 建索引
 """
 import argparse
 import json
@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 

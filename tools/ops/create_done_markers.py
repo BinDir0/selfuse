@@ -8,8 +8,8 @@
 3. 只为确实完成的stage创建.done标记
 
 用法:
-    python scripts/create_done_markers.py /path/to/video/root --stages detect_track motion slam infiller
-    python scripts/create_done_markers.py /path/to/video/root --stages detect_track --dry-run
+    python tools/ops/create_done_markers.py /path/to/video/root --stages detect_track motion slam infiller
+    python tools/ops/create_done_markers.py /path/to/video/root --stages detect_track --dry-run
 """
 
 import argparse
@@ -18,15 +18,10 @@ from pathlib import Path
 from tqdm import tqdm
 
 # Add project root to path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.batch_worker import (
-    is_stage_complete,
-    get_track_range,
-    validate_stage_output_fast,
-    STAGES
-)
+from lib.pipeline.stage_api import STAGES, get_track_range, validate_stage_output_fast
 
 
 def find_video_folders(root_dir: Path, max_depth: int = 5):
@@ -168,16 +163,16 @@ def main():
         epilog="""
 Examples:
   # 检查所有stage（dry-run模式）
-  python scripts/create_done_markers.py /path/to/videos --dry-run
+  python tools/ops/create_done_markers.py /path/to/videos --dry-run
 
   # 只为detect_track和motion创建.done
-  python scripts/create_done_markers.py /path/to/videos --stages detect_track motion
+  python tools/ops/create_done_markers.py /path/to/videos --stages detect_track motion
 
   # 创建所有stage的.done标记
-  python scripts/create_done_markers.py /path/to/videos --stages detect_track motion slam infiller
+  python tools/ops/create_done_markers.py /path/to/videos --stages detect_track motion slam infiller
 
   # 显示详细信息
-  python scripts/create_done_markers.py /path/to/videos --stages detect_track --verbose
+  python tools/ops/create_done_markers.py /path/to/videos --stages detect_track --verbose
         """
     )
 

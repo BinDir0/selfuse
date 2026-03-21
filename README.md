@@ -137,7 +137,9 @@ The repository is organized so CLI entrypoints stay stable while reusable pipeli
 - `lib/pipeline/batch/`: batch-inference scheduler, state tracking, events, and worker orchestration
 - `lib/pipeline/stage_api.py`: shared task/config/validation layer for batch and pipeline orchestration
 - `lib/pipeline/exporters/`: dataset/export code, including the WebDataset builder
-- `scripts/`: user-facing entrypoints such as `batch_infer.py`, `batch_worker.py`, and `build_vla_dataset.py`
+- `scripts/`: stable user-facing entrypoints such as `batch_infer.py`, `batch_worker.py`, and `build_vla_dataset.py`
+- `tools/ops/`: operational and recovery helpers such as run analysis, done-marker creation, and setup validation
+- `tools/dataset/`: dataset scanning, indexing, and video-list generation helpers
 - `deprecated/scripts_test_video/`: compatibility wrappers for older script paths
 - `deprecated/`: older experiments and non-primary pipeline variants
 

@@ -184,31 +184,31 @@ def main():
         epilog="""
 Examples:
   # Generate list of all videos
-  python scripts/generate_video_list.py \
+  python tools/dataset/generate_video_list.py \
       --base_dir /share_data/lvjianan/datasets/BuildAI-processed \
       --output videos.txt
 
   # Filter by specific factories
-  python scripts/generate_video_list.py \\
+  python tools/dataset/generate_video_list.py \\
       --base_dir /share_data/lvjianan/datasets/BuildAI-processed \\
       --factory 1 2 3 \\
       --output factory_1_2_3.txt
 
   # Filter by specific workers
-  python scripts/generate_video_list.py \\
+  python tools/dataset/generate_video_list.py \\
       --base_dir /share_data/lvjianan/datasets/BuildAI-processed \\
       --worker 1 2 \\
       --output worker_1_2.txt
 
   # Combine filters
-  python scripts/generate_video_list.py \\
+  python tools/dataset/generate_video_list.py \\
       --base_dir /share_data/lvjianan/datasets/BuildAI-processed \\
       --factory 1 \\
       --worker 1 2 3 \\
       --output factory1_workers123.txt
 
   # Output to stdout (for piping)
-  python scripts/generate_video_list.py \\
+  python tools/dataset/generate_video_list.py \\
       --base_dir /share_data/lvjianan/datasets/BuildAI-processed \\
       --no-output
         """
