@@ -540,17 +540,50 @@ if __name__ == "__main__":
         model.to(device=device, dtype=dtype)
         model.eval()
 
-        def _load_deepspeed_checkpoint(ckpt_dir: str) -> None:
-            ckpt_path = Path(ckpt_dir) / "pytorch_model" / "mp_rank_00_model_states.pt"
-            if not ckpt_path.exists():
-                raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")
-            payload = torch.load(ckpt_path, map_location="cpu")
-            state = payload.get("module", payload.get("state_dict", payload))
-            if isinstance(state, dict):
-                keys = list(state.keys())
-                if keys and all(k.startswith("module.") for k in keys):
-                    state = {k.replace("module.", "", 1): v for k, v in state.items()}
-            model.load_state_dict(state, strict=False)
+        def _load_resume_checkpoint(ckpt_dir: str) -> None:
+            ckpt_dir = Path(ckpt_dir)
+
+            legacy_checkpoint_file = ckpt_dir / "pytorch_model" / "mp_rank_00_model_states.pt"
+            if legacy_checkpoint_file.exists():
+                payload = torch.load(legacy_checkpoint_file, map_location="cpu")
+                state = payload.get("module", payload.get("state_dict", payload))
+                if isinstance(state, dict):
+                    keys = list(state.keys())
+                    if keys and all(k.startswith("module.") for k in keys):
+                        state = {k.replace("module.", "", 1): v for k, v in state.items()}
+                model.load_state_dict(state, strict=False)
+                return
+
+            fsdp_ckpt_dir = ckpt_dir / "pytorch_model_fsdp_0"
+            if fsdp_ckpt_dir.exists():
+                import torch.distributed.checkpoint as dist_cp
+                from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
+                from accelerate.utils import FullyShardedDataParallelPlugin
+                from accelerate.utils.fsdp_utils import (
+                    _get_model_state_dict,
+                    _prepare_sd_options,
+                    _set_model_state_dict,
+                )
+
+                fsdp_plugin = FullyShardedDataParallelPlugin(
+                    fsdp_version=2,
+                    state_dict_type="SHARDED_STATE_DICT",
+                )
+                sd_options = _prepare_sd_options(fsdp_plugin)
+                state_dict = {"model": _get_model_state_dict(model, sd_options=sd_options)}
+                dist_cp.load(
+                    state_dict=state_dict,
+                    storage_reader=dist_cp.FileSystemReader(str(fsdp_ckpt_dir)),
+                    planner=DefaultLoadPlanner(),
+                )
+                _set_model_state_dict(model, state_dict["model"], sd_options=sd_options)
+                return
+
+            from accelerate.utils import load_checkpoint_in_model
+
+            if not ckpt_dir.exists():
+                raise FileNotFoundError(f"Checkpoint path not found: {ckpt_dir}")
+            load_checkpoint_in_model(model, str(ckpt_dir), strict=False)
 
         if getattr(cfg.training, "load_pretrained_pi05_weights", False):
             model.load_pretrained_pi05_weights()
@@ -558,7 +591,7 @@ if __name__ == "__main__":
             model.load_pretrained_vlm_weights()
         resume_ckpt_dir = getattr(cfg.training, "resume_checkpoint_path", None)
         if resume_ckpt_dir:
-            _load_deepspeed_checkpoint(resume_ckpt_dir)
+            _load_resume_checkpoint(resume_ckpt_dir)
 
         dataset = hydra.utils.instantiate(cfg.dataset)
         data_collator = hydra.utils.instantiate(cfg.data_collator)
