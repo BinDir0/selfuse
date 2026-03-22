@@ -130,22 +130,24 @@ def _save_dense_depth_uint16_npz(
     out_path: str,
     frame_indices: np.ndarray,
     depths_list,
-    depth_backend: str,
 ):
-    """Save per-frame metric depth maps as uint16 + global scale (decode: d = u16 * depth_scale)."""
+    """
+    Save per-frame metric depth as uint16 in **fixed millimeters** (no per-file scale).
+
+    Encoding: ``depths_uint16`` value is millimeters from camera; max representable depth
+    is 65535 mm (~65.5 m). Decode meters: ``d_m = depths_uint16.astype(float) * 1e-3``.
+    Non-finite values become 0.
+    """
     stack = np.stack([np.asarray(d, dtype=np.float32) for d in depths_list], axis=0)
-    valid = np.isfinite(stack)
-    dmax = float(np.nanmax(stack[valid])) if valid.any() else 1.0
-    dmax = max(dmax, 1e-6)
-    clipped = np.clip(stack, 0.0, dmax)
-    u16 = np.round(clipped / dmax * 65535.0).astype(np.uint16)
-    scale = np.float64(dmax / 65535.0)
+    stack = np.nan_to_num(stack, nan=0.0, posinf=0.0, neginf=0.0)
+    stack = np.clip(stack, 0.0, None)
+    depth_mm = stack * 1000.0
+    u16 = np.clip(np.round(depth_mm), 0.0, 65535.0).astype(np.uint16)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     np.savez_compressed(
         out_path,
         frame_indices=np.asarray(frame_indices, dtype=np.int64),
         depths_uint16=u16,
-        depth_scale=scale,
         height=np.int32(stack.shape[1]),
         width=np.int32(stack.shape[2]),
         depth_backend=np.array([str(depth_backend)]),
@@ -522,7 +524,7 @@ def hawor_slam(
             dense_npz = os.path.join(
                 seq_folder, "SLAM", f"dense_depth_{_db}_{start_idx}_{end_idx}.npz"
             )
-            _save_dense_depth_uint16_npz(dense_npz, seg_ids, dense_list, _db)
+            _save_dense_depth_uint16_npz(dense_npz, seg_ids, dense_list)
             vprint(f"Saved dense depth (uint16): {dense_npz}")
             pred_depths = _gather_keyframe_depths_from_dense(
                 dense_list, seg_ids, tstamp_metric
@@ -755,7 +757,7 @@ def hawor_slam(
         dense_npz = os.path.join(
             seq_folder, "SLAM", f"dense_depth_{_db}_{start_idx}_{end_idx}.npz"
         )
-        _save_dense_depth_uint16_npz(dense_npz, seg_ids, dense_list, _db)
+        _save_dense_depth_uint16_npz(dense_npz, seg_ids, dense_list)
         vprint(f"Saved dense depth (uint16): {dense_npz}")
         pred_depths = _gather_keyframe_depths_from_dense(
             dense_list, seg_ids, tstamp_metric

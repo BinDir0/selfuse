@@ -1,3 +1,50 @@
+## environment set up
+
+
+### 1. 创建环境
+
+```bash
+conda create -n rowah python=3.10 -y
+conda activate rowah
+pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -U xformers --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 3. HaWoR / RoWaH Python 依赖
+
+在**仓库根目录**：
+
+```bash
+cd /path/to/RoWaH
+pip install -r requirements.txt
+pip install pytorch-lightning==2.2.4 --no-deps
+pip install lightning-utilities torchmetrics==1.4.0
+```
+
+
+### 4. 额外的库
+
+```bash
+pip install --no-build-isolation mmcv
+pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable
+pip install --no-build-isolation git+https://github.com/mattloper/chumpy
+```
+
+
+### 5. 装模块（DROID / DPVO /Metric 3D）
+
+```bash
+- **DPVO** : cd thirdparty/DPVO && pip install . --no-build-isolation
+- **DROID-SLAM** : cd thirdparty/DROID-SLAM && python setup.py install
+- **Any4D** : pip install -e thirdparty/Any4D  --no-deps
+```
+
+
+### 6. 权重与 MANO
+
+- HaWoR / 检测器等：见原 HaWoR 说明（`weights/hawor/`、`weights/external/droid.pth` 等）。
+- Any4D：`checkpoints/any4d_4v_combined.pth`（可用仓库内 `scripts/download_any4d_4v_combined_checkpoint.sh`）。
+- MANO 模型放入 `_DATA/data/`、`_DATA/data_left/` 约定路径。
 
 
 ---
@@ -21,7 +68,15 @@ python scripts/extract_frames.py --video_path /path/to/video.mp4
 
 - **关闭（仅关键帧，更快）**：`batch_infer.py` / `batch_worker.py` 加 `--no_depth_predict_all_frames`，或 `export HAWOR_DEPTH_PREDICT_ALL_FRAMES=0`
 
+会在 `video/视频名/SLAM/dense_depth_{metric3d|any4d}_{start}_{end}.npz` 写入：
 
+- `frame_indices`：全局帧号（与 `extracted_images` 六位数命名一致）
+- `depths_uint16`：`[T,H,W]`，**固定单位为毫米（mm）**，无单独 `depth_scale`；还原米制：`depth_m = depths_uint16.astype(float) * 1e-3`（超过 ~65.5 m 会饱和在 65535）
+- `height`、`width`
+
+Any4D **中间缓存**为单个 `SLAM/any4d_depth_{droid|dpvo}_{start}_{end}[_allframes].npz`（`depths` float32、`frame_indices`）；不再按 batch 拆多个 `_b*_*` 文件。重跑：`export HAWOR_ANY4D_FORCE_RERUN=1` 会删除该合并缓存。
+
+SLAM 深度 batch 默认 **`--metric3d_batch_size 48`**（可用 `HAWOR_METRIC3D_BATCH_SIZE` 覆盖）；Any4D 多视图显存占用大，**OOM 时请改小**。
 
 ### 1. DPVO + Metric3D
 
@@ -112,7 +167,7 @@ python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
 python scripts/extract_frames.py --video_path /path/to/video.mp4
 
 python scripts/batch_infer.py \
-  --video_list videos_10.txt --gpus 0,6 \
+  --video_list videos_10.txt --gpus 0,1,2,3,4,5,6,7 \
   --stages detect_track,motion,slam,infiller \
   --scheduler_mode wave \
   --slam_backend dpvo --any4d

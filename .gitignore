@@ -47,7 +47,7 @@ pred_vis/
 /*_trainset_export/
 
 # 示例与本地视频（按需保留小示例时可改为更细规则）
-/example/video_0
+/example/
 example_video/
 *.mov
 # 本地跑批生成的整段示例目录（抽帧 / tracks / SLAM / npz 等，勿提交）
