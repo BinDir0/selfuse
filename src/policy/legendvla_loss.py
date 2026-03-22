@@ -12,7 +12,6 @@ import torch
 from torch import nn
 
 
-@torch.compile
 def compute_celoss(
     lm_head: nn.Module,
     ce_loss_fn: nn.Module,

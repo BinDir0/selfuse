@@ -11,6 +11,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
+
 log = logging.getLogger(__name__)
 
 _CONFIG_DIR = str(pathlib.Path(__file__).resolve().parents[1] / "config")
@@ -87,9 +88,9 @@ class LegendVLAInference(nn.Module):
             "action_dim": self.action_dim,
         }
         self._model_compiled = False
-        self.compile_kwargs = None
+        self.compile_cfg = None
         if compile is not None:
-            self.compile_kwargs = (
+            self.compile_cfg = (
                 OmegaConf.to_container(compile, resolve=True)
                 if OmegaConf.is_config(compile)
                 else compile
@@ -126,10 +127,16 @@ class LegendVLAInference(nn.Module):
         return model
 
     def maybe_compile_model(self) -> None:
-        if self.compile_kwargs is None or self._model_compiled:
+        if self.compile_cfg is None or not self.compile_cfg.get("enabled", False) or self._model_compiled:
             return
-        log.info("Compiling model with kwargs=%s", self.compile_kwargs)
-        self.model = torch.compile(self.model, **self.compile_kwargs)
+
+        compile_kwargs = {
+            key: value
+            for key, value in self.compile_cfg.items()
+            if key != "enabled" and value is not None
+        }
+        log.info("Compiling blocks with kwargs=%s", compile_kwargs)
+        self.get_model_core().compile_blocks(compile_kwargs)
         self._model_compiled = True
 
     def load_checkpoint(self, path: str) -> None:

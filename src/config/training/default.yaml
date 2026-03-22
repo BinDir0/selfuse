@@ -48,7 +48,7 @@ training:
       freq: 100000
       device:
   compile:
-    enabled: False  # Set True to wrap the full training model with torch.compile.
+    enabled: False  # Set True to compile the fixed block stacks.
     fullgraph: False  # Start with False for dynamic multimodal training workloads.
     backend: inductor  # Default PyTorch compiler backend for CUDA workloads.
     mode: default  # Good starting point. Try reduce-overhead mainly for stable inference-like shapes.

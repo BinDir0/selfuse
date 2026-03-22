@@ -6,6 +6,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from src.utils.compile_utils import compile_module_list
 from src.model.vlm.prefix_cache import (
     BackboneStreamOutput,
     gather_action_position_ids,
@@ -93,6 +94,13 @@ class LegendVLA(nn.Module):
         self.diffloss = diffloss
         self.latent_condition_projector = latent_condition_projector
 
+    def compile_blocks(
+        self,
+        compile_kwargs: dict[str, Any],
+    ) -> None:
+        compile_module_list(self.backbone.base_model.model.visual.blocks, compile_kwargs)
+        compile_module_list(self.backbone.language_model.layers, compile_kwargs)
+        compile_module_list(self.flow_expert.layers, compile_kwargs)
     @property
     def trainable_vlm_parameters(self):
         return [param for param in self.backbone.parameters() if param.requires_grad]

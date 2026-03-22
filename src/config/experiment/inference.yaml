@@ -43,7 +43,7 @@ policy:
   ar_cfg: 1.0
   normalizer_path: ${training.normalizer_path}
   use_relative_action: True
-  compile: null  # Optional selected-submodule compile config for serving. Keep null to disable.
+  compile: null  # Optional compile config for the fixed block stacks.
 
 env_wrapper:
   enabled: True

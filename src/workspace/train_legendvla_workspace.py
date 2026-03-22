@@ -77,22 +77,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         print(f"Training with objective function: {self.objective_func}")
 
     def maybe_compile_model(self, accelerator):
-        enabled = self.compile_cfg.get("enabled", False)
-        if not enabled:
+        if not self.compile_cfg.get("enabled", False):
             return
 
         compile_cfg = OmegaConf.to_container(self.compile_cfg, resolve=True)
-        compile_kwargs, compile_targets = resolve_compile_config(compile_cfg)
+        compile_kwargs = {
+            key: value
+            for key, value in compile_cfg.items()
+            if key != "enabled" and value is not None
+        }
 
         if accelerator.is_main_process:
-            print(
-                f"Compiling submodules {selected_compile_targets(compile_targets)} "
-                f"with kwargs: {compile_kwargs}"
-            )
+            print(f"Compiling blocks with kwargs: {compile_kwargs}")
 
-        compiled_names = self.model.compile_heavy_submodules(compile_kwargs, compile_targets)
-        if accelerator.is_main_process and not compiled_names:
-            print("Compile was enabled, but no submodules were selected for compilation.")
+        self.model.compile_blocks(compile_kwargs)
         
     def reset_run_seed(self, accelerator):
         """Reset runtime seed before building dataset/dataloader."""
