@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Master-only multi-node Accelerate FSDP launcher using pdsh.
-# Usage: bash scripts/launch_multi_node_fsdp.sh
+# Usage: bash scripts/pretrain_legendvla_fsdp2.sh
 
 set -euo pipefail
 

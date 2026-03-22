@@ -35,8 +35,11 @@ from src.utils.training_utils import (
     capture_output_to_training_log,
     DeviceTransferWrapper,
     FullMemoryTracker,
+    grads_l2_norm,
     params_l2_norm,
+    scalar_metric_value,
 )
+from src.utils.compile_utils import resolve_compile_config, selected_compile_targets
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -78,13 +81,18 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if not enabled:
             return
 
-        compile_kwargs = OmegaConf.to_container(self.compile_cfg, resolve=True)
-        compile_kwargs.pop("enabled", None)
+        compile_cfg = OmegaConf.to_container(self.compile_cfg, resolve=True)
+        compile_kwargs, compile_targets = resolve_compile_config(compile_cfg)
 
         if accelerator.is_main_process:
-            print(f"Compiling model with kwargs: {compile_kwargs}")
+            print(
+                f"Compiling submodules {selected_compile_targets(compile_targets)} "
+                f"with kwargs: {compile_kwargs}"
+            )
 
-        self.model = torch.compile(self.model, **compile_kwargs)
+        compiled_names = self.model.compile_heavy_submodules(compile_kwargs, compile_targets)
+        if accelerator.is_main_process and not compiled_names:
+            print("Compile was enabled, but no submodules were selected for compilation.")
         
     def reset_run_seed(self, accelerator):
         """Reset runtime seed before building dataset/dataloader."""
@@ -239,16 +247,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if cfg.training.train_depth is False:
             model.freeze_weights_in_depth()
 
-        self.grad_stats = {}
-        def get_grad_hook(param):
-            def hook(grad):
-                if grad is not None:
-                    self.grad_stats[id(param)] = grad.detach()
-                return grad
-            return hook
-        for _, param in model.named_parameters():
-            if param.requires_grad:
-                param.register_hook(get_grad_hook(param))
         diffloss_trainable_paramters = self.get_grouped_parameters(
             model.diffloss_parameters,
             cfg.optimizer.diffloss,
@@ -408,8 +406,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
                         self.tracker.track()
-                    # Clear hook-captured grad stats for this step
-                    self.grad_stats.clear()
                     with accelerator.accumulate(self.model):
                         # Forward pass
                         with accelerator.autocast():
@@ -437,20 +433,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 "vlm": unwrapped_model.trainable_vlm_parameters,
                                 "diffloss": unwrapped_model.diffloss_parameters,
                             }
-                            def grad_stats_l2_norm(params):
-                                total_sq = None
-                                for param in params:
-                                    grad = self.grad_stats.get(id(param))
-                                    if grad is None:
-                                        continue
-                                    grad = grad.float()
-                                    sq = torch.sum(grad * grad)
-                                    total_sq = sq if total_sq is None else total_sq + sq
-                                if total_sq is None:
-                                    return None
-                                return torch.sqrt(total_sq)
                             for name, params in part_params.items():
-                                part_grad_norms[name] = grad_stats_l2_norm(params)
+                                part_grad_norms[name] = grads_l2_norm(params)
                         if accelerator.sync_gradients and cfg.training.clipping.enabled:
                             total_norm = accelerator.clip_grad_norm_(
                                 self.model.parameters(),
@@ -512,7 +496,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             'samples_per_sec': batch_size_local / step_time_sec if step_time_sec > 0 else 0,
                         })
                         if total_norm is not None:
-                            step_log['grad_norm'] = total_norm
+                            step_log['grad_norm'] = scalar_metric_value(total_norm)
                         if part_grad_norms is not None:
                             step_log.update({
                                 'grad_norm_action_expert': part_grad_norms["action_expert"],

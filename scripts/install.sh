@@ -21,7 +21,7 @@ sudo apt-get update
 sudo apt-get install -y libnccl2 libnccl-dev
 rm -f cuda-keyring_1.0-1_all.deb
 
-# Install pdsh for deepspeed
+# Install pdsh for the multi-node launcher
 sudo apt-get install -y pdsh
 
 source "$(conda info --base)/etc/profile.d/conda.sh"

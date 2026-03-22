@@ -10,6 +10,6 @@ defaults:
 
 name: legendvla_qwen3_vl
 exp_name: legendvla_qwen3_vl
-_target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
+_target_: src.workspace.train_legendvla_workspace.TrainLegendVLAWorkspace
 
 objective:

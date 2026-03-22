@@ -118,19 +118,26 @@ def capture_output_to_training_log(func):
     return wrapper
 
 
+def scalar_metric_value(value):
+    if isinstance(value, torch.Tensor) and value.numel() == 1:
+        return value.detach().float().cpu().item()
+    return value
+
+
 def params_l2_norm(params):
     params = [p for p in params if p is not None]
     if not params:
         return 0.0
-    device = params[0].device
-    total = torch.zeros((), device=device, dtype=torch.float32)
-    for param in params:
-        p = param.detach()
-        # FSDP2 wraps parameters as DTensor; materialize to local shard first
-        if hasattr(p, "full_tensor"):
-            p = p.full_tensor()
-        total += p.float().pow(2).sum()
-    return torch.sqrt(total).item()
+    norm = torch.nn.utils.get_total_norm(params, norm_type=2.0)
+    return scalar_metric_value(norm)
+
+
+def grads_l2_norm(params):
+    grads = [param.grad for param in params if param is not None and param.grad is not None]
+    if not grads:
+        return None
+    norm = torch.nn.utils.get_total_norm(grads, norm_type=2.0)
+    return scalar_metric_value(norm)
 
 
 class FullMemoryTracker:
@@ -189,4 +196,3 @@ class FullMemoryTracker:
     def stop(self):
         for h in self.hooks:
             h.remove()
-

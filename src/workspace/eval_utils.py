@@ -1,7 +1,7 @@
 '''
 Evaluation and checkpoint utilities for LegendVLA training workspace.
 
-Extracted from train_legendvla_deepspeed_workspace.py for modularity.
+Extracted from train_legendvla_workspace.py for modularity.
 '''
 
 import os

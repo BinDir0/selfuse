@@ -137,23 +137,22 @@ accelerate launch --config_file src/config/acc_config.yaml train.py experiment=l
 也可以直接使用仓库脚本：
 
 ```bash
-./scripts/pretrain_legendvla_deepspeed.sh
+./scripts/pretrain_legendvla_fsdp2.sh
 ```
 
 > 这个脚本现在实际也会启动 `experiment=legendvla_qwen3_vl`。
 
-### Multi-node with DeepSpeed
+### Multi-node with FSDP2
 
 当前多机启动脚本示例：
 
-- `scripts/deepspeed_launch.sh`
-- `scripts/pretrain_legendvla_deepspeed.sh`
-- `scripts/finetune_legendvla_deepspeed.sh`
+- `scripts/pretrain_legendvla_fsdp2.sh`
 
-它们都已经切到新的 `legendvla_qwen3_vl` 配置。运行前请根据实际机器环境修改：
+它已经切到新的 `legendvla_qwen3_vl` 配置。运行前请根据实际机器环境修改：
 
-- `hostfile`
-- `MASTER_ADDR` / `MASTER_PORT`
+- `NODES`
+- `PROJECT_DIR`
+- `MASTER_PORT`
 - 网卡和 NCCL 相关环境变量
 
 ### Resume from checkpoint
@@ -167,7 +166,7 @@ accelerate launch --config_file src/config/acc_config.yaml train.py experiment=l
 
 - `src/config/experiment/legendvla_qwen3_vl.yaml`
 
-如果训练环境与原 ZeRO checkpoint 不一致，可以先使用 `ds_to_universal.py` 转换为 universal checkpoint，再将转换后的目录填入恢复路径。
+当前 FSDP2 训练输出的 checkpoint 可直接用于恢复。
 
 ## Normalizer
 
@@ -226,7 +225,7 @@ nsys launch accelerate launch --config_file src/config/acc_config.yaml train.py 
 - 只在 `Rank 0` 上挂起调试器
 - 启动前设置 NCCL 超时，避免其他 rank 提前退出
 
-在启动脚本（例如 `scripts/pretrain_legendvla_deepspeed.sh`）中常用：
+在启动脚本（例如 `scripts/pretrain_legendvla_fsdp2.sh`）中常用：
 
 ```bash
 export NCCL_TIMEOUT=3600000
@@ -258,7 +257,7 @@ src/
 │   ├── legendvla_inference.py
 │   └── legendvla_loss.py
 └── workspace/
-    ├── train_legendvla_deepspeed_workspace.py
+    ├── train_legendvla_workspace.py
     └── train_unified_vla_workspace.py
 ```
 

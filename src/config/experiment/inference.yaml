@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 # Override workspace target (not used for serving, but keeps Hydra happy)
-_target_: src.workspace.train_legendvla_deepspeed_workspace.TrainLegendVLAWorkspace
+_target_: src.workspace.train_legendvla_workspace.TrainLegendVLAWorkspace
 
 serving:
   host: "0.0.0.0"
@@ -43,7 +43,7 @@ policy:
   ar_cfg: 1.0
   normalizer_path: ${training.normalizer_path}
   use_relative_action: True
-  compile: null  # Optional torch.compile kwargs for serving. Keep null to disable.
+  compile: null  # Optional selected-submodule compile config for serving. Keep null to disable.
 
 env_wrapper:
   enabled: True

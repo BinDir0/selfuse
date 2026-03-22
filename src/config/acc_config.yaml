@@ -10,7 +10,7 @@ fsdp_config:
   # false here is the FSDP2 setting closest to the old SHARD_GRAD_OP behavior.
   fsdp_reshard_after_forward: False
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: Qwen3VLTextDecoderLayer
+  fsdp_transformer_layer_cls_to_wrap: Qwen3VLTextDecoderLayer,Qwen3VLVisionBlock,DiTQwen3DecoderLayer,ResBlock
   fsdp_cpu_ram_efficient_loading: true
   fsdp_state_dict_type: SHARDED_STATE_DICT
 machine_rank: 0

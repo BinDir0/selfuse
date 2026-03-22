@@ -66,7 +66,7 @@ def get_training_command(dataset):
     
     exp_name_override = f"name=legendvla_{name.replace(' ', '_')}"
     
-    # Environment variables from pretrain_legendvla_deepspeed.sh
+    # Environment variables aligned with pretrain_legendvla_fsdp2.sh
     env_vars = [
         "export NCCL_DEBUG=INFO",
         "export NCCL_TIMEOUT=3600000",
