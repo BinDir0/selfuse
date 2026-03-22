@@ -22,6 +22,14 @@ class DummyBackbone(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.num_layers = num_layers
+        self.base_model = nn.Module()
+        self.base_model.model = nn.Module()
+        self.base_model.model.visual = nn.Module()
+        self.base_model.model.visual.blocks = nn.ModuleList([nn.Identity(), nn.Identity()])
+        self.language_model = nn.Module()
+        self.language_model.layers = nn.ModuleList(
+            [nn.Linear(hidden_size, hidden_size), nn.Linear(hidden_size, hidden_size)]
+        )
         self.embed = nn.Embedding(vocab_size, hidden_size, padding_idx=0)
         self.hidden_proj = nn.Linear(hidden_size, hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
@@ -64,7 +72,12 @@ class DummyBackbone(nn.Module):
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
         position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-        hidden = self.hidden_proj(embeds)
+        hidden = embeds
+        for block in self.base_model.model.visual.blocks:
+            hidden = block(hidden)
+        hidden = self.hidden_proj(hidden)
+        for layer in self.language_model.layers:
+            hidden = layer(hidden)
         batch_size, seq_len, _ = hidden.shape
         cache = []
         for _ in range(self.num_layers):
@@ -73,7 +86,6 @@ class DummyBackbone(nn.Module):
             cache.append((key, value))
         return BackboneStreamOutput(
             last_hidden_states=hidden,
-            all_hidden_states=(hidden,),
             position_ids=position_ids,
             past_key_values_hf=cache,
         )
@@ -250,3 +262,33 @@ def test_legendvla_vlm_inference_smoke():
     result = model("infer_vlm", batch, max_new_tokens=3, temperature=0.0)
     assert result["generated_ids"].shape == (1, 3)
     assert result["full_ids"].shape == (1, 7)
+
+
+def test_legendvla_compile_blocks_smoke():
+    model = make_model(diffloss=None)
+    model.compile_blocks({"backend": "eager"})
+
+    batch = make_vla_batch(batch_size=1)
+    output = model("train", batch)
+
+    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "flow_loss"}
+    assert output["total_loss"].ndim == 0
+
+
+def test_legendvla_compile_blocks_respects_module_flags():
+    model = make_model(diffloss=None)
+    model.compile_blocks({"backend": "eager", "vision": False, "text": True, "flow": True})
+
+    assert not hasattr(model.backbone.base_model.model.visual.blocks[0], "_orig_mod")
+    assert hasattr(model.backbone.language_model.layers[0], "_orig_mod")
+    assert hasattr(model.flow_expert.layers[0], "_orig_mod")
+
+
+def test_legendvla_compile_blocks_defaults_to_all_enabled():
+    model = make_model(diffloss=None)
+
+    model.compile_blocks({"backend": "eager"})
+
+    assert hasattr(model.backbone.base_model.model.visual.blocks[0], "_orig_mod")
+    assert hasattr(model.backbone.language_model.layers[0], "_orig_mod")
+    assert hasattr(model.flow_expert.layers[0], "_orig_mod")

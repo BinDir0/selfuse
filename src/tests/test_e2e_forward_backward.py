@@ -85,7 +85,6 @@ class DummyBackbone(nn.Module):
             cache.append((k, k.clone()))
         return BackboneStreamOutput(
             last_hidden_states=hidden,
-            all_hidden_states=(hidden,),
             position_ids=position_ids,
             past_key_values_hf=cache,
         )

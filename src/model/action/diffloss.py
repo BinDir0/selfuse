@@ -187,7 +187,7 @@ class BaseGenerativeMLP(nn.Module):
 
         y = t + c
 
-        if self.grad_checkpointing and not torch.jit.is_scripting():
+        if self.training and self.grad_checkpointing and not torch.jit.is_scripting():
             for block in self.res_blocks:
                 x = checkpoint(block, x, y, use_reentrant=False)
         else:

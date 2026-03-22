@@ -13,6 +13,13 @@ class DummyFlowExpert(nn.Module):
         self.action_proj = nn.Linear(hidden_size, hidden_size)
         self.time_proj = nn.Linear(time_hidden_size, hidden_size, bias=False)
         self.mode_embedding = nn.Embedding(2, hidden_size)
+        self.layers = nn.ModuleList(
+            [
+                nn.Linear(hidden_size, hidden_size),
+                nn.SiLU(),
+                nn.Linear(hidden_size, hidden_size),
+            ]
+        )
 
     def forward(
         self,
@@ -47,4 +54,6 @@ class DummyFlowExpert(nn.Module):
         hidden_states = hidden_states + self.time_proj(time_cond)
         hidden_states = hidden_states + self.mode_embedding.weight[mode_index].view(1, 1, -1)
         hidden_states = hidden_states + action_position_ids.unsqueeze(-1).to(hidden_states.dtype) * 0.01
+        for layer in self.layers:
+            hidden_states = layer(hidden_states)
         return hidden_states * action_mask.unsqueeze(-1).to(hidden_states.dtype)

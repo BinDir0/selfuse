@@ -7,10 +7,12 @@ pre-norms with AdaLN-Zero conditioning.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from src.model.common.modules import AdaLNZero
 from src.model.vlm.prefix_cache import PrefixKVCache
@@ -145,6 +147,15 @@ class Qwen3ActionExpert(nn.Module):
             ]
         )
         self.norm = Qwen3VLTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.gradient_checkpointing = False
+        self._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+
+    def enable_gradient_checkpointing(self) -> None:
+        self.gradient_checkpointing = True
+        self._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+
+    def disable_gradient_checkpointing(self) -> None:
+        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -164,9 +175,9 @@ class Qwen3ActionExpert(nn.Module):
             )
 
         hidden_states = action_embeds
-        past_key_values = self.dynamic_cache_cls()
+        mask_past_key_values = self.dynamic_cache_cls()
         for layer_idx, layer_kv in enumerate(prefix_cache.layers[:self.num_layers]):
-            past_key_values.update(layer_kv.key, layer_kv.value, layer_idx)
+            mask_past_key_values.update(layer_kv.key, layer_kv.value, layer_idx)
 
         full_attention_mask = torch.cat(
             [
@@ -200,7 +211,7 @@ class Qwen3ActionExpert(nn.Module):
                 inputs_embeds=hidden_states,
                 attention_mask=full_attention_mask,
                 cache_position=cache_position,
-                past_key_values=past_key_values,
+                past_key_values=mask_past_key_values,
                 position_ids=text_position_ids,
             )
             is_causal = True
@@ -214,17 +225,45 @@ class Qwen3ActionExpert(nn.Module):
         else:
             raise ValueError(f"Unsupported action expert mode: {mode}")
 
-        for layer in self.layers:
-            hidden_states = layer(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                time_cond=time_cond,
-                is_causal=is_causal,
-                text_position_ids=text_position_ids,
-                cache_position=cache_position,
-            )
+        for layer_idx, layer in enumerate(self.layers):
+            layer_prefix = prefix_cache.layers[layer_idx]
+
+            def run_layer(
+                layer_hidden_states: torch.Tensor,
+                layer_time_cond: torch.Tensor,
+                prefix_key: torch.Tensor,
+                prefix_value: torch.Tensor,
+                layer_module: nn.Module = layer,
+                layer_index: int = layer_idx,
+            ) -> torch.Tensor:
+                layer_past_key_values = self.dynamic_cache_cls()
+                layer_past_key_values.update(prefix_key, prefix_value, layer_index)
+                return layer_module(
+                    layer_hidden_states,
+                    position_embeddings=position_embeddings,
+                    attention_mask=attention_mask,
+                    past_key_values=layer_past_key_values,
+                    time_cond=layer_time_cond,
+                    is_causal=is_causal,
+                    text_position_ids=text_position_ids,
+                    cache_position=cache_position,
+                )
+
+            if self.gradient_checkpointing and self.training:
+                hidden_states = self._gradient_checkpointing_func(
+                    run_layer,
+                    hidden_states,
+                    time_cond,
+                    layer_prefix.key,
+                    layer_prefix.value,
+                )
+            else:
+                hidden_states = run_layer(
+                    hidden_states,
+                    time_cond,
+                    layer_prefix.key,
+                    layer_prefix.value,
+                )
 
         hidden_states = self.norm(hidden_states)
         return hidden_states * action_mask.unsqueeze(-1).to(dtype=hidden_states.dtype)

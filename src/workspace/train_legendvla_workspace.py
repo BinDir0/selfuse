@@ -39,7 +39,6 @@ from src.utils.training_utils import (
     params_l2_norm,
     scalar_metric_value,
 )
-from src.utils.compile_utils import resolve_compile_config, selected_compile_targets
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -58,6 +57,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # configure model
         self.model: LegendVLA
         self.model = hydra.utils.instantiate(cfg.policy) 
+        if cfg.training.get("gradient_checkpointing", False):
+            enable_method = getattr(self.model, "enable_gradient_checkpointing", None)
+            if callable(enable_method):
+                enable_method()
         self.tracker = FullMemoryTracker(self.model)
         
         # do not save optimizer if resume=False

@@ -56,7 +56,6 @@ class PrefixKVCache:
 @dataclass
 class BackboneStreamOutput:
     last_hidden_states: torch.Tensor
-    all_hidden_states: tuple[torch.Tensor, ...] | None
     position_ids: torch.Tensor | None
     past_key_values_hf: Any
     prefix_cache: PrefixKVCache | None = None
@@ -139,10 +138,6 @@ def slice_prefix_cache_from_full_kv(full_kv: Any, prefix_lengths: torch.Tensor) 
             raise ValueError(
                 f"Prefix cache batch mismatch: cache={key.shape[0]} prefix_lengths={batch_size}"
             )
-        if max_prefix_len > 0:
-            broadcast_mask = mask[:, None, :, None].to(dtype=key.dtype)
-            key = key * broadcast_mask
-            value = value * broadcast_mask
         sliced_layers.append(LayerKV(key=key, value=value))
 
     return PrefixKVCache(layers=sliced_layers, mask=mask, lengths=prefix_lengths)

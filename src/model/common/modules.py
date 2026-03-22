@@ -1,9 +1,7 @@
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
-from einops import rearrange
 
 
 class GemmaRMSNorm(nn.Module):
@@ -177,7 +175,7 @@ class AdaptiveRMSNorm(nn.Module):
     ) -> torch.FloatTensor:
         output = self._norm(x)
         if cond.ndim == 2:
-            cond = rearrange(cond, "b d -> b 1 d")
+            cond = cond.unsqueeze(1)
         gamma = self.to_gamma(cond)
         beta = self.to_beta(cond)
         return output * gamma + beta, None # no gate for adaptive RMSNorm, use unified gate for all RMSNorm modes
@@ -198,7 +196,7 @@ class AdaptiveLayerscale(nn.Module):
         self, x: torch.FloatTensor, cond: torch.FloatTensor
     ) -> torch.FloatTensor:
         if cond.ndim == 2:
-            cond = rearrange(cond, "b d -> b 1 d")
+            cond = cond.unsqueeze(1)
         gamma = self.to_adaln_zero_gamma(cond)
         return x * gamma.sigmoid()
 
@@ -217,7 +215,7 @@ class AdaLNZero(nn.Module):
     def forward(self, x: torch.FloatTensor, cond: torch.FloatTensor) -> torch.FloatTensor:
         output = self._norm(x)
         if cond.ndim == 2:
-            cond = rearrange(cond, "b d -> b 1 d")
+            cond = cond.unsqueeze(1)
         scale, shift, gate = self.modulation(cond).chunk(3, dim=-1)
         return output * (1.0 + scale) + shift, gate
 

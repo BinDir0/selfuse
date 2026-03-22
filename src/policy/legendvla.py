@@ -133,6 +133,20 @@ class LegendVLA(nn.Module):
             "flow": bool(flow_flag),
         }
 
+    def enable_gradient_checkpointing(self) -> None:
+        """Enable checkpointing on modules that support it."""
+        for module in (self.backbone, self.flow_expert):
+            enable_method = getattr(module, "enable_gradient_checkpointing", None)
+            if callable(enable_method):
+                enable_method()
+
+    def disable_gradient_checkpointing(self) -> None:
+        """Disable checkpointing on modules that support it."""
+        for module in (self.backbone, self.flow_expert):
+            disable_method = getattr(module, "disable_gradient_checkpointing", None)
+            if callable(disable_method):
+                disable_method()
+
     @property
     def trainable_vlm_parameters(self):
         return [param for param in self.backbone.parameters() if param.requires_grad]
@@ -247,6 +261,9 @@ class LegendVLA(nn.Module):
             output.past_key_values_hf,
             self.build_prefix_lengths(batch),
         )
+        if self.knowledge_insulation and output.prefix_cache is not None:
+            output.prefix_cache = output.prefix_cache.detach()
+        output.past_key_values_hf = None
         return output
 
     def forward_flow_stream(
@@ -268,8 +285,6 @@ class LegendVLA(nn.Module):
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
         action_position_ids = self.build_action_position_ids(batch, backbone_output.position_ids)
         prefix_cache = backbone_output.prefix_cache
-        if self.knowledge_insulation and prefix_cache is not None:
-            prefix_cache = prefix_cache.detach()
         expert_hidden = self.flow_expert(
             action_embeds=action_embeds,
             prefix_cache=prefix_cache,

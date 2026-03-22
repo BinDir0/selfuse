@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    ALL_ATTENTION_FUNCTIONS,
+    Qwen3VLTextAttention,
+    Qwen3VLTextDecoderLayer,
+    Qwen3VLTextModel,
+    create_causal_mask,
+    eager_attention_forward,
+)
 
 from src.model.vlm.prefix_cache import BackboneStreamOutput
 
@@ -14,6 +25,214 @@ class BackboneEmbedOutput:
     inputs_embeds: torch.Tensor
     visual_pos_masks: torch.Tensor | None
     deepstack_visual_embeds: list[torch.Tensor] | None
+
+
+class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
+    """Wrap the upstream attention block and also expose the full-sequence key/value tensors."""
+
+    def __init__(self, base_attention: Qwen3VLTextAttention):
+        nn.Module.__init__(self)
+        object.__setattr__(self, "base_attention", base_attention)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None,
+        past_key_values: Any = None,
+        cache_position: torch.LongTensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        base_attention = self.base_attention
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, base_attention.head_dim)
+
+        query_states = base_attention.q_norm(base_attention.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        key_states = base_attention.k_norm(base_attention.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        value_states = base_attention.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = base_attention.rotary_fn(query_states, key_states, cos, sin)
+
+        if past_key_values is not None:
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(
+                key_states,
+                value_states,
+                base_attention.layer_idx,
+                cache_kwargs,
+            )
+
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            base_attention.config._attn_implementation,
+            eager_attention_forward,
+        )
+        attn_output, attn_weights = attention_interface(
+            base_attention,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not base_attention.training else base_attention.attention_dropout,
+            scaling=base_attention.scaling,
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = base_attention.o_proj(attn_output)
+        return attn_output, attn_weights, key_states, value_states
+
+
+class Qwen3VLTextDecoderLayerWithKV(Qwen3VLTextDecoderLayer):
+    """Wrap the upstream decoder layer and return the layer key/value tensors explicitly."""
+
+    def __init__(self, base_layer: Qwen3VLTextDecoderLayer):
+        nn.Module.__init__(self)
+        object.__setattr__(self, "base_layer", base_layer)
+        self.self_attn = Qwen3VLTextAttentionWithKV(base_layer.self_attn)
+        self.hidden_size = base_layer.hidden_size
+        self.gradient_checkpointing = False
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Any = None,
+        use_cache: bool | None = False,
+        cache_position: torch.LongTensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        base_layer = self.base_layer
+
+        residual = hidden_states
+        hidden_states = base_layer.input_layernorm(hidden_states)
+        hidden_states, _, key_states, value_states = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = base_layer.post_attention_layernorm(hidden_states)
+        hidden_states = base_layer.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states, key_states, value_states
+
+
+class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
+    """Run the upstream decoder stack while returning full-sequence layer KV for prefix reuse.
+
+    This wrapper keeps the original forward inputs intact and only changes the outputs:
+    `past_key_values` is reused to carry one `(key, value)` tuple per decoder layer.
+    """
+
+    def __init__(self, base_model: Qwen3VLTextModel):
+        nn.Module.__init__(self)
+        object.__setattr__(self, "upstream_text_model", base_model)
+        self.config = base_model.config
+        self.padding_idx = base_model.padding_idx
+        self.vocab_size = base_model.vocab_size
+        self.layers = nn.ModuleList(
+            [Qwen3VLTextDecoderLayerWithKV(layer) for layer in base_model.layers]
+        )
+        self.gradient_checkpointing = False
+        self._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        past_key_values: Any = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
+        deepstack_visual_embeds: list[torch.Tensor] | None = None,
+        **kwargs: Any,
+    ) -> tuple | BaseModelOutputWithPast:
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        return_dict = bool(kwargs.pop("return_dict", True))
+        kwargs.pop("output_hidden_states", None)
+        kwargs.pop("output_attentions", None)
+
+        base_model = self.upstream_text_model
+        if inputs_embeds is None:
+            inputs_embeds = base_model.embed_tokens(input_ids)
+
+        if cache_position is None:
+            past_seen_tokens = 0
+            if past_key_values is not None and hasattr(past_key_values, "get_seq_length"):
+                past_seen_tokens = int(past_key_values.get_seq_length())
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            )
+
+        if position_ids is None:
+            position_ids = cache_position.view(1, 1, -1).expand(4, inputs_embeds.shape[0], -1)
+        elif position_ids.ndim == 2:
+            position_ids = position_ids[None, ...].expand(4, position_ids.shape[0], -1)
+
+        if position_ids.ndim == 3 and position_ids.shape[0] == 4:
+            text_position_ids = position_ids[0]
+            rope_position_ids = position_ids[1:]
+        else:
+            text_position_ids = None
+            rope_position_ids = position_ids
+
+        attention_mask = create_causal_mask(
+            config=self.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            cache_position=cache_position,
+            past_key_values=past_key_values,
+            position_ids=text_position_ids,
+        )
+
+        hidden_states = inputs_embeds
+        position_embeddings = base_model.rotary_emb(hidden_states, rope_position_ids)
+        layer_kv: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+        for layer_idx, decoder_layer in enumerate(self.layers):
+            hidden_states, key_states, value_states = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=text_position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
+            layer_kv.append((key_states, value_states))
+
+            if deepstack_visual_embeds is not None and layer_idx < len(deepstack_visual_embeds):
+                hidden_states = base_model._deepstack_process(
+                    hidden_states,
+                    visual_pos_masks,
+                    deepstack_visual_embeds[layer_idx],
+                )
+
+        hidden_states = base_model.norm(hidden_states)
+        full_layer_kv = tuple(layer_kv)
+        if not return_dict:
+            return hidden_states, full_layer_kv
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=full_layer_kv,
+        )
 
 
 class Qwen3VLBackboneWrapper(nn.Module):
@@ -43,14 +262,13 @@ class Qwen3VLBackboneWrapper(nn.Module):
                 "Qwen3-VL backbone requires a recent transformers installation."
             ) from exc
 
-        # ── Tokenizer & processor ──
         processor = AutoProcessor.from_pretrained(
-            model_name_or_path, trust_remote_code=trust_remote_code,
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
         )
         tokenizer = processor.tokenizer
         tokenizer.add_special_tokens({"additional_special_tokens": [state_token, action_token]})
 
-        # ── Quantization config ──
         resolved_dtype = self._resolve_torch_dtype(torch_dtype)
         quantization_config = None
         if use_quantization:
@@ -63,7 +281,6 @@ class Qwen3VLBackboneWrapper(nn.Module):
             )
             quantization_config = BitsAndBytesConfig(**qkwargs)
 
-        # ── Load model ──
         if attn_implementation is not None and not isinstance(attn_implementation, str):
             raise TypeError("attn_implementation must be a string or None.")
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
@@ -77,19 +294,16 @@ class Qwen3VLBackboneWrapper(nn.Module):
         )
         self.model.resize_token_embeddings(len(tokenizer))
 
-        # ── Extract references BEFORE LoRA wrapping ──
-        # Qwen3VLForConditionalGeneration → .model (Qwen3VLModel) → .language_model (Qwen3VLTextModel)
-        text_config = self.model.config.text_config
-        self.base_model = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
-        self.language_model = self.base_model.model.language_model
-        self.lm_head = self.model.lm_head
-
-        # ── LoRA (via PEFT) ──
         self.use_lora = use_lora
         if use_lora:
             self._apply_lora(lora or {}, use_quantization)
 
-        # ── Public attributes ──
+        text_config = self.model.config.text_config
+        self.base_model = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
+        self.hf_language_model = self.base_model.model.language_model
+        self.language_model = Qwen3VLTextModelWithKV(self.hf_language_model)
+        self.lm_head = self.model.lm_head
+
         self.tokenizer = tokenizer
         self.processor = processor
         self.hidden_size = text_config.hidden_size
@@ -108,9 +322,6 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if freeze_backbone:
             self.freeze_non_lora_parameters()
 
-    # ------------------------------------------------------------------
-    # LoRA
-    # ------------------------------------------------------------------
     def _apply_lora(self, lora_cfg: dict, use_quantization: bool) -> None:
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
@@ -119,21 +330,17 @@ class Qwen3VLBackboneWrapper(nn.Module):
             model_for_peft = prepare_model_for_kbit_training(model_for_peft, use_gradient_checkpointing=False)
 
         kwargs = dict(lora_cfg)
-        # Ensure list type for PEFT
         for key in ("target_modules", "modules_to_save"):
             if isinstance(kwargs.get(key), tuple):
                 kwargs[key] = list(kwargs[key])
 
-        # get_peft_model automatically freezes non-LoRA parameters
         self.model = get_peft_model(model_for_peft, LoraConfig(task_type="CAUSAL_LM", **kwargs))
 
     def freeze_non_lora_parameters(self) -> None:
         if self.use_lora:
-            # PEFT already handles requires_grad; re-freeze any that were unfrozen
             base = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
             for param in base.parameters():
                 param.requires_grad = False
-            # Re-enable LoRA params
             for name, param in self.model.named_parameters():
                 if "lora_" in name:
                     param.requires_grad = True
@@ -141,9 +348,6 @@ class Qwen3VLBackboneWrapper(nn.Module):
             for param in self.model.parameters():
                 param.requires_grad = False
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     @staticmethod
     def _resolve_torch_dtype(dtype_name: str | torch.dtype | None) -> torch.dtype | None:
         if dtype_name is None:
@@ -152,9 +356,31 @@ class Qwen3VLBackboneWrapper(nn.Module):
             return dtype_name
         return getattr(torch, str(dtype_name))
 
-    # ------------------------------------------------------------------
-    # Embedding construction
-    # ------------------------------------------------------------------
+    def enable_gradient_checkpointing(self) -> None:
+        """Enable checkpointing on the vision tower and the training text wrapper."""
+        checkpoint_func = partial(checkpoint, use_reentrant=False)
+        self.language_model.gradient_checkpointing = True
+        self.language_model._gradient_checkpointing_func = checkpoint_func
+        for layer in self.language_model.layers:
+            layer.gradient_checkpointing = True
+            layer._gradient_checkpointing_func = checkpoint_func
+
+        visual_model = self.base_model.model.visual
+        enable_method = getattr(visual_model, "gradient_checkpointing_enable", None)
+        if callable(enable_method):
+            enable_method()
+
+    def disable_gradient_checkpointing(self) -> None:
+        """Disable checkpointing on the vision tower and the training text wrapper."""
+        self.language_model.gradient_checkpointing = False
+        for layer in self.language_model.layers:
+            layer.gradient_checkpointing = False
+
+        visual_model = self.base_model.model.visual
+        disable_method = getattr(visual_model, "gradient_checkpointing_disable", None)
+        if callable(disable_method):
+            disable_method()
+
     def encode_visual_features(
         self,
         input_ids: torch.LongTensor,
@@ -170,7 +396,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         deepstack_image_embeds = None
         deepstack_video_embeds = None
 
-        # Upstream-aligned block copied/adapted from transformers Qwen3-VL.
+        # This block follows the upstream Qwen3-VL embedding replacement flow.
         if pixel_values is not None:
             image_outputs = base_model.get_image_features(
                 pixel_values=pixel_values,
@@ -259,16 +485,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         state_token_id: int | None = None,
         action_token_id: int | None = None,
     ) -> BackboneEmbedOutput:
-        """Construct final language-model embeddings from project batch tensors.
-
-        The embedding pipeline is intentionally non-standard and happens in three stages:
-        - Start from token embeddings of `input_ids`.
-        - Replace Qwen image/video placeholder token positions with visual features from the HF vision tower.
-        - Replace project `<state>` and `<action>` placeholder token positions with learned slot embeddings.
-
-        `mm_token_type_ids` is kept for position-id computation later in the pipeline, but it does not directly
-        control embedding replacement in this function.
-        """
+        """Construct final language-model embeddings from project batch tensors."""
         del mm_token_type_ids
         inputs_embeds = self.base_model.get_input_embeddings()(input_ids)
         inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self.encode_visual_features(
@@ -310,6 +527,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         output_hidden_states: bool = True,
         past_key_values: Any = None,
     ) -> BackboneStreamOutput:
+        del output_hidden_states
         embed_output = self.build_inputs_embeds(
             input_ids=input_ids,
             pixel_values=pixel_values,
@@ -331,7 +549,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             past_key_values=past_key_values,
             mm_token_type_ids=mm_token_type_ids,
         )
-        # Upstream-aligned block copied/adapted from transformers Qwen3-VL.
+
         outputs = self.language_model(
             input_ids=None,
             inputs_embeds=embed_output.inputs_embeds,
@@ -341,12 +559,12 @@ class Qwen3VLBackboneWrapper(nn.Module):
             visual_pos_masks=embed_output.visual_pos_masks,
             deepstack_visual_embeds=embed_output.deepstack_visual_embeds,
             use_cache=use_cache,
-            output_hidden_states=output_hidden_states,
             return_dict=True,
         )
+
+        # In training, `past_key_values` carries one full-sequence `(key, value)` pair per text layer.
         return BackboneStreamOutput(
             last_hidden_states=outputs.last_hidden_state,
-            all_hidden_states=outputs.hidden_states,
             position_ids=position_ids,
             past_key_values_hf=outputs.past_key_values,
         )
