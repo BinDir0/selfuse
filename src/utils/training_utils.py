@@ -125,7 +125,11 @@ def params_l2_norm(params):
     device = params[0].device
     total = torch.zeros((), device=device, dtype=torch.float32)
     for param in params:
-        total += param.detach().float().pow(2).sum()
+        p = param.detach()
+        # FSDP2 wraps parameters as DTensor; materialize to local shard first
+        if hasattr(p, "full_tensor"):
+            p = p.full_tensor()
+        total += p.float().pow(2).sum()
     return torch.sqrt(total).item()
 
 

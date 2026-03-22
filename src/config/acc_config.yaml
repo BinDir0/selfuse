@@ -1,20 +1,23 @@
 compute_environment: LOCAL_MACHINE
 debug: false
-deepspeed_config:
-  # need to change to the correct path
-  deepspeed_config_file: src/config/ds_config.json
-  # need to change to the correct path
-  deepspeed_hostfile: src/config/hostfile
-  deepspeed_multinode_launcher: pdsh
-distributed_type: DEEPSPEED
+distributed_type: FSDP
 downcast_bf16: 'no'
-dynamo_config:
-  dynamo_backend: INDUCTOR
+# dynamo_config:
+#   dynamo_backend: INDUCTOR
 enable_cpu_affinity: false
+fsdp_config:
+  fsdp_version: 2
+  # false here is the FSDP2 setting closest to the old SHARD_GRAD_OP behavior.
+  fsdp_reshard_after_forward: False
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: Qwen3VLTextDecoderLayer
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_state_dict_type: SHARDED_STATE_DICT
 machine_rank: 0
 main_process_ip: 172.18.0.111 # need to change to the main process ip
 main_process_port: 12345 # need to change to the main process port
 main_training_function: main
+mixed_precision: bf16
 num_machines: 1 # need to change to the correct number
 num_processes: 8 # need to change to the correct number, sum of gpus of all nodes
 rdzv_backend: static
