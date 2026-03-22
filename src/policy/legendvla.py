@@ -98,9 +98,41 @@ class LegendVLA(nn.Module):
         self,
         compile_kwargs: dict[str, Any],
     ) -> None:
-        compile_module_list(self.backbone.base_model.model.visual.blocks, compile_kwargs)
-        compile_module_list(self.backbone.language_model.layers, compile_kwargs)
-        compile_module_list(self.flow_expert.layers, compile_kwargs)
+        compile_flags = self.resolve_compile_block_flags(compile_kwargs)
+        block_compile_kwargs = {
+            key: value
+            for key, value in compile_kwargs.items()
+            if key not in {"vision", "text", "flow"}
+        }
+
+        if compile_flags["vision"]:
+            compile_module_list(self.backbone.base_model.model.visual.blocks, block_compile_kwargs)
+        if compile_flags["text"]:
+            compile_module_list(self.backbone.language_model.layers, block_compile_kwargs)
+        if compile_flags["flow"]:
+            compile_module_list(self.flow_expert.layers, block_compile_kwargs)
+
+    def resolve_compile_block_flags(
+        self,
+        compile_kwargs: dict[str, Any],
+    ) -> dict[str, bool]:
+        vision_flag = compile_kwargs.get("vision")
+        text_flag = compile_kwargs.get("text")
+        flow_flag = compile_kwargs.get("flow")
+
+        if vision_flag is None:
+            vision_flag = True
+        if text_flag is None:
+            text_flag = True
+        if flow_flag is None:
+            flow_flag = True
+
+        return {
+            "vision": bool(vision_flag),
+            "text": bool(text_flag),
+            "flow": bool(flow_flag),
+        }
+
     @property
     def trainable_vlm_parameters(self):
         return [param for param in self.backbone.parameters() if param.requires_grad]

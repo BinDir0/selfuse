@@ -53,6 +53,9 @@ training:
     backend: inductor  # Default PyTorch compiler backend for CUDA workloads.
     mode: default  # Good starting point. Try reduce-overhead mainly for stable inference-like shapes.
     dynamic: True # Leave null for the PyTorch default. Set True only when variable shapes cause recompiles.
+    vision: False  # Compile visual blocks when enabled.
+    text: True  # Keep text decoder blocks on by default.
+    flow: True  # Keep action-expert blocks on by default.
   gradient_checkpointing: False
 optimizer:
   action:
