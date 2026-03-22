@@ -11,7 +11,11 @@ from tqdm import tqdm
 from lib.pipeline.frame_source import build_frame_source
 from lib.pipeline.tools import parse_chunks, parse_chunks_hand_frame
 from lib.models.hawor import HAWOR
-from lib.eval_utils.custom_utils import cam2world_convert, load_slam_cam
+from lib.eval_utils.custom_utils import (
+    cam2world_convert,
+    interpolate_slam_cameras_at_video_frames,
+    load_slam_cam,
+)
 from lib.eval_utils.custom_utils import interpolate_bboxes, validate_motion_velocity
 from lib.eval_utils.filling_utils import filling_postprocess, filling_preprocess
 import cv2
@@ -542,6 +546,52 @@ def hawor_motion_estimation(args, start_idx, end_idx, seq_folder, profiler=None)
     return run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=None, profiler=profiler)
 
 
+def _load_cam_space_pred_dict(seq_folder, hand_idx, frame_ck):
+    """读 cam_space JSON；若无 {first}_{last}.json，从覆盖该段帧的更大 JSON 里按时间维切片。"""
+    frame_ck = np.asarray(frame_ck, dtype=np.int64)
+    first, last = int(frame_ck[0]), int(frame_ck[-1])
+    n = len(frame_ck)
+    if not np.array_equal(frame_ck, np.arange(first, first + n, dtype=np.int64)):
+        raise ValueError(f"cam_space 需连续帧 chunk，得到 {frame_ck}")
+
+    cam_dir = os.path.join(seq_folder, "cam_space", str(hand_idx))
+    exact = os.path.join(cam_dir, f"{first}_{last}.json")
+    if os.path.isfile(exact):
+        with open(exact, "r") as f:
+            return json.load(f)
+
+    if not os.path.isdir(cam_dir):
+        raise FileNotFoundError(f"缺少 {cam_dir}，请先跑 motion。")
+    candidates = []
+    for fn in os.listdir(cam_dir):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            a, b = os.path.splitext(fn)[0].split("_", 1)
+            a, b = int(a), int(b)
+        except ValueError:
+            continue
+        if a <= first and b >= last:
+            candidates.append((b - a, a, fn))
+    if not candidates:
+        raise FileNotFoundError(
+            f"{cam_dir} 无覆盖帧 {first}-{last} 的 JSON，现有: {sorted(os.listdir(cam_dir))}"
+        )
+    candidates.sort(key=lambda x: x[0])
+    _, a, fn = candidates[0]
+    i0 = first - a
+    with open(os.path.join(cam_dir, fn), "r") as f:
+        raw = json.load(f)
+    out = {}
+    for k, v in raw.items():
+        arr = np.array(v)
+        if arr.ndim >= 2 and arr.shape[1] >= i0 + n:
+            out[k] = arr[:, i0 : i0 + n].tolist()
+        else:
+            out[k] = v
+    return out
+
+
 def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_runner=None):
     # load infiller
     infiller_runner = infiller_runner or build_infiller_runner(args.infiller_weight)
@@ -560,7 +610,11 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
     filling_length = 120
 
     fpath = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
-    R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(fpath)
+    backend_txt = os.path.join(seq_folder, "SLAM", "slam_backend.txt")
+    use_dpvo_infiller = os.environ.get("HAWOR_INFILLER_DPVO_MODE", "").strip() == "1"
+    if not use_dpvo_infiller and os.path.isfile(backend_txt):
+        with open(backend_txt, "r") as bf:
+            use_dpvo_infiller = bf.read().strip().lower() == "dpvo"
 
     pred_trans = torch.zeros(2, num_frames, 3)
     pred_rot = torch.zeros(2, num_frames, 3)
@@ -568,42 +622,67 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
     pred_betas = torch.zeros(2, num_frames, 10)
     pred_valid = torch.zeros((2, pred_betas.size(1)))
 
-    max_slam_frames = min(pred_trans.shape[1], R_c2w_sla_all.shape[0], t_c2w_sla_all.shape[0])
-
-    # camera space to world space
-    tid = [0, 1]            
-    for k, idx in enumerate(tid):
-        frame_chunks = frame_chunks_all[idx]
-
-        if len(frame_chunks) == 0:
-            continue
-
-        for frame_ck in frame_chunks:
-            frame_ck = np.asarray(frame_ck)
-            valid_frame_mask = frame_ck < max_slam_frames
-            if valid_frame_mask.sum() == 0:
+    tid = [0, 1]
+    if use_dpvo_infiller:
+        load_slam_cam(fpath)
+        for k, idx in enumerate(tid):
+            frame_chunks = frame_chunks_all[idx]
+            if len(frame_chunks) == 0:
                 continue
-            frame_ck = frame_ck[valid_frame_mask]
-            vprint(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
-            pred_path = os.path.join(seq_folder, 'cam_space', str(idx), f"{frame_ck[0]}_{frame_ck[-1]}.json")
-            with open(pred_path, "r") as f:
-                pred_dict = json.load(f)
-            data_out = {
-                k:torch.tensor(v) for k, v in pred_dict.items()
-                }
+            for frame_ck in frame_chunks:
+                frame_ck = np.asarray(frame_ck, dtype=np.int64)
+                valid_frame_mask = frame_ck < num_frames
+                if valid_frame_mask.sum() == 0:
+                    continue
+                frame_ck = frame_ck[valid_frame_mask]
+                vprint(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
+                pred_dict = _load_cam_space_pred_dict(seq_folder, idx, frame_ck)
+                data_out = {kk: torch.tensor(vv) for kk, vv in pred_dict.items()}
+                R_c2w_sla, t_c2w_sla = interpolate_slam_cameras_at_video_frames(
+                    fpath, frame_ck
+                )
+                data_world = cam2world_convert(
+                    R_c2w_sla, t_c2w_sla, data_out, "right" if idx > 0 else "left"
+                )
+                pred_trans[[idx], frame_ck] = data_world["init_trans"]
+                pred_rot[[idx], frame_ck] = data_world["init_root_orient"]
+                pred_hand_pose[[idx], frame_ck] = data_world["init_hand_pose"].flatten(-2)
+                pred_betas[[idx], frame_ck] = data_world["init_betas"]
+                pred_valid[[idx], frame_ck] = 1
+    else:
+        # DROID / 旧 npz：与最初版一致（max_slam_frames + 精确 json + 行下标取相机）
+        R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(fpath)
+        max_slam_frames = min(
+            pred_trans.shape[1], R_c2w_sla_all.shape[0], t_c2w_sla_all.shape[0]
+        )
+        for k, idx in enumerate(tid):
+            frame_chunks = frame_chunks_all[idx]
+            if len(frame_chunks) == 0:
+                continue
+            for frame_ck in frame_chunks:
+                frame_ck = np.asarray(frame_ck)
+                valid_frame_mask = frame_ck < max_slam_frames
+                if valid_frame_mask.sum() == 0:
+                    continue
+                frame_ck = frame_ck[valid_frame_mask]
+                vprint(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
+                pred_path = os.path.join(
+                    seq_folder, "cam_space", str(idx), f"{frame_ck[0]}_{frame_ck[-1]}.json"
+                )
+                with open(pred_path, "r") as f:
+                    pred_dict = json.load(f)
+                data_out = {kk: torch.tensor(vv) for kk, vv in pred_dict.items()}
+                R_c2w_sla = R_c2w_sla_all[frame_ck]
+                t_c2w_sla = t_c2w_sla_all[frame_ck]
+                data_world = cam2world_convert(
+                    R_c2w_sla, t_c2w_sla, data_out, "right" if idx > 0 else "left"
+                )
+                pred_trans[[idx], frame_ck] = data_world["init_trans"]
+                pred_rot[[idx], frame_ck] = data_world["init_root_orient"]
+                pred_hand_pose[[idx], frame_ck] = data_world["init_hand_pose"].flatten(-2)
+                pred_betas[[idx], frame_ck] = data_world["init_betas"]
+                pred_valid[[idx], frame_ck] = 1
 
-            R_c2w_sla = R_c2w_sla_all[frame_ck]
-            t_c2w_sla = t_c2w_sla_all[frame_ck]
-
-            data_world = cam2world_convert(R_c2w_sla, t_c2w_sla, data_out, 'right' if idx > 0 else 'left')
-
-            pred_trans[[idx], frame_ck] = data_world["init_trans"]
-            pred_rot[[idx], frame_ck] = data_world["init_root_orient"]
-            pred_hand_pose[[idx], frame_ck] = data_world["init_hand_pose"].flatten(-2)
-            pred_betas[[idx], frame_ck] = data_world["init_betas"]
-            pred_valid[[idx], frame_ck] = 1
-            
-        
     # runing fillingnet for this video
     frame_list = torch.tensor(list(range(pred_trans.size(1))))
     pred_valid = (pred_valid > 0).numpy()

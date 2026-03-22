@@ -1,158 +1,204 @@
-<div align="center">
 
-# HaWoR: World-Space Hand Motion Reconstruction from Egocentric Videos
 
-[Jinglei Zhang]()<sup>1</sup> &emsp; [Jiankang Deng](https://jiankangdeng.github.io/)<sup>2</sup> &emsp; [Chao Ma](https://scholar.google.com/citations?user=syoPhv8AAAAJ&hl=en)<sup>1</sup> &emsp; [Rolandos Alexandros Potamias](https://rolpotamias.github.io)<sup>2</sup> &emsp;  
+---
 
-<sup>1</sup>Shanghai Jiao Tong University, China
-<sup>2</sup>Imperial College London, UK <br>
+## Usage
 
-<font color="blue"><strong>CVPR 2025 Highlight✨</strong></font> 
-
-<a href='https://arxiv.org/abs/2501.02973'><img src='https://img.shields.io/badge/Arxiv-2501.02973-A42C25?style=flat&logo=arXiv&logoColor=A42C25'></a> 
-<a href='https://arxiv.org/pdf/2501.02973'><img src='https://img.shields.io/badge/Paper-PDF-yellow?style=flat&logo=arXiv&logoColor=yellow'></a> 
-<a href='https://hawor-project.github.io/'><img src='https://img.shields.io/badge/Project-Page-%23df5b46?style=flat&logo=Google%20chrome&logoColor=%23df5b46'></a> 
-<a href='https://github.com/ThunderVVV/HaWoR'><img src='https://img.shields.io/badge/GitHub-Code-black?style=flat&logo=github&logoColor=white'></a> 
-<a href='https://huggingface.co/spaces/ThunderVVV/HaWoR'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-green'></a>
-</div>
-
-This is the official implementation of **[HaWoR](https://hawor-project.github.io/)**, a hand reconstruction model in the world coordinates:
-
-![teaser](assets/teaser.png)
-
-## Installation
- 
-### Installation
-```
-git clone --recursive https://github.com/ThunderVVV/HaWoR.git
-cd HaWoR
-```
-
-The code has been tested with PyTorch 1.13 and CUDA 11.7. Higher torch and cuda versions should be also compatible. It is suggested to use an anaconda environment to install the the required dependencies:
-```bash
-conda create --name hawor python=3.10
-conda activate hawor
-
-pip install torch==1.13.0+cu117 torchvision==0.14.0+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
-# Install requirements
-pip install -r requirements.txt
-pip install pytorch-lightning==2.2.4 --no-deps
-pip install lightning-utilities torchmetrics==1.4.0
-```
-
-### Install masked DROID-SLAM:
-
-```
-cd thirdparty/DROID-SLAM
-python setup.py install
-```
-
-Download DROID-SLAM official weights [droid.pth](https://drive.google.com/file/d/1PpqVt1H4maBa_GbPJp4NwxRsd9jk-elh/view?usp=sharing), put it under `./weights/external/`.
-
-### Install Metric3D
-
-Download Metric3D official weights [metric_depth_vit_large_800k.pth](https://drive.google.com/file/d/1eT2gG-kwsVzNy5nJrbm4KC-9DbNKyLnr/view?usp=drive_link), put it under `thirdparty/Metric3D/weights`.
-
-### Download the model weights
 
 ```bash
-wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/detector.pt -P ./weights/external/
-wget https://huggingface.co/ThunderVVV/HaWoR/resolve/main/hawor/checkpoints/hawor.ckpt -P ./weights/hawor/checkpoints/
-wget https://huggingface.co/ThunderVVV/HaWoR/resolve/main/hawor/checkpoints/infiller.pt -P ./weights/hawor/checkpoints/
-wget https://huggingface.co/ThunderVVV/HaWoR/resolve/main/hawor/model_config.yaml -P ./weights/hawor/
-```
-It is also required to download MANO model from [MANO website](https://mano.is.tue.mpg.de). 
-Create an account by clicking Sign Up and download the models (mano_v*_*.zip). Unzip and put the hand model to the `_DATA/data/mano/MANO_RIGHT.pkl` and `_DATA/data_left/mano_left/MANO_LEFT.pkl`. 
-
-Note that MANO model falls under the [MANO license](https://mano.is.tue.mpg.de/license.html).
-## Demo
-
-### Single Video Inference
-
-For visualizaiton in world view, run with:
-```bash
-python demo.py --video_path ./example/video_0.mp4  --vis_mode world
+conda activate rowah
+export CUDA_HOME=/usr/local/cuda-12.8   # 按本机实际修改
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 ```
 
-For visualizaiton in camera view, run with:
+### 0. extract image
+python scripts/extract_frames.py --video_path /path/to/video.mp4
+
+### SLAM 深度：整段逐帧（默认开启）
+
+默认在 **`[start_idx, end_idx]` 片段内每一帧** 上跑 Metric3D / Any4D，写出 `dense_depth_*.npz`，再从中取出 **关键帧深度** 做尺度估计。
+
+- **关闭（仅关键帧，更快）**：`batch_infer.py` / `batch_worker.py` 加 `--no_depth_predict_all_frames`，或 `export HAWOR_DEPTH_PREDICT_ALL_FRAMES=0`
+
+
+
+### 1. DPVO + Metric3D
+
+
+#### 1.1 分步式
+
 ```bash
-python demo.py --video_path ./example/video_0.mp4 --vis_mode cam
-```
 
-### Batch Inference (Multi-GPU)
-
-For processing multiple videos in parallel across multiple GPUs:
-
-```bash
-# Process videos from a directory using 8 GPUs
 python scripts/batch_infer.py \
-  --video_dir /path/to/videos \
-  --gpus 0,1,2,3,4,5,6,7
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion --scheduler_mode wave
 
-# Process videos from a list file (decord on-the-fly decode, fallback to opencv if decord unavailable)
 python scripts/batch_infer.py \
-  --video_list videos.txt \
-  --gpus 0,1,2,3,4,5,6,7 \
-  --frame_backend decord
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages slam --scheduler_mode wave \
+  --slam_backend dpvo
 
-# Custom configuration with retries
 python scripts/batch_infer.py \
-  --video_dir /path/to/videos \
-  --gpus 0,1,2,3 \
-  --retries 3 \
-  --stages detect_track,motion,slam,infiller
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages infiller --scheduler_mode wave
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
 ```
 
-**Key features:**
-- Parallel processing across multiple GPUs (1 video per GPU)
-- Unified on-the-fly frame decode (no `extracted_images/*.jpg` dependency)
-- Selectable decode backend via `--frame_backend {decord|opencv}` (default: `decord`)
-- Automatic resume from existing outputs (use `--no-resume` to force rerun)
-- Per-stage retry logic (default: 2 retries)
-- Structured logging and progress tracking in `batch_runs/<timestamp>/`
-- Each video processes stages sequentially: `detect_track → motion → slam → infiller`
+#### 1.2 一步式
 
-**Output structure:**
-```
-batch_runs/<timestamp>/
-├── status.json          # Current status of all videos
-├── events.jsonl         # Event stream (start/success/fail/retry)
-└── logs/
-    ├── video1_detect_track.log
-    ├── video1_motion.log
-    └── ...
-```
-
-To resume an interrupted batch:
 ```bash
 python scripts/batch_infer.py \
-  --video_list videos.txt \
-  --gpus 0,1,2,3,4,5,6,7 \
-  --run_dir batch_runs/20260301_120000  # specify existing run directory
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion,slam,infiller \
+  --scheduler_mode wave \
+  --slam_backend dpvo
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
 ```
 
-## Training
-The training code will be released soon. 
+---
 
-## Acknowledgements
-Parts of the code are taken or adapted from the following repos:
-- [HaMeR](https://github.com/geopavlakos/hamer/)
-- [WiLoR](https://github.com/rolpotamias/WiLoR)
-- [SLAHMR](https://github.com/vye16/slahmr)
-- [TRAM](https://github.com/yufu-wang/tram)
-- [CMIB](https://github.com/jihoonerd/Conditional-Motion-In-Betweening)
+### 2. DPVO + Any4D
 
+**依赖：** 同上 DPVO；统一环境内已可 `import` Any4D；**Any4D 深度需要**对应视频的 `extracted_images/`（务必先抽帧）。可选：
 
-## License 
-HaWoR models fall under the [CC-BY-NC--ND License](./license.txt). This repository depends also on [MANO Model](https://mano.is.tue.mpg.de/license.html), which are fall under their own licenses. By using this repository, you must also comply with the terms of these external licenses.
-## Citing
-If you find HaWoR useful for your research, please consider citing our paper:
+```bash
+export HAWOR_ANY4D_REPO_ROOT=thirdparty/Any4D
+export HAWOR_ANY4D_CHECKPOINT_PATH=checkpoints/any4d_4v_combined.pth
+```
 
-```bibtex
-@article{zhang2025hawor,
-      title={HaWoR: World-Space Hand Motion Reconstruction from Egocentric Videos},
-      author={Zhang, Jinglei and Deng, Jiankang and Ma, Chao and Potamias, Rolandos Alexandros},
-      journal={arXiv preprint arXiv:2501.02973},
-      year={2025}
-    }
+**性能：** 多段 keyframe batch 时会在**同一进程内复用**已加载的 Any4D 权重，避免每个 batch 重复初始化。
+
+**默认开启（相对旧版「全 FP32 + 非 SDPA」可能有极小数值差；要与旧结果对齐可关）：**
+
+- **AMP**：默认开 → 关闭：`export HAWOR_ANY4D_USE_AMP=0`
+- **PyTorch SDPA**（DINO 注意力）：默认开 → 关闭：`export HAWOR_ANY4D_USE_PYTORCH_SDPA=0`
+
+加载 Any4D 权重时默认**屏蔽**第三方库的冗长 `print`（含整段 kwargs、torch hub、`_IncompatibleKeys` 等）；需要排查问题时：`export HAWOR_ANY4D_VERBOSE=1`。
+
+独立脚本 `scripts/scripts_test_video/run_any4d_depth.py` 可加 `--no_amp` 强制关 AMP。
+
+#### 2.1 分步式
+
+```bash
+python scripts/extract_frames.py --video_path /path/to/video.mp4
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion --scheduler_mode wave
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages slam --scheduler_mode wave \
+  --slam_backend dpvo --any4d
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages infiller --scheduler_mode wave
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
+```
+
+（`--any4d` 等价于 `--depth_backend any4d`。）
+
+#### 2.2 一步式
+
+```bash
+python scripts/extract_frames.py --video_path /path/to/video.mp4
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion,slam,infiller \
+  --scheduler_mode wave \
+  --slam_backend dpvo --any4d
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
+```
+
+---
+
+### 3. DROID-SLAM + Metric3D
+
+**依赖：** 已安装 `thirdparty/DROID-SLAM`（`lietorch`、`droid_backends`）；`--slam_backend droid`。
+
+#### 3.1 分步式
+
+```bash
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion --scheduler_mode wave
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages slam --scheduler_mode wave \
+  --slam_backend droid
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages infiller --scheduler_mode wave
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
+```
+
+#### 3.2 一步式
+
+```bash
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion,slam,infiller \
+  --scheduler_mode wave \
+  --slam_backend droid
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
+```
+
+---
+
+### 4. DROID-SLAM + Any4D
+
+**依赖：** DROID 同上；Any4D 同上——**必须先** `extract_frames`，再跑带 `slam` 的阶段。Any4D 的 **AMP / SDPA 默认开启**，与上文「DPVO + Any4D」相同；可用 `HAWOR_ANY4D_USE_AMP=0`、`HAWOR_ANY4D_USE_PYTORCH_SDPA=0` 关闭。
+
+#### 4.1 分步式
+
+```bash
+python scripts/extract_frames.py --video_path /path/to/video.mp4
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion --scheduler_mode wave
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages slam --scheduler_mode wave \
+  --slam_backend droid --any4d
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages infiller --scheduler_mode wave
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
+```
+
+#### 4.2 一步式
+
+```bash
+python scripts/extract_frames.py --video_path /path/to/video.mp4
+
+python scripts/batch_infer.py \
+  --video_list videos_10.txt --gpus 0,6 \
+  --stages detect_track,motion,slam,infiller \
+  --scheduler_mode wave \
+  --slam_backend droid --any4d
+
+python demo.py --video_path /path/to/video.mp4 --vis_mode cam --headless
+python demo.py --video_path /path/to/video.mp4 --vis_mode world --headless
 ```

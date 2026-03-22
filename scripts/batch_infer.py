@@ -28,15 +28,20 @@ warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', message='.*pkg_resources.*')
 warnings.filterwarnings('ignore', message='.*timm.models.layers.*')
 
-# Set temporary directory to shared storage instead of local /tmp
-SHARED_TMP_DIR = Path("/share_data/guantianrui/tmp")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Temp dir: set HAWOR_BATCH_TMPDIR to override; default is repo-local `.tmp`
+# (avoids hard-coded shared-disk paths).
+_env_tmp = os.environ.get("HAWOR_BATCH_TMPDIR")
+if _env_tmp:
+    SHARED_TMP_DIR = Path(_env_tmp).expanduser().resolve()
+else:
+    SHARED_TMP_DIR = (PROJECT_ROOT / ".tmp").resolve()
 SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
 os.environ["TEMP"] = str(SHARED_TMP_DIR)
 os.environ["TMP"] = str(SHARED_TMP_DIR)
 tempfile.tempdir = str(SHARED_TMP_DIR)
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STAGES = ["detect_track", "motion", "slam", "infiller"]
 
 
@@ -86,6 +91,9 @@ class BatchScheduler:
         persistent_worker: bool,
         max_stage_retries: int,
         enable_profiler: bool = False,
+        slam_backend: str = "droid",
+        depth_backend: Optional[str] = None,
+        depth_predict_all_frames: bool = True,
     ):
         self.video_paths = video_paths
         self.gpus = gpus
@@ -108,6 +116,9 @@ class BatchScheduler:
         self.persistent_worker = persistent_worker
         self.max_stage_retries = max_stage_retries
         self.enable_profiler = enable_profiler
+        self.slam_backend = slam_backend
+        self.depth_backend = depth_backend
+        self.depth_predict_all_frames = depth_predict_all_frames
 
         self.log_dir = run_dir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +178,12 @@ class BatchScheduler:
             "--checkpoint", self.checkpoint,
             "--infiller_weight", self.infiller_weight,
         ]
+        if stage == "slam":
+            cmd.extend(["--slam_backend", self.slam_backend])
+            if self.depth_backend is not None:
+                cmd.extend(["--depth_backend", self.depth_backend])
+            if not getattr(self, "depth_predict_all_frames", True):
+                cmd.append("--no_depth_predict_all_frames")
         if self.img_focal is not None:
             cmd.extend(["--img_focal", str(self.img_focal)])
         cmd.extend(["--run_dir", str(self.run_dir)])
@@ -225,6 +242,12 @@ class BatchScheduler:
             "--num_workers", str(self.num_workers),
             "--render_batch_size", str(self.render_batch_size),
         ]
+        if stage == "slam":
+            cmd.extend(["--slam_backend", self.slam_backend])
+            if self.depth_backend is not None:
+                cmd.extend(["--depth_backend", self.depth_backend])
+            if not getattr(self, "depth_predict_all_frames", True):
+                cmd.append("--no_depth_predict_all_frames")
         if self.img_focal is not None:
             cmd.extend(["--img_focal", str(self.img_focal)])
         cmd.extend(["--run_dir", str(self.run_dir)])
@@ -519,6 +542,7 @@ class BatchScheduler:
             metric3d_batch_size=self.metric3d_batch_size,
             detect_batch_size=self.detect_batch_size,
             detect_io_workers=self.detect_io_workers,
+            slam_backend=getattr(self, "slam_backend", "droid"),
         )
 
         # Ensure stage models are loaded
@@ -595,6 +619,11 @@ class BatchScheduler:
         task_ns.chunk_batch_size = self.chunk_batch_size
         task_ns.num_workers = self.num_workers
         task_ns.metric3d_batch_size = self.metric3d_batch_size
+        task_ns.slam_backend = getattr(self, "slam_backend", "droid")
+        task_ns.depth_backend = getattr(self, "depth_backend", None)
+        task_ns.depth_predict_all_frames = getattr(
+            self, "depth_predict_all_frames", True
+        )
 
         try:
             result = run_stage_with_runtime(runtime, task_ns, prefetched_data=prefetched_data)
@@ -1053,8 +1082,8 @@ def get_parser():
     parser.add_argument(
         "--metric3d_batch_size",
         type=int,
-        default=32,
-        help="Batch size for Metric3D depth estimation in SLAM stage",
+        default=48,
+        help="Batch size for Metric3D/Any4D depth in SLAM stage (env HAWOR_METRIC3D_BATCH_SIZE overrides)",
     )
     parser.add_argument(
         "--render_batch_size",
@@ -1083,8 +1112,8 @@ def get_parser():
     parser.add_argument(
         "--detect_half_precision",
         action="store_true",
-        default=True,
-        help="Use FP16 for YOLO detector (2x faster, default: enabled)",
+        default=False,
+        help="Use FP16 for YOLO detector (2x faster). Default: disabled",
     )
     parser.add_argument(
         "--no-detect_half_precision",
@@ -1114,7 +1143,7 @@ def get_parser():
         type=str,
         default="legacy",
         choices=["legacy", "wave"],
-        help="Scheduling mode: legacy (per-video stages) or wave (global stage waves)",
+        help="Scheduling mode: legacy (per-video stages) or wave (global stage waves, faster for heavy stages like slam)",
     )
     parser.add_argument(
         "--persistent_worker",
@@ -1127,12 +1156,39 @@ def get_parser():
         default=1,
         help="Max retries per stage wave (wave mode only, default: 1)",
     )
+    parser.add_argument(
+        "--slam_backend",
+        type=str,
+        default="droid",
+        choices=["droid", "dpvo"],
+        help="SLAM backend to use in slam stage",
+    )
+    parser.add_argument(
+        "--depth_backend",
+        type=str,
+        default=None,
+        choices=["metric3d", "any4d"],
+        help="Depth for SLAM scale, droid or dpvo; omit → env HAWOR_DEPTH_BACKEND",
+    )
+    parser.add_argument(
+        "--any4d",
+        action="store_true",
+        help="Shorthand for --depth_backend any4d",
+    )
+    parser.add_argument(
+        "--no_depth_predict_all_frames",
+        dest="depth_predict_all_frames",
+        action="store_false",
+        help="SLAM: keyframe-only depth (faster; no dense_depth_*.npz). Default is dense on.",
+    )
 
     return parser
 
 
 def main():
     args = get_parser().parse_args()
+    if getattr(args, "any4d", False):
+        args.depth_backend = "any4d"
 
     if args.video_list:
         with open(args.video_list) as f:
@@ -1190,6 +1246,9 @@ def main():
     print(f"Detect I/O workers: {args.detect_io_workers}")
     print(f"Chunk batch size (motion): {args.chunk_batch_size}")
     print(f"Metric3D batch size (slam): {args.metric3d_batch_size}")
+    print(f"SLAM backend: {args.slam_backend}")
+    print(f"Depth backend (slam): {args.depth_backend or '(env HAWOR_DEPTH_BACKEND, default metric3d)'}")
+    print(f"Dense depth all frames (slam): {args.depth_predict_all_frames}")
     print(f"Resume: {args.resume}")
     print(f"Run directory: {run_dir}")
     print()
@@ -1216,6 +1275,9 @@ def main():
         persistent_worker=args.persistent_worker,
         max_stage_retries=args.max_stage_retries,
         enable_profiler=args.enable_profiler,
+        slam_backend=args.slam_backend,
+        depth_backend=args.depth_backend,
+        depth_predict_all_frames=args.depth_predict_all_frames,
     )
 
     success = scheduler.run()

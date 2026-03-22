@@ -10,7 +10,10 @@ from scripts.scripts_test_video.detect_track_video import detect_track_video
 from scripts.scripts_test_video.hawor_video import hawor_motion_estimation, hawor_infiller
 from scripts.scripts_test_video.hawor_slam import hawor_slam
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
-from lib.eval_utils.custom_utils import load_slam_cam
+from lib.eval_utils.custom_utils import (
+    interpolate_slam_cameras_at_video_frames,
+    load_slam_cam,
+)
 from lib.vis.run_vis2 import run_vis2_on_video, run_vis2_on_video_cam
 
 
@@ -23,6 +26,12 @@ if __name__ == '__main__':
     parser.add_argument("--infiller_weight",  type=str, default='./weights/hawor/checkpoints/infiller.pt')
     parser.add_argument("--vis_mode",  type=str, default='world', help='cam | world')
     parser.add_argument("--headless", action='store_true', help='Run in headless mode (no GUI, save video file)')
+    parser.add_argument(
+        "--world_rebase_to_first_camera",
+        action="store_true",
+        help="Rebase world coordinates so that the first frame camera pose becomes identity. "
+             "This helps compare different SLAM backends under the same viewer view direction.",
+    )
     args = parser.parse_args()
 
     # Set offscreen rendering for headless mode
@@ -38,7 +47,6 @@ if __name__ == '__main__':
     if not os.path.exists(slam_path):
         hawor_slam(args, start_idx, end_idx)
     slam_path = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
-    R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(slam_path)
 
     pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = hawor_infiller(args, start_idx, end_idx, frame_chunks_all)
 
@@ -49,6 +57,22 @@ if __name__ == '__main__':
     }
     vis_start = 0
     vis_end = pred_trans.shape[1] - 1
+
+    # DPVO（及任意稀疏 SLAM）：npz 里位姿数可能少于视频帧，须按 tstamp 插值到与 mesh 时间维一致
+    R_w2c_sla_all, t_w2c_sla_all, R_c2w_sla_all, t_c2w_sla_all = load_slam_cam(slam_path)
+    n_slam = int(R_c2w_sla_all.shape[0])
+    backend_txt = os.path.join(seq_folder, "SLAM", "slam_backend.txt")
+    use_dpvo_vis = False
+    if os.path.isfile(backend_txt):
+        with open(backend_txt, "r") as bf:
+            use_dpvo_vis = bf.read().strip().lower() == "dpvo"
+    if use_dpvo_vis or n_slam < vis_end:
+        vis_idx = np.arange(vis_start, vis_end, dtype=np.int64)
+        R_c2w_sla_all, t_c2w_sla_all = interpolate_slam_cameras_at_video_frames(
+            slam_path, vis_idx
+        )
+        R_w2c_sla_all = R_c2w_sla_all.transpose(-1, -2)
+        t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
             
     # get faces
     faces = get_mano_faces()
@@ -98,6 +122,29 @@ if __name__ == '__main__':
     t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
     left_dict['vertices'] = torch.einsum('ij,btnj->btni', R_x, left_dict['vertices'].cpu())
     right_dict['vertices'] = torch.einsum('ij,btnj->btni', R_x, right_dict['vertices'].cpu())
+
+    # Optional: rebase world coordinates to make camera pose at frame 0 identical
+    # across different SLAM runs (e.g., DPVO vs DROID), improving visual comparison.
+    if args.world_rebase_to_first_camera and R_c2w_sla_all.shape[0] > 0:
+        R0 = R_c2w_sla_all[0]  # (3,3)
+        t0 = t_c2w_sla_all[0]  # (3,)
+        R_align = R0.transpose(-1, -2)  # R0^T
+        t_align = -torch.einsum("ij,j->i", R_align, t0)  # -R0^T t0
+
+        R_c2w_sla_all = torch.einsum("ij,njk->nik", R_align, R_c2w_sla_all)
+        t_c2w_sla_all = torch.einsum("ij,nj->ni", R_align, t_c2w_sla_all) + t_align[None, :]
+
+        R_w2c_sla_all = R_c2w_sla_all.transpose(-1, -2)
+        t_w2c_sla_all = -torch.einsum("bij,bj->bi", R_w2c_sla_all, t_c2w_sla_all)
+
+        left_dict['vertices'] = (
+            torch.einsum('ij,btnj->btni', R_align, left_dict['vertices'])
+            + t_align[None, None, None, :]
+        )
+        right_dict['vertices'] = (
+            torch.einsum('ij,btnj->btni', R_align, right_dict['vertices'])
+            + t_align[None, None, None, :]
+        )
     
     # Here we use aitviewer(https://github.com/eth-ait/aitviewer) for simple visualization.
     if args.vis_mode == 'world':

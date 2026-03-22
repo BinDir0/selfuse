@@ -5,6 +5,13 @@ from abc import abstractmethod
 
 import matplotlib.cm as cm
 import numpy as np
+
+# NumPy 2.0 removed np.NINF / np.PINF; older aitviewer still uses them.
+if not hasattr(np, "NINF"):
+    np.NINF = -np.inf  # type: ignore[attr-defined]
+if not hasattr(np, "PINF"):
+    np.PINF = np.inf  # type: ignore[attr-defined]
+
 from aitviewer.headless import HeadlessRenderer
 from aitviewer.renderables.billboard import Billboard
 from aitviewer.renderables.meshes import Meshes

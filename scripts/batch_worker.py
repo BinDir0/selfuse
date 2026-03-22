@@ -25,9 +25,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Set temporary directory to shared storage instead of local /tmp
+# Temp dir: set HAWOR_BATCH_TMPDIR to override; default is repo-local `.tmp`
 # IMPORTANT: Set this AFTER importing torch to avoid library loading issues
-SHARED_TMP_DIR = Path("/share_data/guantianrui/tmp")
+_env_tmp = os.environ.get("HAWOR_BATCH_TMPDIR")
+if _env_tmp:
+    SHARED_TMP_DIR = Path(_env_tmp).expanduser().resolve()
+else:
+    SHARED_TMP_DIR = (PROJECT_ROOT / ".tmp").resolve()
 SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
 os.environ["TEMP"] = str(SHARED_TMP_DIR)
@@ -263,9 +267,10 @@ class WorkerRuntime:
         chunk_batch_size: int = 4,
         num_workers: int = 16,
         render_batch_size: int = 8,
-        metric3d_batch_size: int = 8,
+        metric3d_batch_size: int = 32,
         detect_batch_size: int = 128,
         detect_io_workers: int = 8,
+        slam_backend: str = "droid",
     ):
         self.gpu = gpu
         self.checkpoint = checkpoint
@@ -278,6 +283,7 @@ class WorkerRuntime:
         self.metric3d_batch_size = metric3d_batch_size
         self.detect_batch_size = detect_batch_size
         self.detect_io_workers = detect_io_workers
+        self.slam_backend = slam_backend
 
         self.detector_runner = None
         self.motion_runner = None
@@ -349,7 +355,7 @@ class WorkerRuntime:
 
             self.metric_runner = build_metric3d_runner()
 
-        if stage == "slam" and self.droid_net is None:
+        if stage == "slam" and self.slam_backend == "droid" and self.droid_net is None:
             from lib.pipeline.masked_droid_slam import build_droid_net
 
             self.droid_net = build_droid_net()
@@ -393,6 +399,17 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
 
     runtime.ensure_runner(ns.stage)
 
+    # For SLAM stage, aggressively release runners that are no longer needed
+    # (detector, motion, infiller) to free GPU memory before DPVO/DROID-SLAM.
+    if ns.stage == "slam":
+        try:
+            runtime.detector_runner = None
+            runtime.motion_runner = None
+            runtime.infiller_runner = None
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     if ns.stage == "detect_track":
         start_idx, end_idx, _, _ = detect_track_video(
             stage_args,
@@ -431,7 +448,17 @@ def run_stage_with_runtime(runtime: WorkerRuntime, ns, prefetched_data=None):
             prefetched_data=prefetched_data,
         )
     elif ns.stage == "slam":
-        hawor_slam(stage_args, start_idx, end_idx, metric_runner=runtime.metric_runner, metric3d_batch_size=ns.metric3d_batch_size, droid_net=runtime.droid_net)
+        hawor_slam(
+            stage_args,
+            start_idx,
+            end_idx,
+            metric_runner=runtime.metric_runner,
+            metric3d_batch_size=ns.metric3d_batch_size,
+            droid_net=runtime.droid_net,
+            slam_backend=getattr(ns, "slam_backend", "droid"),
+            depth_backend=getattr(ns, "depth_backend", None),
+            depth_predict_all_frames=getattr(ns, "depth_predict_all_frames", True),
+        )
     elif ns.stage == "infiller":
         tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
         frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
@@ -472,6 +499,7 @@ def worker_runtime_loop(ns):
         num_workers=getattr(ns, 'num_workers', 16),
         render_batch_size=getattr(ns, 'render_batch_size', 8),
         detect_io_workers=getattr(ns, 'detect_io_workers', 8),
+        slam_backend=getattr(ns, 'slam_backend', "droid"),
     )
 
     with open(ns.video_list) as f:
@@ -597,7 +625,15 @@ def run_stage(ns):
         else:
             hawor_motion_estimation(stage_args, start_idx, end_idx, str(seq_folder))
     elif ns.stage == "slam":
-        hawor_slam(stage_args, start_idx, end_idx, metric3d_batch_size=ns.metric3d_batch_size)
+        hawor_slam(
+            stage_args,
+            start_idx,
+            end_idx,
+            metric3d_batch_size=ns.metric3d_batch_size,
+            slam_backend=getattr(ns, "slam_backend", "droid"),
+            depth_backend=getattr(ns, "depth_backend", None),
+            depth_predict_all_frames=getattr(ns, "depth_predict_all_frames", True),
+        )
     elif ns.stage == "infiller":
         tracks_dir = seq_folder / f"tracks_{start_idx}_{end_idx}"
         frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
@@ -633,12 +669,37 @@ def get_parser():
     parser.add_argument("--chunk_batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=16, help="Number of DataLoader workers for parallel frame loading")
     parser.add_argument("--render_batch_size", type=int, default=8, help="Batch size for rendering phase")
-    parser.add_argument("--metric3d_batch_size", type=int, default=32, help="Batch size for Metric3D depth estimation")
+    parser.add_argument(
+        "--metric3d_batch_size",
+        type=int,
+        default=48,
+        help="Batch size for Metric3D/Any4D depth in SLAM (env HAWOR_METRIC3D_BATCH_SIZE overrides)",
+    )
     parser.add_argument("--detect_batch_size", type=int, default=128, help="Batch size for YOLO detection (default 128)")
     parser.add_argument("--detect_io_workers", type=int, default=8, help="Number of DataLoader workers for parallel frame loading")
     parser.add_argument("--detect_device", type=str, default="cuda:0", help="Device for YOLO detector (e.g., cuda:0)")
-    parser.add_argument("--detect_half_precision", action="store_true", default=True, help="Use FP16 for YOLO detector (2x faster)")
+    # Default: disable FP16 to improve numerical stability/debuggability across envs.
+    parser.add_argument("--detect_half_precision", action="store_true", default=False, help="Use FP16 for YOLO detector (2x faster)")
     parser.add_argument("--no-detect_half_precision", dest="detect_half_precision", action="store_false", help="Disable FP16 for YOLO")
+    parser.add_argument("--slam_backend", type=str, default="droid", choices=["droid", "dpvo"], help="SLAM backend to use for 'slam' stage")
+    parser.add_argument(
+        "--depth_backend",
+        type=str,
+        default=None,
+        choices=["metric3d", "any4d"],
+        help="Depth for SLAM scale (droid/dpvo): metric3d or any4d; omit → env HAWOR_DEPTH_BACKEND (default metric3d)",
+    )
+    parser.add_argument(
+        "--any4d",
+        action="store_true",
+        help="Shorthand for --depth_backend any4d",
+    )
+    parser.add_argument(
+        "--no_depth_predict_all_frames",
+        dest="depth_predict_all_frames",
+        action="store_false",
+        help="SLAM: keyframe-only depth (faster; no dense_depth_*.npz). Default: dense on.",
+    )
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     parser.add_argument("--force", action="store_true", help="Ignore existing outputs and rerun this stage")
@@ -651,6 +712,8 @@ def get_parser():
 
 if __name__ == "__main__":
     args = get_parser().parse_args()
+    if getattr(args, "any4d", False):
+        args.depth_backend = "any4d"
 
     if args.persistent_worker:
         if not args.video_list:

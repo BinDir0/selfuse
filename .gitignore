@@ -1,45 +1,91 @@
-# Project specific data and submodule
+# =============================================================================
+# RoWaH — 数据、权重、实验产物（勿提交大文件）
+# =============================================================================
 
-/example/video_0
-/weights
-/app_pytorch3d*
+# batch_infer 默认运行目录与临时目录（可用 HAWOR_BATCH_TMPDIR 改 .tmp 位置）
+/batch_runs/
+/.tmp/
+/tmp_rerun_meta/
+/tmp_rerun_meta2/
 
-.vscode/
-**/.DS_Store
+# 权重与 checkpoint（按需下载；README 中有脚本说明）
+/weights/
+/checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.trt
+
+# 数据与打包
+/datasets/
+/dataset*/
+/dataset_tars/
+/dataset_untars/
+_DATA.zip
+*.zip
+/*.zip
+
+# 预训练 / SMPL / MANO 等（体积大）
 data/pretrain/*.pth
 data/pretrain/*.pth.tar
 data/smpl/SMPL_*.pkl
-*.mov
-example_video/
-/thirdparty/detection
+*.pkl
+
+# 实验、日志、可视化导出
 experiments/
 logs/
-hot3d_*/
-File/
-thirdparty/ZoeDepth
+logs*
 eval_vis_mdslam/
 eval_vis_*/
 pred_vis/
-_DATA.zip
-train_ddp_process*
-logs*
-/*_trainset_export/
-/*.png
-/*.zip
-/dataset_tars/
-/dataset_untars/
-/datasets/
-/eval_log*/
-*.pth
-*.pkl
-/dataset*/
 /eval*/
+/eval_log*/
+/train_ddp_process*
+/*_trainset_export/
+
+# 示例与本地视频（按需保留小示例时可改为更细规则）
+/example/video_0
+example_video/
+*.mov
+# 本地跑批生成的整段示例目录（抽帧 / tracks / SLAM / npz 等，勿提交）
+/example/dpvo+any4d/
+/example/segment_018/
+
+# 第三方：过大或需单独克隆的目录（与 README / 子模块策略一致）
+/thirdparty/detection
+/thirdparty/ZoeDepth
 /thirdparty/aitviewer
 
-# Byte-compiled / optimized / DLL files
-__pycache__/
+# 其它项目内大块路径
+hot3d_*/
+File/
+app_pytorch3d*
 
-# Distribution / packaging
+# =============================================================================
+# 环境与密钥（上传前务必检查未误提交）
+# =============================================================================
+
+.env
+.env.*
+!.env.example
+*.pem
+secrets/
+credentials.json
+wandb/
+mlruns/
+.dvc/
+
+# =============================================================================
+# Python
+# =============================================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 .Python
 build/
 develop-eggs/
@@ -47,6 +93,7 @@ dist/
 downloads/
 eggs/
 .eggs/
+# 注意：勿忽略仓库根目录的 lib/（RoWaH 源码）
 lib64/
 parts/
 sdist/
@@ -59,16 +106,54 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+.python-version
 
-# IPython
+# 测试 / 类型 / 格式化缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# =============================================================================
+# Jupyter / IPython
+# =============================================================================
+
+.ipynb_checkpoints/
+*.ipynb
 profile_default/
 ipython_config.py
 
-# pyenv
-.python-version
+# =============================================================================
+# IDE 与编辑器
+# =============================================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# 操作系统
+# =============================================================================
+
+**/.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =============================================================================
+# 运行期杂项
+# =============================================================================
 
 vis.mp4
 imgui.ini
+/*.png

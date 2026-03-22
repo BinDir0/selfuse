@@ -72,13 +72,69 @@ def quaternion_to_matrix(quaternions):
 def load_slam_cam(fpath):
     print(f"Loading cameras from {fpath}...")
     pred_cam = dict(np.load(fpath, allow_pickle=True))
-    pred_traj = pred_cam['traj']
-    t_c2w_sla = torch.tensor(pred_traj[:, :3]) * pred_cam['scale']
-    pred_camq = torch.tensor(pred_traj[:, 3:])
-    R_c2w_sla = quaternion_to_matrix(pred_camq[:,[3,0,1,2]])
+    pred_traj = pred_cam["traj"]
+    # Use float32 everywhere: traj may be float32 in npz while np.float64(scale) promotes
+    # (tensor * scale) to float64, but quaternion_to_matrix stays float32 → einsum dtype error.
+    scale = float(pred_cam["scale"])
+    t_c2w_sla = torch.as_tensor(pred_traj[:, :3], dtype=torch.float32) * scale
+    pred_camq = torch.as_tensor(pred_traj[:, 3:], dtype=torch.float32)
+    R_c2w_sla = quaternion_to_matrix(pred_camq[:, [3, 0, 1, 2]])
     R_w2c_sla = R_c2w_sla.transpose(-1, -2)
     t_w2c_sla = -torch.einsum("bij,bj->bi", R_w2c_sla, t_c2w_sla)
     return R_w2c_sla, t_w2c_sla, R_c2w_sla, t_c2w_sla
+
+
+def interpolate_slam_cameras_at_video_frames(fpath, video_frame_indices):
+    """
+    按视频帧号从 SLAM npz（tstamp + traj）插值得到 c2w 的 R、t。
+    稀疏轨迹（DPVO/DROID 关键帧）不能把视频帧号当作 traj 行下标。
+    """
+    from scipy.spatial.transform import Rotation as Rsci
+    from scipy.spatial.transform import Slerp
+
+    pred_cam = dict(np.load(fpath, allow_pickle=True))
+    pred_traj = pred_cam["traj"]
+    scale = float(pred_cam["scale"])
+    tstamp = np.asarray(pred_cam.get("tstamp", np.arange(len(pred_traj)))).astype(
+        np.int64
+    ).reshape(-1)
+    t_c2w = (pred_traj[:, :3] * scale).astype(np.float64)
+    pred_camq = torch.tensor(pred_traj[:, 3:])
+    R_c2w = quaternion_to_matrix(pred_camq[:, [3, 0, 1, 2]]).numpy()
+
+    order = np.argsort(tstamp)
+    ts = tstamp[order]
+    R_ord = R_c2w[order]
+    t_ord = t_c2w[order]
+    K = len(ts)
+    if K < 1:
+        raise ValueError("empty SLAM trajectory")
+
+    vf = np.asarray(video_frame_indices, dtype=np.int64).reshape(-1)
+    R_list, t_list = [], []
+    for f in vf:
+        fi = int(f)
+        if fi <= int(ts[0]):
+            R_list.append(R_ord[0])
+            t_list.append(t_ord[0])
+        elif fi >= int(ts[-1]):
+            R_list.append(R_ord[-1])
+            t_list.append(t_ord[-1])
+        else:
+            j = int(np.searchsorted(ts, fi))
+            if int(ts[j]) == fi:
+                R_list.append(R_ord[j])
+                t_list.append(t_ord[j])
+            else:
+                t0, t1 = int(ts[j - 1]), int(ts[j])
+                alpha = (fi - t0) / (t1 - t0) if t1 > t0 else 0.0
+                rseq = Rsci.from_matrix(np.stack([R_ord[j - 1], R_ord[j]]))
+                slerp = Slerp([0.0, 1.0], rseq)
+                R_list.append(slerp([alpha]).as_matrix()[0])
+                t_list.append((1.0 - alpha) * t_ord[j - 1] + alpha * t_ord[j])
+    return torch.tensor(np.stack(R_list), dtype=torch.float32), torch.tensor(
+        np.stack(t_list), dtype=torch.float32
+    )
 
 
 def validate_motion_velocity(bboxes, max_relative_velocity=3.0):
