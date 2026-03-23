@@ -29,6 +29,13 @@ class StageExecutionConfig:
     rebuild_cam_space_cache: bool = False
     detect_device: str = "cuda:0"
     detect_half_precision: bool = True
+    slam_backend: str = "droid"
+    depth_backend: str = "metric3d"
+    depth_predict_all_frames: bool = True
+    any4d_repo_root: Optional[str] = None
+    any4d_checkpoint_path: Optional[str] = None
+    any4d_resolution_set: Optional[int] = None
+    any4d_use_amp: Optional[bool] = None
     vis_mode: str = "world"
     skip_vis: bool = True
 
@@ -48,6 +55,13 @@ class StageExecutionConfig:
             rebuild_cam_space_cache=bool(getattr(ns, "rebuild_cam_space_cache", False)),
             detect_device=getattr(ns, "detect_device", "cuda:0"),
             detect_half_precision=bool(getattr(ns, "detect_half_precision", True)),
+            slam_backend=getattr(ns, "slam_backend", "droid"),
+            depth_backend=getattr(ns, "depth_backend", "metric3d"),
+            depth_predict_all_frames=bool(getattr(ns, "depth_predict_all_frames", True)),
+            any4d_repo_root=getattr(ns, "any4d_repo_root", None),
+            any4d_checkpoint_path=getattr(ns, "any4d_checkpoint_path", None),
+            any4d_resolution_set=getattr(ns, "any4d_resolution_set", None),
+            any4d_use_amp=getattr(ns, "any4d_use_amp", None),
         )
 
     def to_stage_args(self, video_path: str):
@@ -64,6 +78,15 @@ class StageExecutionConfig:
             detect_io_workers=self.detect_io_workers,
             infiller_window_batch_size=self.infiller_window_batch_size,
             rebuild_cam_space_cache=self.rebuild_cam_space_cache,
+            detect_device=self.detect_device,
+            detect_half_precision=self.detect_half_precision,
+            slam_backend=self.slam_backend,
+            depth_backend=self.depth_backend,
+            depth_predict_all_frames=self.depth_predict_all_frames,
+            any4d_repo_root=self.any4d_repo_root,
+            any4d_checkpoint_path=self.any4d_checkpoint_path,
+            any4d_resolution_set=self.any4d_resolution_set,
+            any4d_use_amp=self.any4d_use_amp,
             vis_mode=self.vis_mode,
             skip_vis=self.skip_vis,
         )
@@ -441,6 +464,7 @@ def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, 
         metric_runner=getattr(runtime, "metric_runner", None),
         metric3d_batch_size=config.metric3d_batch_size,
         droid_net=getattr(runtime, "droid_net", None),
+        any4d_runner=getattr(runtime, "any4d_runner", None),
         frame_source=frame_source,
         seq_folder=str(task.seq_folder),
     )

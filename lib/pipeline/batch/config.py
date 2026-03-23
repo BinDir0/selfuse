@@ -34,6 +34,13 @@ class BatchRunConfig:
     detect_half_precision: bool
     detect_io_workers: int
     rebuild_cam_space_cache: bool
+    slam_backend: str
+    depth_backend: str
+    depth_predict_all_frames: bool
+    any4d_repo_root: Optional[str]
+    any4d_checkpoint_path: Optional[str]
+    any4d_resolution_set: Optional[int]
+    any4d_use_amp: Optional[bool]
     max_stage_retries: int
     workers_per_gpu: int
     detect_track_workers_per_gpu: Optional[int]
@@ -53,6 +60,14 @@ class BatchRunConfig:
         gpus = [int(gpu.strip()) for gpu in args.gpus.split(",") if gpu.strip()]
         if not gpus:
             raise ValueError("At least one GPU must be specified via --gpus")
+
+        valid_slam_backends = {"droid", "dpvo"}
+        if args.slam_backend not in valid_slam_backends:
+            raise ValueError(f"Unknown --slam_backend {args.slam_backend!r}. Valid: {sorted(valid_slam_backends)}")
+
+        valid_depth_backends = {"metric3d", "any4d"}
+        if args.depth_backend not in valid_depth_backends:
+            raise ValueError(f"Unknown --depth_backend {args.depth_backend!r}. Valid: {sorted(valid_depth_backends)}")
 
         worker_counts = {
             "workers_per_gpu": args.workers_per_gpu,
@@ -85,6 +100,13 @@ class BatchRunConfig:
             detect_half_precision=args.detect_half_precision,
             detect_io_workers=args.detect_io_workers,
             rebuild_cam_space_cache=args.rebuild_cam_space_cache,
+            slam_backend=args.slam_backend,
+            depth_backend=args.depth_backend,
+            depth_predict_all_frames=args.depth_predict_all_frames,
+            any4d_repo_root=args.any4d_repo_root,
+            any4d_checkpoint_path=args.any4d_checkpoint_path,
+            any4d_resolution_set=args.any4d_resolution_set,
+            any4d_use_amp=args.any4d_use_amp,
             max_stage_retries=args.max_stage_retries,
             workers_per_gpu=args.workers_per_gpu,
             detect_track_workers_per_gpu=args.detect_track_workers_per_gpu,

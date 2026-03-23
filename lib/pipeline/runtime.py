@@ -37,6 +37,13 @@ class WorkerRuntime:
         detect_half_precision: bool = True,
         infiller_window_batch_size: int = 64,
         rebuild_cam_space_cache: bool = False,
+        slam_backend: str = "droid",
+        depth_backend: str = "metric3d",
+        depth_predict_all_frames: bool = True,
+        any4d_repo_root: str = None,
+        any4d_checkpoint_path: str = None,
+        any4d_resolution_set: int = None,
+        any4d_use_amp: bool = None,
     ):
         self.gpu = gpu
         self.stage_config = StageExecutionConfig(
@@ -53,6 +60,13 @@ class WorkerRuntime:
             rebuild_cam_space_cache=rebuild_cam_space_cache,
             detect_device=detect_device,
             detect_half_precision=detect_half_precision,
+            slam_backend=slam_backend,
+            depth_backend=depth_backend,
+            depth_predict_all_frames=depth_predict_all_frames,
+            any4d_repo_root=any4d_repo_root,
+            any4d_checkpoint_path=any4d_checkpoint_path,
+            any4d_resolution_set=any4d_resolution_set,
+            any4d_use_amp=any4d_use_amp,
         )
 
         self.detector_runner = None
@@ -60,6 +74,7 @@ class WorkerRuntime:
         self.metric_runner = None
         self.infiller_runner = None
         self.droid_net = None
+        self.any4d_runner = None
         self.mano_right = None
         self.mano_left = None
 
@@ -84,15 +99,25 @@ class WorkerRuntime:
             self.mano_left = MANO(**get_mano_cfg(is_right=False)).to(device)
             self.mano_left.shapedirs[:, 0, :] *= -1
 
-        if stage == "slam" and self.metric_runner is None:
+        if stage == "slam" and self.stage_config.depth_backend == "metric3d" and self.metric_runner is None:
             from lib.pipeline.stages.slam import build_metric3d_runner
 
             self.metric_runner = build_metric3d_runner()
 
-        if stage == "slam" and self.droid_net is None:
+        if stage == "slam" and self.stage_config.slam_backend == "droid" and self.droid_net is None:
             from lib.pipeline.masked_droid_slam import build_droid_net
 
             self.droid_net = build_droid_net()
+
+        if stage == "slam" and self.stage_config.depth_backend == "any4d" and self.any4d_runner is None:
+            from lib.pipeline.any4d_depth import build_any4d_runner
+
+            self.any4d_runner = build_any4d_runner(
+                any4d_repo_root=self.stage_config.any4d_repo_root,
+                checkpoint_path=self.stage_config.any4d_checkpoint_path,
+                resolution_set=self.stage_config.any4d_resolution_set,
+                use_amp=self.stage_config.any4d_use_amp,
+            )
 
         if stage == "infiller" and self.infiller_runner is None:
             from lib.pipeline.stages.infiller import build_infiller_runner

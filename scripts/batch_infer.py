@@ -169,6 +169,35 @@ def get_parser():
         help="Batch size for Metric3D depth estimation in SLAM stage",
     )
     parser.add_argument(
+        "--slam_backend",
+        type=str,
+        default="droid",
+        choices=["droid", "dpvo"],
+        help="SLAM backend for stage3",
+    )
+    parser.add_argument(
+        "--depth_backend",
+        type=str,
+        default="metric3d",
+        choices=["metric3d", "any4d"],
+        help="Metric depth backend used for stage3 scale estimation",
+    )
+    parser.add_argument(
+        "--depth_predict_all_frames",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Predict dense depth for all frames and cache it under SLAM/",
+    )
+    parser.add_argument("--any4d_repo_root", type=str, default=None, help="Optional Any4D repo root override")
+    parser.add_argument("--any4d_checkpoint_path", type=str, default=None, help="Optional Any4D checkpoint override")
+    parser.add_argument("--any4d_resolution_set", type=int, default=None, help="Optional Any4D inference resolution override")
+    parser.add_argument(
+        "--any4d_use_amp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override Any4D AMP usage when depth_backend=any4d",
+    )
+    parser.add_argument(
         "--render_batch_size",
         type=int,
         default=8,
@@ -232,6 +261,12 @@ def main():
     print(f"Detect I/O workers: {config.detect_io_workers}")
     print(f"Chunk batch size (motion): {config.chunk_batch_size}")
     print(f"Metric3D batch size (slam): {config.metric3d_batch_size}")
+    print(
+        "Stage3 backends: "
+        f"slam={config.slam_backend}, "
+        f"depth={config.depth_backend}, "
+        f"depth_predict_all_frames={config.depth_predict_all_frames}"
+    )
     print(f"Infiller window batch size: {config.infiller_window_batch_size}")
     print(
         "Workers per GPU: "

@@ -37,6 +37,13 @@ def _build_runtime(config: BatchRunConfig, gpu: int) -> WorkerRuntime:
         detect_half_precision=config.detect_half_precision,
         infiller_window_batch_size=config.infiller_window_batch_size,
         rebuild_cam_space_cache=config.rebuild_cam_space_cache,
+        slam_backend=config.slam_backend,
+        depth_backend=config.depth_backend,
+        depth_predict_all_frames=config.depth_predict_all_frames,
+        any4d_repo_root=config.any4d_repo_root,
+        any4d_checkpoint_path=config.any4d_checkpoint_path,
+        any4d_resolution_set=config.any4d_resolution_set,
+        any4d_use_amp=config.any4d_use_amp,
     )
 
 
