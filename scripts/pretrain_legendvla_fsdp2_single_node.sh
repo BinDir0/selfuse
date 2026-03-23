@@ -12,7 +12,7 @@ PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 ACC_CONFIG="src/config/acc_config.yaml"
 SCRIPT="train.py"
 ARGS="experiment=legendvla_qwen3_vl"
-MASTER_ADDR="127.0.0.1"
+MASTER_ADDR="172.18.1.150"
 MASTER_PORT="18276"
 GPU_COUNT="8"
 # -----------------------------------------------

@@ -32,7 +32,15 @@ class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
 
     def __init__(self, base_attention: Qwen3VLTextAttention):
         nn.Module.__init__(self)
+        # Keep hidden ref for non-module attributes (config, head_dim, scaling, etc.)
         object.__setattr__(self, "base_attention", base_attention)
+        # Register parameter-bearing submodules so FSDP2 can manage them.
+        self.q_proj = base_attention.q_proj
+        self.k_proj = base_attention.k_proj
+        self.v_proj = base_attention.v_proj
+        self.o_proj = base_attention.o_proj
+        self.q_norm = base_attention.q_norm
+        self.k_norm = base_attention.k_norm
 
     def forward(
         self,
@@ -47,9 +55,9 @@ class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, base_attention.head_dim)
 
-        query_states = base_attention.q_norm(base_attention.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = base_attention.k_norm(base_attention.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = base_attention.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = base_attention.rotary_fn(query_states, key_states, cos, sin)
@@ -79,7 +87,7 @@ class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = base_attention.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights, key_states, value_states
 
 
@@ -88,8 +96,10 @@ class Qwen3VLTextDecoderLayerWithKV(Qwen3VLTextDecoderLayer):
 
     def __init__(self, base_layer: Qwen3VLTextDecoderLayer):
         nn.Module.__init__(self)
-        object.__setattr__(self, "base_layer", base_layer)
         self.self_attn = Qwen3VLTextAttentionWithKV(base_layer.self_attn)
+        self.input_layernorm = base_layer.input_layernorm
+        self.post_attention_layernorm = base_layer.post_attention_layernorm
+        self.mlp = base_layer.mlp
         self.hidden_size = base_layer.hidden_size
         self.gradient_checkpointing = False
 
@@ -104,10 +114,8 @@ class Qwen3VLTextDecoderLayerWithKV(Qwen3VLTextDecoderLayer):
         cache_position: torch.LongTensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        base_layer = self.base_layer
-
         residual = hidden_states
-        hidden_states = base_layer.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states)
         hidden_states, _, key_states, value_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -121,8 +129,8 @@ class Qwen3VLTextDecoderLayerWithKV(Qwen3VLTextDecoderLayer):
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = base_layer.post_attention_layernorm(hidden_states)
-        hidden_states = base_layer.mlp(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states, key_states, value_states
 
@@ -143,6 +151,9 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
         self.layers = nn.ModuleList(
             [Qwen3VLTextDecoderLayerWithKV(layer) for layer in base_model.layers]
         )
+        # Clear original layers so FSDP2 doesn't find the same parameters
+        # through both the original and wrapper module paths.
+        base_model.layers = nn.ModuleList()
         self.gradient_checkpointing = False
         self._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
 
@@ -523,7 +534,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         action_slot_embeds: torch.Tensor | None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
-        use_cache: bool = True,
+        use_cache: bool = False,
         output_hidden_states: bool = True,
         past_key_values: Any = None,
     ) -> BackboneStreamOutput:

@@ -56,7 +56,7 @@ training:
     vision: False  # Compile visual blocks when enabled.
     text: True  # Keep text decoder blocks on by default.
     flow: True  # Keep action-expert blocks on by default.
-  gradient_checkpointing: False
+  gradient_checkpointing: True
 optimizer:
   action:
     lr: 3e-4
