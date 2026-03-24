@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+import threading
 
 import torch
 import torch.utils.data
@@ -44,10 +45,16 @@ class ImageFolderFrameSource(BaseFrameSource):
             raise RuntimeError("ImageFolderFrameSource requires non-empty image_paths")
 
         self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE
-        if self.use_turbojpeg:
-            self.jpeg_decoder = TurboJPEG()
-        else:
-            self.jpeg_decoder = None
+        self._thread_local = threading.local()
+
+    def _get_jpeg_decoder(self):
+        if not self.use_turbojpeg:
+            return None
+        decoder = getattr(self._thread_local, 'jpeg_decoder', None)
+        if decoder is None:
+            decoder = TurboJPEG()
+            self._thread_local.jpeg_decoder = decoder
+        return decoder
 
     def __len__(self):
         return len(self.image_paths)
@@ -66,10 +73,11 @@ class ImageFolderFrameSource(BaseFrameSource):
             try:
                 with open(path, 'rb') as f:
                     jpeg_data = f.read()
+                decoder = self._get_jpeg_decoder()
                 if rgb:
-                    frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=0)  # RGB
+                    frame = decoder.decode(jpeg_data, pixel_format=0)  # RGB
                 else:
-                    frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=1)  # BGR
+                    frame = decoder.decode(jpeg_data, pixel_format=1)  # BGR
                 return frame
             except Exception:
                 pass
@@ -111,24 +119,32 @@ class ShardVideoFrameSource(BaseFrameSource):
             print(f"ShardVideoFrameSource: {len(self.frame_names)} frames from {os.path.basename(tar_path)} ({mode})")
 
         self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE
-        if self.use_turbojpeg:
-            self.jpeg_decoder = TurboJPEG()
+        self._thread_local = threading.local()
 
-        # Lazy-opened file handle for direct seek mode
-        self._fh = None
-        # Lazy-opened tar handle for legacy fallback
-        self._tar = None
+        # Shared fd is safe with os.pread() because it does not mutate file offset.
+        self._fd = None
 
-    def _get_fh(self):
-        if self._fh is None:
-            self._fh = open(self.tar_path, 'rb')
-        return self._fh
+    def _get_fd(self):
+        if self._fd is None:
+            self._fd = os.open(self.tar_path, os.O_RDONLY)
+        return self._fd
+
+    def _get_jpeg_decoder(self):
+        if not self.use_turbojpeg:
+            return None
+        decoder = getattr(self._thread_local, 'jpeg_decoder', None)
+        if decoder is None:
+            decoder = TurboJPEG()
+            self._thread_local.jpeg_decoder = decoder
+        return decoder
 
     def _get_tar(self):
-        if self._tar is None:
+        tar = getattr(self._thread_local, 'tar', None)
+        if tar is None:
             import tarfile
-            self._tar = tarfile.open(self.tar_path, 'r')
-        return self._tar
+            tar = tarfile.open(self.tar_path, 'r')
+            self._thread_local.tar = tar
+        return tar
 
     def __len__(self):
         return len(self.frame_names)
@@ -142,14 +158,17 @@ class ShardVideoFrameSource(BaseFrameSource):
 
         member_name = self.frame_names[index]
 
-        # Fast path: direct seek+read using pre-computed offsets
+        # Fast path: direct offset read using pread, which is thread-safe.
         if self.frame_offsets is not None:
             offset, size = self.frame_offsets[index]
-            fh = self._get_fh()
-            fh.seek(offset)
-            jpeg_data = fh.read(size)
+            jpeg_data = os.pread(self._get_fd(), size, offset)
+            if len(jpeg_data) != size:
+                raise RuntimeError(
+                    f"Short read from tar: {self.tar_path}/{member_name} "
+                    f"(expected {size} bytes, got {len(jpeg_data)})"
+                )
         else:
-            # Legacy fallback: tarfile
+            # Legacy fallback: tarfile handle is thread-local because TarFile is not thread-safe.
             tar = self._get_tar()
             member = tar.getmember(member_name)
             jpeg_data = tar.extractfile(member).read()
@@ -157,7 +176,8 @@ class ShardVideoFrameSource(BaseFrameSource):
         if self.use_turbojpeg and member_name.lower().endswith(('.jpg', '.jpeg')):
             try:
                 pixel_format = 0 if rgb else 1  # RGB=0, BGR=1
-                frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=pixel_format)
+                decoder = self._get_jpeg_decoder()
+                frame = decoder.decode(jpeg_data, pixel_format=pixel_format)
                 return frame
             except Exception:
                 pass
@@ -170,14 +190,15 @@ class ShardVideoFrameSource(BaseFrameSource):
         return frame
 
     def __del__(self):
-        if self._fh is not None:
+        if self._fd is not None:
             try:
-                self._fh.close()
+                os.close(self._fd)
             except Exception:
                 pass
-        if self._tar is not None:
+        tar = getattr(self._thread_local, 'tar', None)
+        if tar is not None:
             try:
-                self._tar.close()
+                tar.close()
             except Exception:
                 pass
 
@@ -236,14 +257,17 @@ def _frame_dataset_worker_init(worker_id):
     dataset = worker_info.dataset
     if dataset.use_turbojpeg and TURBOJPEG_AVAILABLE:
         dataset.jpeg_decoder = TurboJPEG()
-    # Re-open file/tar handles for ShardVideoFrameSource (not fork-safe)
+    # Re-open low-level handles for ShardVideoFrameSource after fork.
     fs = dataset.frame_source
-    if hasattr(fs, '_fh') and fs._fh is not None:
-        fs._fh.close()
-        fs._fh = None
-    if hasattr(fs, '_tar') and fs._tar is not None:
-        fs._tar.close()
-        fs._tar = None
+    if hasattr(fs, '_fd') and fs._fd is not None:
+        os.close(fs._fd)
+        fs._fd = None
+    thread_local = getattr(fs, '_thread_local', None)
+    if thread_local is not None:
+        tar = getattr(thread_local, 'tar', None)
+        if tar is not None:
+            tar.close()
+        fs._thread_local = threading.local()
 
 
 def build_frame_source(video_path: str):
