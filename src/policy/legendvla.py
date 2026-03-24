@@ -116,21 +116,10 @@ class LegendVLA(nn.Module):
         self,
         compile_kwargs: dict[str, Any],
     ) -> dict[str, bool]:
-        vision_flag = compile_kwargs.get("vision")
-        text_flag = compile_kwargs.get("text")
-        flow_flag = compile_kwargs.get("flow")
-
-        if vision_flag is None:
-            vision_flag = True
-        if text_flag is None:
-            text_flag = True
-        if flow_flag is None:
-            flow_flag = True
-
         return {
-            "vision": bool(vision_flag),
-            "text": bool(text_flag),
-            "flow": bool(flow_flag),
+            "vision": bool(compile_kwargs.get("vision", False)),
+            "text": bool(compile_kwargs.get("text", False)),
+            "flow": bool(compile_kwargs.get("flow", False)),
         }
 
     def enable_gradient_checkpointing(self) -> None:

@@ -263,7 +263,8 @@ class Qwen3VLBackboneWrapper(nn.Module):
         quantization: dict[str, Any] | None = None,
         device_map: Any = None,
         low_cpu_mem_usage: bool = True,
-        attn_implementation: str | None = None,
+        text_attn_implementation: str = "sdpa",
+        vision_attn_implementation: str = "flash_attention_2",
     ):
         super().__init__()
         try:
@@ -292,8 +293,10 @@ class Qwen3VLBackboneWrapper(nn.Module):
             )
             quantization_config = BitsAndBytesConfig(**qkwargs)
 
-        if attn_implementation is not None and not isinstance(attn_implementation, str):
-            raise TypeError("attn_implementation must be a string or None.")
+        if not isinstance(text_attn_implementation, str):
+            raise TypeError("text_attn_implementation must be a string.")
+        if not isinstance(vision_attn_implementation, str):
+            raise TypeError("vision_attn_implementation must be a string.")
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name_or_path,
             trust_remote_code=trust_remote_code,
@@ -301,7 +304,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             quantization_config=quantization_config,
             device_map=device_map,
             low_cpu_mem_usage=low_cpu_mem_usage,
-            attn_implementation=attn_implementation,
+            attn_implementation=text_attn_implementation,
         )
         self.model.resize_token_embeddings(len(tokenizer))
 
@@ -314,6 +317,12 @@ class Qwen3VLBackboneWrapper(nn.Module):
         self.hf_language_model = self.base_model.model.language_model
         self.language_model = Qwen3VLTextModelWithKV(self.hf_language_model)
         self.lm_head = self.model.lm_head
+
+        self.model.config.text_config._attn_implementation = text_attn_implementation
+        self.model.config.vision_config._attn_implementation = vision_attn_implementation
+        self.hf_language_model.config._attn_implementation = text_attn_implementation
+        self.language_model.config._attn_implementation = text_attn_implementation
+        self.base_model.model.visual.config._attn_implementation = vision_attn_implementation
 
         self.tokenizer = tokenizer
         self.processor = processor

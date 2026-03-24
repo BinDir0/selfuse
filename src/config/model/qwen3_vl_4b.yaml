@@ -6,9 +6,10 @@ pretrained:
   torch_dtype: bfloat16
   # Attention backend used by the Qwen3-VL text tower and the Qwen3 action expert.
   # Valid values in transformers 5.3.0: eager, sdpa, flash_attention_2, flash_attention_3.
-  # Use `sdpa` as the safe default. Switch to `flash_attention_x` after installing `flash-attn`.
-  # `flash_attention_3` is mainly intended for Hopper-class GPUs and may require a separate setup.
-  attn_implementation: flash_attention_2
+  # Use `sdpa` for text/action blocks to keep torch.compile-friendly dispatch.
+  text_attn_implementation: sdpa
+  # Keep vision on FA2 because the upstream sdpa fallback splits ragged visual sequences in Python.
+  vision_attn_implementation: flash_attention_2
 
 added_slot_tokens:
   state: <state>
@@ -45,7 +46,8 @@ policy:
       bias: none
       target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
     use_quantization: ${runtime.use_quantization}
-    attn_implementation: ${pretrained.attn_implementation}
+    text_attn_implementation: ${pretrained.text_attn_implementation}
+    vision_attn_implementation: ${pretrained.vision_attn_implementation}
     quantization:
       load_in_4bit: True
       load_in_8bit: False
@@ -91,7 +93,7 @@ policy:
     hidden_size: ${dims.action_hidden_size}
     intermediate_size: 4096
     num_heads: 32
-    attn_implementation: ${pretrained.attn_implementation}
+    attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
   action_decoder:
     _target_: src.model.action.action_head.MLPProjector
