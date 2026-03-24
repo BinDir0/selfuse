@@ -218,7 +218,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if use_lora:
             model.freeze_non_lora_weights_in_vlm()
 
-        self.maybe_compile_model(accelerator)
+        # Compile after accelerator.prepare() to avoid _orig_mod issues with FSDP2.
+        # Moved from here; see post-prepare block below.
 
         self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device)
         for key in self.include_keys:
@@ -353,6 +354,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.model, self.optimizer, self.lr_scheduler
         )
         
+        # Compile after FSDP2 wrapping to avoid _orig_mod KeyError in accelerate.
+        self.maybe_compile_model(accelerator)
+
         # Resume training from checkpoint after accelerator prepare
         if cfg.training.resume_checkpoint_path:
             accelerator.load_state(cfg.training.resume_checkpoint_path)
@@ -428,11 +432,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         part_grad_norms = None
                         if accelerator.sync_gradients and should_record:
                             part_grad_norms = {}
-                            unwrapped_model = accelerator.unwrap_model(self.model)
                             part_params = {
-                                "action_expert": unwrapped_model.action_expert_parameters,
-                                "vlm": unwrapped_model.trainable_vlm_parameters,
-                                "diffloss": unwrapped_model.diffloss_parameters,
+                                "action_expert": self.model.action_expert_parameters,
+                                "vlm": self.model.trainable_vlm_parameters,
+                                "diffloss": self.model.diffloss_parameters,
                             }
                             for name, params in part_params.items():
                                 part_grad_norms[name] = grads_l2_norm(params)
@@ -505,15 +508,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 'grad_norm_diffloss': part_grad_norms["diffloss"],
                             })
                         with torch.no_grad():
-                            unwrapped_model = accelerator.unwrap_model(self.model)
                             if cfg.training.train_vlm:
-                                vlm_params = unwrapped_model.trainable_vlm_parameters
+                                vlm_params = self.model.trainable_vlm_parameters
                                 step_log["weight_norm/vlm"] = params_l2_norm(vlm_params)
                             step_log["weight_norm/action"] = params_l2_norm(
-                                unwrapped_model.action_expert_parameters
+                                self.model.action_expert_parameters
                             )
                             step_log["weight_norm/diffloss"] = params_l2_norm(
-                                unwrapped_model.diffloss_parameters
+                                self.model.diffloss_parameters
                             )
                         step_log.update(raw_loss_cpu)
 

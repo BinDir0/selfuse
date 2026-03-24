@@ -91,7 +91,7 @@ data_collator:
 
 dataloader:
   loader:
-    batch_size: 80
+    batch_size: 8
     num_workers: 8
     pin_memory: True
     persistent_workers: True
@@ -99,7 +99,7 @@ dataloader:
 
 val_dataloader:
   loader:
-    batch_size: 80
+    batch_size: 8
     shuffle: False
     drop_last: False
     num_workers: 2

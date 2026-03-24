@@ -8,7 +8,7 @@ pretrained:
   # Valid values in transformers 5.3.0: eager, sdpa, flash_attention_2, flash_attention_3.
   # Use `sdpa` as the safe default. Switch to `flash_attention_x` after installing `flash-attn`.
   # `flash_attention_3` is mainly intended for Hopper-class GPUs and may require a separate setup.
-  attn_implementation: sdpa
+  attn_implementation: flash_attention_2
 
 added_slot_tokens:
   state: <state>

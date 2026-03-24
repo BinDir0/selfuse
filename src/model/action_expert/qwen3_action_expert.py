@@ -134,16 +134,19 @@ class Qwen3ActionExpert(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = config.num_hidden_layers
         self.rotary_emb = Qwen3VLTextRotaryEmbedding(config)
+        # All layers use layer_idx=0 because each layer gets its own
+        # single-entry cache at runtime.  Using the same index everywhere
+        # prevents torch.compile from recompiling for every distinct layer_idx.
         self.layers = nn.ModuleList(
             [
                 DiTQwen3DecoderLayer(
                     config=config,
-                    layer_idx=layer_idx,
+                    layer_idx=0,
                     time_hidden_size=time_hidden_size,
                     attention_cls=Qwen3VLTextAttention,
                     mlp_cls=Qwen3VLTextMLP,
                 )
-                for layer_idx in range(self.num_layers)
+                for _ in range(self.num_layers)
             ]
         )
         self.norm = Qwen3VLTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -225,6 +228,7 @@ class Qwen3ActionExpert(nn.Module):
         else:
             raise ValueError(f"Unsupported action expert mode: {mode}")
 
+        _cache_cls = self.dynamic_cache_cls
         for layer_idx, layer in enumerate(self.layers):
             layer_prefix = prefix_cache.layers[layer_idx]
 
@@ -234,10 +238,16 @@ class Qwen3ActionExpert(nn.Module):
                 prefix_key: torch.Tensor,
                 prefix_value: torch.Tensor,
                 layer_module: nn.Module = layer,
-                layer_index: int = layer_idx,
             ) -> torch.Tensor:
-                layer_past_key_values = self.dynamic_cache_cls()
-                layer_past_key_values.update(prefix_key, prefix_value, layer_index)
+                # Single-entry cache at index 0 — all action expert layers
+                # share layer_idx=0, so one entry is sufficient and avoids
+                # torch.compile recompilation from varying indices.
+                layer_past_key_values = _cache_cls()
+                entry = layer_past_key_values.layer_class_to_replicate()
+                entry.keys = prefix_key
+                entry.values = prefix_value
+                entry.is_initialized = True
+                layer_past_key_values.layers.append(entry)
                 return layer_module(
                     layer_hidden_states,
                     position_embeddings=position_embeddings,
