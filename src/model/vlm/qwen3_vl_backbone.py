@@ -563,11 +563,24 @@ class Qwen3VLBackboneWrapper(nn.Module):
             state_token_id=state_token_id,
             action_token_id=action_token_id,
         )
+        # Qwen3-VL processor splits each video into per-frame vision blocks separated
+        # by timestamps, but get_rope_index in transformers<=5.3.0 expects video_grid_thw
+        # to have one [1, H, W] entry per block (not one [T, H, W] entry per video).
+        # Fixed upstream in https://github.com/huggingface/transformers/pull/44474.
+        # When upgrading transformers past that fix, this workaround can be removed.
+        if video_grid_thw is not None:
+            rope_video_grid_thw = torch.repeat_interleave(
+                video_grid_thw, video_grid_thw[:, 0], dim=0
+            )
+            rope_video_grid_thw[:, 0] = 1
+        else:
+            rope_video_grid_thw = video_grid_thw
+
         position_ids = self.base_model.model.compute_3d_position_ids(
             input_ids=input_ids,
             inputs_embeds=embed_output.inputs_embeds,
             image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
+            video_grid_thw=rope_video_grid_thw,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             mm_token_type_ids=mm_token_type_ids,

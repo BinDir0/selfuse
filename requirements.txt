@@ -9,7 +9,12 @@ deepspeed==0.17.5
 zarr  # legacy data build/conversion/visualization utilities
 tensorstore
 numba
-transformers==5.3.0
+# transformers==5.3.0 has a bug where Qwen3-VL processor creates per-frame video
+# blocks with timestamps, but get_rope_index doesn't split video_grid_thw to match,
+# causing shape mismatch in batched video training.
+# Fixed in https://github.com/huggingface/transformers/pull/44474 (merged 2026-03-10,
+# after the 5.3.0 release). Pin to the fix commit until a new release includes it.
+transformers @ git+https://github.com/huggingface/transformers.git@5a098a1e01034095f037c8a37f7fe87c31118e26
 peft
 einops
 ps3-torch
