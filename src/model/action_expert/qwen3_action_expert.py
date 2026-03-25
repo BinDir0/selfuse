@@ -187,14 +187,21 @@ class Qwen3ActionExpert(nn.Module):
         )
         self.norm = Qwen3VLTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
-        self._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+        self.checkpoint_every_n = 1
+        self._gradient_checkpointing_func = partial(
+            checkpoint, use_reentrant=False, preserve_rng_state=False,
+        )
 
-    def enable_gradient_checkpointing(self) -> None:
+    def enable_gradient_checkpointing(self, every_n: int = 1) -> None:
         self.gradient_checkpointing = True
-        self._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+        self.checkpoint_every_n = every_n
+        self._gradient_checkpointing_func = partial(
+            checkpoint, use_reentrant=False, preserve_rng_state=False,
+        )
 
     def disable_gradient_checkpointing(self) -> None:
         self.gradient_checkpointing = False
+        self.checkpoint_every_n = 1
 
     def forward(
         self,
@@ -275,7 +282,11 @@ class Qwen3ActionExpert(nn.Module):
             prefix_key = prefix_cache.keys[layer_idx]
             prefix_value = prefix_cache.values[layer_idx]
 
-            if self.gradient_checkpointing and self.training:
+            if (
+                self.gradient_checkpointing
+                and self.training
+                and layer_idx % self.checkpoint_every_n == 0
+            ):
                 hidden_states = self._gradient_checkpointing_func(
                     layer,
                     hidden_states,

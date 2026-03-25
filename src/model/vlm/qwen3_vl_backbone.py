@@ -155,7 +155,10 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
         # through both the original and wrapper module paths.
         base_model.layers = nn.ModuleList()
         self.gradient_checkpointing = False
-        self._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+        self.checkpoint_every_n = 1
+        self._gradient_checkpointing_func = partial(
+            checkpoint, use_reentrant=False, preserve_rng_state=False,
+        )
 
     def forward(
         self,
@@ -217,8 +220,7 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
         layer_kv: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         for layer_idx, decoder_layer in enumerate(self.layers):
-            hidden_states, key_states, value_states = decoder_layer(
-                hidden_states,
+            layer_kwargs = dict(
                 attention_mask=attention_mask,
                 position_ids=text_position_ids,
                 past_key_values=past_key_values,
@@ -227,6 +229,20 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
+            if (
+                self.gradient_checkpointing
+                and self.training
+                and layer_idx % self.checkpoint_every_n == 0
+            ):
+                hidden_states, key_states, value_states = (
+                    self._gradient_checkpointing_func(
+                        decoder_layer, hidden_states, **layer_kwargs,
+                    )
+                )
+            else:
+                hidden_states, key_states, value_states = decoder_layer(
+                    hidden_states, **layer_kwargs,
+                )
             layer_kv.append((key_states, value_states))
 
             if deepstack_visual_embeds is not None and layer_idx < len(deepstack_visual_embeds):
@@ -379,23 +395,43 @@ class Qwen3VLBackboneWrapper(nn.Module):
             return dtype_name
         return getattr(torch, str(dtype_name))
 
-    def enable_gradient_checkpointing(self) -> None:
-        """Enable checkpointing on the vision tower and the training text wrapper."""
-        checkpoint_func = partial(checkpoint, use_reentrant=False)
-        self.language_model.gradient_checkpointing = True
-        self.language_model._gradient_checkpointing_func = checkpoint_func
-        for layer in self.language_model.layers:
-            layer.gradient_checkpointing = True
-            layer._gradient_checkpointing_func = checkpoint_func
+    def enable_gradient_checkpointing(
+        self,
+        text_every_n: int = 1,
+        vision_enabled: bool = True,
+    ) -> None:
+        """Enable checkpointing on the vision tower and the training text wrapper.
 
-        visual_model = self.base_model.model.visual
-        enable_method = getattr(visual_model, "gradient_checkpointing_enable", None)
-        if callable(enable_method):
-            enable_method()
+        Args:
+            text_every_n: checkpoint every N-th text layer. 0 disables text checkpointing.
+            vision_enabled: whether to checkpoint the vision tower.
+        """
+        checkpoint_func = partial(
+            checkpoint, use_reentrant=False, preserve_rng_state=False,
+        )
+        if text_every_n > 0:
+            self.language_model.gradient_checkpointing = True
+            self.language_model.checkpoint_every_n = text_every_n
+            self.language_model._gradient_checkpointing_func = checkpoint_func
+            for layer in self.language_model.layers:
+                layer.gradient_checkpointing = True
+                layer._gradient_checkpointing_func = checkpoint_func
+
+        if vision_enabled:
+            visual_model = self.base_model.model.visual
+            enable_method = getattr(visual_model, "gradient_checkpointing_enable", None)
+            if callable(enable_method):
+                enable_method(
+                    gradient_checkpointing_kwargs={
+                        "use_reentrant": False,
+                        "preserve_rng_state": False,
+                    },
+                )
 
     def disable_gradient_checkpointing(self) -> None:
         """Disable checkpointing on the vision tower and the training text wrapper."""
         self.language_model.gradient_checkpointing = False
+        self.language_model.checkpoint_every_n = 1
         for layer in self.language_model.layers:
             layer.gradient_checkpointing = False
 

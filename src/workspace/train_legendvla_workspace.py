@@ -57,10 +57,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # configure model
         self.model: LegendVLA
         self.model = hydra.utils.instantiate(cfg.policy) 
-        if cfg.training.get("gradient_checkpointing", False):
-            enable_method = getattr(self.model, "enable_gradient_checkpointing", None)
-            if callable(enable_method):
-                enable_method()
+        gc_cfg = cfg.training.get("gradient_checkpointing", False)
+        if isinstance(gc_cfg, bool):
+            # Backward compat: True -> all components, every_n=1
+            if gc_cfg:
+                self.model.enable_gradient_checkpointing()
+        else:
+            # Structured per-component config
+            gc_dict = OmegaConf.to_container(gc_cfg, resolve=True)
+            has_any_enabled = any(
+                v.get("enabled", False) if isinstance(v, dict) else bool(v)
+                for v in gc_dict.values()
+            )
+            if has_any_enabled:
+                self.model.enable_gradient_checkpointing(config=gc_dict)
         self.tracker = FullMemoryTracker(self.model)
         
         # do not save optimizer if resume=False
