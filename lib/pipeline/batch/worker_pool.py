@@ -1,5 +1,6 @@
 import multiprocessing as mp
 import os
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty
@@ -96,8 +97,12 @@ def _run_single_video(video_path: str, stage: str, runtime: WorkerRuntime, descr
 
 
 def _stage_worker_main(gpu: int, stage: str, video_queue: mp.Queue, result_queue: mp.Queue, descriptor_map, config: BatchRunConfig):
-    runtime = _build_runtime(config, gpu)
-    runtime.ensure_runner(stage)
+    try:
+        runtime = _build_runtime(config, gpu)
+        runtime.ensure_runner(stage)
+    except Exception:
+        traceback.print_exc()
+        return
 
     with ThreadPoolExecutor(max_workers=1) as prefetcher:
         prefetch_future = None
@@ -174,6 +179,31 @@ class StageWorkerPool:
     def _prioritize_videos(self, video_paths: List[str], stage: str) -> List[str]:
         return sorted(video_paths, key=lambda video_path: self._estimate_video_work(video_path, stage), reverse=True)
 
+    @staticmethod
+    def _stop_workers(workers: List[mp.Process], *, force: bool):
+        for worker in workers:
+            if not worker.is_alive():
+                continue
+            if force:
+                worker.kill()
+            else:
+                worker.terminate()
+
+    @staticmethod
+    def _join_workers(workers: List[mp.Process], timeout_sec: float = 5.0):
+        for worker in workers:
+            worker.join(timeout=timeout_sec)
+        lingering = [worker for worker in workers if worker.is_alive()]
+        if lingering:
+            StageWorkerPool._stop_workers(lingering, force=False)
+            for worker in lingering:
+                worker.join(timeout=timeout_sec)
+        stubborn = [worker for worker in workers if worker.is_alive()]
+        if stubborn:
+            StageWorkerPool._stop_workers(stubborn, force=True)
+            for worker in stubborn:
+                worker.join(timeout=timeout_sec)
+
     def run_stage(self, stage: str, video_paths: List[str], on_result) -> Dict[str, bool]:
         if not video_paths:
             return {}
@@ -202,26 +232,39 @@ class StageWorkerPool:
         stage_results = {}
         completed = 0
         total = len(prioritized_videos)
+        last_result_time = time.monotonic()
+        stall_timeout_sec = self.config.wave_stall_timeout_sec
+        stalled = False
 
         while completed < total:
             try:
                 result = result_queue.get(timeout=1)
             except Empty:
-                if all(not worker.is_alive() for worker in workers):
+                alive_workers = [worker for worker in workers if worker.is_alive()]
+                if not alive_workers:
+                    break
+                if time.monotonic() - last_result_time >= stall_timeout_sec:
+                    print(
+                        f"[wave:{stage}] No worker results for {stall_timeout_sec}s; "
+                        f"terminating {len(alive_workers)} stalled worker(s)."
+                    )
+                    self._stop_workers(alive_workers, force=False)
+                    stalled = True
                     break
                 continue
 
             video_path = result["video"]
             stage_results[video_path] = result["success"]
             completed += 1
+            last_result_time = time.monotonic()
             on_result(result)
 
-        for worker in workers:
-            worker.join()
+        self._join_workers(workers)
 
         missing = [video_path for video_path in prioritized_videos if video_path not in stage_results]
         for video_path in missing:
-            synthetic_result = {"video": video_path, "success": False, "gpu": None, "error": "worker_exited_without_result"}
+            error = "worker_stalled_without_result" if stalled else "worker_exited_without_result"
+            synthetic_result = {"video": video_path, "success": False, "gpu": None, "error": error}
             stage_results[video_path] = False
             on_result(synthetic_result)
 

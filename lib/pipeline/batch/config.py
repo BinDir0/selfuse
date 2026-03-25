@@ -42,6 +42,7 @@ class BatchRunConfig:
     any4d_resolution_set: Optional[int]
     any4d_use_amp: Optional[bool]
     max_stage_retries: int
+    wave_stall_timeout_sec: int
     workers_per_gpu: int
     detect_track_workers_per_gpu: Optional[int]
     motion_workers_per_gpu: Optional[int]
@@ -79,6 +80,8 @@ class BatchRunConfig:
         invalid_counts = {name: value for name, value in worker_counts.items() if value is not None and value < 1}
         if invalid_counts:
             raise ValueError(f"Worker counts must be >= 1: {invalid_counts}")
+        if args.wave_stall_timeout_sec < 1:
+            raise ValueError("--wave_stall_timeout_sec must be >= 1")
 
         return cls(
             video_paths=video_paths,
@@ -108,6 +111,7 @@ class BatchRunConfig:
             any4d_resolution_set=args.any4d_resolution_set,
             any4d_use_amp=args.any4d_use_amp,
             max_stage_retries=args.max_stage_retries,
+            wave_stall_timeout_sec=args.wave_stall_timeout_sec,
             workers_per_gpu=args.workers_per_gpu,
             detect_track_workers_per_gpu=args.detect_track_workers_per_gpu,
             motion_workers_per_gpu=args.motion_workers_per_gpu,

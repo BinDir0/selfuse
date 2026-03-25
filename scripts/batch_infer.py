@@ -229,6 +229,12 @@ def get_parser():
         default=2,
         help="Max retries per stage wave.",
     )
+    parser.add_argument(
+        "--wave_stall_timeout_sec",
+        type=int,
+        default=1800,
+        help="Fail the current wave if no worker reports a result for this many seconds.",
+    )
     return parser
 
 
@@ -257,6 +263,7 @@ def main():
     print(f"Stages: {config.stages}")
     print("Scheduler mode: wave")
     print(f"Max stage retries: {config.max_stage_retries}")
+    print(f"Wave stall timeout (sec): {config.wave_stall_timeout_sec}")
     print(f"Detect batch size (detect_track): {config.detect_batch_size}")
     print(f"Detect I/O workers: {config.detect_io_workers}")
     print(f"Chunk batch size (motion): {config.chunk_batch_size}")
