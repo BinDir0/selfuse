@@ -450,13 +450,63 @@ class Qwen3VLBackboneWrapper(nn.Module):
         video_grid_thw: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor] | None]:
         base_model = self.base_model
-        image_mask = None
-        video_mask = None
-        deepstack_image_embeds = None
-        deepstack_video_embeds = None
+        has_images = pixel_values is not None
+        has_videos = pixel_values_videos is not None
 
-        # This block follows the upstream Qwen3-VL embedding replacement flow.
-        if pixel_values is not None:
+        # When both modalities are present, merge into a single ViT forward pass.
+        # get_video_features delegates to get_image_features (same ViT), and
+        # cu_seqlens computed from grid_thw guarantees per-entry attention isolation,
+        # so a merged call is mathematically equivalent to two separate calls.
+        if has_images and has_videos:
+            n_image_entries = image_grid_thw.shape[0]
+            combined_pv = torch.cat([pixel_values, pixel_values_videos], dim=0)
+            combined_grid = torch.cat([image_grid_thw, video_grid_thw], dim=0)
+
+            combined_out = base_model.get_image_features(
+                pixel_values=combined_pv,
+                image_grid_thw=combined_grid,
+                return_dict=True,
+            )
+
+            # pooler_output is a per-entry tuple (already split by get_image_features).
+            image_embeds = torch.cat(combined_out.pooler_output[:n_image_entries], dim=0)
+            video_embeds = torch.cat(combined_out.pooler_output[n_image_entries:], dim=0)
+            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+
+            # deepstack_features are flat (total_tokens, hidden) per layer; split by token count.
+            sms = base_model.model.visual.spatial_merge_size
+            img_tokens = (image_grid_thw.prod(dim=-1) // (sms * sms)).sum().item()
+            deepstack_image = [f[:img_tokens] for f in combined_out.deepstack_features]
+            deepstack_video = [f[img_tokens:] for f in combined_out.deepstack_features]
+
+            image_mask, _ = base_model.model.get_placeholder_mask(
+                input_ids=input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds,
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            _, video_mask = base_model.model.get_placeholder_mask(
+                input_ids=input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds,
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            # Merge deepstack features into text-sequence positional order.
+            image_mask = image_mask[..., 0]
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = image_mask | video_mask
+            image_mask_joint = image_mask[visual_pos_masks]
+            video_mask_joint = video_mask[visual_pos_masks]
+            deepstack_visual_embeds = []
+            for img_feat, vid_feat in zip(deepstack_image, deepstack_video):
+                merged = img_feat.new_zeros(visual_pos_masks.sum(), img_feat.shape[-1]).to(img_feat.device)
+                merged[image_mask_joint, :] = img_feat
+                merged[video_mask_joint, :] = vid_feat
+                deepstack_visual_embeds.append(merged)
+
+            return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
+
+        # Single-modality paths: only one ViT call needed.
+        if has_images:
             image_outputs = base_model.get_image_features(
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
@@ -464,14 +514,12 @@ class Qwen3VLBackboneWrapper(nn.Module):
             )
             image_embeds = torch.cat(image_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             image_mask, _ = base_model.model.get_placeholder_mask(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                image_features=image_embeds,
+                input_ids=input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds,
             )
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-            deepstack_image_embeds = image_outputs.deepstack_features
+            return inputs_embeds, image_mask[..., 0], image_outputs.deepstack_features
 
-        if pixel_values_videos is not None:
+        if has_videos:
             video_outputs = base_model.get_video_features(
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
@@ -479,35 +527,12 @@ class Qwen3VLBackboneWrapper(nn.Module):
             )
             video_embeds = torch.cat(video_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             _, video_mask = base_model.model.get_placeholder_mask(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                video_features=video_embeds,
+                input_ids=input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds,
             )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-            deepstack_video_embeds = video_outputs.deepstack_features
+            return inputs_embeds, video_mask[..., 0], video_outputs.deepstack_features
 
-        visual_pos_masks = None
-        deepstack_visual_embeds = None
-        if image_mask is not None and video_mask is not None:
-            image_mask = image_mask[..., 0]
-            video_mask = video_mask[..., 0]
-            visual_pos_masks = image_mask | video_mask
-            deepstack_visual_embeds = []
-            image_mask_joint = image_mask[visual_pos_masks]
-            video_mask_joint = video_mask[visual_pos_masks]
-            for image_embed, video_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
-                visual_embed = image_embed.new_zeros(visual_pos_masks.sum(), image_embed.shape[-1]).to(image_embed.device)
-                visual_embed[image_mask_joint, :] = image_embed
-                visual_embed[video_mask_joint, :] = video_embed
-                deepstack_visual_embeds.append(visual_embed)
-        elif image_mask is not None:
-            visual_pos_masks = image_mask[..., 0]
-            deepstack_visual_embeds = deepstack_image_embeds
-        elif video_mask is not None:
-            visual_pos_masks = video_mask[..., 0]
-            deepstack_visual_embeds = deepstack_video_embeds
-
-        return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
+        return inputs_embeds, None, None
 
     def replace_slot_embeddings(
         self,
