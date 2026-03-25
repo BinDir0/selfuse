@@ -46,10 +46,12 @@ class DummyFlowExpert(nn.Module):
             raise ValueError(f"Unsupported mode: {mode}")
 
         hidden_states = self.action_proj(action_embeds)
-        prefix_signal = torch.zeros(action_embeds.shape[0], device=action_embeds.device, dtype=hidden_states.dtype)
-        for layer in prefix_cache.layers:
-            prefix_signal = prefix_signal + layer.key.to(dtype=hidden_states.dtype).mean(dim=(1, 2, 3))
-            prefix_signal = prefix_signal + layer.value.to(dtype=hidden_states.dtype).mean(dim=(1, 2, 3))
+        # Aggregate prefix signal from stacked KV tensors
+        # keys/values: [num_layers, B, num_kv_heads, prefix_len, head_dim]
+        prefix_signal = (
+            prefix_cache.keys.to(dtype=hidden_states.dtype).mean(dim=(0, 2, 3, 4))
+            + prefix_cache.values.to(dtype=hidden_states.dtype).mean(dim=(0, 2, 3, 4))
+        )
         hidden_states = hidden_states + prefix_signal.view(-1, 1, 1)
         hidden_states = hidden_states + self.time_proj(time_cond)
         hidden_states = hidden_states + self.mode_embedding.weight[mode_index].view(1, 1, -1)

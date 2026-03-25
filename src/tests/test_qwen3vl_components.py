@@ -296,7 +296,7 @@ class TestSlicePrefixCache:
     """Verify prefix cache slicing from full KV."""
 
     def test_slice_shapes(self):
-        """Sliced cache should have shape [B, H_kv, max_prefix_len, Dh]."""
+        """Cache keeps full KV seq_len; mask marks valid prefix positions."""
         batch_size, num_kv_heads, seq_len, head_dim = 2, 4, 20, 8
         num_layers = 3
         cache = [
@@ -309,14 +309,13 @@ class TestSlicePrefixCache:
         prefix_lengths = torch.tensor([5, 10])
         prefix_cache = slice_prefix_cache_from_full_kv(cache, prefix_lengths)
 
-        assert len(prefix_cache.layers) == num_layers
-        assert prefix_cache.mask.shape == (2, 10)
-        for layer in prefix_cache.layers:
-            assert layer.key.shape == (2, 4, 10, 8)
-            assert layer.value.shape == (2, 4, 10, 8)
+        assert prefix_cache.num_layers == num_layers
+        assert prefix_cache.mask.shape == (2, seq_len)
+        assert prefix_cache.keys.shape == (num_layers, 2, 4, seq_len, 8)
+        assert prefix_cache.values.shape == (num_layers, 2, 4, seq_len, 8)
 
-    def test_masked_positions_are_zeroed(self):
-        """KV at positions beyond prefix_length should be zeroed out."""
+    def test_mask_marks_valid_prefix_positions(self):
+        """Mask is True only for positions < prefix_length."""
         cache = [(
             torch.ones(2, 2, 8, 4),
             torch.ones(2, 2, 8, 4),
@@ -324,27 +323,26 @@ class TestSlicePrefixCache:
         prefix_lengths = torch.tensor([3, 5])
         prefix_cache = slice_prefix_cache_from_full_kv(cache, prefix_lengths)
 
-        # Batch 0: positions [3, 4] should be zero (max_prefix_len = 5)
-        assert (prefix_cache.layers[0].key[0, :, 3:, :] == 0).all()
-        # Batch 1: all positions [0:5] should be ones
-        assert (prefix_cache.layers[0].key[1, :, :5, :] == 1).all()
+        assert prefix_cache.mask.shape == (2, 8)
+        assert prefix_cache.mask[0].sum() == 3
+        assert prefix_cache.mask[1].sum() == 5
 
     def test_uniform_prefix_lengths(self):
-        """When all prefix lengths are the same, no masking needed."""
+        """When all prefix lengths are the same, mask is uniform."""
         cache = [(
             torch.ones(3, 2, 10, 4),
             torch.ones(3, 2, 10, 4),
         )]
         prefix_lengths = torch.tensor([6, 6, 6])
         prefix_cache = slice_prefix_cache_from_full_kv(cache, prefix_lengths)
-        assert prefix_cache.layers[0].key.shape == (3, 2, 6, 4)
-        assert prefix_cache.mask.all()
+        assert prefix_cache.keys[0].shape == (3, 2, 10, 4)
+        assert prefix_cache.mask[:, :6].all()
+        assert not prefix_cache.mask[:, 6:].any()
 
-    def test_empty_cache_returns_empty_layers(self):
+    def test_empty_cache_returns_empty_tensors(self):
         prefix_lengths = torch.tensor([5])
         prefix_cache = slice_prefix_cache_from_full_kv(None, prefix_lengths)
-        assert prefix_cache.layers == []
-        assert prefix_cache.mask.shape == (1, 5)
+        assert prefix_cache.num_layers == 0
 
 
 class TestGatherActionPositionIds:
@@ -444,18 +442,20 @@ class TestPrefixKVCacheCast:
     """Verify PrefixKVCache.to() preserves semantics."""
 
     def test_dtype_cast(self):
-        layers = [LayerKV(key=torch.randn(2, 4, 5, 8), value=torch.randn(2, 4, 5, 8))]
+        keys = torch.randn(1, 2, 4, 5, 8)
+        values = torch.randn(1, 2, 4, 5, 8)
         mask = torch.ones(2, 5, dtype=torch.bool)
         lengths = torch.tensor([5, 5])
-        cache = PrefixKVCache(layers=layers, mask=mask, lengths=lengths)
+        cache = PrefixKVCache(keys=keys, values=values, mask=mask, lengths=lengths)
 
         cast = cache.to(dtype=torch.float16)
-        assert cast.layers[0].key.dtype == torch.float16
-        assert cast.layers[0].value.dtype == torch.float16
+        assert cast.keys.dtype == torch.float16
+        assert cast.values.dtype == torch.float16
         # mask is not floating point, should stay bool
         assert cast.mask.dtype == torch.bool
 
-    def test_max_prefix_len_property(self):
+    def test_kv_seq_len_property(self):
         mask = torch.ones(2, 7, dtype=torch.bool)
-        cache = PrefixKVCache(layers=[], mask=mask, lengths=torch.tensor([7, 7]))
-        assert cache.max_prefix_len == 7
+        empty_kv = torch.zeros(0, 2, 0, 7, 0)
+        cache = PrefixKVCache(keys=empty_kv, values=empty_kv, mask=mask, lengths=torch.tensor([7, 7]))
+        assert cache.kv_seq_len == 7

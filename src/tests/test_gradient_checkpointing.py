@@ -6,7 +6,7 @@ from transformers import Qwen3VLConfig, Qwen3VLTextConfig
 
 from src.model.action.diffloss import SimpleMLPAdaLN
 from src.model.action_expert.qwen3_action_expert import Qwen3ActionExpert
-from src.model.vlm.prefix_cache import LayerKV, PrefixKVCache
+from src.model.vlm.prefix_cache import PrefixKVCache
 
 
 def test_diffloss_checkpoint_runs_only_in_train_mode():
@@ -74,15 +74,10 @@ def test_action_expert_checkpoint_runs_only_in_train_mode(monkeypatch):
     batch_size = 2
     prefix_len = 3
     action_len = 4
-    layers = [
-        LayerKV(
-            key=torch.randn(batch_size, 2, prefix_len, 16),
-            value=torch.randn(batch_size, 2, prefix_len, 16),
-        )
-        for _ in range(expert.num_layers)
-    ]
+    num_layers = expert.num_layers
     prefix_cache = PrefixKVCache(
-        layers=layers,
+        keys=torch.randn(num_layers, batch_size, 2, prefix_len, 16),
+        values=torch.randn(num_layers, batch_size, 2, prefix_len, 16),
         mask=torch.ones(batch_size, prefix_len, dtype=torch.bool),
         lengths=torch.full((batch_size,), prefix_len, dtype=torch.long),
     )
