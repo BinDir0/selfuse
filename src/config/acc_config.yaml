@@ -10,11 +10,11 @@ fsdp_config:
   # false here is the FSDP2 setting closest to the old SHARD_GRAD_OP behavior.
   fsdp_reshard_after_forward: False
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: Qwen3VLTextDecoderLayerWithKV,Qwen3VLVisionBlock,DiTQwen3DecoderLayer,ResBlock
+  fsdp_transformer_layer_cls_to_wrap: Qwen3VLTextDecoderLayerWithKV,Qwen3VLVisionBlock,Qwen3ActionExpert,DiffLoss
   fsdp_cpu_ram_efficient_loading: true
   fsdp_state_dict_type: SHARDED_STATE_DICT
 machine_rank: 0
-main_process_ip: 172.18.0.111 # need to change to the main process ip
+main_process_ip: 172.18.1.150 # need to change to the main process ip
 main_process_port: 12345 # need to change to the main process port
 main_training_function: main
 mixed_precision: bf16
