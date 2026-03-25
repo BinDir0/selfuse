@@ -18,6 +18,38 @@ from src.model.common.modules import AdaLNZero
 from src.model.vlm.prefix_cache import PrefixKVCache
 
 
+class StaticPrefixCache:
+    """Compile-friendly single-layer KV cache for action expert.
+
+    Mimics the subset of HF DynamicCache interface used by
+    Qwen3VLTextAttention.forward (only ``update`` is called when
+    past_key_values is not None). Stores a fixed prefix and prepends it
+    to incoming key/value states — pure tensor ops, no graph breaks.
+
+    # Source: transformers Qwen3VLTextAttention.forward calls
+    #   past_key_values.update(key_states, value_states, self.layer_idx)
+    """
+
+    def __init__(self, key: torch.Tensor, value: torch.Tensor):
+        # key/value: [B, num_kv_heads, prefix_len, head_dim]
+        self.key = key
+        self.value = value
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: dict[str, Any] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key_states = torch.cat([self.key.to(key_states.dtype), key_states], dim=2)
+        value_states = torch.cat([self.value.to(value_states.dtype), value_states], dim=2)
+        return key_states, value_states
+
+    def get_seq_length(self, layer_idx: int = 0) -> int:
+        return self.key.shape[2]
+
+
 class DiTQwen3DecoderLayer(nn.Module):
     """Qwen3 decoder block with AdaLN-Zero in place of the two pre-norms."""
 
@@ -40,12 +72,15 @@ class DiTQwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | Any,
-        past_key_values: Any,
+        prefix_key: torch.Tensor,
+        prefix_value: torch.Tensor,
         time_cond: torch.Tensor,
         is_causal: bool,
         text_position_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        prefix_cache = StaticPrefixCache(prefix_key, prefix_value)
+
         residual = hidden_states
         attn_inputs, attn_gate = self.attn_adaln(hidden_states, time_cond)
         attn_output, _ = self.self_attn(
@@ -53,7 +88,7 @@ class DiTQwen3DecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             position_ids=text_position_ids,
-            past_key_values=past_key_values,
+            past_key_values=prefix_cache,
             use_cache=False,
             cache_position=cache_position,
             is_causal=is_causal,
@@ -100,6 +135,7 @@ class Qwen3ActionExpert(nn.Module):
                 "Qwen3ActionExpert requires transformers with Qwen3-VL support."
             ) from exc
 
+        # DynamicCache only used for AR mode mask creation (outside compile region)
         self.dynamic_cache_cls = DynamicCache
         base = Qwen3VLConfig.from_pretrained(
             model_name_or_path,
@@ -171,17 +207,15 @@ class Qwen3ActionExpert(nn.Module):
     ) -> torch.Tensor:
         if prefix_cache is None:
             raise ValueError("Action expert requires a prefix cache.")
-        if len(prefix_cache.layers) < self.num_layers:
+        if prefix_cache.num_layers < self.num_layers:
             raise ValueError(
-                f"Prefix cache has {len(prefix_cache.layers)} layers, "
+                f"Prefix cache has {prefix_cache.num_layers} layers, "
                 f"but expert expects {self.num_layers}."
             )
 
         hidden_states = action_embeds
-        mask_past_key_values = self.dynamic_cache_cls()
-        for layer_idx, layer_kv in enumerate(prefix_cache.layers[:self.num_layers]):
-            mask_past_key_values.update(layer_kv.key, layer_kv.value, layer_idx)
 
+        # Build full attention mask: [prefix_mask | action_mask]
         full_attention_mask = torch.cat(
             [
                 prefix_cache.mask.to(device=action_mask.device, dtype=torch.bool),
@@ -198,7 +232,7 @@ class Qwen3ActionExpert(nn.Module):
         text_position_ids = action_position_ids[0]
         position_embeddings = self.rotary_emb(hidden_states, action_position_ids[1:])
 
-        prefix_len = prefix_cache.layers[0].key.shape[2]
+        prefix_len = prefix_cache.keys.shape[3]
         action_len = action_embeds.shape[1]
         cache_position = torch.arange(
             prefix_len,
@@ -209,6 +243,14 @@ class Qwen3ActionExpert(nn.Module):
         from transformers.masking_utils import create_bidirectional_mask, create_causal_mask
 
         if mode == "ar":
+            # AR mode: need DynamicCache for create_causal_mask (outside compile region)
+            mask_past_key_values = self.dynamic_cache_cls()
+            for layer_idx in range(self.num_layers):
+                mask_past_key_values.update(
+                    prefix_cache.keys[layer_idx],
+                    prefix_cache.values[layer_idx],
+                    layer_idx,
+                )
             attention_mask = create_causal_mask(
                 config=self.config,
                 inputs_embeds=hidden_states,
@@ -228,51 +270,35 @@ class Qwen3ActionExpert(nn.Module):
         else:
             raise ValueError(f"Unsupported action expert mode: {mode}")
 
-        _cache_cls = self.dynamic_cache_cls
         for layer_idx, layer in enumerate(self.layers):
-            layer_prefix = prefix_cache.layers[layer_idx]
-
-            def run_layer(
-                layer_hidden_states: torch.Tensor,
-                layer_time_cond: torch.Tensor,
-                prefix_key: torch.Tensor,
-                prefix_value: torch.Tensor,
-                layer_module: nn.Module = layer,
-            ) -> torch.Tensor:
-                # Single-entry cache at index 0 — all action expert layers
-                # share layer_idx=0, so one entry is sufficient and avoids
-                # torch.compile recompilation from varying indices.
-                layer_past_key_values = _cache_cls()
-                entry = layer_past_key_values.layer_class_to_replicate()
-                entry.keys = prefix_key
-                entry.values = prefix_value
-                entry.is_initialized = True
-                layer_past_key_values.layers.append(entry)
-                return layer_module(
-                    layer_hidden_states,
-                    position_embeddings=position_embeddings,
-                    attention_mask=attention_mask,
-                    past_key_values=layer_past_key_values,
-                    time_cond=layer_time_cond,
-                    is_causal=is_causal,
-                    text_position_ids=text_position_ids,
-                    cache_position=cache_position,
-                )
+            # Compile-friendly: pure tensor indexing on stacked cache
+            prefix_key = prefix_cache.keys[layer_idx]
+            prefix_value = prefix_cache.values[layer_idx]
 
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
-                    run_layer,
+                    layer,
                     hidden_states,
+                    position_embeddings,
+                    attention_mask,
+                    prefix_key,
+                    prefix_value,
                     time_cond,
-                    layer_prefix.key,
-                    layer_prefix.value,
+                    is_causal,
+                    text_position_ids,
+                    cache_position,
                 )
             else:
-                hidden_states = run_layer(
+                hidden_states = layer(
                     hidden_states,
-                    time_cond,
-                    layer_prefix.key,
-                    layer_prefix.value,
+                    position_embeddings=position_embeddings,
+                    attention_mask=attention_mask,
+                    prefix_key=prefix_key,
+                    prefix_value=prefix_value,
+                    time_cond=time_cond,
+                    is_causal=is_causal,
+                    text_position_ids=text_position_ids,
+                    cache_position=cache_position,
                 )
 
         hidden_states = self.norm(hidden_states)

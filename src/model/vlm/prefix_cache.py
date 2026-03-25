@@ -8,46 +8,45 @@ import torch
 
 @dataclass
 class LayerKV:
+    """Per-layer key/value pair. Used internally by get_hf_cache_layers."""
     key: torch.Tensor
     value: torch.Tensor
 
 
 @dataclass
 class PrefixKVCache:
-    layers: list[LayerKV]
+    """Stacked prefix KV cache for compile-friendly tensor indexing.
+
+    keys:    [num_layers, B, num_kv_heads, kv_seq_len, head_dim]
+    values:  [num_layers, B, num_kv_heads, kv_seq_len, head_dim]
+    mask:    [B, kv_seq_len]  — True for valid prefix positions
+    lengths: [B]
+    """
+    keys: torch.Tensor
+    values: torch.Tensor
     mask: torch.Tensor
     lengths: torch.Tensor
 
     @property
-    def max_prefix_len(self) -> int:
+    def num_layers(self) -> int:
+        return int(self.keys.shape[0])
+
+    @property
+    def kv_seq_len(self) -> int:
         return int(self.mask.shape[-1])
 
     def to(self, device: torch.device | None = None, dtype: torch.dtype | None = None) -> "PrefixKVCache":
-        cast_layers = []
-        for layer in self.layers:
-            cast_layers.append(
-                LayerKV(
-                    key=layer.key.to(device=device, dtype=dtype if layer.key.is_floating_point() else None),
-                    value=layer.value.to(device=device, dtype=dtype if layer.value.is_floating_point() else None),
-                )
-            )
         return PrefixKVCache(
-            layers=cast_layers,
+            keys=self.keys.to(device=device, dtype=dtype if self.keys.is_floating_point() else None),
+            values=self.values.to(device=device, dtype=dtype if self.values.is_floating_point() else None),
             mask=self.mask.to(device=device),
             lengths=self.lengths.to(device=device),
         )
 
     def detach(self) -> "PrefixKVCache":
-        detached_layers = []
-        for layer in self.layers:
-            detached_layers.append(
-                LayerKV(
-                    key=layer.key.detach(),
-                    value=layer.value.detach(),
-                )
-            )
         return PrefixKVCache(
-            layers=detached_layers,
+            keys=self.keys.detach(),
+            values=self.values.detach(),
             mask=self.mask.detach(),
             lengths=self.lengths.detach(),
         )
@@ -124,23 +123,34 @@ def slice_prefix_cache_from_full_kv(full_kv: Any, prefix_lengths: torch.Tensor) 
     layers = get_hf_cache_layers(full_kv)
     prefix_lengths = prefix_lengths.to(dtype=torch.long)
     batch_size = int(prefix_lengths.shape[0])
-    max_prefix_len = int(prefix_lengths.max().item()) if prefix_lengths.numel() > 0 else 0
-    mask = build_prefix_mask(prefix_lengths, max_prefix_len=max_prefix_len, device=prefix_lengths.device)
 
     if not layers:
-        return PrefixKVCache(layers=[], mask=mask, lengths=prefix_lengths)
+        empty_keys = torch.zeros(0, batch_size, 0, 0, 0, device=prefix_lengths.device)
+        empty_values = torch.zeros(0, batch_size, 0, 0, 0, device=prefix_lengths.device)
+        mask = build_prefix_mask(prefix_lengths, max_prefix_len=0, device=prefix_lengths.device)
+        return PrefixKVCache(keys=empty_keys, values=empty_values, mask=mask, lengths=prefix_lengths)
 
-    sliced_layers: list[LayerKV] = []
+    # Use full cache seq_len as mask length (no truncation, shape stays fixed)
+    full_seq_len = layers[0].key.shape[2]
+    mask = build_prefix_mask(prefix_lengths, max_prefix_len=full_seq_len, device=prefix_lengths.device)
+
+    all_keys: list[torch.Tensor] = []
+    all_values: list[torch.Tensor] = []
     for layer in layers:
-        key = layer.key[:, :, :max_prefix_len, :]
-        value = layer.value[:, :, :max_prefix_len, :]
-        if key.shape[0] != batch_size:
+        if layer.key.shape[0] != batch_size:
             raise ValueError(
-                f"Prefix cache batch mismatch: cache={key.shape[0]} prefix_lengths={batch_size}"
+                f"Prefix cache batch mismatch: cache={layer.key.shape[0]} prefix_lengths={batch_size}"
             )
-        sliced_layers.append(LayerKV(key=key, value=value))
+        all_keys.append(layer.key)
+        all_values.append(layer.value)
 
-    return PrefixKVCache(layers=sliced_layers, mask=mask, lengths=prefix_lengths)
+    # keys/values: [num_layers, B, num_kv_heads, prefix_len, head_dim]
+    return PrefixKVCache(
+        keys=torch.stack(all_keys, dim=0),
+        values=torch.stack(all_values, dim=0),
+        mask=mask,
+        lengths=prefix_lengths,
+    )
 
 
 def gather_action_position_ids(
