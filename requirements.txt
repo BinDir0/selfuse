@@ -2,7 +2,7 @@ pydantic==2.11.7
 hydra-core
 wandb
 tqdm
-numpy==1.26.4
+numpy
 accelerate==1.10.0
 diffusers==0.34.0
 deepspeed==0.17.5
@@ -27,7 +27,7 @@ PyRender
 scipy 
 matplotlib
 seaborn
-xformers
+xformers==0.0.32.post2 # for torch 2.8.0
 websockets
 scikit-learn
 webdataset

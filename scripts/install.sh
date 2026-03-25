@@ -38,7 +38,7 @@ pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128
 
 # Install FlashAttention after PyTorch so it can build against the active torch/CUDA toolchain.
 # Keep it out of requirements.txt because this dependency usually needs an environment-specific build step.
-pip install packaging ninja
+pip install packaging ninja psutil
 pip install flash-attn --no-build-isolation
 
 pip install -r requirements.txt
