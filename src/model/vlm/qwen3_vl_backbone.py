@@ -297,6 +297,9 @@ class Qwen3VLBackboneWrapper(nn.Module):
             raise TypeError("text_attn_implementation must be a string.")
         if not isinstance(vision_attn_implementation, str):
             raise TypeError("vision_attn_implementation must be a string.")
+        # Load with sdpa; runtime attention backend is set below via config._attn_implementation.
+        # from_pretrained rejects "flex_attention" at the validation gate, but the actual
+        # dispatch happens through ALL_ATTENTION_FUNCTIONS at forward time.
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_name_or_path,
             trust_remote_code=trust_remote_code,
@@ -304,7 +307,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             quantization_config=quantization_config,
             device_map=device_map,
             low_cpu_mem_usage=low_cpu_mem_usage,
-            attn_implementation=text_attn_implementation,
+            attn_implementation="sdpa",
         )
         self.model.resize_token_embeddings(len(tokenizer))
 
