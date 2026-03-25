@@ -52,8 +52,8 @@ training:
     fullgraph: False  # Start with False for dynamic multimodal training workloads.
     backend: inductor  # Default PyTorch compiler backend for CUDA workloads.
     mode: default  # Good starting point. Try reduce-overhead mainly for stable inference-like shapes.
-    dynamic: True # Leave null for the PyTorch default. Set True only when variable shapes cause recompiles.
-    vision: True  # Compile visual blocks when enabled.
+    dynamic:  # Leave null for the PyTorch default. Set True only when variable shapes cause recompiles.
+    vision: True  # Keep vision blocks on by default.
     text: True  # Keep text decoder blocks on by default.
     flow: True  # Keep action-expert blocks on by default.
   gradient_checkpointing: False

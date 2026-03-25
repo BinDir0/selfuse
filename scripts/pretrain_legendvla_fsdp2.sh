@@ -94,7 +94,9 @@ export NCCL_MIN_CTAS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCHINDUCTOR_FX_GRAPH_CACHE=1
 export TORCHINDUCTOR_FORCE_CUDA_CODE_CACHE=1
+export TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS=1 # support capture scalar outputs in transformers
 export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
+export TORCH_LOGS="recompiles"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 exec accelerate launch \\

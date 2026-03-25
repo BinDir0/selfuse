@@ -83,6 +83,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if not self.compile_cfg.get("enabled", False):
             return
 
+        # Patch Qwen3 VL vision attention before compile to avoid
+        # FakeTensor / graph-break issues with flash_attn_varlen_func.
+        from src.model.vlm.qwen3_vl_compile_patch import apply_patch
+        apply_patch()
+
         compile_cfg = OmegaConf.to_container(self.compile_cfg, resolve=True)
         compile_kwargs = {
             key: value
