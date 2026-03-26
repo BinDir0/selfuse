@@ -2,10 +2,14 @@
 Data transformation functions for LegendVLA datasets.
 '''
 
+import random
 from typing import Optional
+
 import numpy as np
 import torch
 from PIL import Image
+from torchvision.transforms import ColorJitter
+from torchvision.transforms import functional as TF
 
 from src.utils.geometry import (
     transform_wrist_to_target_frame,
@@ -191,28 +195,116 @@ def process_state_action(
         action = processed_action
     return state, action
 
-# TODO: maybe we need to use the same augmentation for all images in the action chunk
-# TODO: we can try more advanced augmentation techniques, notably, we should care about the depth image augmentation
-def process_image(image, depth_image = None, aug_transform = None, depth_clip_range = None):
+def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0)):
+    '''Random crop then resize back. Same crop for all frames (temporal consistency).'''
+    N, H, W = images.shape[:3]
+    scale = random.uniform(*scale_range)
+    crop_h, crop_w = int(H * scale), int(W * scale)
+    if crop_h >= H and crop_w >= W:
+        return images, depth_images, intrinsic
+
+    y0 = random.randint(0, H - crop_h)
+    x0 = random.randint(0, W - crop_w)
+    sx, sy = W / crop_w, H / crop_h
+
+    # Crop + resize RGB (bilinear)
+    images = np.stack([
+        np.array(Image.fromarray(f).crop((x0, y0, x0 + crop_w, y0 + crop_h)).resize((W, H), Image.BILINEAR), dtype=np.uint8)
+        for f in images
+    ])
+
+    # Crop + resize depth (nearest to avoid interpolation artifacts at edges)
+    if depth_images is not None:
+        depth_images = np.stack([
+            np.array(Image.fromarray(f, mode='F').crop((x0, y0, x0 + crop_w, y0 + crop_h)).resize((W, H), Image.NEAREST), dtype=np.float32)
+            for f in depth_images
+        ])
+
+    # Update intrinsic [fx, fy, cx, cy] for the crop-then-resize transform
+    if intrinsic is not None:
+        intrinsic = intrinsic.copy()
+        intrinsic[0] *= sx                      # fx
+        intrinsic[1] *= sy                      # fy
+        intrinsic[2] = (intrinsic[2] - x0) * sx # cx
+        intrinsic[3] = (intrinsic[3] - y0) * sy # cy
+
+    return images, depth_images, intrinsic
+
+
+def augment_color(images):
+    '''Color jitter + Gaussian blur. Params sampled once for temporal consistency.'''
+    fn_idx, brightness, contrast, saturation, hue = ColorJitter.get_params(
+        brightness=(0.7, 1.3), contrast=(0.7, 1.3),
+        saturation=(0.7, 1.3), hue=(-0.1, 0.1),
+    )
+    sigma = random.uniform(0.1, 2.0)
+
+    jitter = [
+        lambda img: TF.adjust_brightness(img, brightness),
+        lambda img: TF.adjust_contrast(img, contrast),
+        lambda img: TF.adjust_saturation(img, saturation),
+        lambda img: TF.adjust_hue(img, hue),
+    ]
+    ops = [jitter[i] for i in fn_idx]
+    ops.append(lambda img: TF.gaussian_blur(img, kernel_size=[5, 5], sigma=sigma))
+
+    def apply(frame):
+        pil = Image.fromarray(frame)
+        for op in ops:
+            pil = op(pil)
+        return np.array(pil, dtype=np.uint8)
+
+    return np.stack([apply(f) for f in images])
+
+
+def augment_depth(depth_images, noise_scale=0.005, dropout_prob=0.5):
+    '''Depth-dependent Gaussian noise + random rectangular dropout (shared across frames).
+    Noise sigma = noise_scale * depth; at 1m ≈ 5mm. Dropout area ≤ ~16%.'''
+    depth_images = depth_images.copy()
+    N, H, W = depth_images.shape
+
+    # Depth-dependent Gaussian noise: only on valid (>0) pixels
+    valid = depth_images > 0
+    noise = np.random.randn(N, H, W).astype(np.float32)
+    depth_images[valid] += noise[valid] * noise_scale * depth_images[valid]
+    np.maximum(depth_images, 0, out=depth_images)
+
+    # Random rectangular dropout
+    if random.random() < dropout_prob:
+        rh = random.randint(1, max(1, int(H * 0.4)))
+        rw = random.randint(1, max(1, int(W * 0.4)))
+        ry = random.randint(0, H - rh)
+        rx = random.randint(0, W - rw)
+        depth_images[:, ry:ry + rh, rx:rx + rw] = 0
+
+    return depth_images
+
+
+def process_image(image, depth_image=None, intrinsic=None, aug_transform=None, depth_clip_range=None):
     '''
     Args:
-        image: np.ndarray, shape: [N, H, W, 3]
-        depth_image: np.ndarray, shape: [N, H, W]
-        aug_transform: Optional[Callable]
+        image: np.ndarray, shape: [N, H, W, 3], uint8
+        depth_image: np.ndarray or None, shape: [N, H, W]
+        intrinsic: np.ndarray or None, shape: [4] — [fx, fy, cx, cy]
+        aug_transform: truthy value enables augmentation (the object itself is not called)
+        depth_clip_range: [min, max] in meters, or None
     Returns:
         image: np.ndarray, shape: [N, H, W, 3]
-        depth_image: np.ndarray, shape: [N, H, W]
+        depth_image: np.ndarray or None, shape: [N, H, W], float32 (meters)
+        intrinsic: np.ndarray or None, shape: [4]
     '''
-    images_to_process = image
-    depth_images_to_process = depth_image
-    if aug_transform is not None:
-        augmented_images = []
-        for img_np in images_to_process:
-            # convert NumPy array (H, W, C) to PIL Image
-            img_pil = Image.fromarray(img_np)
-            augmented_pil = aug_transform(img_pil)
-            augmented_np = np.array(augmented_pil, dtype=np.uint8)
-            augmented_images.append(augmented_np)
-        images_to_process = np.stack(augmented_images, dtype=np.uint8)
+    # Depth stored as uint16 in millimeters; convert to float32 meters.
+    # If already float, assume meters and skip conversion.
+    if depth_image is not None and depth_image.dtype == np.uint16:
+        depth_image = depth_image.astype(np.float32) / 1000.0
 
-    return images_to_process, depth_images_to_process
+    if aug_transform is not None:
+        image, depth_image, intrinsic = random_resized_crop(image, depth_image, intrinsic)
+        image = augment_color(image)
+        if depth_image is not None:
+            depth_image = augment_depth(depth_image)
+
+    if depth_clip_range is not None and depth_image is not None:
+        depth_image = np.clip(depth_image, depth_clip_range[0], depth_clip_range[1])
+
+    return image, depth_image, intrinsic

@@ -145,9 +145,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             context=sample_context,
         )
 
-        image, depth_images = process_image(
+        intrinsic = sample["intrinsic"].astype(np.float32)
+        image, depth_images, intrinsic = process_image(
             sample["image"],
             sample.get("depth", None),
+            intrinsic,
             self.aug_transform,
             self.depth_clip_range,
         )
@@ -156,8 +158,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             stage="vla_after_image_process",
             context=sample_context,
         )
-
-        intrinsic = sample["intrinsic"].astype(np.float32)
         instruction = sample["instruction"]
         instruction_num = sample["instruction_num"]
 
