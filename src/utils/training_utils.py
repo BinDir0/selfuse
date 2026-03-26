@@ -120,6 +120,14 @@ def capture_output_to_training_log(func):
 
 def scalar_metric_value(value):
     if isinstance(value, torch.Tensor) and value.numel() == 1:
+        # FSDP2 DTensor with _NormPartial placement: .item() only returns the
+        # local shard's value without triggering all-reduce, giving
+        # full_norm / sqrt(world_size) instead of the true global norm.
+        # Calling .full_tensor() forces the reduction (x^p -> allreduce_sum -> x^(1/p)).
+        # See: https://github.com/pytorch/pytorch/issues/144054
+        #      https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/utils.py
+        if hasattr(value, 'full_tensor'):
+            value = value.full_tensor()
         return value.detach().float().cpu().item()
     return value
 
