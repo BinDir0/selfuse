@@ -347,6 +347,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
         if cfg.training.max_train_steps is not None:
             max_train_steps = cfg.training.max_train_steps
+        # Accelerate's prepared scheduler only steps once every num_processes
+        # optimizer steps, so multiply total and warmup steps by num_processes
+        # to keep the effective schedule correct.
         max_train_steps = max_train_steps * accelerator.num_processes
         num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
         if accelerator.is_main_process:

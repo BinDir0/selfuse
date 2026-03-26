@@ -248,13 +248,13 @@ class LegendVLA(nn.Module):
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
         slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None}
         if "states" in batch:
-            state_embeds = self.state_encoder(batch["states"]) / (self.vlm_hidden_size ** 0.5)
+            state_embeds = self.state_encoder(batch["states"])
             slot_embeds["state"] = state_embeds
         if "actions" in batch:
             action_input = batch["actions"]
             if add_action_noise:
                 action_input = action_input + torch.randn_like(batch["actions"]) * self.ar_action_noise_std
-            action_embeds = self.ar_action_encoder(action_input) / (self.vlm_hidden_size ** 0.5)
+            action_embeds = self.ar_action_encoder(action_input)
             slot_embeds["action"] = action_embeds
         return slot_embeds
 
@@ -294,7 +294,7 @@ class LegendVLA(nn.Module):
             )
         else:
             time_cond = self.time_embedding(time_for_model)
-        action_embeds = self.action_encoder(flow_inputs["noisy_actions"]) / (self.action_hidden_size ** 0.5)
+        action_embeds = self.action_encoder(flow_inputs["noisy_actions"])
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
         action_position_ids = self.build_action_position_ids(batch, backbone_output.position_ids)
         prefix_cache = backbone_output.prefix_cache
