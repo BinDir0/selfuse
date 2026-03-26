@@ -77,7 +77,6 @@ def infer_flow_action(model, batch: dict, prev_action_chunk=None, inference_dela
     action_valid_mask = _build_action_valid_mask(working_batch, model.action_dim)
     batch_size, action_len, _ = action_valid_mask.shape
     device = working_batch["input_ids"].device
-    dtype = working_batch.get("pixel_values", working_batch["input_ids"]).dtype
     action_dtype = working_batch.get("states", torch.empty((), device=device, dtype=torch.float32)).dtype
     if not torch.is_floating_point(torch.empty((), dtype=action_dtype)):
         action_dtype = torch.float32
