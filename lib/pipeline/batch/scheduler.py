@@ -1,3 +1,4 @@
+import time
 from typing import Dict
 
 from tqdm import tqdm
@@ -42,10 +43,13 @@ class BatchScheduler:
         stage_results[video_path] = success
         self._update_progress_bar(pbar, stage_results)
 
-    def _run_stage_with_retries(self, stage: str, pbar=None):
+    def _run_stage_with_retries(self, stage: str, pbar=None, initial_pending_videos=None):
         final_results = {}
         for attempt in range(self.config.max_stage_retries + 1):
-            pending_videos = self.state.get_stage_pending_videos(stage)
+            if attempt == 0 and initial_pending_videos is not None:
+                pending_videos = initial_pending_videos
+            else:
+                pending_videos = self.state.get_stage_pending_videos(stage)
             if not pending_videos:
                 break
 
@@ -95,13 +99,17 @@ class BatchScheduler:
         return final_results
 
     def run(self):
+        resume_prep_start = time.monotonic()
         self.state.prepare_for_resume()
+        resume_prep_elapsed = time.monotonic() - resume_prep_start
         self.state.mark_batch_started()
 
         self.events.emit("batch_start", total_videos=len(self.config.video_paths), gpus=self.config.gpus, mode="wave")
 
         print(f"\n{'=' * 60}")
         print(f"Stage-Wave Scheduling: {len(self.config.video_paths)} videos, {len(self.config.gpus)} GPUs")
+        if self.config.resume:
+            print(f"Resume preparation: {resume_prep_elapsed:.2f}s")
         print(f"{'=' * 60}\n")
 
         for stage_idx, stage in enumerate(self.config.stages, 1):
@@ -110,7 +118,7 @@ class BatchScheduler:
 
             print(f"Stage {stage_idx}/{len(self.config.stages)}: {stage} ({total_for_stage} videos)")
             with tqdm(total=total_for_stage, desc=f"  {stage}", unit="video", leave=True) as pbar:
-                self._run_stage_with_retries(stage, pbar=pbar)
+                self._run_stage_with_retries(stage, pbar=pbar, initial_pending_videos=pending_videos)
 
         success_count, fail_count, completed_videos, failed_videos = self.state.finalize_videos()
         for video_path in completed_videos:

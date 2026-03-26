@@ -9,7 +9,6 @@ from lib.pipeline.batch.config import BatchRunConfig
 from lib.pipeline.stage_api import (
     PipelineVideoTask,
     get_stage_done_marker,
-    is_stage_complete,
 )
 from lib.pipeline.video_index import VideoDescriptor
 
@@ -68,6 +67,7 @@ class BatchRunState:
             )
             for video_path in config.video_paths
         }
+        self._done_marker_cache: Dict[str, Dict[str, bool]] = defaultdict(dict)
 
     def _task_seq_folder(self, task: VideoTaskState) -> Path:
         if task.descriptor is not None:
@@ -116,23 +116,31 @@ class BatchRunState:
             return
         self.load()
         self._normalize_resume_states()
-        self._initialize_completed_from_disk()
         self._print_resume_distribution()
+
+    def _stage_done_marker_exists(self, task: VideoTaskState, stage: str) -> bool:
+        cached = self._done_marker_cache[task.video_path]
+        if stage not in cached:
+            cached[stage] = get_stage_done_marker(self._task_seq_folder(task), stage).exists()
+        return cached[stage]
+
+    def _mark_stage_completed_from_done_marker(self, task: VideoTaskState, stage: str) -> bool:
+        if not self._stage_done_marker_exists(task, stage):
+            return False
+        task.stage_status[stage] = "completed"
+        return True
 
     def _normalize_resume_states(self):
         reconciled_done = defaultdict(int)
         normalized_running = defaultdict(int)
 
         for task in self.tasks.values():
-            seq_folder = self._task_seq_folder(task)
             for stage in self.config.stages:
-                done_marker = get_stage_done_marker(seq_folder, stage)
                 current_status = task.stage_status.get(stage, "pending")
 
-                if done_marker.exists():
+                if self._mark_stage_completed_from_done_marker(task, stage):
                     if current_status != "completed":
                         reconciled_done[stage] += 1
-                        task.stage_status[stage] = "completed"
                 elif current_status == "running":
                     normalized_running[stage] += 1
                     task.stage_status[stage] = "pending"
@@ -145,15 +153,6 @@ class BatchRunState:
                 if normalized_running[stage] > 0:
                     print(f"  {stage}: normalized {normalized_running[stage]} stale 'running' -> 'pending'")
             print()
-
-    def _initialize_completed_from_disk(self):
-        for task in self.tasks.values():
-            if not all(task.stage_status.get(stage) == "pending" for stage in self.config.stages):
-                continue
-            seq_folder = self._task_seq_folder(task)
-            for stage in self.config.stages:
-                if is_stage_complete(stage, seq_folder, fast_check=True):
-                    task.stage_status[stage] = "completed"
 
     def _print_resume_distribution(self):
         print("\n[Resume Status Distribution]")
@@ -176,6 +175,8 @@ class BatchRunState:
 
     def mark_stage_result(self, video_path: str, stage: str, success: bool):
         self.tasks[video_path].stage_status[stage] = "completed" if success else "failed"
+        if success:
+            self._done_marker_cache[video_path][stage] = True
 
     def record_retry(self, video_path: str, stage: str, attempt: int):
         self.tasks[video_path].retry_count[stage] = attempt
@@ -210,13 +211,22 @@ class BatchRunState:
         candidates = []
         for video_path in self.config.video_paths:
             task = self.tasks[video_path]
-            current_status = task.stage_status.get(stage, "pending")
 
             if prev_stage is not None:
                 prev_status = task.stage_status.get(prev_stage, "pending")
+                if self.config.resume and prev_status != "completed":
+                    self._mark_stage_completed_from_done_marker(task, prev_stage)
+                    prev_status = task.stage_status.get(prev_stage, "pending")
                 if prev_status != "completed":
                     excluded_prev_stage += 1
                     continue
+
+            current_status = task.stage_status.get(stage, "pending")
+            if self.config.resume and current_status != "completed":
+                if self._mark_stage_completed_from_done_marker(task, stage):
+                    excluded_done_marker += 1
+                    continue
+                current_status = task.stage_status.get(stage, "pending")
 
             if current_status not in ("pending", "failed"):
                 if current_status == "completed":
@@ -241,24 +251,16 @@ class BatchRunState:
             )
             return candidates
 
-        pending = []
-        for video_path in candidates:
-            seq_folder = self._task_seq_folder(self.tasks[video_path])
-            if is_stage_complete(stage, seq_folder, fast_check=True):
-                excluded_done_marker += 1
-                continue
-            pending.append(video_path)
-
         self._print_stage_eligibility(
             stage,
-            scheduled=len(pending),
+            scheduled=len(candidates),
             excluded_completed=excluded_completed,
             excluded_running=excluded_running,
             excluded_prev_stage=excluded_prev_stage,
             excluded_done_marker=excluded_done_marker,
             excluded_other=excluded_other,
         )
-        return pending
+        return candidates
 
     def _print_stage_eligibility(
         self,
