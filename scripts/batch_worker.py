@@ -58,15 +58,13 @@ def _build_runtime_from_args(ns):
         chunk_batch_size=ns.chunk_batch_size,
         num_workers=ns.num_workers,
         render_batch_size=ns.render_batch_size,
-        metric3d_batch_size=ns.metric3d_batch_size,
+        any4d_batch_size=ns.any4d_batch_size,
         detect_batch_size=ns.detect_batch_size,
         detect_io_workers=ns.detect_io_workers,
         detect_device=ns.detect_device,
         detect_half_precision=ns.detect_half_precision,
         infiller_window_batch_size=ns.infiller_window_batch_size,
         rebuild_cam_space_cache=ns.rebuild_cam_space_cache,
-        slam_backend=ns.slam_backend,
-        depth_backend=ns.depth_backend,
         depth_predict_all_frames=ns.depth_predict_all_frames,
         any4d_repo_root=ns.any4d_repo_root,
         any4d_checkpoint_path=ns.any4d_checkpoint_path,
@@ -223,14 +221,12 @@ def get_parser():
     parser.add_argument("--chunk_batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=16, help="Number of DataLoader workers for parallel frame loading")
     parser.add_argument("--render_batch_size", type=int, default=8, help="Batch size for rendering phase")
-    parser.add_argument("--metric3d_batch_size", type=int, default=32, help="Batch size for Metric3D depth estimation")
-    parser.add_argument("--slam_backend", type=str, default="dpvo", choices=["droid", "dpvo"])
-    parser.add_argument("--depth_backend", type=str, default="metric3d", choices=["metric3d", "any4d"])
+    parser.add_argument("--any4d_batch_size", type=int, default=32, help="Batch size for Any4D depth estimation")
     parser.add_argument(
         "--depth_predict_all_frames",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Predict dense depth for all frames and cache it under SLAM/",
+        default=None,
+        help="Predict dense depth for all frames in SLAM; defaults to env HAWOR_DEPTH_PREDICT_ALL_FRAMES or on.",
     )
     parser.add_argument("--any4d_repo_root", type=str, default=None)
     parser.add_argument("--any4d_checkpoint_path", type=str, default=None)

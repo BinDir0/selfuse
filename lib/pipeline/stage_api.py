@@ -22,16 +22,14 @@ class StageExecutionConfig:
     chunk_batch_size: int = 64
     num_workers: int = 16
     render_batch_size: int = 8
-    metric3d_batch_size: int = 32
+    any4d_batch_size: int = 32
     detect_batch_size: int = 128
     detect_io_workers: int = 8
     infiller_window_batch_size: int = 64
     rebuild_cam_space_cache: bool = False
     detect_device: str = "cuda:0"
     detect_half_precision: bool = True
-    slam_backend: str = "dpvo"
-    depth_backend: str = "metric3d"
-    depth_predict_all_frames: bool = True
+    depth_predict_all_frames: Optional[bool] = None
     any4d_repo_root: Optional[str] = None
     any4d_checkpoint_path: Optional[str] = None
     any4d_resolution_set: Optional[int] = None
@@ -48,16 +46,14 @@ class StageExecutionConfig:
             chunk_batch_size=getattr(ns, "chunk_batch_size", 64),
             num_workers=getattr(ns, "num_workers", 16),
             render_batch_size=getattr(ns, "render_batch_size", 8),
-            metric3d_batch_size=getattr(ns, "metric3d_batch_size", 32),
+            any4d_batch_size=getattr(ns, "any4d_batch_size", 32),
             detect_batch_size=getattr(ns, "detect_batch_size", 128),
             detect_io_workers=getattr(ns, "detect_io_workers", 8),
             infiller_window_batch_size=getattr(ns, "infiller_window_batch_size", 64),
             rebuild_cam_space_cache=bool(getattr(ns, "rebuild_cam_space_cache", False)),
             detect_device=getattr(ns, "detect_device", "cuda:0"),
             detect_half_precision=bool(getattr(ns, "detect_half_precision", True)),
-            slam_backend=getattr(ns, "slam_backend", "dpvo"),
-            depth_backend=getattr(ns, "depth_backend", "metric3d"),
-            depth_predict_all_frames=bool(getattr(ns, "depth_predict_all_frames", True)),
+            depth_predict_all_frames=getattr(ns, "depth_predict_all_frames", None),
             any4d_repo_root=getattr(ns, "any4d_repo_root", None),
             any4d_checkpoint_path=getattr(ns, "any4d_checkpoint_path", None),
             any4d_resolution_set=getattr(ns, "any4d_resolution_set", None),
@@ -73,15 +69,13 @@ class StageExecutionConfig:
             chunk_batch_size=self.chunk_batch_size,
             num_workers=self.num_workers,
             render_batch_size=self.render_batch_size,
-            metric3d_batch_size=self.metric3d_batch_size,
+            any4d_batch_size=self.any4d_batch_size,
             detect_batch_size=self.detect_batch_size,
             detect_io_workers=self.detect_io_workers,
             infiller_window_batch_size=self.infiller_window_batch_size,
             rebuild_cam_space_cache=self.rebuild_cam_space_cache,
             detect_device=self.detect_device,
             detect_half_precision=self.detect_half_precision,
-            slam_backend=self.slam_backend,
-            depth_backend=self.depth_backend,
             depth_predict_all_frames=self.depth_predict_all_frames,
             any4d_repo_root=self.any4d_repo_root,
             any4d_checkpoint_path=self.any4d_checkpoint_path,
@@ -461,10 +455,8 @@ def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, 
         stage_args,
         start_idx,
         end_idx,
-        metric_runner=getattr(runtime, "metric_runner", None),
-        metric3d_batch_size=config.metric3d_batch_size,
-        droid_net=getattr(runtime, "droid_net", None),
         any4d_runner=getattr(runtime, "any4d_runner", None),
+        any4d_batch_size=config.any4d_batch_size,
         frame_source=frame_source,
         seq_folder=str(task.seq_folder),
     )

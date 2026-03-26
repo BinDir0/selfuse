@@ -30,16 +30,14 @@ class WorkerRuntime:
         chunk_batch_size: int = 8,
         num_workers: int = 16,
         render_batch_size: int = 8,
-        metric3d_batch_size: int = 8,
+        any4d_batch_size: int = 8,
         detect_batch_size: int = 256,
         detect_io_workers: int = 16,
         detect_device: str = "cuda:0",
         detect_half_precision: bool = True,
         infiller_window_batch_size: int = 64,
         rebuild_cam_space_cache: bool = False,
-        slam_backend: str = "dpvo",
-        depth_backend: str = "metric3d",
-        depth_predict_all_frames: bool = True,
+        depth_predict_all_frames: bool = None,
         any4d_repo_root: str = None,
         any4d_checkpoint_path: str = None,
         any4d_resolution_set: int = None,
@@ -53,15 +51,13 @@ class WorkerRuntime:
             chunk_batch_size=chunk_batch_size,
             num_workers=num_workers,
             render_batch_size=render_batch_size,
-            metric3d_batch_size=metric3d_batch_size,
+            any4d_batch_size=any4d_batch_size,
             detect_batch_size=detect_batch_size,
             detect_io_workers=detect_io_workers,
             infiller_window_batch_size=infiller_window_batch_size,
             rebuild_cam_space_cache=rebuild_cam_space_cache,
             detect_device=detect_device,
             detect_half_precision=detect_half_precision,
-            slam_backend=slam_backend,
-            depth_backend=depth_backend,
             depth_predict_all_frames=depth_predict_all_frames,
             any4d_repo_root=any4d_repo_root,
             any4d_checkpoint_path=any4d_checkpoint_path,
@@ -71,9 +67,7 @@ class WorkerRuntime:
 
         self.detector_runner = None
         self.motion_runner = None
-        self.metric_runner = None
         self.infiller_runner = None
-        self.droid_net = None
         self.any4d_runner = None
         self.mano_right = None
         self.mano_left = None
@@ -99,17 +93,7 @@ class WorkerRuntime:
             self.mano_left = MANO(**get_mano_cfg(is_right=False)).to(device)
             self.mano_left.shapedirs[:, 0, :] *= -1
 
-        if stage == "slam" and self.stage_config.depth_backend == "metric3d" and self.metric_runner is None:
-            from lib.pipeline.stages.slam import build_metric3d_runner
-
-            self.metric_runner = build_metric3d_runner()
-
-        if stage == "slam" and self.stage_config.slam_backend == "droid" and self.droid_net is None:
-            from lib.pipeline.masked_droid_slam import build_droid_net
-
-            self.droid_net = build_droid_net()
-
-        if stage == "slam" and self.stage_config.depth_backend == "any4d" and self.any4d_runner is None:
+        if stage == "slam" and self.any4d_runner is None:
             from lib.pipeline.any4d_depth import build_any4d_runner
 
             self.any4d_runner = build_any4d_runner(

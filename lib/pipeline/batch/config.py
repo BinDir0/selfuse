@@ -26,7 +26,7 @@ class BatchRunConfig:
     img_focal: Optional[float]
     chunk_batch_size: int
     num_workers: int
-    metric3d_batch_size: int
+    any4d_batch_size: int
     render_batch_size: int
     infiller_window_batch_size: int
     detect_batch_size: int
@@ -34,9 +34,7 @@ class BatchRunConfig:
     detect_half_precision: bool
     detect_io_workers: int
     rebuild_cam_space_cache: bool
-    slam_backend: str
-    depth_backend: str
-    depth_predict_all_frames: bool
+    depth_predict_all_frames: Optional[bool]
     any4d_repo_root: Optional[str]
     any4d_checkpoint_path: Optional[str]
     any4d_resolution_set: Optional[int]
@@ -62,14 +60,6 @@ class BatchRunConfig:
         if not gpus:
             raise ValueError("At least one GPU must be specified via --gpus")
 
-        valid_slam_backends = {"droid", "dpvo"}
-        if args.slam_backend not in valid_slam_backends:
-            raise ValueError(f"Unknown --slam_backend {args.slam_backend!r}. Valid: {sorted(valid_slam_backends)}")
-
-        valid_depth_backends = {"metric3d", "any4d"}
-        if args.depth_backend not in valid_depth_backends:
-            raise ValueError(f"Unknown --depth_backend {args.depth_backend!r}. Valid: {sorted(valid_depth_backends)}")
-
         worker_counts = {
             "workers_per_gpu": args.workers_per_gpu,
             "detect_track_workers_per_gpu": args.detect_track_workers_per_gpu,
@@ -80,6 +70,8 @@ class BatchRunConfig:
         invalid_counts = {name: value for name, value in worker_counts.items() if value is not None and value < 1}
         if invalid_counts:
             raise ValueError(f"Worker counts must be >= 1: {invalid_counts}")
+        if args.any4d_batch_size < 1:
+            raise ValueError("--any4d_batch_size must be >= 1")
         if args.wave_stall_timeout_sec < 1:
             raise ValueError("--wave_stall_timeout_sec must be >= 1")
 
@@ -95,7 +87,7 @@ class BatchRunConfig:
             img_focal=args.img_focal,
             chunk_batch_size=args.chunk_batch_size,
             num_workers=args.num_workers,
-            metric3d_batch_size=args.metric3d_batch_size,
+            any4d_batch_size=args.any4d_batch_size,
             render_batch_size=args.render_batch_size,
             infiller_window_batch_size=args.infiller_window_batch_size,
             detect_batch_size=args.detect_batch_size,
@@ -103,8 +95,6 @@ class BatchRunConfig:
             detect_half_precision=args.detect_half_precision,
             detect_io_workers=args.detect_io_workers,
             rebuild_cam_space_cache=args.rebuild_cam_space_cache,
-            slam_backend=args.slam_backend,
-            depth_backend=args.depth_backend,
             depth_predict_all_frames=args.depth_predict_all_frames,
             any4d_repo_root=args.any4d_repo_root,
             any4d_checkpoint_path=args.any4d_checkpoint_path,

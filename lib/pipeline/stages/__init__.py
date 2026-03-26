@@ -9,11 +9,10 @@ from .hawor_video import (
     run_infiller_for_video,
     run_motion_for_video,
 )
-from .slam import build_metric3d_runner, hawor_slam
+from .slam import hawor_slam
 
 __all__ = [
     "build_infiller_runner",
-    "build_metric3d_runner",
     "build_motion_runner",
     "detect_track_video",
     "hawor_infiller",

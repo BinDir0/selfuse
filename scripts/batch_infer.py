@@ -163,30 +163,16 @@ def get_parser():
     )
     parser.add_argument("--num_workers", type=int, default=16, help="Number of DataLoader workers for motion stage frame loading")
     parser.add_argument(
-        "--metric3d_batch_size",
+        "--any4d_batch_size",
         type=int,
         default=32,
-        help="Batch size for Metric3D depth estimation in SLAM stage",
-    )
-    parser.add_argument(
-        "--slam_backend",
-        type=str,
-        default="dpvo",
-        choices=["droid", "dpvo"],
-        help="SLAM backend for stage3",
-    )
-    parser.add_argument(
-        "--depth_backend",
-        type=str,
-        default="metric3d",
-        choices=["metric3d", "any4d"],
-        help="Metric depth backend used for stage3 scale estimation",
+        help="Batch size for Any4D depth estimation in SLAM stage",
     )
     parser.add_argument(
         "--depth_predict_all_frames",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Predict dense depth for all frames and cache it under SLAM/",
+        default=None,
+        help="Predict dense depth for all frames in SLAM; defaults to env HAWOR_DEPTH_PREDICT_ALL_FRAMES or on.",
     )
     parser.add_argument("--any4d_repo_root", type=str, default=None, help="Optional Any4D repo root override")
     parser.add_argument("--any4d_checkpoint_path", type=str, default=None, help="Optional Any4D checkpoint override")
@@ -195,7 +181,7 @@ def get_parser():
         "--any4d_use_amp",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override Any4D AMP usage when depth_backend=any4d",
+        help="Override Any4D AMP usage for stage3 depth inference",
     )
     parser.add_argument(
         "--render_batch_size",
@@ -267,13 +253,12 @@ def main():
     print(f"Detect batch size (detect_track): {config.detect_batch_size}")
     print(f"Detect I/O workers: {config.detect_io_workers}")
     print(f"Chunk batch size (motion): {config.chunk_batch_size}")
-    print(f"Metric3D batch size (slam): {config.metric3d_batch_size}")
-    print(
-        "Stage3 backends: "
-        f"slam={config.slam_backend}, "
-        f"depth={config.depth_backend}, "
-        f"depth_predict_all_frames={config.depth_predict_all_frames}"
-    )
+    print(f"Any4D batch size (slam): {config.any4d_batch_size}")
+    print("Stage3 backends: slam=dpvo, depth=any4d")
+    if config.depth_predict_all_frames is None:
+        print("Dense depth all frames (slam): env HAWOR_DEPTH_PREDICT_ALL_FRAMES or default on")
+    else:
+        print(f"Dense depth all frames (slam): {config.depth_predict_all_frames}")
     print(f"Infiller window batch size: {config.infiller_window_batch_size}")
     print(
         "Workers per GPU: "
