@@ -62,9 +62,7 @@ class LegendVLAInference(nn.Module):
 
         collator_mode = "infer" if mode == "flow" else "infer-ar"
         self.data_collator = hydra.utils.instantiate(model_cfg.data_collator).for_mode(collator_mode)
-        self.data_collator.batch_processor.processor_call_kwargs["padding"] = tokenizer_padding
-        if max_length is not None:
-            self.data_collator.batch_processor.processor_call_kwargs["max_length"] = max_length
+        self.configure_batch_processor_text_kwargs(tokenizer_padding=tokenizer_padding, max_length=max_length)
 
         self.normalizer = self.load_normalizer(normalizer_path) if normalizer_path else None
         self.use_relative_action = use_relative_action
@@ -76,6 +74,9 @@ class LegendVLAInference(nn.Module):
         self.state_horizon = int(self.model.shape_meta["obs"]["state"]["horizon"])
         self.state_dim = int(self.model.shape_meta["obs"]["state"]["shape"][0])
         self.image_stride = int(self.model.shape_meta["obs"]["rgb"].get("stride", 1))
+        dataset_cfg = getattr(model_cfg, "dataset", None)
+        vla_dataset_cfg = getattr(dataset_cfg, "vla_dataset", None)
+        self.history_pad_mode = str(getattr(vla_dataset_cfg, "history_pad_mode", "truncate"))
         data_cfg = getattr(model_cfg, "data", None)
         self.video_base_fps = float(getattr(data_cfg, "video_base_fps", getattr(model_cfg, "video_base_fps", 30.0)))
         self.ar_max_new_tokens = ar_max_new_tokens or self.action_horizon
@@ -139,6 +140,24 @@ class LegendVLAInference(nn.Module):
         self.get_model_core().compile_blocks(compile_kwargs)
         self._model_compiled = True
 
+    def configure_batch_processor_text_kwargs(
+        self,
+        tokenizer_padding: str,
+        max_length: int | None,
+    ) -> None:
+        processor_call_kwargs = self.data_collator.batch_processor.processor_call_kwargs
+        text_kwargs = processor_call_kwargs.get("text_kwargs")
+
+        if isinstance(text_kwargs, dict):
+            text_kwargs["padding"] = tokenizer_padding
+            if max_length is not None:
+                text_kwargs["max_length"] = max_length
+            return
+
+        processor_call_kwargs["padding"] = tokenizer_padding
+        if max_length is not None:
+            processor_call_kwargs["max_length"] = max_length
+
     def load_checkpoint(self, path: str) -> None:
         path = pathlib.Path(path)
         if not path.exists():
@@ -170,19 +189,31 @@ class LegendVLAInference(nn.Module):
         return intrinsic.reshape(-1)
 
     def pad_states(self, states: np.ndarray) -> np.ndarray:
+        padded_states, _ = self.prepare_states(states)
+        return padded_states
+
+    def prepare_states(self, states: np.ndarray) -> tuple[np.ndarray, int]:
         states = np.asarray(states, dtype=np.float32)
         if states.ndim != 2:
             raise ValueError(f"Expected states shape [T, D], got {states.shape}")
         current = states.shape[0]
         if current >= self.state_horizon:
-            return states[-self.state_horizon:]
+            return states[-self.state_horizon:], self.state_horizon
+
         pad_count = self.state_horizon - current
-        padding = (
-            np.zeros((pad_count, self.state_dim), dtype=states.dtype)
-            if current == 0
-            else np.repeat(states[-1:], pad_count, axis=0)
-        )
-        return np.concatenate([states, padding], axis=0)
+        if self.history_pad_mode == "repeat":
+            if current == 0:
+                padding = np.zeros((pad_count, self.state_dim), dtype=states.dtype)
+                return padding, 0
+
+            padding = np.repeat(states[:1], pad_count, axis=0)
+            return np.concatenate([padding, states], axis=0), self.state_horizon
+
+        if self.history_pad_mode == "truncate":
+            padding = np.zeros((pad_count, self.state_dim), dtype=states.dtype)
+            return np.concatenate([states, padding], axis=0), current
+
+        raise ValueError(f"Unsupported history_pad_mode: {self.history_pad_mode}")
 
     def prepare_process(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """Convert one runtime observation into the single-sample schema expected by the collator.
@@ -207,14 +238,16 @@ class LegendVLAInference(nn.Module):
             key = "states" if self.use_relative_action else "motions"
             states = self.normalizer[key](states)
 
+        padded_states, n_states = self.prepare_states(states)
+
         sample = {
             "images": torch.as_tensor(obs["image"]),
             "instruction": instruction,
             "intrinsic": torch.from_numpy(self.extract_intrinsic(obs["intrinsic"])),
             "vision_type": "video",
             "video_fps": torch.tensor(self.video_base_fps / self.image_stride, dtype=torch.float32),
-            "states": torch.from_numpy(self.pad_states(states)),
-            "n_states": torch.tensor(min(states.shape[0], self.state_horizon), dtype=torch.int32),
+            "states": torch.from_numpy(padded_states),
+            "n_states": torch.tensor(n_states, dtype=torch.int32),
             "actions": torch.zeros((self.action_horizon, self.action_dim), dtype=torch.float32),
             "actions_valid_mask": torch.ones((self.action_horizon, self.action_dim), dtype=torch.bool),
             "n_actions": torch.tensor(self.action_horizon, dtype=torch.int32),

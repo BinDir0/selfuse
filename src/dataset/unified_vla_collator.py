@@ -29,10 +29,12 @@ class UnifiedVLACollator:
         self,
         formatter: Qwen3VLChatFormatter,
         batch_processor: Qwen3VLBatchProcessor,
+        debug_capture_texts: bool = False,
     ):
         self.formatter = formatter
         self.batch_processor = batch_processor
         self.ignore_index = batch_processor.ignore_index
+        self.debug_capture_texts = bool(debug_capture_texts)
 
         if self.formatter.state_token != self.batch_processor.state_token:
             raise ValueError("Formatter and batch processor must share the same state token.")
@@ -67,6 +69,7 @@ class UnifiedVLACollator:
             messages_batch=full_messages,
             batch_samples=samples,
             add_generation_prompt=False,
+            return_rendered_texts=self.debug_capture_texts,
         )
 
         prompt_messages = [self.formatter.build_messages(sample, prompt_only=True) for sample in samples]
@@ -75,6 +78,7 @@ class UnifiedVLACollator:
             messages_batch=prompt_messages,
             batch_samples=samples,
             add_generation_prompt=True,
+            return_rendered_texts=self.debug_capture_texts,
         )
 
         input_ids = full_batch["input_ids"].to(dtype=torch.long)
@@ -126,6 +130,12 @@ class UnifiedVLACollator:
 
         for key in sorted(common_keys - reserved_keys):
             batch[key] = self.collate_values([sample[key] for sample in samples])
+
+        if self.debug_capture_texts:
+            batch["debug_full_messages"] = full_messages
+            batch["debug_prompt_messages"] = prompt_messages
+            batch["debug_full_texts"] = full_batch["rendered_texts"]
+            batch["debug_prompt_texts"] = prompt_batch["rendered_texts"]
 
         return batch
 
