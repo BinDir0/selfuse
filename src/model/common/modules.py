@@ -217,6 +217,13 @@ class AdaLNZero(nn.Module):
         if cond.ndim == 2:
             cond = cond.unsqueeze(1)
         scale, shift, gate = self.modulation(cond).chunk(3, dim=-1)
+        # TODO(ablation): gate is unbounded — when RTC prefix tokens (t=1.0) leak
+        # gradients through bidirectional attention, the unbounded gate compounds
+        # across 36 DiT layers and causes grad norm spikes to 1e15.
+        # Candidate fix: gate = gate.tanh()  # bound to [-1, 1]
+        # Ref: Mochi (genmoai/mochi) uses tanh-gated RMSNorm in every DiT block;
+        #      arXiv 2602.22610 proposes gamma_max * tanh(gamma / gamma_max).
+        # See docs/training_instability_analysis.md P0/P0+ for full analysis.
         return output * (1.0 + scale) + shift, gate
 
 
