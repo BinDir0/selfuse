@@ -172,7 +172,6 @@ class BaseGenerativeMLP(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    @torch.compile(mode="default")
     def forward(self, x, t, c):
         """
         Apply the model to an input batch.
@@ -205,7 +204,6 @@ class SimpleMLPAdaLN(BaseGenerativeMLP):
         nn.init.normal_(self.time_embed.mlp[0].weight, std=0.02)
         nn.init.normal_(self.time_embed.mlp[2].weight, std=0.02)
 
-    @torch.compile(mode="default")
     def forward_with_cfg(self, x, t, c, cfg_scale):
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
@@ -253,7 +251,6 @@ class FlowMatchingMLP(BaseGenerativeMLP):
         nn.init.normal_(self.time_embed[1].linear_1.weight, std=0.02)
         nn.init.normal_(self.time_embed[1].linear_2.weight, std=0.02)
 
-    @torch.compile(mode="default")
     def forward_with_cfg(self, x, t, c, cfg_scale):
         """
         Classifier-free guidance for Flow Matching.
@@ -488,12 +485,12 @@ class DiffLoss(nn.Module):
     def diffusion_sample(self, z, temperature=1.0, cfg=1.0):
         """Traditional DDPM/DDIM sampling"""
         if not cfg == 1.0:
-            noise = torch.randn(z.shape[0] // 2, self.in_channels).cuda()
+            noise = torch.randn(z.shape[0] // 2, self.in_channels, device=z.device)
             noise = torch.cat([noise, noise], dim=0)
             model_kwargs = dict(c=z, cfg_scale=cfg)
             sample_fn = self.net.forward_with_cfg
         else:
-            noise = torch.randn(z.shape[0], self.in_channels).cuda()
+            noise = torch.randn(z.shape[0], self.in_channels, device=z.device)
             model_kwargs = dict(c=z)
             sample_fn = self.net.forward
 

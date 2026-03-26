@@ -102,7 +102,7 @@ class LegendVLA(nn.Module):
         block_compile_kwargs = {
             key: value
             for key, value in compile_kwargs.items()
-            if key not in {"vision", "text", "flow"}
+            if key not in {"vision", "text", "flow", "diffloss"}
         }
 
         if compile_flags["vision"]:
@@ -111,6 +111,8 @@ class LegendVLA(nn.Module):
             compile_module_list(self.backbone.language_model.layers, block_compile_kwargs)
         if compile_flags["flow"]:
             compile_module_list(self.flow_expert.layers, block_compile_kwargs)
+        if compile_flags["diffloss"] and self.diffloss is not None:
+            self.diffloss.net = torch.compile(self.diffloss.net, **block_compile_kwargs)
 
     def resolve_compile_block_flags(
         self,
@@ -120,6 +122,7 @@ class LegendVLA(nn.Module):
             "vision": bool(compile_kwargs.get("vision", False)),
             "text": bool(compile_kwargs.get("text", False)),
             "flow": bool(compile_kwargs.get("flow", False)),
+            "diffloss": bool(compile_kwargs.get("diffloss", False)),
         }
 
     def enable_gradient_checkpointing(self, config: dict | None = None) -> None:
