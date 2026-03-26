@@ -53,6 +53,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
         video_base_fps: float = 30.0,
+        debug_capture_raw_sample: bool = False,
+        debug_capture_processed_sample: bool = False,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -69,6 +71,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.val_wds_datasets = val_wds_datasets
         self.return_dataset_info = return_dataset_info
         self.video_base_fps = float(video_base_fps)
+        self.debug_capture_raw_sample = bool(debug_capture_raw_sample)
+        self.debug_capture_processed_sample = bool(debug_capture_processed_sample)
 
         self.collator = None
         self.normalizer = None
@@ -118,6 +122,49 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
                 dtype=np.float32,
             ),
             "has_depth_values": np.array(False, dtype=bool),
+        }
+
+    def copy_debug_value(self, value):
+        """Create a detached debug copy of one sample field."""
+        if isinstance(value, np.ndarray):
+            return value.copy()
+        if isinstance(value, torch.Tensor):
+            return value.clone()
+        if isinstance(value, dict):
+            return {key: self.copy_debug_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.copy_debug_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self.copy_debug_value(item) for item in value)
+        return value
+
+    def build_debug_raw_sample(self, sample):
+        """Keep the dataset sample before state/image processing for offline inspection."""
+        debug_sample = {
+            "valid_action_len": np.array(sample["valid_action_len"], dtype=np.int32),
+            "wrist_state": sample["wrist_state"].astype(np.float32),
+            "hand_state": sample["hand_state"].astype(np.float32),
+            "wrist_action": sample["wrist_action"].astype(np.float32),
+            "hand_action": sample["hand_action"].astype(np.float32),
+            "extrinsic": sample["extrinsic"].astype(np.float32).reshape(4, 4),
+            "intrinsic": sample["intrinsic"].astype(np.float32),
+            "instruction": self.copy_debug_value(sample["instruction"]),
+            "instruction_num": np.array(sample["instruction_num"], dtype=np.int32),
+            "presence": np.array(sample.get("presence", 3), dtype=np.int32),
+            "image": sample["image"].copy(),
+        }
+        if "dataset_name" in sample:
+            debug_sample["dataset_name"] = self.copy_debug_value(sample["dataset_name"])
+        if "episode_index" in sample:
+            debug_sample["episode_index"] = np.array(sample["episode_index"], dtype=np.int32)
+        return debug_sample
+
+    def build_debug_processed_sample(self, data):
+        """Keep the exact collator input sample for offline inspection."""
+        return {
+            key: self.copy_debug_value(value)
+            for key, value in data.items()
+            if not key.startswith("debug_")
         }
 
     def sample_to_data(self, sample):
@@ -202,6 +249,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             stage="vla_dataset_output",
             context=sample_context,
         )
+
+        if self.debug_capture_raw_sample:
+            data["debug_raw_sample"] = self.build_debug_raw_sample(sample)
+        if self.debug_capture_processed_sample:
+            data["debug_processed_sample"] = self.build_debug_processed_sample(data)
         return data
 
     def build_pipeline(self):
@@ -270,6 +322,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             future_pad_mode=self.window_config.future_pad_mode,
             lowdim_slices=self.lowdim_slices,
             return_dataset_info=self.return_dataset_info,
+            debug_capture_raw_sample=self.debug_capture_raw_sample,
+            debug_capture_processed_sample=self.debug_capture_processed_sample,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -408,6 +462,10 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
         vlm_sample["depth_values"] = torch.zeros(*shape_meta["depth_values"])
         vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)
+        if self.vla_dataset.debug_capture_raw_sample:
+            vlm_sample["debug_raw_sample"] = None
+        if self.vla_dataset.debug_capture_processed_sample:
+            vlm_sample["debug_processed_sample"] = None
 
 
 class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):

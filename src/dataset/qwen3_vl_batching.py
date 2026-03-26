@@ -242,6 +242,7 @@ class Qwen3VLBatchProcessor:
         messages_batch: list[list[dict[str, Any]]],
         batch_samples: list[dict[str, Any]],
         add_generation_prompt: bool,
+        return_rendered_texts: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Run the native Qwen3-VL processor on one batch.
 
@@ -269,6 +270,8 @@ class Qwen3VLBatchProcessor:
         batch.setdefault("video_grid_thw", None)
         if "mm_token_type_ids" not in batch:
             batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
+        if return_rendered_texts:
+            batch["rendered_texts"] = rendered_texts
         return batch
 
     def build_labels(
