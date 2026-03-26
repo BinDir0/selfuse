@@ -171,7 +171,7 @@ def get_parser():
     parser.add_argument(
         "--slam_backend",
         type=str,
-        default="droid",
+        default="dpvo",
         choices=["droid", "dpvo"],
         help="SLAM backend for stage3",
     )

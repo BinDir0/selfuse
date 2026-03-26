@@ -37,7 +37,7 @@ class WorkerRuntime:
         detect_half_precision: bool = True,
         infiller_window_batch_size: int = 64,
         rebuild_cam_space_cache: bool = False,
-        slam_backend: str = "droid",
+        slam_backend: str = "dpvo",
         depth_backend: str = "metric3d",
         depth_predict_all_frames: bool = True,
         any4d_repo_root: str = None,

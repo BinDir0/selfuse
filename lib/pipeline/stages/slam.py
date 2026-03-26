@@ -125,7 +125,7 @@ def _run_dpvo_backend(frame_source, masks, calib):
 
 
 def _run_slam_backend(args, frame_source, masks, calib, droid_net=None):
-    slam_backend = getattr(args, "slam_backend", "droid")
+    slam_backend = getattr(args, "slam_backend", "dpvo")
     if slam_backend == "droid":
         return _run_droid_backend(frame_source, masks, calib, droid_net=droid_net)
     if slam_backend == "dpvo":
@@ -336,7 +336,17 @@ def _save_slam_outputs(seq_folder, start_idx, end_idx, tstamp, disps, traj, foca
     return save_path
 
 
-def _print_timing(video_path: str, timing: dict, num_keyframes: int, depth_frame_count: int):
+def _print_timing(
+    video_path: str,
+    timing: dict,
+    num_keyframes: int,
+    depth_frame_count: int,
+    *,
+    slam_backend: str,
+    depth_backend: str,
+    predict_all_frames: bool,
+    used_depth_cache: bool,
+):
     total_time = timing["total"]
     print(f"\n{'=' * 60}")
     print(f"SLAM Stage Timing for {os.path.basename(video_path)}")
@@ -346,6 +356,10 @@ def _print_timing(video_path: str, timing: dict, num_keyframes: int, depth_frame
         pct = elapsed / total_time * 100 if total_time > 0 else 0
         print(f"  {key:20s}: {elapsed:7.2f}s ({pct:5.1f}%)")
     print(f"  {'total':20s}: {total_time:7.2f}s")
+    print(f"  {'slam_backend':20s}: {slam_backend}")
+    print(f"  {'depth_backend':20s}: {depth_backend}")
+    print(f"  {'depth_scope':20s}: {'all_frames' if predict_all_frames else 'keyframes'}")
+    print(f"  {'depth_cache_used':20s}: {used_depth_cache}")
     print(f"  {'keyframes':20s}: {num_keyframes}")
     print(f"  {'depth_frames':20s}: {depth_frame_count}")
     print(f"{'=' * 60}\n")
@@ -368,7 +382,14 @@ def hawor_slam(
     seq_folder = _resolve_seq_folder(args.video_path, seq_folder)
     os.makedirs(seq_folder, exist_ok=True)
     frame_source = _resolve_frame_source(args.video_path, frame_source)
-    vprint(f"Running slam on {seq_folder} ...")
+    slam_backend = getattr(args, "slam_backend", "dpvo")
+    depth_backend = getattr(args, "depth_backend", "metric3d")
+    predict_all_frames = bool(getattr(args, "depth_predict_all_frames", True))
+    vprint(
+        f"Running slam on {seq_folder} "
+        f"(slam_backend={slam_backend}, depth_backend={depth_backend}, "
+        f"depth_scope={'all_frames' if predict_all_frames else 'keyframes'}) ..."
+    )
 
     t0 = time.time()
     masks = _load_masks(seq_folder, start_idx, end_idx)
@@ -399,7 +420,7 @@ def hawor_slam(
     keyframe_depths = _gather_keyframe_depths(tstamp, depth_frame_indices, depth_predictions)
     if used_cache:
         vprint(f"Loaded cached dense depth from {depth_cache_path}")
-    elif bool(getattr(args, "depth_predict_all_frames", True)):
+    elif predict_all_frames:
         vprint(f"Saved dense depth cache to {depth_cache_path}")
     timing["3_depth"] = time.time() - t0
 
@@ -413,7 +434,16 @@ def hawor_slam(
     timing["5_save"] = time.time() - t0
 
     timing["total"] = time.time() - start_time
-    _print_timing(args.video_path, timing, len(tstamp), len(depth_frame_indices))
+    _print_timing(
+        args.video_path,
+        timing,
+        len(tstamp),
+        len(depth_frame_indices),
+        slam_backend=slam_backend,
+        depth_backend=depth_backend,
+        predict_all_frames=predict_all_frames,
+        used_depth_cache=used_cache,
+    )
 
 
 if __name__ == "__main__":
@@ -421,7 +451,7 @@ if __name__ == "__main__":
     parser.add_argument("--img_focal", type=float)
     parser.add_argument("--video_path", type=str, default="")
     parser.add_argument("--input_type", type=str, default="file")
-    parser.add_argument("--slam_backend", type=str, default="droid", choices=["droid", "dpvo"])
+    parser.add_argument("--slam_backend", type=str, default="dpvo", choices=["droid", "dpvo"])
     parser.add_argument("--depth_backend", type=str, default="metric3d", choices=["metric3d", "any4d"])
     parser.add_argument(
         "--depth_predict_all_frames",

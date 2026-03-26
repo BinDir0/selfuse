@@ -29,7 +29,7 @@ class StageExecutionConfig:
     rebuild_cam_space_cache: bool = False
     detect_device: str = "cuda:0"
     detect_half_precision: bool = True
-    slam_backend: str = "droid"
+    slam_backend: str = "dpvo"
     depth_backend: str = "metric3d"
     depth_predict_all_frames: bool = True
     any4d_repo_root: Optional[str] = None
@@ -55,7 +55,7 @@ class StageExecutionConfig:
             rebuild_cam_space_cache=bool(getattr(ns, "rebuild_cam_space_cache", False)),
             detect_device=getattr(ns, "detect_device", "cuda:0"),
             detect_half_precision=bool(getattr(ns, "detect_half_precision", True)),
-            slam_backend=getattr(ns, "slam_backend", "droid"),
+            slam_backend=getattr(ns, "slam_backend", "dpvo"),
             depth_backend=getattr(ns, "depth_backend", "metric3d"),
             depth_predict_all_frames=bool(getattr(ns, "depth_predict_all_frames", True)),
             any4d_repo_root=getattr(ns, "any4d_repo_root", None),
