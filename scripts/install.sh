@@ -30,8 +30,7 @@ conda activate legendvla
 
 # Install LegendVLA dependencies inside the repository root.
 cd "${ROOT_DIR}"
-pip install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 \
-    torch-tensorrt==2.8.0+cu128 tensorrt-cu12==10.12.0.36 \
+pip install torch==2.10.0+cu128 torchvision==0.25.0+cu128 torchaudio==2.10.0+cu128 \
     -i https://pypi.tuna.tsinghua.edu.cn/simple \
     -f https://mirrors.aliyun.com/pytorch-wheels/cu128/ \
     --extra-index-url https://download.pytorch.org/whl/cu128

@@ -36,7 +36,7 @@ PyRender
 scipy 
 matplotlib
 seaborn
-xformers==0.0.32.post2 # for torch 2.8.0
+xformers==0.0.35 # for torch 2.10.0
 websockets
 scikit-learn
 webdataset
