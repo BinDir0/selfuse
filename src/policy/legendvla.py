@@ -131,7 +131,7 @@ class LegendVLA(nn.Module):
         Args:
             config: per-component checkpointing config. Keys:
                 text:           {enabled: bool, every_n: int}
-                vision:         {enabled: bool}
+                vision:         {enabled: bool, every_n: int}
                 action_expert:  {enabled: bool, every_n: int}
                 When *config* is None every component is fully checkpointed
                 (backward compatible with the old parameterless call).
@@ -142,18 +142,20 @@ class LegendVLA(nn.Module):
         vision_cfg = config.get("vision", {})
         expert_cfg = config.get("action_expert", {})
 
-        # Defaults: enabled=True, every_n=1 (same as the old behaviour)
+        # Defaults: enabled=True, every_n=1 (same as the old behaviour).
+        # every_n=0 disables checkpointing for that component.
         text_enabled = text_cfg.get("enabled", True)
         text_every_n = text_cfg.get("every_n", 1) if text_enabled else 0
         vision_enabled = vision_cfg.get("enabled", True)
+        vision_every_n = vision_cfg.get("every_n", 1) if vision_enabled else 0
         expert_enabled = expert_cfg.get("enabled", True)
-        expert_every_n = expert_cfg.get("every_n", 1)
+        expert_every_n = expert_cfg.get("every_n", 1) if expert_enabled else 0
 
         self.backbone.enable_gradient_checkpointing(
             text_every_n=text_every_n,
-            vision_enabled=vision_enabled,
+            vision_every_n=vision_every_n,
         )
-        if expert_enabled:
+        if expert_every_n > 0:
             self.flow_expert.enable_gradient_checkpointing(every_n=expert_every_n)
 
     def disable_gradient_checkpointing(self) -> None:

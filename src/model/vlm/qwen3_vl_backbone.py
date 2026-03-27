@@ -398,13 +398,16 @@ class Qwen3VLBackboneWrapper(nn.Module):
     def enable_gradient_checkpointing(
         self,
         text_every_n: int = 1,
-        vision_enabled: bool = True,
+        vision_every_n: int = 1,
     ) -> None:
         """Enable checkpointing on the vision tower and the training text wrapper.
 
         Args:
-            text_every_n: checkpoint every N-th text layer. 0 disables text checkpointing.
-            vision_enabled: whether to checkpoint the vision tower.
+            text_every_n: checkpoint every N-th text layer. 0 disables.
+            vision_every_n: checkpoint every N-th vision block. 0 disables.
+                HF's GradientCheckpointingLayer checks a per-block boolean flag,
+                so we first enable all blocks then selectively disable the
+                non-selected ones.
         """
         checkpoint_func = partial(
             checkpoint, use_reentrant=False, preserve_rng_state=False,
@@ -417,7 +420,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
                 layer.gradient_checkpointing = True
                 layer._gradient_checkpointing_func = checkpoint_func
 
-        if vision_enabled:
+        if vision_every_n > 0:
             visual_model = self.base_model.model.visual
             enable_method = getattr(visual_model, "gradient_checkpointing_enable", None)
             if callable(enable_method):
@@ -427,6 +430,11 @@ class Qwen3VLBackboneWrapper(nn.Module):
                         "preserve_rng_state": False,
                     },
                 )
+            # Selective every-N: disable checkpointing on non-selected blocks.
+            if vision_every_n > 1 and hasattr(visual_model, "blocks"):
+                for i, blk in enumerate(visual_model.blocks):
+                    if i % vision_every_n != 0:
+                        blk.gradient_checkpointing = False
 
     def disable_gradient_checkpointing(self) -> None:
         """Disable checkpointing on the vision tower and the training text wrapper."""

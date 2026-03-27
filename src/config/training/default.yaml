@@ -64,6 +64,7 @@ training:
       every_n: 1           # checkpoint every N-th text layer (1 = all layers)
     vision:
       enabled: False
+      every_n: 1           # checkpoint every N-th vision block (1 = all blocks)
     action_expert:
       enabled: False
       every_n: 1           # checkpoint every N-th action expert layer
