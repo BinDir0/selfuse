@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from src.policy.legendvla import LegendVLA
-from src.test.debug_dataloader_batch import build_dataloader, load_config, prepare_dataset
+from src.tests.debug_dataloader_batch import build_dataloader, load_config, prepare_dataset
 from src.utils.embedding_analysis import (
     analyze_embedding_distribution,
     plot_embedding_l2norm_by_position,

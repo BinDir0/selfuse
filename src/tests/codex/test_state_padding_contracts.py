@@ -4,7 +4,7 @@ import numpy as np
 
 import pytest
 
-from src.test.codex.common import build_wrapper_stub
+from src.tests.codex.common import build_wrapper_stub
 
 
 def test_prepare_states_repeat_left_pads_and_promotes_n_states():

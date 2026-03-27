@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from src.test.debug_dataloader_batch import (
+from src.tests.debug_dataloader_batch import (
     build_dataloader,
     build_sample_export,
     load_config,

@@ -3,6 +3,7 @@ WebDataset-based VLA datasets for LegendVLA training and normalizer fitting.
 """
 
 import warnings
+import time
 from collections import Counter
 from typing import Dict, List, Optional
 
@@ -55,6 +56,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         video_base_fps: float = 30.0,
         debug_capture_raw_sample: bool = False,
         debug_capture_processed_sample: bool = False,
+        debug_profile_timing: bool = False,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -73,6 +75,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.video_base_fps = float(video_base_fps)
         self.debug_capture_raw_sample = bool(debug_capture_raw_sample)
         self.debug_capture_processed_sample = bool(debug_capture_processed_sample)
+        self.debug_profile_timing = bool(debug_profile_timing)
 
         self.collator = None
         self.normalizer = None
@@ -271,13 +274,25 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             })
 
         def preprocess_fn(sample):
+            worker_info = torch.utils.data.get_worker_info()
+            worker_id = -1 if worker_info is None else int(worker_info.id)
+            preprocess_start = time.perf_counter()
             try:
+                sample_to_data_start = time.perf_counter()
                 data = self.sample_to_data(sample)
+                sample_to_data_s = time.perf_counter() - sample_to_data_start
                 torch_data = dict_apply(
                     data,
                     lambda x: torch.from_numpy(x)
                     if isinstance(x, np.ndarray) else x,
                 )
+                preprocess_total_s = time.perf_counter() - preprocess_start
+                if self.debug_profile_timing:
+                    torch_data["debug_sample_profile"] = {
+                        "worker_id": worker_id,
+                        "sample_to_data_s": sample_to_data_s,
+                        "preprocess_total_s": preprocess_total_s,
+                    }
                 return torch_data
             except NonFiniteDataError:
                 raise
@@ -324,6 +339,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             return_dataset_info=self.return_dataset_info,
             debug_capture_raw_sample=self.debug_capture_raw_sample,
             debug_capture_processed_sample=self.debug_capture_processed_sample,
+            debug_profile_timing=self.debug_profile_timing,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -466,6 +482,8 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
             vlm_sample["debug_raw_sample"] = None
         if self.vla_dataset.debug_capture_processed_sample:
             vlm_sample["debug_processed_sample"] = None
+        if self.vla_dataset.debug_profile_timing:
+            vlm_sample["debug_sample_profile"] = None
 
 
 class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):

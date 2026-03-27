@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from src.policy.legendvla import LegendVLA
-from src.test.debug_dataloader_batch import build_dataloader, load_config, prepare_dataset
+from src.tests.debug_dataloader_batch import build_dataloader, load_config, prepare_dataset
 from src.tests.test_legendvla_hooks import run_with_hooks, visualize_stats
 from src.utils.pytorch_util import dict_apply
 

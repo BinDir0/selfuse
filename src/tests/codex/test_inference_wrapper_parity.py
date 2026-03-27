@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from src.test.codex.common import (
+from src.tests.codex.common import (
     build_dummy_collator,
     build_wrapper_stub,
     make_expected_vla_sample,

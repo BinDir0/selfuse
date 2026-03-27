@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import time
 from typing import Any
 
 import torch
@@ -30,11 +31,13 @@ class UnifiedVLACollator:
         formatter: Qwen3VLChatFormatter,
         batch_processor: Qwen3VLBatchProcessor,
         debug_capture_texts: bool = False,
+        debug_profile_timing: bool = False,
     ):
         self.formatter = formatter
         self.batch_processor = batch_processor
         self.ignore_index = batch_processor.ignore_index
         self.debug_capture_texts = bool(debug_capture_texts)
+        self.debug_profile_timing = bool(debug_profile_timing)
 
         if self.formatter.state_token != self.batch_processor.state_token:
             raise ValueError("Formatter and batch processor must share the same state token.")
@@ -63,6 +66,7 @@ class UnifiedVLACollator:
         - Prompt-only inputs use `True` so the rendered prompt ends exactly at the assistant prefix where
           generation should begin.
         """
+        collate_start = time.perf_counter()
         full_messages = [self.formatter.build_messages(sample, prompt_only=False) for sample in samples]
         # Keep the original assistant turn only. Appending a fresh assistant prefix here would shift labels.
         full_batch = self.batch_processor.encode_messages(
@@ -136,6 +140,27 @@ class UnifiedVLACollator:
             batch["debug_prompt_messages"] = prompt_messages
             batch["debug_full_texts"] = full_batch["rendered_texts"]
             batch["debug_prompt_texts"] = prompt_batch["rendered_texts"]
+
+        if self.debug_profile_timing:
+            sample_profiles = [
+                sample.get("debug_sample_profile")
+                for sample in samples
+                if sample.get("debug_sample_profile") is not None
+            ]
+            worker_ids = sorted({int(profile["worker_id"]) for profile in sample_profiles})
+            sample_to_data_total_s = sum(float(profile["sample_to_data_s"]) for profile in sample_profiles)
+            preprocess_total_s = sum(float(profile["preprocess_total_s"]) for profile in sample_profiles)
+            profiled_samples = len(sample_profiles)
+            collate_total_s = time.perf_counter() - collate_start
+            batch["debug_collate_profile"] = {
+                "worker_ids": worker_ids,
+                "profiled_samples": profiled_samples,
+                "collator_s": collate_total_s,
+                "sample_to_data_total_s": sample_to_data_total_s,
+                "sample_to_data_avg_s": sample_to_data_total_s / profiled_samples if profiled_samples else 0.0,
+                "preprocess_total_s": preprocess_total_s,
+                "preprocess_avg_s": preprocess_total_s / profiled_samples if profiled_samples else 0.0,
+            }
 
         return batch
 
