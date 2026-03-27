@@ -1,7 +1,7 @@
 # @package _global_
 
 pretrained:
-  model_name_or_path: /share_data/chenzhang/checkpoints/Qwen3-VL-4B-Instruct
+  model_name_or_path: /share_data/chenzhang/checkpoints/Qwen3-VL-2B-Instruct
   trust_remote_code: False
   torch_dtype: bfloat16
   # Attention backend used by the Qwen3-VL text tower and the Qwen3 action expert.
@@ -21,10 +21,10 @@ runtime:
   knowledge_insulation: True  # True = full, False = off, int N = insulate first N layers
 
 dims:
-  vlm_hidden_size: 2560
+  vlm_hidden_size: 2048
   action_hidden_size: 1024
   time_hidden_size: 1024
-  diffloss_z_channels: 2048
+  diffloss_z_channels: 1024
   action_dim: 48
   state_dim: 48
 
@@ -92,7 +92,7 @@ policy:
     time_hidden_size: ${dims.time_hidden_size}
     hidden_size: ${dims.action_hidden_size}
     intermediate_size: 4096
-    num_heads: 32
+    num_heads: 8
     attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
   action_decoder:
@@ -113,10 +113,10 @@ policy:
     use_mlp_layer_norm: False
   diffloss:
     _target_: src.model.action.diffloss.DiffLoss
-    target_channels: ${eval:'${dims.action_dim}*4'}
+    target_channels: ${eval:'${dims.action_dim}*${policy.ar_action_chunk_size}'}
     z_channels: ${dims.diffloss_z_channels}
-    depth: 8
-    width: 2048
+    depth: 4
+    width: 1024
     num_sampling_steps: "100"
     grad_checkpointing: False
     use_ddim_sampling: True
@@ -134,7 +134,7 @@ policy:
   flow_sig_min: ${flow.sig_min}
   num_inference_steps: ${flow.num_inference_steps}
   ar_action_noise_std: 0.02
-  ar_action_chunk_size: 4
+  ar_action_chunk_size: 8
   diffloss_micro_batch_size: 16
   use_rtc: True
   rtc_delay_strategy: exp

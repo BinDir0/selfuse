@@ -56,12 +56,13 @@ training:
     vision: True  # Keep vision blocks on by default.
     text: True  # Keep text decoder blocks on by default.
     flow: True  # Keep action-expert blocks on by default.
+    diffloss: True  # Keep diffloss blocks on by default.
   # Per-component gradient checkpointing. Set to plain `False` to disable all,
   # or `True` to enable all with every_n=1 (backward compatible).
   gradient_checkpointing:
     text:
-      enabled: False
-      every_n: 1           # checkpoint every N-th text layer (1 = all layers)
+      enabled: True
+      every_n: 2           # checkpoint every N-th text layer (1 = all layers)
     vision:
       enabled: False
       every_n: 1           # checkpoint every N-th vision block (1 = all blocks)
