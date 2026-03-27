@@ -1,4 +1,53 @@
+## environment set up
 
+
+### 1. 创建环境
+
+```bash
+conda create -n rowah python=3.10 -y
+conda activate rowah
+pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -U xformers --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 3. HaWoR / RoWaH Python 依赖
+
+在**仓库根目录**：
+
+```bash
+cd /path/to/RoWaH
+pip install -r requirements.txt
+pip install pytorch-lightning==2.2.4 --no-deps
+pip install lightning-utilities torchmetrics==1.4.0
+```
+
+
+### 4. 额外的库
+
+```bash
+pip install --no-build-isolation mmcv
+pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable
+pip install --no-build-isolation git+https://github.com/mattloper/chumpy
+```
+
+
+### 5. 装模块（DROID / DPVO /Metric 3D）
+
+```bash
+- **DPVO** : cd thirdparty/DPVO && pip install . --no-build-isolation
+- **DROID-SLAM** : cd thirdparty/DROID-SLAM && python setup.py install
+- **Any4D** : pip install -e thirdparty/Any4D  --no-deps
+```
+
+
+### 6. 权重与 MANO
+
+- HaWoR / 检测器等：见原 HaWoR 说明（`weights/hawor/`、`weights/external/droid.pth` 等）。
+- Any4D：`checkpoints/any4d_4v_combined.pth`（可用仓库内 `scripts/download_any4d_4v_combined_checkpoint.sh`）。
+- MANO 模型放入 `_DATA/data/`、`_DATA/data_left/` 约定路径。
+
+
+---
 
 ## Usage
 
@@ -98,7 +147,7 @@ python scripts/batch_infer.py \
   --stages detect_track,motion --scheduler_mode wave
 
 python scripts/batch_infer.py \
-  --video_list videos_10.txt --gpus 0,6 \
+  --video_list videos_10.txt --gpus 0,1,2,3,4,5,6,7\
   --stages slam --scheduler_mode wave \
   --slam_backend dpvo --any4d
 

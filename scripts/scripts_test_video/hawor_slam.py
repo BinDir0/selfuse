@@ -150,7 +150,6 @@ def _save_dense_depth_uint16_npz(
         depths_uint16=u16,
         height=np.int32(stack.shape[1]),
         width=np.int32(stack.shape[2]),
-        depth_backend=np.array([str(depth_backend)]),
     )
 
 
@@ -458,6 +457,17 @@ def hawor_slam(
     calib[:2] = focal
     timing['1_load_masks'] = time.time() - t0
 
+    # ------------------------------------------------------------
+    # VRAM peak measurement (stage3: slam -> depth -> save)
+    # Reset here so peak is measured for this stage invocation.
+    # ------------------------------------------------------------
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+
     # -------------------------------------------------------------------------
     # DROID 分支（深度可选 metric3d / any4d，与 CLI --depth_backend 一致）
     # -------------------------------------------------------------------------
@@ -603,6 +613,18 @@ def hawor_slam(
         print(f"  {'total':20s}: {total_time:7.2f}s")
         print(f"  {'keyframes':20s}: {n}")
         print(f"{'='*60}\n")
+
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+                max_alloc_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+                max_reserved_mb = torch.cuda.max_memory_reserved() / (1024 ** 2)
+                print(
+                    f"  [VRAM peak] max_alloc={max_alloc_mb:.1f}MB "
+                    f"max_reserved={max_reserved_mb:.1f}MB\n"
+                )
+            except Exception:
+                pass
         return
 
     # -------------------------------------------------------------------------
@@ -850,6 +872,18 @@ def hawor_slam(
     if len(kf_idx) != n_save:
         print(f"  {'Metric3D subsampled':20s}: {len(kf_idx)}")
     print(f"{'='*60}\n")
+
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+            max_alloc_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            max_reserved_mb = torch.cuda.max_memory_reserved() / (1024 ** 2)
+            print(
+                f"  [VRAM peak] max_alloc={max_alloc_mb:.1f}MB "
+                f"max_reserved={max_reserved_mb:.1f}MB\n"
+            )
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
