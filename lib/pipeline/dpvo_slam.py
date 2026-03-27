@@ -15,11 +15,19 @@ if str(DPVO_ROOT) not in sys.path:
     sys.path.insert(0, str(DPVO_ROOT))
 
 
-def _frame_stream(frame_source, calib, stride=1, max_size=800):
+def _frame_stream(frame_source, calib, stride=1, max_size=800, frame_indices=None):
     """Yield DPVO-ready frames and intrinsics from a generic frame_source."""
     fx, fy, cx, cy = np.array(calib[:4], dtype=np.float64)
-    for t in range(0, len(frame_source), stride):
-        image = frame_source.get_frame(t, rgb=False)
+    if frame_indices is None:
+        frame_pairs = [(idx, idx) for idx in range(0, len(frame_source), stride)]
+    else:
+        frame_pairs = [
+            (local_idx, int(frame_indices[local_idx]))
+            for local_idx in range(0, len(frame_indices), stride)
+        ]
+
+    for local_idx, t in frame_pairs:
+        image = frame_source.get_frame(local_idx, rgb=False)
         if image is None:
             break
         height, width = image.shape[:2]
@@ -84,7 +92,7 @@ def _build_disps_from_patches(slam, height, width):
     return np.stack(disps_list, axis=0)
 
 
-def run_dpvo_slam(imagedir, masks, calib=None, stride=1):
+def run_dpvo_slam(imagedir, masks, calib=None, stride=1, frame_indices=None):
     """Run DPVO and return trajectory/disparity arrays for stage3 scale estimation."""
     del masks  # DPVO itself does not consume the hand masks.
 
@@ -133,7 +141,7 @@ def run_dpvo_slam(imagedir, masks, calib=None, stride=1):
 
     slam = None
     with torch.inference_mode():
-        for t, image, intrinsics in _frame_stream(frame_source, calib, stride, max_size=800):
+        for t, image, intrinsics in _frame_stream(frame_source, calib, stride, max_size=800, frame_indices=frame_indices):
             image_t = torch.from_numpy(image).permute(2, 0, 1).float().cuda()
             intrinsics_t = torch.from_numpy(intrinsics).float().cuda()
 

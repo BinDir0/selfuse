@@ -43,6 +43,7 @@ def _build_runtime(config: BatchRunConfig, gpu: int) -> WorkerRuntime:
         any4d_checkpoint_path=config.any4d_checkpoint_path,
         any4d_resolution_set=config.any4d_resolution_set,
         any4d_use_amp=config.any4d_use_amp,
+        stage3_tmp_root=config.stage3_tmp_root,
     )
 
 

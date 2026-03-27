@@ -34,6 +34,7 @@ class StageExecutionConfig:
     any4d_checkpoint_path: Optional[str] = None
     any4d_resolution_set: Optional[int] = None
     any4d_use_amp: Optional[bool] = None
+    stage3_tmp_root: Optional[str] = None
     vis_mode: str = "world"
     skip_vis: bool = True
 
@@ -58,6 +59,7 @@ class StageExecutionConfig:
             any4d_checkpoint_path=getattr(ns, "any4d_checkpoint_path", None),
             any4d_resolution_set=getattr(ns, "any4d_resolution_set", None),
             any4d_use_amp=getattr(ns, "any4d_use_amp", None),
+            stage3_tmp_root=getattr(ns, "stage3_tmp_root", None),
         )
 
     def to_stage_args(self, video_path: str):
@@ -81,6 +83,7 @@ class StageExecutionConfig:
             any4d_checkpoint_path=self.any4d_checkpoint_path,
             any4d_resolution_set=self.any4d_resolution_set,
             any4d_use_amp=self.any4d_use_amp,
+            stage3_tmp_root=self.stage3_tmp_root,
             vis_mode=self.vis_mode,
             skip_vis=self.skip_vis,
         )

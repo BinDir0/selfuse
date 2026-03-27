@@ -39,6 +39,7 @@ class BatchRunConfig:
     any4d_checkpoint_path: Optional[str]
     any4d_resolution_set: Optional[int]
     any4d_use_amp: Optional[bool]
+    stage3_tmp_root: Optional[str]
     max_stage_retries: int
     wave_stall_timeout_sec: int
     workers_per_gpu: int
@@ -100,6 +101,7 @@ class BatchRunConfig:
             any4d_checkpoint_path=args.any4d_checkpoint_path,
             any4d_resolution_set=args.any4d_resolution_set,
             any4d_use_amp=args.any4d_use_amp,
+            stage3_tmp_root=args.stage3_tmp_root,
             max_stage_retries=args.max_stage_retries,
             wave_stall_timeout_sec=args.wave_stall_timeout_sec,
             workers_per_gpu=args.workers_per_gpu,

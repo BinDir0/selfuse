@@ -70,6 +70,7 @@ def _build_runtime_from_args(ns):
         any4d_checkpoint_path=ns.any4d_checkpoint_path,
         any4d_resolution_set=ns.any4d_resolution_set,
         any4d_use_amp=ns.any4d_use_amp,
+        stage3_tmp_root=ns.stage3_tmp_root,
     )
 
 
@@ -232,6 +233,7 @@ def get_parser():
     parser.add_argument("--any4d_checkpoint_path", type=str, default=None)
     parser.add_argument("--any4d_resolution_set", type=int, default=None)
     parser.add_argument("--any4d_use_amp", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--stage3_tmp_root", type=str, default=None)
     parser.add_argument("--detect_batch_size", type=int, default=128, help="Batch size for YOLO detection (default 128)")
     parser.add_argument("--detect_io_workers", type=int, default=8, help="Number of DataLoader workers for parallel frame loading")
     parser.add_argument("--infiller_window_batch_size", type=int, default=64, help="Number of infiller windows to batch per forward pass")

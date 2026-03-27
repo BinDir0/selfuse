@@ -178,6 +178,12 @@ def get_parser():
     parser.add_argument("--any4d_checkpoint_path", type=str, default=None, help="Optional Any4D checkpoint override")
     parser.add_argument("--any4d_resolution_set", type=int, default=None, help="Optional Any4D inference resolution override")
     parser.add_argument(
+        "--stage3_tmp_root",
+        type=str,
+        default=None,
+        help="Scratch root for stage3 shared frame caches (default: env HAWOR_STAGE3_TMP_ROOT or /DATA/guantianrui/tmp)",
+    )
+    parser.add_argument(
         "--any4d_use_amp",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -255,6 +261,7 @@ def main():
     print(f"Chunk batch size (motion): {config.chunk_batch_size}")
     print(f"Any4D batch size (slam): {config.any4d_batch_size}")
     print("Stage3 backends: slam=dpvo, depth=any4d")
+    print(f"Stage3 tmp root: {config.stage3_tmp_root or os.environ.get('HAWOR_STAGE3_TMP_ROOT', '/DATA/guantianrui/tmp')}")
     if config.depth_predict_all_frames is None:
         print("Dense depth all frames (slam): env HAWOR_DEPTH_PREDICT_ALL_FRAMES or default on")
     else:

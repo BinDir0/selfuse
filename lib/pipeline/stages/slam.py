@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import math
 import os
 import shutil
@@ -24,7 +25,7 @@ from lib.pipeline.any4d_depth import (
 )
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
-from lib.pipeline.frame_source import build_frame_source
+from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
 from lib.pipeline.slam_geom_utils import est_calib, get_dimention
 
 
@@ -85,6 +86,21 @@ def _resolve_any4d_batch_size(default_batch_size: int) -> int:
     return int(os.environ.get("HAWOR_ANY4D_BATCH_SIZE", default_batch_size))
 
 
+def _resolve_stage3_tmp_root(args) -> str:
+    tmp_root = getattr(args, "stage3_tmp_root", None) or os.environ.get("HAWOR_STAGE3_TMP_ROOT") or "/DATA/guantianrui/tmp"
+    tmp_root = os.path.abspath(os.path.expanduser(tmp_root))
+    if not os.path.isdir(tmp_root):
+        raise FileNotFoundError(f"Stage3 tmp root does not exist: {tmp_root}")
+    if not os.access(tmp_root, os.W_OK | os.X_OK):
+        raise PermissionError(f"Stage3 tmp root is not writable: {tmp_root}")
+    return tmp_root
+
+
+def _keep_stage3_tmp() -> bool:
+    value = os.environ.get("HAWOR_STAGE3_KEEP_TMP", "").strip().lower()
+    return value in ("1", "true", "yes", "y", "on")
+
+
 def _direct_frame_path(frame_source, frame_idx: int):
     image_paths = getattr(frame_source, "image_paths", None)
     if image_paths is None:
@@ -95,15 +111,17 @@ def _direct_frame_path(frame_source, frame_idx: int):
     return path if os.path.exists(path) else None
 
 
-def _stage3_frame_cache_dir(seq_folder: str, start_idx: int, end_idx: int) -> str:
-    return os.path.join(seq_folder, "SLAM", f"_stage3_frames_{start_idx}_{end_idx}")
+def _stage3_frame_cache_dir(tmp_root: str, seq_folder: str, start_idx: int, end_idx: int) -> str:
+    seq_hash = hashlib.sha1(os.path.abspath(seq_folder).encode("utf-8")).hexdigest()[:12]
+    seq_name = Path(seq_folder).name
+    return os.path.join(tmp_root, "hawor_stage3_frames", f"{seq_name}_{seq_hash}_{start_idx}_{end_idx}")
 
 
 def _stage3_frame_cache_marker(cache_dir: str) -> str:
     return os.path.join(cache_dir, ".ready")
 
 
-def _resolve_stage3_frame_paths(frame_source, frame_ids: np.ndarray, seq_folder: str, start_idx: int, end_idx: int):
+def _build_stage3_workspace(frame_source, frame_ids: np.ndarray, seq_folder: str, start_idx: int, end_idx: int, tmp_root: str):
     frame_id_list = [int(frame_id) for frame_id in np.asarray(frame_ids, dtype=np.int64).tolist()]
     direct_paths = {}
     use_direct_paths = True
@@ -114,15 +132,29 @@ def _resolve_stage3_frame_paths(frame_source, frame_ids: np.ndarray, seq_folder:
             break
         direct_paths[frame_id] = path
     if use_direct_paths:
-        return direct_paths
+        ordered_paths = [direct_paths[frame_id] for frame_id in frame_id_list]
+        return {
+            "frame_path_map": direct_paths,
+            "frame_source": ImageFolderFrameSource(ordered_paths),
+            "workspace_dir": None,
+            "ready_marker": None,
+            "materialized": False,
+        }
 
-    cache_dir = _stage3_frame_cache_dir(seq_folder, start_idx, end_idx)
+    cache_dir = _stage3_frame_cache_dir(tmp_root, seq_folder, start_idx, end_idx)
     ready_marker = _stage3_frame_cache_marker(cache_dir)
     expected_paths = {frame_id: os.path.join(cache_dir, f"{frame_id:06d}.png") for frame_id in frame_id_list}
 
     if os.path.isfile(ready_marker):
         if all(os.path.isfile(path) for path in expected_paths.values()):
-            return expected_paths
+            ordered_paths = [expected_paths[frame_id] for frame_id in frame_id_list]
+            return {
+                "frame_path_map": expected_paths,
+                "frame_source": ImageFolderFrameSource(ordered_paths),
+                "workspace_dir": cache_dir,
+                "ready_marker": ready_marker,
+                "materialized": True,
+            }
         try:
             os.remove(ready_marker)
         except OSError:
@@ -139,14 +171,35 @@ def _resolve_stage3_frame_paths(frame_source, frame_ids: np.ndarray, seq_folder:
             raise RuntimeError(f"Failed to write stage3 frame cache image: {out_path}")
 
     Path(ready_marker).touch()
-    return expected_paths
+    ordered_paths = [expected_paths[frame_id] for frame_id in frame_id_list]
+    return {
+        "frame_path_map": expected_paths,
+        "frame_source": ImageFolderFrameSource(ordered_paths),
+        "workspace_dir": cache_dir,
+        "ready_marker": ready_marker,
+        "materialized": True,
+    }
+
+
+def _cleanup_stage3_workspace(workspace: dict, *, success: bool):
+    workspace_dir = workspace.get("workspace_dir")
+    ready_marker = workspace.get("ready_marker")
+    if not workspace_dir or not os.path.isdir(workspace_dir):
+        return
+    if success:
+        if _keep_stage3_tmp():
+            return
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        return
+    if ready_marker is None or not os.path.isfile(ready_marker):
+        shutil.rmtree(workspace_dir, ignore_errors=True)
 
 
 def _dpvo_cache_path(seq_folder: str, start_idx: int, end_idx: int) -> str:
     return os.path.join(seq_folder, "SLAM", f"dpvo_raw_{start_idx}_{end_idx}.npz")
 
 
-def _run_dpvo_with_cache(frame_source, masks, calib, seq_folder: str, start_idx: int, end_idx: int):
+def _run_dpvo_with_cache(frame_source, masks, calib, seq_folder: str, start_idx: int, end_idx: int, frame_indices: Optional[np.ndarray] = None):
     cache_path = _dpvo_cache_path(seq_folder, start_idx, end_idx)
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
@@ -157,7 +210,7 @@ def _run_dpvo_with_cache(frame_source, masks, calib, seq_folder: str, start_idx:
     ran_fresh = not os.path.exists(cache_path)
     if ran_fresh:
         t0 = time.time()
-        traj, disps, traj_tstamp, disp_tstamp = run_dpvo_slam(frame_source, masks=masks, calib=calib)
+        traj, disps, traj_tstamp, disp_tstamp = run_dpvo_slam(frame_source, masks=masks, calib=calib, frame_indices=frame_indices)
         dpvo_vo_sec = time.time() - t0
         wall_sec = np.array([dpvo_vo_sec], dtype=np.float64)
         np.savez(
@@ -306,6 +359,7 @@ def _predict_any4d_depths_for_frames(
     seq_folder: str,
     start_idx: int,
     end_idx: int,
+    frame_path_map,
     any4d_cache_suffix: str = "",
 ):
     cache_path = _any4d_cache_path(seq_folder, start_idx, end_idx, suffix=any4d_cache_suffix)
@@ -321,7 +375,6 @@ def _predict_any4d_depths_for_frames(
         if cached_depths is not None:
             return cached_depths, cache_path, True
 
-    frame_path_map = _resolve_stage3_frame_paths(frame_source, frame_ids, seq_folder, start_idx, end_idx)
     pred_depths = np.empty((len(frame_ids),) + tuple(output_hw), dtype=np.float32)
     desc = "Any4D batches (all frames)" if any4d_cache_suffix else "Any4D batches"
     batch_specs = []
@@ -486,10 +539,18 @@ def hawor_slam(
 ):
     timing = {}
     start_time = time.time()
+    success = False
 
     seq_folder = _resolve_seq_folder(args.video_path, seq_folder)
     os.makedirs(seq_folder, exist_ok=True)
     frame_source = _resolve_frame_source(args.video_path, frame_source)
+    segment_frame_ids = _segment_frame_ids(start_idx, end_idx, len(frame_source))
+    if segment_frame_ids.size == 0:
+        raise ValueError("stage3: empty frame range after clipping to available frames")
+    stage3_tmp_root = _resolve_stage3_tmp_root(args)
+    workspace = _build_stage3_workspace(frame_source, segment_frame_ids, seq_folder, start_idx, end_idx, stage3_tmp_root)
+    stage3_frame_source = workspace["frame_source"]
+    stage3_frame_path_map = workspace["frame_path_map"]
     predict_all_frames = _depth_predict_all_frames_enabled(getattr(args, "depth_predict_all_frames", None))
     any4d_batch_size = _resolve_any4d_batch_size(any4d_batch_size)
     vprint(
@@ -498,52 +559,80 @@ def hawor_slam(
         f"depth_scope={'all_frames' if predict_all_frames else 'keyframes'}) ..."
     )
 
-    t0 = time.time()
-    masks = _load_masks(seq_folder, start_idx, end_idx)
-    focal = _resolve_focal(seq_folder, getattr(args, "img_focal", None))
-    calib = _build_calibration(frame_source, focal)
-    timing["1_load_masks"] = time.time() - t0
+    try:
+        t0 = time.time()
+        masks = _load_masks(seq_folder, start_idx, end_idx)
+        focal = _resolve_focal(seq_folder, getattr(args, "img_focal", None))
+        calib = _build_calibration(stage3_frame_source, focal)
+        timing["1_load_masks"] = time.time() - t0
 
-    t0 = time.time()
-    slam_outputs = _run_dpvo_with_cache(frame_source, masks, calib, seq_folder, start_idx, end_idx)
-    traj = slam_outputs["traj"]
-    tstamp = slam_outputs["tstamp"]
-    disps = slam_outputs["disps"]
-    timing["2_slam"] = slam_outputs["cached_vo_sec"] if slam_outputs["used_cache"] and slam_outputs["cached_vo_sec"] is not None else time.time() - t0
-
-    output_hw = get_dimention(frame_source)
-    depth_cache_used = False
-
-    t0 = time.time()
-    if any4d_runner is None:
-        any4d_runner = build_any4d_runner(
-            any4d_repo_root=getattr(args, "any4d_repo_root", None),
-            checkpoint_path=getattr(args, "any4d_checkpoint_path", None),
-            resolution_set=getattr(args, "any4d_resolution_set", None),
-            use_amp=getattr(args, "any4d_use_amp", None),
+        t0 = time.time()
+        slam_outputs = _run_dpvo_with_cache(
+            stage3_frame_source,
+            masks,
+            calib,
+            seq_folder,
+            start_idx,
+            end_idx,
+            frame_indices=segment_frame_ids,
         )
+        traj = slam_outputs["traj"]
+        tstamp = slam_outputs["tstamp"]
+        disps = slam_outputs["disps"]
+        timing["2_slam"] = slam_outputs["cached_vo_sec"] if slam_outputs["used_cache"] and slam_outputs["cached_vo_sec"] is not None else time.time() - t0
 
-    if predict_all_frames:
-        frame_ids = _segment_frame_ids(start_idx, end_idx, len(frame_source))
-        if frame_ids.size == 0:
-            raise ValueError("dense depth: empty frame range after clipping to available frames")
+        output_hw = get_dimention(stage3_frame_source)
+        depth_cache_used = False
 
-        force_any4d_rerun = os.environ.get("HAWOR_ANY4D_FORCE_RERUN", "0") == "1"
-        if force_any4d_rerun:
-            dense_cache_path = _dense_depth_cache_path(seq_folder, start_idx, end_idx)
-            if os.path.exists(dense_cache_path):
-                try:
-                    os.remove(dense_cache_path)
-                except OSError:
-                    pass
-        cached_dense = None if force_any4d_rerun else _load_matching_dense_depth_cache(seq_folder, start_idx, end_idx, frame_ids)
-        if cached_dense is not None:
-            depth_frame_indices, depth_predictions, depth_cache_path = cached_dense
-            depth_cache_used = True
+        t0 = time.time()
+        if any4d_runner is None:
+            any4d_runner = build_any4d_runner(
+                any4d_repo_root=getattr(args, "any4d_repo_root", None),
+                checkpoint_path=getattr(args, "any4d_checkpoint_path", None),
+                resolution_set=getattr(args, "any4d_resolution_set", None),
+                use_amp=getattr(args, "any4d_use_amp", None),
+            )
+
+        if predict_all_frames:
+            frame_ids = segment_frame_ids
+
+            force_any4d_rerun = os.environ.get("HAWOR_ANY4D_FORCE_RERUN", "0") == "1"
+            if force_any4d_rerun:
+                dense_cache_path = _dense_depth_cache_path(seq_folder, start_idx, end_idx)
+                if os.path.exists(dense_cache_path):
+                    try:
+                        os.remove(dense_cache_path)
+                    except OSError:
+                        pass
+            cached_dense = None if force_any4d_rerun else _load_matching_dense_depth_cache(seq_folder, start_idx, end_idx, frame_ids)
+            if cached_dense is not None:
+                depth_frame_indices, depth_predictions, depth_cache_path = cached_dense
+                depth_cache_used = True
+            else:
+                depth_predictions, any4d_cache_path, used_any4d_cache = _predict_any4d_depths_for_frames(
+                    stage3_frame_source,
+                    frame_ids,
+                    any4d_runner=any4d_runner,
+                    any4d_batch_size=any4d_batch_size,
+                    output_hw=output_hw,
+                    args=args,
+                    seq_folder=seq_folder,
+                    start_idx=start_idx,
+                    end_idx=end_idx,
+                    frame_path_map=stage3_frame_path_map,
+                    any4d_cache_suffix="_allframes",
+                )
+                depth_frame_indices = frame_ids.astype(np.int64)
+                dense_cache_path = _dense_depth_cache_path(seq_folder, start_idx, end_idx)
+                _save_dense_depth_uint16_npz(dense_cache_path, depth_frame_indices, depth_predictions)
+                depth_cache_path = any4d_cache_path if used_any4d_cache else dense_cache_path
+                depth_cache_used = used_any4d_cache
+            keyframe_depths = _gather_keyframe_depths_from_dense(depth_predictions, depth_frame_indices, tstamp)
         else:
-            depth_predictions, any4d_cache_path, used_any4d_cache = _predict_any4d_depths_for_frames(
-                frame_source,
-                frame_ids,
+            depth_frame_indices = np.asarray(tstamp, dtype=np.int64)
+            depth_predictions, depth_cache_path, depth_cache_used = _predict_any4d_depths_for_frames(
+                stage3_frame_source,
+                depth_frame_indices,
                 any4d_runner=any4d_runner,
                 any4d_batch_size=any4d_batch_size,
                 output_hw=output_hw,
@@ -551,44 +640,28 @@ def hawor_slam(
                 seq_folder=seq_folder,
                 start_idx=start_idx,
                 end_idx=end_idx,
-                any4d_cache_suffix="_allframes",
+                frame_path_map=stage3_frame_path_map,
+                any4d_cache_suffix="",
             )
-            depth_frame_indices = frame_ids.astype(np.int64)
-            dense_cache_path = _dense_depth_cache_path(seq_folder, start_idx, end_idx)
-            _save_dense_depth_uint16_npz(dense_cache_path, depth_frame_indices, depth_predictions)
-            depth_cache_path = any4d_cache_path if used_any4d_cache else dense_cache_path
-            depth_cache_used = used_any4d_cache
-        keyframe_depths = _gather_keyframe_depths_from_dense(depth_predictions, depth_frame_indices, tstamp)
-    else:
-        depth_frame_indices = np.asarray(tstamp, dtype=np.int64)
-        depth_predictions, depth_cache_path, depth_cache_used = _predict_any4d_depths_for_frames(
-            frame_source,
-            depth_frame_indices,
-            any4d_runner=any4d_runner,
-            any4d_batch_size=any4d_batch_size,
-            output_hw=output_hw,
-            args=args,
-            seq_folder=seq_folder,
-            start_idx=start_idx,
-            end_idx=end_idx,
-            any4d_cache_suffix="",
-        )
-        keyframe_depths = [depth_predictions[i] for i in range(len(depth_predictions))]
+            keyframe_depths = [depth_predictions[i] for i in range(len(depth_predictions))]
 
-    if depth_cache_used:
-        vprint(f"Loaded cached Any4D depth from {depth_cache_path}")
-    elif predict_all_frames:
-        vprint(f"Saved dense depth cache to {depth_cache_path}")
-    timing["3_depth"] = time.time() - t0
+        if depth_cache_used:
+            vprint(f"Loaded cached Any4D depth from {depth_cache_path}")
+        elif predict_all_frames:
+            vprint(f"Saved dense depth cache to {depth_cache_path}")
+        timing["3_depth"] = time.time() - t0
 
-    t0 = time.time()
-    scale = _estimate_scale(disps, keyframe_depths, masks, tstamp)
-    vprint(f"estimated scale: {scale}")
-    timing["4_scale_est"] = time.time() - t0
+        t0 = time.time()
+        scale = _estimate_scale(disps, keyframe_depths, masks, tstamp)
+        vprint(f"estimated scale: {scale}")
+        timing["4_scale_est"] = time.time() - t0
 
-    t0 = time.time()
-    _save_slam_outputs(seq_folder, start_idx, end_idx, tstamp, disps, traj, focal, calib, scale)
-    timing["5_save"] = time.time() - t0
+        t0 = time.time()
+        _save_slam_outputs(seq_folder, start_idx, end_idx, tstamp, disps, traj, focal, calib, scale)
+        timing["5_save"] = time.time() - t0
+        success = True
+    finally:
+        _cleanup_stage3_workspace(workspace, success=success)
 
     timing["total"] = time.time() - start_time
     _print_timing(
@@ -616,6 +689,7 @@ if __name__ == "__main__":
     parser.add_argument("--any4d_repo_root", type=str, default=None)
     parser.add_argument("--any4d_checkpoint_path", type=str, default=None)
     parser.add_argument("--any4d_resolution_set", type=int, default=None)
+    parser.add_argument("--stage3_tmp_root", type=str, default=None)
     parser.add_argument(
         "--any4d_use_amp",
         action=argparse.BooleanOptionalAction,
