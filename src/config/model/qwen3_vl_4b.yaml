@@ -18,7 +18,7 @@ added_slot_tokens:
 runtime:
   use_lora: False
   use_quantization: False
-  knowledge_insulation: True
+  knowledge_insulation: True  # True = full, False = off, int N = insulate first N layers
 
 dims:
   vlm_hidden_size: 2560

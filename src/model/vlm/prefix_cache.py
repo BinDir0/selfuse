@@ -51,6 +51,23 @@ class PrefixKVCache:
             lengths=self.lengths.detach(),
         )
 
+    def partial_detach(self, depth: int) -> "PrefixKVCache":
+        """Detach layers [0, depth), keep gradient for layers [depth, num_layers).
+
+        Useful for partial knowledge insulation: early backbone layers are
+        protected from action-expert gradients while late layers can adapt.
+        """
+        if depth <= 0:
+            return self
+        if depth >= self.num_layers:
+            return self.detach()
+        return PrefixKVCache(
+            keys=torch.cat([self.keys[:depth].detach(), self.keys[depth:]], dim=0),
+            values=torch.cat([self.values[:depth].detach(), self.values[depth:]], dim=0),
+            mask=self.mask,
+            lengths=self.lengths,
+        )
+
 
 @dataclass
 class BackboneStreamOutput:

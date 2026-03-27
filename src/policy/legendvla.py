@@ -40,7 +40,7 @@ class LegendVLA(nn.Module):
         ce_loss_weight: float = 0.1,
         diffusion_loss_weight: float = 1.0,
         flow_loss_weight: float = 1.0,
-        knowledge_insulation: bool = True,
+        knowledge_insulation: bool | int = True,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -279,8 +279,13 @@ class LegendVLA(nn.Module):
             output.past_key_values_hf,
             self.build_prefix_lengths(batch),
         )
-        if self.knowledge_insulation and output.prefix_cache is not None:
-            output.prefix_cache = output.prefix_cache.detach()
+        if output.prefix_cache is not None:
+            if self.knowledge_insulation is True:
+                output.prefix_cache = output.prefix_cache.detach()
+            elif isinstance(self.knowledge_insulation, int) and self.knowledge_insulation > 0:
+                output.prefix_cache = output.prefix_cache.partial_detach(
+                    self.knowledge_insulation
+                )
         output.past_key_values_hf = None
         return output
 
