@@ -1,8 +1,10 @@
 import argparse
 import math
 import os
+import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -15,7 +17,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.pipeline.any4d_depth import build_any4d_runner, predict_any4d_depth_batch
+from lib.pipeline.any4d_depth import (
+    build_any4d_runner,
+    build_any4d_views,
+    predict_any4d_depths_from_views,
+)
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import build_frame_source
@@ -77,6 +83,63 @@ def _depth_predict_all_frames_enabled(explicit: Optional[bool]) -> bool:
 
 def _resolve_any4d_batch_size(default_batch_size: int) -> int:
     return int(os.environ.get("HAWOR_ANY4D_BATCH_SIZE", default_batch_size))
+
+
+def _direct_frame_path(frame_source, frame_idx: int):
+    image_paths = getattr(frame_source, "image_paths", None)
+    if image_paths is None:
+        return None
+    if frame_idx < 0 or frame_idx >= len(image_paths):
+        return None
+    path = image_paths[frame_idx]
+    return path if os.path.exists(path) else None
+
+
+def _stage3_frame_cache_dir(seq_folder: str, start_idx: int, end_idx: int) -> str:
+    return os.path.join(seq_folder, "SLAM", f"_stage3_frames_{start_idx}_{end_idx}")
+
+
+def _stage3_frame_cache_marker(cache_dir: str) -> str:
+    return os.path.join(cache_dir, ".ready")
+
+
+def _resolve_stage3_frame_paths(frame_source, frame_ids: np.ndarray, seq_folder: str, start_idx: int, end_idx: int):
+    frame_id_list = [int(frame_id) for frame_id in np.asarray(frame_ids, dtype=np.int64).tolist()]
+    direct_paths = {}
+    use_direct_paths = True
+    for frame_id in frame_id_list:
+        path = _direct_frame_path(frame_source, frame_id)
+        if path is None:
+            use_direct_paths = False
+            break
+        direct_paths[frame_id] = path
+    if use_direct_paths:
+        return direct_paths
+
+    cache_dir = _stage3_frame_cache_dir(seq_folder, start_idx, end_idx)
+    ready_marker = _stage3_frame_cache_marker(cache_dir)
+    expected_paths = {frame_id: os.path.join(cache_dir, f"{frame_id:06d}.png") for frame_id in frame_id_list}
+
+    if os.path.isfile(ready_marker):
+        if all(os.path.isfile(path) for path in expected_paths.values()):
+            return expected_paths
+        try:
+            os.remove(ready_marker)
+        except OSError:
+            pass
+
+    if os.path.isdir(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    os.makedirs(cache_dir, exist_ok=True)
+
+    for frame_id in frame_id_list:
+        image = frame_source.get_frame(frame_id, rgb=False)
+        out_path = expected_paths[frame_id]
+        if not cv2.imwrite(out_path, image):
+            raise RuntimeError(f"Failed to write stage3 frame cache image: {out_path}")
+
+    Path(ready_marker).touch()
+    return expected_paths
 
 
 def _dpvo_cache_path(seq_folder: str, start_idx: int, end_idx: int) -> str:
@@ -258,11 +321,18 @@ def _predict_any4d_depths_for_frames(
         if cached_depths is not None:
             return cached_depths, cache_path, True
 
-    predicted_batches = []
+    frame_path_map = _resolve_stage3_frame_paths(frame_source, frame_ids, seq_folder, start_idx, end_idx)
+    pred_depths = np.empty((len(frame_ids),) + tuple(output_hw), dtype=np.float32)
     desc = "Any4D batches (all frames)" if any4d_cache_suffix else "Any4D batches"
-    for batch_start in tqdm(range(0, len(frame_ids), any4d_batch_size), desc=desc, disable=QUIET_MODE):
+    batch_specs = []
+    for batch_start in range(0, len(frame_ids), any4d_batch_size):
         batch_indices = frame_ids[batch_start : batch_start + any4d_batch_size]
-        batch_depths = predict_any4d_depth_batch(
+        ref_frame_idx = int(batch_indices[len(batch_indices) // 2])
+        batch_image_paths = [frame_path_map[ref_frame_idx], *[frame_path_map[int(frame_idx)] for frame_idx in batch_indices.tolist()]]
+        batch_specs.append((batch_start, batch_indices, batch_image_paths))
+
+    def _prepare_views(batch_indices, batch_image_paths):
+        return build_any4d_views(
             frame_source,
             batch_indices.tolist(),
             runner=any4d_runner,
@@ -270,10 +340,38 @@ def _predict_any4d_depths_for_frames(
             checkpoint_path=getattr(args, "any4d_checkpoint_path", None),
             resolution_set=getattr(args, "any4d_resolution_set", None),
             use_amp=getattr(args, "any4d_use_amp", None),
+            image_paths=batch_image_paths,
         )
-        predicted_batches.append(_resize_depths(np.asarray(batch_depths), output_hw))
 
-    pred_depths = np.concatenate(predicted_batches, axis=0) if predicted_batches else np.empty((0,) + tuple(output_hw), dtype=np.float32)
+    with ThreadPoolExecutor(max_workers=1) as prefetcher:
+        next_views_future = None
+        for batch_idx, (batch_start, batch_indices, batch_image_paths) in enumerate(
+            tqdm(batch_specs, desc=desc, disable=QUIET_MODE)
+        ):
+            if next_views_future is None:
+                views = _prepare_views(batch_indices, batch_image_paths)
+            else:
+                views = next_views_future.result()
+
+            if batch_idx + 1 < len(batch_specs):
+                next_batch_indices = batch_specs[batch_idx + 1][1]
+                next_batch_image_paths = batch_specs[batch_idx + 1][2]
+                next_views_future = prefetcher.submit(_prepare_views, next_batch_indices, next_batch_image_paths)
+            else:
+                next_views_future = None
+
+            batch_depths = predict_any4d_depths_from_views(
+                batch_indices.tolist(),
+                views,
+                runner=any4d_runner,
+                any4d_repo_root=getattr(args, "any4d_repo_root", None),
+                checkpoint_path=getattr(args, "any4d_checkpoint_path", None),
+                resolution_set=getattr(args, "any4d_resolution_set", None),
+                use_amp=getattr(args, "any4d_use_amp", None),
+            )
+            batch_size = len(batch_indices)
+            pred_depths[batch_start : batch_start + batch_size] = _resize_depths(np.asarray(batch_depths), output_hw)
+
     os.makedirs(os.path.join(seq_folder, "SLAM"), exist_ok=True)
     np.savez(
         cache_path,

@@ -69,6 +69,11 @@ def _suppress_any4d_init_io():
             yield
 
 
+def _prepend_sys_path(path: str):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
 def _any4d_config_dict(any4d_root: str):
     use_sdpa = _env_flag_on("HAWOR_ANY4D_USE_PYTORCH_SDPA", default_on=True)
     sdpa_override = (
@@ -106,16 +111,109 @@ def _materialize_frame(frame_source, frame_idx: int, temp_dir: str):
     return path
 
 
+def _resolve_image_paths(frame_source, frame_indices: Sequence[int], ref_frame_idx: int, temp_dir: Optional[str] = None):
+    image_paths = []
+    for frame_idx in [ref_frame_idx, *frame_indices]:
+        path = _direct_frame_path(frame_source, frame_idx)
+        if path is None:
+            if temp_dir is None:
+                raise RuntimeError(
+                    f"[Any4D] frame_source does not expose direct paths for frame {frame_idx}, "
+                    "and no temp_dir was provided for materialization."
+                )
+            path = _materialize_frame(frame_source, frame_idx, temp_dir)
+        image_paths.append(path)
+    return image_paths
+
+
 @contextlib.contextmanager
 def _build_image_paths(frame_source, frame_indices: Sequence[int], ref_frame_idx: int):
     with tempfile.TemporaryDirectory(prefix="hawor-any4d-") as temp_dir:
-        image_paths = []
-        for frame_idx in [ref_frame_idx, *frame_indices]:
-            path = _direct_frame_path(frame_source, frame_idx)
-            if path is None:
-                path = _materialize_frame(frame_source, frame_idx, temp_dir)
-            image_paths.append(path)
-        yield image_paths
+        yield _resolve_image_paths(frame_source, frame_indices, ref_frame_idx, temp_dir=temp_dir)
+
+
+def _import_any4d_modules(repo_root: str):
+    any4d_scripts_dir = os.path.join(repo_root, "scripts")
+    _prepend_sys_path(repo_root)
+    _prepend_sys_path(any4d_scripts_dir)
+
+    import inference_test as any4d_inference_test
+    from any4d.utils.image import load_images
+
+    return any4d_inference_test, load_images
+
+
+def _load_any4d_views(load_images, image_paths, resolution_set: int):
+    return load_images(
+        image_paths,
+        resize_mode="fixed_mapping",
+        resolution_set=resolution_set,
+        norm_type="dinov2",
+        patch_size=14,
+        verbose=False,
+        compute_moge_mask=False,
+        binary_mask_path=None,
+    )
+
+
+def _predict_depths_from_views(any4d_inference_test, runner, views, frame_count: int):
+    device = str(next(runner["model"].parameters()).device)
+    pred_result = any4d_inference_test.sample_inference(
+        model=runner["model"],
+        views=views,
+        device=device,
+        use_amp=runner["use_amp"],
+    )
+
+    depth_list = []
+    for target_i in range(frame_count):
+        view_idx = 1 + target_i
+        depth_z = (
+            pred_result[f"pred{view_idx}"]["pts3d_cam"][..., 2:3][0]
+            .squeeze(-1)
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        depth_list.append(depth_z.astype(np.float32))
+
+    return np.stack(depth_list, axis=0)
+
+
+def build_any4d_views(frame_source, frame_indices, runner=None, *, any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None, image_paths=None):
+    frame_indices = [int(frame_idx) for frame_idx in frame_indices]
+    if not frame_indices:
+        raise ValueError("[Any4D] frame_indices is empty")
+
+    runner = runner or build_any4d_runner(
+        any4d_repo_root=any4d_repo_root,
+        checkpoint_path=checkpoint_path,
+        resolution_set=resolution_set,
+        use_amp=use_amp,
+    )
+
+    load_images = runner["load_images"]
+    if image_paths is None:
+        ref_frame_idx = frame_indices[len(frame_indices) // 2]
+        with _build_image_paths(frame_source, frame_indices, ref_frame_idx) as resolved_image_paths:
+            return _load_any4d_views(load_images, resolved_image_paths, runner["resolution_set"])
+    return _load_any4d_views(load_images, image_paths, runner["resolution_set"])
+
+
+def predict_any4d_depths_from_views(frame_indices, views, runner=None, *, any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None):
+    frame_indices = [int(frame_idx) for frame_idx in frame_indices]
+    if not frame_indices:
+        raise ValueError("[Any4D] frame_indices is empty")
+
+    runner = runner or build_any4d_runner(
+        any4d_repo_root=any4d_repo_root,
+        checkpoint_path=checkpoint_path,
+        resolution_set=resolution_set,
+        use_amp=use_amp,
+    )
+
+    any4d_inference_test = runner["inference_module"]
+    return _predict_depths_from_views(any4d_inference_test, runner, views, len(frame_indices))
 
 
 def build_any4d_runner(any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None):
@@ -129,11 +227,7 @@ def build_any4d_runner(any4d_repo_root=None, checkpoint_path=None, resolution_se
     ensure_exists(repo_root, "Any4D repo root")
     ensure_exists(checkpoint_path, "Any4D checkpoint")
 
-    any4d_scripts_dir = os.path.join(repo_root, "scripts")
-    sys.path.insert(0, repo_root)
-    sys.path.insert(0, any4d_scripts_dir)
-
-    import inference_test as any4d_inference_test
+    any4d_inference_test, load_images = _import_any4d_modules(repo_root)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with _suppress_any4d_init_io():
@@ -145,6 +239,8 @@ def build_any4d_runner(any4d_repo_root=None, checkpoint_path=None, resolution_se
 
     return {
         "model": model,
+        "inference_module": any4d_inference_test,
+        "load_images": load_images,
         "repo_root": repo_root,
         "checkpoint_path": checkpoint_path,
         "resolution_set": resolution_set,
@@ -152,7 +248,7 @@ def build_any4d_runner(any4d_repo_root=None, checkpoint_path=None, resolution_se
     }
 
 
-def predict_any4d_depth_batch(frame_source, frame_indices, runner=None, *, any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None):
+def predict_any4d_depth_batch(frame_source, frame_indices, runner=None, *, any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None, image_paths=None):
     frame_indices = [int(frame_idx) for frame_idx in frame_indices]
     if not frame_indices:
         raise ValueError("[Any4D] frame_indices is empty")
@@ -164,45 +260,22 @@ def predict_any4d_depth_batch(frame_source, frame_indices, runner=None, *, any4d
         use_amp=use_amp,
     )
 
-    repo_root = runner["repo_root"]
-    any4d_scripts_dir = os.path.join(repo_root, "scripts")
-    sys.path.insert(0, repo_root)
-    sys.path.insert(0, any4d_scripts_dir)
-
-    import inference_test as any4d_inference_test
-    from any4d.utils.image import load_images
-
-    ref_frame_idx = frame_indices[len(frame_indices) // 2]
-    with _build_image_paths(frame_source, frame_indices, ref_frame_idx) as image_paths:
-        views = load_images(
-            image_paths,
-            resize_mode="fixed_mapping",
-            resolution_set=runner["resolution_set"],
-            norm_type="dinov2",
-            patch_size=14,
-            verbose=False,
-            compute_moge_mask=False,
-            binary_mask_path=None,
-        )
-
-    device = str(next(runner["model"].parameters()).device)
-    pred_result = any4d_inference_test.sample_inference(
-        model=runner["model"],
-        views=views,
-        device=device,
-        use_amp=runner["use_amp"],
+    views = build_any4d_views(
+        frame_source,
+        frame_indices,
+        runner=runner,
+        any4d_repo_root=any4d_repo_root,
+        checkpoint_path=checkpoint_path,
+        resolution_set=resolution_set,
+        use_amp=use_amp,
+        image_paths=image_paths,
     )
-
-    depth_list = []
-    for target_i in range(len(frame_indices)):
-        view_idx = 1 + target_i
-        depth_z = (
-            pred_result[f"pred{view_idx}"]["pts3d_cam"][..., 2:3][0]
-            .squeeze(-1)
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        depth_list.append(depth_z.astype(np.float32))
-
-    return np.stack(depth_list, axis=0)
+    return predict_any4d_depths_from_views(
+        frame_indices,
+        views,
+        runner=runner,
+        any4d_repo_root=any4d_repo_root,
+        checkpoint_path=checkpoint_path,
+        resolution_set=resolution_set,
+        use_amp=use_amp,
+    )
