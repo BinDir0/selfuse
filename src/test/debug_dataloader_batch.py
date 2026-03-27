@@ -38,6 +38,28 @@ OmegaConf.register_new_resolver(
 )
 
 
+def _register_offline_hydra_resolver(mock_hydra: Any) -> None:
+    """Bind ${hydra:...} to mock_hydra. Must run after hydra.compose — compose re-registers the default resolver."""
+
+    def _hydra_resolver(key: str) -> Any:
+        val = OmegaConf.select(mock_hydra, key)
+        return "" if val is None else val
+
+    OmegaConf.register_new_resolver("hydra", _hydra_resolver, replace=True)
+
+
+def _offline_hydra_stub(experiment_stem: str, output_dir: str) -> Any:
+    return OmegaConf.create(
+        {
+            "runtime": {
+                "output_dir": output_dir,
+                "choices": {"experiment": experiment_stem},
+            },
+            "job": {"num": 0, "name": experiment_stem},
+        }
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Inspect one real dataloader batch and export debug artifacts."
@@ -95,7 +117,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config(config_path: pathlib.Path):
+def load_config(
+    config_path: pathlib.Path,
+    *,
+    hydra_output_dir: pathlib.Path | str | None = None,
+):
+    """Compose Hydra config without @hydra.main; stub ${hydra:...} for OmegaConf.resolve.
+
+    hydra_output_dir:
+        Value for ${hydra:runtime.output_dir} (e.g. script --output_dir). Defaults to <repo>/outputs.
+    """
+    config_path = config_path.resolve()
+    experiment_stem = config_path.stem
+    out = (
+        pathlib.Path(hydra_output_dir).resolve()
+        if hydra_output_dir is not None
+        else (REPO_ROOT / "outputs")
+    )
     raw_cfg = OmegaConf.load(config_path)
     if "defaults" not in raw_cfg:
         cfg = raw_cfg
@@ -107,8 +145,13 @@ def load_config(config_path: pathlib.Path):
             version_base=None,
         ):
             cfg = hydra.compose(config_name=config_name)
-    OmegaConf.resolve(cfg)
+
     OmegaConf.set_struct(cfg, False)
+    mock_hydra = _offline_hydra_stub(experiment_stem, str(out))
+    _register_offline_hydra_resolver(mock_hydra)
+    cfg.hydra = OmegaConf.to_container(mock_hydra)
+
+    OmegaConf.resolve(cfg)
     return cfg
 
 
@@ -136,17 +179,30 @@ def copy_for_save(value: Any):
 
 def summarize_value(value: Any):
     if isinstance(value, torch.Tensor):
-        return {
+        out: dict[str, Any] = {
             "type": "torch.Tensor",
             "dtype": str(value.dtype),
             "shape": list(value.shape),
         }
+        # Scalars (e.g. n_states, n_actions, is_vla_data) have shape []; JSON looked "empty" without value.
+        if value.numel() == 1:
+            raw = value.detach().cpu().item()
+            if isinstance(raw, bool):
+                out["value"] = raw
+            elif torch.is_floating_point(value):
+                out["value"] = float(raw)
+            else:
+                out["value"] = int(raw)
+        return out
     if isinstance(value, np.ndarray):
-        return {
+        out = {
             "type": "np.ndarray",
             "dtype": str(value.dtype),
             "shape": list(value.shape),
         }
+        if value.size == 1:
+            out["value"] = value.reshape(-1)[0].item()
+        return out
     if isinstance(value, dict):
         return {key: summarize_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -605,7 +661,7 @@ def main():
     output_dir = pathlib.Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = load_config(config_path)
+    cfg = load_config(config_path, hydra_output_dir=output_dir)
     dataset, data_collator, normalizer, normalizer_path = prepare_dataset(cfg, args)
     dataloader = build_dataloader(cfg, dataset, args)
 
