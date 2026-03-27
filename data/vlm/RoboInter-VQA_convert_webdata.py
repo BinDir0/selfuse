@@ -7,6 +7,7 @@ and converts it into WebDataset shards with FineVision-compatible metadata.
 
 import io
 import os
+import re
 import json
 import glob
 import time
@@ -18,6 +19,13 @@ import webdataset as wds
 from PIL import Image
 from pathlib import Path
 from tqdm import tqdm
+
+
+HF_CACHE_DIR = "/share_data/zengfanlian/.cache/huggingface"
+os.environ["HF_HOME"] = HF_CACHE_DIR
+os.environ["HF_DATASETS_CACHE"] = os.path.join(HF_CACHE_DIR, "datasets")
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(HF_CACHE_DIR, "transformers")
+os.makedirs(HF_CACHE_DIR, exist_ok=True)
 
 # ================= Configuration =================
 ROBOINTER_ROOT = "/share_data/guantianrui/datasets/VLM/RoboInter-VQA"
@@ -81,18 +89,62 @@ def normalize_point(point, width, height):
     y_norm = point[1] / height
     return max(0.0, min(1.0, x_norm)), max(0.0, min(1.0, y_norm))
 
+_FORMAT_INSTR_RE = re.compile(
+    r'\s*Your answer should be formatted as.*?'
+    r'(?:in the image|pixel locations)\.\s*',
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def strip_format_instructions(text):
+    """Remove coordinate-format boilerplate from question text."""
+    return _FORMAT_INSTR_RE.sub(' ', text).strip()
+
+
+# Regex to match absolute pixel coordinate patterns in text:
+# Matches (320, 240) or [320, 240] or [[320, 240], [450, 100]] style coords
+_ABS_COORD_TUPLE_RE = re.compile(r'\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\)')
+_ABS_COORD_BRACKET_RE = re.compile(r'\[(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\]')
+
+
+def normalize_abs_coords_in_text(text, img_width, img_height):
+    """Convert absolute pixel coordinate tuples/brackets in text to 0-1000 plain tuple format.
+
+    (320, 240) → (500, 500)  for a 640x480 image
+    [320, 240] → [500, 500]
+    Used for coordinates in choice options and question text.
+    """
+    def _replace_paren(m):
+        x = round(float(m.group(1)) / img_width * 1000)
+        y = round(float(m.group(2)) / img_height * 1000)
+        return f'({x}, {y})'
+
+    def _replace_bracket(m):
+        x = round(float(m.group(1)) / img_width * 1000)
+        y = round(float(m.group(2)) / img_height * 1000)
+        return f'[{x}, {y}]'
+
+    text = _ABS_COORD_TUPLE_RE.sub(_replace_paren, text)
+    text = _ABS_COORD_BRACKET_RE.sub(_replace_bracket, text)
+    return text
+
+
 def bbox_to_text(y_min, x_min, y_max, x_max):
-    """Format: [(y_min, x_min, y_max, x_max)]"""
-    return f"[({y_min:.3f}, {x_min:.3f}, {y_max:.3f}, {x_max:.3f})]"
+    """Qwen3-VL JSON format: [{"bbox_2d": [x1, y1, x2, y2]}] in 0-1000."""
+    x1 = round(x_min * 1000)
+    y1 = round(y_min * 1000)
+    x2 = round(x_max * 1000)
+    y2 = round(y_max * 1000)
+    return f'[{{"bbox_2d": [{x1}, {y1}, {x2}, {y2}]}}]'
 
 def point_to_text(x, y):
-    """Format: (x, y)"""
-    return f"({x:.3f}, {y:.3f})"
+    """Single point JSON in 0-1000."""
+    return f'{{"point_2d": [{round(x * 1000)}, {round(y * 1000)}]}}'
 
 def trajectory_to_text(points):
-    """Format: [(x1, y1), (x2, y2), ...]"""
-    point_strs = [point_to_text(x, y) for x, y in points]
-    return "[" + ", ".join(point_strs) + "]"
+    """Qwen3-VL JSON format: [{"point_2d": [x, y]}, ...] in 0-1000."""
+    items = ", ".join(point_to_text(x, y) for x, y in points)
+    return f"[{items}]"
 
 def load_image_safe(image_path):
     """Safely load an image."""
@@ -104,17 +156,13 @@ def load_image_safe(image_path):
             return None
     return None
 
-def process_entry(entry, task_type, filter_multi_image=False):
+def process_entry(entry, task_type):
     """Process a single entry based on task type."""
     try:
         # Load images
         image_paths = entry['images']
         if isinstance(image_paths, str):
             image_paths = [image_paths]
-            
-        # Filter multi-image samples if requested
-        if filter_multi_image and len(image_paths) > 1:
-            return None
 
         images = []
         for path in image_paths:
@@ -167,7 +215,8 @@ def process_entry(entry, task_type, filter_multi_image=False):
                 
             if isinstance(gt_data[0], list):
                 points = [normalize_point(p, norm_w, norm_h) for p in gt_data]
-                assistant_text = "[" + ", ".join([point_to_text(x, y) for x, y in points]) + "]"
+                items = ", ".join(point_to_text(x, y) for x, y in points)
+                assistant_text = f"[{items}]"
             else:
                 x, y = normalize_point(gt_data, norm_w, norm_h)
                 assistant_text = f"[{point_to_text(x, y)}]"
@@ -184,14 +233,30 @@ def process_entry(entry, task_type, filter_multi_image=False):
             points = [normalize_point(p, norm_w, norm_h) for p in gt_data]
             assistant_text = trajectory_to_text(points)
             
-        else:
-            # Classification / Planning / Text generation
+        elif task_type == "classification":
+            # Classification tasks (Understanding)
+            # The GT is usually just a letter (A, B, C, D) or a simple word
             assistant_text = gt_str
+            
+        else:
+            # Planning / Text generation
+            # Normalize any absolute pixel coordinates in the answer text
+            assistant_text = normalize_abs_coords_in_text(gt_str, norm_w, norm_h)
 
         # Create conversation
-        human_msg = next((msg['value'] for msg in entry['conversations'] if msg['from'] == 'human'), "")
-        # Clean up <image> tags
-        human_msg = human_msg.replace("<image>\n", "").replace("\n<image>", "").replace("<image>", "").strip()
+        # Some datasets use 'human', others use 'huamn' (typo)
+        human_msg = ""
+        for msg in entry['conversations']:
+            if msg['from'] in ['human', 'huamn']:
+                human_msg = msg['value']
+                break
+                
+        # Clean up <image> tags and format instructions
+        # Handle various image tag formats and ensure text is preserved
+        human_msg = human_msg.replace("<image>\n", "").replace("\n<image>", "").replace("<image>", "")
+        human_msg = strip_format_instructions(human_msg)
+        # Normalize any absolute pixel coordinates in question/choices to 0-1000 tuples
+        human_msg = normalize_abs_coords_in_text(human_msg, norm_w, norm_h).strip()
         
         return {
             "images": images,
@@ -238,7 +303,7 @@ def get_worker_next_shard_idx(output_dir, worker_id, shard_prefix="shard"):
             
     return max_idx + 1
 
-def process_batch_wrapper(samples, output_dir, worker_id, filter_multi_image, maxcount, maxsize, image_quality, shard_prefix):
+def process_batch_wrapper(samples, output_dir, worker_id, maxcount, maxsize, image_quality, shard_prefix):
     """Wrapper to handle the task_type extraction from item and writing."""
     
     # Determine start index
@@ -257,7 +322,7 @@ def process_batch_wrapper(samples, output_dir, worker_id, filter_multi_image, ma
         # Extract task type which we attached earlier
         task_type = entry.pop('_task_type_internal', 'unknown')
         
-        processed = process_entry(entry, task_type, filter_multi_image)
+        processed = process_entry(entry, task_type)
         if not processed:
             continue
             
@@ -279,6 +344,7 @@ def process_batch_wrapper(samples, output_dir, worker_id, filter_multi_image, ma
             "source": processed['source'],
             "task": processed['task'],
             "id": processed['id'],
+            "n_images": len(processed['images']),
             "texts": processed['texts'],
             "formatting_ratings": [0],
             "visual_dependency_ratings": [0],
@@ -352,7 +418,6 @@ def process_split(files, output_dir, args, task_mapping, shard_prefix="shard"):
             chunk,
             output_dir,
             i, # worker_id
-            args.filter_multi_image,
             args.maxcount,
             args.maxsize,
             args.image_quality,
@@ -365,10 +430,7 @@ def process_split(files, output_dir, args, task_mapping, shard_prefix="shard"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_workers", type=int, default=16)
-    parser.add_argument("--category", type=str, default="Generation", 
-                        choices=["Generation", "Understanding", "Task_planning"])
-    parser.add_argument("--filter_multi_image", action="store_true", help="Filter out samples with multiple images")
+    parser.add_argument("--num_workers", type=int, default=64)
     
     # Standard arguments matching user's request
     parser.add_argument("--split", type=str, default="both", help="Split directory to convert (train/val/both)")
@@ -378,9 +440,7 @@ def main():
     
     args = parser.parse_args()
 
-    print(f"Processing {args.category}...")
-    if args.filter_multi_image:
-        print("Filtering out multi-image samples.")
+    print("Processing Generation, Understanding, and Task_planning...")
     
     # Determine splits to process
     splits = []
@@ -389,75 +449,88 @@ def main():
     else:
         splits = [args.split]
         
-    # Collect paths based on category and splits
-    search_paths = []
+    # Collect paths and task mappings for all categories
+    all_tasks = []
     
-    if args.category == "Generation":
-        if "train" in splits:
-            search_paths.extend([
-                os.path.join(ROBOINTER_ROOT, "Generation/meta/train/droid/origin_format/*.json"),
-                os.path.join(ROBOINTER_ROOT, "Generation/meta/train/rh20t/origin_format/*.json")
-            ])
-        if "val" in splits:
-             search_paths.extend([
-                os.path.join(ROBOINTER_ROOT, "Generation/meta/val/origin_format/*.json")
-            ])
-        task_mapping = GENERATION_TASKS
-        
-    elif args.category == "Understanding":
-        if "train" in splits:
-            search_paths.extend([
-                os.path.join(ROBOINTER_ROOT, "Understanding/meta/train/droid/*.json"),
-                os.path.join(ROBOINTER_ROOT, "Understanding/meta/train/rh20t/*.json")
-            ])
-        if "val" in splits:
-            search_paths.extend([
-                os.path.join(ROBOINTER_ROOT, "Understanding/meta/val/*.json")
-            ])
-        task_mapping = UNDERSTANDING_TASKS
-        
-    else: # Task_planning
-        if "train" in splits:
-            search_paths.extend([
-                os.path.join(ROBOINTER_ROOT, "Task_planning/meta/train/manipvqa/*.json")
-            ])
-        if "val" in splits:
-            search_paths.extend([
-                os.path.join(ROBOINTER_ROOT, "Task_planning/meta/val/*/*.json")
-            ])
-        task_mapping = PLANNING_TASKS
+    # 1. Generation
+    gen_paths = []
+    if "train" in splits:
+        gen_paths.extend([
+            os.path.join(ROBOINTER_ROOT, "Generation/meta/train/droid/origin_format/*.json"),
+            os.path.join(ROBOINTER_ROOT, "Generation/meta/train/rh20t/origin_format/*.json")
+        ])
+    if "val" in splits:
+        gen_paths.extend([
+            os.path.join(ROBOINTER_ROOT, "Generation/meta/val/origin_format/*.json")
+        ])
+    all_tasks.append((gen_paths, GENERATION_TASKS))
+    
+    # 2. Understanding
+    und_paths = []
+    if "train" in splits:
+        und_paths.extend([
+            os.path.join(ROBOINTER_ROOT, "Understanding/meta/train/droid/*.json"),
+            os.path.join(ROBOINTER_ROOT, "Understanding/meta/train/rh20t/*.json")
+        ])
+    if "val" in splits:
+        und_paths.extend([
+            os.path.join(ROBOINTER_ROOT, "Understanding/meta/val/*.json")
+        ])
+    all_tasks.append((und_paths, UNDERSTANDING_TASKS))
+    
+    # 3. Task_planning
+    plan_paths = []
+    if "train" in splits:
+        plan_paths.extend([
+            os.path.join(ROBOINTER_ROOT, "Task_planning/meta/train/manipvqa/*.json")
+        ])
+    if "val" in splits:
+        plan_paths.extend([
+            os.path.join(ROBOINTER_ROOT, "Task_planning/meta/val/*/*.json")
+        ])
+    all_tasks.append((plan_paths, PLANNING_TASKS))
 
-    json_files = []
-    for path in search_paths:
-        json_files.extend(glob.glob(path))
-    
-    if not json_files:
-        print(f"No JSON files found for splits {splits}!")
-        return
+    # Process each category sequentially to avoid mixing task mappings
+    for search_paths, task_mapping in all_tasks:
+        json_files = []
+        for path in search_paths:
+            json_files.extend(glob.glob(path))
+        
+        if not json_files:
+            continue
 
-    print(f"Found {len(json_files)} JSON files.")
-    
-    # Group files by split (train/test)
-    train_files = []
-    test_files = []
-    
-    for json_file in json_files:
-        if "/val/" in json_file or "/val" in os.path.dirname(json_file):
-            test_files.append(json_file)
-        else:
-            train_files.append(json_file)
+        print(f"Found {len(json_files)} JSON files for current category.")
+        
+        # Group files by split (train/test)
+        train_files = []
+        test_files = []
+        
+        for json_file in json_files:
+            if "/val/" in json_file or "/val" in os.path.dirname(json_file):
+                test_files.append(json_file)
+            else:
+                train_files.append(json_file)
+                
+        # Extract category name from the first path to use as prefix
+        category_name = "unknown"
+        if "Generation" in search_paths[0]:
+            category_name = "generation"
+        elif "Understanding" in search_paths[0]:
+            category_name = "understanding"
+        elif "Task_planning" in search_paths[0]:
+            category_name = "planning"
             
-    shard_prefix = "shard"
-    
-    # Process train files
-    if train_files:
-        output_dir = os.path.join(OUTPUT_ROOT, "train")
-        process_split(train_files, output_dir, args, task_mapping, shard_prefix)
+        shard_prefix = f"shard_{category_name}"
+        
+        # Process train files
+        if train_files:
+            output_dir = os.path.join(OUTPUT_ROOT, "train")
+            process_split(train_files, output_dir, args, task_mapping, shard_prefix)
 
-    # Process test files
-    if test_files:
-        output_dir = os.path.join(OUTPUT_ROOT, "test")
-        process_split(test_files, output_dir, args, task_mapping, shard_prefix)
+        # Process test files
+        if test_files:
+            output_dir = os.path.join(OUTPUT_ROOT, "test")
+            process_split(test_files, output_dir, args, task_mapping, shard_prefix)
             
     print("Done!")
 

@@ -110,7 +110,7 @@ def check_2_1_encoder_distributions(skip_visual: bool, output_dir) -> CheckResul
 def check_2_2_time_embedding(skip_visual: bool, output_dir) -> CheckResult:
     """Verify time embedding has structure: different t -> different embeddings."""
     errors = []
-    te = TimeEmbedding(hidden_size=1024)
+    te = TimeEmbedding(time_hidden_size=1024)
     te.eval()
 
     # Test t=0 and t=1 are different
@@ -137,10 +137,10 @@ def check_2_2_time_embedding(skip_visual: bool, output_dir) -> CheckResult:
 
     # Visualization: PCA of 100 time steps
     if not skip_visual:
-        t_vals = torch.linspace(0, 1, 100).unsqueeze(1).unsqueeze(0).expand(1, 100, 1).squeeze(0)
-        # TimeEmbedding expects [B, T, 1] -> reshape
+        t_vals = torch.linspace(0, 1, 100).unsqueeze(1) # [100, 1]
+        # TimeEmbedding expects [B, 1]
         with torch.no_grad():
-            all_emb = te(t_vals.unsqueeze(0)).squeeze(0)  # [100, 1024]
+            all_emb = te(t_vals)  # [100, 1024]
 
         all_emb_np = all_emb.numpy()
         # PCA to 2D

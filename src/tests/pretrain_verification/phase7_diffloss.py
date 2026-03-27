@@ -48,6 +48,9 @@ def check_7_1_zero_init() -> CheckResult:
         z_channels=2048,
         depth=8,
         width=2048,
+        num_sampling_steps="100",
+        use_ddim_sampling=True,
+        use_flow_matching=False,
     )
 
     # Check zero-init in the network (SimpleMLPAdaLN)
@@ -180,6 +183,9 @@ def check_7_3_sampling(skip_visual: bool, output_dir) -> CheckResult:
         z_channels=2048,
         depth=8,
         width=2048,
+        num_sampling_steps="100",
+        use_ddim_sampling=True,
+        use_flow_matching=False,
     )
     diffloss.eval()
 

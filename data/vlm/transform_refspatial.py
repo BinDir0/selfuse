@@ -1,19 +1,23 @@
 import os
 import json
 import io
+import re
+import argparse
+import multiprocessing as mp
 from PIL import Image
-from datasets import Dataset, Features, Value, Image as HFImage, concatenate_datasets
-from datasets.features import List
-import shutil
+from wds_utils import ShardWriter, split_train_test
 
 # ================= Configuration Section =================
-
+HF_CACHE_DIR = "/share_data/zengfanlian/.cache/huggingface"
+os.environ["HF_HOME"] = HF_CACHE_DIR
+os.environ["HF_DATASETS_CACHE"] = os.path.join(HF_CACHE_DIR, "datasets")
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(HF_CACHE_DIR, "transformers")
+os.makedirs(HF_CACHE_DIR, exist_ok=True)
 # 1. Root directory of RefSpatial dataset
 REFSPATIAL_ROOT = "/share_data/guantianrui/datasets/VLM/RefSpatial"
 
-# 2. Output directory for Arrow format
-OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/refspatial_cleaned"
-TEMP_DIR = "/share_data/zengfanlian/datasets/VLM/FineVision_Arrow_Format/refspatial_temp"
+# 2. Output directory for WebDataset format
+OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/Webdataset/refspatial"
 
 # 3. Train/test split ratio
 VAL_RATIO = 0.001  # 0.1% for validation
@@ -22,10 +26,7 @@ SEED = 42
 # 4. Test mode: Set to a number to only process first N samples (None = process all)
 MAX_SAMPLES = None
 
-# 5. Batch size for incremental processing
-BATCH_SIZE = 50000
-
-# 6. Sub-dataset configs
+# 5. Sub-dataset configs
 #    Each entry describes one JSON file within RefSpatial.
 #    image_dir: directory where the filenames in sample['image'] live
 #    depth_dir:  directory where the filenames in sample['depth'] live
@@ -76,8 +77,8 @@ DATASET_CONFIGS = [
     },
 ]
 
-# 7. Text quality filtering
-MAX_TURN_CHARS = 500          # drop turns where user+assistant combined > this
+# 6. Text quality filtering
+MAX_TURN_CHARS = 800          # drop turns where user+assistant combined > this
 SLASH_REPEAT_THRESHOLD = 5    # flag if any token repeats this many times consecutively in '/' splits
 
 # =========================================================
@@ -129,11 +130,29 @@ def clean_image_metadata(img):
     return clean_img
 
 
+# Regex to match [0,1] normalized coordinate tuples like (0.567, 0.086)
+_NORM_COORD_RE = re.compile(r'\((\d+\.\d+),\s*(\d+\.\d+)\)')
+
+
+def scale_coords_to_1000(text):
+    """Convert [0,1] normalized coordinate tuples to 0-1000 plain tuple format.
+
+    (0.567, 0.086) → (567, 86)
+    Used for coordinates in choice options and referring expressions.
+    """
+    def _replace(m):
+        x = round(float(m.group(1)) * 1000)
+        y = round(float(m.group(2)) * 1000)
+        return f'({x}, {y})'
+    return _NORM_COORD_RE.sub(_replace, text)
+
+
 def conversations_to_texts(conversations):
     """
     Convert a list of {'from': 'human'/'gpt', 'value': str} pairs
     into a list of {'user': str, 'assistant': str} dicts (one per turn).
 
+    Coordinates in [0,1] range are scaled to 0-1000 plain tuple format.
     Turns that are too long or contain corrupted repetitive text are dropped.
     Returns None if no valid turns remain.
     """
@@ -146,8 +165,8 @@ def conversations_to_texts(conversations):
         gpt_turn = conversations[i + 1]
         if human_turn.get('from') != 'human' or gpt_turn.get('from') != 'gpt':
             return None
-        user_text = human_turn.get('value', '').strip()
-        assistant_text = gpt_turn.get('value', '').strip()
+        user_text = scale_coords_to_1000(human_turn.get('value', '').strip())
+        assistant_text = scale_coords_to_1000(gpt_turn.get('value', '').strip())
         if not user_text or not assistant_text:
             continue
         if not is_turn_clean(user_text, assistant_text):
@@ -175,91 +194,6 @@ def load_images_from_dir(filenames, directory):
     return loaded, True
 
 
-def convert_refspatial_batch(batch, image_dir, depth_dir, source):
-    """
-    Batch conversion for RefSpatial samples.
-
-    Args:
-        batch: dict of lists with keys ['id', 'image', 'depth', 'conversations', ...]
-        image_dir: directory containing the RGB image files
-        depth_dir: directory containing the depth image files
-        source: source name string for this sub-dataset
-
-    Returns:
-        dict in FineVision format
-    """
-    batch_size = len(batch['image'])
-
-    images_out = []
-    depth_images_out = []
-    texts_out = []
-    sources = []
-    image_corr_ratings = []
-    image_corr_min = []
-    visual_dep_ratings = []
-    visual_dep_min = []
-    formatting_ratings = []
-    formatting_min = []
-    relevance_ratings = []
-    relevance_min = []
-
-    for i in range(batch_size):
-        image_filenames = batch['image'][i]       # list of RGB filename strings
-        depth_filenames = batch.get('depth', [None] * batch_size)[i]  # may be absent
-        conversations = batch.get('conversations', [None] * batch_size)[i]
-
-        if not image_filenames or not conversations:
-            continue
-
-        # Parse multi-turn conversations into [{user, assistant}, ...]
-        texts = conversations_to_texts(conversations)
-        if not texts:
-            continue
-
-        # Load RGB images
-        loaded_images, ok = load_images_from_dir(image_filenames, image_dir)
-        if not ok or not loaded_images:
-            continue
-
-        # Load depth images (best effort: skip sample only if depth_dir is set but files fail)
-        loaded_depths = []
-        if depth_filenames:
-            loaded_depths, ok = load_images_from_dir(depth_filenames, depth_dir)
-            if not ok:
-                continue  # depth files listed but failed to load → skip sample
-
-        num_turns = len(texts)
-        images_out.append(loaded_images)
-        depth_images_out.append(loaded_depths)
-        texts_out.append(texts)
-        sources.append(source)
-
-        # Dummy metadata ratings (one entry per turn in texts)
-        image_corr_ratings.append([0] * num_turns)
-        image_corr_min.append(0)
-        visual_dep_ratings.append([0] * num_turns)
-        visual_dep_min.append(0)
-        formatting_ratings.append([0] * num_turns)
-        formatting_min.append(0)
-        relevance_ratings.append([0] * num_turns)
-        relevance_min.append(0)
-
-    return {
-        "images": images_out,
-        "depth": depth_images_out,
-        "texts": texts_out,
-        "source": sources,
-        "image_correspondence_ratings": image_corr_ratings,
-        "image_correspondence_min": image_corr_min,
-        "visual_dependency_ratings": visual_dep_ratings,
-        "visual_dependency_min": visual_dep_min,
-        "formatting_ratings": formatting_ratings,
-        "formatting_min": formatting_min,
-        "relevance_ratings": relevance_ratings,
-        "relevance_min": relevance_min,
-    }
-
-
 def load_json_data(json_path, source_name):
     """Load a RefSpatial JSON file and return the list of samples."""
     print(f"Loading {source_name} from {json_path}...")
@@ -278,177 +212,122 @@ def load_json_data(json_path, source_name):
     return data
 
 
-def process_sub_dataset(cfg, global_batch_idx, finevision_features):
-    """
-    Process one RefSpatial sub-dataset (one JSON file) in BATCH_SIZE chunks.
+def process_sample(sample, image_dir, depth_dir, source):
+    """Process a single RefSpatial sample."""
+    image_filenames = sample.get('image')
+    depth_filenames = sample.get('depth')
+    conversations = sample.get('conversations')
 
-    Returns a list of saved batch paths.
-    """
-    json_path = cfg["json_path"]
-    image_dir = cfg["image_dir"]
-    source = cfg["source"]
+    if not image_filenames or not conversations:
+        return None
 
-    data = load_json_data(json_path, source)
-    total_samples = len(data)
-    num_batches = (total_samples + BATCH_SIZE - 1) // BATCH_SIZE
+    texts = conversations_to_texts(conversations)
+    if not texts:
+        return None
 
-    saved_paths = []
-    for batch_idx in range(num_batches):
-        start_idx = batch_idx * BATCH_SIZE
-        end_idx = min((batch_idx + 1) * BATCH_SIZE, total_samples)
+    loaded_images, ok = load_images_from_dir(image_filenames, image_dir)
+    if not ok or not loaded_images:
+        return None
 
-        batch_path = os.path.join(TEMP_DIR, f"batch_{global_batch_idx:06d}")
+    # Load depth images (best effort)
+    loaded_depths = []
+    if depth_filenames:
+        loaded_depths, ok = load_images_from_dir(depth_filenames, depth_dir)
+        if not ok:
+            return None
 
-        # Resume: skip if this batch was already saved
-        if os.path.exists(batch_path) and os.path.exists(os.path.join(batch_path, "dataset_info.json")):
-            print(f"\n  [Sub-batch {batch_idx + 1}/{num_batches}] SKIP (already exists: {batch_path})")
-            saved_paths.append(batch_path)
-            global_batch_idx += 1
+    return loaded_images, loaded_depths, texts, source
+
+
+def process_chunk(args):
+    """Worker function: process a chunk of samples and write to WebDataset shards."""
+    chunk, output_dir, worker_id, split, image_quality, maxcount, maxsize = args
+    sw = ShardWriter(output_dir, split=split, worker_id=worker_id,
+                     maxcount=maxcount, maxsize=maxsize, image_quality=image_quality)
+    for local_idx, (sample, image_dir, depth_dir, source) in enumerate(chunk):
+        result = process_sample(sample, image_dir, depth_dir, source)
+        if result is None:
             continue
+        images, depths, texts, src = result
 
-        batch_data = data[start_idx:end_idx]
-        print(f"\n  [Sub-batch {batch_idx + 1}/{num_batches}] samples {start_idx}–{end_idx}...")
+        # Encode depth images as extra files (depth_000.jpg, depth_001.jpg, ...)
+        extra_images = {}
+        for i, d in enumerate(depths):
+            extra_images[f"depth_{i:03d}.jpg"] = d
 
-        initial_ds = Dataset.from_list(batch_data)
-        ds = initial_ds.map(
-            convert_refspatial_batch,
-            batched=True,
-            batch_size=500,
-            num_proc=32,
-            fn_kwargs={
-                "image_dir": image_dir,
-                "depth_dir": cfg["depth_dir"],
-                "source": source,
-            },
-            remove_columns=initial_ds.column_names,
-            desc=f"Converting {source} batch {batch_idx + 1}",
-            features=finevision_features,
-        )
-
-        print(f"  Converted {len(ds)} samples (from {len(batch_data)})")
-
-        ds.save_to_disk(batch_path, num_proc=4)
-        print(f"  Saved to {batch_path}")
-
-        saved_paths.append(batch_path)
-        global_batch_idx += 1
-
-        del initial_ds, ds
-
-    return saved_paths, global_batch_idx
+        key = f"refspatial_{src}_w{worker_id:04d}_{local_idx:010d}"
+        sw.write(key, images, texts, source=src, sample_idx=local_idx,
+                 extra_images=extra_images if extra_images else None)
+    sw.close()
 
 
 def main():
+    parser = argparse.ArgumentParser(description="RefSpatial to WebDataset conversion")
+    parser.add_argument("--num_workers", type=int, default=32, help="Number of parallel workers")
+    parser.add_argument("--maxcount", type=int, default=20000, help="Max samples per shard")
+    parser.add_argument("--maxsize", type=float, default=1e9, help="Max shard size in bytes")
+    parser.add_argument("--image_quality", type=int, default=95, help="JPEG quality")
+    args = parser.parse_args()
+
     print("=" * 80)
-    print("RefSpatial to FineVision Arrow Format Conversion")
+    print("RefSpatial to WebDataset Format Conversion")
     print(f"  Filtering: drop turns with combined length > {MAX_TURN_CHARS} chars")
     print(f"  Filtering: drop turns with slash-repeat >= {SLASH_REPEAT_THRESHOLD}")
+    print(f"  Output: {OUTPUT_DIR}")
+    print(f"  Workers: {args.num_workers}, maxcount: {args.maxcount}, "
+          f"maxsize: {args.maxsize:.0f}, quality: {args.image_quality}")
     print("=" * 80)
 
-    finevision_features = Features({
-        "images": List(HFImage()),
-        "depth": List(HFImage()),
-        "texts": List({
-            "user": Value("string"),
-            "assistant": Value("string"),
-        }),
-        "source": Value("string"),
-        "image_correspondence_ratings": List(Value("int64")),
-        "image_correspondence_min": Value("int64"),
-        "visual_dependency_ratings": List(Value("int64")),
-        "visual_dependency_min": Value("int64"),
-        "formatting_ratings": List(Value("int64")),
-        "formatting_min": Value("int64"),
-        "relevance_ratings": List(Value("int64")),
-        "relevance_min": Value("int64"),
-    })
-
-    # Resume support: keep existing temp batches, only recreate missing ones
-    os.makedirs(TEMP_DIR, exist_ok=True)
-
-    # Process each sub-dataset
-    all_batch_paths = []
-    global_batch_idx = 0
-
+    # Load all sub-datasets
+    all_data = []
     for cfg_idx, cfg in enumerate(DATASET_CONFIGS):
-        print("\n" + "=" * 80)
-        print(f"[{cfg_idx + 1}/{len(DATASET_CONFIGS)}] Processing sub-dataset: {cfg['source']}")
-        print("=" * 80)
+        print(f"\n[{cfg_idx + 1}/{len(DATASET_CONFIGS)}] Loading sub-dataset: {cfg['source']}")
+        json_path = cfg["json_path"]
+        source = cfg["source"]
+        data = load_json_data(json_path, source)
+        for sample in data:
+            all_data.append((sample, cfg["image_dir"], cfg["depth_dir"], source))
 
-        batch_paths, global_batch_idx = process_sub_dataset(
-            cfg, global_batch_idx, finevision_features
-        )
-        all_batch_paths.extend(batch_paths)
-        print(f"  Sub-dataset done, total batches so far: {len(all_batch_paths)}")
+    print(f"\nTotal samples loaded: {len(all_data)}")
 
-    # Concatenate all batches
-    print("\n" + "=" * 80)
-    print(f"Concatenating {len(all_batch_paths)} batch shards...")
-    print("=" * 80)
+    # Split into train/test
+    print(f"\nSplitting dataset (val_ratio={VAL_RATIO}, seed={SEED})...")
+    train_data, test_data = split_train_test(all_data, VAL_RATIO, SEED)
+    print(f"  Train: {len(train_data)}, Test: {len(test_data)}")
 
-    from datasets import load_from_disk
-    all_datasets = []
-    for i, batch_path in enumerate(all_batch_paths):
-        print(f"Loading shard {i + 1}/{len(all_batch_paths)}: {batch_path}")
-        ds = load_from_disk(batch_path)
-        all_datasets.append(ds)
-
-    print("Concatenating datasets...")
-    full_ds = concatenate_datasets(all_datasets)
-    print(f"Total samples: {len(full_ds)}")
-    del all_datasets
-
-    # Split into train/val
-    print("\n" + "=" * 80)
-    print(f"Splitting dataset (val_ratio={VAL_RATIO})...")
-    print("=" * 80)
-    ds_dict = full_ds.train_test_split(test_size=VAL_RATIO, seed=SEED)
-    print(f"Train: {len(ds_dict['train'])}, Val: {len(ds_dict['test'])}")
-    del full_ds
-
-    # Save final dataset
-    print("\n" + "=" * 80)
-    print(f"Saving to: {OUTPUT_DIR}")
-    print("=" * 80)
-
-    if os.path.exists(OUTPUT_DIR):
-        print(f"Removing existing output directory: {OUTPUT_DIR}")
-        shutil.rmtree(OUTPUT_DIR)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    train_size = len(ds_dict['train'])
-    target_samples_per_shard = 10000
-    num_shards = max(1, train_size // target_samples_per_shard)
-    num_proc = min(num_shards, 16)
-    print(f"Saving {train_size} train samples (~{num_shards} shards, {num_proc} workers)")
+    # Process each split with multiprocessing
+    for split_name, split_data in [("train", train_data), ("test", test_data)]:
+        if not split_data:
+            print(f"\nSkipping {split_name}: no data")
+            continue
 
-    ds_dict.save_to_disk(OUTPUT_DIR, num_proc=num_proc)
-    print(f"\n✅ Saved to {OUTPUT_DIR}")
+        n_workers = min(args.num_workers, len(split_data))
+        chunk_size = (len(split_data) + n_workers - 1) // n_workers
+        chunks = []
+        for w in range(n_workers):
+            start = w * chunk_size
+            end = min((w + 1) * chunk_size, len(split_data))
+            if start >= len(split_data):
+                break
+            chunks.append((
+                split_data[start:end],
+                OUTPUT_DIR,
+                w,
+                split_name,
+                args.image_quality,
+                args.maxcount,
+                int(args.maxsize),
+            ))
 
-    # Clean up temp directory
-    print("\n" + "=" * 80)
-    print("Cleaning up temp files...")
-    shutil.rmtree(TEMP_DIR)
-    print(f"✓ Removed {TEMP_DIR}")
-
-    # Verification
-    print("\n" + "=" * 80)
-    print("Verifying first training sample...")
-    print("=" * 80)
-    loaded_ds = load_from_disk(OUTPUT_DIR)
-    sample = loaded_ds['train'][0]
-
-    print("Keys:", list(sample.keys()))
-    print("Images count:", len(sample['images']))
-    print("Depth images count:", len(sample['depth']))
-    print("Texts count:", len(sample['texts']))
-    print("First turn:")
-    print("  User:     ", sample['texts'][0]['user'][:120], "...")
-    print("  Assistant:", sample['texts'][0]['assistant'][:120], "...")
-    print("Source:", sample['source'])
+        print(f"\nWriting {split_name} split: {len(split_data)} samples with {len(chunks)} workers...")
+        with mp.Pool(len(chunks)) as pool:
+            pool.map(process_chunk, chunks)
 
     print("\n" + "=" * 80)
-    print("✅ Conversion completed successfully!")
+    print(f"Conversion completed successfully!")
+    print(f"Output: {OUTPUT_DIR}")
     print("=" * 80)
 
 
