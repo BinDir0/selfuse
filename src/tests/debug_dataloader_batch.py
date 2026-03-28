@@ -107,6 +107,13 @@ def parse_args() -> argparse.Namespace:
         help="Random seed used for sampling in debug mode.",
     )
     parser.add_argument(
+        "--pool_size",
+        type=int,
+        default=0,
+        help="Stream this many samples from the train pipeline into a pool, "
+             "then randomly pick sample_count from it. 0 = original sequential mode.",
+    )
+    parser.add_argument(
         "--profile_batches",
         type=int,
         default=8,
@@ -443,6 +450,58 @@ def build_dataloader(cfg, dataset, args):
     )
 
 
+def collect_pool_samples(dataset, args, rng):
+    """Stream samples from the train pipeline into a pool, then randomly pick a subset.
+
+    Uses multi-worker DataLoader with collate_fn=list to collect raw (pre-collated)
+    samples in parallel, then np.random.choice to pick sample_count from the pool,
+    and finally the real collator to produce the export batch.
+    """
+    loader_kwargs = {
+        "num_workers": args.num_workers,
+        "pin_memory": False,
+    }
+    if args.num_workers > 0:
+        loader_kwargs["persistent_workers"] = False
+        loader_kwargs["prefetch_factor"] = 2
+
+    pool_loader = DataLoader(
+        dataset=dataset,
+        batch_size=args.pool_size,
+        collate_fn=list,
+        **loader_kwargs,
+    )
+
+    print(f"Streaming {args.pool_size} samples with {args.num_workers} workers ...")
+    collect_start = time.perf_counter()
+    pool = next(iter(pool_loader))
+    collect_s = time.perf_counter() - collect_start
+    print(f"Collected {len(pool)} samples in {collect_s:.1f}s")
+
+    num_pick = min(args.sample_count, len(pool))
+    if num_pick < len(pool):
+        pick_indices = sorted(rng.choice(len(pool), size=num_pick, replace=False))
+        picked = [pool[i] for i in pick_indices]
+    else:
+        picked = list(pool)
+    print(f"Picked {num_pick} samples from pool of {len(pool)}")
+
+    collate_fn = dataset.get_collator()
+    collate_start = time.perf_counter()
+    batch = collate_fn(picked)
+    collate_s = time.perf_counter() - collate_start
+
+    sampling_info = {
+        "mode": "pool_sampling",
+        "pool_size": len(pool),
+        "picked_count": num_pick,
+        "num_workers": args.num_workers,
+        "collect_s": float(collect_s),
+        "collate_s": float(collate_s),
+    }
+    return batch, sampling_info
+
+
 def build_sample_export(
     sample_index: int,
     batch: dict[str, Any],
@@ -711,8 +770,17 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = load_config(config_path)
+
+    # Pool sampling forces the train pipeline for diverse shard coverage
+    use_pool = args.pool_size > 0
+    if use_pool:
+        saved_split = args.split
+        args.split = "train"
+
     dataset, data_collator, normalizer, normalizer_path = prepare_dataset(cfg, args)
-    dataloader = build_dataloader(cfg, dataset, args)
+
+    if use_pool:
+        args.split = saved_split
 
     motion_type = dataset.motion_type if args.dataset_kind == "vla" else dataset.vla_dataset.motion_type
     use_relative_action = dataset.use_relative_action if args.dataset_kind == "vla" else dataset.vla_dataset.use_relative_action
@@ -724,27 +792,35 @@ def main():
 
     state_normalizer, action_normalizer = select_normalizer_fields(normalizer, use_relative_action)
 
-    profile_records = []
-    batch = None
-    export_batch_fetch_s = 0.0
-    dataloader_iter = iter(dataloader)
-    requested_profile_batches = max(int(args.profile_batches), 1)
-    for batch_index in range(requested_profile_batches):
-        fetch_start = time.perf_counter()
-        try:
-            current_batch = next(dataloader_iter)
-        except StopIteration:
-            break
-        fetch_s = time.perf_counter() - fetch_start
-        profile_records.append(build_profile_record(batch_index, current_batch, fetch_s))
+    if use_pool:
+        rng = np.random.RandomState(args.seed)
+        batch, sampling_info = collect_pool_samples(dataset, args, rng)
+        profile_records = []
+        profile_summary = sampling_info
+    else:
+        dataloader = build_dataloader(cfg, dataset, args)
+        profile_records = []
+        batch = None
+        export_batch_fetch_s = 0.0
+        dataloader_iter = iter(dataloader)
+        requested_profile_batches = max(int(args.profile_batches), 1)
+        for batch_index in range(requested_profile_batches):
+            fetch_start = time.perf_counter()
+            try:
+                current_batch = next(dataloader_iter)
+            except StopIteration:
+                break
+            fetch_s = time.perf_counter() - fetch_start
+            profile_records.append(build_profile_record(batch_index, current_batch, fetch_s))
+            if batch is None:
+                batch = current_batch
+                export_batch_fetch_s = fetch_s
+
         if batch is None:
-            batch = current_batch
-            export_batch_fetch_s = fetch_s
+            raise RuntimeError("Dataloader produced no batch for debugging.")
 
-    if batch is None:
-        raise RuntimeError("Dataloader produced no batch for debugging.")
+        profile_summary = summarize_profile_records(profile_records)
 
-    profile_summary = summarize_profile_records(profile_records)
     save_json(output_dir / "profile_summary.json", profile_summary)
     save_jsonl(output_dir / "profile_batches.jsonl", profile_records)
 
@@ -775,9 +851,7 @@ def main():
         "sample_count": args.sample_count,
         "num_workers": args.num_workers,
         "seed": args.seed,
-        "profile_batches_requested": requested_profile_batches,
-        "profile_batches_captured": len(profile_records),
-        "export_batch_fetch_s": export_batch_fetch_s,
+        "pool_size": args.pool_size,
         "normalizer_path": normalizer_path,
         "motion_type": motion_type,
         "use_relative_action": bool(use_relative_action),
@@ -785,6 +859,10 @@ def main():
         "profile_summary_path": "profile_summary.json",
         "profile_batches_path": "profile_batches.jsonl",
     }
+    if not use_pool:
+        manifest["profile_batches_requested"] = requested_profile_batches
+        manifest["profile_batches_captured"] = len(profile_records)
+        manifest["export_batch_fetch_s"] = export_batch_fetch_s
     save_json(output_dir / "manifest.json", manifest)
     write_html_report(output_dir, manifest, sample_entries, profile_summary)
 
