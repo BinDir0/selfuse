@@ -128,7 +128,7 @@ policy:
     flow_alpha: ${flow.alpha}
     flow_beta: ${flow.beta}
     num_inference_steps: ${flow.num_inference_steps}
-    cond_dropout_prob: 0.1
+    cond_dropout_prob: 0.0
   shape_meta: ${data.shape_meta}
   ignore_index: ${data.ignore_index}
   action_hidden_size: ${dims.action_hidden_size}
@@ -142,5 +142,5 @@ policy:
   rtc_max_delay: 8
   knowledge_insulation: ${runtime.knowledge_insulation}
   ce_loss_weight: 0.1
-  diffusion_loss_weight: 20.0
+  diffusion_loss_weight: 100.0
   flow_loss_weight: 1.0

@@ -33,5 +33,3 @@ val_vla_wds_datasets:
     shard_urls: ${val_wds_base_dir}/taco_test_seen/shard-*.tar
   - name: oakink2_test_seen_presence_clean
     shard_urls: ${val_wds_base_dir}/oakink2_test_seen_presence_clean/shard-*.tar
-  - name: egodex_filter_test_presence_clean
-    shard_urls: ${val_wds_base_dir}/egodex_filter_test_presence_clean/shard-*.tar
