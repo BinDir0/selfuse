@@ -1,5 +1,10 @@
 """Dataset export helpers for pipeline outputs."""
 
-from .webdataset import main as build_webdataset_main
+
+def build_webdataset_main():
+    """Lazy wrapper for the WebDataset builder entrypoint."""
+    from .webdataset import main
+
+    return main()
 
 __all__ = ["build_webdataset_main"]

@@ -44,6 +44,7 @@ def plan_shards(episodes, frames_per_shard, output_dir):
                 "crop_dir": ep["crop_dir"],
                 "episode_id": ep["episode_id"],
                 "episode_index": ep["episode_index"],
+                "instruction": list(ep.get("instruction", [])),
                 "frame_start": 0,
                 "frame_end": num_frames,
             }
@@ -67,8 +68,8 @@ def iter_episode_samples(ep, episode_data, frame_start, frame_end):
         meta = {
             "dataset_name": "buildai",
             "episode_index": ep["episode_index"],
-            "instruction": [],
-            "instruction_num": 0,
+            "instruction": list(ep.get("instruction", [])),
+            "instruction_num": len(ep.get("instruction", [])),
             "presence": int(episode_data["presence_per_frame"][frame_idx]),
         }
         sample_key = f"buildai_ep{ep['episode_index']:06d}_f{frame_idx:05d}"

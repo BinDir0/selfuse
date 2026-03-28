@@ -3,22 +3,81 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 import joblib
 import numpy as np
 from tqdm import tqdm
 
+FACTORY_DIR_PATTERN = re.compile(r"^factory_(\d+)$")
+FACTORY_NAME_PATTERN = re.compile(r"factory_?(\d+)")
 
-def discover_episodes(input_dir, episode_list=None, max_episodes=None, cache_file=None, require_world_res=True):
+
+def parse_factory_range(factory_range):
+    """Parse an inclusive factory range string like '1-50'."""
+    if factory_range is None:
+        return None
+    if isinstance(factory_range, (tuple, list)) and len(factory_range) == 2:
+        start = int(factory_range[0])
+        end = int(factory_range[1])
+        if start > end:
+            raise ValueError(f"Invalid factory range: {factory_range!r}. Start must be <= end")
+        return start, end
+
+    value = str(factory_range).strip()
+    match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", value)
+    if not match:
+        raise ValueError(f"Invalid factory range: {factory_range!r}. Expected format like '1-50'")
+
+    start = int(match.group(1))
+    end = int(match.group(2))
+    if start > end:
+        raise ValueError(f"Invalid factory range: {factory_range!r}. Start must be <= end")
+    return start, end
+
+
+def extract_factory_index(path_like):
+    """Extract a numeric factory index from the 10K BuildAI path layout."""
+    path = Path(path_like)
+    for part in path.parts:
+        match = FACTORY_DIR_PATTERN.match(part)
+        if match:
+            return int(match.group(1))
+
+    basename = path.name
+    match = FACTORY_NAME_PATTERN.search(basename)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def matches_factory_range(path_like, factory_range):
+    """Return whether a path falls inside the requested factory range."""
+    parsed_range = parse_factory_range(factory_range)
+    if parsed_range is None:
+        return True
+
+    factory_index = extract_factory_index(path_like)
+    if factory_index is None:
+        return False
+
+    start, end = parsed_range
+    return start <= factory_index <= end
+
+
+def discover_episodes(input_dir, episode_list=None, max_episodes=None, cache_file=None, require_world_res=True, factory_range=None):
     """Discover episode directories under BuildAI processed output."""
     if cache_file is None:
         cache_file = os.path.join(input_dir, "_vla_episodes_cache.json")
+    parsed_factory_range = parse_factory_range(factory_range)
 
     if require_world_res and os.path.exists(cache_file):
         print(f"Loading cached episode list from {cache_file}")
         with open(cache_file) as f:
             episodes = json.load(f)
+        if parsed_factory_range is not None:
+            episodes = [ep for ep in episodes if matches_factory_range(ep["crop_dir"], parsed_factory_range)]
         for i, ep in enumerate(episodes):
             ep["episode_index"] = i
         if max_episodes:
@@ -36,6 +95,8 @@ def discover_episodes(input_dir, episode_list=None, max_episodes=None, cache_fil
                 if not line:
                     continue
                 crop_dir = line[:-4] if line.endswith(".mp4") else line
+                if not matches_factory_range(crop_dir, parsed_factory_range):
+                    continue
                 if require_world_res and not os.path.exists(os.path.join(crop_dir, "world_space_res.pth")):
                     continue
                 episodes.append({"crop_dir": crop_dir, "episode_id": Path(crop_dir).name})
@@ -43,6 +104,8 @@ def discover_episodes(input_dir, episode_list=None, max_episodes=None, cache_fil
         input_path = Path(input_dir)
         for extracted_dir in sorted(input_path.glob("*/*/processed/*/extracted_images")):
             crop_dir = str(extracted_dir.parent)
+            if not matches_factory_range(crop_dir, parsed_factory_range):
+                continue
             if require_world_res and not os.path.exists(os.path.join(crop_dir, "world_space_res.pth")):
                 continue
             episodes.append({"crop_dir": crop_dir, "episode_id": Path(crop_dir).name})

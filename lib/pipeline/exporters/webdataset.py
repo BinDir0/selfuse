@@ -21,7 +21,12 @@ from .webdataset_discovery import (  # noqa: E402
     get_episode_feature_cache_path,
     load_episode_stats,
     load_or_build_frame_index,
+    parse_factory_range,
     repeat_episode_stats,
+)
+from .webdataset_annotation import (  # noqa: E402
+    DEFAULT_ANNOTATION_SUFFIX,
+    attach_or_filter_episode_instructions,
 )
 from .webdataset_features import (  # noqa: E402
     DEFAULT_INTRINSIC,
@@ -47,11 +52,13 @@ from .webdataset_writer import add_sample_to_tar, iter_episode_samples, plan_sha
 
 __all__ = [
     "DEFAULT_INTRINSIC",
+    "DEFAULT_ANNOTATION_SUFFIX",
     "FINGERTIP_INDICES",
     "LOWDIM_SIZE",
     "_worker_init",
     "_worker_process_shard",
     "add_sample_to_tar",
+    "attach_or_filter_episode_instructions",
     "axis_angle_to_rot6d",
     "build_mano_models",
     "discover_episode_stats",
@@ -64,6 +71,7 @@ __all__ = [
     "load_or_build_frame_index",
     "main",
     "normalize_mano_devices",
+    "parse_factory_range",
     "normalize_slam_keyframes",
     "plan_shards",
     "quat_to_4x4",
@@ -80,6 +88,7 @@ def build_parser():
     parser.add_argument("--output_dir", default="/share_data/guantianrui/datasets/BuildAI-VLA/")
     parser.add_argument("--episode_list", default=None, help="Text file with one episode path per line")
     parser.add_argument("--frames_per_shard", type=int, default=10000)
+    parser.add_argument("--factory_range", default=None, help="Inclusive factory range like 1-50 for 10K BuildAI layout")
     parser.add_argument("--repeat_episodes", type=int, default=1, help="Repeat the full episode list this many times in order")
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--mano_device", default="cuda:0", help="Device for MANO forward pass")
@@ -91,6 +100,16 @@ def build_parser():
     parser.add_argument("--auto_infill", action="store_true", help="Run infill for missing world_space_res.pth")
     parser.add_argument("--checkpoint", default=None, help="HaWoR checkpoint path (required if --auto_infill)")
     parser.add_argument("--infiller_weight", default=None, help="Infiller weight path (required if --auto_infill)")
+    parser.add_argument(
+        "--annotation_suffix",
+        default=DEFAULT_ANNOTATION_SUFFIX,
+        help="Suffix for per-episode annotation JSON files",
+    )
+    parser.add_argument(
+        "--allow_missing_annotation",
+        action="store_true",
+        help="Keep episodes even when annotation is missing or invalid",
+    )
     return parser
 
 
@@ -98,6 +117,7 @@ def normalize_args(args):
     """Normalize deprecated aliases and validate simple invariants."""
     if args.repeat_episodes < 1:
         raise ValueError("--repeat_episodes must be >= 1")
+    parse_factory_range(args.factory_range)
     return args.writer_workers
 
 
@@ -133,6 +153,7 @@ def maybe_run_auto_infill(args, cache_file, writer_workers):
         episode_list=args.episode_list,
         max_episodes=args.max_episodes,
         require_world_res=False,
+        factory_range=args.factory_range,
     )
     missing_infill = [
         ep
@@ -155,7 +176,13 @@ def maybe_run_auto_infill(args, cache_file, writer_workers):
 
 def prepare_episode_stats(args, cache_file):
     """Discover, validate, and expand episodes before shard planning."""
-    episodes = discover_episodes(args.input_dir, args.episode_list, args.max_episodes, cache_file=cache_file)
+    episodes = discover_episodes(
+        args.input_dir,
+        args.episode_list,
+        args.max_episodes,
+        cache_file=cache_file,
+        factory_range=args.factory_range,
+    )
     print(f"Found {len(episodes)} episodes with world_space_res.pth")
     if not episodes:
         return None, None
@@ -165,8 +192,26 @@ def prepare_episode_stats(args, cache_file):
     if not episode_stats:
         return episodes, None
 
-    episode_stats = repeat_episode_stats(episode_stats, args.repeat_episodes)
-    return episodes, episode_stats
+    episode_stats, annotation_stats = attach_or_filter_episode_instructions(
+        episode_stats,
+        annotation_suffix=args.annotation_suffix,
+        allow_missing_annotation=args.allow_missing_annotation,
+    )
+    print(
+        "Annotation filter:"
+        f" kept={annotation_stats['kept']}"
+        f" filtered={annotation_stats['filtered']}"
+        f" missing={annotation_stats['missing_annotation']}"
+        f" invalid_json={annotation_stats['invalid_json']}"
+        f" invalid_status={annotation_stats['invalid_status']}"
+        f" empty_instruction={annotation_stats['empty_instruction']}"
+    )
+    if not episode_stats:
+        return episodes, None
+
+    filtered_episodes = episode_stats
+    episode_stats = repeat_episode_stats(filtered_episodes, args.repeat_episodes)
+    return filtered_episodes, episode_stats
 
 
 def prepare_feature_cache_dir(args, episodes, episode_stats):
