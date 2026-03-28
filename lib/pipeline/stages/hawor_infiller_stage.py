@@ -319,8 +319,6 @@ def run_infiller_for_video(
     frame_source=None,
     seq_folder=None,
 ):
-    del start_idx, end_idx
-
     infiller_runner = infiller_runner or build_infiller_runner(args.infiller_weight)
     filling_model = infiller_runner["model"]
     device = infiller_runner["device"]
