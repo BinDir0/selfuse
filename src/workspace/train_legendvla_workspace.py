@@ -630,9 +630,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         param_list = [p for p in param_list if p.requires_grad]
         decay_params = [p for p in param_list if p.dim() >= 2]
         nodecay_params = [p for p in param_list if p.dim() < 2]
+        # Convert OmegaConf ListConfig to plain list so PyTorch's
+        # _iterate_state_dict can serialize it during FSDP2 checkpoint save.
+        betas = list(cfg.betas)
         optimizer_grouped_parameters = [
-            {'params': decay_params, 'weight_decay': cfg.weight_decay, 'lr': cfg.lr, 'betas': cfg.betas},
-            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': cfg.lr, 'betas': cfg.betas}
+            {'params': decay_params, 'weight_decay': cfg.weight_decay, 'lr': cfg.lr, 'betas': betas},
+            {'params': nodecay_params, 'weight_decay': 0.0, 'lr': cfg.lr, 'betas': betas}
         ]
         return optimizer_grouped_parameters
 
