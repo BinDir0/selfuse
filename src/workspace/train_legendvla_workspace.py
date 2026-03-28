@@ -35,7 +35,6 @@ from src.utils.training_utils import (
     capture_output_to_training_log,
     DeviceTransferWrapper,
     FullMemoryTracker,
-    grads_l2_norm,
     params_l2_norm,
     scalar_metric_value,
 )
@@ -445,23 +444,22 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             accelerator.sync_gradients
                             and (self.update_step % log_interval == 0)
                         )
-                        # Gradient clipping
-                        total_norm = None
+                        # Per-component gradient clipping to prevent cross-component interference.
+                        # clip_grad_norm_ returns the total norm before clipping.
                         part_grad_norms = None
-                        if accelerator.sync_gradients and should_record:
-                            part_grad_norms = {}
+                        if accelerator.sync_gradients and cfg.training.clipping.enabled:
+                            max_norm = cfg.training.clipping.max_grad_norm
                             part_params = {
                                 "action_expert": self.model.action_expert_parameters,
                                 "vlm": self.model.trainable_vlm_parameters,
                                 "diffloss": self.model.diffloss_parameters,
                             }
-                            for name, params in part_params.items():
-                                part_grad_norms[name] = grads_l2_norm(params)
-                        if accelerator.sync_gradients and cfg.training.clipping.enabled:
-                            total_norm = accelerator.clip_grad_norm_(
-                                self.model.parameters(),
-                                cfg.training.clipping.max_grad_norm
-                            )
+                            norms = {
+                                name: accelerator.clip_grad_norm_(params, max_norm)
+                                for name, params in part_params.items()
+                            }
+                            if should_record:
+                                part_grad_norms = norms
 
                         # Standard training
                         self.optimizer.step()
@@ -517,8 +515,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
                             'samples_per_sec': batch_size_local / step_time_sec if step_time_sec > 0 else 0,
                         })
-                        if total_norm is not None:
-                            step_log['grad_norm'] = scalar_metric_value(total_norm)
                         if part_grad_norms is not None:
                             step_log.update({
                                 'grad_norm_action_expert': part_grad_norms["action_expert"],
