@@ -22,6 +22,8 @@ from .hawor_cache import _load_or_build_cam_space_cache, _slice_cam_space_pred_d
 from .hawor_common import QUIET_MODE, vprint
 from .hawor_runtime import build_infiller_runner
 
+INFILLER_DEBUG_WINDOWS = os.environ.get("HAWOR_INFILLER_VERBOSE_WINDOWS", "0") == "1"
+
 
 @dataclass
 class InfillerState:
@@ -35,6 +37,11 @@ class InfillerState:
     cam_space_cache: dict
     r_c2w_sla_all: torch.Tensor
     t_c2w_sla_all: torch.Tensor
+
+
+def infiller_debug(*args, **kwargs):
+    if INFILLER_DEBUG_WINDOWS and not QUIET_MODE:
+        print(*args, **kwargs)
 
 
 def _prepare_infiller_window(
@@ -202,7 +209,7 @@ def _project_cam_space_chunks_to_world(state, frame_chunks_all):
             pred_dict = state.cam_space_cache[idx][original_key]
             pred_dict = _slice_cam_space_pred_dict(pred_dict, valid_frame_mask)
             frame_ck = frame_ck[valid_frame_mask]
-            vprint(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
+            infiller_debug(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
             data_out = {name: torch.from_numpy(value) for name, value in pred_dict.items()}
 
             r_c2w_sla = state.r_c2w_sla_all[frame_ck]
@@ -235,7 +242,7 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
         frame_chunks = parse_chunks_hand_frame(frame)
         pending_windows = []
 
-        vprint(f"run infiller on {idx_to_hand[idx]} hand ...")
+        infiller_debug(f"run infiller on {idx_to_hand[idx]} hand ...")
         for frame_ck in tqdm(frame_chunks, disable=QUIET_MODE):
             t_window = time.time()
             window = _prepare_infiller_window(
@@ -254,7 +261,7 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
 
             total_windows += 1
             pending_windows.append(window)
-            vprint(
+            infiller_debug(
                 f"queue infiller window {window['filling_net_start']} to "
                 f"{min(state.num_frames - 1, window['filling_net_start'] + filling_length)}"
             )
