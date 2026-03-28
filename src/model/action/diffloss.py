@@ -133,7 +133,9 @@ class BaseGenerativeMLP(nn.Module):
         self.time_embed = self.build_time_embed()
         self.cond_embed = nn.Linear(z_channels, model_channels)
 
-        self.input_proj = nn.Linear(in_channels, model_channels)
+        # Concat z with noisy input so z enters the main computation path,
+        # providing a direct gradient route to the conditioning backbone.
+        self.input_proj = nn.Linear(in_channels + z_channels, model_channels)
 
         res_blocks = []
         for _ in range(num_res_blocks):
@@ -180,7 +182,7 @@ class BaseGenerativeMLP(nn.Module):
         :param c: conditioning from AR transformer.
         :return: an [N x C] Tensor of outputs.
         """
-        x = self.input_proj(x)
+        x = self.input_proj(torch.cat([x, c], dim=-1))
         t = self.time_embed(t)
         c = self.cond_embed(c)
 
