@@ -292,12 +292,14 @@ class DiffLoss(nn.Module):
         flow_alpha=1.5,  # Beta distribution alpha parameter
         flow_beta=1.0,  # Beta distribution beta parameter
         num_inference_steps=10,  # Euler ODE steps for Flow Matching sampling
+        cond_dropout_prob=0.0,  # Probability of dropping condition z during training (CFG)
     ):
         super(DiffLoss, self).__init__()
         self.in_channels = target_channels
         self.use_ddim_sampling = use_ddim_sampling
         self.use_flow_matching = use_flow_matching
         self.flow_sig_min = flow_sig_min
+        self.cond_dropout_prob = cond_dropout_prob
         
         # Flow matching time sampling
         self.flow_sampling = flow_sampling
@@ -373,19 +375,27 @@ class DiffLoss(nn.Module):
         tiled = dim_weights.repeat_interleave(chunk_size)
         self.register_buffer('dim_weights', tiled)
 
+    def _apply_cond_dropout(self, z):
+        """Randomly zero out condition z for classifier-free guidance training."""
+        if not self.training or self.cond_dropout_prob <= 0.0:
+            return z
+        drop_mask = torch.rand(z.shape[0], 1, device=z.device) < self.cond_dropout_prob
+        return z.masked_fill(drop_mask, 0.0)
+
     def forward(self, target, z, mask=None, t=None):
         """
         Compute loss based on configuration.
-        
+
         Args:
             target: [B, C] Ground truth action
             z: [B, D] Condition embedding
             mask: Optional mask for valid elements
             t: Optional [B] timesteps for flow matching (if None, will sample internally)
-            
+
         Returns:
             Loss value
         """
+        z = self._apply_cond_dropout(z)
         if self.use_flow_matching:
             return self.flow_matching_loss(target, z, mask, t)
         else:
