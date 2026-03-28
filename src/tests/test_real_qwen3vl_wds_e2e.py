@@ -15,7 +15,7 @@ from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.dataset.vla_dataset import UnifiedWdsDataset, VLAWdsDataset
 from src.dataset.vlm_dataset import VLMWdsDataset
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
-from src.model.action.diffloss import DiffLoss
+from src.model.common.diffloss import DiffLoss
 from src.model.common.modules import TimeEmbedding
 from src.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from src.model.vlm.qwen3_vl_backbone import Qwen3VLBackboneWrapper

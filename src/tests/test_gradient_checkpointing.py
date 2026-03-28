@@ -4,8 +4,8 @@ from unittest.mock import patch
 import torch
 from transformers import Qwen3VLConfig, Qwen3VLTextConfig
 
-from src.model.action.diffloss import SimpleMLPAdaLN
-from src.model.action_expert.qwen3_action_expert import Qwen3ActionExpert
+from src.model.common.diffloss import SimpleMLPAdaLN
+from src.model.action.qwen3_action_expert import Qwen3ActionExpert
 from src.model.vlm.prefix_cache import PrefixKVCache
 
 
@@ -84,7 +84,7 @@ def test_diffloss_checkpoint_runs_only_in_train_mode():
         return fn(*args)
 
     net.train()
-    with patch("src.model.action.diffloss.checkpoint", fake_checkpoint):
+    with patch("src.model.common.diffloss.checkpoint", fake_checkpoint):
         net(x, t, c)
     assert len(train_calls) == 2
 
@@ -95,7 +95,7 @@ def test_diffloss_checkpoint_runs_only_in_train_mode():
         return fn(*args)
 
     net.eval()
-    with patch("src.model.action.diffloss.checkpoint", fake_checkpoint_eval):
+    with patch("src.model.common.diffloss.checkpoint", fake_checkpoint_eval):
         net(x, t, c)
     assert len(eval_calls) == 0
 

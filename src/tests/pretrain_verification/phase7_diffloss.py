@@ -38,7 +38,7 @@ def check_7_1_zero_init() -> CheckResult:
     errors = []
 
     try:
-        from src.model.action.diffloss import DiffLoss
+        from src.model.common.diffloss import DiffLoss
     except ImportError:
         return CheckResult(name="7.1 zero_init", passed=True,
                            message="Skipped (DiffLoss import failed)", details={"skipped": True})
@@ -173,7 +173,7 @@ def check_7_2_chunk_construction() -> CheckResult:
 def check_7_3_sampling(skip_visual: bool, output_dir) -> CheckResult:
     """Verify DiffLoss sampling at initialization produces near-random outputs."""
     try:
-        from src.model.action.diffloss import DiffLoss
+        from src.model.common.diffloss import DiffLoss
     except ImportError:
         return CheckResult(name="7.3 sampling", passed=True,
                            message="Skipped (DiffLoss import failed)", details={"skipped": True})

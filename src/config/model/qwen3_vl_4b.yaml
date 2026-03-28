@@ -87,7 +87,7 @@ policy:
     min_period: 0.004
     max_period: 4.0
   flow_expert:
-    _target_: src.model.action_expert.qwen3_action_expert.Qwen3ActionExpert
+    _target_: src.model.action.qwen3_action_expert.Qwen3ActionExpert
     model_name_or_path: ${pretrained.model_name_or_path}
     time_hidden_size: ${dims.time_hidden_size}
     hidden_size: ${dims.action_hidden_size}
@@ -112,7 +112,7 @@ policy:
     final_layer_norm: False
     use_mlp_layer_norm: False
   diffloss:
-    _target_: src.model.action.diffloss.DiffLoss
+    _target_: src.model.common.diffloss.DiffLoss
     target_channels: ${eval:'${dims.action_dim}*${policy.ar_action_chunk_size}'}
     z_channels: ${dims.diffloss_z_channels}
     depth: 4

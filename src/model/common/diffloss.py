@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 import math
 
-from src.utils import create_diffusion
+from src.model.common import create_diffusion
 from src.model.common.modules import SinusoidalPosEmb, TimeEncoder
 
 
