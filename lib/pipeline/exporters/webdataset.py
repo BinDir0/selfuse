@@ -98,8 +98,16 @@ def build_parser():
     parser.add_argument("--writer_workers", type=int, default=8, help="Number of parallel shard writers")
     parser.add_argument("--shard_manifest_out", default=None, help="Optional JSON manifest of planned shards")
     parser.add_argument("--auto_infill", action="store_true", help="Run infill for missing world_space_res.pth")
-    parser.add_argument("--checkpoint", default=None, help="HaWoR checkpoint path (required if --auto_infill)")
-    parser.add_argument("--infiller_weight", default=None, help="Infiller weight path (required if --auto_infill)")
+    parser.add_argument(
+        "--checkpoint",
+        default="/share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/hawor.ckpt",
+        help="HaWoR checkpoint path (required if --auto_infill)",
+    )
+    parser.add_argument(
+        "--infiller_weight",
+        default="/share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/infiller.pt",
+        help="Infiller weight path (required if --auto_infill)",
+    )
     parser.add_argument(
         "--annotation_suffix",
         default=DEFAULT_ANNOTATION_SUFFIX,
