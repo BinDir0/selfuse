@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, List
 
 if TYPE_CHECKING:
-    from lib.pipeline.video_index import VideoDescriptor
+    from lib.pipeline.datasets.descriptors import ClipDescriptor
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class ClipManifestRecord:
     clip_id: str
     source_id: str
     split: str
-    descriptor: "VideoDescriptor"
+    descriptor: "ClipDescriptor"
     group_id: str
     metadata: dict = field(default_factory=dict)
 
@@ -28,7 +28,7 @@ class ClipManifestRecord:
                 "source_id": self.source_id,
                 "split": self.split,
                 "group_id": self.group_id,
-                "descriptor": self.descriptor.__dict__,
+                "descriptor": self.descriptor.to_dict(),
                 "metadata": self.metadata,
             },
             ensure_ascii=False,
@@ -36,15 +36,15 @@ class ClipManifestRecord:
 
     @classmethod
     def from_json(cls, raw: str) -> "ClipManifestRecord":
-        from lib.pipeline.video_index import VideoDescriptor
+        from lib.pipeline.datasets.descriptors import ClipDescriptor
 
         payload = json.loads(raw)
         return cls(
             clip_id=payload["clip_id"],
             source_id=payload["source_id"],
             split=payload["split"],
-            group_id=payload.get("group_id") or Path(payload["descriptor"]["factory_dir"]).name,
-            descriptor=VideoDescriptor.from_dict(payload["descriptor"]),
+            group_id=payload.get("group_id") or Path(payload["descriptor"].get("root_dir") or payload["descriptor"].get("factory_dir") or "").name,
+            descriptor=ClipDescriptor.from_dict(payload["descriptor"]),
             metadata=payload.get("metadata") or {},
         )
 
@@ -76,12 +76,22 @@ def build_clip_manifest_records(
     from lib.pipeline.video_index import collect_videos_from_factories
 
     descriptors = collect_videos_from_factories(list(shard_dirs))
+    return build_manifest_records_from_descriptors(descriptors, source_id=source_id, split=split)
+
+
+def build_manifest_records_from_descriptors(
+    descriptors,
+    *,
+    source_id: str,
+    split: str,
+) -> List[ClipManifestRecord]:
     records = []
     for descriptor in descriptors:
-        group_id = Path(descriptor.factory_dir).name
+        group_root = descriptor.root_dir or descriptor.seq_folder
+        group_id = Path(group_root).name
         records.append(
             ClipManifestRecord(
-                clip_id=descriptor.video_key,
+                clip_id=descriptor.clip_id,
                 source_id=source_id,
                 split=split,
                 descriptor=descriptor,

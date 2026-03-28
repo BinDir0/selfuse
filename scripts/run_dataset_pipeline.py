@@ -18,6 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lib.pipeline.clip_manifest import build_manifest_records_from_descriptors, write_clip_manifest, write_shard_dir_list
+from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
+
 
 STAGE_ORDER = [
     "preprocess",
@@ -108,11 +111,6 @@ def selected_stages(raw: str) -> list[str]:
         raise ValueError(f"Unknown stages: {invalid}. Valid stages: {STAGE_ORDER}")
     return stages
 
-
-def buildai_group_names(start_factory_id: int, end_factory_id: int) -> list[str]:
-    return [f"factory{factory_id:03d}" for factory_id in range(start_factory_id, end_factory_id + 1)]
-
-
 def format_annotation_command(template: str, context: dict) -> list[str]:
     command = template.format(**context)
     return ["/bin/bash", "-lc", command]
@@ -128,7 +126,7 @@ def main():
     runtimes_cfg = config.get("runtimes", {})
     batch_cfg = config.get("batch_infer", {})
     build_cfg = config.get("build", {})
-    buildai_cfg = config.get("buildai", {})
+    adapter_cfg = config.get("adapter_config", config.get("buildai", {}))
     annotation_cfg = config.get("annotation", {})
     validation_cfg = config.get("validation", {})
 
@@ -141,16 +139,23 @@ def main():
     shard_dirs_list_path = run_dir / "shard_dirs.txt"
     summary_path = run_dir / "run_summary.json"
 
-    source_type = dataset_cfg.get("source_type", "buildai")
-    source_id = dataset_cfg.get("source_id", source_type)
+    adapter_name = dataset_cfg.get("adapter") or dataset_cfg.get("source_type", "buildai")
+    source_type = adapter_name
+    source_id = dataset_cfg.get("source_id", adapter_name)
     split = dataset_cfg.get("split", "train")
-    shard_root = Path(paths_cfg["shard_root"])
     annotation_root = paths_cfg.get("annotation_root")
     final_dataset_root = Path(paths_cfg["final_dataset_root"])
     hawor_python = runtimes_cfg["hawor_python"]
     slam_python = runtimes_cfg.get("slam_python", hawor_python)
-    buildai_repo_root = Path(paths_cfg.get("buildai_repo_root", "/root/buildai_processing"))
-    buildai_config = paths_cfg.get("buildai_config")
+    adapter = get_dataset_adapter(adapter_name)
+    adapter_context = DatasetAdapterContext(
+        project_root=PROJECT_ROOT,
+        run_dir=run_dir,
+        manifest_path=manifest_path,
+        shard_dirs_list_path=shard_dirs_list_path,
+        summary_path=summary_path,
+    )
+    prepared = None
 
     run_summary = {
         "config": str(Path(args.config).resolve()),
@@ -170,54 +175,58 @@ def main():
         stream_command(name, cmd, run_dir / f"{name}.log", cwd=cwd)
 
     if "preprocess" in stages:
-        if source_type != "buildai":
-            raise RuntimeError("preprocess stage currently supports source_type=buildai only")
-        start_factory_id = int(dataset_cfg["start_factory_id"])
-        end_factory_id = int(dataset_cfg["end_factory_id"])
-        preprocess_cmd = [
-            runtimes_cfg.get("buildai_shell", "/bin/bash"),
-            str(buildai_repo_root / "run_buildai_pipeline.sh"),
-            "--config",
-            str(buildai_config),
-            "--start-factory-id",
-            str(start_factory_id),
-            "--end-factory-id",
-            str(end_factory_id),
-            "--stages",
-            buildai_cfg.get("stages", "1,2,3"),
-        ]
-        if buildai_cfg.get("setup_decord"):
-            preprocess_cmd.append("--setup-decord")
-        if buildai_cfg.get("clean_stage3_output"):
-            preprocess_cmd.append("--clean-stage3-output")
-        run_logged("preprocess", preprocess_cmd, cwd=buildai_repo_root)
+        prepared = adapter.prepare(
+            dataset_cfg=dataset_cfg,
+            adapter_cfg=adapter_cfg,
+            paths_cfg=paths_cfg,
+            runtimes_cfg=runtimes_cfg,
+            context=adapter_context,
+            run_logged=run_logged,
+        )
 
     if "manifest" in stages:
-        manifest_cmd = [
-            hawor_python,
-            str(PROJECT_ROOT / "scripts" / "build_clip_manifest.py"),
-            "--shard_root",
-            str(shard_root),
-            "--source_id",
-            source_id,
-            "--split",
-            split,
-            "--manifest_out",
-            str(manifest_path),
-            "--shard_dirs_out",
-            str(shard_dirs_list_path),
-        ]
-        if source_type == "buildai":
-            include_dirs = buildai_group_names(
-                int(dataset_cfg["start_factory_id"]),
-                int(dataset_cfg["end_factory_id"]),
+        descriptors = list(
+            adapter.build_descriptors(
+                dataset_cfg=dataset_cfg,
+                adapter_cfg=adapter_cfg,
+                paths_cfg=paths_cfg,
+                context=adapter_context,
+                prepared=prepared,
             )
-            manifest_cmd.append("--include_dirs")
-            manifest_cmd.extend(include_dirs)
-        elif dataset_cfg.get("include_dirs"):
-            manifest_cmd.append("--include_dirs")
-            manifest_cmd.extend(str(item) for item in dataset_cfg["include_dirs"])
-        run_logged("manifest", manifest_cmd)
+        )
+        records = build_manifest_records_from_descriptors(
+            descriptors,
+            source_id=source_id,
+            split=split,
+        )
+        if not records:
+            raise RuntimeError(f"No clips found while building manifest for adapter={adapter_name}")
+        write_clip_manifest(records, manifest_path)
+
+        shard_root = paths_cfg.get("shard_root")
+        if shard_root and source_type == "buildai":
+            from lib.pipeline.clip_manifest import discover_shard_dirs
+
+            include_dirs = None
+            if prepared is not None:
+                include_dirs = prepared.payload.get("include_dirs")
+            if include_dirs is None:
+                include_dirs = adapter_cfg.get("include_dirs") or dataset_cfg.get("include_dirs")
+            shard_dirs = discover_shard_dirs(shard_root, include_dirs=include_dirs)
+            write_shard_dir_list(shard_dirs, shard_dirs_list_path)
+        print(
+            json.dumps(
+                {
+                    "adapter": adapter_name,
+                    "source_id": source_id,
+                    "split": split,
+                    "clip_count": len(records),
+                    "manifest_out": str(manifest_path.resolve()),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
     common_batch_args = cli_args_from_mapping(
         batch_cfg.get("common"),
@@ -275,6 +284,13 @@ def main():
         annotation_command = annotation_cfg.get("command")
         if not annotation_command:
             raise RuntimeError("annotate stage selected but annotation.command is missing in config")
+        annotation_context = adapter.resolve_annotation_context(
+            dataset_cfg=dataset_cfg,
+            adapter_cfg=adapter_cfg,
+            paths_cfg=paths_cfg,
+            context=adapter_context,
+            prepared=prepared,
+        )
         context = {
             "manifest": str(manifest_path),
             "annotation_root": str(annotation_root or ""),
@@ -283,6 +299,7 @@ def main():
             "slam_python": slam_python,
             "project_root": str(PROJECT_ROOT),
         }
+        context.update(annotation_context)
         run_logged("annotate", format_annotation_command(annotation_command, context))
 
     if "build" in stages:
@@ -300,6 +317,17 @@ def main():
         run_logged("build", build_cmd)
 
     if "validate" in stages:
+        source_validation = adapter.validate_source(
+            dataset_cfg=dataset_cfg,
+            adapter_cfg=adapter_cfg,
+            paths_cfg=paths_cfg,
+            context=adapter_context,
+            prepared=prepared,
+        )
+        if source_validation.summary:
+            print(json.dumps({"source_validation": source_validation.summary}, ensure_ascii=False, indent=2))
+        if not source_validation.ok:
+            raise RuntimeError(f"Source validation failed for adapter={adapter_name}: {source_validation.summary}")
         validate_cmd = [
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "validate_pipeline_run.py"),

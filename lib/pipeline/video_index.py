@@ -8,35 +8,11 @@ import json
 import os
 import re
 import tarfile
-from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Dict, Optional
 
 from tqdm import tqdm
-
-
-@dataclass
-class VideoDescriptor:
-    """Describes a single video within a WebDataset factory directory."""
-    video_key: str          # e.g. "f001_w012_v00029_i000" — unique ID
-    video_name: str         # e.g. "factory_001_worker_012_0029" — from JSON metadata
-    factory_dir: str        # e.g. "/share_data/.../factory001"
-    shard_path: str         # absolute path to the tar containing this video
-    frame_names: List[str]  # sorted list of JPEG filenames within the tar
-    seq_folder: str         # output directory for this video
-    frame_offsets: Optional[List[List]] = None  # [[offset, size], ...] parallel to frame_names
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), ensure_ascii=False)
-
-    @classmethod
-    def from_json(cls, s: str) -> 'VideoDescriptor':
-        d = json.loads(s)
-        return cls(**d)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'VideoDescriptor':
-        return cls(**d)
+from lib.pipeline.datasets.descriptors import ClipDescriptor as VideoDescriptor
 
 
 # Regex to split frame filename into video_key + frame_number
@@ -230,9 +206,10 @@ def collect_videos_from_factory(factory_dir: str) -> List[VideoDescriptor]:
         frame_offsets = [[f["offset"], f["size"]] for f in frames]
 
         desc = VideoDescriptor(
-            video_key=video_key,
-            video_name=info["video_name"],
-            factory_dir=factory_dir,
+            clip_id=video_key,
+            clip_name=info["video_name"],
+            storage_kind="tar_shard",
+            root_dir=factory_dir,
             shard_path=shard_path,
             frame_names=frame_names,
             seq_folder=seq_folder,

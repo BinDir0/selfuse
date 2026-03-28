@@ -10,7 +10,7 @@ from lib.pipeline.stage_api import (
     PipelineVideoTask,
     get_stage_done_marker,
 )
-from lib.pipeline.video_index import VideoDescriptor
+from lib.pipeline.datasets.descriptors import ClipDescriptor
 
 
 @dataclass
@@ -19,15 +19,15 @@ class VideoTaskState:
     video_name: str
     run_id: str
     log_dir: Path
-    descriptor: Optional[VideoDescriptor] = None
+    descriptor: Optional[ClipDescriptor] = None
     stage_status: Dict[str, str] = field(default_factory=dict)
     retry_count: Dict[str, int] = field(default_factory=dict)
     start_time: Optional[str] = None
     end_time: Optional[str] = None
 
     @classmethod
-    def create(cls, video_path: str, stages, run_id: str, log_dir: Path, descriptor: Optional[VideoDescriptor] = None):
-        video_name = Path(video_path).stem if descriptor is None else descriptor.video_key
+    def create(cls, video_path: str, stages, run_id: str, log_dir: Path, descriptor: Optional[ClipDescriptor] = None):
+        video_name = Path(video_path).stem if descriptor is None else descriptor.clip_id
         return cls(
             video_path=video_path,
             video_name=video_name,

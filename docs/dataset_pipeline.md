@@ -2,6 +2,12 @@
 
 This repository now supports a production dataset pipeline that connects raw-source preprocessing, HaWoR stage inference, clip-level annotation, final WebDataset build, and validation.
 
+The pipeline is adapter-driven. A new dataset should normally require only:
+
+- one dataset adapter
+- one YAML config
+- optional preprocess / annotation bridge scripts
+
 ## Goal
 
 The pipeline is designed for production use, not just one-off BuildAI exports.
@@ -15,6 +21,17 @@ The stable contract is:
 5. Final build reads the manifest, stage outputs, and sidecars to produce the trainable WebDataset.
 
 BuildAI is treated as one source adapter. The intermediate and final contracts are source-agnostic.
+
+## Adapter Model
+
+Each dataset plugs into the pipeline through a small adapter interface:
+
+- `prepare(...)`
+- `build_descriptors(...)`
+- `resolve_annotation_context(...)`
+- `validate_source(...)`
+
+The canonical handoff is the frozen clip manifest. Downstream stages do not need to know whether the source came from BuildAI tar shards, image-sequence clips, or video folders with extracted frames.
 
 ## Storage Contract
 
@@ -33,7 +50,7 @@ The preprocess stage should emit a shard root like:
     ...
 ```
 
-Each clip must also have a `seq_folder` resolved by the existing `VideoDescriptor` pipeline. HaWoR stage outputs continue to live under that clip-local directory, for example:
+Each clip must also have a `seq_folder` resolved by the descriptor. HaWoR stage outputs continue to live under that clip-local directory, for example:
 
 ```text
 <seq_folder>/
@@ -52,9 +69,14 @@ Each clip must also have a `seq_folder` resolved by the existing `VideoDescripto
 - `source_id`
 - `split`
 - `group_id`
-- the full `VideoDescriptor`
+- the full `ClipDescriptor`
 
 This is the critical orchestration boundary. All downstream stages consume the manifest instead of rescanning live shard directories.
+
+The built-in descriptors currently support:
+
+- `tar_shard`
+- `image_sequence`
 
 ### 3. Annotation Sidecars
 
@@ -115,7 +137,7 @@ python scripts/run_dataset_pipeline.py \
 
 The config controls:
 
-- source selection
+- adapter selection
 - preprocess repo path and config
 - runtime Python executables
 - batch inference arguments
@@ -127,12 +149,12 @@ The config controls:
 
 ```bash
 python scripts/build_clip_manifest.py \
-  --shard_root /path/to/stage3_jpg \
-  --source_id buildai \
-  --split train \
+  --config configs/dataset_pipeline_buildai.example.yaml \
   --manifest_out /path/to/run/clip_manifest.jsonl \
   --shard_dirs_out /path/to/run/shard_dirs.txt
 ```
+
+Legacy shard scanning mode is still supported for existing BuildAI-style roots.
 
 ### Run HaWoR Stages From Manifest
 
@@ -192,3 +214,8 @@ Acceptance criteria:
 - The final dataset builder shards by approximate frame budget, but each shard contains whole episodes only.
 - The manifest-based builder does not rely on old BuildAI directory rescans.
 - If annotation is delayed, you can generate the final dataset later from the frozen manifest without rerunning preprocess or HaWoR stages.
+- Built-in adapters now include `buildai`, `image_sequence`, and `video_folder`.
+- Example configs live under:
+  - `configs/dataset_pipeline_buildai.example.yaml`
+  - `configs/dataset_pipeline_image_sequence.example.yaml`
+  - `configs/dataset_pipeline_video_folder.example.yaml`

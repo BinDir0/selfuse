@@ -36,7 +36,7 @@ _configure_process_environment()
 
 from lib.pipeline.runtime import WorkerRuntime, set_determinism  # noqa: E402
 from lib.pipeline.stage_api import STAGES, PipelineVideoTask, run_pipeline_stage  # noqa: E402
-from lib.pipeline.video_index import VideoDescriptor  # noqa: E402
+from lib.pipeline.datasets.descriptors import ClipDescriptor  # noqa: E402
 
 
 def emit_event(event: str, **kwargs):
@@ -76,11 +76,11 @@ def _build_runtime_from_args(ns):
 
 def _parse_video_list_entry(line: str):
     if line.startswith("{"):
-        descriptor = VideoDescriptor.from_json(line)
+        descriptor = ClipDescriptor.from_json(line)
         return {
             "descriptor": descriptor,
-            "video_path": descriptor.video_key,
-            "video_label": descriptor.video_key,
+            "video_path": descriptor.media_path or descriptor.clip_id,
+            "video_label": descriptor.clip_id,
         }
 
     return {

@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from lib.pipeline.annotation_protocol import load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
+from lib.pipeline.frame_sources import read_frame_bytes_from_descriptor
 from lib.pipeline.exporters.webdataset_features import (
     _build_lowdim_features,
     _compute_hand_state,
@@ -80,32 +81,6 @@ def _write_cached_features(seq_folder: str, feature_cache_dir: str, episode_data
     except OSError:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
-
-def read_frame_bytes(descriptor, frame_idx: int) -> bytes:
-    if descriptor.frame_offsets is not None:
-        offset, size = descriptor.frame_offsets[frame_idx]
-        fd = _worker_shard_fd_cache.get(descriptor.shard_path)
-        if fd is None:
-            fd = os.open(descriptor.shard_path, os.O_RDONLY)
-            _worker_shard_fd_cache[descriptor.shard_path] = fd
-        payload = os.pread(fd, size, offset)
-        if len(payload) != size:
-            raise RuntimeError(
-                f"Short read from shard {descriptor.shard_path} frame {descriptor.frame_names[frame_idx]}"
-            )
-        return payload
-
-    member_name = descriptor.frame_names[frame_idx]
-    tar_reader = _worker_shard_tar_cache.get(descriptor.shard_path)
-    if tar_reader is None:
-        tar_reader = tarfile.open(descriptor.shard_path, "r")
-        _worker_shard_tar_cache[descriptor.shard_path] = tar_reader
-    member = tar_reader.getmember(member_name)
-    extracted = tar_reader.extractfile(member)
-    if extracted is None:
-        raise RuntimeError(f"Failed to extract {member_name} from {descriptor.shard_path}")
-    return extracted.read()
 
 
 def load_descriptor_episode_features(ep: dict, mano_right, mano_left, device, feature_cache_dir: str | None):
@@ -284,7 +259,12 @@ def _worker_process_shard(task):
 
             descriptor = episode_slice["descriptor"]
             for frame_idx in range(episode_slice["frame_start"], episode_slice["frame_end"]):
-                image_bytes = read_frame_bytes(descriptor, frame_idx)
+                image_bytes = read_frame_bytes_from_descriptor(
+                    descriptor,
+                    frame_idx,
+                    shard_fd_cache=_worker_shard_fd_cache,
+                    shard_tar_cache=_worker_shard_tar_cache,
+                )
                 meta = {
                     "dataset_name": episode_slice["source_id"],
                     "clip_id": episode_slice["clip_id"],
@@ -345,7 +325,7 @@ def _prepare_manifest_episode(record: ClipManifestRecord, require_annotation: bo
     except Exception:
         return None, "invalid_world_res"
 
-    num_frames = min(int(np.asarray(pred_trans).shape[1]), len(record.descriptor.frame_names))
+    num_frames = min(int(np.asarray(pred_trans).shape[1]), record.descriptor.frame_count)
     if num_frames <= 0:
         return None, "empty_frames"
 

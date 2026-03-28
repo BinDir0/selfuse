@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
-    from lib.pipeline.video_index import VideoDescriptor
+    from lib.pipeline.datasets.descriptors import ClipDescriptor
 
 
 STAGE_ALIASES = {
@@ -16,7 +16,7 @@ VALID_BATCH_STAGES = ["detect_track", "motion", "slam", "infiller"]
 @dataclass(frozen=True)
 class BatchRunConfig:
     video_paths: List[str]
-    descriptors: Optional[List["VideoDescriptor"]]
+    descriptors: Optional[List["ClipDescriptor"]]
     gpus: List[int]
     stages: List[str]
     resume: bool
@@ -50,7 +50,7 @@ class BatchRunConfig:
     enable_profiler: bool = False
 
     @classmethod
-    def from_args(cls, args, *, video_paths: List[str], descriptors: Optional[List["VideoDescriptor"]], run_dir: Path):
+    def from_args(cls, args, *, video_paths: List[str], descriptors: Optional[List["ClipDescriptor"]], run_dir: Path):
         raw_stages = [part.strip() for part in args.stages.split(",") if part.strip()]
         stages = [STAGE_ALIASES.get(stage, stage) for stage in raw_stages]
         invalid = [stage for stage in stages if stage not in VALID_BATCH_STAGES]

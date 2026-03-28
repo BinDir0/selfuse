@@ -7,8 +7,8 @@ from typing import Optional
 import joblib
 import numpy as np
 
-from lib.pipeline.frame_source import ShardVideoFrameSource
-from lib.pipeline.video_index import VideoDescriptor
+from lib.pipeline.datasets.descriptors import ClipDescriptor
+from lib.pipeline.frame_sources import build_frame_source_from_descriptor
 
 
 STAGES = ["detect_track", "motion", "slam", "infiller"]
@@ -93,13 +93,13 @@ class StageExecutionConfig:
 class PipelineVideoTask:
     video_path: str
     seq_folder: Path
-    descriptor: Optional[VideoDescriptor] = None
+    descriptor: Optional[ClipDescriptor] = None
 
     @classmethod
-    def from_inputs(cls, video_path: Optional[str] = None, descriptor: Optional[VideoDescriptor] = None):
+    def from_inputs(cls, video_path: Optional[str] = None, descriptor: Optional[ClipDescriptor] = None):
         if descriptor is not None:
             return cls(
-                video_path=descriptor.video_key,
+                video_path=descriptor.media_path or descriptor.clip_id,
                 seq_folder=Path(descriptor.seq_folder),
                 descriptor=descriptor,
             )
@@ -121,11 +121,7 @@ class PipelineVideoTask:
     def build_frame_source(self):
         if self.descriptor is None:
             return None
-        return ShardVideoFrameSource(
-            self.descriptor.shard_path,
-            self.descriptor.frame_names,
-            frame_offsets=self.descriptor.frame_offsets,
-        )
+        return build_frame_source_from_descriptor(self.descriptor)
 
 
 @dataclass(frozen=True)
@@ -144,7 +140,7 @@ class StageArtifacts:
         return get_stage_done_marker(self.seq_folder, self.stage_name)
 
 
-def get_seq_folder(video_path: str = None, descriptor: VideoDescriptor = None) -> Path:
+def get_seq_folder(video_path: str = None, descriptor: ClipDescriptor = None) -> Path:
     if descriptor is not None:
         return Path(descriptor.seq_folder)
     video_path = Path(video_path)

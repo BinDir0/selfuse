@@ -147,6 +147,91 @@ Primary entrypoints:
 - `python scripts/build_vla_from_manifest.py ...`
 - `python scripts/validate_pipeline_run.py ...`
 
+Built-in dataset adapters:
+
+- `buildai`
+- `image_sequence`
+- `video_folder`
+
+### Adding A New Dataset
+
+The pipeline is adapter-driven. A new dataset should normally require:
+
+- one dataset adapter under `lib/pipeline/datasets/`
+- one YAML config under `configs/`
+- optional preprocess and annotation bridge scripts
+
+The stable handoff is the frozen clip manifest. Your adapter should convert the source dataset into standard `ClipDescriptor` records, and everything downstream reuses the same stage/build/validate pipeline.
+
+Minimum checklist for a new dataset:
+
+- Decide the clip unit.
+  Each manifest row must represent one complete clip/episode.
+- Decide the frame storage mode.
+  The built-in pipeline currently supports `tar_shard` and `image_sequence`.
+- Define a stable `clip_id`.
+  It must be unique across the dataset and stable enough to be reused by stage outputs and annotation sidecars.
+- Define `seq_folder`.
+  This is where `detect_track`, `motion`, `slam`, and `infiller` will write outputs for the clip.
+- Map source metadata into the manifest.
+  Keep dataset-specific information in `metadata` or `descriptor.extra`, not in downstream stage logic.
+- If language annotation is needed, write sidecars to `<annotation_root>/<clip_id>.annotation.json`.
+
+### Adapter Interface
+
+Each dataset adapter plugs into the pipeline through a small interface:
+
+- `prepare(...)`
+  Optional source-specific preprocess step.
+- `build_descriptors(...)`
+  Required. Returns the canonical clip descriptors used to build the frozen manifest.
+- `resolve_annotation_context(...)`
+  Optional. Supplies adapter-specific inputs for the annotation stage command.
+- `validate_source(...)`
+  Optional. Performs dataset-specific source checks before or during pipeline validation.
+
+In practice, a new dataset should usually only need a new adapter class plus one config file. The orchestrator, batch inference, final build, and validation code should not need dataset-specific edits.
+
+### Final Outputs
+
+After the whole pipeline finishes, the main outputs are:
+
+- `clip_manifest.jsonl`
+  Frozen list of clips used by all downstream stages.
+- Per-clip `seq_folder` outputs
+  Stage artifacts such as `tracks_*_*`, `SLAM/...`, and `world_space_res.pth`.
+- Annotation sidecars
+  One `<clip_id>.annotation.json` per clip when language annotation is enabled.
+- Final VLA WebDataset shards
+  `.tar` files containing image bytes, lowdim features, and metadata including `clip_id`, `instruction`, `instruction_num`, `language`, and `presence`.
+- Validation summary
+  Checks for source coverage, stage completeness, annotation validity, and final dataset schema.
+
+Typical end state:
+
+```text
+<run_dir>/
+  clip_manifest.jsonl
+  shard_dirs.txt                # optional, for shard-based sources
+  preprocess.log
+  manifest.log
+  detect_motion.log
+  slam.log
+  infiller.log
+  annotate.log
+  build.log
+  validate.log
+
+<annotation_root>/
+  <clip_id>.annotation.json
+  ...
+
+<final_dataset_root>/
+  shard-000000.tar
+  shard-000001.tar
+  ...
+```
+
 The recommended annotation format is one sidecar per clip:
 
 - `<annotation_root>/<clip_id>.annotation.json`
@@ -157,6 +242,12 @@ with normalized fields:
 - `language`
 - `instruction`
 - optional `hierarchy`
+
+Example configs:
+
+- `configs/dataset_pipeline_buildai.example.yaml`
+- `configs/dataset_pipeline_image_sequence.example.yaml`
+- `configs/dataset_pipeline_video_folder.example.yaml`
 
 Detailed storage contracts, runtime split, and smoke-test procedure are documented in [`docs/dataset_pipeline.md`](docs/dataset_pipeline.md).
 

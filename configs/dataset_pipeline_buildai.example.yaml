@@ -1,5 +1,5 @@
 dataset:
-  source_type: buildai
+  adapter: buildai
   source_id: buildai
   split: train
   start_factory_id: 1
@@ -18,7 +18,7 @@ runtimes:
   hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
   slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4/bin/python3.10
 
-buildai:
+adapter_config:
   stages: 1,2,3
   setup_decord: false
   clean_stage3_output: false
