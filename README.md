@@ -129,6 +129,37 @@ python scripts/batch_infer.py \
   --run_dir batch_runs/20260301_120000  # specify existing run directory
 ```
 
+## Dataset Production Pipeline
+
+The repo now includes a production dataset pipeline for:
+
+- source-specific preprocess
+- frozen clip manifest generation
+- HaWoR stage inference across split runtimes
+- clip-level language/annotation sidecars
+- final VLA WebDataset build
+- run validation
+
+Primary entrypoints:
+
+- `python scripts/run_dataset_pipeline.py --config ...`
+- `python scripts/build_clip_manifest.py ...`
+- `python scripts/build_vla_from_manifest.py ...`
+- `python scripts/validate_pipeline_run.py ...`
+
+The recommended annotation format is one sidecar per clip:
+
+- `<annotation_root>/<clip_id>.annotation.json`
+
+with normalized fields:
+
+- `status`
+- `language`
+- `instruction`
+- optional `hierarchy`
+
+Detailed storage contracts, runtime split, and smoke-test procedure are documented in [`docs/dataset_pipeline.md`](docs/dataset_pipeline.md).
+
 ## Repository Layout
 
 The repository is organized so CLI entrypoints stay stable while reusable pipeline logic lives under `lib/pipeline`.

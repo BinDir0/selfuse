@@ -43,14 +43,33 @@ def collect_videos(video_dir: Path, extensions=(".mp4", ".avi", ".mov")) -> List
 
 def resolve_inputs(args):
     from lib.pipeline.video_index import collect_videos_from_factory, collect_videos_from_factories
+    from lib.pipeline.clip_manifest import load_clip_manifest
 
     descriptors = None
 
-    if args.video_list:
+    if args.descriptor_manifest:
+        records = load_clip_manifest(args.descriptor_manifest)
+        descriptors = [record.descriptor for record in records]
+        video_paths = [descriptor.video_key for descriptor in descriptors]
+        print(f"Descriptor manifest: {args.descriptor_manifest}")
+        print(f"Discovered {len(descriptors)} videos from manifest")
+    elif args.video_list:
         with open(args.video_list) as handle:
             video_paths = [line.strip() for line in handle if line.strip()]
     elif args.video_dir:
         video_paths = collect_videos(Path(args.video_dir))
+    elif args.shard_dir:
+        descriptors = collect_videos_from_factory(args.shard_dir)
+        video_paths = [descriptor.video_key for descriptor in descriptors]
+        print(f"Shard mode: {args.shard_dir}")
+        print(f"Discovered {len(descriptors)} videos from shard dir")
+    elif args.shard_dir_list:
+        with open(args.shard_dir_list) as handle:
+            shard_dirs = [line.strip() for line in handle if line.strip()]
+        descriptors = collect_videos_from_factories(shard_dirs)
+        video_paths = [descriptor.video_key for descriptor in descriptors]
+        print(f"Shard mode: {len(shard_dirs)} shard dirs")
+        print(f"Discovered {len(descriptors)} videos total")
     elif args.factory_dir:
         descriptors = collect_videos_from_factory(args.factory_dir)
         video_paths = [descriptor.video_key for descriptor in descriptors]
@@ -119,8 +138,11 @@ def build_run_dir(args) -> Path:
 def get_parser():
     parser = argparse.ArgumentParser(description="Multi-GPU batch inference scheduler for HaWoR")
     input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--descriptor_manifest", type=str, help="Path to JSONL manifest of clip descriptors")
     input_group.add_argument("--video_list", type=str, help="Path to text file with one video path per line")
     input_group.add_argument("--video_dir", type=str, help="Directory to recursively search for video files")
+    input_group.add_argument("--shard_dir", type=str, help="Directory containing tar shards for one shard group")
+    input_group.add_argument("--shard_dir_list", type=str, help="Path to text file with one shard directory per line")
     input_group.add_argument("--factory_dir", type=str, help="WebDataset factory directory containing tar shards")
     input_group.add_argument("--factory_list", type=str, help="Path to text file with one factory directory per line")
     input_group.add_argument(
