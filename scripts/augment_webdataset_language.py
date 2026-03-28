@@ -5,6 +5,7 @@ import argparse
 import os
 import sys
 import tarfile
+from multiprocessing import get_context
 from pathlib import Path
 
 from tqdm import tqdm
@@ -32,6 +33,9 @@ from lib.pipeline.exporters.webdataset_rewriter import (  # noqa: E402
     write_sample_to_tar,
 )
 
+_worker_episode_lookup = None
+_worker_output_dir = None
+
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Rewrite WebDataset shards with instruction metadata")
@@ -42,6 +46,12 @@ def build_parser():
     parser.add_argument("--episode_list", default=None, help="Optional episode list used during the original build")
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes like the original build")
     parser.add_argument("--repeat_episodes", type=int, default=1, help="Repeat count used during the original build")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(8, os.cpu_count() or 1)),
+        help="Number of shard rewrite workers",
+    )
     parser.add_argument("--rescan", action="store_true", help="Force rescan of frame indexes when rebuilding episode order")
     parser.add_argument(
         "--annotation_suffix",
@@ -175,6 +185,17 @@ def rewrite_shard(shard_path, output_dir, episode_lookup):
     }
 
 
+def _worker_init(output_dir, episode_lookup):
+    global _worker_episode_lookup, _worker_output_dir
+
+    _worker_episode_lookup = episode_lookup
+    _worker_output_dir = output_dir
+
+
+def _worker_rewrite_shard(shard_path):
+    return rewrite_shard(shard_path, _worker_output_dir, _worker_episode_lookup)
+
+
 def print_lookup_summary(stats):
     print(
         "Episode annotation map:"
@@ -198,14 +219,7 @@ def print_final_summary(output_dir, totals):
     print(f"  Episodes skipped: {totals['skipped_episodes']}")
 
 
-def main():
-    args = build_parser().parse_args()
-    parse_factory_range(args.factory_range)
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    episode_lookup, lookup_stats = build_episode_lookup(args)
-    print_lookup_summary(lookup_stats)
-
+def run_rewrite_workers(shard_paths, output_dir, episode_lookup, workers):
     totals = {
         "shards_written": 0,
         "frames_written": 0,
@@ -214,17 +228,50 @@ def main():
         "skipped_episodes": 0,
     }
 
-    shard_paths = list(iter_shard_paths(args.source_shard_dir))
-    if not shard_paths:
-        raise RuntimeError(f"No .tar shards found in {args.source_shard_dir}")
+    if workers <= 1:
+        result_iter = (rewrite_shard(shard_path, output_dir, episode_lookup) for shard_path in shard_paths)
+    else:
+        mp_context = get_context()
+        with mp_context.Pool(
+            workers,
+            initializer=_worker_init,
+            initargs=(output_dir, episode_lookup),
+        ) as pool:
+            result_iter = pool.imap_unordered(_worker_rewrite_shard, shard_paths, chunksize=1)
+            for result in tqdm(result_iter, total=len(shard_paths), desc="Rewrite shards"):
+                totals["shards_written"] += result["shard_written"]
+                totals["frames_written"] += result["frames_written"]
+                totals["skipped_frames"] += result["skipped_frames"]
+                totals["written_episodes"] += result["written_episodes"]
+                totals["skipped_episodes"] += result["skipped_episodes"]
+        return totals
 
-    for shard_path in tqdm(shard_paths, desc="Rewrite shards"):
-        result = rewrite_shard(shard_path, args.output_dir, episode_lookup)
+    for result in tqdm(result_iter, total=len(shard_paths), desc="Rewrite shards"):
         totals["shards_written"] += result["shard_written"]
         totals["frames_written"] += result["frames_written"]
         totals["skipped_frames"] += result["skipped_frames"]
         totals["written_episodes"] += result["written_episodes"]
         totals["skipped_episodes"] += result["skipped_episodes"]
+
+    return totals
+
+
+def main():
+    args = build_parser().parse_args()
+    parse_factory_range(args.factory_range)
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    episode_lookup, lookup_stats = build_episode_lookup(args)
+    print_lookup_summary(lookup_stats)
+
+    shard_paths = list(iter_shard_paths(args.source_shard_dir))
+    if not shard_paths:
+        raise RuntimeError(f"No .tar shards found in {args.source_shard_dir}")
+
+    print(f"Rewriting {len(shard_paths)} shards with {args.workers} worker(s)...")
+    totals = run_rewrite_workers(shard_paths, args.output_dir, episode_lookup, args.workers)
 
     print_final_summary(args.output_dir, totals)
 
