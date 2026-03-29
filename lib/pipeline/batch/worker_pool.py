@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from lib.pipeline.batch.config import BatchRunConfig
+from lib.pipeline.errors import CorruptStageDataError
 from lib.pipeline.frame_source import build_frame_source
 from lib.pipeline.runtime import WorkerRuntime, set_determinism
 from lib.pipeline.stage_api import (
@@ -137,6 +138,15 @@ def _stage_worker_main(gpu: int, stage: str, video_queue: mp.Queue, result_queue
                     prefetched_data=prefetched_data,
                 )
                 result_queue.put({"video": video_path, "success": success, "gpu": gpu})
+            except CorruptStageDataError as error:
+                result_queue.put(
+                    {
+                        "video": video_path,
+                        "success": False,
+                        "gpu": gpu,
+                        "error": str(error),
+                    }
+                )
             except Exception as error:
                 traceback.print_exc()
                 result_queue.put(

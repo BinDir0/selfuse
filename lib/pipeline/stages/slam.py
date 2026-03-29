@@ -5,6 +5,8 @@ import os
 import shutil
 import sys
 import time
+import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Sequence
@@ -23,6 +25,7 @@ from lib.pipeline.any4d_depth import (
     build_any4d_views,
     predict_any4d_depths_from_views,
 )
+from lib.pipeline.errors import CorruptStageDataError
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
@@ -30,6 +33,18 @@ from lib.pipeline.slam_geom_utils import est_calib, get_dimention
 
 
 QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
+CORRUPT_STAGE_ERROR_TOKENS = (
+    "bad crc-32",
+    "invalid block type",
+    "failed to decode image from tar",
+    "failed to read image",
+    "failed to write stage3 frame cache image",
+    "failed to decode",
+    "no such file or directory",
+    "truncated",
+    "unexpected end of data",
+    "cannot identify image file",
+)
 
 
 def vprint(*args, **kwargs):
@@ -50,7 +65,10 @@ def _resolve_frame_source(video_path: str, frame_source=None):
 
 def _load_masks(seq_folder: str, start_idx: int, end_idx: int) -> torch.Tensor:
     masks_path = os.path.join(seq_folder, f"tracks_{start_idx}_{end_idx}", "model_masks.npy")
-    return torch.from_numpy(np.load(masks_path, allow_pickle=True))
+    try:
+        return torch.from_numpy(np.load(masks_path, allow_pickle=True))
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile, zlib.error) as error:
+        raise CorruptStageDataError(f"Corrupt masks file: {masks_path} ({error})") from error
 
 
 def _resolve_focal(seq_folder: str, requested_focal: float = None) -> float:
@@ -165,10 +183,15 @@ def _build_stage3_workspace(frame_source, frame_ids: np.ndarray, seq_folder: str
     os.makedirs(cache_dir, exist_ok=True)
 
     for frame_id in frame_id_list:
-        image = frame_source.get_frame(frame_id, rgb=False)
+        try:
+            image = frame_source.get_frame(frame_id, rgb=False)
+        except Exception as error:
+            raise CorruptStageDataError(
+                f"Failed to materialize stage3 frame {frame_id} for {seq_folder}: {error}"
+            ) from error
         out_path = expected_paths[frame_id]
         if not cv2.imwrite(out_path, image):
-            raise RuntimeError(f"Failed to write stage3 frame cache image: {out_path}")
+            raise CorruptStageDataError(f"Failed to write stage3 frame cache image: {out_path}")
 
     Path(ready_marker).touch()
     ordered_paths = [expected_paths[frame_id] for frame_id in frame_id_list]
@@ -224,16 +247,20 @@ def _run_dpvo_with_cache(frame_source, masks, calib, seq_folder: str, start_idx:
         )
         torch.cuda.empty_cache()
 
-    with np.load(cache_path, allow_pickle=False) as cached:
-        traj_full = cached["traj"].astype(np.float32)
-        disps_full = cached["disps"].astype(np.float32)
-        tstamp_full = cached["tstamp"].astype(np.int64).reshape(-1)
-        tstamp_disps = cached["tstamp_disps"].astype(np.int64).reshape(-1) if "tstamp_disps" in cached.files else None
-        cached_vo_sec = None
-        if "dpvo_vo_wall_sec" in cached.files:
-            cached_vo_sec = float(np.asarray(cached["dpvo_vo_wall_sec"]).reshape(-1)[0])
-        elif "dpvo_subprocess_sec" in cached.files:
-            cached_vo_sec = float(np.asarray(cached["dpvo_subprocess_sec"]).reshape(-1)[0])
+    try:
+        with np.load(cache_path, allow_pickle=False) as cached:
+            traj_full = cached["traj"].astype(np.float32)
+            disps_full = cached["disps"].astype(np.float32)
+            tstamp_full = cached["tstamp"].astype(np.int64).reshape(-1)
+            tstamp_disps = cached["tstamp_disps"].astype(np.int64).reshape(-1) if "tstamp_disps" in cached.files else None
+            cached_vo_sec = None
+            if "dpvo_vo_wall_sec" in cached.files:
+                cached_vo_sec = float(np.asarray(cached["dpvo_vo_wall_sec"]).reshape(-1)[0])
+            elif "dpvo_subprocess_sec" in cached.files:
+                cached_vo_sec = float(np.asarray(cached["dpvo_subprocess_sec"]).reshape(-1)[0])
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile, zlib.error) as error:
+        _drop_corrupt_cache(cache_path, error)
+        return _run_dpvo_with_cache(frame_source, masks, calib, seq_folder, start_idx, end_idx, frame_indices=frame_indices)
 
     if tstamp_disps is not None and tstamp_disps.shape[0] == disps_full.shape[0]:
         order = np.argsort(tstamp_full)
@@ -296,18 +323,52 @@ def _save_dense_depth_uint16_npz(out_path: str, frame_indices, depths):
     )
 
 
+def _drop_corrupt_cache(cache_path: str, error: Exception):
+    vprint(f"Corrupt cache ignored: {cache_path} ({error})")
+    try:
+        os.remove(cache_path)
+        vprint(f"Removed corrupt cache: {cache_path}")
+    except OSError:
+        pass
+
+
+def _iter_exception_chain(error: Exception):
+    current = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        yield current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+
+
+def _is_corrupt_stage_data_error(error: Exception) -> bool:
+    for item in _iter_exception_chain(error):
+        if isinstance(item, CorruptStageDataError):
+            return True
+        if isinstance(item, (EOFError, zipfile.BadZipFile, zlib.error, cv2.error)):
+            return True
+        message = str(item).strip().lower()
+        if any(token in message for token in CORRUPT_STAGE_ERROR_TOKENS):
+            return True
+    return False
+
+
 def _load_dense_depth_cache(cache_path: str):
     if not os.path.exists(cache_path):
         return None
 
-    with np.load(cache_path, allow_pickle=False) as cached:
-        frame_indices = cached["frame_indices"].astype(np.int64).reshape(-1)
-        if "depths_uint16" in cached.files:
-            depths = cached["depths_uint16"].astype(np.float32) * 1e-3
-        elif "pred_depths" in cached.files:
-            depths = cached["pred_depths"].astype(np.float32)
-        else:
-            return None
+    try:
+        with np.load(cache_path, allow_pickle=False) as cached:
+            frame_indices = cached["frame_indices"].astype(np.int64).reshape(-1)
+            if "depths_uint16" in cached.files:
+                depths = cached["depths_uint16"].astype(np.float32) * 1e-3
+            elif "pred_depths" in cached.files:
+                depths = cached["pred_depths"].astype(np.float32)
+            else:
+                return None
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile, zlib.error) as error:
+        _drop_corrupt_cache(cache_path, error)
+        return None
     return frame_indices, depths
 
 
@@ -326,16 +387,20 @@ def _load_matching_dense_depth_cache(seq_folder: str, start_idx: int, end_idx: i
 def _load_matching_any4d_cache(cache_path: str, frame_ids: np.ndarray, output_hw):
     if not os.path.exists(cache_path):
         return None
-    with np.load(cache_path, allow_pickle=False) as cached:
-        if "depths" not in cached.files:
-            return None
-        if "frame_indices" in cached.files:
-            cached_ids = cached["frame_indices"].astype(np.int64).reshape(-1)
-            if not np.array_equal(cached_ids, frame_ids):
+    try:
+        with np.load(cache_path, allow_pickle=False) as cached:
+            if "depths" not in cached.files:
                 return None
-        elif cached["depths"].shape[0] != frame_ids.shape[0]:
-            return None
-        depth_stack = cached["depths"].astype(np.float32)
+            if "frame_indices" in cached.files:
+                cached_ids = cached["frame_indices"].astype(np.int64).reshape(-1)
+                if not np.array_equal(cached_ids, frame_ids):
+                    return None
+            elif cached["depths"].shape[0] != frame_ids.shape[0]:
+                return None
+            depth_stack = cached["depths"].astype(np.float32)
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile, zlib.error) as error:
+        _drop_corrupt_cache(cache_path, error)
+        return None
     return _resize_depths(depth_stack, output_hw)
 
 
@@ -660,6 +725,12 @@ def hawor_slam(
         _save_slam_outputs(seq_folder, start_idx, end_idx, tstamp, disps, traj, focal, calib, scale)
         timing["5_save"] = time.time() - t0
         success = True
+    except Exception as error:
+        if isinstance(error, CorruptStageDataError):
+            raise
+        if _is_corrupt_stage_data_error(error):
+            raise CorruptStageDataError(f"Corrupt stage data for {seq_folder}: {error}") from error
+        raise
     finally:
         _cleanup_stage3_workspace(workspace, success=success)
 
