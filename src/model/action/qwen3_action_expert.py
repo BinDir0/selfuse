@@ -233,8 +233,15 @@ class Qwen3ActionExpert(nn.Module):
 
         if action_position_ids.ndim == 3:
             action_position_ids = action_position_ids[0]
-        if action_position_ids.ndim == 2:
-            action_position_ids = action_position_ids.unsqueeze(0).expand(4, -1, -1)
+        if action_position_ids.ndim != 2:
+            raise ValueError(f"Expected action_position_ids to be 2D after squeeze, got {action_position_ids.shape}.")
+        if action_position_ids.shape[1] != hidden_states.shape[1]:
+            raise ValueError(
+                "Action position ids length "
+                f"{action_position_ids.shape[1]} does not match hidden sequence length {hidden_states.shape[1]}."
+            )
+        # Qwen3-VL position_ids: 4 dims = [text_pos, height, width, temporal]
+        action_position_ids = action_position_ids.unsqueeze(0).expand(4, -1, -1)
 
         text_position_ids = action_position_ids[0]
         position_embeddings = self.rotary_emb(hidden_states, action_position_ids[1:])

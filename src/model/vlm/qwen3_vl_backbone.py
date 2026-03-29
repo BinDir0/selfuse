@@ -194,6 +194,7 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
                 device=inputs_embeds.device,
             )
 
+        # Qwen3-VL position_ids: 4 dims = [text_pos, height, width, temporal]
         if position_ids is None:
             position_ids = cache_position.view(1, 1, -1).expand(4, inputs_embeds.shape[0], -1)
         elif position_ids.ndim == 2:
