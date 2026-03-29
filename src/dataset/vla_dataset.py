@@ -2,6 +2,7 @@
 WebDataset-based VLA datasets for LegendVLA training and normalizer fitting.
 """
 
+import math
 import warnings
 import time
 from collections import Counter
@@ -374,7 +375,7 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         self.vla_ratio = vla_ratio
         self.batch_size = batch_size
         self.mode = mode
-        assert vla_ratio >= 0 and vla_ratio <= 1, "vla_ratio must be between 0 and 1"
+        assert vla_ratio > 0 and vla_ratio <= 1, "vla_ratio must be in (0, 1]"
 
         self.build_vla_shape_meta()
 
@@ -438,7 +439,7 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
             return
 
         vlm_iter = iter(self.vlm_dataset)
-        vla_per_batch = int(self.vla_ratio * self.batch_size)
+        vla_per_batch = math.ceil(self.vla_ratio * self.batch_size)
         vlm_per_batch = self.batch_size - vla_per_batch
 
         count = 0
