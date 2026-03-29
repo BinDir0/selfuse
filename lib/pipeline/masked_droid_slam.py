@@ -121,60 +121,37 @@ def get_dimention(imagedir):
 
 
 def image_stream(imagedir, calib, stride, max_frame=None):
-    """Image generator for DROID.
-
-    Optimized to reuse resize parameters and intrinsic scaling across frames
-    while keeping the math exactly the same as the original implementation.
-    """
+    """ Image generator for DROID """
     fx, fy, cx, cy = calib[:4]
 
     K = np.eye(3)
-    K[0, 0] = fx
-    K[0, 2] = cx
-    K[1, 1] = fy
-    K[1, 2] = cy
+    K[0,0] = fx
+    K[0,2] = cx
+    K[1,1] = fy
+    K[1,2] = cy
 
     frame_source = _to_frame_source(imagedir)
     frame_indices = list(range(0, len(frame_source), stride))
     if max_frame is not None:
         frame_indices = frame_indices[:max_frame]
 
-    # Precompute target size and intrinsic scaling from the first frame.
-    # All subsequent frames are assumed to have the same resolution, which
-    # holds for standard video sources and image folders.
-    if not frame_indices:
-        return
-
-    first_image = frame_source.get_frame(frame_indices[0], rgb=False)
-    if len(calib) > 4:
-        first_image = cv2.undistort(first_image, K, calib[4:])
-
-    h0, w0, _ = first_image.shape
-    h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
-    w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
-
-    # Ensure dimensions are multiples of 8, identical to the original logic
-    h1_aligned = h1 - h1 % 8
-    w1_aligned = w1 - w1 % 8
-
-    # Precompute intrinsic scaling factors
-    scale_x = w1 / w0
-    scale_y = h1 / h0
-    base_intrinsics = torch.as_tensor([fx, fy, cx, cy])
-    base_intrinsics[0::2] *= scale_x
-    base_intrinsics[1::2] *= scale_y
-
     for frame_idx in frame_indices:
         image = frame_source.get_frame(frame_idx, rgb=False)
         if len(calib) > 4:
             image = cv2.undistort(image, K, calib[4:])
 
-        # Resize using the precomputed target size
+        h0, w0, _ = image.shape
+        h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
+        w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
+
         image = cv2.resize(image, (w1, h1))
-        image = image[:h1_aligned, :w1_aligned]
+        image = image[:h1-h1%8, :w1-w1%8]
         image = torch.as_tensor(image).permute(2, 0, 1)
 
-        intrinsics = base_intrinsics.clone()
+        intrinsics = torch.as_tensor([fx, fy, cx, cy])
+        intrinsics[0::2] *= (w1 / w0)
+        intrinsics[1::2] *= (h1 / h0)
+
         yield frame_idx, image[None], intrinsics
 
 

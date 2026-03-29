@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+import threading
 
 import torch
 import torch.utils.data
@@ -44,10 +45,16 @@ class ImageFolderFrameSource(BaseFrameSource):
             raise RuntimeError("ImageFolderFrameSource requires non-empty image_paths")
 
         self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE
-        if self.use_turbojpeg:
-            self.jpeg_decoder = TurboJPEG()
-        else:
-            self.jpeg_decoder = None
+        self._thread_local = threading.local()
+
+    def _get_jpeg_decoder(self):
+        if not self.use_turbojpeg:
+            return None
+        decoder = getattr(self._thread_local, 'jpeg_decoder', None)
+        if decoder is None:
+            decoder = TurboJPEG()
+            self._thread_local.jpeg_decoder = decoder
+        return decoder
 
     def __len__(self):
         return len(self.image_paths)
@@ -66,10 +73,11 @@ class ImageFolderFrameSource(BaseFrameSource):
             try:
                 with open(path, 'rb') as f:
                     jpeg_data = f.read()
+                decoder = self._get_jpeg_decoder()
                 if rgb:
-                    frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=0)  # RGB
+                    frame = decoder.decode(jpeg_data, pixel_format=0)  # RGB
                 else:
-                    frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=1)  # BGR
+                    frame = decoder.decode(jpeg_data, pixel_format=1)  # BGR
                 return frame
             except Exception:
                 pass
@@ -82,35 +90,157 @@ class ImageFolderFrameSource(BaseFrameSource):
         return frame
 
 
-class FrameDataset(torch.utils.data.Dataset):
-    """PyTorch Dataset wrapper for parallel frame loading via DataLoader."""
+class ShardVideoFrameSource(BaseFrameSource):
+    """Frame source that reads a single video's frames from a WebDataset tar shard.
 
-    def __init__(self, frame_source: ImageFolderFrameSource):
-        self.image_paths = frame_source.image_paths
-        self.use_turbojpeg = frame_source.use_turbojpeg
+    Uses pre-computed byte offsets to read frames via direct seek+read,
+    bypassing tarfile's expensive member index scanning entirely.
+    """
+
+    def __init__(self, tar_path, frame_names, frame_offsets=None, use_turbojpeg=True):
+        """
+        Args:
+            tar_path: Path to the tar shard containing this video's frames.
+            frame_names: Sorted list of JPEG filenames within the tar for this video.
+            frame_offsets: List of [offset, size] pairs parallel to frame_names.
+                          If provided, uses direct seek+read (fast path).
+                          If None, falls back to tarfile (legacy path).
+            use_turbojpeg: Use TurboJPEG for faster decoding if available.
+        """
+        self.tar_path = tar_path
+        self.frame_names = list(frame_names)
+        self.frame_offsets = frame_offsets  # [[offset, size], ...]
+
+        if len(self.frame_names) == 0:
+            raise RuntimeError(f"ShardVideoFrameSource requires non-empty frame_names for {tar_path}")
+
+        if not QUIET_MODE:
+            mode = "direct-seek" if frame_offsets else "tarfile"
+            print(f"ShardVideoFrameSource: {len(self.frame_names)} frames from {os.path.basename(tar_path)} ({mode})")
+
+        self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE
+        self._thread_local = threading.local()
+
+        # Shared fd is safe with os.pread() because it does not mutate file offset.
+        self._fd = None
+
+    def _get_fd(self):
+        if self._fd is None:
+            self._fd = os.open(self.tar_path, os.O_RDONLY)
+        return self._fd
+
+    def _get_jpeg_decoder(self):
+        if not self.use_turbojpeg:
+            return None
+        decoder = getattr(self._thread_local, 'jpeg_decoder', None)
+        if decoder is None:
+            decoder = TurboJPEG()
+            self._thread_local.jpeg_decoder = decoder
+        return decoder
+
+    def _get_tar(self):
+        tar = getattr(self._thread_local, 'tar', None)
+        if tar is None:
+            import tarfile
+            tar = tarfile.open(self.tar_path, 'r')
+            self._thread_local.tar = tar
+        return tar
+
+    def __len__(self):
+        return len(self.frame_names)
+
+    def get_frame(self, index: int, rgb: bool = False):
+        if index < 0 or index >= len(self.frame_names):
+            raise IndexError(
+                f"Frame index {index} out of range [0, {len(self.frame_names)}). "
+                f"Total frames available: {len(self.frame_names)}"
+            )
+
+        member_name = self.frame_names[index]
+
+        # Fast path: direct offset read using pread, which is thread-safe.
+        if self.frame_offsets is not None:
+            offset, size = self.frame_offsets[index]
+            jpeg_data = os.pread(self._get_fd(), size, offset)
+            if len(jpeg_data) != size:
+                raise RuntimeError(
+                    f"Short read from tar: {self.tar_path}/{member_name} "
+                    f"(expected {size} bytes, got {len(jpeg_data)})"
+                )
+        else:
+            # Legacy fallback: tarfile handle is thread-local because TarFile is not thread-safe.
+            tar = self._get_tar()
+            member = tar.getmember(member_name)
+            jpeg_data = tar.extractfile(member).read()
+
+        if self.use_turbojpeg and member_name.lower().endswith(('.jpg', '.jpeg')):
+            try:
+                pixel_format = 0 if rgb else 1  # RGB=0, BGR=1
+                decoder = self._get_jpeg_decoder()
+                frame = decoder.decode(jpeg_data, pixel_format=pixel_format)
+                return frame
+            except Exception:
+                pass
+
+        frame = cv2.imdecode(np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError(f"Failed to decode image from tar: {self.tar_path}/{member_name}")
+        if rgb:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return frame
+
+    def __del__(self):
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except Exception:
+                pass
+        tar = getattr(self._thread_local, 'tar', None)
+        if tar is not None:
+            try:
+                tar.close()
+            except Exception:
+                pass
+
+
+class FrameDataset(torch.utils.data.Dataset):
+    """PyTorch Dataset wrapper for parallel frame loading via DataLoader.
+
+    Works with any BaseFrameSource (ImageFolderFrameSource, ShardVideoFrameSource, etc.).
+    """
+
+    def __init__(self, frame_source: BaseFrameSource):
+        self.frame_source = frame_source
+        self.use_turbojpeg = getattr(frame_source, 'use_turbojpeg', False)
         if self.use_turbojpeg:
             self.jpeg_decoder = TurboJPEG()
         else:
             self.jpeg_decoder = None
+        # Cache image_paths for ImageFolderFrameSource fast path
+        self._image_paths = getattr(frame_source, 'image_paths', None)
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.frame_source)
 
     def __getitem__(self, idx):
-        path = self.image_paths[idx]
+        # Fast path: ImageFolderFrameSource with TurboJPEG (avoids get_frame overhead)
+        if self._image_paths is not None:
+            path = self._image_paths[idx]
+            if self.use_turbojpeg and path.lower().endswith(('.jpg', '.jpeg')):
+                try:
+                    with open(path, 'rb') as f:
+                        jpeg_data = f.read()
+                    frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=1)  # BGR
+                    return idx, frame
+                except Exception:
+                    pass
+            frame = cv2.imread(path)
+            if frame is None:
+                raise RuntimeError(f"Failed to read image: {path}")
+            return idx, frame
 
-        if self.use_turbojpeg and path.lower().endswith(('.jpg', '.jpeg')):
-            try:
-                with open(path, 'rb') as f:
-                    jpeg_data = f.read()
-                frame = self.jpeg_decoder.decode(jpeg_data, pixel_format=1)  # BGR
-                return idx, frame
-            except Exception:
-                pass
-
-        frame = cv2.imread(path)
-        if frame is None:
-            raise RuntimeError(f"Failed to read image: {path}")
+        # Generic path: any BaseFrameSource (ShardVideoFrameSource etc.)
+        frame = self.frame_source.get_frame(idx, rgb=False)
         return idx, frame
 
 
@@ -127,10 +257,24 @@ def _frame_dataset_worker_init(worker_id):
     dataset = worker_info.dataset
     if dataset.use_turbojpeg and TURBOJPEG_AVAILABLE:
         dataset.jpeg_decoder = TurboJPEG()
+    # Re-open low-level handles for ShardVideoFrameSource after fork.
+    fs = dataset.frame_source
+    if hasattr(fs, '_fd') and fs._fd is not None:
+        os.close(fs._fd)
+        fs._fd = None
+    thread_local = getattr(fs, '_thread_local', None)
+    if thread_local is not None:
+        tar = getattr(thread_local, 'tar', None)
+        if tar is not None:
+            tar.close()
+        fs._thread_local = threading.local()
 
 
 def build_frame_source(video_path: str):
-    """Build an ImageFolderFrameSource from pre-extracted frames. Raises if not found."""
+    """Build an ImageFolderFrameSource from pre-extracted frames.
+
+    For WebDataset format, use ShardVideoFrameSource directly instead.
+    """
     from pathlib import Path
     import glob
     from natsort import natsorted
@@ -140,24 +284,18 @@ def build_frame_source(video_path: str):
     video_stem = video_path_obj.stem
 
     extracted_dir = video_dir / video_stem / "extracted_images"
+    if extracted_dir.exists():
+        image_files = natsorted(glob.glob(str(extracted_dir / "*.jpg")))
+        if not image_files:
+            image_files = natsorted(glob.glob(str(extracted_dir / "*.png")))
 
-    if not extracted_dir.exists() or not extracted_dir.is_dir():
-        raise FileNotFoundError(
-            f"Pre-extracted frames not found at: {extracted_dir}\n"
-            f"Run frame extraction first: python scripts/extract_frames.py --video_path {video_path}"
-        )
+        if image_files:
+            if not QUIET_MODE:
+                print(f"Using extracted frames: {extracted_dir} ({len(image_files)} frames)")
+            return ImageFolderFrameSource(image_files)
 
-    image_files = natsorted(glob.glob(str(extracted_dir / "*.jpg")))
-    if not image_files:
-        image_files = natsorted(glob.glob(str(extracted_dir / "*.png")))
-
-    if not image_files:
-        raise FileNotFoundError(
-            f"No image files (jpg/png) found in: {extracted_dir}\n"
-            f"Run frame extraction first: python scripts/extract_frames.py --video_path {video_path}"
-        )
-
-    if not QUIET_MODE:
-        print(f"Using extracted frames from: {extracted_dir} ({len(image_files)} frames)")
-
-    return ImageFolderFrameSource(image_files)
+    raise FileNotFoundError(
+        f"No frames found for {video_path}. Expected:\n"
+        f"  - JPEG folder: {extracted_dir}/*.jpg\n"
+        f"  - Or use ShardVideoFrameSource for WebDataset format"
+    )

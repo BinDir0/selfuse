@@ -188,11 +188,15 @@ def shift_align(smpl_depth, pred_depth, sigma=0.5):
 
 def est_scale_hybrid_batch(slam_depths, pred_depths, sigma=0.5, masks=None,
                            near_thresh=0.4, far_thresh=0.7):
-    """Batch scale estimation: all keyframes in one vectorized GPU BFGS call.
+    """Batch scale estimation with single GPU transfer + N independent 1D BFGS.
 
-    Same algorithm as est_scale_hybrid but avoids N separate minimize() calls.
-    Stage 1 (iterative median) runs per-keyframe on CPU.
-    Stage 2 (BFGS) runs once on GPU with all keyframes packed into padded tensors.
+    Same algorithm and convergence as est_scale_hybrid, but:
+    - Stage 1 (iterative median) runs per-keyframe on CPU (unchanged)
+    - Stage 2 transfers all filtered data to GPU in one batch, then runs
+      N independent 1D BFGS optimizations (each with 1 scalar variable)
+
+    This avoids N separate CPU->GPU transfers while keeping each optimization
+    independent (no cross-keyframe coupling in the Hessian).
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     N = len(slam_depths)
@@ -246,39 +250,25 @@ def est_scale_hybrid_batch(slam_depths, pred_depths, sigma=0.5, masks=None,
     if len(valid_idx) == 0:
         return [float('nan')] * N
 
-    # Stage 2: pack into padded tensors and run one BFGS
-    max_len = max(sm_arrays[i].size for i in valid_idx)
-    M = len(valid_idx)
-    sm_padded = torch.zeros(M, max_len, device=device)
-    pm_padded = torch.zeros(M, max_len, device=device)
-    valid_mask = torch.zeros(M, max_len, device=device)
-    counts = torch.zeros(M, device=device)
-
-    for j, i in enumerate(valid_idx):
-        L = sm_arrays[i].size
-        sm_padded[j, :L] = torch.from_numpy(sm_arrays[i].ravel()).to(device)
-        pm_padded[j, :L] = torch.from_numpy(pm_arrays[i].ravel()).to(device)
-        valid_mask[j, :L] = 1.0
-        counts[j] = L
-
-    x0 = torch.tensor([init_scales[i] for i in valid_idx], device=device, dtype=torch.float32)
+    # Stage 2: batch transfer to GPU, then N independent 1D BFGS
+    # Transfer all data in one pass to avoid per-keyframe CPU->GPU overhead
+    sm_gpu = [torch.from_numpy(sm_arrays[i].ravel()).to(device) for i in valid_idx]
+    pm_gpu = [torch.from_numpy(pm_arrays[i].ravel()).to(device) for i in valid_idx]
 
     sigma_sq = sigma ** 2
-
-    def f_batched(x):
-        residuals = sm_padded * x[:, None] - pm_padded  # (M, max_len)
-        r_sq = residuals ** 2
-        losses = (sigma_sq * r_sq) / (sigma_sq + r_sq)  # gmof inlined
-        losses = (losses * valid_mask).sum(dim=1) / counts  # mean per keyframe
-        return losses.sum()
-
-    result = minimize(f_batched, x0, method='bfgs')
-    opt_scales = result.x.detach().cpu().numpy()
-
-    # Assemble final results
     scales = [float('nan')] * N
     for j, i in enumerate(valid_idx):
-        scales[i] = float(opt_scales[j])
+        sm = sm_gpu[j]
+        pm = pm_gpu[j]
+
+        def f(x, _sm=sm, _pm=pm):
+            residuals = _sm * x - _pm
+            r_sq = residuals ** 2
+            return (sigma_sq * r_sq / (sigma_sq + r_sq)).mean()
+
+        x0 = torch.tensor([init_scales[i]], device=device)
+        result = minimize(f, x0, method='bfgs')
+        scales[i] = result.x.detach().cpu().item()
 
     return scales
 
