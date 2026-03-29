@@ -381,14 +381,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
 
-        # Flow matching timestep sampling
-        self.flow_sampling = cfg.flow.sampling
-        if self.flow_sampling == "beta":
-            flow_alpha = cfg.flow.get("alpha", 1.5)
-            flow_beta = cfg.flow.get("beta", 1)
-            self.flow_t_max = 1 - cfg.flow.get("sig_min", 0.001)
-            self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
-
         if cfg.training.debug:
             cfg.training.num_epochs = 2
             cfg.training.max_train_steps = 3
@@ -424,7 +416,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         torch.cuda.reset_peak_memory_stats()
 
                     # Preprocess batch
-                    inputs = self.preprocess_batch(batch, split_mask=False, sample_fm_time=self.objective_func != "train_ar")
+                    inputs = self.preprocess_batch(batch)
 
                     if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
                         self.tracker.track()
@@ -581,18 +573,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         from src.workspace.eval_utils import save_interval_ckpt
         save_interval_ckpt(self, accelerator)
 
-    def sample_fm_time(self, bsz: int) -> torch.FloatTensor:
-        if self.flow_sampling == "uniform":  # uniform between 0 and 1
-            """https://github.com/gle-bellier/flow-matching/blob/main/Flow_Matching.ipynb"""
-            eps = 1e-5
-            t = (torch.rand(1) + torch.arange(bsz) / bsz) % (1 - eps)
-        elif self.flow_sampling == "beta":  # from pi0 paper
-            z = self.flow_beta_dist.sample((bsz,))
-            t = self.flow_t_max * (1 - z)  # flip and shift
-        return t
-
-    def preprocess_batch(self, batch, split_mask: bool = False, sample_fm_time: bool = True):
-        del split_mask
+    def preprocess_batch(self, batch):
         input_ids = batch["input_ids"]
         inputs = {
             "input_ids": input_ids,
@@ -615,8 +596,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             inputs["actions_valid_mask"] = batch["actions_valid_mask"]
         if self.objective_func != "train_flow":
             inputs["labels"] = batch["labels"]
-        if sample_fm_time:
-            inputs["t"] = self.sample_fm_time(len(input_ids)).to(input_ids.device).to(self.dtype)
         return inputs
 
     def get_grouped_parameters(self, param_list, cfg):

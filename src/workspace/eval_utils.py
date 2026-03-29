@@ -324,7 +324,7 @@ def evaluation(workspace, accelerator, dataloader, step_log):
         save_eval_attn_weights = bool(workspace.cfg.training.save_eval_attn_weights)
 
         for batch_idx, batch in enumerate(dataloader):
-            inputs = workspace.preprocess_batch(batch, split_mask=True)
+            inputs = workspace.preprocess_batch(batch)
 
             # Compute validation loss
             with accelerator.autocast(), torch.inference_mode():

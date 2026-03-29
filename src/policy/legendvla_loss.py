@@ -69,7 +69,7 @@ def psi_t(
 
     return (1 - (1 - flow_sig_min) * t) * x + t * x1
 
-def _sample_rtc_delay(
+def sample_rtc_delay(
     valid_action_len: torch.LongTensor,
     strategy: str = "uniform",
     max_delay: int | None = None,
@@ -133,7 +133,7 @@ def _sample_rtc_delay(
 
     raise ValueError(f"Unsupported RTC delay strategy: {strategy}")
 
-def _build_rtc_flow_inputs(
+def build_rtc_flow_inputs(
     *,
     actions: torch.FloatTensor,
     actions_valid_mask: torch.Tensor,
@@ -194,7 +194,7 @@ def _build_rtc_flow_inputs(
         valid_action_len = actions_valid_mask.reshape(batch_size, horizon_steps, -1).any(dim=-1).sum(dim=1)
     valid_action_len = valid_action_len.clamp(min=0, max=horizon_steps)
 
-    delay = _sample_rtc_delay(
+    delay = sample_rtc_delay(
         valid_action_len,
         strategy=rtc_delay_strategy,
         max_delay=rtc_max_delay,
@@ -207,55 +207,34 @@ def _build_rtc_flow_inputs(
     postfix_valid_mask = postfix_mask & actions_valid_mask.to(dtype=torch.bool)
     return token_t, postfix_valid_mask, prefix_mask, delay
 
-def _compute_flow_loss(
+def compute_flow_loss(
     *,
     model,
     actions: torch.FloatTensor,
-    actions_valid_mask: torch.Tensor,
     pred_v_t: torch.FloatTensor,
     noise: torch.FloatTensor,
-    rtc_mask: torch.Tensor | None = None,
+    loss_mask: torch.Tensor,
 ) -> torch.FloatTensor:
-    """
-    Compute the masked flow-matching regression loss.
+    """Compute masked flow-matching regression loss with global normalization.
 
-    This helper is shared by the legacy flow-training path and the RTC path.
-    When rtc_mask is None, the loss is computed on all valid action positions.
-    When rtc_mask is provided, the loss is restricted to RTC postfix positions.
+    All inputs are pre-packed by build_flow_inputs to shape [B, T*H, D],
+    so this function is a simple element-wise masked MSE.
 
     Args:
-        model:
-            LegendVLA model instance. Only model.flow_config.sig_min is used here.
-        actions:
-            [B, H, D] Ground-truth action tensor.
-        actions_valid_mask:
-            [B, H, D] or broadcast-compatible validity mask for the legacy
-            training path.
-        pred_v_t:
-            [B, H, D] Predicted flow velocity from the action decoder.
-        noise:
-            [B, H, D] Gaussian noise used to construct the noisy action input.
-        rtc_mask:
-            Optional [B, H, D] or broadcast-compatible boolean mask selecting the
-            RTC postfix region to supervise.
-
-    Returns:
-        torch.FloatTensor:
-            Scalar normalized flow loss.
+        model: LegendVLA model instance (uses model.flow_config.sig_min).
+        actions: [B, T*H, D] Packed ground-truth actions (repeated per chunk).
+        pred_v_t: [B, T*H, D] Packed predicted flow velocity.
+        noise: [B, T*H, D] Packed Gaussian noise.
+        loss_mask: [B, T*H, D] Boolean mask for valid loss positions.
     """
-    target_v_t = actions - (1 - model.flow_config.sig_min) * noise
-    flow_loss = (pred_v_t - target_v_t) ** 2
+    target_v = actions - (1 - model.flow_config.sig_min) * noise
+    squared_error = (pred_v_t - target_v) ** 2
+    if hasattr(model, "action_dim_weights"):
+        squared_error = squared_error * model.action_dim_weights
+    mask_float = loss_mask.to(dtype=squared_error.dtype)
+    return (squared_error * mask_float).sum() / mask_float.sum().clamp(min=1)
 
-    # Apply per-dimension weighting
-    if hasattr(model, 'action_dim_weights'):
-        flow_loss = flow_loss * model.action_dim_weights
-
-    loss_mask = rtc_mask if rtc_mask is not None else actions_valid_mask
-    masked_loss = flow_loss * loss_mask.to(dtype=flow_loss.dtype)
-    valid_count = loss_mask.to(dtype=flow_loss.dtype).sum()
-    return torch.sum(masked_loss) / valid_count.clamp(min=1)
-
-def _build_dense_diffloss_inputs(
+def build_dense_diffloss_inputs(
     model,
     hidden_states: torch.FloatTensor,
     actions: torch.FloatTensor,
@@ -303,7 +282,7 @@ def compute_reg_action_loss(
 ) -> torch.Tensor:
     """Direct Smooth-L1 regression from backbone hidden states to action chunks.
 
-    Expects pre-computed dense_inputs from _build_dense_diffloss_inputs:
+    Expects pre-computed dense_inputs from build_dense_diffloss_inputs:
         (vla_hidden_z [N, H], action_gt [N, D], mask [N]).
     """
     if model.reg_action_head is None or dense_inputs is None:
@@ -355,37 +334,92 @@ def compute_diffloss_loss(
     return diff_loss / repeat_factor
 
 
-def build_flow_inputs(model, batch: dict[str, torch.Tensor | None]) -> dict[str, torch.Tensor | None]:
+def build_flow_inputs(
+    model,
+    batch: dict[str, torch.Tensor | None],
+    *,
+    num_parallel_t: int | None = None,
+    sampled_t: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor | None]:
     actions = batch["actions"]
     actions_valid_mask = batch["actions_valid_mask"]
-    t = batch["t"]
-    n_actions = batch["n_actions"]
+    n_actions = batch.get("n_actions")
+    batch_size, horizon_steps, action_dim = actions.shape
+    if num_parallel_t is None:
+        num_parallel_t = model.flow_config.num_parallel_t
+    if num_parallel_t < 1:
+        raise ValueError(f"num_parallel_t must be >= 1, got {num_parallel_t}.")
 
-    noise = torch.randn_like(actions, device=actions.device, dtype=actions.dtype)
-    rtc_mask = None
+    if sampled_t is None:
+        sampled_t = model.sample_flow_time(batch_size, num_parallel_t)
+    sampled_t = sampled_t.to(device=actions.device, dtype=actions.dtype)
+    if sampled_t.ndim == 1:
+        if num_parallel_t != 1 or sampled_t.shape[0] != batch_size:
+            raise ValueError(
+                f"Expected sampled flow time to have shape [{batch_size}] for num_parallel_t=1, got {sampled_t.shape}."
+            )
+        sampled_t = sampled_t.unsqueeze(1)
+    elif sampled_t.shape != (batch_size, num_parallel_t):
+        raise ValueError(
+            f"Expected sampled flow time to have shape [{batch_size}, {num_parallel_t}], got {sampled_t.shape}."
+        )
+
+    expanded_actions = actions.unsqueeze(1).expand(-1, num_parallel_t, -1, -1)
+    flat_actions = expanded_actions.reshape(batch_size * num_parallel_t, horizon_steps, action_dim)
+    flat_noise = torch.randn_like(flat_actions)
+
     prefix_mask = None
-    time_for_model = t
+    rtc_mask = None
     if model.rtc_config.enabled:
-        time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
-            actions=actions,
-            actions_valid_mask=actions_valid_mask,
-            postfix_time=t,
-            n_actions=n_actions,
+        expanded_valid_mask = actions_valid_mask.unsqueeze(1).expand(-1, num_parallel_t, -1, -1)
+        flat_n_actions = None
+        if n_actions is not None:
+            flat_n_actions = n_actions.unsqueeze(1).expand(-1, num_parallel_t).reshape(-1)
+        flat_time_for_model, flat_rtc_mask, flat_prefix_mask, _ = build_rtc_flow_inputs(
+            actions=flat_actions,
+            actions_valid_mask=expanded_valid_mask.reshape(batch_size * num_parallel_t, horizon_steps, action_dim),
+            postfix_time=sampled_t.reshape(-1),
+            n_actions=flat_n_actions,
             rtc_delay_strategy=model.rtc_config.delay_strategy,
             rtc_max_delay=model.rtc_config.max_delay,
         )
-    noisy_actions = psi_t(noise, actions, time_for_model, model.flow_config.sig_min)
+        time_for_model = flat_time_for_model.reshape(batch_size, num_parallel_t, horizon_steps)
+        rtc_mask = flat_rtc_mask.reshape(batch_size, num_parallel_t, horizon_steps, action_dim)
+        prefix_mask = flat_prefix_mask.reshape(batch_size, num_parallel_t, horizon_steps)
+    else:
+        time_for_model = sampled_t.unsqueeze(-1).expand(-1, -1, horizon_steps)
+
+    flat_noisy_actions = psi_t(
+        flat_noise,
+        flat_actions,
+        time_for_model.reshape(batch_size * num_parallel_t, horizon_steps),
+        model.flow_config.sig_min,
+    )
     if prefix_mask is not None:
-        noisy_actions = torch.where(prefix_mask.unsqueeze(-1), actions, noisy_actions)
+        flat_noisy_actions = torch.where(
+            prefix_mask.reshape(batch_size * num_parallel_t, horizon_steps).unsqueeze(-1),
+            flat_actions,
+            flat_noisy_actions,
+        )
+
+    # Build packed loss mask: [B, T*H, D]
+    if rtc_mask is not None:
+        loss_mask = rtc_mask.reshape(batch_size, num_parallel_t * horizon_steps, action_dim)
+    else:
+        loss_mask = actions_valid_mask.unsqueeze(1).expand(-1, num_parallel_t, -1, -1).reshape(
+            batch_size, num_parallel_t * horizon_steps, action_dim,
+        )
+
     return {
-        "noise": noise,
-        "rtc_mask": rtc_mask,
-        "time_for_model": time_for_model,
-        "noisy_actions": noisy_actions,
+        "noisy_actions": flat_noisy_actions.reshape(batch_size, num_parallel_t * horizon_steps, action_dim),
+        "time_for_model": time_for_model.reshape(batch_size, num_parallel_t * horizon_steps),
+        "noise": flat_noise.reshape(batch_size, num_parallel_t * horizon_steps, action_dim),
+        "actions": flat_actions.reshape(batch_size, num_parallel_t * horizon_steps, action_dim),
+        "loss_mask": loss_mask,
     }
 
 
-def _compute_flow_stream_loss(
+def compute_flow_stream_loss(
     model,
     batch: dict[str, torch.Tensor | None],
     backbone_output,
@@ -406,19 +440,20 @@ def _compute_flow_stream_loss(
         if not torch.any(flow_batch["actions_valid_mask"]):
             return zero_loss(backbone_output.last_hidden_states), {}
 
-    flow_inputs = build_flow_inputs(model, flow_batch)
+    num_parallel_t = model.flow_config.num_parallel_t
+    flow_inputs = build_flow_inputs(model, flow_batch, num_parallel_t=num_parallel_t)
     flow_output = model.forward_flow_stream(
         batch=flow_batch,
         backbone_output=backbone_output,
         flow_inputs=flow_inputs,
+        num_parallel_chunks=num_parallel_t,
     )
-    flow_loss = _compute_flow_loss(
+    flow_loss = compute_flow_loss(
         model=model,
-        actions=flow_batch["actions"],
-        actions_valid_mask=flow_batch["actions_valid_mask"],
+        actions=flow_inputs["actions"],
         pred_v_t=flow_output["pred_v"],
         noise=flow_inputs["noise"],
-        rtc_mask=flow_inputs["rtc_mask"],
+        loss_mask=flow_inputs["loss_mask"],
     )
     flow_output["flow_loss"] = flow_loss
     return flow_loss, flow_output
@@ -434,13 +469,13 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
 
     dense_inputs = None
     if torch.any(is_vla_data):
-        dense_inputs = _build_dense_diffloss_inputs(
+        dense_inputs = build_dense_diffloss_inputs(
             model, hidden_states, batch["actions"],
             batch["answer_start_idx"], batch["n_actions"], is_vla_data,
         )
     diff_loss = compute_diffloss_loss(model, hidden_states, dense_inputs)
     reg_loss = compute_reg_action_loss(model, hidden_states, dense_inputs)
-    flow_loss, _ = _compute_flow_stream_loss(model, batch, backbone_output)
+    flow_loss, _ = compute_flow_stream_loss(model, batch, backbone_output)
 
     total_loss = (
         model.loss_config.ce_loss_weight * ce_loss
@@ -466,7 +501,7 @@ def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, tor
 
     dense_inputs = None
     if torch.any(is_vla_data):
-        dense_inputs = _build_dense_diffloss_inputs(
+        dense_inputs = build_dense_diffloss_inputs(
             model, hidden_states, batch["actions"],
             batch["answer_start_idx"], batch["n_actions"], is_vla_data,
         )
@@ -489,7 +524,7 @@ def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, tor
 def compute_flow_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     slot_embeds = model.build_slot_embeddings(batch)
     backbone_output = model.forward_backbone_stream(batch, slot_embeds)
-    flow_loss, _ = _compute_flow_stream_loss(model, batch, backbone_output)
+    flow_loss, _ = compute_flow_stream_loss(model, batch, backbone_output)
     ref = backbone_output.last_hidden_states
     return {
         "total_loss": model.loss_config.flow_loss_weight * flow_loss,
