@@ -9,7 +9,7 @@ Does NOT require downloading the real Qwen3-VL model.
 import torch
 from torch import nn
 
-from src.policy.legendvla import LegendVLA
+from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput
@@ -148,9 +148,9 @@ def build_model(with_diffloss=False, knowledge_insulation=True):
         shape_meta={"obs": {"state": {"shape": [SD], "horizon": 2}}, "action": {"shape": [AD], "horizon": 4}},
         diffloss=diffloss,
         action_hidden_size=AH,
-        num_inference_steps=3,
-        ar_action_chunk_size=2,
-        diffloss_micro_batch_size=1,
+        flow_config=FlowConfig(num_inference_steps=3),
+        ar_action_train_config=ARActionTrainConfig(chunk_size=2),
+        loss_config=LossConfig(),
         knowledge_insulation=knowledge_insulation,
     )
 
@@ -440,16 +440,17 @@ class TestLossValues:
         model = build_model()
         batch = build_batch()
         output = model("train", batch)
-        assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "flow_loss"}
+        assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
 
     def test_total_loss_is_weighted_sum(self):
         """total_loss should equal weighted combination of sub-losses."""
         model = build_model()
         batch = build_batch()
         output = model("train", batch)
-        w = model.loss_weights
+        w = model.loss_config
         expected = (w.ce_loss_weight * output["ce_loss"]
                     + w.diffusion_loss_weight * output["diffusion_loss"]
+                    + w.reg_loss_weight * output["reg_loss"]
                     + w.flow_loss_weight * output["flow_loss"])
         torch.testing.assert_close(output["total_loss"], expected, rtol=1e-4, atol=1e-6)
 
@@ -468,3 +469,4 @@ class TestLossValues:
         output = model("train", batch)
         assert output["flow_loss"].item() == 0.0
         assert output["diffusion_loss"].item() == 0.0
+        assert output["reg_loss"].item() == 0.0

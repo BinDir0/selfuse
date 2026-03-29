@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from src.policy.legendvla import LegendVLA
+from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput, gather_action_position_ids
@@ -218,11 +218,10 @@ def make_model(diffloss=None):
         shape_meta=shape_meta,
         diffloss=diffloss,
         action_hidden_size=action_hidden_size,
-        num_inference_steps=5,
-        ar_action_chunk_size=2,
-        diffloss_micro_batch_size=1,
-        rtc_delay_strategy="uniform",
-        rtc_max_delay=2,
+        flow_config=FlowConfig(num_inference_steps=5),
+        ar_action_train_config=ARActionTrainConfig(chunk_size=2),
+        rtc_config=RTCConfig(delay_strategy="uniform", max_delay=2),
+        loss_config=LossConfig(),
     )
 
 
@@ -237,7 +236,7 @@ def test_legendvla_scaffold_forward():
     model = make_model(diffloss=None)
     batch = make_vla_batch()
     output = model("train", batch)
-    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "flow_loss"}
+    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
     assert output["total_loss"].ndim == 0
 
 
@@ -271,7 +270,7 @@ def test_legendvla_compile_blocks_smoke():
     batch = make_vla_batch(batch_size=1)
     output = model("train", batch)
 
-    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "flow_loss"}
+    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
     assert output["total_loss"].ndim == 0
 
 

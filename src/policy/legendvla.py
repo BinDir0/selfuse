@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -12,6 +12,38 @@ from src.model.vlm.prefix_cache import (
     gather_action_position_ids,
     slice_prefix_cache_from_full_kv,
 )
+
+
+@dataclass(frozen=True)
+class FlowConfig:
+    sig_min: float = 0.001
+    num_parallel_t: int = 1
+    sampling: str = "beta"
+    alpha: float = 1.5
+    beta: float = 1.0
+    num_inference_steps: int = 10
+
+
+@dataclass(frozen=True)
+class RTCConfig:
+    enabled: bool = True
+    delay_strategy: str = "exp"
+    max_delay: int = 16
+
+
+@dataclass(frozen=True)
+class LossConfig:
+    ce_loss_weight: float = 0.1
+    diffusion_loss_weight: float = 1.0
+    flow_loss_weight: float = 1.0
+    reg_loss_weight: float = 0.0
+
+
+@dataclass(frozen=True)
+class ARActionTrainConfig:
+    noise_std: float = 0.02
+    chunk_size: int = 4
+    diffloss_repeat: int = 1
 
 
 class LegendVLA(nn.Module):
@@ -27,19 +59,13 @@ class LegendVLA(nn.Module):
         latent_condition_projector: nn.Module,
         shape_meta: dict,
         diffloss: nn.Module | None = None,
+        reg_action_head: nn.Module | None = None,
         ignore_index: int = -100,
         action_hidden_size: int = 1024,
-        flow_sig_min: float = 0.001,
-        num_inference_steps: int = 10,
-        ar_action_noise_std: float = 0.02,
-        ar_action_chunk_size: int = 4,
-        diffloss_micro_batch_size: int = 16,
-        use_rtc: bool = True,
-        rtc_delay_strategy: str = "exp",
-        rtc_max_delay: int = 16,
-        ce_loss_weight: float = 0.1,
-        diffusion_loss_weight: float = 1.0,
-        flow_loss_weight: float = 1.0,
+        flow_config: FlowConfig = FlowConfig(),
+        rtc_config: RTCConfig = RTCConfig(),
+        loss_config: LossConfig = LossConfig(),
+        ar_action_train_config: ARActionTrainConfig = ARActionTrainConfig(),
         knowledge_insulation: bool | int = True,
     ):
         super().__init__()
@@ -56,23 +82,23 @@ class LegendVLA(nn.Module):
         self.lm_head = getattr(self.backbone, "lm_head")
         self.eos_token_id = getattr(getattr(self.backbone, "tokenizer", None), "eos_token_id", None)
 
-        # Scalar config
+        # Grouped config (frozen dataclasses)
         self.ignore_index = ignore_index
         self.CELoss = nn.CrossEntropyLoss(reduction="sum", ignore_index=ignore_index)
-        self.flow_sig_min = flow_sig_min
-        self.num_inference_steps = num_inference_steps
-        self.ar_action_noise_std = ar_action_noise_std
-        self.ar_action_chunk_size = ar_action_chunk_size
-        self.diffloss_micro_batch_size = diffloss_micro_batch_size
-        self.use_rtc = use_rtc
-        self.rtc_delay_strategy = rtc_delay_strategy
-        self.rtc_max_delay = rtc_max_delay
+        self.flow_config = flow_config
+        self.rtc_config = rtc_config
+        self.loss_config = loss_config
+        self.ar_action_train_config = ar_action_train_config
+
+        if self.flow_config.sampling == "beta":
+            self.flow_beta_dist = torch.distributions.Beta(self.flow_config.alpha, self.flow_config.beta)
+        elif self.flow_config.sampling == "uniform":
+            self.flow_beta_dist = None
+        else:
+            raise ValueError(f"Unsupported flow sampling strategy: {self.flow_config.sampling}")
+        # Mutable: overridden at inference time by legendvla_inference_wrapper.
+        self.num_inference_steps = self.flow_config.num_inference_steps
         self.knowledge_insulation = knowledge_insulation
-        self.loss_weights = SimpleNamespace(
-            ce_loss_weight=ce_loss_weight,
-            diffusion_loss_weight=diffusion_loss_weight,
-            flow_loss_weight=flow_loss_weight,
-        )
 
         # Shape meta derived
         self.action_dim = int(shape_meta["action"]["shape"][0])
@@ -92,6 +118,7 @@ class LegendVLA(nn.Module):
         self.flow_expert = flow_expert
         self.action_decoder = action_decoder
         self.diffloss = diffloss
+        self.reg_action_head = reg_action_head
         self.latent_condition_projector = latent_condition_projector
 
     def compile_blocks(
@@ -190,6 +217,8 @@ class LegendVLA(nn.Module):
         modules = [self.latent_condition_projector]
         if self.diffloss is not None:
             modules.append(self.diffloss)
+        if self.reg_action_head is not None:
+            modules.append(self.reg_action_head)
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
@@ -258,7 +287,7 @@ class LegendVLA(nn.Module):
         if "actions" in batch:
             action_input = batch["actions"]
             if add_action_noise:
-                action_input = action_input + torch.randn_like(batch["actions"]) * self.ar_action_noise_std
+                action_input = action_input + torch.randn_like(batch["actions"]) * self.ar_action_train_config.noise_std
             action_embeds = self.ar_action_encoder(action_input)
             slot_embeds["action"] = action_embeds
         return slot_embeds
@@ -296,7 +325,7 @@ class LegendVLA(nn.Module):
         flow_inputs: dict,
     ) -> dict[str, torch.Tensor | None]:
         time_for_model = flow_inputs["time_for_model"]
-        if time_for_model.ndim == 2 and self.use_rtc:
+        if time_for_model.ndim == 2 and self.rtc_config.enabled:
             time_cond = self.time_embedding(time_for_model.reshape(-1)).reshape(
                 time_for_model.shape[0],
                 time_for_model.shape[1],

@@ -19,7 +19,7 @@ from src.model.common.diffloss import DiffLoss
 from src.model.common.modules import TimeEmbedding
 from src.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from src.model.vlm.qwen3_vl_backbone import Qwen3VLBackboneWrapper
-from src.policy.legendvla import LegendVLA
+from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
 from src.tests.dummy_flow_expert import DummyFlowExpert
 
 
@@ -235,15 +235,10 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
             num_inference_steps=2,
         ),
         action_hidden_size=action_hidden_size,
-        flow_sig_min=0.001,
-        num_inference_steps=2,
-        ar_action_noise_std=0.0,
-        ar_action_chunk_size=1,
-        diffloss_micro_batch_size=1,
-        use_rtc=False,
-        ce_loss_weight=0.1,
-        diffusion_loss_weight=1.0,
-        flow_loss_weight=1.0,
+        flow_config=FlowConfig(sampling="uniform", num_inference_steps=2),
+        ar_action_train_config=ARActionTrainConfig(noise_std=0.0, chunk_size=1),
+        rtc_config=RTCConfig(enabled=False),
+        loss_config=LossConfig(),
     )
 
     modules_to_move = [

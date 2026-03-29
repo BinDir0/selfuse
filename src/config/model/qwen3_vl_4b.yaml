@@ -113,7 +113,7 @@ policy:
     use_mlp_layer_norm: False
   diffloss:
     _target_: src.model.common.diffloss.DiffLoss
-    target_channels: ${eval:'${dims.action_dim}*${policy.ar_action_chunk_size}'}
+    target_channels: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
     z_channels: ${dims.diffloss_z_channels}
     depth: 4
     width: 1024
@@ -129,18 +129,41 @@ policy:
     flow_beta: ${flow.beta}
     num_inference_steps: ${flow.num_inference_steps}
     cond_dropout_prob: 0.0
+  reg_action_head: null
+  # Direct MSE regression head for backbone action supervision.
+  # Can be used alone or alongside diffloss. To enable:
+  #   _target_: src.model.action.action_head.MLPProjector
+  #   input_dim: ${dims.vlm_hidden_size}
+  #   output_dim: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
+  #   width: ${dims.vlm_hidden_size}
+  #   depth: 2
+  #   final_layer_norm: False
+  #   use_mlp_layer_norm: False
   shape_meta: ${data.shape_meta}
   ignore_index: ${data.ignore_index}
   action_hidden_size: ${dims.action_hidden_size}
-  flow_sig_min: ${flow.sig_min}
-  num_inference_steps: ${flow.num_inference_steps}
-  ar_action_noise_std: 0.02
-  ar_action_chunk_size: 8
-  diffloss_micro_batch_size: 16
-  use_rtc: True
-  rtc_delay_strategy: exp
-  rtc_max_delay: 8
+  flow_config:
+    _target_: src.policy.legendvla.FlowConfig
+    sig_min: ${flow.sig_min}
+    num_parallel_t: ${flow.num_parallel_t}
+    sampling: ${flow.sampling}
+    alpha: ${flow.alpha}
+    beta: ${flow.beta}
+    num_inference_steps: ${flow.num_inference_steps}
+  rtc_config:
+    _target_: src.policy.legendvla.RTCConfig
+    enabled: True
+    delay_strategy: exp
+    max_delay: 8
+  ar_action_train_config:
+    _target_: src.policy.legendvla.ARActionTrainConfig
+    noise_std: 0.02
+    chunk_size: 8
+    diffloss_repeat: 1
+  loss_config:
+    _target_: src.policy.legendvla.LossConfig
+    ce_loss_weight: 0.1
+    diffusion_loss_weight: 50.0
+    flow_loss_weight: 1.0
+    reg_loss_weight: 5.0
   knowledge_insulation: ${runtime.knowledge_insulation}
-  ce_loss_weight: 0.1
-  diffusion_loss_weight: 50.0
-  flow_loss_weight: 1.0

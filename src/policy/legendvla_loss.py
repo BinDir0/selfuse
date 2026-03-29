@@ -225,7 +225,7 @@ def _compute_flow_loss(
 
     Args:
         model:
-            LegendVLA model instance. Only model.flow_sig_min is used here.
+            LegendVLA model instance. Only model.flow_config.sig_min is used here.
         actions:
             [B, H, D] Ground-truth action tensor.
         actions_valid_mask:
@@ -243,7 +243,7 @@ def _compute_flow_loss(
         torch.FloatTensor:
             Scalar normalized flow loss.
     """
-    target_v_t = actions - (1 - model.flow_sig_min) * noise
+    target_v_t = actions - (1 - model.flow_config.sig_min) * noise
     flow_loss = (pred_v_t - target_v_t) ** 2
 
     # Apply per-dimension weighting
@@ -268,7 +268,7 @@ def _build_dense_diffloss_inputs(
     vla_answer_start_idx = answer_start_idx[vla_sample_mask]
     vla_n_actions = n_actions[vla_sample_mask]
 
-    ar_action_chunk_size = model.ar_action_chunk_size
+    ar_action_chunk_size = model.ar_action_train_config.chunk_size
     ar_action_chunks = vla_action.unfold(dimension=1, size=ar_action_chunk_size, step=1)
     ar_action_chunks_flat = ar_action_chunks.flatten(start_dim=2)
 
@@ -296,6 +296,27 @@ def zero_loss(reference: torch.Tensor) -> torch.Tensor:
     return reference.new_zeros(())
 
 
+def compute_reg_action_loss(
+    model,
+    hidden_states: torch.Tensor,
+    dense_inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
+) -> torch.Tensor:
+    """Direct Smooth-L1 regression from backbone hidden states to action chunks.
+
+    Expects pre-computed dense_inputs from _build_dense_diffloss_inputs:
+        (vla_hidden_z [N, H], action_gt [N, D], mask [N]).
+    """
+    if model.reg_action_head is None or dense_inputs is None:
+        return zero_loss(hidden_states)
+
+    vla_hidden_z, action_gt, mask = dense_inputs
+    if vla_hidden_z.numel() == 0 or not mask.any():
+        return zero_loss(hidden_states)
+
+    pred_actions = model.reg_action_head(vla_hidden_z)
+    return nn.functional.smooth_l1_loss(pred_actions[mask], action_gt[mask])
+
+
 def compute_ce_loss(model, hidden_states: torch.Tensor, labels: torch.Tensor, is_vla_data: torch.Tensor) -> torch.Tensor:
     non_vla_mask = ~is_vla_data.to(dtype=torch.bool)
     if not torch.any(non_vla_mask):
@@ -312,26 +333,16 @@ def compute_ce_loss(model, hidden_states: torch.Tensor, labels: torch.Tensor, is
 def compute_diffloss_loss(
     model,
     hidden_states: torch.Tensor,
-    actions: torch.Tensor,
-    answer_start_idx: torch.Tensor,
-    n_actions: torch.Tensor,
-    is_vla_data: torch.Tensor,
+    dense_inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
 ) -> torch.Tensor:
-    if model.diffloss is None or not torch.any(is_vla_data.to(dtype=torch.bool)):
+    if model.diffloss is None or dense_inputs is None:
         return zero_loss(hidden_states)
 
-    vla_hidden_z, action_gt, diffloss_mask = _build_dense_diffloss_inputs(
-        model,
-        hidden_states,
-        actions,
-        answer_start_idx,
-        n_actions,
-        is_vla_data.to(dtype=torch.bool),
-    )
+    vla_hidden_z, action_gt, diffloss_mask = dense_inputs
     if vla_hidden_z.numel() == 0:
         return zero_loss(hidden_states)
 
-    repeat_factor = int(getattr(model, "diffloss_micro_batch_size", 1))
+    repeat_factor = model.ar_action_train_config.diffloss_repeat
     vla_hidden_z = vla_hidden_z.repeat_interleave(repeat_factor, dim=0)
     action_gt = action_gt.repeat_interleave(repeat_factor, dim=0)
     diffloss_mask = diffloss_mask.repeat_interleave(repeat_factor, dim=0)
@@ -354,16 +365,16 @@ def build_flow_inputs(model, batch: dict[str, torch.Tensor | None]) -> dict[str,
     rtc_mask = None
     prefix_mask = None
     time_for_model = t
-    if model.use_rtc:
+    if model.rtc_config.enabled:
         time_for_model, rtc_mask, prefix_mask, _ = _build_rtc_flow_inputs(
             actions=actions,
             actions_valid_mask=actions_valid_mask,
             postfix_time=t,
             n_actions=n_actions,
-            rtc_delay_strategy=model.rtc_delay_strategy,
-            rtc_max_delay=model.rtc_max_delay,
+            rtc_delay_strategy=model.rtc_config.delay_strategy,
+            rtc_max_delay=model.rtc_config.max_delay,
         )
-    noisy_actions = psi_t(noise, actions, time_for_model, model.flow_sig_min)
+    noisy_actions = psi_t(noise, actions, time_for_model, model.flow_config.sig_min)
     if prefix_mask is not None:
         noisy_actions = torch.where(prefix_mask.unsqueeze(-1), actions, noisy_actions)
     return {
@@ -420,25 +431,28 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
     is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
 
     ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
-    diff_loss = compute_diffloss_loss(
-        model,
-        hidden_states,
-        batch["actions"],
-        batch["answer_start_idx"],
-        batch["n_actions"],
-        is_vla_data,
-    )
+
+    dense_inputs = None
+    if torch.any(is_vla_data):
+        dense_inputs = _build_dense_diffloss_inputs(
+            model, hidden_states, batch["actions"],
+            batch["answer_start_idx"], batch["n_actions"], is_vla_data,
+        )
+    diff_loss = compute_diffloss_loss(model, hidden_states, dense_inputs)
+    reg_loss = compute_reg_action_loss(model, hidden_states, dense_inputs)
     flow_loss, _ = _compute_flow_stream_loss(model, batch, backbone_output)
 
     total_loss = (
-        model.loss_weights.ce_loss_weight * ce_loss
-        + model.loss_weights.diffusion_loss_weight * diff_loss
-        + model.loss_weights.flow_loss_weight * flow_loss
+        model.loss_config.ce_loss_weight * ce_loss
+        + model.loss_config.diffusion_loss_weight * diff_loss
+        + model.loss_config.reg_loss_weight * reg_loss
+        + model.loss_config.flow_loss_weight * flow_loss
     )
     return {
         "total_loss": total_loss,
         "ce_loss": ce_loss,
         "diffusion_loss": diff_loss,
+        "reg_loss": reg_loss,
         "flow_loss": flow_loss,
     }
 
@@ -449,19 +463,25 @@ def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, tor
     hidden_states = backbone_output.last_hidden_states
     is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
     ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
-    diff_loss = compute_diffloss_loss(
-        model,
-        hidden_states,
-        batch["actions"],
-        batch["answer_start_idx"],
-        batch["n_actions"],
-        is_vla_data,
+
+    dense_inputs = None
+    if torch.any(is_vla_data):
+        dense_inputs = _build_dense_diffloss_inputs(
+            model, hidden_states, batch["actions"],
+            batch["answer_start_idx"], batch["n_actions"], is_vla_data,
+        )
+    diff_loss = compute_diffloss_loss(model, hidden_states, dense_inputs)
+    reg_loss = compute_reg_action_loss(model, hidden_states, dense_inputs)
+    total_loss = (
+        model.loss_config.ce_loss_weight * ce_loss
+        + model.loss_config.diffusion_loss_weight * diff_loss
+        + model.loss_config.reg_loss_weight * reg_loss
     )
-    total_loss = model.loss_weights.ce_loss_weight * ce_loss + model.loss_weights.diffusion_loss_weight * diff_loss
     return {
         "total_loss": total_loss,
         "ce_loss": ce_loss,
         "diffusion_loss": diff_loss,
+        "reg_loss": reg_loss,
         "flow_loss": zero_loss(hidden_states),
     }
 
@@ -470,10 +490,12 @@ def compute_flow_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, t
     slot_embeds = model.build_slot_embeddings(batch)
     backbone_output = model.forward_backbone_stream(batch, slot_embeds)
     flow_loss, _ = _compute_flow_stream_loss(model, batch, backbone_output)
+    ref = backbone_output.last_hidden_states
     return {
-        "total_loss": model.loss_weights.flow_loss_weight * flow_loss,
-        "ce_loss": zero_loss(backbone_output.last_hidden_states),
-        "diffusion_loss": zero_loss(backbone_output.last_hidden_states),
+        "total_loss": model.loss_config.flow_loss_weight * flow_loss,
+        "ce_loss": zero_loss(ref),
+        "diffusion_loss": zero_loss(ref),
+        "reg_loss": zero_loss(ref),
         "flow_loss": flow_loss,
     }
 
