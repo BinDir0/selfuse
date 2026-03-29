@@ -44,6 +44,8 @@ echo "正在使用 GPU: $CUDA_VISIBLE_DEVICES (共 $NUM_GPUS 张卡)"
 # 3. 使用 --num_machines 1 强制单机模式（调试通常是单机）
 # 4. 不要传 --gpu_ids，让环境变量生效
 
+# WARNING: do not insert inline comments between backslash-continued lines;
+# bash treats '#' as a literal argument, breaking the command silently.
 $PYTHON_PATH -m accelerate.commands.launch \
     --config_file src/config/acc_config.yaml \
     --num_processes $NUM_GPUS \
@@ -52,6 +54,6 @@ $PYTHON_PATH -m accelerate.commands.launch \
     --main_process_port 29501 \
     train.py \
     experiment=legendvla_qwen3_vl \
-    # training.max_train_steps=10 \
-    # training.eval_every=5 \
+    training.max_train_steps=10 \
+    training.eval_every=5 \
     2>&1 | tee debug_training.log
