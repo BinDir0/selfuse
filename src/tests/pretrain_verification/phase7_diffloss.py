@@ -119,9 +119,13 @@ def check_7_2_chunk_construction() -> CheckResult:
     n_actions = torch.tensor([8, 6, 4], dtype=torch.long)
     vla_mask = torch.tensor([True, True, True], dtype=torch.bool)
 
-    # Create a simple mock model with ar_action_chunk_size
+    # Create a simple mock model with grouped AR action training config.
     class MockModel:
-        ar_action_chunk_size = ar_chunk_size
+        class ARActionTrainConfig:
+            chunk_size = ar_chunk_size
+
+        ar_action_train_config = ARActionTrainConfig()
+
     model = MockModel()
 
     vla_hidden_z, action_gt, diffloss_mask = build_dense_diffloss_inputs(

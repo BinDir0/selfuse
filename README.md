@@ -128,7 +128,7 @@ python data/visualizer.py \
 ```text
 src/config/train_config.yaml                    # 顶层入口，指定 experiment
   └── experiment/legendvla_qwen3_vl.yaml        # 实验配置，组合以下子配置
-        ├── model/qwen3_vl_4b.yaml              # 模型结构、预训练路径、attention backend
+        ├── model/qwen3_vl_2b.yaml              # 模型结构、预训练路径、attention backend
         ├── data/unified_wds.yaml               # 数据加载、collator、dataloader
         ├── training/default.yaml               # 优化器、学习率、compile、gradient checkpointing
         ├── logging/default.yaml                # WandB、checkpoint 策略
@@ -294,8 +294,8 @@ FSDP2 训练输出的 sharded checkpoint 可直接用于恢复。
 | `training.compile.enabled` | `training/default.yaml` | torch.compile 开关（默认 True） |
 | `training.gradient_checkpointing` | `training/default.yaml` | 分组件 gradient checkpointing |
 | `training.clipping.max_grad_norm` | `training/default.yaml` | 梯度裁剪阈值（默认 1.0） |
-| `runtime.knowledge_insulation` | `model/qwen3_vl_4b.yaml` | 知识隔离（True/False/int N） |
-| `pretrained.text_attn_implementation` | `model/qwen3_vl_4b.yaml` | Text attention backend（默认 flex_attention） |
+| `runtime.knowledge_insulation` | `model/qwen3_vl_2b.yaml` | 知识隔离（True/False/int N） |
+| `pretrained.text_attn_implementation` | `model/qwen3_vl_2b.yaml` | Text attention backend（默认 flex_attention） |
 
 ## Inference
 
@@ -373,7 +373,7 @@ src/
 │   │   ├── legendvla_qwen3_vl.yaml       # main experiment config
 │   │   └── inference.yaml
 │   ├── model/
-│   │   └── qwen3_vl_4b.yaml             # model architecture & pretrained paths
+│   │   └── qwen3_vl_2b.yaml             # model architecture & pretrained paths
 │   ├── data/
 │   │   └── unified_wds.yaml             # data pipeline, collator, dataloader
 │   ├── training/

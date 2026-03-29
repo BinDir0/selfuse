@@ -207,7 +207,7 @@ def build_rtc_flow_inputs(
     postfix_valid_mask = postfix_mask & actions_valid_mask.to(dtype=torch.bool)
     return token_t, postfix_valid_mask, prefix_mask, delay
 
-def compute_flow_loss(
+def compute_packed_flow_loss(
     *,
     model,
     actions: torch.FloatTensor,
@@ -448,7 +448,7 @@ def compute_flow_stream_loss(
         flow_inputs=flow_inputs,
         num_parallel_chunks=num_parallel_t,
     )
-    flow_loss = compute_flow_loss(
+    flow_loss = compute_packed_flow_loss(
         model=model,
         actions=flow_inputs["actions"],
         pred_v_t=flow_output["pred_v"],

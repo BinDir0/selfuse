@@ -36,7 +36,7 @@ from src.tests.pretrain_verification.utils import (
 )
 from src.policy.legendvla_loss import (
     build_flow_inputs,
-    compute_flow_loss,
+    compute_packed_flow_loss,
     build_dense_diffloss_inputs,
 )
 
@@ -152,7 +152,7 @@ def check_flow_loss(report: PhaseReport, output_dir: Path, skip_visual: bool) ->
     manual_flow_loss = masked_loss.sum() / valid_count.clamp(min=1)
 
     # Also compute via the internal function for cross-check
-    internal_flow_loss = compute_flow_loss(
+    internal_flow_loss = compute_packed_flow_loss(
         model=model2,
         actions=actions,
         pred_v_t=pred_v,

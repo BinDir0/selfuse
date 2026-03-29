@@ -341,6 +341,97 @@ class TestEndToEndForwardBackward:
         torch.testing.assert_close(model.flow_expert.last_action_position_ids, expected_position_ids)
         assert model.flow_expert.last_num_parallel_chunks == 4
 
+    def test_parallel_flow_matches_separate_single_t_forward_values(self):
+        model = build_model(
+            with_diffloss=False,
+            num_parallel_t=4,
+            rtc_config=RTCConfig(enabled=False),
+        )
+        model.eval()
+        batch = build_batch(batch_size=1)
+        slot_embeds = model.build_slot_embeddings(batch)
+        backbone_output = model.forward_backbone_stream(batch, slot_embeds)
+        sampled_t = torch.tensor([[0.15, 0.35, 0.55, 0.75]], dtype=batch["actions"].dtype)
+        packed_inputs = build_flow_inputs(model, batch, num_parallel_t=4, sampled_t=sampled_t)
+        packed_output = model.forward_flow_stream(
+            batch=batch,
+            backbone_output=backbone_output,
+            flow_inputs=packed_inputs,
+            num_parallel_chunks=4,
+        )
+
+        horizon = batch["actions"].shape[1]
+        for chunk_idx in range(4):
+            chunk_start = chunk_idx * horizon
+            chunk_end = chunk_start + horizon
+            single_inputs = {
+                "actions": packed_inputs["actions"][:, chunk_start:chunk_end],
+                "noise": packed_inputs["noise"][:, chunk_start:chunk_end],
+                "noisy_actions": packed_inputs["noisy_actions"][:, chunk_start:chunk_end],
+                "time_for_model": packed_inputs["time_for_model"][:, chunk_start:chunk_end],
+                "loss_mask": packed_inputs["loss_mask"][:, chunk_start:chunk_end],
+            }
+            single_output = model.forward_flow_stream(
+                batch=batch,
+                backbone_output=backbone_output,
+                flow_inputs=single_inputs,
+                num_parallel_chunks=1,
+            )
+            torch.testing.assert_close(
+                packed_output["action_hidden_states"][:, chunk_start:chunk_end],
+                single_output["action_hidden_states"],
+            )
+            torch.testing.assert_close(
+                packed_output["pred_v"][:, chunk_start:chunk_end],
+                single_output["pred_v"],
+            )
+
+    def test_parallel_flow_matches_separate_single_t_forward_values_with_rtc(self):
+        model = build_model(
+            with_diffloss=False,
+            num_parallel_t=3,
+            rtc_config=RTCConfig(enabled=True, delay_strategy="uniform", max_delay=4),
+        )
+        model.eval()
+        batch = build_batch(batch_size=1)
+        slot_embeds = model.build_slot_embeddings(batch)
+        backbone_output = model.forward_backbone_stream(batch, slot_embeds)
+        sampled_t = torch.tensor([[0.2, 0.5, 0.8]], dtype=batch["actions"].dtype)
+        torch.manual_seed(123)
+        packed_inputs = build_flow_inputs(model, batch, num_parallel_t=3, sampled_t=sampled_t)
+        packed_output = model.forward_flow_stream(
+            batch=batch,
+            backbone_output=backbone_output,
+            flow_inputs=packed_inputs,
+            num_parallel_chunks=3,
+        )
+
+        horizon = batch["actions"].shape[1]
+        for chunk_idx in range(3):
+            chunk_start = chunk_idx * horizon
+            chunk_end = chunk_start + horizon
+            single_inputs = {
+                "actions": packed_inputs["actions"][:, chunk_start:chunk_end],
+                "noise": packed_inputs["noise"][:, chunk_start:chunk_end],
+                "noisy_actions": packed_inputs["noisy_actions"][:, chunk_start:chunk_end],
+                "time_for_model": packed_inputs["time_for_model"][:, chunk_start:chunk_end],
+                "loss_mask": packed_inputs["loss_mask"][:, chunk_start:chunk_end],
+            }
+            single_output = model.forward_flow_stream(
+                batch=batch,
+                backbone_output=backbone_output,
+                flow_inputs=single_inputs,
+                num_parallel_chunks=1,
+            )
+            torch.testing.assert_close(
+                packed_output["action_hidden_states"][:, chunk_start:chunk_end],
+                single_output["action_hidden_states"],
+            )
+            torch.testing.assert_close(
+                packed_output["pred_v"][:, chunk_start:chunk_end],
+                single_output["pred_v"],
+            )
+
     def test_train_flow_mode_knowledge_insulation_blocks_backbone_gradients(self):
         """Knowledge insulation should stop flow gradients from reaching the backbone through prefix KV."""
         batch = build_batch(batch_size=1)

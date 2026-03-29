@@ -163,10 +163,10 @@ class LegendVLA(nn.Module):
         compile_kwargs: dict[str, Any],
     ) -> dict[str, bool]:
         return {
-            "vision": bool(compile_kwargs.get("vision", False)),
-            "text": bool(compile_kwargs.get("text", False)),
-            "flow": bool(compile_kwargs.get("flow", False)),
-            "diffloss": bool(compile_kwargs.get("diffloss", False)),
+            "vision": bool(compile_kwargs.get("vision", True)),
+            "text": bool(compile_kwargs.get("text", True)),
+            "flow": bool(compile_kwargs.get("flow", True)),
+            "diffloss": bool(compile_kwargs.get("diffloss", True)),
         }
 
     def enable_gradient_checkpointing(self, config: dict | None = None) -> None:

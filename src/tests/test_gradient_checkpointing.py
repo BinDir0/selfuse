@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from transformers import Qwen3VLConfig, Qwen3VLTextConfig
 
@@ -37,6 +38,33 @@ def _make_expert(monkeypatch, num_layers=2, attn_implementation="flex_attention"
         attn_implementation=attn_implementation,
         use_kv_projection=use_kv_projection,
     )
+
+
+def _move_expert_inputs_to_cuda(expert, inputs):
+    expert = expert.cuda()
+    cuda_inputs = {}
+    for key, value in inputs.items():
+        if isinstance(value, PrefixKVCache):
+            cuda_inputs[key] = PrefixKVCache(
+                keys=value.keys.cuda(),
+                values=value.values.cuda(),
+                mask=value.mask.cuda(),
+                lengths=value.lengths.cuda(),
+            )
+        elif torch.is_tensor(value):
+            cuda_value = value.cuda()
+            if value.requires_grad:
+                cuda_value = cuda_value.detach().requires_grad_(True)
+            cuda_inputs[key] = cuda_value
+        else:
+            cuda_inputs[key] = value
+    return expert, cuda_inputs
+
+
+requires_cuda_action_expert = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Qwen3ActionExpert BlockMask tests require CUDA flex_attention.",
+)
 
 
 def _make_expert_inputs(expert, batch_size=2, prefix_len=3, action_len=4):
@@ -101,10 +129,12 @@ def test_diffloss_checkpoint_runs_only_in_train_mode():
     assert len(eval_calls) == 0
 
 
+@requires_cuda_action_expert
 def test_action_expert_checkpoint_runs_only_in_train_mode(monkeypatch):
     expert = _make_expert(monkeypatch)
     expert.enable_gradient_checkpointing()
     inputs = _make_expert_inputs(expert)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
     train_calls = []
 
@@ -138,6 +168,7 @@ def test_action_expert_checkpoint_runs_only_in_train_mode(monkeypatch):
 # New: every_n selective checkpointing
 # ---------------------------------------------------------------------------
 
+@requires_cuda_action_expert
 def test_action_expert_every_n(monkeypatch):
     """With 6 layers and every_n=3, only layers 0 and 3 should be checkpointed."""
     expert = _make_expert(monkeypatch, num_layers=6)
@@ -145,6 +176,7 @@ def test_action_expert_every_n(monkeypatch):
     assert expert.checkpoint_every_n == 3
 
     inputs = _make_expert_inputs(expert)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
     ckpt_layer_indices = []
 
     def tracking_gc(fn, *args, **kwargs):
@@ -160,12 +192,14 @@ def test_action_expert_every_n(monkeypatch):
     assert len(ckpt_layer_indices) == 2
 
 
+@requires_cuda_action_expert
 def test_action_expert_every_n_equals_1_checkpoints_all(monkeypatch):
     """every_n=1 should checkpoint every layer (default)."""
     expert = _make_expert(monkeypatch, num_layers=4)
     expert.enable_gradient_checkpointing(every_n=1)
 
     inputs = _make_expert_inputs(expert)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
     calls = []
 
     def tracking_gc(fn, *args, **kwargs):
@@ -201,6 +235,7 @@ def test_action_expert_preserve_rng_state_false(monkeypatch):
     assert func.keywords.get("use_reentrant") is False
 
 
+@requires_cuda_action_expert
 def test_kv_projection_identity_init_and_parity(monkeypatch):
     expert_plain = _make_expert(monkeypatch, use_kv_projection=False)
     expert_proj = _make_expert(monkeypatch, use_kv_projection=True)
@@ -223,6 +258,8 @@ def test_kv_projection_identity_init_and_parity(monkeypatch):
         torch.testing.assert_close(layer.prefix_value_proj.weight, eye)
 
     inputs = _make_expert_inputs(expert_plain)
+    expert_plain, inputs = _move_expert_inputs_to_cuda(expert_plain, inputs)
+    expert_proj = expert_proj.cuda()
     expert_plain.eval()
     expert_proj.eval()
     out_plain = expert_plain(**inputs)
@@ -230,10 +267,12 @@ def test_kv_projection_identity_init_and_parity(monkeypatch):
     torch.testing.assert_close(out_plain, out_proj)
 
 
+@requires_cuda_action_expert
 def test_parallel_flow_block_mask_prevents_chunk_leakage(monkeypatch):
     expert = _make_expert(monkeypatch, attn_implementation="flex_attention")
     expert.eval()
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=4)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
     base_action_embeds = inputs["action_embeds"].clone()
     chunk0 = base_action_embeds[:, :2].clone()
@@ -257,6 +296,86 @@ def test_parallel_flow_block_mask_prevents_chunk_leakage(monkeypatch):
 
     torch.testing.assert_close(out_a[:, :2], out_b[:, :2], atol=1e-5, rtol=1e-5)
     assert not torch.allclose(out_a[:, 2:], out_b[:, 2:])
+
+
+@requires_cuda_action_expert
+def test_parallel_chunk_forward_matches_separate_single_chunk(monkeypatch):
+    expert = _make_expert(monkeypatch, attn_implementation="flex_attention")
+    expert.eval()
+    inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=6)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
+
+    num_parallel_chunks = 3
+    chunk_size = inputs["action_embeds"].shape[1] // num_parallel_chunks
+    base_position_ids = torch.arange(chunk_size, device=inputs["action_embeds"].device).unsqueeze(0)
+    packed_position_ids = base_position_ids.repeat(1, num_parallel_chunks)
+    packed_output = expert(
+        **{
+            **inputs,
+            "action_position_ids": packed_position_ids,
+            "num_parallel_chunks": num_parallel_chunks,
+        }
+    )
+
+    for chunk_idx in range(num_parallel_chunks):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = chunk_start + chunk_size
+        single_output = expert(
+            action_embeds=inputs["action_embeds"][:, chunk_start:chunk_end],
+            prefix_cache=inputs["prefix_cache"],
+            action_position_ids=base_position_ids,
+            time_cond=inputs["time_cond"][:, chunk_start:chunk_end],
+            action_mask=inputs["action_mask"][:, chunk_start:chunk_end],
+            num_parallel_chunks=1,
+        )
+        torch.testing.assert_close(
+            packed_output[:, chunk_start:chunk_end],
+            single_output,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
+
+@requires_cuda_action_expert
+def test_parallel_chunk_forward_matches_separate_single_chunk_with_kv_projection(monkeypatch):
+    expert = _make_expert(
+        monkeypatch,
+        attn_implementation="flex_attention",
+        use_kv_projection=True,
+    )
+    expert.eval()
+    inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=6)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
+
+    num_parallel_chunks = 3
+    chunk_size = inputs["action_embeds"].shape[1] // num_parallel_chunks
+    base_position_ids = torch.arange(chunk_size, device=inputs["action_embeds"].device).unsqueeze(0)
+    packed_position_ids = base_position_ids.repeat(1, num_parallel_chunks)
+    packed_output = expert(
+        **{
+            **inputs,
+            "action_position_ids": packed_position_ids,
+            "num_parallel_chunks": num_parallel_chunks,
+        }
+    )
+
+    for chunk_idx in range(num_parallel_chunks):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = chunk_start + chunk_size
+        single_output = expert(
+            action_embeds=inputs["action_embeds"][:, chunk_start:chunk_end],
+            prefix_cache=inputs["prefix_cache"],
+            action_position_ids=base_position_ids,
+            time_cond=inputs["time_cond"][:, chunk_start:chunk_end],
+            action_mask=inputs["action_mask"][:, chunk_start:chunk_end],
+            num_parallel_chunks=1,
+        )
+        torch.testing.assert_close(
+            packed_output[:, chunk_start:chunk_end],
+            single_output,
+            atol=1e-5,
+            rtol=1e-5,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -447,11 +566,13 @@ def test_mask_mod_batch_independence():
 # BlockMask correctness: forward-level isolation tests
 # ---------------------------------------------------------------------------
 
+@requires_cuda_action_expert
 def test_forward_same_chunk_influence(monkeypatch):
     """Perturbing position 0 (chunk 0) changes chunk 0 output but not chunk 1."""
     expert = _make_expert(monkeypatch, attn_implementation="flex_attention")
     expert.eval()
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=4)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
     base = inputs["action_embeds"].clone()
     perturbed = base.clone()
@@ -466,6 +587,7 @@ def test_forward_same_chunk_influence(monkeypatch):
     torch.testing.assert_close(out_base[:, 2:], out_pert[:, 2:], atol=1e-5, rtol=1e-5)
 
 
+@requires_cuda_action_expert
 def test_forward_padding_queries_produce_finite_output(monkeypatch):
     """Queries at padded action positions produce finite output (no NaN).
 
@@ -476,6 +598,7 @@ def test_forward_padding_queries_produce_finite_output(monkeypatch):
     expert = _make_expert(monkeypatch, attn_implementation="flex_attention")
     expert.eval()
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=4)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
     inputs["action_mask"][:, 3] = False
 
     out = expert(**{**inputs, "num_parallel_chunks": 2})
@@ -487,11 +610,13 @@ def test_forward_padding_queries_produce_finite_output(monkeypatch):
     )
 
 
+@requires_cuda_action_expert
 def test_forward_three_chunk_isolation(monkeypatch):
     """With T=3, perturbing chunk 1 leaves chunks 0 and 2 unchanged."""
     expert = _make_expert(monkeypatch, attn_implementation="flex_attention")
     expert.eval()
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=6)
+    expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
     base = inputs["action_embeds"].clone()
     perturbed = base.clone()

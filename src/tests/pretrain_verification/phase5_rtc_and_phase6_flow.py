@@ -30,7 +30,7 @@ import torch
 
 from src.policy.legendvla_loss import (
     build_rtc_flow_inputs,
-    compute_flow_loss,
+    compute_packed_flow_loss,
     sample_rtc_delay,
     build_flow_inputs,
     psi_t,
@@ -330,7 +330,7 @@ def check_6_2_velocity_target(report: PhaseReport) -> None:
     pred_v = target_v_manual.clone()
     loss_mask = torch.ones(B, H, D, dtype=torch.bool)
 
-    loss = compute_flow_loss(
+    loss = compute_packed_flow_loss(
         model=mock_model,
         actions=actions,
         pred_v_t=pred_v,

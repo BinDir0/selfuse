@@ -36,6 +36,8 @@ from src.tests.pretrain_verification.utils import (
 
 def _build_model_and_batch():
     from src.tests.test_e2e_forward_backward import build_model, build_batch
+    torch.manual_seed(0)
+    np.random.seed(0)
     model = build_model(with_diffloss=True, knowledge_insulation=True)
     batch = build_batch(batch_size=2)
     return model, batch
@@ -124,6 +126,8 @@ def check_9_3_roundtrip(skip_visual: bool, output_dir: Path) -> CheckResult:
     """Overfit on one fixed VLA batch, then run inference. Results should approximate GT."""
     from src.tests.test_e2e_forward_backward import build_model, build_batch
 
+    torch.manual_seed(0)
+    np.random.seed(0)
     model = build_model(with_diffloss=True, knowledge_insulation=True)
     batch = build_batch(batch_size=1)
     model.train()
