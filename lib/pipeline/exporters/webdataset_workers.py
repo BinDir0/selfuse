@@ -98,6 +98,25 @@ def _worker_prepare_episode_features(episode_slice):
     }
 
 
+def _worker_prepare_episode_feature_batch(batch):
+    episodes_ok = 0
+    episodes_failed = 0
+    frames_cached = 0
+
+    for episode_slice in batch:
+        result = _worker_prepare_episode_features(episode_slice)
+        episodes_ok += 1 if result["ok"] else 0
+        episodes_failed += 0 if result["ok"] else 1
+        frames_cached += int(result["num_frames"])
+
+    return {
+        "episodes_total": len(batch),
+        "episodes_ok": episodes_ok,
+        "episodes_failed": episodes_failed,
+        "frames_cached": frames_cached,
+    }
+
+
 def _worker_process_shard(task):
     """Build one shard in a worker process and write directly to disk."""
     frames_written = 0

@@ -45,6 +45,7 @@ from .webdataset_geometry import (  # noqa: E402
 )
 from .webdataset_workers import (  # noqa: E402
     _worker_init,
+    _worker_prepare_episode_feature_batch,
     _worker_prepare_episode_features,
     _worker_process_shard,
     normalize_mano_devices,
@@ -57,6 +58,7 @@ __all__ = [
     "FINGERTIP_INDICES",
     "LOWDIM_SIZE",
     "_worker_init",
+    "_worker_prepare_episode_feature_batch",
     "_worker_prepare_episode_features",
     "_worker_process_shard",
     "add_sample_to_tar",
@@ -80,6 +82,9 @@ __all__ = [
     "run_infill_for_episode",
     "run_mano_forward",
 ]
+
+PRECOMPUTE_EPISODES_PER_BATCH = 128
+PRECOMPUTE_FRAMES_PER_BATCH = 16384
 
 
 def build_parser():
@@ -256,6 +261,48 @@ def prepare_feature_cache_dir(args, episodes, episode_stats):
     return feature_cache_dir
 
 
+def _make_precompute_episode_task(ep):
+    task = {
+        "crop_dir": ep["crop_dir"],
+        "episode_id": ep["episode_id"],
+        "num_valid_frames": int(ep["num_valid_frames"]),
+    }
+    frame_ids = ep.get("frame_ids")
+    if frame_ids is not None:
+        task["frame_ids"] = frame_ids
+    return task
+
+
+def _build_precompute_batches(episode_stats):
+    batches = []
+    current_batch = []
+    current_frames = 0
+
+    def flush():
+        nonlocal current_batch, current_frames
+        if not current_batch:
+            return
+        batches.append(current_batch)
+        current_batch = []
+        current_frames = 0
+
+    for ep in episode_stats:
+        task = _make_precompute_episode_task(ep)
+        task_frames = int(task["num_valid_frames"])
+        if current_batch and (
+            len(current_batch) >= PRECOMPUTE_EPISODES_PER_BATCH
+            or current_frames + task_frames > PRECOMPUTE_FRAMES_PER_BATCH
+        ):
+            flush()
+        current_batch.append(task)
+        current_frames += task_frames
+        if len(current_batch) >= PRECOMPUTE_EPISODES_PER_BATCH or current_frames >= PRECOMPUTE_FRAMES_PER_BATCH:
+            flush()
+
+    flush()
+    return batches
+
+
 def precompute_episode_features(episode_stats, mano_device_specs, args, feature_cache_dir):
     if not feature_cache_dir or not args.precompute_features:
         return None
@@ -269,16 +316,22 @@ def precompute_episode_features(episode_stats, mano_device_specs, args, feature_
         }
 
     worker_count = max(1, len(mano_device_specs))
+    precompute_batches = _build_precompute_batches(episode_stats)
+    total_frames = sum(int(ep["num_valid_frames"]) for ep in episode_stats)
     print(
         f"Precomputing episode features with {worker_count} worker(s)"
-        f" on {', '.join(mano_device_specs)} ..."
+        f" on {', '.join(mano_device_specs)}"
+        f" across {len(precompute_batches)} batch(es)"
+        f" for {len(episode_stats)} episode(s) / {total_frames} frame(s) ..."
     )
     totals = {
         "episodes_ok": 0,
         "episodes_failed": 0,
         "frames_cached": 0,
         "workers": worker_count,
+        "batches": len(precompute_batches),
     }
+    started_at = time.perf_counter()
 
     if worker_count <= 1:
         _worker_init(
@@ -289,7 +342,7 @@ def precompute_episode_features(episode_stats, mano_device_specs, args, feature_
             require_feature_cache=False,
             eager_model_init=True,
         )
-        result_iter = (_worker_prepare_episode_features(ep) for ep in episode_stats)
+        result_iter = (_worker_prepare_episode_feature_batch(batch) for batch in precompute_batches)
     else:
         mp_context = get_context("spawn")
         with mp_context.Pool(
@@ -297,17 +350,41 @@ def precompute_episode_features(episode_stats, mano_device_specs, args, feature_
             initializer=_worker_init,
             initargs=(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir, False, True),
         ) as pool:
-            result_iter = pool.imap_unordered(_worker_prepare_episode_features, episode_stats, chunksize=1)
-            for result in tqdm(result_iter, total=len(episode_stats), desc="Episode features"):
-                totals["episodes_ok"] += 1 if result["ok"] else 0
-                totals["episodes_failed"] += 0 if result["ok"] else 1
-                totals["frames_cached"] += result["num_frames"]
+            result_iter = pool.imap_unordered(_worker_prepare_episode_feature_batch, precompute_batches, chunksize=1)
+            with tqdm(total=len(episode_stats), desc="Episode features") as pbar:
+                for result in result_iter:
+                    totals["episodes_ok"] += int(result["episodes_ok"])
+                    totals["episodes_failed"] += int(result["episodes_failed"])
+                    totals["frames_cached"] += int(result["frames_cached"])
+                    pbar.update(int(result["episodes_total"]))
+                    elapsed = max(time.perf_counter() - started_at, 1e-6)
+                    pbar.set_postfix(
+                        ep_s=f"{totals['episodes_ok'] / elapsed:.2f}",
+                        frame_s=f"{totals['frames_cached'] / elapsed:.1f}",
+                    )
+            elapsed = time.perf_counter() - started_at
+            print(
+                f"Episode features throughput: {totals['episodes_ok'] / max(elapsed, 1e-6):.2f} ep/s, "
+                f"{totals['frames_cached'] / max(elapsed, 1e-6):.1f} frame/s"
+            )
             return totals
 
-    for result in tqdm(result_iter, total=len(episode_stats), desc="Episode features"):
-        totals["episodes_ok"] += 1 if result["ok"] else 0
-        totals["episodes_failed"] += 0 if result["ok"] else 1
-        totals["frames_cached"] += result["num_frames"]
+    with tqdm(total=len(episode_stats), desc="Episode features") as pbar:
+        for result in result_iter:
+            totals["episodes_ok"] += int(result["episodes_ok"])
+            totals["episodes_failed"] += int(result["episodes_failed"])
+            totals["frames_cached"] += int(result["frames_cached"])
+            pbar.update(int(result["episodes_total"]))
+            elapsed = max(time.perf_counter() - started_at, 1e-6)
+            pbar.set_postfix(
+                ep_s=f"{totals['episodes_ok'] / elapsed:.2f}",
+                frame_s=f"{totals['frames_cached'] / elapsed:.1f}",
+            )
+    elapsed = time.perf_counter() - started_at
+    print(
+        f"Episode features throughput: {totals['episodes_ok'] / max(elapsed, 1e-6):.2f} ep/s, "
+        f"{totals['frames_cached'] / max(elapsed, 1e-6):.1f} frame/s"
+    )
     return totals
 
 
@@ -477,6 +554,7 @@ def main():
             f" ok={precompute_stats['episodes_ok']}"
             f" failed={precompute_stats['episodes_failed']}"
             f" frames={precompute_stats['frames_cached']}"
+            f" batches={precompute_stats['batches']}"
             f" workers={precompute_stats['workers']}"
             f" elapsed={precompute_elapsed:.1f}s"
         )
