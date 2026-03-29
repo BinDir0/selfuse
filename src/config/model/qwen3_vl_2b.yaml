@@ -1,0 +1,165 @@
+# @package _global_
+
+pretrained:
+  model_name_or_path: /share_data/chenzhang/checkpoints/Qwen3-VL-2B-Instruct
+  trust_remote_code: False
+  torch_dtype: bfloat16
+  # Attention backend used by the Qwen3-VL text tower and the Qwen3 action expert.
+  # Valid values in transformers 5.3.0: eager, sdpa, flash_attention_2, flash_attention_3.
+  # Use `sdpa` for text/action blocks to keep torch.compile-friendly dispatch.
+  text_attn_implementation: flex_attention
+  # Keep vision on FA2 because the upstream sdpa fallback splits ragged visual sequences in Python.
+  vision_attn_implementation: flash_attention_2
+
+added_slot_tokens:
+  state: <state>
+  action: <action>
+
+runtime:
+  use_lora: False
+  use_quantization: False
+  knowledge_insulation: True  # True = full, False = off, int N = insulate first N layers
+
+dims:
+  vlm_hidden_size: 2048
+  action_hidden_size: 1024
+  time_hidden_size: 1024
+  diffloss_z_channels: 1024
+  action_dim: 48
+  state_dim: 48
+
+policy:
+  _target_: src.policy.legendvla.LegendVLA
+  backbone:
+    _target_: src.model.vlm.qwen3_vl_backbone.Qwen3VLBackboneWrapper
+    model_name_or_path: ${pretrained.model_name_or_path}
+    trust_remote_code: ${pretrained.trust_remote_code}
+    freeze_backbone: False
+    torch_dtype: ${pretrained.torch_dtype}
+    state_token: ${added_slot_tokens.state}
+    action_token: ${added_slot_tokens.action}
+    use_lora: ${runtime.use_lora}
+    lora:
+      r: 16
+      lora_alpha: 32
+      lora_dropout: 0.05
+      bias: none
+      target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    use_quantization: ${runtime.use_quantization}
+    text_attn_implementation: ${pretrained.text_attn_implementation}
+    vision_attn_implementation: ${pretrained.vision_attn_implementation}
+    quantization:
+      load_in_4bit: True
+      load_in_8bit: False
+      bnb_4bit_quant_type: nf4
+      bnb_4bit_use_double_quant: True
+      bnb_4bit_compute_dtype: ${pretrained.torch_dtype}
+  state_encoder:
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: ${dims.state_dim}
+    width: ${dims.vlm_hidden_size}
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  ar_action_encoder:
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: ${dims.action_dim}
+    width: ${dims.vlm_hidden_size}
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  action_encoder:
+    _target_: src.model.action.action_head.FourierActionEncoder
+    action_dim: ${dims.action_dim}
+    width: ${dims.action_hidden_size}
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  time_embedding:
+    _target_: src.model.common.modules.TimeEmbedding
+    time_hidden_size: ${dims.time_hidden_size}
+    min_period: 0.004
+    max_period: 4.0
+  flow_expert:
+    _target_: src.model.action.qwen3_action_expert.Qwen3ActionExpert
+    model_name_or_path: ${pretrained.model_name_or_path}
+    time_hidden_size: ${dims.time_hidden_size}
+    hidden_size: ${dims.action_hidden_size}
+    intermediate_size: 4096
+    num_heads: 8
+    attn_implementation: ${pretrained.text_attn_implementation}
+    trust_remote_code: ${pretrained.trust_remote_code}
+    use_kv_projection: false
+  action_decoder:
+    _target_: src.model.action.action_head.MLPProjector
+    input_dim: ${dims.action_hidden_size}
+    output_dim: ${dims.action_dim}
+    width: ${dims.action_hidden_size}
+    depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  latent_condition_projector:
+    _target_: src.model.action.action_head.MLPProjector
+    input_dim: ${dims.vlm_hidden_size}
+    output_dim: ${dims.diffloss_z_channels}
+    width: ${dims.vlm_hidden_size}
+    depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  diffloss:
+    _target_: src.model.common.diffloss.DiffLoss
+    target_channels: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
+    z_channels: ${dims.diffloss_z_channels}
+    depth: 4
+    width: 1024
+    num_sampling_steps: "100"
+    grad_checkpointing: False
+    use_ddim_sampling: True
+    use_flow_matching: False
+    time_min_period: 0.004
+    time_max_period: 4.0
+    cond_dropout_prob: 0.0
+  reg_action_head: null
+  # Direct MSE regression head for backbone action supervision.
+  # Can be used alone or alongside diffloss. To enable:
+  #   _target_: src.model.action.action_head.MLPProjector
+  #   input_dim: ${dims.vlm_hidden_size}
+  #   output_dim: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
+  #   width: ${dims.vlm_hidden_size}
+  #   depth: 2
+  #   final_layer_norm: False
+  #   use_mlp_layer_norm: False
+  shape_meta: ${data.shape_meta}
+  ignore_index: ${data.ignore_index}
+  action_hidden_size: ${dims.action_hidden_size}
+  flow_config:
+    _target_: src.policy.legendvla.FlowConfig
+    sig_min: ${flow.sig_min}
+    num_parallel_t: ${flow.num_parallel_t}
+    sampling: ${flow.sampling}
+    alpha: ${flow.alpha}
+    beta: ${flow.beta}
+    num_inference_steps: ${flow.num_inference_steps}
+  rtc_config:
+    _target_: src.policy.legendvla.RTCConfig
+    enabled: True
+    delay_strategy: exp
+    max_delay: 8
+  ar_action_train_config:
+    _target_: src.policy.legendvla.ARActionTrainConfig
+    noise_std: 0.02
+    chunk_size: 8
+    diffloss_repeat: 1
+  loss_config:
+    _target_: src.policy.legendvla.LossConfig
+    ce_loss_weight: 0.1
+    diffusion_loss_weight: 50.0
+    flow_loss_weight: 1.0
+    reg_loss_weight: 5.0
+  knowledge_insulation: ${runtime.knowledge_insulation}

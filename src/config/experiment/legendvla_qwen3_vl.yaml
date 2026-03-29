@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /model: qwen3_vl_4b
+  - /model: qwen3_vl_2b
   - /data: unified_wds
   - /training: default
   - /logging: default
