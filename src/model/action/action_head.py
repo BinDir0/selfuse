@@ -53,7 +53,7 @@ class FourierActionEncoder(nn.Module):
         use_mlp_layer_norm: bool = False,
     ):
         super().__init__()
-        assert mlp_depth >= 0, "mlp_depth must be >= 0"
+        assert mlp_depth > 0, "mlp_depth must be > 0"
         self.time_cond = time_cond
         if self.time_cond:
             if time_emb_dim is None:
