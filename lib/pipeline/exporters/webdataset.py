@@ -444,8 +444,10 @@ def run_shard_writers(shard_tasks, writer_workers, mano_device, mano_device_spec
         "total_shards": 0,
         "total_episodes_written": 0,
         "total_skipped": 0,
+        "total_shard_elapsed_sec": 0.0,
     }
     pool = None
+    started_at = time.perf_counter()
 
     if writer_workers <= 1:
         _worker_init(
@@ -474,16 +476,30 @@ def run_shard_writers(shard_tasks, writer_workers, mano_device, mano_device_spec
         results_iter = pool.imap_unordered(_worker_process_shard, shard_tasks)
 
     try:
-        for result in tqdm(results_iter, total=len(shard_tasks), desc="Shards"):
-            totals["total_frames"] += result["frames_written"]
-            totals["total_shards"] += 1 if result["frames_written"] > 0 else 0
-            totals["total_episodes_written"] += result["episodes_written"]
-            totals["total_skipped"] += result["skipped_episodes"]
+        with tqdm(results_iter, total=len(shard_tasks), desc="Shards") as pbar:
+            for result in pbar:
+                totals["total_frames"] += result["frames_written"]
+                totals["total_shards"] += 1 if result["frames_written"] > 0 else 0
+                totals["total_episodes_written"] += result["episodes_written"]
+                totals["total_skipped"] += result["skipped_episodes"]
+                totals["total_shard_elapsed_sec"] += float(result.get("elapsed_sec", 0.0))
+                elapsed = max(time.perf_counter() - started_at, 1e-6)
+                pbar.set_postfix(
+                    shard_s=f"{totals['total_shards'] / elapsed:.2f}",
+                    frame_s=f"{totals['total_frames'] / elapsed:.1f}",
+                    last_s=f"{float(result.get('elapsed_sec', 0.0)):.2f}",
+                )
     finally:
         if pool is not None:
             pool.close()
             pool.join()
 
+    elapsed = max(time.perf_counter() - started_at, 1e-6)
+    print(
+        f"Shard throughput: {totals['total_shards'] / elapsed:.2f} shard/s, "
+        f"{totals['total_frames'] / elapsed:.1f} frame/s, "
+        f"avg shard worker time={totals['total_shard_elapsed_sec'] / max(len(shard_tasks), 1):.2f}s"
+    )
     return totals
 
 

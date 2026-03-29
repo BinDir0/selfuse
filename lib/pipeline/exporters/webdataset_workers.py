@@ -2,12 +2,14 @@
 
 import os
 import tarfile
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import current_process
 
 import torch
 
 from .webdataset_features import build_mano_models, load_episode_features
-from .webdataset_writer import add_sample_to_tar, iter_episode_samples
+from .webdataset_writer import add_prepared_sample_to_tar, iter_episode_samples, prepare_sample_payload
 
 _worker_mano_right = None
 _worker_mano_left = None
@@ -17,6 +19,9 @@ _worker_feature_cache_dir = None
 _worker_episode_cache = {}
 _worker_mano_dir = None
 _worker_require_feature_cache = False
+
+WRITE_PREFETCH_THREADS = 4
+WRITE_PREFETCH_DEPTH = 16
 
 
 def normalize_mano_devices(mano_device, mano_gpus):
@@ -119,6 +124,7 @@ def _worker_prepare_episode_feature_batch(batch):
 
 def _worker_process_shard(task):
     """Build one shard in a worker process and write directly to disk."""
+    started_at = time.perf_counter()
     frames_written = 0
     skipped_episodes = 0
     touched_episodes = set()
@@ -127,40 +133,57 @@ def _worker_process_shard(task):
     tmp_path = task["tmp_path"]
 
     try:
-        for episode_slice in task["episode_slices"]:
-            cache_key = episode_slice["crop_dir"]
-            if cache_key not in _worker_episode_cache:
-                if not _worker_require_feature_cache:
-                    _ensure_worker_mano_models()
-                _worker_episode_cache[cache_key] = load_episode_features(
+        with ThreadPoolExecutor(max_workers=WRITE_PREFETCH_THREADS) as prefetch_pool:
+            for episode_slice in task["episode_slices"]:
+                cache_key = episode_slice["crop_dir"]
+                if cache_key not in _worker_episode_cache:
+                    if not _worker_require_feature_cache:
+                        _ensure_worker_mano_models()
+                    _worker_episode_cache[cache_key] = load_episode_features(
+                        episode_slice,
+                        _worker_mano_right,
+                        _worker_mano_left,
+                        _worker_device,
+                        rescan_frame_index=_worker_rescan_frame_index,
+                        feature_cache_dir=_worker_feature_cache_dir,
+                        require_cache=_worker_require_feature_cache,
+                    )
+
+                episode_data = _worker_episode_cache[cache_key]
+                if episode_data is None:
+                    skipped_episodes += 1
+                    continue
+
+                sample_iter = iter_episode_samples(
                     episode_slice,
-                    _worker_mano_right,
-                    _worker_mano_left,
-                    _worker_device,
-                    rescan_frame_index=_worker_rescan_frame_index,
-                    feature_cache_dir=_worker_feature_cache_dir,
-                    require_cache=_worker_require_feature_cache,
+                    episode_data,
+                    episode_slice["frame_start"],
+                    episode_slice["frame_end"],
                 )
+                pending = deque()
 
-            episode_data = _worker_episode_cache[cache_key]
-            if episode_data is None:
-                skipped_episodes += 1
-                continue
+                def submit_next():
+                    try:
+                        sample = next(sample_iter)
+                    except StopIteration:
+                        return False
+                    pending.append(prefetch_pool.submit(prepare_sample_payload, *sample))
+                    return True
 
-            sample_iter = iter_episode_samples(
-                episode_slice,
-                episode_data,
-                episode_slice["frame_start"],
-                episode_slice["frame_end"],
-            )
-            for key, frame_path, lowdim, meta in sample_iter:
-                if tar_writer is None:
-                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                    tar_writer = tarfile.open(tmp_path, "w")
-                add_sample_to_tar(tar_writer, key, frame_path, lowdim, meta)
-                frames_written += 1
+                for _ in range(WRITE_PREFETCH_DEPTH):
+                    if not submit_next():
+                        break
 
-            touched_episodes.add(cache_key)
+                while pending:
+                    key, image_bytes, lowdim_bytes, meta_bytes = pending.popleft().result()
+                    if tar_writer is None:
+                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                        tar_writer = tarfile.open(tmp_path, "w")
+                    add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, meta_bytes)
+                    frames_written += 1
+                    submit_next()
+
+                touched_episodes.add(cache_key)
     except Exception:
         if tar_writer is not None:
             tar_writer.close()
@@ -183,4 +206,5 @@ def _worker_process_shard(task):
         "episodes_written": len(touched_episodes),
         "skipped_episodes": skipped_episodes,
         "output_path": output_path,
+        "elapsed_sec": time.perf_counter() - started_at,
     }

@@ -8,6 +8,14 @@ import tarfile
 import numpy as np
 
 
+LOWDIM_SIZE = 116
+LOWDIM_DTYPE = np.dtype(np.float32)
+_LOWDIM_SAMPLE = np.zeros((LOWDIM_SIZE,), dtype=LOWDIM_DTYPE)
+_LOWDIM_BUF = io.BytesIO()
+np.save(_LOWDIM_BUF, _LOWDIM_SAMPLE, allow_pickle=False)
+_LOWDIM_NPY_HEADER = _LOWDIM_BUF.getvalue()[: -_LOWDIM_SAMPLE.nbytes]
+
+
 def plan_shards(episodes, frames_per_shard, output_dir):
     """Pack whole episodes into shards near the target frame count."""
     tasks = []
@@ -60,37 +68,62 @@ def plan_shards(episodes, frames_per_shard, output_dir):
 
 def iter_episode_samples(ep, episode_data, frame_start, frame_end):
     """Yield frame samples for one planned episode slice."""
+    instruction = list(ep.get("instruction", []))
+    meta_prefix = (
+        json.dumps(
+            {
+                "dataset_name": "buildai",
+                "episode_index": ep["episode_index"],
+                "instruction": instruction,
+                "instruction_num": len(instruction),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )[:-1]
+        + ',"presence":'
+    )
     frame_ids = episode_data["frame_ids"][frame_start:frame_end]
     for frame_idx in frame_ids:
         frame_path = episode_data["frame_index"].get(frame_idx)
         if frame_path is None:
             continue
-        meta = {
-            "dataset_name": "buildai",
-            "episode_index": ep["episode_index"],
-            "instruction": list(ep.get("instruction", [])),
-            "instruction_num": len(ep.get("instruction", [])),
-            "presence": int(episode_data["presence_per_frame"][frame_idx]),
-        }
+        presence = int(episode_data["presence_per_frame"][frame_idx])
+        meta_bytes = f"{meta_prefix}{presence}}}".encode("utf-8")
         sample_key = f"buildai_ep{ep['episode_index']:06d}_f{frame_idx:05d}"
-        yield sample_key, frame_path, episode_data["lowdim_all"][frame_idx], meta
+        yield sample_key, frame_path, episode_data["lowdim_all"][frame_idx], meta_bytes
 
 
-def add_sample_to_tar(tar_writer, key, frame_path, lowdim, meta):
-    """Write one WebDataset sample to a tar file."""
-    with open(frame_path, "rb") as image_file:
-        img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
-        img_info.size = os.fstat(image_file.fileno()).st_size
-        tar_writer.addfile(img_info, image_file)
+def _encode_lowdim_npy(lowdim):
+    array = np.asarray(lowdim, dtype=LOWDIM_DTYPE)
+    if array.shape == (LOWDIM_SIZE,):
+        return _LOWDIM_NPY_HEADER + np.ascontiguousarray(array).tobytes()
 
     lowdim_buf = io.BytesIO()
-    np.save(lowdim_buf, lowdim, allow_pickle=False)
-    lowdim_bytes = lowdim_buf.getvalue()
+    np.save(lowdim_buf, array, allow_pickle=False)
+    return lowdim_buf.getvalue()
+
+
+def prepare_sample_payload(key, frame_path, lowdim, meta_bytes):
+    with open(frame_path, "rb") as image_file:
+        image_bytes = image_file.read()
+    lowdim_bytes = _encode_lowdim_npy(lowdim)
+    return key, image_bytes, lowdim_bytes, meta_bytes
+
+
+def add_sample_to_tar(tar_writer, key, frame_path, lowdim, meta_bytes):
+    key, image_bytes, lowdim_bytes, meta_bytes = prepare_sample_payload(key, frame_path, lowdim, meta_bytes)
+    add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, meta_bytes)
+
+
+def add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, meta_bytes):
+    img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
+    img_info.size = len(image_bytes)
+    tar_writer.addfile(img_info, io.BytesIO(image_bytes))
+
     lowdim_info = tarfile.TarInfo(name=f"{key}.lowdim.npy")
     lowdim_info.size = len(lowdim_bytes)
     tar_writer.addfile(lowdim_info, io.BytesIO(lowdim_bytes))
 
-    meta_bytes = json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     meta_info = tarfile.TarInfo(name=f"{key}.meta.json")
     meta_info.size = len(meta_bytes)
     tar_writer.addfile(meta_info, io.BytesIO(meta_bytes))
