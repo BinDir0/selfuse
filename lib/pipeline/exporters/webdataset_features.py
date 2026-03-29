@@ -246,6 +246,23 @@ def _build_episode_data(extracted_dir, num_frames, lowdim_all, presence_per_fram
     }
 
 
+def _build_episode_data_from_known_frame_ids(extracted_dir, frame_ids, lowdim_all, presence_per_frame):
+    valid_frame_ids = [int(frame_idx) for frame_idx in frame_ids if int(frame_idx) < int(lowdim_all.shape[0])]
+    if not valid_frame_ids:
+        return None
+
+    frame_index = {
+        frame_idx: os.path.join(extracted_dir, f"{frame_idx}.jpg")
+        for frame_idx in valid_frame_ids
+    }
+    return {
+        "frame_index": frame_index,
+        "frame_ids": valid_frame_ids,
+        "lowdim_all": lowdim_all,
+        "presence_per_frame": presence_per_frame,
+    }
+
+
 def _write_episode_feature_cache(ep, feature_cache_dir, episode_data):
     if not feature_cache_dir:
         return
@@ -268,7 +285,7 @@ def _write_episode_feature_cache(ep, feature_cache_dir, episode_data):
             os.remove(cache_tmp_path)
 
 
-def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=False, feature_cache_dir=None):
+def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=False, feature_cache_dir=None, require_cache=False):
     """Load one episode and compute per-frame lowdim features."""
     crop_dir = ep["crop_dir"]
     world_res_path = os.path.join(crop_dir, "world_space_res.pth")
@@ -278,6 +295,11 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
         cached = _load_cached_episode_features(ep, extracted_dir, feature_cache_dir)
         if cached is not None:
             return cached
+        if require_cache:
+            raise RuntimeError(f"Missing episode feature cache for {crop_dir}")
+
+    if require_cache:
+        raise RuntimeError(f"Feature cache mode requires --feature_cache for {crop_dir}")
 
     prediction = _load_world_space_prediction(ep, world_res_path)
     if prediction is None:
@@ -304,13 +326,21 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
     presence_per_frame = _compute_presence_per_frame(pred_valid, num_frames)
     lowdim_all = _build_lowdim_features(wrist_state, hand_state, extrinsics, intrinsic)
 
-    episode_data = _build_episode_data(
-        extracted_dir,
-        num_frames,
-        lowdim_all,
-        presence_per_frame,
-        rescan_frame_index=rescan_frame_index,
-    )
+    if not rescan_frame_index and ep.get("frame_ids"):
+        episode_data = _build_episode_data_from_known_frame_ids(
+            extracted_dir,
+            ep["frame_ids"],
+            lowdim_all,
+            presence_per_frame,
+        )
+    else:
+        episode_data = _build_episode_data(
+            extracted_dir,
+            num_frames,
+            lowdim_all,
+            presence_per_frame,
+            rescan_frame_index=rescan_frame_index,
+        )
     if episode_data is None:
         return None
 

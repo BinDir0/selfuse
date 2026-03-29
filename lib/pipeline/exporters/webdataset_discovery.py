@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+from multiprocessing import get_context
 from pathlib import Path
 
 import joblib
@@ -189,14 +190,33 @@ def load_episode_stats(ep, rescan_frame_index=False):
     return ep_with_stats
 
 
-def discover_episode_stats(episodes, rescan_frame_index=False):
+def _load_episode_stats_worker(task):
+    ep, rescan_frame_index = task
+    return load_episode_stats(ep, rescan_frame_index=rescan_frame_index)
+
+
+def discover_episode_stats(episodes, rescan_frame_index=False, workers=1):
     """Collect stats for all valid episodes."""
     stats = []
-    for ep in tqdm(episodes, desc="Episode stats"):
-        ep_stats = load_episode_stats(ep, rescan_frame_index=rescan_frame_index)
-        if ep_stats is None:
-            continue
-        stats.append(ep_stats)
+    if workers <= 1:
+        for ep in tqdm(episodes, desc="Episode stats"):
+            ep_stats = load_episode_stats(ep, rescan_frame_index=rescan_frame_index)
+            if ep_stats is None:
+                continue
+            stats.append(ep_stats)
+        return stats
+
+    tasks = ((ep, rescan_frame_index) for ep in episodes)
+    mp_context = get_context()
+    with mp_context.Pool(workers) as pool:
+        for ep_stats in tqdm(
+            pool.imap(_load_episode_stats_worker, tasks, chunksize=32),
+            total=len(episodes),
+            desc="Episode stats",
+        ):
+            if ep_stats is None:
+                continue
+            stats.append(ep_stats)
     return stats
 
 

@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from multiprocessing import get_context
 from pathlib import Path
 
@@ -22,7 +23,6 @@ from .webdataset_discovery import (  # noqa: E402
     load_episode_stats,
     load_or_build_frame_index,
     parse_factory_range,
-    repeat_episode_stats,
 )
 from .webdataset_annotation import (  # noqa: E402
     DEFAULT_ANNOTATION_SUFFIX,
@@ -45,6 +45,7 @@ from .webdataset_geometry import (  # noqa: E402
 )
 from .webdataset_workers import (  # noqa: E402
     _worker_init,
+    _worker_prepare_episode_features,
     _worker_process_shard,
     normalize_mano_devices,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "FINGERTIP_INDICES",
     "LOWDIM_SIZE",
     "_worker_init",
+    "_worker_prepare_episode_features",
     "_worker_process_shard",
     "add_sample_to_tar",
     "attach_or_filter_episode_instructions",
@@ -75,7 +77,6 @@ __all__ = [
     "normalize_slam_keyframes",
     "plan_shards",
     "quat_to_4x4",
-    "repeat_episode_stats",
     "run_infill_for_episode",
     "run_mano_forward",
 ]
@@ -89,12 +90,29 @@ def build_parser():
     parser.add_argument("--episode_list", default=None, help="Text file with one episode path per line")
     parser.add_argument("--frames_per_shard", type=int, default=10000)
     parser.add_argument("--factory_range", default=None, help="Inclusive factory range like 1-50 for 10K BuildAI layout")
-    parser.add_argument("--repeat_episodes", type=int, default=1, help="Repeat the full episode list this many times in order")
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
+    parser.add_argument(
+        "--preprocess_workers",
+        type=int,
+        default=max(1, min(8, os.cpu_count() or 1)),
+        help="Number of workers for episode stats and annotation preprocessing",
+    )
     parser.add_argument("--mano_device", default="cuda:0", help="Device for MANO forward pass")
     parser.add_argument("--mano_gpus", default=None, help="Comma-separated GPU ids for parallel MANO workers, e.g. 0,1,2,3")
     parser.add_argument("--mano_dir", default=None, help="Directory containing MANO_RIGHT.pkl and MANO_LEFT.pkl")
     parser.add_argument("--rescan", action="store_true", help="Force rescan episodes and frame indexes")
+    parser.add_argument(
+        "--feature_cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cache per-episode lowdim features under output_dir for faster reruns",
+    )
+    parser.add_argument(
+        "--precompute_features",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Precompute per-episode lowdim features before shard writing to improve GPU utilization and rerun speed",
+    )
     parser.add_argument("--writer_workers", type=int, default=8, help="Number of parallel shard writers")
     parser.add_argument("--shard_manifest_out", default=None, help="Optional JSON manifest of planned shards")
     parser.add_argument("--auto_infill", action="store_true", help="Run infill for missing world_space_res.pth")
@@ -123,8 +141,8 @@ def build_parser():
 
 def normalize_args(args):
     """Normalize deprecated aliases and validate simple invariants."""
-    if args.repeat_episodes < 1:
-        raise ValueError("--repeat_episodes must be >= 1")
+    if args.preprocess_workers < 1:
+        raise ValueError("--preprocess_workers must be >= 1")
     parse_factory_range(args.factory_range)
     return args.writer_workers
 
@@ -196,7 +214,11 @@ def prepare_episode_stats(args, cache_file):
         return None, None
 
     print("Collecting episode stats...")
-    episode_stats = discover_episode_stats(episodes, rescan_frame_index=args.rescan)
+    episode_stats = discover_episode_stats(
+        episodes,
+        rescan_frame_index=args.rescan,
+        workers=args.preprocess_workers,
+    )
     if not episode_stats:
         return episodes, None
 
@@ -204,6 +226,7 @@ def prepare_episode_stats(args, cache_file):
         episode_stats,
         annotation_suffix=args.annotation_suffix,
         allow_missing_annotation=args.allow_missing_annotation,
+        workers=args.preprocess_workers,
     )
     print(
         "Annotation filter:"
@@ -217,23 +240,75 @@ def prepare_episode_stats(args, cache_file):
     if not episode_stats:
         return episodes, None
 
-    filtered_episodes = episode_stats
-    episode_stats = repeat_episode_stats(filtered_episodes, args.repeat_episodes)
-    return filtered_episodes, episode_stats
+    return episode_stats, episode_stats
 
 
 def prepare_feature_cache_dir(args, episodes, episode_stats):
-    """Create feature cache directory when repeating episodes."""
+    """Create feature cache directory for reusable episode features."""
     feature_cache_dir = None
-    if args.repeat_episodes > 1:
+    if args.feature_cache:
         print(
-            f"Expanded dataset by repeating {len(episodes)} episodes x{args.repeat_episodes} "
-            f"-> {len(episode_stats)} episode entries"
+            f"Episode feature cache enabled for {len(episode_stats)} episode entries"
+            f" at {os.path.join(args.output_dir, '_episode_feature_cache')}"
         )
         feature_cache_dir = os.path.join(args.output_dir, "_episode_feature_cache")
         os.makedirs(feature_cache_dir, exist_ok=True)
-        print(f"Episode feature cache enabled: {feature_cache_dir}")
     return feature_cache_dir
+
+
+def precompute_episode_features(episode_stats, mano_device_specs, args, feature_cache_dir):
+    if not feature_cache_dir or not args.precompute_features:
+        return None
+
+    if not episode_stats:
+        return {
+            "episodes_ok": 0,
+            "episodes_failed": 0,
+            "frames_cached": 0,
+            "workers": 0,
+        }
+
+    worker_count = max(1, len(mano_device_specs))
+    print(
+        f"Precomputing episode features with {worker_count} worker(s)"
+        f" on {', '.join(mano_device_specs)} ..."
+    )
+    totals = {
+        "episodes_ok": 0,
+        "episodes_failed": 0,
+        "frames_cached": 0,
+        "workers": worker_count,
+    }
+
+    if worker_count <= 1:
+        _worker_init(
+            mano_device_specs,
+            args.mano_dir,
+            args.rescan,
+            feature_cache_dir,
+            require_feature_cache=False,
+            eager_model_init=True,
+        )
+        result_iter = (_worker_prepare_episode_features(ep) for ep in episode_stats)
+    else:
+        mp_context = get_context("spawn")
+        with mp_context.Pool(
+            worker_count,
+            initializer=_worker_init,
+            initargs=(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir, False, True),
+        ) as pool:
+            result_iter = pool.imap_unordered(_worker_prepare_episode_features, episode_stats, chunksize=1)
+            for result in tqdm(result_iter, total=len(episode_stats), desc="Episode features"):
+                totals["episodes_ok"] += 1 if result["ok"] else 0
+                totals["episodes_failed"] += 0 if result["ok"] else 1
+                totals["frames_cached"] += result["num_frames"]
+            return totals
+
+    for result in tqdm(result_iter, total=len(episode_stats), desc="Episode features"):
+        totals["episodes_ok"] += 1 if result["ok"] else 0
+        totals["episodes_failed"] += 0 if result["ok"] else 1
+        totals["frames_cached"] += result["num_frames"]
+    return totals
 
 
 def write_shard_manifest(shard_tasks, shard_manifest_out):
@@ -268,6 +343,12 @@ def resolve_mano_runtime(args, writer_workers):
     return mano_device, mano_device_specs, writer_workers
 
 
+def resolve_writer_runtime(writer_workers, feature_cache_precomputed):
+    if feature_cache_precomputed:
+        return torch.device("cpu"), ["cpu"], writer_workers
+    return None, None, writer_workers
+
+
 def print_writer_config(writer_workers, mano_device_specs):
     """Print worker allocation summary."""
     if len(mano_device_specs) > 1:
@@ -290,14 +371,28 @@ def run_shard_writers(shard_tasks, writer_workers, mano_device, mano_device_spec
     pool = None
 
     if writer_workers <= 1:
-        _worker_init(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir)
+        _worker_init(
+            mano_device_specs,
+            args.mano_dir,
+            args.rescan,
+            feature_cache_dir,
+            require_feature_cache=bool(feature_cache_dir and args.precompute_features),
+            eager_model_init=not bool(feature_cache_dir and args.precompute_features),
+        )
         results_iter = (_worker_process_shard(task) for task in shard_tasks)
     else:
         mp_context = get_context("spawn") if mano_device.type == "cuda" else get_context()
         pool = mp_context.Pool(
             writer_workers,
             initializer=_worker_init,
-            initargs=(mano_device_specs, args.mano_dir, args.rescan, feature_cache_dir),
+            initargs=(
+                mano_device_specs,
+                args.mano_dir,
+                args.rescan,
+                feature_cache_dir,
+                bool(feature_cache_dir and args.precompute_features),
+                not bool(feature_cache_dir and args.precompute_features),
+            ),
         )
         results_iter = pool.imap_unordered(_worker_process_shard, shard_tasks)
 
@@ -326,6 +421,7 @@ def print_summary(output_dir, totals):
 
 
 def main():
+    started_at = time.perf_counter()
     args = build_parser().parse_args()
     writer_workers = normalize_args(args)
     os.makedirs(args.output_dir, exist_ok=True)
@@ -337,7 +433,9 @@ def main():
     maybe_rescan_episode_cache(cache_file, args.rescan)
     maybe_run_auto_infill(args, cache_file, writer_workers)
 
+    prepare_started_at = time.perf_counter()
     episodes, episode_stats = prepare_episode_stats(args, cache_file)
+    prepare_elapsed = time.perf_counter() - prepare_started_at
     if not episodes:
         print("No episodes found!")
         return
@@ -351,7 +449,18 @@ def main():
     write_shard_manifest(shard_tasks, args.shard_manifest_out)
 
     mano_device, mano_device_specs, writer_workers = resolve_mano_runtime(args, writer_workers)
+    precompute_started_at = time.perf_counter()
+    precompute_stats = precompute_episode_features(episode_stats, mano_device_specs, args, feature_cache_dir)
+    precompute_elapsed = time.perf_counter() - precompute_started_at
+    feature_cache_precomputed = bool(feature_cache_dir and args.precompute_features)
+    if precompute_stats is not None and precompute_stats["episodes_failed"] > 0:
+        raise RuntimeError(
+            f"Episode feature precompute failed for {precompute_stats['episodes_failed']} episode(s); aborting build"
+        )
+    if feature_cache_precomputed:
+        mano_device, mano_device_specs, writer_workers = resolve_writer_runtime(writer_workers, True)
     print_writer_config(writer_workers, mano_device_specs)
+    build_started_at = time.perf_counter()
     totals = run_shard_writers(
         shard_tasks,
         writer_workers,
@@ -360,7 +469,20 @@ def main():
         args,
         feature_cache_dir,
     )
+    build_elapsed = time.perf_counter() - build_started_at
     print_summary(args.output_dir, totals)
+    if precompute_stats is not None:
+        print(
+            "Feature cache:"
+            f" ok={precompute_stats['episodes_ok']}"
+            f" failed={precompute_stats['episodes_failed']}"
+            f" frames={precompute_stats['frames_cached']}"
+            f" workers={precompute_stats['workers']}"
+            f" elapsed={precompute_elapsed:.1f}s"
+        )
+    print(
+        f"Timings: prepare={prepare_elapsed:.1f}s build={build_elapsed:.1f}s total={time.perf_counter() - started_at:.1f}s"
+    )
 
 
 if __name__ == "__main__":

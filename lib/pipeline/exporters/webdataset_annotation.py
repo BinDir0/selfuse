@@ -2,6 +2,9 @@
 
 import json
 import os
+from multiprocessing import get_context
+
+from tqdm import tqdm
 
 ANNOTATION_LEVEL_KEYS = ("level1", "level2", "level3", "level4", "level5")
 DEFAULT_ANNOTATION_SUFFIX = "_qwen-annotation.json"
@@ -54,7 +57,18 @@ def load_episode_instruction(ep, annotation_suffix=DEFAULT_ANNOTATION_SUFFIX):
     return instruction, None, annotation_path
 
 
-def attach_or_filter_episode_instructions(episodes, annotation_suffix=DEFAULT_ANNOTATION_SUFFIX, allow_missing_annotation=False):
+def _load_episode_instruction_worker(task):
+    ep, annotation_suffix = task
+    instruction, error_code, annotation_path = load_episode_instruction(ep, annotation_suffix=annotation_suffix)
+    return ep, instruction, error_code, annotation_path
+
+
+def attach_or_filter_episode_instructions(
+    episodes,
+    annotation_suffix=DEFAULT_ANNOTATION_SUFFIX,
+    allow_missing_annotation=False,
+    workers=1,
+):
     """Attach instruction to episodes or drop invalid entries."""
     kept = []
     stats = {
@@ -66,23 +80,39 @@ def attach_or_filter_episode_instructions(episodes, annotation_suffix=DEFAULT_AN
         "empty_instruction": 0,
     }
 
-    for ep in episodes:
-        instruction, error_code, annotation_path = load_episode_instruction(ep, annotation_suffix=annotation_suffix)
-        ep_copy = dict(ep)
-        ep_copy["annotation_path"] = annotation_path
+    if workers <= 1:
+        iterator = (
+            (ep, *load_episode_instruction(ep, annotation_suffix=annotation_suffix))
+            for ep in episodes
+        )
+    else:
+        tasks = ((ep, annotation_suffix) for ep in episodes)
+        mp_context = get_context()
+        pool = mp_context.Pool(workers)
+        iterator = pool.imap(_load_episode_instruction_worker, tasks, chunksize=64)
 
-        if instruction is None:
-            stats[error_code] = stats.get(error_code, 0) + 1
-            if allow_missing_annotation:
-                ep_copy["instruction"] = []
-                kept.append(ep_copy)
-                stats["kept"] += 1
-            else:
-                stats["filtered"] += 1
-            continue
+    try:
+        for item in tqdm(iterator, total=len(episodes), desc="Episode annotations"):
+            ep, instruction, error_code, annotation_path = item
+            ep_copy = dict(ep)
+            ep_copy["annotation_path"] = annotation_path
 
-        ep_copy["instruction"] = instruction
-        kept.append(ep_copy)
-        stats["kept"] += 1
+            if instruction is None:
+                stats[error_code] = stats.get(error_code, 0) + 1
+                if allow_missing_annotation:
+                    ep_copy["instruction"] = []
+                    kept.append(ep_copy)
+                    stats["kept"] += 1
+                else:
+                    stats["filtered"] += 1
+                continue
+
+            ep_copy["instruction"] = instruction
+            kept.append(ep_copy)
+            stats["kept"] += 1
+    finally:
+        if workers > 1:
+            pool.close()
+            pool.join()
 
     return kept, stats

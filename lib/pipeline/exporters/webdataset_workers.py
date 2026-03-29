@@ -15,6 +15,8 @@ _worker_device = None
 _worker_rescan_frame_index = False
 _worker_feature_cache_dir = None
 _worker_episode_cache = {}
+_worker_mano_dir = None
+_worker_require_feature_cache = False
 
 
 def normalize_mano_devices(mano_device, mano_gpus):
@@ -34,20 +36,66 @@ def normalize_mano_devices(mano_device, mano_gpus):
     return [mano_device]
 
 
-def _worker_init(device_specs, mano_dir, rescan_frame_index, feature_cache_dir):
+def _ensure_worker_mano_models():
+    global _worker_mano_right, _worker_mano_left
+    if _worker_mano_right is not None and _worker_mano_left is not None:
+        return
+    _worker_mano_right, _worker_mano_left = build_mano_models(_worker_device, mano_dir=_worker_mano_dir)
+    _worker_mano_right.eval()
+    _worker_mano_left.eval()
+
+
+def _worker_init(device_specs, mano_dir, rescan_frame_index, feature_cache_dir, require_feature_cache=False, eager_model_init=True):
     global _worker_mano_right, _worker_mano_left, _worker_device
     global _worker_rescan_frame_index, _worker_feature_cache_dir, _worker_episode_cache
+    global _worker_mano_dir, _worker_require_feature_cache
 
     identity = current_process()._identity
     worker_idx = identity[0] - 1 if identity else 0
     device_str = device_specs[worker_idx % len(device_specs)]
     _worker_device = torch.device(device_str)
-    _worker_mano_right, _worker_mano_left = build_mano_models(_worker_device, mano_dir=mano_dir)
-    _worker_mano_right.eval()
-    _worker_mano_left.eval()
+    _worker_mano_dir = mano_dir
+    _worker_mano_right = None
+    _worker_mano_left = None
     _worker_rescan_frame_index = rescan_frame_index
     _worker_feature_cache_dir = feature_cache_dir
     _worker_episode_cache = {}
+    _worker_require_feature_cache = require_feature_cache
+    if eager_model_init:
+        _ensure_worker_mano_models()
+
+
+def _worker_prepare_episode_features(episode_slice):
+    cache_key = episode_slice["crop_dir"]
+    if cache_key in _worker_episode_cache:
+        episode_data = _worker_episode_cache[cache_key]
+    else:
+        _ensure_worker_mano_models()
+        episode_data = load_episode_features(
+            episode_slice,
+            _worker_mano_right,
+            _worker_mano_left,
+            _worker_device,
+            rescan_frame_index=_worker_rescan_frame_index,
+            feature_cache_dir=_worker_feature_cache_dir,
+            require_cache=False,
+        )
+        _worker_episode_cache[cache_key] = episode_data
+
+    if episode_data is None:
+        return {
+            "episode_id": episode_slice["episode_id"],
+            "cached": False,
+            "ok": False,
+            "num_frames": 0,
+        }
+
+    return {
+        "episode_id": episode_slice["episode_id"],
+        "cached": True,
+        "ok": True,
+        "num_frames": len(episode_data["frame_ids"]),
+    }
 
 
 def _worker_process_shard(task):
@@ -63,6 +111,8 @@ def _worker_process_shard(task):
         for episode_slice in task["episode_slices"]:
             cache_key = episode_slice["crop_dir"]
             if cache_key not in _worker_episode_cache:
+                if not _worker_require_feature_cache:
+                    _ensure_worker_mano_models()
                 _worker_episode_cache[cache_key] = load_episode_features(
                     episode_slice,
                     _worker_mano_right,
@@ -70,6 +120,7 @@ def _worker_process_shard(task):
                     _worker_device,
                     rescan_frame_index=_worker_rescan_frame_index,
                     feature_cache_dir=_worker_feature_cache_dir,
+                    require_cache=_worker_require_feature_cache,
                 )
 
             episode_data = _worker_episode_cache[cache_key]

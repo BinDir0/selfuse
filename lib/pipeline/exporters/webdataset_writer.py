@@ -78,21 +78,19 @@ def iter_episode_samples(ep, episode_data, frame_start, frame_end):
 
 def add_sample_to_tar(tar_writer, key, frame_path, lowdim, meta):
     """Write one WebDataset sample to a tar file."""
-    with open(frame_path, "rb") as f:
-        image_bytes = f.read()
-
-    img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
-    img_info.size = len(image_bytes)
-    tar_writer.addfile(img_info, io.BytesIO(image_bytes))
+    with open(frame_path, "rb") as image_file:
+        img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
+        img_info.size = os.fstat(image_file.fileno()).st_size
+        tar_writer.addfile(img_info, image_file)
 
     lowdim_buf = io.BytesIO()
-    np.save(lowdim_buf, lowdim)
+    np.save(lowdim_buf, lowdim, allow_pickle=False)
     lowdim_bytes = lowdim_buf.getvalue()
     lowdim_info = tarfile.TarInfo(name=f"{key}.lowdim.npy")
     lowdim_info.size = len(lowdim_bytes)
     tar_writer.addfile(lowdim_info, io.BytesIO(lowdim_bytes))
 
-    meta_bytes = json.dumps(meta, ensure_ascii=False).encode("utf-8")
+    meta_bytes = json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     meta_info = tarfile.TarInfo(name=f"{key}.meta.json")
     meta_info.size = len(meta_bytes)
     tar_writer.addfile(meta_info, io.BytesIO(meta_bytes))
