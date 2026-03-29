@@ -2,6 +2,7 @@
 
 import os
 import tarfile
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import current_process
