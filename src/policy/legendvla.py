@@ -90,6 +90,8 @@ class LegendVLA(nn.Module):
         self.loss_config = loss_config
         self.ar_action_train_config = ar_action_train_config
 
+        if self.flow_config.num_parallel_t < 1:
+            raise ValueError(f"num_parallel_t must be >= 1, got {self.flow_config.num_parallel_t}.")
         if self.flow_config.sampling == "beta":
             self.flow_beta_dist = torch.distributions.Beta(self.flow_config.alpha, self.flow_config.beta)
         elif self.flow_config.sampling == "uniform":
@@ -120,6 +122,21 @@ class LegendVLA(nn.Module):
         self.diffloss = diffloss
         self.reg_action_head = reg_action_head
         self.latent_condition_projector = latent_condition_projector
+
+    def sample_flow_time(self, batch_size: int, num_samples: int = 1) -> torch.FloatTensor:
+        if self.flow_config.sampling == "uniform":
+            # Stratified sampling: batch elements are evenly spaced across [0, 1),
+            # each shifted by a shared random offset per sample.
+            eps = 1e-5
+            ranks = torch.arange(batch_size, dtype=torch.float32) / batch_size
+            offsets = torch.rand(num_samples, dtype=torch.float32)
+            t = (ranks.unsqueeze(1) + offsets.unsqueeze(0)) % (1 - eps)  # [B, T]
+            return t.squeeze(1) if num_samples == 1 else t
+        if self.flow_config.sampling == "beta":
+            z = self.flow_beta_dist.sample((batch_size, num_samples))
+            t = (1 - self.flow_config.sig_min) * (1 - z)
+            return t.squeeze(1) if num_samples == 1 else t
+        raise ValueError(f"Unsupported flow sampling: {self.flow_config.sampling}")
 
     def compile_blocks(
         self,
@@ -323,19 +340,34 @@ class LegendVLA(nn.Module):
         batch: dict,
         backbone_output: BackboneStreamOutput,
         flow_inputs: dict,
+        num_parallel_chunks: int,
     ) -> dict[str, torch.Tensor | None]:
         time_for_model = flow_inputs["time_for_model"]
-        if time_for_model.ndim == 2 and self.rtc_config.enabled:
-            time_cond = self.time_embedding(time_for_model.reshape(-1)).reshape(
-                time_for_model.shape[0],
-                time_for_model.shape[1],
-                -1,
+        if time_for_model.ndim != 2:
+            raise ValueError(
+                f"Expected packed flow time tensor with shape [B, T*H], got {time_for_model.shape}."
             )
-        else:
-            time_cond = self.time_embedding(time_for_model)
+        if num_parallel_chunks < 1:
+            raise ValueError(f"num_parallel_chunks must be >= 1, got {num_parallel_chunks}.")
+
+        batch_size, seq_len = time_for_model.shape
+        time_cond = self.time_embedding(time_for_model.reshape(-1)).reshape(
+            batch_size, seq_len, -1,
+        )
         action_embeds = self.action_encoder(flow_inputs["noisy_actions"])
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
         action_position_ids = self.build_action_position_ids(batch, backbone_output.position_ids)
+        action_mask = action_mask.repeat(1, num_parallel_chunks)
+        action_position_ids = action_position_ids.repeat(1, num_parallel_chunks)
+        if action_embeds.shape[1] != action_mask.shape[1]:
+            raise ValueError(
+                f"Action mask length {action_mask.shape[1]} does not match action embeddings length {action_embeds.shape[1]}."
+            )
+        if action_embeds.shape[1] != action_position_ids.shape[1]:
+            raise ValueError(
+                "Action position ids length "
+                f"{action_position_ids.shape[1]} does not match action embeddings length {action_embeds.shape[1]}."
+            )
         prefix_cache = backbone_output.prefix_cache
         expert_hidden = self.flow_expert(
             action_embeds=action_embeds,
@@ -343,7 +375,7 @@ class LegendVLA(nn.Module):
             action_position_ids=action_position_ids,
             time_cond=time_cond,
             action_mask=action_mask,
-            mode="flow",
+            num_parallel_chunks=num_parallel_chunks,
         )
         pred_v = self.action_decoder(expert_hidden)
         return {

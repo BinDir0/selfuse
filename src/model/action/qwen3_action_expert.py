@@ -60,12 +60,22 @@ class DiTQwen3DecoderLayer(nn.Module):
         time_hidden_size: int,
         attention_cls: type[nn.Module],
         mlp_cls: type[nn.Module],
+        use_kv_projection: bool = False,
     ):
         super().__init__()
         self.self_attn = attention_cls(config=config, layer_idx=layer_idx)
         self.mlp = mlp_cls(config)
         self.attn_adaln = AdaLNZero(config.hidden_size, time_hidden_size, eps=config.rms_norm_eps)
         self.mlp_adaln = AdaLNZero(config.hidden_size, time_hidden_size, eps=config.rms_norm_eps)
+        head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        if use_kv_projection:
+            self.prefix_key_proj = nn.Linear(head_dim, head_dim, bias=False)
+            self.prefix_value_proj = nn.Linear(head_dim, head_dim, bias=False)
+            nn.init.eye_(self.prefix_key_proj.weight)
+            nn.init.eye_(self.prefix_value_proj.weight)
+        else:
+            self.prefix_key_proj = nn.Identity()
+            self.prefix_value_proj = nn.Identity()
 
     def forward(
         self,
@@ -75,10 +85,10 @@ class DiTQwen3DecoderLayer(nn.Module):
         prefix_key: torch.Tensor,
         prefix_value: torch.Tensor,
         time_cond: torch.Tensor,
-        is_causal: bool,
         text_position_ids: torch.Tensor | None = None,
-        cache_position: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        prefix_key = self.prefix_key_proj(prefix_key)
+        prefix_value = self.prefix_value_proj(prefix_value)
         prefix_cache = StaticPrefixCache(prefix_key, prefix_value)
 
         residual = hidden_states
@@ -90,8 +100,7 @@ class DiTQwen3DecoderLayer(nn.Module):
             position_ids=text_position_ids,
             past_key_values=prefix_cache,
             use_cache=False,
-            cache_position=cache_position,
-            is_causal=is_causal,
+            is_causal=False,
         )
         hidden_states = residual + attn_gate * attn_output
 
@@ -120,10 +129,11 @@ class Qwen3ActionExpert(nn.Module):
         num_heads: int | None = None,
         attn_implementation: str | None = None,
         trust_remote_code: bool = False,
+        use_kv_projection: bool = False,
     ):
         super().__init__()
         try:
-            from transformers import DynamicCache, Qwen3VLConfig, Qwen3VLTextConfig
+            from transformers import Qwen3VLConfig, Qwen3VLTextConfig
             from transformers.models.qwen3_vl.modeling_qwen3_vl import (
                 Qwen3VLTextAttention,
                 Qwen3VLTextMLP,
@@ -134,9 +144,6 @@ class Qwen3ActionExpert(nn.Module):
             raise ImportError(
                 "Qwen3ActionExpert requires transformers with Qwen3-VL support."
             ) from exc
-
-        # DynamicCache only used for AR mode mask creation (outside compile region)
-        self.dynamic_cache_cls = DynamicCache
         base = Qwen3VLConfig.from_pretrained(
             model_name_or_path,
             trust_remote_code=trust_remote_code,
@@ -165,6 +172,11 @@ class Qwen3ActionExpert(nn.Module):
             config._attn_implementation = attn_implementation
         elif hasattr(base, "_attn_implementation"):
             config._attn_implementation = base._attn_implementation
+        if getattr(config, "_attn_implementation", None) != "flex_attention":
+            raise ValueError(
+                "Qwen3ActionExpert requires attn_implementation='flex_attention' "
+                "because action attention always uses a BlockMask."
+            )
 
         self.config = config
         self.hidden_size = hidden_size
@@ -181,6 +193,7 @@ class Qwen3ActionExpert(nn.Module):
                     time_hidden_size=time_hidden_size,
                     attention_cls=Qwen3VLTextAttention,
                     mlp_cls=Qwen3VLTextMLP,
+                    use_kv_projection=use_kv_projection,
                 )
                 for _ in range(self.num_layers)
             ]
@@ -210,7 +223,7 @@ class Qwen3ActionExpert(nn.Module):
         action_position_ids: torch.Tensor,
         time_cond: torch.Tensor,
         action_mask: torch.Tensor,
-        mode: str,
+        num_parallel_chunks: int,
     ) -> torch.Tensor:
         if prefix_cache is None:
             raise ValueError("Action expert requires a prefix cache.")
@@ -219,7 +232,8 @@ class Qwen3ActionExpert(nn.Module):
                 f"Prefix cache has {prefix_cache.num_layers} layers, "
                 f"but expert expects {self.num_layers}."
             )
-
+        if num_parallel_chunks < 1:
+            raise ValueError(f"num_parallel_chunks must be >= 1, got {num_parallel_chunks}.")
         hidden_states = action_embeds
 
         # Build full attention mask: [prefix_mask | action_mask]
@@ -246,43 +260,35 @@ class Qwen3ActionExpert(nn.Module):
         text_position_ids = action_position_ids[0]
         position_embeddings = self.rotary_emb(hidden_states, action_position_ids[1:])
 
-        prefix_len = prefix_cache.keys.shape[3]
+        prefix_len = prefix_cache.kv_seq_len
         action_len = action_embeds.shape[1]
-        cache_position = torch.arange(
-            prefix_len,
-            prefix_len + action_len,
+        if action_len % num_parallel_chunks != 0:
+            raise ValueError(
+                f"Action length {action_len} must be divisible by num_parallel_chunks={num_parallel_chunks}."
+            )
+        from torch.nn.attention.flex_attention import create_block_mask
+
+        batch_size = hidden_states.shape[0]
+        chunk_size = action_len // num_parallel_chunks
+        full_attention_mask_bool = full_attention_mask.to(device=action_embeds.device)
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            del h
+            valid = full_attention_mask_bool[b, kv_idx]
+            is_prefix = kv_idx < prefix_len
+            same_chunk = (q_idx // chunk_size) == ((kv_idx - prefix_len) // chunk_size)
+            return valid & (is_prefix | same_chunk)
+
+        # T=1 is the same code path with a single chunk, which degenerates to
+        # fully bidirectional action attention plus always-visible prefix KV.
+        attention_mask = create_block_mask(
+            mask_mod=mask_mod,
+            B=batch_size,
+            H=None,
+            Q_LEN=action_len,
+            KV_LEN=prefix_len + action_len,
             device=action_embeds.device,
         )
-
-        from transformers.masking_utils import create_bidirectional_mask, create_causal_mask
-
-        if mode == "ar":
-            # AR mode: need DynamicCache for create_causal_mask (outside compile region)
-            mask_past_key_values = self.dynamic_cache_cls()
-            for layer_idx in range(self.num_layers):
-                mask_past_key_values.update(
-                    prefix_cache.keys[layer_idx],
-                    prefix_cache.values[layer_idx],
-                    layer_idx,
-                )
-            attention_mask = create_causal_mask(
-                config=self.config,
-                inputs_embeds=hidden_states,
-                attention_mask=full_attention_mask,
-                cache_position=cache_position,
-                past_key_values=mask_past_key_values,
-                position_ids=text_position_ids,
-            )
-            is_causal = True
-        elif mode == "flow":
-            attention_mask = create_bidirectional_mask(
-                config=self.config,
-                inputs_embeds=hidden_states,
-                attention_mask=full_attention_mask,
-            )
-            is_causal = False
-        else:
-            raise ValueError(f"Unsupported action expert mode: {mode}")
 
         for layer_idx, layer in enumerate(self.layers):
             # Compile-friendly: pure tensor indexing on stacked cache
@@ -302,9 +308,7 @@ class Qwen3ActionExpert(nn.Module):
                     prefix_key,
                     prefix_value,
                     time_cond,
-                    is_causal,
                     text_position_ids,
-                    cache_position,
                 )
             else:
                 hidden_states = layer(
@@ -314,9 +318,7 @@ class Qwen3ActionExpert(nn.Module):
                     prefix_key=prefix_key,
                     prefix_value=prefix_value,
                     time_cond=time_cond,
-                    is_causal=is_causal,
                     text_position_ids=text_position_ids,
-                    cache_position=cache_position,
                 )
 
         hidden_states = self.norm(hidden_states)

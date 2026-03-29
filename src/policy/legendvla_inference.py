@@ -112,7 +112,7 @@ def infer_flow_action(model, batch: dict, prev_action_chunk=None, inference_dela
                 t[:, None].expand(-1, action_len),
             )
         else:
-            time_for_model = t
+            time_for_model = t[:, None].expand(-1, action_len)
 
         flow_inputs = {
             "noisy_actions": generated_actions,
@@ -122,6 +122,7 @@ def infer_flow_action(model, batch: dict, prev_action_chunk=None, inference_dela
             batch=working_batch,
             backbone_output=backbone_output,
             flow_inputs=flow_inputs,
+            num_parallel_chunks=1,
         )
         generated_actions = generated_actions + delta_t * flow_output["pred_v"]
         t = (t + delta_t).clamp(max=1.0)
@@ -186,14 +187,14 @@ def infer_ar_action(
             next_action = next_action.unsqueeze(0)
         if next_action.ndim == 3:
             next_action = next_action[:, 0, :]
-        elif next_action.shape[-1] == model.action_dim * model.ar_action_chunk_size:
-            next_action = next_action.view(next_action.shape[0], model.ar_action_chunk_size, model.action_dim)[:, 0, :]
+        elif next_action.shape[-1] == model.action_dim * model.ar_action_train_config.chunk_size:
+            next_action = next_action.view(next_action.shape[0], model.ar_action_train_config.chunk_size, model.action_dim)[:, 0, :]
         elif next_action.shape[-1] != model.action_dim:
             raise ValueError(
                 "DiffLoss AR inference must return either action_dim or "
                 "action_dim * ar_action_chunk_size channels. "
                 f"Got {next_action.shape[-1]} and expected {model.action_dim} or "
-                f"{model.action_dim * model.ar_action_chunk_size}."
+                f"{model.action_dim * model.ar_action_train_config.chunk_size}."
             )
         valid_step = action_step_mask[:, step_idx].unsqueeze(-1)
         generated_actions[:, step_idx] = torch.where(
