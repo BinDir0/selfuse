@@ -29,9 +29,9 @@ import numpy as np
 import torch
 
 from src.policy.legendvla_loss import (
-    _build_rtc_flow_inputs,
-    _compute_flow_loss,
-    _sample_rtc_delay,
+    build_rtc_flow_inputs,
+    compute_flow_loss,
+    sample_rtc_delay,
     build_flow_inputs,
     psi_t,
 )
@@ -67,7 +67,7 @@ def check_5_1_delay_sampling_distribution(report: PhaseReport, skip_visual: bool
     max_delay = 8
     valid_action_len = torch.full((n_samples,), 64, dtype=torch.long)
 
-    delays = _sample_rtc_delay(
+    delays = sample_rtc_delay(
         valid_action_len, strategy="exp", max_delay=max_delay,
     )
 
@@ -124,7 +124,7 @@ def check_5_2_prefix_postfix_mask(report: PhaseReport) -> None:
     n_actions = torch.tensor([64, 64], dtype=torch.long)
     forced_delay = torch.tensor([3, 5], dtype=torch.long)
 
-    token_t, postfix_valid_mask, prefix_mask, delay = _build_rtc_flow_inputs(
+    token_t, postfix_valid_mask, prefix_mask, delay = build_rtc_flow_inputs(
         actions=actions,
         actions_valid_mask=actions_valid_mask,
         postfix_time=postfix_time,
@@ -166,6 +166,40 @@ def check_5_2_prefix_postfix_mask(report: PhaseReport) -> None:
         f"postfix_valid_mask[0,:3] all False (prefix excluded): {postfix_prefix_excluded}",
     ))
 
+    # delay=0 should be a valid RTC training case: no prefix, all valid tokens
+    # remain supervised as postfix tokens.
+    zero_delay = torch.zeros(batch_size, dtype=torch.long)
+    token_t_zero, postfix_valid_mask_zero, prefix_mask_zero, delay_zero = build_rtc_flow_inputs(
+        actions=actions,
+        actions_valid_mask=actions_valid_mask,
+        postfix_time=postfix_time,
+        n_actions=n_actions,
+        forced_delay=zero_delay,
+    )
+
+    zero_delay_ok = bool(torch.equal(delay_zero, zero_delay))
+    prefix_empty = bool((~prefix_mask_zero).all())
+    token_t_matches_postfix = bool(torch.allclose(
+        token_t_zero,
+        postfix_time[:, None].expand(-1, horizon),
+    ))
+    postfix_covers_all_valid = bool(torch.equal(
+        postfix_valid_mask_zero,
+        actions_valid_mask,
+    ))
+
+    report.add(assert_check(
+        zero_delay_ok and prefix_empty and token_t_matches_postfix and postfix_covers_all_valid,
+        "5.2e_zero_delay_is_valid_training_case",
+        "forced_delay=0 -> empty prefix, token_t==postfix_time, postfix_valid_mask==actions_valid_mask",
+        {
+            "delay_zero_ok": zero_delay_ok,
+            "prefix_empty": prefix_empty,
+            "token_t_matches_postfix": token_t_matches_postfix,
+            "postfix_covers_all_valid": postfix_covers_all_valid,
+        },
+    ))
+
 
 def check_5_3_rtc_noisy_actions(report: PhaseReport) -> None:
     """Check 5.3: RTC noisy actions preserve original actions at prefix positions."""
@@ -180,10 +214,11 @@ def check_5_3_rtc_noisy_actions(report: PhaseReport) -> None:
 
     # Create a mock model with required attributes
     mock_model = SimpleNamespace(
-        flow_sig_min=0.001,
-        use_rtc=True,
-        rtc_delay_strategy="uniform",
-        rtc_max_delay=8,
+        flow_config=SimpleNamespace(sig_min=0.001, num_parallel_t=1),
+        rtc_config=SimpleNamespace(enabled=True, delay_strategy="uniform", max_delay=8),
+        sample_flow_time=lambda batch_size, num_samples=1: (
+            t[:batch_size].clone() if num_samples == 1 else t[:batch_size].unsqueeze(1).expand(-1, num_samples).clone()
+        ),
     )
 
     # Run build_flow_inputs multiple times to find a case with nonzero delay.
@@ -194,18 +229,14 @@ def check_5_3_rtc_noisy_actions(report: PhaseReport) -> None:
         batch = {
             "actions": actions.clone(),
             "actions_valid_mask": actions_valid_mask.clone(),
-            "t": t.clone(),
             "n_actions": n_actions.clone(),
         }
-        result = build_flow_inputs(mock_model, batch)
+        result = build_flow_inputs(mock_model, batch, num_parallel_t=1)
         noisy_actions = result["noisy_actions"]
         time_for_model = result["time_for_model"]
 
         # Identify prefix positions from time_for_model (token_t == 1.0)
-        if time_for_model.ndim == 2:
-            prefix_mask = (time_for_model == 1.0)
-        else:
-            continue
+        prefix_mask = (time_for_model == 1.0)
 
         if prefix_mask.any():
             found_nonzero = True
@@ -292,19 +323,19 @@ def check_6_2_velocity_target(report: PhaseReport) -> None:
     # Manually compute target velocity
     target_v_manual = actions - (1 - sig_min) * noise
 
-    # Compare with _compute_flow_loss internals by constructing a mock
-    mock_model = SimpleNamespace(flow_sig_min=sig_min)
+    # Compare with compute_flow_loss internals by constructing a mock
+    mock_model = SimpleNamespace(flow_config=SimpleNamespace(sig_min=sig_min))
 
     # Use pred_v = target_v (perfect prediction) -- loss should be zero
     pred_v = target_v_manual.clone()
-    actions_valid_mask = torch.ones(B, H, D, dtype=torch.bool)
+    loss_mask = torch.ones(B, H, D, dtype=torch.bool)
 
-    loss = _compute_flow_loss(
+    loss = compute_flow_loss(
         model=mock_model,
         actions=actions,
-        actions_valid_mask=actions_valid_mask,
         pred_v_t=pred_v,
         noise=noise,
+        loss_mask=loss_mask,
     )
     loss_val = loss.item()
     report.add(assert_check(

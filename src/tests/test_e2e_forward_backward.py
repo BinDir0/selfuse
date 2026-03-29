@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
+from src.policy.legendvla_loss import build_flow_inputs
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput
@@ -123,10 +124,12 @@ SD = 48         # state dim
 LAYERS = 4
 
 
-def build_model(with_diffloss=False, knowledge_insulation=True):
+def build_model(with_diffloss=False, knowledge_insulation=True, num_parallel_t=1, rtc_config=None):
     backbone = DummyBackbone(hidden_size=H, num_layers=LAYERS,
                              num_heads=NH, num_kv_heads=NKV, head_dim=HD)
     diffloss = DummyDiffLoss(target_channels=AD * 2, z_channels=AH) if with_diffloss else None
+    if rtc_config is None:
+        rtc_config = RTCConfig()
 
     return LegendVLA(
         backbone=backbone,
@@ -148,8 +151,9 @@ def build_model(with_diffloss=False, knowledge_insulation=True):
         shape_meta={"obs": {"state": {"shape": [SD], "horizon": 2}}, "action": {"shape": [AD], "horizon": 4}},
         diffloss=diffloss,
         action_hidden_size=AH,
-        flow_config=FlowConfig(num_inference_steps=3),
+        flow_config=FlowConfig(num_parallel_t=num_parallel_t, num_inference_steps=3),
         ar_action_train_config=ARActionTrainConfig(chunk_size=2),
+        rtc_config=rtc_config,
         loss_config=LossConfig(),
         knowledge_insulation=knowledge_insulation,
     )
@@ -193,7 +197,6 @@ def build_batch(batch_size=2):
         "is_vla_data": torch.tensor([True, False], dtype=torch.bool)[:batch_size],
         "n_states": torch.tensor([2, 0], dtype=torch.long)[:batch_size],
         "n_actions": torch.tensor([4, 0], dtype=torch.long)[:batch_size],
-        "t": torch.rand(batch_size),
     }
 
 
@@ -214,6 +217,7 @@ class TestEndToEndForwardBackward:
         assert "total_loss" in output
         assert "ce_loss" in output
         assert "diffusion_loss" in output
+        assert "reg_loss" in output
         assert "flow_loss" in output
         assert output["total_loss"].requires_grad
         assert output["ce_loss"].item() > 0
@@ -272,6 +276,71 @@ class TestEndToEndForwardBackward:
                               for p in model.flow_expert.parameters())
         assert expert_has_grad, "No gradient reached flow expert in train_flow mode"
 
+    def test_train_flow_mode_parallel_timesteps(self):
+        """Parallel flow denoising should keep the flow-only path finite and differentiable."""
+        model = build_model(with_diffloss=False, num_parallel_t=4)
+        batch = build_batch(batch_size=1)
+        output = model("train_flow", batch)
+
+        assert output["total_loss"].requires_grad
+        assert torch.isfinite(output["flow_loss"])
+        output["total_loss"].backward()
+
+        expert_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
+                              for p in model.flow_expert.parameters())
+        assert expert_has_grad, "No gradient reached flow expert with parallel flow timesteps enabled"
+
+    def test_build_flow_inputs_normalizes_single_t_shape_without_rtc(self):
+        model = build_model(with_diffloss=False, rtc_config=RTCConfig(enabled=False))
+        batch = build_batch(batch_size=1)
+        sampled_t = torch.tensor([0.37], dtype=batch["actions"].dtype)
+        sampled_t_2d = sampled_t.unsqueeze(1)
+
+        torch.manual_seed(123)
+        single_inputs = build_flow_inputs(model, batch, num_parallel_t=1, sampled_t=sampled_t)
+        torch.manual_seed(123)
+        same_inputs = build_flow_inputs(model, batch, num_parallel_t=1, sampled_t=sampled_t_2d)
+
+        torch.testing.assert_close(single_inputs["noise"], same_inputs["noise"])
+        torch.testing.assert_close(single_inputs["noisy_actions"], same_inputs["noisy_actions"])
+        torch.testing.assert_close(single_inputs["time_for_model"], same_inputs["time_for_model"])
+        torch.testing.assert_close(single_inputs["loss_mask"], same_inputs["loss_mask"])
+
+    def test_build_flow_inputs_normalizes_single_t_shape_with_rtc(self):
+        model = build_model(with_diffloss=False, rtc_config=RTCConfig(enabled=True, delay_strategy="uniform", max_delay=4))
+        batch = build_batch(batch_size=1)
+        sampled_t = torch.tensor([0.37], dtype=batch["actions"].dtype)
+        sampled_t_2d = sampled_t.unsqueeze(1)
+
+        torch.manual_seed(123)
+        single_inputs = build_flow_inputs(model, batch, num_parallel_t=1, sampled_t=sampled_t)
+        torch.manual_seed(123)
+        same_inputs = build_flow_inputs(model, batch, num_parallel_t=1, sampled_t=sampled_t_2d)
+
+        torch.testing.assert_close(single_inputs["noise"], same_inputs["noise"])
+        torch.testing.assert_close(single_inputs["noisy_actions"], same_inputs["noisy_actions"])
+        torch.testing.assert_close(single_inputs["time_for_model"], same_inputs["time_for_model"])
+        torch.testing.assert_close(single_inputs["loss_mask"], same_inputs["loss_mask"])
+
+    def test_parallel_flow_repeats_action_position_ids_per_chunk(self):
+        model = build_model(with_diffloss=False, num_parallel_t=4)
+        batch = build_batch(batch_size=1)
+        slot_embeds = model.build_slot_embeddings(batch)
+        backbone_output = model.forward_backbone_stream(batch, slot_embeds)
+        flow_inputs = build_flow_inputs(model, batch, num_parallel_t=4)
+
+        model.forward_flow_stream(
+            batch=batch,
+            backbone_output=backbone_output,
+            flow_inputs=flow_inputs,
+            num_parallel_chunks=4,
+        )
+
+        base_position_ids = model.build_action_position_ids(batch, backbone_output.position_ids)
+        expected_position_ids = base_position_ids.repeat(1, 4)
+        torch.testing.assert_close(model.flow_expert.last_action_position_ids, expected_position_ids)
+        assert model.flow_expert.last_num_parallel_chunks == 4
+
     def test_train_flow_mode_knowledge_insulation_blocks_backbone_gradients(self):
         """Knowledge insulation should stop flow gradients from reaching the backbone through prefix KV."""
         batch = build_batch(batch_size=1)
@@ -321,7 +390,6 @@ class TestEndToEndForwardBackward:
 
         for step in range(2):
             batch = build_batch()
-            batch["t"] = torch.rand(2)
             optimizer.zero_grad()
             output = model("train", batch)
             output["total_loss"].backward()
@@ -469,4 +537,3 @@ class TestLossValues:
         output = model("train", batch)
         assert output["flow_loss"].item() == 0.0
         assert output["diffusion_loss"].item() == 0.0
-        assert output["reg_loss"].item() == 0.0

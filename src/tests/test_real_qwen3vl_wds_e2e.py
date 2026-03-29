@@ -277,7 +277,6 @@ def preprocess_batch(batch: dict[str, torch.Tensor], dtype: torch.dtype, device:
         "actions": batch["actions"].to(device=device, dtype=dtype),
         "actions_valid_mask": batch["actions_valid_mask"].to(device=device),
         "labels": batch["labels"].to(device=device),
-        "t": torch.full((batch["input_ids"].shape[0],), 0.5, device=device, dtype=dtype),
     }
     return inputs
 

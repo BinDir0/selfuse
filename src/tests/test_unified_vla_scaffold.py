@@ -137,7 +137,6 @@ def make_vla_batch(batch_size=2, action_horizon=4, action_dim=48):
         "is_vla_data": torch.tensor([True, False])[:batch_size],
         "n_states": torch.tensor([2, 0], dtype=torch.long)[:batch_size],
         "n_actions": torch.tensor([4, 0], dtype=torch.long)[:batch_size],
-        "t": torch.rand(batch_size),
     }
 
 

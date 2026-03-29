@@ -331,7 +331,7 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "6.4": "Euler 积分闭环：oracle velocity, 10 步从噪声恢复 target, error < 0.05",
     # Phase 7: DiffLoss
     "7.1": "Zero-Init 验证：AdaLN modulation & FinalLayer 权重为零, 初始输出 abs < 0.1",
-    "7.2": "Chunk 构造：_build_dense_diffloss_inputs shape 和 hidden state 对齐",
+    "7.2": "Chunk 构造：build_dense_diffloss_inputs shape 和 hidden state 对齐",
     "7.3": "采样质量：初始 DiffLoss 采样值有限 (finite)",
     # Phase 8: Training loop
     "8.1": "Optimizer 参数组：无重叠、无遗漏, dim≥2 有 weight_decay",

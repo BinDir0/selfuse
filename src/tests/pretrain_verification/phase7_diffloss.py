@@ -3,7 +3,7 @@ Phase 7: DiffLoss detailed verification.
 
 Checks:
   7.1  Zero-init verification   -- AdaLN modulation & FinalLayer weights = 0, initial output < 0.1
-  7.2  Chunk construction       -- _build_dense_diffloss_inputs shape, hidden state gathering
+  7.2  Chunk construction       -- build_dense_diffloss_inputs shape, hidden state gathering
   7.3  Sampling quality         -- initial sampling is finite (sanity check)
 
 Requires: nothing (uses DummyBackbone, no real Qwen3-VL weights)
@@ -102,8 +102,8 @@ def check_7_1_zero_init() -> CheckResult:
 # ---------------------------------------------------------------------------
 
 def check_7_2_chunk_construction() -> CheckResult:
-    """Verify _build_dense_diffloss_inputs produces correct shapes and indices."""
-    from src.policy.legendvla_loss import _build_dense_diffloss_inputs
+    """Verify build_dense_diffloss_inputs produces correct shapes and indices."""
+    from src.policy.legendvla_loss import build_dense_diffloss_inputs
 
     errors = []
     B = 3
@@ -124,7 +124,7 @@ def check_7_2_chunk_construction() -> CheckResult:
         ar_action_chunk_size = ar_chunk_size
     model = MockModel()
 
-    vla_hidden_z, action_gt, diffloss_mask = _build_dense_diffloss_inputs(
+    vla_hidden_z, action_gt, diffloss_mask = build_dense_diffloss_inputs(
         model, hidden_states, actions, answer_start_idx, n_actions, vla_mask,
     )
 

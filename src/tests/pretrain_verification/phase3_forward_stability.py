@@ -191,7 +191,6 @@ def check_3_3_bf16_precision(model_fn, batch_fn) -> CheckResult:
     model_fp32.eval()
     batch_fp32 = batch_fn()
     batch_fp32 = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch_fp32.items()}
-    batch_fp32["t"] = batch_fp32["t"].float()
     with torch.no_grad():
         loss_fp32 = model_fp32("train", batch_fp32)
 
@@ -202,7 +201,6 @@ def check_3_3_bf16_precision(model_fn, batch_fn) -> CheckResult:
     model_bf16.eval()
     batch_bf16 = batch_fn()
     batch_bf16 = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch_bf16.items()}
-    batch_bf16["t"] = batch_bf16["t"].bfloat16()
     batch_bf16["states"] = batch_bf16["states"].bfloat16()
     batch_bf16["actions"] = batch_bf16["actions"].bfloat16()
     batch_bf16["pixel_values"] = batch_bf16["pixel_values"].bfloat16()

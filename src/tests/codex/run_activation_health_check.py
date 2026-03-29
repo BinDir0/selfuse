@@ -44,8 +44,6 @@ def move_batch_to_device(batch: dict[str, Any], device: torch.device, dtype: tor
 
 
 def forward_train(model: LegendVLA, batch: dict[str, Any]) -> Any:
-    batch = dict(batch)
-    batch["t"] = torch.rand(batch["input_ids"].shape[0], device=batch["input_ids"].device, dtype=batch["states"].dtype)
     return model("train", batch)
 
 
@@ -101,4 +99,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

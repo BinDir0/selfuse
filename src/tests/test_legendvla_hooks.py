@@ -438,63 +438,32 @@ def visualize_stats(
             if isinstance(entry, dict):
                 _plot_per_dim(name, entry, sec_dir)
 
-def sample_fm_time(bsz: int) -> torch.FloatTensor:
-    flow_alpha = 1.5
-    flow_beta = 1
-    flow_t_max = 1 - 0.001
-    flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
-    z = flow_beta_dist.sample((bsz,))
-    t = flow_t_max * (1 - z)  # flip and shift
-    return t
-
-def preprocess_batch(model, batch, split_mask: bool = False, is_sample_fm_time: bool = True, dtype: torch.dtype = torch.float32):
-    """Preprocess batch for training"""
+def preprocess_batch(model, batch, dtype: torch.dtype = torch.float32):
+    """Preprocess batch for training."""
     input_ids = batch["input_ids"]
-    # Get unwrapped model for mask building
     if hasattr(model, 'module'):
         model = model.module
-    
-    # Build causal mask and position ids
-    # We need to move the new created tensors to the same device as the input prepared by the accelerate
-    causal_mask, vlm_position_ids, action_position_ids = (
-        model.build_causal_mask_and_position_ids(   
-            batch["attention_mask"], batch["answer_start_idx"], batch["n_actions"], dtype
-        )
-    )
 
     inputs = {
         "input_ids": input_ids,
+        "attention_mask": batch["attention_mask"],
         "pixel_values": batch["pixel_values"].to(dtype),
-        "vlm_position_ids": vlm_position_ids,
+        "image_grid_thw": batch.get("image_grid_thw"),
+        "pixel_values_videos": batch.get("pixel_values_videos"),
+        "video_grid_thw": batch.get("video_grid_thw"),
+        "mm_token_type_ids": batch.get("mm_token_type_ids", torch.zeros_like(input_ids)),
         "states": batch["states"].to(dtype),
         "answer_start_idx": batch["answer_start_idx"],
         "is_vla_data": batch["is_vla_data"],
         "n_states": batch["n_states"],
         "n_actions": batch["n_actions"],
+        "actions": batch["actions"].to(dtype),
+        "actions_valid_mask": batch["actions_valid_mask"],
+        "labels": batch["labels"],
     }
-    # Add depth_values if available
     if "depth_values" in batch:
         inputs["depth_values"] = batch["depth_values"].to(dtype)
         inputs["has_depth_values"] = batch["has_depth_values"]
-    inputs["action_position_ids"] = action_position_ids
-    inputs["actions"] = batch["actions"].to(dtype)
-    inputs["actions_valid_mask"] = batch["actions_valid_mask"]
-    inputs["labels"] = batch["labels"]
-    
-    if split_mask:
-        max_vlm_tokens = input_ids.shape[-1]
-        vlm_mask, action_mask = (
-            model.split_full_mask_into_submasks(causal_mask, max_vlm_tokens)
-        )
-        inputs["vlm_mask"] = vlm_mask
-        inputs["action_mask"] = action_mask
-    inputs["causal_mask"] = causal_mask
-
-    # Sample flow matching timesteps
-    if is_sample_fm_time:
-        # We need to move the new created tensors to the same device as the input prepared by the accelerate
-        inputs["t"] = sample_fm_time(len(input_ids)).to(input_ids.device).to(dtype)
-
     return inputs
 
 
@@ -615,7 +584,7 @@ if __name__ == "__main__":
         )
 
         batch = next(iter(dataloader))
-        batch = preprocess_batch(model, batch, split_mask=True, is_sample_fm_time=True, dtype=dtype)
+        batch = preprocess_batch(model, batch, dtype=dtype)
         batch = dict_apply(batch, lambda x: x.to(device))
         mask_vla = batch["is_vla_data"].bool()
         mask_vlm = ~mask_vla

@@ -130,7 +130,6 @@ def check_9_3_roundtrip(skip_visual: bool, output_dir: Path) -> CheckResult:
     num_steps = 800
 
     optimizer = AdamW(model.parameters(), lr=1e-3)
-    batch["t"] = torch.full((batch["input_ids"].shape[0],), 0.5)
     for step in range(num_steps):
         optimizer.zero_grad()
         output = model("train", batch)

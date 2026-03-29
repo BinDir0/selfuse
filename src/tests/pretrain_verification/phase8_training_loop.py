@@ -224,8 +224,6 @@ def check_8_4_convergence(skip_visual: bool, output_dir: Path) -> CheckResult:
 
     for step in range(num_steps):
         optimizer.zero_grad()
-        # Re-sample t each step
-        batch["t"] = torch.rand(batch["input_ids"].shape[0])
         output = model("train", batch)
 
         total_loss = output["total_loss"]
@@ -294,8 +292,6 @@ def check_8_5_overfit(skip_visual: bool, output_dir: Path) -> CheckResult:
 
     optimizer = AdamW(model.parameters(), lr=1e-3)
     losses = []
-    fixed_t = torch.full((batch["input_ids"].shape[0],), 0.5)
-    batch["t"] = fixed_t
 
     for step in range(num_steps):
         optimizer.zero_grad()

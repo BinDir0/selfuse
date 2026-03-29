@@ -36,8 +36,8 @@ from src.tests.pretrain_verification.utils import (
 )
 from src.policy.legendvla_loss import (
     build_flow_inputs,
-    _compute_flow_loss,
-    _build_dense_diffloss_inputs,
+    compute_flow_loss,
+    build_dense_diffloss_inputs,
 )
 
 
@@ -122,45 +122,42 @@ def check_flow_loss(report: PhaseReport, output_dir: Path, skip_visual: bool) ->
     model2 = build_model(with_diffloss=False)
     batch2 = build_batch(batch_size=1)
     batch2["is_vla_data"] = torch.tensor([True], dtype=torch.bool)
-    batch2["t"] = torch.tensor([0.5])
 
     torch.manual_seed(42)
     slot_embeds = model2.build_slot_embeddings(batch2)
     backbone_output = model2.forward_backbone_stream(batch2, slot_embeds)
 
     torch.manual_seed(123)
-    flow_inputs = build_flow_inputs(model2, batch2)
+    flow_inputs = build_flow_inputs(model2, batch2, num_parallel_t=1, sampled_t=torch.tensor([0.5]))
 
     flow_output = model2.forward_flow_stream(
         batch=batch2,
         backbone_output=backbone_output,
         flow_inputs=flow_inputs,
+        num_parallel_chunks=1,
     )
 
     # Manually compute target_v = actions - (1 - sig_min) * noise
-    actions = batch2["actions"]
+    actions = flow_inputs["actions"]
     noise = flow_inputs["noise"]
-    sig_min = model2.flow_sig_min
+    loss_mask = flow_inputs["loss_mask"]
+    sig_min = model2.flow_config.sig_min
     target_v_manual = actions - (1 - sig_min) * noise
 
     # Compute manual MSE loss
     pred_v = flow_output["pred_v"]
-    actions_valid_mask = batch2["actions_valid_mask"]
-    rtc_mask = flow_inputs["rtc_mask"]
-    loss_mask = rtc_mask if rtc_mask is not None else actions_valid_mask
     manual_flow_loss_elements = (pred_v - target_v_manual) ** 2
     masked_loss = manual_flow_loss_elements * loss_mask.to(dtype=manual_flow_loss_elements.dtype)
     valid_count = loss_mask.to(dtype=manual_flow_loss_elements.dtype).sum()
     manual_flow_loss = masked_loss.sum() / valid_count.clamp(min=1)
 
     # Also compute via the internal function for cross-check
-    internal_flow_loss = _compute_flow_loss(
+    internal_flow_loss = compute_flow_loss(
         model=model2,
         actions=actions,
-        actions_valid_mask=actions_valid_mask,
         pred_v_t=pred_v,
         noise=noise,
-        rtc_mask=rtc_mask,
+        loss_mask=loss_mask,
     )
 
     manual_val = manual_flow_loss.item()
@@ -182,7 +179,9 @@ def check_flow_loss(report: PhaseReport, output_dir: Path, skip_visual: bool) ->
             model_t = build_model(with_diffloss=False)
             batch_t = build_batch(batch_size=1)
             batch_t["is_vla_data"] = torch.tensor([True], dtype=torch.bool)
-            batch_t["t"] = torch.tensor([t_val.item()])
+            model_t.sample_flow_time = lambda batch_size, num_samples=1, t=t_val.item(): (
+                torch.full((batch_size,), t) if num_samples == 1 else torch.full((batch_size, num_samples), t)
+            )
             with torch.no_grad():
                 out_t = model_t("train_flow", batch_t)
             flow_losses.append(out_t["flow_loss"].item())
@@ -227,7 +226,7 @@ def check_diffloss(report: PhaseReport) -> None:
 
     # Verify chunk construction: actions.unfold(dim=1, size=ar_action_chunk_size, step=1)
     actions = batch["actions"]
-    ar_chunk_size = model.ar_action_chunk_size
+    ar_chunk_size = model.ar_action_train_config.chunk_size
     n_actions_tensor = batch["n_actions"]
     B, H, D = actions.shape
 
@@ -257,12 +256,12 @@ def check_diffloss(report: PhaseReport) -> None:
             {"n_actions": n_act.item(), "valid_chunks": per_sample_expected},
         ))
 
-    # Also verify via _build_dense_diffloss_inputs
+    # Also verify via build_dense_diffloss_inputs
     slot_embeds = model.build_slot_embeddings(batch)
     backbone_output = model.forward_backbone_stream(batch, slot_embeds)
     hidden_states = backbone_output.last_hidden_states
 
-    vla_hidden_z, action_gt, diffloss_mask = _build_dense_diffloss_inputs(
+    vla_hidden_z, action_gt, diffloss_mask = build_dense_diffloss_inputs(
         model,
         hidden_states,
         batch["actions"],
@@ -299,7 +298,7 @@ def check_total_loss_weighting(report: PhaseReport, output_dir: Path, skip_visua
     batch = build_batch(batch_size=2)
     output = model("train", batch)
 
-    w = model.loss_weights
+    w = model.loss_config
     expected_total = (
         w.ce_loss_weight * output["ce_loss"]
         + w.diffusion_loss_weight * output["diffusion_loss"]
@@ -339,7 +338,6 @@ def check_total_loss_weighting(report: PhaseReport, output_dir: Path, skip_visua
         for _ in range(10):
             model_i = build_model(with_diffloss=True)
             batch_i = build_batch(batch_size=2)
-            batch_i["t"] = torch.rand(2)
             with torch.no_grad():
                 out_i = model_i("train", batch_i)
             ce_weighted_list.append(w.ce_loss_weight * out_i["ce_loss"].item())
