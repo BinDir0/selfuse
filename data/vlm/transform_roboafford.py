@@ -102,11 +102,11 @@ def strip_format_instructions(text):
 
 
 def normalize_coords_to_tuple(text, img_width, img_height):
-    """Convert absolute pixel coordinates to plain tuple format with 0-1000 coords.
+    """Convert absolute pixel coordinates to Qwen3 bracket format with 0-1000 coords.
 
     For use in question/input text (referring expressions, choice options).
-    Bbox  [(x1, y1, x2, y2)] → [(qx1, qy1, qx2, qy2)]
-    Points [(x, y), ...]      → [(qx, qy), ...]
+    Bbox  [(x1, y1, x2, y2)] → [qx1, qy1, qx2, qy2]
+    Points [(x, y), ...]      → [[qx, qy], ...]
     """
     def normalize_match(match):
         coords_str = match.group(1)
@@ -123,14 +123,14 @@ def normalize_coords_to_tuple(text, img_width, img_height):
             qy1 = round(y1 / img_height * 1000)
             qx2 = round(x2 / img_width * 1000)
             qy2 = round(y2 / img_height * 1000)
-            return f'[({qx1}, {qy1}, {qx2}, {qy2})]'
+            return f'[{qx1}, {qy1}, {qx2}, {qy2}]'
         else:  # Points (x, y), ...
             items = []
             for t in tuples:
                 x, y = float(t.group(1)), float(t.group(2))
                 qx = round(x / img_width * 1000)
                 qy = round(y / img_height * 1000)
-                items.append(f'({qx}, {qy})')
+                items.append(f'[{qx}, {qy}]')
             return "[" + ", ".join(items) + "]"
 
     return re.sub(r'\[((?:\([^)]+\)(?:,\s*)?)+)\]', normalize_match, text)

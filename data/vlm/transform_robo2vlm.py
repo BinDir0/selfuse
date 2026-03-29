@@ -74,7 +74,7 @@ def format_answer(correct_answer_idx, choices):
         str - formatted answer with letter label
     """
     # Dynamically generate letter label (A=65 in ASCII)
-    return f"Answer: {chr(65 + correct_answer_idx)}"
+    return chr(65 + correct_answer_idx)
 
 
 def process_chunk(args):

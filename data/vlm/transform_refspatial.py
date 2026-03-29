@@ -133,18 +133,66 @@ def clean_image_metadata(img):
 # Regex to match [0,1] normalized coordinate tuples like (0.567, 0.086)
 _NORM_COORD_RE = re.compile(r'\((\d+\.\d+),\s*(\d+\.\d+)\)')
 
+# Regex to detect a choice answer starting with (A), (B), (C), ...
+_CHOICE_ANSWER_RE = re.compile(r'^\(([A-Z])\)')
+
+# Regex to detect inline choice questions like "... (A) opt1 (B) opt2"
+_FIRST_CHOICE_RE = re.compile(r'\([A-Z]\)')
+
 
 def scale_coords_to_1000(text):
-    """Convert [0,1] normalized coordinate tuples to 0-1000 plain tuple format.
+    """Convert [0,1] normalized coordinate tuples to 0-1000 Qwen3 bracket format.
 
-    (0.567, 0.086) → (567, 86)
+    (0.567, 0.086) → [567, 86]
     Used for coordinates in choice options and referring expressions.
     """
     def _replace(m):
         x = round(float(m.group(1)) * 1000)
         y = round(float(m.group(2)) * 1000)
-        return f'({x}, {y})'
+        return f'[{x}, {y}]'
     return _NORM_COORD_RE.sub(_replace, text)
+
+
+def extract_choice_letter(text):
+    """If assistant answer starts with (A)/(B)/... extract just the letter.
+
+    (A) Correct, ... → A
+    (B) black matte door at center → B
+    """
+    m = _CHOICE_ANSWER_RE.match(text)
+    if m:
+        return m.group(1)
+    return text
+
+
+def reformat_choice_question(text):
+    """Convert inline choice format to robo2vlm multi-line format.
+
+    'Question? (A) opt1 (B) opt2' →
+    'Question: Question?\nChoices:\nA. opt1\nB. opt2\nAnswer with the letter.'
+
+    Non-choice questions are returned unchanged.
+    """
+    first = _FIRST_CHOICE_RE.search(text)
+    if not first:
+        return text
+
+    question = text[:first.start()].strip()
+    choices_str = text[first.start():]
+
+    # Split by (X) markers → ['', 'A', 'text_a ', 'B', 'text_b', ...]
+    parts = re.split(r'\(([A-Z])\)\s*', choices_str)
+    choices = []
+    for i in range(1, len(parts), 2):
+        letter = parts[i]
+        choice_text = parts[i + 1].strip() if i + 1 < len(parts) else ''
+        choices.append((letter, choice_text))
+
+    if not choices:
+        return text
+
+    formatted_choices = '\n'.join(f'{letter}. {choice}' for letter, choice in choices)
+    return f'Question: {question}\nChoices:\n{formatted_choices}\nAnswer with the letter.'
 
 
 def conversations_to_texts(conversations):
@@ -152,7 +200,8 @@ def conversations_to_texts(conversations):
     Convert a list of {'from': 'human'/'gpt', 'value': str} pairs
     into a list of {'user': str, 'assistant': str} dicts (one per turn).
 
-    Coordinates in [0,1] range are scaled to 0-1000 plain tuple format.
+    Coordinates in [0,1] range are scaled to 0-1000 Qwen3 bracket format.
+    Choice answers are reduced to a single letter (A/B/C/D).
     Turns that are too long or contain corrupted repetitive text are dropped.
     Returns None if no valid turns remain.
     """
@@ -165,8 +214,12 @@ def conversations_to_texts(conversations):
         gpt_turn = conversations[i + 1]
         if human_turn.get('from') != 'human' or gpt_turn.get('from') != 'gpt':
             return None
-        user_text = scale_coords_to_1000(human_turn.get('value', '').strip())
-        assistant_text = scale_coords_to_1000(gpt_turn.get('value', '').strip())
+        user_text = reformat_choice_question(
+            scale_coords_to_1000(human_turn.get('value', '').strip())
+        )
+        assistant_text = extract_choice_letter(
+            scale_coords_to_1000(gpt_turn.get('value', '').strip())
+        )
         if not user_text or not assistant_text:
             continue
         if not is_turn_clean(user_text, assistant_text):

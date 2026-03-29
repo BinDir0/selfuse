@@ -142,5 +142,5 @@ policy:
   rtc_max_delay: 8
   knowledge_insulation: ${runtime.knowledge_insulation}
   ce_loss_weight: 0.1
-  diffusion_loss_weight: 100.0
+  diffusion_loss_weight: 50.0
   flow_loss_weight: 1.0

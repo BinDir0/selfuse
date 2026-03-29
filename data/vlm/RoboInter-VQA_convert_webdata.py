@@ -95,10 +95,17 @@ _FORMAT_INSTR_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_RETURN_JSON_RE = re.compile(
+    r'\s*Return in JSON format:.*?\.',
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def strip_format_instructions(text):
     """Remove coordinate-format boilerplate from question text."""
-    return _FORMAT_INSTR_RE.sub(' ', text).strip()
+    text = _FORMAT_INSTR_RE.sub(' ', text)
+    text = _RETURN_JSON_RE.sub(' ', text)
+    return text.strip()
 
 
 # Regex to match absolute pixel coordinate patterns in text:
