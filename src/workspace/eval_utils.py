@@ -35,27 +35,15 @@ def _to_numpy(value):
 @contextmanager
 def eval_with_averaged_model(accelerator, model, averaged_model):
     """
-    A context manager to temporarily load averaged weights into the main model during evaluation.
+    Context manager that temporarily swaps in averaged (EMA/SWA) weights
+    for evaluation, then restores originals.  FSDP2-safe.
     """
-    if averaged_model.model_avg is not None:
-        unwrapped_model = accelerator.unwrap_model(model)
-
-        # Use .clone() to avoid affecting the original dictionary
-        # Move to CPU to avoid GPU memory issues
-        device = next(iter(unwrapped_model.parameters())).device
-        original_state_dict = {k: v.clone().to('cpu') for k, v in unwrapped_model.state_dict().items()}
-
-        averaged_state_dict = averaged_model.averaged_model_state_dict()
-        unwrapped_model.load_state_dict(averaged_state_dict)
     model.eval()
-
-    try:
-        yield
-    finally:
-        if averaged_model.model_avg is not None:
-            unwrapped_model.load_state_dict(original_state_dict)
-            unwrapped_model.to(device)
-        model.train()
+    with averaged_model.use_averaged_params():
+        try:
+            yield
+        finally:
+            model.train()
 
 
 def save_checkpoint_accelerator(workspace, accelerator, path=None, tag='latest'):
@@ -325,7 +313,7 @@ def evaluation(workspace, accelerator, dataloader, step_log):
         torch.no_grad(),
         eval_with_averaged_model(accelerator, workspace.model, workspace.model_averaging),
     ):
-        val_losses = {"total_loss": [], "ce_loss": [], "diffusion_loss": [], "flow_loss": []}
+        val_losses = {"total_loss": [], "ce_loss": [], "diffusion_loss": [], "ar_pred_loss": [], "flow_loss": []}
         eval_thresholds = workspace.cfg.training.eval_thresholds
         eval_accuracy = []
         eval_l1_loss = []
@@ -336,7 +324,7 @@ def evaluation(workspace, accelerator, dataloader, step_log):
         save_eval_attn_weights = bool(workspace.cfg.training.save_eval_attn_weights)
 
         for batch_idx, batch in enumerate(dataloader):
-            inputs = workspace.preprocess_batch(batch, split_mask=True, sample_fm_time=True)
+            inputs = workspace.preprocess_batch(batch, split_mask=True)
 
             # Compute validation loss
             with accelerator.autocast(), torch.inference_mode():
