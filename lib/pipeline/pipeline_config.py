@@ -96,6 +96,22 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         _maybe_set(validation_cfg, key, raw.get(key))
         validation_cfg.setdefault(key, default)
 
+    filter_cfg = _as_dict(raw.get("filter"))
+    for key, default in (
+        ("stages", "detect_track,motion,slam,infiller"),
+        ("workers", 8),
+        ("drop_nonfinite_world_res", True),
+        ("drop_nonfinite_slam", True),
+    ):
+        _maybe_set(filter_cfg, key, raw.get(key))
+        filter_cfg.setdefault(key, default)
+    for key in (
+        "max_hand_translation_step",
+        "max_camera_translation_step",
+        "max_camera_rotation_step",
+    ):
+        _maybe_set(filter_cfg, key, raw.get(key))
+
     annotation_cfg = _as_dict(raw.get("annotation"))
     _maybe_set(annotation_cfg, "command", raw.get("annotation_command"))
 
@@ -119,5 +135,6 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         },
         "annotation": annotation_cfg,
         "build": build_cfg,
+        "filter": filter_cfg,
         "validation": validation_cfg,
     }

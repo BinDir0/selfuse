@@ -29,6 +29,7 @@ STAGE_ORDER = [
     "detect_motion",
     "slam",
     "infiller",
+    "filter",
     "annotate",
     "build",
     "validate",
@@ -127,6 +128,7 @@ def main():
     runtimes_cfg = config.get("runtimes", {})
     batch_cfg = config.get("batch_infer", {})
     build_cfg = config.get("build", {})
+    filter_cfg = config.get("filter", {})
     adapter_cfg = config.get("adapter_config", config.get("buildai", {}))
     annotation_cfg = config.get("annotation", {})
     validation_cfg = config.get("validation", {})
@@ -137,8 +139,10 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_path = run_dir / "clip_manifest.jsonl"
+    filtered_manifest_path = run_dir / "clip_manifest.filtered.jsonl"
     shard_dirs_list_path = run_dir / "shard_dirs.txt"
     summary_path = run_dir / "run_summary.json"
+    filter_report_path = run_dir / "filter_report.json"
 
     adapter_name = dataset_cfg.get("adapter") or dataset_cfg.get("source_type", "buildai")
     source_type = adapter_name
@@ -165,11 +169,13 @@ def main():
         "source_id": source_id,
         "split": split,
         "manifest_path": str(manifest_path.resolve()),
+        "active_manifest_path": str(manifest_path.resolve()),
         "annotation_root": annotation_root,
         "final_dataset_root": str(final_dataset_root.resolve()),
         "stages": stages,
     }
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    active_manifest_path = manifest_path
 
     def run_logged(name: str, cmd: list[str], *, cwd: str | Path | None = None):
         print(f"\n[{name}] {shlex.join(cmd)}\n")
@@ -238,7 +244,7 @@ def main():
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
             "--descriptor_manifest",
-            str(manifest_path),
+            str(active_manifest_path),
             "--stages",
             "detect_track,motion",
             *common_batch_args,
@@ -254,7 +260,7 @@ def main():
             slam_python,
             str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
             "--descriptor_manifest",
-            str(manifest_path),
+            str(active_manifest_path),
             "--stages",
             "slam",
             *common_batch_args,
@@ -270,7 +276,7 @@ def main():
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
             "--descriptor_manifest",
-            str(manifest_path),
+            str(active_manifest_path),
             "--stages",
             "infiller",
             *common_batch_args,
@@ -280,6 +286,24 @@ def main():
             ),
         ]
         run_logged("infiller", infiller_cmd)
+
+    if "filter" in stages:
+        filter_cmd = [
+            hawor_python,
+            str(PROJECT_ROOT / "scripts" / "filter_manifest_by_quality.py"),
+            "--input_manifest",
+            str(active_manifest_path),
+            "--output_manifest",
+            str(filtered_manifest_path),
+            "--report_out",
+            str(filter_report_path),
+            *cli_args_from_mapping(filter_cfg),
+        ]
+        run_logged("filter", filter_cmd)
+        active_manifest_path = filtered_manifest_path
+        run_summary["active_manifest_path"] = str(active_manifest_path.resolve())
+        run_summary["filter_report_path"] = str(filter_report_path.resolve())
+        summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if "annotate" in stages:
         annotation_command = annotation_cfg.get("command")
@@ -293,7 +317,7 @@ def main():
             prepared=prepared,
         )
         context = {
-            "manifest": str(manifest_path),
+            "manifest": str(active_manifest_path),
             "annotation_root": str(annotation_root or ""),
             "run_dir": str(run_dir),
             "hawor_python": hawor_python,
@@ -308,7 +332,7 @@ def main():
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "build_vla_from_manifest.py"),
             "--descriptor_manifest",
-            str(manifest_path),
+            str(active_manifest_path),
             "--output_dir",
             str(final_dataset_root),
             *cli_args_from_mapping(build_cfg),
@@ -333,7 +357,7 @@ def main():
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "validate_pipeline_run.py"),
             "--descriptor_manifest",
-            str(manifest_path),
+            str(active_manifest_path),
             "--dataset_dir",
             str(final_dataset_root),
             *cli_args_from_mapping(validation_cfg),
