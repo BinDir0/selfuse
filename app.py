@@ -529,6 +529,7 @@ with gr.Blocks(
 demo.launch(
     debug=True,
     css="""
+
 .gradio-container {
     max-width: 1120px;
     margin: auto;
@@ -538,6 +539,7 @@ demo.launch(
 .gradio-container .prose, .gradio-container .markdown {
     color: #0f172a !important;
 }
+
 .gradio-container .block{
     border-radius: 18px;
 }
