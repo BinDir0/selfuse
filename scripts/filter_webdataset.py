@@ -34,7 +34,7 @@ from lib.pipeline.quality_metrics import (  # noqa: E402
 
 
 DEFAULT_WORKERS = max(1, min(8, os.cpu_count() or 1))
-_WORKER_KEEP_CLIPS = None
+_WORKER_ARGS = None
 _WORKER_OUTPUT_DIR = None
 
 
@@ -93,7 +93,6 @@ def _new_clip_stats(clip_id: str) -> dict:
         "invalid_meta_frames": 0,
         "invalid_lowdim_frames": 0,
         "instruction_num_max": 0,
-        "shards": set(),
         "max_hand_translation_step": 0.0,
         "max_camera_translation_step": 0.0,
         "max_camera_rotation_step": 0.0,
@@ -172,273 +171,280 @@ def _update_clip_stats(stats: dict, sample_key: str, meta: dict, lowdim, *, coun
     stats["_prev_finite"] = True
 
 
-def _finalize_partial_stats(partial: dict) -> dict:
-    finalized = {}
-    for clip_id, stats in partial.items():
-        clip_stats = dict(stats)
-        clip_stats["shards"] = sorted(stats["shards"])
-        for key in ("_prev_frame_idx", "_prev_left", "_prev_right", "_prev_extrinsic", "_prev_finite"):
-            clip_stats.pop(key, None)
-        finalized[clip_id] = clip_stats
-    return finalized
-
-
-def analyze_shard(shard_path: str) -> dict:
-    shard_name = os.path.basename(shard_path)
-    clip_stats = {}
-    samples_total = 0
-    for sample in iter_shard_samples(shard_path):
-        samples_total += 1
-        validate_sample_record(sample)
-        meta = None
-        clip_id = None
-        try:
-            meta = json.loads(sample["meta_bytes"].decode("utf-8"))
-            clip_id = str(meta.get("clip_id") or sample["key"].rsplit("_f", 1)[0])
-        except Exception:
-            clip_id = sample["key"].rsplit("_f", 1)[0]
-        stats = clip_stats.setdefault(clip_id, _new_clip_stats(clip_id))
-        stats["shards"].add(shard_name)
-
-        if meta is None:
-            stats["invalid_meta_frames"] += 1
-            _update_clip_stats(stats, sample["key"], {}, None, count_invalid_lowdim=False)
-            continue
-
-        try:
-            lowdim = decode_lowdim(sample["lowdim_bytes"])
-        except Exception:
-            lowdim = None
-        _update_clip_stats(stats, sample["key"], meta, lowdim)
-
+def _finalize_clip_metrics(stats: dict) -> dict:
     return {
-        "shard_name": shard_name,
-        "samples_total": samples_total,
-        "clips": _finalize_partial_stats(clip_stats),
-    }
-
-
-def merge_clip_stats(partials: list[dict]) -> tuple[dict, dict]:
-    merged = {}
-    shard_stats = {}
-    for partial in partials:
-        shard_stats[partial["shard_name"]] = {"samples_total": partial["samples_total"]}
-        for clip_id, clip_stats in partial["clips"].items():
-            target = merged.setdefault(
-                clip_id,
-                {
-                    "clip_id": clip_id,
-                    "frames_total": 0,
-                    "frames_kept_candidate": 0,
-                    "presence_nonzero_frames": 0,
-                    "nonfinite_lowdim_frames": 0,
-                    "invalid_meta_frames": 0,
-                    "invalid_lowdim_frames": 0,
-                    "instruction_num_max": 0,
-                    "shards": set(),
-                    "max_hand_translation_step": 0.0,
-                    "max_camera_translation_step": 0.0,
-                    "max_camera_rotation_step": 0.0,
-                },
-            )
-            target["frames_total"] += clip_stats["frames_total"]
-            target["frames_kept_candidate"] += clip_stats["frames_kept_candidate"]
-            target["presence_nonzero_frames"] += clip_stats["presence_nonzero_frames"]
-            target["nonfinite_lowdim_frames"] += clip_stats["nonfinite_lowdim_frames"]
-            target["invalid_meta_frames"] += clip_stats["invalid_meta_frames"]
-            target["invalid_lowdim_frames"] += clip_stats["invalid_lowdim_frames"]
-            target["instruction_num_max"] = max(target["instruction_num_max"], clip_stats["instruction_num_max"])
-            target["shards"].update(clip_stats["shards"])
-            target["max_hand_translation_step"] = max(
-                target["max_hand_translation_step"],
-                clip_stats["max_hand_translation_step"],
-            )
-            target["max_camera_translation_step"] = max(
-                target["max_camera_translation_step"],
-                clip_stats["max_camera_translation_step"],
-            )
-            target["max_camera_rotation_step"] = max(
-                target["max_camera_rotation_step"],
-                clip_stats["max_camera_rotation_step"],
-            )
-
-    for clip_stats in merged.values():
-        clip_stats["shards"] = sorted(clip_stats["shards"])
-    return merged, shard_stats
-
-
-def decide_clip_keep(clip_stats: dict, args) -> tuple[bool, list[str], dict]:
-    reasons = []
-    metrics = {
-        "frames_total": int(clip_stats["frames_total"]),
-        "frames_kept_candidate": int(clip_stats["frames_kept_candidate"]),
+        "frames_total": int(stats["frames_total"]),
+        "frames_kept_candidate": int(stats["frames_kept_candidate"]),
         "presence_ratio": (
-            float(clip_stats["presence_nonzero_frames"]) / float(clip_stats["frames_total"])
-            if clip_stats["frames_total"] > 0
+            float(stats["presence_nonzero_frames"]) / float(stats["frames_total"])
+            if stats["frames_total"] > 0
             else 0.0
         ),
-        "instruction_num_max": int(clip_stats["instruction_num_max"]),
-        "nonfinite_lowdim_frames": int(clip_stats["nonfinite_lowdim_frames"]),
-        "invalid_meta_frames": int(clip_stats["invalid_meta_frames"]),
-        "invalid_lowdim_frames": int(clip_stats["invalid_lowdim_frames"]),
-        "max_hand_translation_step": float(clip_stats["max_hand_translation_step"]),
-        "max_camera_translation_step": float(clip_stats["max_camera_translation_step"]),
-        "max_camera_rotation_step": float(clip_stats["max_camera_rotation_step"]),
-        "shards": list(clip_stats["shards"]),
+        "instruction_num_max": int(stats["instruction_num_max"]),
+        "nonfinite_lowdim_frames": int(stats["nonfinite_lowdim_frames"]),
+        "invalid_meta_frames": int(stats["invalid_meta_frames"]),
+        "invalid_lowdim_frames": int(stats["invalid_lowdim_frames"]),
+        "max_hand_translation_step": float(stats["max_hand_translation_step"]),
+        "max_camera_translation_step": float(stats["max_camera_translation_step"]),
+        "max_camera_rotation_step": float(stats["max_camera_rotation_step"]),
     }
 
-    if clip_stats["invalid_meta_frames"] > 0:
+
+def decide_clip_keep(metrics: dict, args_dict: dict) -> tuple[bool, list[str]]:
+    reasons = []
+    if metrics["invalid_meta_frames"] > 0:
         reasons.append("invalid_meta")
-    if clip_stats["invalid_lowdim_frames"] > 0:
+    if metrics["invalid_lowdim_frames"] > 0:
         reasons.append("invalid_lowdim")
-    if args.drop_nonfinite_lowdim and clip_stats["nonfinite_lowdim_frames"] > 0:
+    if args_dict["drop_nonfinite_lowdim"] and metrics["nonfinite_lowdim_frames"] > 0:
         reasons.append("nonfinite_lowdim")
-    if args.min_instruction_num is not None and clip_stats["instruction_num_max"] < args.min_instruction_num:
+    if args_dict["min_instruction_num"] is not None and metrics["instruction_num_max"] < args_dict["min_instruction_num"]:
         reasons.append("instruction_num_below_min")
-    if args.min_presence_ratio is not None and metrics["presence_ratio"] < args.min_presence_ratio:
+    if args_dict["min_presence_ratio"] is not None and metrics["presence_ratio"] < args_dict["min_presence_ratio"]:
         reasons.append("presence_ratio_below_min")
     if (
-        args.max_hand_translation_step is not None
-        and clip_stats["max_hand_translation_step"] > args.max_hand_translation_step
+        args_dict["max_hand_translation_step"] is not None
+        and metrics["max_hand_translation_step"] > args_dict["max_hand_translation_step"]
     ):
         reasons.append("hand_translation_step_exceeded")
     if (
-        args.max_camera_translation_step is not None
-        and clip_stats["max_camera_translation_step"] > args.max_camera_translation_step
+        args_dict["max_camera_translation_step"] is not None
+        and metrics["max_camera_translation_step"] > args_dict["max_camera_translation_step"]
     ):
         reasons.append("camera_translation_step_exceeded")
     if (
-        args.max_camera_rotation_step is not None
-        and clip_stats["max_camera_rotation_step"] > args.max_camera_rotation_step
+        args_dict["max_camera_rotation_step"] is not None
+        and metrics["max_camera_rotation_step"] > args_dict["max_camera_rotation_step"]
     ):
         reasons.append("camera_rotation_step_exceeded")
-    return not reasons, reasons, metrics
+    return not reasons, reasons
 
 
-def build_report(source_shard_dir: Path, output_dir: Path | None, clip_stats: dict, shard_stats: dict, args) -> tuple[dict, set[str]]:
-    reason_counts = Counter()
-    kept = 0
-    dropped = []
-    keep_clips = set()
+def _sample_clip_id(sample: dict, meta: dict | None) -> str:
+    if meta is not None:
+        clip_id = meta.get("clip_id")
+        if clip_id:
+            return str(clip_id)
+    return sample["key"].rsplit("_f", 1)[0]
 
-    for clip_id in sorted(clip_stats):
-        keep, reasons, metrics = decide_clip_keep(clip_stats[clip_id], args)
-        if keep:
-            kept += 1
-            keep_clips.add(clip_id)
-            continue
-        reason_counts.update(reasons)
-        dropped.append(
-            {
-                "clip_id": clip_id,
-                "reasons": reasons,
-                "metrics": metrics,
-            }
-        )
 
-    report = {
-        "source_shard_dir": str(source_shard_dir.resolve()),
-        "output_dir": str(output_dir.resolve()) if output_dir else None,
-        "criteria": {
-            "drop_nonfinite_lowdim": bool(args.drop_nonfinite_lowdim),
-            "min_instruction_num": args.min_instruction_num,
-            "min_presence_ratio": args.min_presence_ratio,
-            "max_hand_translation_step": args.max_hand_translation_step,
-            "max_camera_translation_step": args.max_camera_translation_step,
-            "max_camera_rotation_step": args.max_camera_rotation_step,
-        },
-        "total_shards": len(shard_stats),
-        "total_clips": len(clip_stats),
-        "kept_clips": kept,
-        "dropped_clips": len(clip_stats) - kept,
-        "reason_counts": dict(sorted(reason_counts.items())),
-        "shards": shard_stats,
-        "dropped": dropped,
+def _flush_clip_block(
+    *,
+    clip_id: str | None,
+    clip_stats: dict | None,
+    clip_samples: list[dict],
+    args_dict: dict,
+    tar_writer,
+    shard_result: dict,
+) -> tuple[object, dict]:
+    if clip_id is None or clip_stats is None:
+        return tar_writer, shard_result
+
+    metrics = _finalize_clip_metrics(clip_stats)
+    keep, reasons = decide_clip_keep(metrics, args_dict)
+    decision = {
+        "clip_id": clip_id,
+        "keep": bool(keep),
+        "reasons": reasons,
+        "metrics": metrics,
     }
-    return report, keep_clips
+    shard_result["clip_decisions"].append(decision)
+    shard_result["clips_total"] += 1
+    if keep:
+        shard_result["kept_clips"] += 1
+        if tar_writer is None and args_dict["output_dir"]:
+            os.makedirs(args_dict["output_dir"], exist_ok=True)
+            tar_writer = tarfile.open(shard_result["tmp_path"], "w")
+        if tar_writer is not None:
+            frames_written = 0
+            for sample in clip_samples:
+                write_sample_to_tar(
+                    tar_writer,
+                    sample["key"],
+                    sample["image_bytes"],
+                    sample["lowdim_bytes"],
+                    sample["meta_bytes"],
+                )
+                frames_written += 1
+            shard_result["frames_written"] += frames_written
+            shard_result["clips_written"] += 1
+    else:
+        shard_result["dropped_clips"] += 1
+    return tar_writer, shard_result
 
 
-def _rewrite_worker_init(output_dir: str, keep_clips: set[str]):
-    global _WORKER_OUTPUT_DIR, _WORKER_KEEP_CLIPS
-    _WORKER_OUTPUT_DIR = output_dir
-    _WORKER_KEEP_CLIPS = keep_clips
+def process_shard(shard_path: str, args_dict: dict) -> dict:
+    shard_name = os.path.basename(shard_path)
+    output_path = None
+    tmp_path = None
+    if args_dict["output_dir"]:
+        output_path = os.path.join(args_dict["output_dir"], shard_name)
+        tmp_path = f"{output_path}.tmp"
 
+    shard_result = {
+        "shard_name": shard_name,
+        "output_path": output_path,
+        "tmp_path": tmp_path,
+        "samples_total": 0,
+        "frames_written": 0,
+        "clips_total": 0,
+        "kept_clips": 0,
+        "dropped_clips": 0,
+        "clips_written": 0,
+        "clip_decisions": [],
+    }
 
-def rewrite_shard(shard_path: str, output_dir: str, keep_clips: set[str]) -> dict:
-    output_path = os.path.join(output_dir, os.path.basename(shard_path))
-    tmp_path = f"{output_path}.tmp"
-    frames_written = 0
-    clips_written = set()
+    current_clip_id = None
+    current_clip_stats = None
+    current_clip_samples = []
     tar_writer = None
 
     try:
         for sample in iter_shard_samples(shard_path):
+            shard_result["samples_total"] += 1
             validate_sample_record(sample)
-            meta = json.loads(sample["meta_bytes"].decode("utf-8"))
-            clip_id = str(meta.get("clip_id") or sample["key"].rsplit("_f", 1)[0])
-            if clip_id not in keep_clips:
-                continue
-            if tar_writer is None:
-                os.makedirs(output_dir, exist_ok=True)
-                tar_writer = tarfile.open(tmp_path, "w")
-            write_sample_to_tar(
-                tar_writer,
-                sample["key"],
-                sample["image_bytes"],
-                sample["lowdim_bytes"],
-                sample["meta_bytes"],
-            )
-            frames_written += 1
-            clips_written.add(clip_id)
+
+            meta = None
+            try:
+                meta = json.loads(sample["meta_bytes"].decode("utf-8"))
+            except Exception:
+                meta = None
+            clip_id = _sample_clip_id(sample, meta)
+
+            if current_clip_id is None:
+                current_clip_id = clip_id
+                current_clip_stats = _new_clip_stats(clip_id)
+            elif clip_id != current_clip_id:
+                tar_writer, shard_result = _flush_clip_block(
+                    clip_id=current_clip_id,
+                    clip_stats=current_clip_stats,
+                    clip_samples=current_clip_samples,
+                    args_dict=args_dict,
+                    tar_writer=tar_writer,
+                    shard_result=shard_result,
+                )
+                current_clip_id = clip_id
+                current_clip_stats = _new_clip_stats(clip_id)
+                current_clip_samples = []
+
+            if meta is None:
+                current_clip_stats["invalid_meta_frames"] += 1
+                _update_clip_stats(current_clip_stats, sample["key"], {}, None, count_invalid_lowdim=False)
+            else:
+                try:
+                    lowdim = decode_lowdim(sample["lowdim_bytes"])
+                except Exception:
+                    lowdim = None
+                _update_clip_stats(current_clip_stats, sample["key"], meta, lowdim)
+
+            if args_dict["output_dir"]:
+                current_clip_samples.append(sample)
+
+        tar_writer, shard_result = _flush_clip_block(
+            clip_id=current_clip_id,
+            clip_stats=current_clip_stats,
+            clip_samples=current_clip_samples,
+            args_dict=args_dict,
+            tar_writer=tar_writer,
+            shard_result=shard_result,
+        )
     except Exception:
         if tar_writer is not None:
             tar_writer.close()
-        if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise
 
     if tar_writer is not None:
         tar_writer.close()
-    if frames_written == 0:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-    else:
-        os.replace(tmp_path, output_path)
+    if output_path:
+        if shard_result["frames_written"] == 0:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        else:
+            os.replace(tmp_path, output_path)
 
-    return {
-        "shard_name": os.path.basename(shard_path),
-        "frames_written": frames_written,
-        "clips_written": len(clips_written),
-        "shard_written": 1 if frames_written > 0 else 0,
-    }
+    shard_result["shard_written"] = 1 if shard_result["frames_written"] > 0 else 0
+    shard_result.pop("tmp_path", None)
+    return shard_result
 
 
-def _rewrite_worker(shard_path: str) -> dict:
-    return rewrite_shard(shard_path, _WORKER_OUTPUT_DIR, _WORKER_KEEP_CLIPS)
+def _worker_init(args_dict: dict, output_dir: str | None):
+    global _WORKER_ARGS, _WORKER_OUTPUT_DIR
+    _WORKER_ARGS = dict(args_dict)
+    _WORKER_OUTPUT_DIR = output_dir
+    _WORKER_ARGS["output_dir"] = output_dir
 
 
-def rewrite_shards(shard_paths: list[str], output_dir: Path, keep_clips: set[str], workers: int) -> dict:
-    totals = {
+def _worker_process_shard(shard_path: str) -> dict:
+    return process_shard(shard_path, _WORKER_ARGS)
+
+
+def build_report(source_shard_dir: Path, output_dir: Path | None, shard_results: list[dict], args_dict: dict) -> dict:
+    reason_counts = Counter()
+    kept_clips = 0
+    dropped = []
+    total_clips = 0
+    total_samples = 0
+    shards = {}
+    rewrite = {
         "shards_written": 0,
         "frames_written": 0,
         "clips_written": 0,
     }
-    if workers <= 1:
-        iterator = (rewrite_shard(shard_path, str(output_dir), keep_clips) for shard_path in shard_paths)
-    else:
-        mp_context = get_context()
-        with mp_context.Pool(
-            workers,
-            initializer=_rewrite_worker_init,
-            initargs=(str(output_dir), keep_clips),
-        ) as pool:
-            iterator = pool.imap_unordered(_rewrite_worker, shard_paths, chunksize=1)
 
-    for result in tqdm(iterator, total=len(shard_paths), desc="Rewrite shards"):
-        totals["shards_written"] += result["shard_written"]
-        totals["frames_written"] += result["frames_written"]
-        totals["clips_written"] += result["clips_written"]
-    return totals
+    for result in shard_results:
+        total_samples += result["samples_total"]
+        total_clips += result["clips_total"]
+        kept_clips += result["kept_clips"]
+        shards[result["shard_name"]] = {
+            "samples_total": result["samples_total"],
+            "clips_total": result["clips_total"],
+            "kept_clips": result["kept_clips"],
+            "dropped_clips": result["dropped_clips"],
+            "frames_written": result["frames_written"],
+        }
+        rewrite["shards_written"] += result["shard_written"]
+        rewrite["frames_written"] += result["frames_written"]
+        rewrite["clips_written"] += result["clips_written"]
+
+        for item in result["clip_decisions"]:
+            if item["keep"]:
+                continue
+            reason_counts.update(item["reasons"])
+            dropped.append(
+                {
+                    "clip_id": item["clip_id"],
+                    "shard_name": result["shard_name"],
+                    "reasons": item["reasons"],
+                    "metrics": item["metrics"],
+                }
+            )
+
+    report = {
+        "source_shard_dir": str(source_shard_dir.resolve()),
+        "output_dir": str(output_dir.resolve()) if output_dir else None,
+        "mode": "single_pass_streaming",
+        "criteria": {
+            "drop_nonfinite_lowdim": bool(args_dict["drop_nonfinite_lowdim"]),
+            "min_instruction_num": args_dict["min_instruction_num"],
+            "min_presence_ratio": args_dict["min_presence_ratio"],
+            "max_hand_translation_step": args_dict["max_hand_translation_step"],
+            "max_camera_translation_step": args_dict["max_camera_translation_step"],
+            "max_camera_rotation_step": args_dict["max_camera_rotation_step"],
+        },
+        "total_shards": len(shard_results),
+        "total_samples": total_samples,
+        "total_clips": total_clips,
+        "kept_clips": kept_clips,
+        "dropped_clips": total_clips - kept_clips,
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "shards": shards,
+        "dropped": dropped,
+    }
+    if output_dir:
+        report["rewrite"] = rewrite
+    return report
 
 
 def main():
@@ -458,26 +464,40 @@ def main():
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
 
+    args_dict = {
+        "drop_nonfinite_lowdim": bool(args.drop_nonfinite_lowdim),
+        "min_instruction_num": args.min_instruction_num,
+        "min_presence_ratio": args.min_presence_ratio,
+        "max_hand_translation_step": args.max_hand_translation_step,
+        "max_camera_translation_step": args.max_camera_translation_step,
+        "max_camera_rotation_step": args.max_camera_rotation_step,
+        "output_dir": str(output_dir) if output_dir else None,
+    }
+
     if args.workers <= 1:
-        partials = [analyze_shard(shard_path) for shard_path in tqdm(shard_paths, desc="Analyze shards")]
+        shard_results = [process_shard(shard_path, args_dict) for shard_path in tqdm(shard_paths, desc="Process shards")]
     else:
         mp_context = get_context()
-        with mp_context.Pool(args.workers) as pool:
-            partials = list(tqdm(pool.imap_unordered(analyze_shard, shard_paths, chunksize=1), total=len(shard_paths), desc="Analyze shards"))
+        with mp_context.Pool(
+            args.workers,
+            initializer=_worker_init,
+            initargs=(args_dict, str(output_dir) if output_dir else None),
+        ) as pool:
+            shard_results = list(
+                tqdm(
+                    pool.imap_unordered(_worker_process_shard, shard_paths, chunksize=1),
+                    total=len(shard_paths),
+                    desc="Process shards",
+                )
+            )
 
-    clip_stats, shard_stats = merge_clip_stats(partials)
-    report, keep_clips = build_report(source_dir, output_dir, clip_stats, shard_stats, args)
+    shard_results.sort(key=lambda item: item["shard_name"])
+    report = build_report(source_dir, output_dir, shard_results, args_dict)
 
     if args.report_out:
         report_path = Path(args.report_out)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    if output_dir is not None:
-        rewrite_totals = rewrite_shards(shard_paths, output_dir, keep_clips, args.workers)
-        report["rewrite"] = rewrite_totals
-        if args.report_out:
-            Path(args.report_out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
