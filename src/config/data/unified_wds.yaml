@@ -44,6 +44,9 @@ data:
       type: fingertips
       horizon: ${data.n_action_steps}
       stride: ${data.n_action_stride}
+    future_frame:
+      horizon: ${oc.select:world_model.future_frame.horizon,0}
+      stride: ${oc.select:world_model.future_frame.stride,1}
 
 dataset:
   _target_: src.dataset.vla_dataset.UnifiedWdsDataset

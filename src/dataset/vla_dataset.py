@@ -93,6 +93,10 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.state_horizon = shape_meta["obs"]["state"]["horizon"]
         self.image_horizon = shape_meta["obs"]["rgb"]["horizon"]
 
+        ff_cfg = shape_meta.get("future_frame", {})
+        self.future_frame_horizon = int(ff_cfg.get("horizon", 0))
+        self.future_frame_stride = int(ff_cfg.get("stride", 1))
+
         self.window_config = WindowConfig(
             action_horizon=shape_meta["action"]["horizon"],
             action_stride=shape_meta["action"]["stride"],
@@ -102,6 +106,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             image_stride=shape_meta["obs"]["rgb"]["stride"],
             history_pad_mode=history_pad_mode,
             future_pad_mode=future_pad_mode,
+            future_frame_horizon=self.future_frame_horizon,
+            future_frame_stride=self.future_frame_stride,
         )
         self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
 
@@ -253,6 +259,21 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             "n_actions": np.array(action.shape[0], dtype=np.int32),
             "is_vla_data": np.array(True, dtype=bool),
         })
+
+        # Future frames for world model supervision (raw uint8, no augmentation).
+        # Pad to full horizon K so all VLA samples share the same tensor shape
+        # for collation. Invalid trailing frames are masked via n_future_frames.
+        K = self.future_frame_horizon
+        if K > 0 and "future_frames" in sample:
+            ff = sample["future_frames"]
+            n_valid = int(sample.get("valid_future_frame_len", ff.shape[0]))
+            if ff.shape[0] < K:
+                pad = np.zeros((K - ff.shape[0], *ff.shape[1:]), dtype=ff.dtype)
+                ff = np.concatenate([ff, pad], axis=0)
+            data["future_frames"] = ff[:K]
+            data["n_future_frames"] = np.array(min(n_valid, K), dtype=np.int32)
+        else:
+            data["n_future_frames"] = np.array(0, dtype=np.int32)
         if self.return_dataset_info:
             data["dataset_name"] = sample["dataset_name"]
             data["episode_index"] = sample["episode_index"]
@@ -496,6 +517,7 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)
         if "intrinsic" not in vlm_sample:
             vlm_sample["intrinsic"] = torch.zeros(4, dtype=torch.float32)
+        vlm_sample["n_future_frames"] = torch.tensor(0, dtype=torch.int32)
         if self.vla_dataset.debug_capture_raw_sample:
             vlm_sample["debug_raw_sample"] = None
         if self.vla_dataset.debug_capture_processed_sample:

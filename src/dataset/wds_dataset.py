@@ -87,6 +87,8 @@ class WindowConfig:
     image_stride: int = 30
     history_pad_mode: str = "repeat"
     future_pad_mode: str = "repeat"
+    future_frame_horizon: int = 0
+    future_frame_stride: int = 1
 
     def __post_init__(self):
         valid_modes = {"repeat", "truncate"}
@@ -105,8 +107,10 @@ class WindowConfig:
     
     @property
     def future_size(self):
-        """Number of future frames(including current) needed for action chunk."""
-        return (self.action_horizon - 1) * self.action_stride + 1
+        """Number of future frames (including current) needed for action + future frame prediction."""
+        action_max = (self.action_horizon - 1) * self.action_stride
+        ff_max = self.future_frame_horizon * self.future_frame_stride
+        return max(action_max, ff_max) + 1
 
 
 def decode_sample_fields(sample, lowdim_only=False):
@@ -247,6 +251,19 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
             past, buf, config.image_horizon, config.image_stride, config.history_pad_mode)
         image_frame_refs = tuple(image_frames)
 
+    # --- Future frames for world model supervision ---
+    future_frame_refs = None
+    if not lowdim_only and config.future_frame_horizon > 0:
+        ff_refs = []
+        for i in range(config.future_frame_horizon):
+            offset = (i + 1) * config.future_frame_stride
+            if offset < len(buf):
+                ff_refs.append(buf[offset])
+            elif config.future_pad_mode == "repeat":
+                ff_refs.append(buf[len(buf) - 1])
+        if ff_refs:
+            future_frame_refs = tuple(ff_refs)
+
     # --- Extrinsic / Intrinsic: from current frame ---
     ld = current["lowdim.npy"]
     es, ee = lowdim_slices['extrinsic']
@@ -277,6 +294,9 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     }
     if image_frame_refs is not None:
         result["image_frame_refs"] = image_frame_refs
+    if future_frame_refs is not None:
+        result["future_frame_refs"] = future_frame_refs
+        result["valid_future_frame_len"] = len(future_frame_refs)
     return result
 
 
@@ -324,6 +344,11 @@ def materialize_sample_media(sample):
             raise ValueError(f"Depth list length {len(depth_list)} does not match image list length {len(images)}")
         if depth_list:
             sample["depth"] = np.stack(depth_list, axis=0)
+
+    future_frame_refs = sample.pop("future_frame_refs", None)
+    if future_frame_refs is not None:
+        ff_images = [decode_image_bytes(frame["image.jpg"]) for frame in future_frame_refs]
+        sample["future_frames"] = np.stack(ff_images, axis=0)
 
     return sample
 
