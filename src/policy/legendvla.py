@@ -37,6 +37,7 @@ class LossConfig:
     diffusion_loss_weight: float = 1.0
     flow_loss_weight: float = 1.0
     reg_loss_weight: float = 0.0
+    wm_loss_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,12 @@ class LegendVLA(nn.Module):
         knowledge_insulation: bool | int = True,
         # Camera intrinsic as token embedding (optional)
         camera_intrinsic_mode: str = "text",
-        camera_encoder: nn.Module | None = None,        
+        camera_encoder: nn.Module | None = None,
+        # World model (all optional, gated behind wm_diffloss != None)
+        target_encoder: nn.Module | None = None,
+        wm_condition_projector: nn.Module | None = None,
+        wm_diffloss: nn.Module | None = None,
+        world_model_cfg: dict | None = None,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -153,6 +159,50 @@ class LegendVLA(nn.Module):
         # Mask embeddings only needed when input_mask_enabled is True.
         if self.ar_action_train_config.input_mask_enabled:
             self.input_mask_embeddings = InputMaskEmbeddings(self.vlm_hidden_size)
+
+        # World model submodules
+        self.use_world_model = wm_diffloss is not None
+        if self.use_world_model:
+            cfg = world_model_cfg or {}
+            self._world_model_cfg = cfg
+            self.wm_condition_projector = wm_condition_projector
+            self.wm_diffloss = wm_diffloss
+            self.ff_noise_std = cfg.get("ff_noise_std", 0.02)
+
+            ff_token_id = getattr(self.backbone, "future_frame_token_id", None)
+            self.future_frame_token_index = int(ff_token_id) if ff_token_id is not None else None
+
+            # Target encoder as a normal submodule so .to(device) propagates.
+            # All params are requires_grad=False after init_ema, so they stay
+            # out of optimizer groups and gradient sync.
+            self.target_encoder = target_encoder
+
+            # Slot embedding projector.
+            # For self_vit: EMA encoder output (pooler_output) is already post-merger
+            # with dim = out_hidden_size = vlm_hidden_size, so no projection needed.
+            # Source: huggingface/transformers, Qwen3VLVisionPatchMerger — the merger
+            # expects pre-merge patches (total_patches, vision_hidden_size) as input,
+            # NOT post-merger features.
+            encoder_type = target_encoder.encoder_type if target_encoder is not None else ""
+            if encoder_type == "self_vit":
+                self.ff_patch_merger = nn.Identity()
+                if target_encoder is not None:
+                    target_encoder.init_ema(
+                        self.backbone.base_model.model.visual,
+                        momentum=cfg.get("ema_momentum", 0.996),
+                    )
+            else:
+                from src.model.action.action_head import FutureFramePatchMerger
+                self.ff_patch_merger = FutureFramePatchMerger(
+                    input_dim=cfg.get("ff_merger_input_dim", 768),
+                    output_dim=self.vlm_hidden_size,
+                )
+        else:
+            self.wm_condition_projector = None
+            self.wm_diffloss = None
+            self.future_frame_token_index = None
+            self.target_encoder = None
+            self.ff_patch_merger = None
 
     def compile_blocks(
         self,
@@ -261,6 +311,79 @@ class LegendVLA(nn.Module):
             modules.append(self.input_mask_embeddings)
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
+    @property
+    def world_model_parameters(self):
+        if not self.use_world_model:
+            return []
+        modules = [m for m in [self.wm_condition_projector, self.wm_diffloss] if m is not None]
+        # ff_patch_merger only if NOT tied with backbone's merger (non-self_vit)
+        target_encoder = self.target_encoder
+        if target_encoder is not None and target_encoder.encoder_type != "self_vit":
+            if self.ff_patch_merger is not None:
+                modules.append(self.ff_patch_merger)
+        return [p for m in modules for p in m.parameters() if p.requires_grad]
+
+    def update_ema(self) -> None:
+        """Update EMA target encoder from backbone visual module. Call after optimizer.step()."""
+        target_encoder = self.target_encoder
+        if self.use_world_model and target_encoder is not None and hasattr(target_encoder, "update_ema"):
+            target_encoder.update_ema(self.backbone.base_model.model.visual)
+
+    @torch.no_grad()
+    def preprocess_future_frame_pixels(
+        self,
+        future_frames: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert raw future frame images to the flat patch format the ViT expects.
+
+        Applies rescale, CLIP normalization, temporal duplication, and 3D patch
+        reshaping to match the Qwen3-VL processor output format consumed by
+        Qwen3VLVisionPatchEmbed (Conv3d with kernel [tps, ps, ps]).
+
+        Args:
+            future_frames: (B, K, H, W, C) uint8 tensor.
+
+        Returns:
+            pixel_values: (total_3d_patches, C * tps * ps * ps) float tensor.
+            grid_thw: (B*K, 3) long tensor with [T=1, H_patches, W_patches] per entry.
+        """
+        visual = self.backbone.base_model.model.visual
+        patch_size = visual.patch_size
+        tps = getattr(visual, "temporal_patch_size", 2)
+
+        B, K = future_frames.shape[:2]
+        # (B*K, H, W, C) -> (B*K, C, H, W) float [0, 1]
+        flat = future_frames.reshape(B * K, *future_frames.shape[2:])
+        pv = flat.permute(0, 3, 1, 2).contiguous().float() / 255.0
+
+        # CLIP normalization (standard for Qwen3-VL image processor)
+        # Source: transformers.image_utils.OPENAI_CLIP_MEAN / OPENAI_CLIP_STD
+        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=pv.device, dtype=pv.dtype)
+        std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=pv.device, dtype=pv.dtype)
+        pv = (pv - mean[None, :, None, None]) / std[None, :, None, None]
+
+        BK, C, H_px, W_px = pv.shape
+        H_p = H_px // patch_size
+        W_p = W_px // patch_size
+
+        # Temporal duplication: (BK, C, H, W) -> (BK, C, tps, H, W)
+        pv = pv.unsqueeze(2).expand(-1, -1, tps, -1, -1).contiguous()
+
+        # Reshape into 3D patches matching PatchEmbed.forward:
+        #   view(-1, C, tps, ps, ps) expects (total_patches, C * tps * ps * ps)
+        # Source: transformers/models/qwen3_vl/modeling_qwen3_vl.py, Qwen3VLVisionPatchEmbed
+        pv = pv.reshape(BK, C, tps, H_p, patch_size, W_p, patch_size)
+        pv = pv.permute(0, 3, 5, 1, 2, 4, 6)  # (BK, H_p, W_p, C, tps, ps, ps)
+        pv = pv.reshape(BK * H_p * W_p, C * tps * patch_size * patch_size)
+
+        # grid_thw: T=1 (temporal patches collapsed), H=H_patches, W=W_patches
+        grid_thw = torch.tensor(
+            [[1, H_p, W_p]] * BK,
+            dtype=torch.long,
+            device=pv.device,
+        )
+        return pv, grid_thw
+
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
         answer_start_idx = batch.get("answer_start_idx")
         assert answer_start_idx is not None, (
@@ -283,7 +406,9 @@ class LegendVLA(nn.Module):
         return base + torch.arange(action_len, device=device).unsqueeze(0)
 
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
-        slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None, "camera": None}
+        slot_embeds: dict[str, torch.Tensor | None] = {
+            "state": None, "action": None, "camera": None, "future_frame": None,
+        }
 
         if self.camera_intrinsic_mode == "token" and self.camera_encoder is not None and "camera_intrinsic" in batch:
             camera_embeds = self.camera_encoder(batch["camera_intrinsic"])
@@ -323,6 +448,43 @@ class LegendVLA(nn.Module):
                 )
             slot_embeds["action"] = action_embeds
 
+        if self.use_world_model and "future_frames" in batch:
+            target_encoder = self.target_encoder
+            future_frames = batch["future_frames"]  # (B, K, H, W, C) uint8
+
+            # Encode targets via frozen/EMA encoder (also cached for loss)
+            with torch.no_grad():
+                B, K = future_frames.shape[:2]
+                flat_pv, grid_thw = self.preprocess_future_frame_pixels(future_frames)
+                target_features, _ = target_encoder(flat_pv, grid_thw)
+                target_features = target_features.detach()
+
+            # Cache clean targets for loss computation
+            batch["_wm_target_features"] = target_features
+            batch["_wm_ff_grid_thw"] = grid_thw
+
+            # Project to VLM space via merger (noisy for slot embedding)
+            noisy_features = target_features + torch.randn_like(target_features) * self.ff_noise_std
+            ff_embeds = self.ff_patch_merger(noisy_features)  # (total_tokens, vlm_hidden_size)
+
+            # Reshape to (B, K*M, vlm_hidden_size) for masked_scatter
+            sms = self.backbone.base_model.model.visual.spatial_merge_size
+            tokens_per_frame = int((grid_thw[0, 1] * grid_thw[0, 2]).item()) // (sms * sms)
+
+            # Validate that actual merged token count matches the configured
+            # ff_tokens_per_frame used by the formatter for token generation.
+            wm_cfg = getattr(self, "_world_model_cfg", None)
+            if wm_cfg is not None:
+                expected_tpf = int(wm_cfg.get("ff_tokens_per_frame", tokens_per_frame))
+                assert tokens_per_frame == expected_tpf, (
+                    f"ff_tokens_per_frame mismatch: config={expected_tpf}, "
+                    f"actual={tokens_per_frame} (from grid_thw={grid_thw[0].tolist()}, sms={sms}). "
+                    f"Check future frame image resolution vs config."
+                )
+
+            ff_embeds = ff_embeds.reshape(B, K * tokens_per_frame, -1)
+            slot_embeds["future_frame"] = ff_embeds
+
         return slot_embeds
 
     def forward_backbone_stream(
@@ -339,6 +501,7 @@ class LegendVLA(nn.Module):
             state_slot_embeds=slot_embeds.get("state"),
             action_slot_embeds=slot_embeds.get("action"),
             camera_slot_embeds=slot_embeds.get("camera"),
+            future_frame_slot_embeds=slot_embeds.get("future_frame"),
             output_attentions=output_attentions,
         )
         output.prefix_cache = slice_prefix_cache_from_full_kv(

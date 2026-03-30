@@ -407,6 +407,80 @@ def compute_flow_stream_loss(
     return flow_loss, flow_output
 
 
+def compute_world_model_loss(
+    model,
+    hidden_states: torch.Tensor,
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Dense DiffLoss for future frame patch feature prediction.
+
+    Gathers VLM hidden states at <future_frame> token positions, projects
+    through wm_condition_projector, and computes DiffLoss against cached
+    target features from the EMA/frozen encoder.
+    """
+    if not model.use_world_model:
+        return zero_loss(hidden_states)
+
+    target_features = batch.get("_wm_target_features")
+    if target_features is None:
+        return zero_loss(hidden_states)
+
+    is_vla = batch["is_vla_data"].to(dtype=torch.bool)
+    if not torch.any(is_vla):
+        return zero_loss(hidden_states)
+
+    ff_token_id = model.future_frame_token_index
+    if ff_token_id is None:
+        return zero_loss(hidden_states)
+
+    vla_hidden = hidden_states[is_vla]
+    vla_ids = batch["input_ids"][is_vla]
+    ff_mask = vla_ids == ff_token_id
+
+    if not ff_mask.any():
+        return zero_loss(hidden_states)
+
+    # Gather hidden states at all <future_frame> positions
+    ff_hidden_list = []
+    for b in range(vla_hidden.shape[0]):
+        positions = ff_mask[b].nonzero(as_tuple=True)[0]
+        ff_hidden_list.append(vla_hidden[b, positions])
+    ff_hidden_flat = torch.cat(ff_hidden_list, dim=0)
+
+    # Align lengths (target_features from build_slot_embeddings covers all VLA samples)
+    total = min(ff_hidden_flat.shape[0], target_features.shape[0])
+    ff_hidden_flat = ff_hidden_flat[:total]
+    target_features = target_features[:total]
+
+    # Validity mask from n_future_frames.
+    # grid_thw contains pre-merge dimensions; merged token count = H*W / sms^2.
+    n_ff = batch["n_future_frames"][is_vla]
+    grid_thw = batch.get("_wm_ff_grid_thw")
+    if grid_thw is not None:
+        sms = model.backbone.base_model.model.visual.spatial_merge_size
+        tokens_per_frame = int((grid_thw[0, 1] * grid_thw[0, 2]).item()) // (sms * sms)
+    else:
+        tokens_per_frame = total // max(n_ff.sum().item(), 1)
+    valid_tokens_per_sample = n_ff * tokens_per_frame
+    valid_mask_list = []
+    for i in range(n_ff.shape[0]):
+        n_valid = int(valid_tokens_per_sample[i].item())
+        n_total = int(ff_mask[i].sum().item())
+        mask = torch.zeros(n_total, device=hidden_states.device, dtype=torch.bool)
+        mask[:n_valid] = True
+        valid_mask_list.append(mask)
+    valid_mask = torch.cat(valid_mask_list, dim=0)[:total]
+
+    # Project + DiffLoss
+    wm_cond = model.wm_condition_projector(ff_hidden_flat)
+    wm_loss = model.wm_diffloss(
+        target_features,
+        wm_cond,
+        mask=valid_mask.to(dtype=target_features.dtype),
+    )
+    return wm_loss
+
+
 def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     slot_embeds = model.build_slot_embeddings(batch)
     backbone_output = model.forward_backbone_stream(batch, slot_embeds)
@@ -424,12 +498,14 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
     diff_loss = compute_diffloss_loss(model, hidden_states, dense_inputs)
     reg_loss = compute_reg_action_loss(model, hidden_states, dense_inputs)
     flow_loss, _ = compute_flow_stream_loss(model, batch, backbone_output)
+    wm_loss = compute_world_model_loss(model, hidden_states, batch)
 
     total_loss = (
         model.loss_config.ce_loss_weight * ce_loss
         + model.loss_config.diffusion_loss_weight * diff_loss
         + model.loss_config.reg_loss_weight * reg_loss
         + model.loss_config.flow_loss_weight * flow_loss
+        + model.loss_config.wm_loss_weight * wm_loss
     )
     return {
         "total_loss": total_loss,
@@ -437,6 +513,7 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
         "diffusion_loss": diff_loss,
         "reg_loss": reg_loss,
         "flow_loss": flow_loss,
+        "wm_loss": wm_loss,
     }
 
 
@@ -466,6 +543,7 @@ def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, tor
         "diffusion_loss": diff_loss,
         "reg_loss": reg_loss,
         "flow_loss": zero_loss(hidden_states),
+        "wm_loss": zero_loss(hidden_states),
     }
 
 
@@ -480,6 +558,7 @@ def compute_flow_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, t
         "diffusion_loss": zero_loss(ref),
         "reg_loss": zero_loss(ref),
         "flow_loss": flow_loss,
+        "wm_loss": zero_loss(ref),
     }
 
 
