@@ -26,11 +26,11 @@ from lib.pipeline.pipeline_config import normalize_pipeline_config
 STAGE_ORDER = [
     "preprocess",
     "manifest",
+    "annotate",
     "detect_motion",
     "slam",
     "infiller",
     "filter",
-    "annotate",
     "build",
     "validate",
 ]
@@ -176,6 +176,7 @@ def main():
     }
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     active_manifest_path = manifest_path
+    annotation_manifest_path = manifest_path
 
     def run_logged(name: str, cmd: list[str], *, cwd: str | Path | None = None):
         print(f"\n[{name}] {shlex.join(cmd)}\n")
@@ -234,6 +235,29 @@ def main():
                 indent=2,
             )
         )
+
+    if "annotate" in stages:
+        annotation_command = annotation_cfg.get("command")
+        if not annotation_command:
+            raise RuntimeError("annotate stage selected but annotation.command is missing in config")
+        annotation_context = adapter.resolve_annotation_context(
+            dataset_cfg=dataset_cfg,
+            adapter_cfg=adapter_cfg,
+            paths_cfg=paths_cfg,
+            context=adapter_context,
+            prepared=prepared,
+        )
+        context = {
+            "manifest": str(annotation_manifest_path),
+            "active_manifest": str(active_manifest_path),
+            "annotation_root": str(annotation_root or ""),
+            "run_dir": str(run_dir),
+            "hawor_python": hawor_python,
+            "slam_python": slam_python,
+            "project_root": str(PROJECT_ROOT),
+        }
+        context.update(annotation_context)
+        run_logged("annotate", format_annotation_command(annotation_command, context))
 
     common_batch_args = cli_args_from_mapping(
         batch_cfg.get("common"),
@@ -304,28 +328,6 @@ def main():
         run_summary["active_manifest_path"] = str(active_manifest_path.resolve())
         run_summary["filter_report_path"] = str(filter_report_path.resolve())
         summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    if "annotate" in stages:
-        annotation_command = annotation_cfg.get("command")
-        if not annotation_command:
-            raise RuntimeError("annotate stage selected but annotation.command is missing in config")
-        annotation_context = adapter.resolve_annotation_context(
-            dataset_cfg=dataset_cfg,
-            adapter_cfg=adapter_cfg,
-            paths_cfg=paths_cfg,
-            context=adapter_context,
-            prepared=prepared,
-        )
-        context = {
-            "manifest": str(active_manifest_path),
-            "annotation_root": str(annotation_root or ""),
-            "run_dir": str(run_dir),
-            "hawor_python": hawor_python,
-            "slam_python": slam_python,
-            "project_root": str(PROJECT_ROOT),
-        }
-        context.update(annotation_context)
-        run_logged("annotate", format_annotation_command(annotation_command, context))
 
     if "build" in stages:
         build_cmd = [

@@ -447,6 +447,31 @@ def build_report(source_shard_dir: Path, output_dir: Path | None, shard_results:
     return report
 
 
+def _is_same_or_nested(path_a: Path, path_b: Path) -> bool:
+    if path_a == path_b:
+        return True
+    try:
+        path_a.relative_to(path_b)
+        return True
+    except ValueError:
+        return False
+
+
+def validate_io_dirs(source_dir: Path, output_dir: Path | None):
+    if output_dir is None:
+        return
+
+    source_resolved = source_dir.resolve()
+    output_resolved = output_dir.resolve()
+
+    if source_resolved == output_resolved:
+        raise ValueError("--output_dir must be different from --source_shard_dir")
+    if _is_same_or_nested(output_resolved, source_resolved):
+        raise ValueError("--output_dir must not be inside --source_shard_dir")
+    if _is_same_or_nested(source_resolved, output_resolved):
+        raise ValueError("--source_shard_dir must not be inside --output_dir")
+
+
 def main():
     args = build_parser().parse_args()
     if args.workers < 1:
@@ -457,8 +482,7 @@ def main():
         raise FileNotFoundError(f"Source shard dir not found: {source_dir}")
 
     output_dir = Path(args.output_dir) if args.output_dir else None
-    if output_dir is not None and output_dir.resolve() == source_dir.resolve():
-        raise ValueError("--output_dir must be different from --source_shard_dir")
+    validate_io_dirs(source_dir, output_dir)
 
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
