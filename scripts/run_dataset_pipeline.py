@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.clip_manifest import build_manifest_records_from_descriptors, write_clip_manifest, write_shard_dir_list
 from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
+from lib.pipeline.pipeline_config import normalize_pipeline_config
 
 
 STAGE_ORDER = [
@@ -118,7 +119,7 @@ def format_annotation_command(template: str, context: dict) -> list[str]:
 
 def main():
     args = get_parser().parse_args()
-    config = load_yaml(args.config)
+    config = normalize_pipeline_config(load_yaml(args.config))
     stages = selected_stages(args.stages)
 
     dataset_cfg = config.get("dataset", {})

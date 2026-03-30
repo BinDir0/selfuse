@@ -12,6 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lib.pipeline.pipeline_config import normalize_pipeline_config
+
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Build clip manifest from dataset adapter or shard directories")
@@ -36,7 +38,7 @@ def get_parser():
 
 def load_yaml(path: str | Path) -> dict:
     with open(path, "r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle) or {}
+        return normalize_pipeline_config(yaml.safe_load(handle) or {})
 
 
 def main():
