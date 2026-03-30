@@ -128,13 +128,13 @@ policy:
   reg_action_head: null
   # Direct MSE regression head for backbone action supervision.
   # Can be used alone or alongside diffloss. To enable:
-  #   _target_: src.model.action.action_head.MLPProjector
-  #   input_dim: ${dims.vlm_hidden_size}
-  #   output_dim: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
-  #   width: ${dims.vlm_hidden_size}
-  #   depth: 2
-  #   final_layer_norm: False
-  #   use_mlp_layer_norm: False
+    # _target_: src.model.action.action_head.MLPProjector
+    # input_dim: ${dims.vlm_hidden_size}
+    # output_dim: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
+    # width: ${dims.vlm_hidden_size}
+    # depth: 2
+    # final_layer_norm: False
+    # use_mlp_layer_norm: False
   shape_meta: ${data.shape_meta}
   ignore_index: ${data.ignore_index}
   action_hidden_size: ${dims.action_hidden_size}
@@ -159,7 +159,7 @@ policy:
   loss_config:
     _target_: src.policy.legendvla.LossConfig
     ce_loss_weight: 0.1
-    diffusion_loss_weight: 50.0
+    diffusion_loss_weight: 100.0
     flow_loss_weight: 1.0
-    reg_loss_weight: 5.0
+    reg_loss_weight: 1.0
   knowledge_insulation: ${runtime.knowledge_insulation}

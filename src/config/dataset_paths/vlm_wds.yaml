@@ -9,37 +9,49 @@ vlm_wds_datasets:
   - name: FineVision
     shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/FineVision/train/shard-*.tar
     weight: 10
-  # - name: Robo2VLM
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Robo2VLM/train/shard-*.tar
-  #   weight: 1
-  # - name: RoboPoint
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboPoint/train/shard-*.tar
-  #   weight: 2
-  # - name: Roborefit
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Roborefit/train/shard-*.tar
-  #   weight: 0.1
-  # - name: RoboAfford
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboAfford/train/shard-*.tar
-  #   weight: 1
-  # - name: ShareRobot
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/ShareRobot/train/shard-*.tar
-  #   weight: 0.5
-  # - name: RoboInter-VQA
-  #   shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/train/shard_*.tar
-  #   weight: 1
+  - name: refspatial
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/refspatial/train/shard-*.tar
+    weight: 1
+  - name: robo2vlm
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/robo2vlm/train/shard-*.tar
+    weight: 1
+  - name: robopoint
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/robopoint/train/shard-*.tar
+    weight: 2
+  - name: roborefit
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/roborefit/train/shard-*.tar
+    weight: 0.1
+  - name: roboafford
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/roboafford/train/shard-*.tar
+    weight: 1
+  - name: sharerobot
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/sharerobot/train/shard-*.tar
+    weight: 0.5
+  - name: RoboInter-VQA
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/train/shard_*.tar
+    weight: 1
 
 val_vlm_wds_datasets:
   - name: FineVision
     shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/FineVision/test/shard-*.tar
-  # - name: Robo2VLM
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Robo2VLM/test/shard-*.tar
-  # - name: RoboPoint
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboPoint/test/shard-*.tar
-  # - name: Roborefit
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/Roborefit/test/shard-*.tar
-  # - name: RoboAfford
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/RoboAfford/test/shard-*.tar
-  # - name: ShareRobot
-  #   shard_urls: /share_data/guantianrui/datasets/VLM/Webdataset/ShareRobot/test/shard-*.tar
-  # - name: RoboInter-VQA
-  #   shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/test/shard_*.tar
+  - name: refspatial
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/refspatial/test/shard-*.tar
+    weight: 1
+  - name: robo2vlm
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/robo2vlm/test/shard-*.tar
+    weight: 1
+  - name: robopoint
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/robopoint/test/shard-*.tar
+    weight: 2
+  - name: roborefit
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/roborefit/test/shard-*.tar
+    weight: 0.1
+  - name: roboafford
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/roboafford/test/shard-*.tar
+    weight: 1
+  - name: sharerobot
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/sharerobot/test/shard-*.tar
+    weight: 0.5
+  - name: RoboInter-VQA
+    shard_urls: /share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/test/shard_*.tar
+    weight: 1

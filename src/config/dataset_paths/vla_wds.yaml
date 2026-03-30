@@ -24,6 +24,9 @@ vla_wds_datasets:
       - ${wds_base_dir}/ego4d_cooking_and_cleaning_train_rechunked/shard-*.tar
       - ${wds_base_dir}/ego4d_other_train_rechunked/shard-*.tar
     weight: 15
+  # - name: buildai
+  #   shard_urls: /share_data/guantianrui/datasets/BuildAI-test-0328/shard-*.tar
+  #   weight: 30
   - name: teleop_xiaozi
     shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-*.tar
     weight: 10
