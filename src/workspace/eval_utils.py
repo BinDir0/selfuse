@@ -332,7 +332,7 @@ def evaluation(workspace, accelerator, dataloader, step_log):
         torch.no_grad(),
         eval_with_averaged_model(accelerator, workspace.model, workspace.model_averaging),
     ):
-        val_losses = {"total_loss": [], "ce_loss": [], "diffusion_loss": [], "reg_loss": [], "flow_loss": []}
+        val_losses = {"total_loss": [], "ce_loss": [], "diffusion_loss": [], "reg_loss": [], "flow_loss": [], "wm_loss": []}
         eval_thresholds = workspace.cfg.training.eval_thresholds
         eval_accuracy = []
         eval_l1_loss = []
