@@ -74,12 +74,16 @@ class Qwen3VLChatFormatter:
         action_token: str = "<action>",
         camera_token: str = "<camera>",
         camera_intrinsic_mode: str = "text",
+        future_frame_token: str = "<future_frame>",
+        ff_tokens_per_frame: int = 0,
         lowercase_vla_text: bool = True,
     ):
         self.state_token = state_token
         self.action_token = action_token
         self.camera_token = camera_token
         self.camera_intrinsic_mode = camera_intrinsic_mode
+        self.future_frame_token = future_frame_token
+        self.ff_tokens_per_frame = ff_tokens_per_frame
         self.lowercase_vla_text = lowercase_vla_text
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
@@ -128,6 +132,13 @@ class Qwen3VLChatFormatter:
                 n_states=sample["n_states"],
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
+            # Always emit K * M future_frame tokens when future_frames is present,
+            # regardless of n_future_frames. This keeps masked_scatter source/mask
+            # aligned across samples with different valid counts. n_future_frames
+            # is only used for loss validity masking.
+            if self.ff_tokens_per_frame > 0 and "future_frames" in sample:
+                K = int(sample["future_frames"].shape[0])  # padded to horizon
+                assistant_text += self.future_frame_token * (K * self.ff_tokens_per_frame)
         else:
             user_text = str(sample["question"]).strip()
             assistant_text = str(sample["answer"]).strip()
@@ -168,6 +179,7 @@ class Qwen3VLBatchProcessor:
         padding_side: str = "right",
         state_token: str = "<state>",
         action_token: str = "<action>",
+        future_frame_token: str = "<future_frame>",
         processor: Any = None,
     ):
         self.model_name_or_path = model_name_or_path
@@ -177,11 +189,13 @@ class Qwen3VLBatchProcessor:
         self.padding_side = padding_side
         self.state_token = state_token
         self.action_token = action_token
+        self.future_frame_token = future_frame_token
         self.processor = processor if processor is not None else self.init_processor()
         self.tokenizer = self.processor.tokenizer
-        self.tokenizer.add_special_tokens(
-            {"additional_special_tokens": [self.state_token, self.action_token]}
-        )
+        special_tokens = [self.state_token, self.action_token]
+        if self.future_frame_token:
+            special_tokens.append(self.future_frame_token)
+        self.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         self.action_token_id = int(self.tokenizer.convert_tokens_to_ids(self.action_token))
 
     def init_processor(self):

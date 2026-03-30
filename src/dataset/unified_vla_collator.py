@@ -131,6 +131,8 @@ class UnifiedVLACollator:
             "intrinsic",
             "vision_type",
             "video_fps",
+            # future_frames is only present in VLA samples; handled below.
+            "future_frames",
         }
         common_keys = set(samples[0])
         for sample in samples[1:]:
@@ -146,6 +148,15 @@ class UnifiedVLACollator:
         if self.formatter.camera_intrinsic_mode == "token":
             intrinsics = [s["intrinsic"] for s in samples]
             batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
+
+        # Stack future_frames from samples that have it (VLA only).
+        # VLM samples never carry this key, so common_keys would drop it
+        # in mixed batches. masked_scatter in the model consumes elements
+        # in flat order matching the <future_frame> token positions, which
+        # only appear in VLA samples — so B_vla-sized stacking is correct.
+        ff_values = [s["future_frames"] for s in samples if "future_frames" in s]
+        if ff_values:
+            batch["future_frames"] = self.collate_values(ff_values)
 
         if self.debug_capture_texts:
             batch["debug_prompt_messages"] = prompt_messages
