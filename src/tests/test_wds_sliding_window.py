@@ -185,6 +185,33 @@ def test_action_truncate():
     assert wa.shape[0] == 2
 
 
+def test_action_sampling_uses_own_horizon_when_future_frames_need_longer_buffer():
+    """Action chunk length should stay capped by action_horizon even if future_size is larger."""
+    config = WindowConfig(
+        action_horizon=4,
+        action_stride=1,
+        future_pad_mode="truncate",
+        future_frame_horizon=4,
+        future_frame_stride=16,
+        state_horizon=1,
+        state_stride=1,
+        image_horizon=1,
+        image_stride=1,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque([make_frame(i) for i in range(66)])
+
+    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+
+    assert config.future_size == 65
+    assert sample["valid_action_len"] == 4
+    assert sample["wrist_action"].shape[0] == 4
+    assert [sample["wrist_action"][i, 0] for i in range(4)] == [0.0, 1.0, 2.0, 3.0]
+    assert sample["valid_future_frame_len"] == 4
+    future_indices = [frame["lowdim.npy"][0] for frame in sample["future_frame_refs"]]
+    assert future_indices == [16.0, 32.0, 48.0, 64.0]
+
+
 def test_history_and_future_pad_modes_are_independent():
     """History and future padding policies should be configurable independently."""
     config = WindowConfig(

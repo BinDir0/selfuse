@@ -213,11 +213,18 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     current = buf[0]
     meta = current["meta.json"]
 
-    # --- Action chunk: vectorized gather of future frames ---
-    n_avail = min(config.future_size, len(buf))
-    lowdims = np.stack([buf[i]["lowdim.npy"] for i in range(0, n_avail, config.action_stride)], axis=0)
-
-    len_lowdims = len(lowdims)
+    # --- Action chunk: gather only action-horizon lowdim targets ---
+    action_refs = []
+    valid_action_len = 0
+    for i in range(config.action_horizon):
+        offset = i * config.action_stride
+        if offset < len(buf):
+            action_refs.append(buf[offset])
+            valid_action_len += 1
+        elif config.future_pad_mode == "repeat":
+            action_refs.append(buf[len(buf) - 1])
+    lowdims = np.stack([frame["lowdim.npy"] for frame in action_refs], axis=0)
+    len_lowdims = lowdims.shape[0]
     if config.future_pad_mode == "repeat":
         if len_lowdims < config.action_horizon:
             pad = np.tile(lowdims[-1:], (config.action_horizon - len_lowdims, 1))
@@ -279,7 +286,7 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     presence = meta.get("presence", 3)
 
     result = {
-        "valid_action_len": len_lowdims,
+        "valid_action_len": valid_action_len,
         "wrist_state": wrist_state.astype(np.float32),
         "hand_state": hand_state.astype(np.float32),
         "wrist_action": wrist_action.astype(np.float32),
