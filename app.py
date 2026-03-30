@@ -1,10 +1,16 @@
 import time
 import gradio as gr
 import os
+import sys
+import subprocess
+import joblib
+from collections import deque
 from pathlib import Path
 import torch
 import numpy as np
 from easydict import EasyDict
+
+from lib.pipeline.frame_source import build_frame_source
 
 from scripts.extract_frames import extract_frames_decord
 from scripts.scripts_test_video.detect_track_video import detect_track_video
@@ -12,25 +18,35 @@ from scripts.scripts_test_video.hawor_video import hawor_motion_estimation, hawo
 from scripts.scripts_test_video.hawor_slam import hawor_slam
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from lib.eval_utils.custom_utils import interpolate_slam_cameras_at_video_frames, load_slam_cam
-from lib.vis.run_vis2 import run_vis2_on_video
+from lib.vis.run_vis2 import run_vis2_on_video, run_vis2_on_video_cam
 
 
 def _stage_html(stage_idx: int, title: str, state: str, seconds: float | None = None, err: str | None = None) -> str:
     """state: pending | running | done | error"""
+    dot = ""
+    status_line = ""
     if state == "pending":
-        bg, line = "#d1d5db", "等待中"
+        dot = ""
     elif state == "running":
-        bg, line = "#fde68a", "运行中…"
+        dot = "<span class='spinner' aria-label='running'></span>"
     elif state == "done":
-        bg = "#4ade80"
-        line = f"完成 · {seconds:.2f}s" if seconds is not None else "完成"
-    else:
-        bg, line = "#fca5a5", err or "失败"
+        dot = "<span class='check'>✓</span>"
+        # seconds under check icon
+        if seconds is None:
+            status_line = ""
+        else:
+            status_line = f"{seconds:.0f}s"
+    else:  # error
+        dot = "<span class='err'>×</span>"
+        status_line = "ERR"
+
+    # Minimal: dot (spinner/check) + title + optional seconds.
     return (
-        f'<div style="padding:10px 14px;border-radius:10px;background:{bg};margin-bottom:8px;'
-        f'color:#111;font-family:system-ui,sans-serif;">'
-        f"<b>Stage {stage_idx}: {title}</b><br>"
-        f'<span style="opacity:.9">{line}</span></div>'
+        f'<div class="step step-{state}">'
+        f'<div class="step-dot">{dot}</div>'
+        f'<div class="step-status">{status_line}</div>'
+        f'<div class="step-title">{title}</div>'
+        f"</div>"
     )
 
 
@@ -59,7 +75,7 @@ def _ensure_extracted_frames(video_path: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     n = extract_frames_decord(str(vp), str(out_dir), quality=95, format="jpg", verbose=False)
     if n <= 0:
-        raise RuntimeError(f"无法从视频抽取帧（请确认文件为有效 MP4/MOV 等）: {video_path}")
+        raise RuntimeError(f"Failed to extract frames (invalid MP4/MOV?): {video_path}")
 
 
 def render_reconstruction_progress(input_video, img_focal):
@@ -69,21 +85,32 @@ def render_reconstruction_progress(input_video, img_focal):
     done = lambda i, t, s: _stage_html(i, t, "done", s)
 
     titles = (
-        "Detect / Track",
-        "Motion estimation",
+        "Detect",
+        "Motion",
         "SLAM",
         "Infiller",
     )
 
-    NO_V = (None, None)
+    detail_orig_hidden = gr.update(visible=False)
+    detail_cam_hidden = gr.update(visible=False)
 
-    def yield_ui(s1, s2, s3, s4, summary: str, video_orig, video_world):
-        return s1, s2, s3, s4, summary, video_orig, video_world
+    def yield_ui(
+        s1, s2, s3, s4, status_html: str, detail_video_original, detail_video_cam
+    ):
+        return (
+            s1,
+            s2,
+            s3,
+            s4,
+            status_html,
+            detail_video_original,
+            detail_video_cam,
+        )
 
     if not path or not os.path.isfile(path):
-        err = "请上传有效视频文件。"
+        err = "Upload a valid video."
         e = lambda i: _stage_html(i, titles[i - 1], "error", err=err)
-        yield yield_ui(e(1), e(2), e(3), e(4), err, *NO_V)
+        yield yield_ui(e(1), e(2), e(3), e(4), err, detail_orig_hidden, detail_cam_hidden)
         return
 
     args = EasyDict()
@@ -96,19 +123,97 @@ def render_reconstruction_progress(input_video, img_focal):
 
     t_wall0 = time.perf_counter()
 
-    # --- Stage 1 ---
+    repo_root = Path(__file__).resolve().parent
+    batch_infer_script = repo_root / "scripts" / "batch_infer.py"
+    stage_order = ["detect_track", "motion", "slam", "infiller"]
+    # Keep UI simple: single GPU by default
+    gpus = "0"
+
+    # Temporary run folder for batch_infer logs/status
+    # Put UI run logs/status under repo-local `.tmp/` (already gitignored),
+    # so we don't create `batch_ui_runs/` artifacts.
+    run_root = repo_root / ".tmp" / f"ui_runs_{int(time.time())}_{os.getpid()}"
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    video_list_file = run_root / "videos.txt"
+    video_list_file.write_text(str(Path(path).resolve()) + "\n")
+
+    frame_source = None
+    start_idx = 0
+    end_idx = 0
+    seq_folder = None
+
+    def _run_batch_infer_one_stage(stage: str, *, run_dir: Path, extra_args: list[str]):
+        cmd = [
+            sys.executable,
+            str(batch_infer_script),
+            "--video_list",
+            str(video_list_file),
+            "--gpus",
+            gpus,
+            "--stages",
+            stage,
+            "--scheduler_mode",
+            "legacy",
+            "--img_focal",
+            str(img_focal),
+            "--metric3d_batch_size",
+            "16",
+            "--run_dir",
+            str(run_dir),
+            "--slam_backend",
+            "dpvo",
+        ]
+        # Any4D only affects SLAM depth backend.
+        # Passing it here keeps the behavior consistent with your request.
+        cmd.append("--any4d")
+        cmd.extend(extra_args)
+
+        env = os.environ.copy()
+
+        # Keep only a short tail for errors (avoid buffering huge output).
+        tail = deque(maxlen=200)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(repo_root),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            tail.append(line)
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(
+                f"batch_infer failed (rc={rc}) for stage={stage}\n"
+                + "".join(tail)[-8000:]
+            )
+
+    # --- Stage 1 (detect_track) ---
     yield yield_ui(
         running(1, titles[0]),
         pending(2, titles[1]),
         pending(3, titles[2]),
         pending(4, titles[3]),
-        "进行中：Stage 1（抽帧 + 检测 / 追踪）×",
-        *NO_V,
+        "",
+        detail_orig_hidden,
+        detail_cam_hidden,
     )
     try:
         _ensure_extracted_frames(path)
+        frame_source = build_frame_source(path)
+        end_idx = int(len(frame_source))
+        start_idx = 0
+        seq_folder = str(Path(path).resolve().parent / Path(path).resolve().stem)
         t_a = time.perf_counter()
-        start_idx, end_idx, seq_folder, frame_source = detect_track_video(args)
+        _run_batch_infer_one_stage(
+            "detect_track",
+            run_dir=run_root / "detect_track",
+            extra_args=[],
+        )
         dt1 = time.perf_counter() - t_a
     except Exception as ex:
         yield yield_ui(
@@ -116,24 +221,30 @@ def render_reconstruction_progress(input_video, img_focal):
             pending(2, titles[1]),
             pending(3, titles[2]),
             pending(4, titles[3]),
-            f"Stage 1 失败: {ex}",
-            *NO_V,
+            f"Stage 1 failed: {ex}",
+            detail_orig_hidden,
+            detail_cam_hidden,
         )
         return
 
-    yield yield_ui(
+        yield yield_ui(
         done(1, titles[0], dt1),
         running(2, titles[1]),
         pending(3, titles[2]),
         pending(4, titles[3]),
-        "进行中：Stage 2 ×",
-        *NO_V,
+        "",
+            detail_orig_hidden,
+            detail_cam_hidden,
     )
 
-    # --- Stage 2 ---
+    # --- Stage 2 (motion) ---
     try:
         t_b = time.perf_counter()
-        frame_chunks_all, img_focal = hawor_motion_estimation(args, start_idx, end_idx, seq_folder)
+        _run_batch_infer_one_stage(
+            "motion",
+            run_dir=run_root / "motion",
+            extra_args=[],
+        )
         dt2 = time.perf_counter() - t_b
     except Exception as ex:
         yield yield_ui(
@@ -141,8 +252,9 @@ def render_reconstruction_progress(input_video, img_focal):
             _stage_html(2, titles[1], "error", err=str(ex)),
             pending(3, titles[2]),
             pending(4, titles[3]),
-            f"Stage 2 失败: {ex}",
-            *NO_V,
+            "Stage 2 failed",
+            detail_orig_hidden,
+            detail_cam_hidden,
         )
         return
 
@@ -151,17 +263,19 @@ def render_reconstruction_progress(input_video, img_focal):
         done(2, titles[1], dt2),
         running(3, titles[2]),
         pending(4, titles[3]),
-        "进行中：Stage 3 ×",
-        *NO_V,
+        "",
+        detail_orig_hidden,
+        detail_cam_hidden,
     )
 
-    # --- Stage 3 (SLAM + load trajectory) ---
+    # --- Stage 3 (slam: dpvo + any4d) ---
     try:
         t_c = time.perf_counter()
-        slam_path = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
-        if not os.path.exists(slam_path):
-            hawor_slam(args, start_idx, end_idx)
-        slam_path = os.path.join(seq_folder, f"SLAM/hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
+        _run_batch_infer_one_stage(
+            "slam",
+            run_dir=run_root / "slam",
+            extra_args=[],
+        )
         dt3 = time.perf_counter() - t_c
     except Exception as ex:
         yield yield_ui(
@@ -169,8 +283,9 @@ def render_reconstruction_progress(input_video, img_focal):
             done(2, titles[1], dt2),
             _stage_html(3, titles[2], "error", err=str(ex)),
             pending(4, titles[3]),
-            f"Stage 3 失败: {ex}",
-            *NO_V,
+            "Stage 3 failed",
+            detail_orig_hidden,
+            detail_cam_hidden,
         )
         return
 
@@ -179,15 +294,18 @@ def render_reconstruction_progress(input_video, img_focal):
         done(2, titles[1], dt2),
         done(3, titles[2], dt3),
         running(4, titles[3]),
-        "进行中：Stage 4 ×",
-        *NO_V,
+        "",
+        detail_orig_hidden,
+        detail_cam_hidden,
     )
 
-    # --- Stage 4 ---
+    # --- Stage 4 (infiller) ---
     try:
         t_d = time.perf_counter()
-        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = hawor_infiller(
-            args, start_idx, end_idx, frame_chunks_all
+        _run_batch_infer_one_stage(
+            "infiller",
+            run_dir=run_root / "infiller",
+            extra_args=[],
         )
         dt4 = time.perf_counter() - t_d
     except Exception as ex:
@@ -196,8 +314,9 @@ def render_reconstruction_progress(input_video, img_focal):
             done(2, titles[1], dt2),
             done(3, titles[2], dt3),
             _stage_html(4, titles[3], "error", err=str(ex)),
-            f"Stage 4 失败: {ex}",
-            *NO_V,
+            "Stage 4 failed",
+            detail_orig_hidden,
+            detail_cam_hidden,
         )
         return
 
@@ -206,11 +325,15 @@ def render_reconstruction_progress(input_video, img_focal):
         done(2, titles[1], dt2),
         done(3, titles[2], dt3),
         done(4, titles[3], dt4),
-        "进行中：可视化 ×",
-        *NO_V,
+        "",
+        detail_orig_hidden,
+        detail_cam_hidden,
     )
 
-    # --- Visualization: align camera path with demo.py --vis_mode world ----------
+    # --- Visualization ---
+    world_file = os.path.join(seq_folder, "world_space_res.pth")
+    pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_file)
+
     hand2idx = {"right": 1, "left": 0}
     vis_start = 0
     vis_end = pred_trans.shape[1] - 1
@@ -283,21 +406,18 @@ def render_reconstruction_progress(input_video, img_focal):
 
     try:
         t_vis = time.perf_counter()
-        if args.vis_mode == "world":
-            output_pth = os.path.join(seq_folder, f"vis_{vis_start}_{vis_end}")
-            os.makedirs(output_pth, exist_ok=True)
-            vis_video_path = run_vis2_on_video(
-                left_dict,
-                right_dict,
-                output_pth,
-                img_focal,
-                frame_source=frame_source,
-                R_c2w=R_c2w_sla_all[vis_start:vis_end],
-                t_c2w=t_c2w_sla_all[vis_start:vis_end],
-                interactive=False,
-            )
-        else:
-            raise NotImplementedError("vis_mode must be world for this demo")
+        output_pth_cam = os.path.join(seq_folder, f"vis_cam_{vis_start}_{vis_end}")
+        os.makedirs(output_pth_cam, exist_ok=True)
+        vis_video_cam_path = run_vis2_on_video_cam(
+            left_dict,
+            right_dict,
+            output_pth_cam,
+            img_focal,
+            frame_source=frame_source,
+            R_w2c=R_w2c_sla_all[vis_start:vis_end],
+            t_w2c=t_w2c_sla_all[vis_start:vis_end],
+            interactive=False,
+        )
         dt_vis = time.perf_counter() - t_vis
     except Exception as ex:
         yield yield_ui(
@@ -305,16 +425,16 @@ def render_reconstruction_progress(input_video, img_focal):
             done(2, titles[1], dt2),
             done(3, titles[2], dt3),
             done(4, titles[3], dt4),
-            f"可视化失败: {ex}",
-            *NO_V,
+            "Visualization failed",
+            detail_orig_hidden,
+            detail_cam_hidden,
         )
         return
 
     total = time.perf_counter() - t_wall0
     summary = (
-        f"**总耗时** {total:.2f}s（含可视化 {dt_vis:.2f}s）| "
-        f"Stage1 {dt1:.2f}s · Stage2 {dt2:.2f}s · Stage3 {dt3:.2f}s · Stage4 {dt4:.2f}s  "
-        f"· 左：原视频 · 右：同 `demo.py --vis_mode world --headless` 导出"
+        f"**Done** · {total:.2f}s | "
+        f"S1 {dt1:.1f}s · S2 {dt2:.1f}s · S3 {dt3:.1f}s · S4 {dt4:.1f}s"
     )
 
     yield yield_ui(
@@ -322,58 +442,254 @@ def render_reconstruction_progress(input_video, img_focal):
         done(2, titles[1], dt2),
         done(3, titles[2], dt3),
         done(4, titles[3], dt4),
-        summary,
-        path,
-        vis_video_path,
+        "<span class='bingo'>✓ Bingo</span>",
+        gr.update(value=path, visible=True),
+        gr.update(
+            value=vis_video_cam_path,
+            visible=bool(vis_video_cam_path and os.path.isfile(vis_video_cam_path)),
+        ),
+    )
+
+
+def _open_detail(video_original_path, video_cam_path):
+    """Open detail compare section: original (left) vs cam (right)."""
+    if not video_cam_path:
+        # 保持闭合：只显示主页面的 World 结果，避免丑的空对比
+        return (
+            gr.update(visible=False, value=None),
+            gr.update(visible=False, value=None),
+        )
+    return (
+        gr.update(value=video_original_path, visible=True),
+        gr.update(value=video_cam_path, visible=True),
     )
 
 
 header = """
 <div style="text-align: center;">
-    <h1>视频手部运动重建</h1>
-    <p style="opacity: 0.85; max-width: 42rem; margin: 0 auto;">上传视频并设置焦距后点击提交，流水线将完成检测追踪、运动估计、SLAM 与补全，并输出 World 空间可视化对比。</p>
+    <h1>Hand Motion Reconstruction</h1>
+    <p style="opacity: 0.85; max-width: 42rem; margin: 0 auto;">Upload → Run. Detail after completion.</p>
 </div>
 """
 
 with gr.Blocks(
-    title="视频手部运动重建",
+    title="Hand Motion Reconstruction",
 ) as demo:
     gr.Markdown(header)
 
     with gr.Row():
         with gr.Column(scale=1):
-            input_video = gr.Video(label="Input video", sources=["upload"])
-            img_focal = gr.Number(label="Focal Length", value=600)
-            submit = gr.Button("Submit", variant="primary")
-        with gr.Column(scale=1):
-            gr.Markdown("**流水线进度**（灰=等待，黄=运行，绿=完成）")
-            stage1 = gr.HTML()
-            stage2 = gr.HTML()
-            stage3 = gr.HTML()
-            stage4 = gr.HTML()
-            timing_md = gr.Markdown()
+            input_video = gr.File(
+                label="Video",
+                file_types=[".mp4", ".mov", ".avi", ".mkv"],
+                type="filepath",
+            )
+            upload_ok = gr.HTML(value="", visible=False)
+            img_focal = gr.Number(label="Focal", value=600)
+            submit = gr.Button("Run", variant="primary")
+        with gr.Column(scale=2):
+            with gr.Row(elem_classes=["stepper-row"]):
+                stage1 = gr.HTML(value=_stage_html(1, "Detect", "pending"))
+                stage2 = gr.HTML(value=_stage_html(2, "Motion", "pending"))
+                stage3 = gr.HTML(value=_stage_html(3, "SLAM", "pending"))
+                stage4 = gr.HTML(value=_stage_html(4, "Infiller", "pending"))
 
-    gr.Markdown("### 结果对比（完成后显示）")
+        with gr.Column(scale=1):
+            overall_status = gr.HTML(value="", visible=True)
+            # no extra buttons; show comparison directly after completion
+
     with gr.Row():
-        video_original = gr.Video(
-            label="原视频（输入）",
+        detail_video_original = gr.Video(
+            label="Original",
             interactive=False,
+            visible=False,
         )
-        video_world = gr.Video(
-            label="World 可视化（与 demo.py --vis_mode world --headless 写入的影片一致）",
+        detail_video_cam = gr.Video(
+            label="Cam",
             interactive=False,
+            visible=False,
         )
 
     submit.click(
         fn=render_reconstruction_progress,
         inputs=[input_video, img_focal],
-        outputs=[stage1, stage2, stage3, stage4, timing_md, video_original, video_world],
+        outputs=[
+            stage1,
+            stage2,
+            stage3,
+            stage4,
+            overall_status,
+            detail_video_original,
+            detail_video_cam,
+        ],
     )
 
     gr.Examples([["./example/video_0.mp4"]], inputs=input_video)
 
-demo.queue()
 demo.launch(
     debug=True,
-    css=".gradio-container { max-width: 1100px; margin: auto; }",
+    css="""
+.gradio-container {
+    max-width: 1120px;
+    margin: auto;
+}
+
+/* Overall minimal “paper UI” look */
+.gradio-container .prose, .gradio-container .markdown {
+    color: #0f172a !important;
+}
+.gradio-container .block{
+    border-radius: 18px;
+}
+
+.step{
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    border: 1px solid rgba(15, 23, 42, 0.10);
+    background: rgba(255, 255, 255, 0.75);
+}
+.step-dot{
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 12px;
+    color: rgba(15, 23, 42, 0.65);
+    background: rgba(2, 6, 23, 0.04);
+}
+.step-title{
+    font-size: 12px;
+    font-weight: 720;
+    color: rgba(15, 23, 42, 0.95);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.step-status{
+    margin-top: 0px;
+    font-size: 12px;
+    font-weight: 650;
+    opacity: 0.90;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+}
+.step-status:empty{
+    display: none;
+}
+
+.step-pending{
+    border-color: rgba(15, 23, 42, 0.10);
+    background: rgba(15, 23, 42, 0.03);
+}
+.step-pending .step-dot{
+    background: rgba(15, 23, 42, 0.05);
+    color: rgba(15, 23, 42, 0.35);
+}
+.step-pending .step-status{ color: rgba(15, 23, 42, 0.85); }
+
+.step-running{
+    border-color: rgba(245, 158, 11, 0.35);
+    background: rgba(254, 243, 199, 0.60);
+}
+.step-running .step-dot{
+    background: rgba(254, 243, 199, 0.95);
+    color: rgba(146, 64, 14, 0.95);
+}
+.step-running .step-status{ color: rgba(146, 64, 14, 0.95); }
+
+.step-done{
+    border-color: rgba(34, 197, 94, 0.35);
+    background: rgba(220, 252, 231, 0.60);
+}
+.step-done .step-dot{
+    background: rgba(220, 252, 231, 0.95);
+    color: rgba(22, 101, 52, 0.95);
+}
+.step-done .step-status{ color: rgba(22, 101, 52, 0.95); }
+
+.step-error{
+    border-color: rgba(239, 68, 68, 0.35);
+    background: rgba(254, 226, 226, 0.65);
+}
+.step-error .step-dot{
+    background: rgba(254, 226, 226, 0.95);
+    color: rgba(153, 27, 27, 0.95);
+}
+.step-error .step-status{ color: rgba(153, 27, 27, 0.95); }
+
+/* Additional polish */
+body{
+    background: linear-gradient(180deg, #f8fafc 0%, #ffffff 60%);
+}
+.step{
+    padding: 8px 10px;
+    border-radius: 14px;
+}
+
+.spinner{
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    border: 2px solid rgba(15, 23, 42, 0.25);
+    border-top-color: currentColor;
+    animation: spin 0.9s linear infinite;
+    display: inline-block;
+    color: inherit;
+}
+.check{
+    font-size: 16px;
+    font-weight: 900;
+    line-height: 1;
+    color: currentColor;
+}
+.err{
+    font-size: 16px;
+    font-weight: 900;
+    line-height: 1;
+    color: currentColor;
+}
+
+@keyframes spin{
+    to{ transform: rotate(360deg); }
+}
+.summary-md{
+    font-size: 12px;
+    font-weight: 560;
+    opacity: 0.88;
+    margin-top: 2px;
+}
+.results-title{
+    margin-top: 6px;
+    margin-bottom: 2px;
+    font-size: 13px;
+    opacity: 0.80;
+    font-weight: 650;
+}
+.stepper-row{
+    gap: 10px;
+}
+
+.upload-ok{
+    color: rgba(22, 101, 52, 0.95);
+    font-weight: 800;
+}
+.bingo{
+    color: rgba(22, 101, 52, 0.95);
+    font-weight: 900;
+    font-size: 14px;
+}
+""",
 )
