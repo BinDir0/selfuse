@@ -1,0 +1,59 @@
+dataset:
+  adapter: buildai
+  source_id: buildai
+  split: train
+  start_factory_id: 1
+  end_factory_id: 2
+
+paths:
+  buildai_repo_root: /root/buildai_processing
+  buildai_config: /root/buildai_processing/pipeline_config_egocentric10k.yaml
+  shard_root: /share_data/guantianrui/datasets/Egocentric-10K_stage3_jpg
+  annotation_root: /share_data/guantianrui/datasets/buildai_annotations
+  final_dataset_root: /share_data/guantianrui/datasets/BuildAI-VLA-production
+  log_root: /share_data/guantianrui/dataset_pipeline_logs
+
+runtimes:
+  buildai_shell: /bin/bash
+  hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
+  slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4/bin/python3.10
+
+adapter_config:
+  stages: 1,2,3
+  setup_decord: false
+  clean_stage3_output: false
+
+batch_infer:
+  common:
+    gpus: 0,1,2,3
+    workers_per_gpu: 1
+    resume: true
+    checkpoint: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/hawor.ckpt
+    infiller_weight: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/infiller.pt
+  detect_motion:
+    chunk_batch_size: 64
+    num_workers: 16
+    detect_batch_size: 128
+    detect_io_workers: 8
+  slam:
+    any4d_batch_size: 32
+    depth_predict_all_frames: true
+  infiller:
+    infiller_window_batch_size: 64
+
+annotation:
+  command: >
+    echo "Provide an external annotation command here that reads {manifest}
+    and writes sidecars into {annotation_root}"
+
+build:
+  require_annotation: true
+  preprocess_workers: 8
+  writer_workers: 4
+  frames_per_shard: 10000
+  repeat_episodes: 1
+  mano_device: cuda:0
+
+validation:
+  max_clips: 200
+  dataset_sample_checks: 20

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ## environment set up
 
 
@@ -113,6 +114,7 @@ Download Metric3D official weights [metric_depth_vit_large_800k.pth](https://dri
 
 #### 5.5 Download the model weights
 
+
 ```bash
 wget https://huggingface.co/spaces/rolpotamias/WiLoR/resolve/main/pretrained_models/detector.pt -P ./weights/external/
 wget https://huggingface.co/ThunderVVV/HaWoR/resolve/main/hawor/checkpoints/hawor.ckpt -P ./weights/hawor/checkpoints/
@@ -123,6 +125,7 @@ It is also required to download MANO model from [MANO website](https://mano.is.t
 Create an account by clicking Sign Up and download the models (mano_v*_*.zip). Unzip and put the hand model to the `_DATA/data/mano/MANO_RIGHT.pkl` and `_DATA/data_left/mano_left/MANO_LEFT.pkl`. 
 
 Note that MANO model falls under the [MANO license](https://mano.is.tue.mpg.de/license.html).
+<<<<<<< HEAD
 
 
 

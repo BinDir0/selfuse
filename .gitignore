@@ -55,8 +55,8 @@ _inspect_buildai0328/
 _inspect_bad_lowdim/
 batch_ui_runs/*
 # 本地跑批生成的整段示例目录（抽帧 / tracks / SLAM / npz 等，勿提交）
-/example/dpvo+any4d/
-/example/segment_018/
+/example/
+/example/
 
 # 第三方：过大或需单独克隆的目录（与 README / 子模块策略一致）
 /thirdparty/detection

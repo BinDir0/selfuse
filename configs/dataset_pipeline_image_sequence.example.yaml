@@ -1,0 +1,43 @@
+dataset:
+  adapter: image_sequence
+  source_id: demo_frames
+  split: train
+
+adapter_config:
+  sequence_root: /share_data/example/clip_frames
+  seq_folder_root: /share_data/example/clip_outputs
+  include_dirs: []
+
+paths:
+  annotation_root: /share_data/example/clip_annotations
+  final_dataset_root: /share_data/example/final_vla_dataset
+  log_root: /share_data/example/dataset_pipeline_logs
+
+runtimes:
+  hawor_python: /path/to/hawor/bin/python
+  slam_python: /path/to/any4/bin/python
+
+batch_infer:
+  common:
+    gpus: 0
+    workers_per_gpu: 1
+    resume: true
+  detect_motion: {}
+  slam: {}
+  infiller: {}
+
+annotation:
+  command: >
+    echo "Read {manifest} and write {annotation_root}/<clip_id>.annotation.json"
+
+build:
+  require_annotation: true
+  preprocess_workers: 8
+  writer_workers: 4
+  frames_per_shard: 10000
+  repeat_episodes: 1
+  mano_device: cuda:0
+
+validation:
+  max_clips: 100
+  dataset_sample_checks: 20
