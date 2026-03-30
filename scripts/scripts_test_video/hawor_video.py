@@ -31,6 +31,75 @@ def vprint(*args, **kwargs):
     if not QUIET_MODE:
         print(*args, **kwargs)
 
+# Set HAWOR_INFILLER_NO_SANITIZE=1 to disable (debug / A-B).
+_INFILLER_SANITIZE = os.environ.get("HAWOR_INFILLER_NO_SANITIZE", "0").strip() != "1"
+
+def _interp_and_smooth_hand_time(x: np.ndarray, *, smooth_window: int = 5) -> tuple[np.ndarray, int]:
+    """Repair NaN/Inf in array shaped (2, T, D) via time interpolation + light smoothing."""
+    arr = np.asarray(x, dtype=np.float64).copy()
+    bad_before = int((~np.isfinite(arr)).sum())
+
+    H, T, D = arr.shape
+    smooth_window = int(smooth_window)
+    if smooth_window <= 1:
+        smooth_window = 1
+    if smooth_window % 2 == 0:
+        smooth_window += 1
+
+    valid_time = np.all(np.isfinite(arr), axis=-1)  # (H, T)
+    for h in range(H):
+        vt = valid_time[h]
+        if int(vt.sum()) < 2:
+            arr[h] = np.nan_to_num(arr[h], nan=0.0, posinf=0.0, neginf=0.0)
+            continue
+
+        invalid_time = ~vt
+        t_valid = np.where(vt)[0].astype(np.int64)
+        t_all = np.arange(T, dtype=np.float64)
+
+        out_h = arr[h]  # (T, D)
+        for d in range(D):
+            y = out_h[:, d]
+            y_valid = y[t_valid]
+            y_interp = np.interp(t_all, t_valid.astype(np.float64), y_valid.astype(np.float64)).astype(np.float64)
+            y_interp[vt] = y[vt]
+
+            if smooth_window > 1 and np.any(invalid_time):
+                k = smooth_window
+                pad_left = k // 2
+                pad_right = (k - 1) - pad_left
+                y_pad = np.pad(y_interp, (pad_left, pad_right), mode="edge")
+                kernel = np.ones(k, dtype=np.float64) / float(k)
+                y_smooth = np.convolve(y_pad, kernel, mode="valid")
+                y_interp[invalid_time] = y_smooth[invalid_time]
+
+            out_h[:, d] = y_interp
+        arr[h] = out_h
+
+    np.nan_to_num(arr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return arr.astype(np.float32), bad_before
+
+def _sanitize_infiller_tensors(pred_trans: torch.Tensor, pred_rot: torch.Tensor, pred_hand_pose: torch.Tensor, pred_betas: torch.Tensor) -> None:
+    """Repair NaN/Inf in infiller output before saving `world_space_res.pth`."""
+    if not _INFILLER_SANITIZE:
+        return
+    smooth_window = int(os.environ.get("HAWOR_INFILLER_SANITIZE_SMOOTH_WINDOW", "5"))
+    for name, t in (
+        ("pred_trans", pred_trans),
+        ("pred_rot", pred_rot),
+        ("pred_hand_pose", pred_hand_pose),
+        ("pred_betas", pred_betas),
+    ):
+        if t is None:
+            continue
+        arr_in = t.detach().cpu().numpy()
+        if arr_in.ndim < 2 or arr_in.shape[0] != 2:
+            continue
+        fixed, n_bad = _interp_and_smooth_hand_time(arr_in, smooth_window=smooth_window)
+        if n_bad > 0 and not QUIET_MODE:
+            vprint(f"[infiller] sanitized {n_bad} non-finite values in {name} (time-interp + light smooth)")
+        t.copy_(torch.from_numpy(fixed))
+
 def load_hawor(checkpoint_path):
     from pathlib import Path
     from hawor.configs import get_config
@@ -757,6 +826,10 @@ def run_infiller_for_video(args, start_idx, end_idx, frame_chunks_all, infiller_
             pred_hand_pose[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['hand_pose'][:])
             pred_betas[:, filling_net_start:filling_net_end] = torch.from_numpy(filling_seq['betas'][:])
             pred_valid[:, filling_net_start:filling_net_end] = 1
+
+    # Numeric guardrail: repair NaN/Inf before saving.
+    _sanitize_infiller_tensors(pred_trans, pred_rot, pred_hand_pose, pred_betas)
+
     save_path = os.path.join(seq_folder, "world_space_res.pth")
     joblib.dump([pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid], save_path)
     return pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid

@@ -56,20 +56,60 @@ def _use_dpvo_infiller_mode(seq_folder: str) -> bool:
     return False
 
 
-def _forward_fill_hand_time(x: np.ndarray) -> tuple[np.ndarray, int]:
-    """Fix NaN/Inf in array shaped (2, T, D) by forward-filling along time, per hand."""
+def _interp_and_smooth_hand_time(x: np.ndarray, *, smooth_window: int = 5) -> tuple[np.ndarray, int]:
+    """
+    Repair NaN/Inf in array shaped (2, T, D) by:
+      1) time interpolation using nearest valid-frame anchors (per hand, per dim)
+      2) light temporal smoothing, applied only to frames that were non-finite.
+
+    This aims to be more visually continuous than pure forward-fill.
+    """
     arr = np.asarray(x, dtype=np.float64).copy()
     bad_before = int((~np.isfinite(arr)).sum())
-    for h in range(arr.shape[0]):
-        row = arr[h]
-        for t in range(1, row.shape[0]):
-            m = ~np.isfinite(row[t])
-            if np.any(m):
-                row[t, m] = row[t - 1, m]
-        m0 = ~np.isfinite(row[0])
-        if np.any(m0):
-            row[0, m0] = 0.0
-        np.nan_to_num(row, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+    H, T, D = arr.shape
+    smooth_window = int(smooth_window)
+    if smooth_window <= 1:
+        smooth_window = 1
+    # Ensure odd window for symmetric padding.
+    if smooth_window % 2 == 0:
+        smooth_window += 1
+
+    # valid_time[h, t] means all D components for this hand/time are finite.
+    valid_time = np.all(np.isfinite(arr), axis=-1)  # (H, T)
+
+    for h in range(H):
+        vt = valid_time[h]  # (T,)
+        if int(vt.sum()) < 2:
+            arr[h] = np.nan_to_num(arr[h], nan=0.0, posinf=0.0, neginf=0.0)
+            continue
+
+        invalid_time = ~vt
+        t_valid = np.where(vt)[0].astype(np.int64)
+        t_all = np.arange(T, dtype=np.float64)
+
+        out_h = arr[h]  # (T, D)
+        for d in range(D):
+            y = out_h[:, d]  # (T,)
+            y_valid = y[t_valid]
+            y_interp = np.interp(t_all, t_valid.astype(np.float64), y_valid.astype(np.float64)).astype(np.float64)
+            # keep anchors exactly
+            y_interp[vt] = y[vt]
+
+            if smooth_window > 1 and np.any(invalid_time):
+                k = smooth_window
+                pad_left = k // 2
+                pad_right = (k - 1) - pad_left
+                y_pad = np.pad(y_interp, (pad_left, pad_right), mode="edge")
+                kernel = np.ones(k, dtype=np.float64) / float(k)
+                y_smooth = np.convolve(y_pad, kernel, mode="valid")
+                y_interp[invalid_time] = y_smooth[invalid_time]
+
+            out_h[:, d] = y_interp
+
+        arr[h] = out_h
+
+    np.nan_to_num(arr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     return arr.astype(np.float32), bad_before
 
 
@@ -85,9 +125,10 @@ def _sanitize_infiller_tensors(state: InfillerState) -> None:
         arr_in = t.detach().cpu().numpy()
         if arr_in.ndim < 2 or arr_in.shape[0] != 2:
             continue
-        fixed, n_bad = _forward_fill_hand_time(arr_in)
+        smooth_window = int(os.environ.get("HAWOR_INFILLER_SANITIZE_SMOOTH_WINDOW", "5"))
+        fixed, n_bad = _interp_and_smooth_hand_time(arr_in, smooth_window=smooth_window)
         if n_bad > 0 and not QUIET_MODE:
-            vprint(f"[infiller] sanitized {n_bad} non-finite values in {name} (forward-fill + zero tail)")
+            vprint(f"[infiller] sanitized {n_bad} non-finite values in {name} (time-interp + light smooth)")
         t.copy_(torch.from_numpy(fixed))
 
 
