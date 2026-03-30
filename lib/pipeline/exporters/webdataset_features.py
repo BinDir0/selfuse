@@ -291,7 +291,9 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
     world_res_path = os.path.join(crop_dir, "world_space_res.pth")
     extracted_dir = os.path.join(crop_dir, "extracted_images")
 
-    if feature_cache_dir and not rescan_frame_index:
+    # After precompute, shard writers call with require_cache=True; allow disk cache load
+    # even if --rescan was used (precompute already rewrote .joblib for this run).
+    if feature_cache_dir and (not rescan_frame_index or require_cache):
         cached = _load_cached_episode_features(ep, extracted_dir, feature_cache_dir)
         if cached is not None:
             return cached

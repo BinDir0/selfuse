@@ -50,6 +50,9 @@ pred_vis/
 /example/
 example_video/
 *.mov
+videos.txt
+_inspect_buildai0328/
+_inspect_bad_lowdim/
 # 本地跑批生成的整段示例目录（抽帧 / tracks / SLAM / npz 等，勿提交）
 /example/dpvo+any4d/
 /example/segment_018/

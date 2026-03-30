@@ -37,3 +37,9 @@ dill
 lapx
 # chumpy@git+https://github.com/mattloper/chumpy
 moderngl-window==2.4.6
+gradio
+
+## analyze:
+zarr
+seaborn
+matplotlib

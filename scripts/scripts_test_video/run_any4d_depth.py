@@ -157,14 +157,24 @@ def run_any4d_depth_batch(
         )
 
     def frame_to_img_path(i: int) -> str:
-        jpg_path = os.path.join(extracted_dir, f"{int(i):06d}.jpg")
-        png_path = os.path.join(extracted_dir, f"{int(i):06d}.png")
-        if os.path.exists(jpg_path):
-            return jpg_path
-        if os.path.exists(png_path):
-            return png_path
+        """Resolve frame file: RoWaH ``extract_frames`` uses 6-digit stems; BuildAI uses 4-digit."""
+        idx = int(i)
+        candidates = [
+            (f"{idx:06d}.jpg", f"{idx:06d}.png"),
+        ]
+        if idx < 10000:
+            candidates.append((f"{idx:04d}.jpg", f"{idx:04d}.png"))
+        tried = []
+        for jpg_name, png_name in candidates:
+            jpg_path = os.path.join(extracted_dir, jpg_name)
+            png_path = os.path.join(extracted_dir, png_name)
+            tried.extend([jpg_path, png_path])
+            if os.path.exists(jpg_path):
+                return jpg_path
+            if os.path.exists(png_path):
+                return png_path
         raise FileNotFoundError(
-            f"[Any4D] frame file missing for idx={i}: tried {jpg_path} / {png_path}"
+            f"[Any4D] frame file missing for idx={idx}: tried " + " / ".join(tried[:4]) + (" ..." if len(tried) > 4 else "")
         )
 
     image_paths = [frame_to_img_path(ref_frame_idx)] + [

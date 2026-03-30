@@ -24,6 +24,9 @@ from .hawor_runtime import build_infiller_runner
 
 INFILLER_DEBUG_WINDOWS = os.environ.get("HAWOR_INFILLER_VERBOSE_WINDOWS", "0") == "1"
 
+# Set HAWOR_INFILLER_NO_SANITIZE=1 to skip finite cleanup (debug / A/B).
+_INFILLER_SANITIZE = os.environ.get("HAWOR_INFILLER_NO_SANITIZE", "0").strip() != "1"
+
 
 @dataclass
 class InfillerState:
@@ -37,6 +40,41 @@ class InfillerState:
     cam_space_cache: dict
     r_c2w_sla_all: torch.Tensor
     t_c2w_sla_all: torch.Tensor
+
+
+def _forward_fill_hand_time(x: np.ndarray) -> tuple[np.ndarray, int]:
+    """Fix NaN/Inf in array shaped (2, T, D) by forward-filling along time, per hand."""
+    arr = np.asarray(x, dtype=np.float64).copy()
+    bad_before = int((~np.isfinite(arr)).sum())
+    for h in range(arr.shape[0]):
+        row = arr[h]
+        for t in range(1, row.shape[0]):
+            m = ~np.isfinite(row[t])
+            if np.any(m):
+                row[t, m] = row[t - 1, m]
+        m0 = ~np.isfinite(row[0])
+        if np.any(m0):
+            row[0, m0] = 0.0
+        np.nan_to_num(row, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return arr.astype(np.float32), bad_before
+
+
+def _sanitize_infiller_tensors(state: InfillerState) -> None:
+    """Ensure saved world-space tensors are finite (Stage 4 guardrail)."""
+    if not _INFILLER_SANITIZE:
+        return
+    names = ("pred_trans", "pred_betas", "pred_rot", "pred_hand_pose")
+    for name in names:
+        t = getattr(state, name, None)
+        if t is None:
+            continue
+        arr_in = t.detach().cpu().numpy()
+        if arr_in.ndim < 2 or arr_in.shape[0] != 2:
+            continue
+        fixed, n_bad = _forward_fill_hand_time(arr_in)
+        if n_bad > 0 and not QUIET_MODE:
+            vprint(f"[infiller] sanitized {n_bad} non-finite values in {name} (forward-fill + zero tail)")
+        t.copy_(torch.from_numpy(fixed))
 
 
 def infiller_debug(*args, **kwargs):
@@ -303,6 +341,7 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
 
 
 def _save_infiller_result(seq_folder, state, total_windows, window_batch_size, timing, load_cam_space_time):
+    _sanitize_infiller_tensors(state)
     save_path = os.path.join(seq_folder, "world_space_res.pth")
     joblib.dump(
         [state.pred_trans, state.pred_rot, state.pred_hand_pose, state.pred_betas, state.pred_valid],
