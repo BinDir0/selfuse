@@ -1,6 +1,6 @@
 # Dataset Pipeline
 
-This repository now supports a production dataset pipeline that connects raw-source preprocessing, HaWoR stage inference, clip-level annotation, final WebDataset build, and validation.
+This repository now supports a production dataset pipeline that connects raw-source preprocessing, clip-level manifest freezing, annotation sidecars, HaWoR stage inference, quality filtering, final WebDataset build, and validation.
 
 The pipeline is adapter-driven. A new dataset should normally require only:
 
@@ -18,7 +18,9 @@ The stable contract is:
 2. Preprocess emits JPEG tar shard groups plus per-clip `seq_folder` directories.
 3. HaWoR stages run against a frozen clip manifest snapshot.
 4. Annotation is written as one sidecar JSON per clip.
-5. Final build reads the manifest, stage outputs, and sidecars to produce the trainable WebDataset.
+5. HaWoR stages run and produce clip-local outputs under each `seq_folder`.
+6. Optional quality filtering drops bad clips by rewriting the manifest.
+7. Final build reads the filtered manifest, stage outputs, and sidecars to produce the trainable WebDataset.
 
 BuildAI is treated as one source adapter. The intermediate and final contracts are source-agnostic.
 
@@ -132,7 +134,7 @@ Use:
 ```bash
 python scripts/run_dataset_pipeline.py \
   --config configs/dataset_pipeline_buildai.example.yaml \
-  --stages preprocess,manifest,detect_motion,slam,infiller,annotate,build,validate
+  --stages preprocess,manifest,annotate,detect_motion,slam,infiller,filter,build,validate
 ```
 
 The config controls:
@@ -155,6 +157,12 @@ python scripts/build_clip_manifest.py \
 ```
 
 Legacy shard scanning mode is still supported for existing BuildAI-style roots.
+
+### Run Annotation From Manifest
+
+Annotation consumes the frozen manifest only. It does not depend on `detect_motion`, `slam`, `infiller`, or `filter`, so it can be run as soon as `manifest` completes.
+
+The orchestrator passes the base manifest as `{manifest}` to the annotation command template even if later stages switch to a filtered manifest.
 
 ### Run HaWoR Stages From Manifest
 
@@ -214,8 +222,9 @@ Acceptance criteria:
 - The final dataset builder shards by approximate frame budget, but each shard contains whole episodes only.
 - The manifest-based builder does not rely on old BuildAI directory rescans.
 - If annotation is delayed, you can generate the final dataset later from the frozen manifest without rerunning preprocess or HaWoR stages.
-- Built-in adapters now include `buildai`, `image_sequence`, and `video_folder`.
+- Built-in adapters now include `buildai`, `flat_shard`, `image_sequence`, and `video_folder`.
 - Example configs live under:
   - `configs/dataset_pipeline_buildai.example.yaml`
+  - `configs/dataset_pipeline_flat_shard.example.yaml`
   - `configs/dataset_pipeline_image_sequence.example.yaml`
   - `configs/dataset_pipeline_video_folder.example.yaml`
