@@ -280,7 +280,34 @@ def augment_depth(depth_images, noise_scale=0.005, dropout_prob=0.5):
     return depth_images
 
 
-def process_image(image, depth_image=None, intrinsic=None, aug_transform=None, depth_clip_range=None):
+def resize_frames(frames, target_hw, interpolation=Image.BILINEAR):
+    '''Resize a batch of frames to target (H, W).
+
+    Args:
+        frames: np.ndarray, shape [N, H, W, C] (uint8 RGB) or [N, H, W] (depth float32).
+        target_hw: (target_H, target_W).
+        interpolation: PIL resampling filter. Use NEAREST for depth to avoid
+            interpolation artifacts at depth discontinuities.
+    Returns:
+        np.ndarray with the same dtype, resized to target spatial dimensions.
+    '''
+    tH, tW = target_hw
+    if frames.shape[1] == tH and frames.shape[2] == tW:
+        return frames
+    is_depth = frames.ndim == 3
+    mode = 'F' if is_depth else None
+    resized = np.stack([
+        np.array(
+            Image.fromarray(f, mode=mode).resize((tW, tH), interpolation),
+            dtype=frames.dtype,
+        )
+        for f in frames
+    ])
+    return resized
+
+
+def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
+                  depth_clip_range=None, target_size=None):
     '''
     Args:
         image: np.ndarray, shape: [N, H, W, 3], uint8
@@ -288,11 +315,31 @@ def process_image(image, depth_image=None, intrinsic=None, aug_transform=None, d
         intrinsic: np.ndarray or None, shape: [4] — [fx, fy, cx, cy]
         aug_transform: truthy value enables augmentation (the object itself is not called)
         depth_clip_range: [min, max] in meters, or None
+        target_size: (H, W) tuple or None. When set, all frames are resized to
+            this resolution before augmentation. Required when world model
+            (future frame prediction) is enabled so that temporal attention
+            patches align across frames with identical spatial semantics.
     Returns:
         image: np.ndarray, shape: [N, H, W, 3]
         depth_image: np.ndarray or None, shape: [N, H, W], float32 (meters)
         intrinsic: np.ndarray or None, shape: [4]
     '''
+    # Resize to target resolution before any augmentation.
+    if target_size is not None:
+        tH, tW = target_size
+        _, H, W, _ = image.shape
+        if H != tH or W != tW:
+            sx, sy = tW / W, tH / H
+            image = resize_frames(image, target_size, interpolation=Image.BILINEAR)
+            if depth_image is not None:
+                depth_image = resize_frames(depth_image, target_size, interpolation=Image.NEAREST)
+            if intrinsic is not None:
+                intrinsic = intrinsic.copy()
+                intrinsic[0] *= sx  # fx
+                intrinsic[1] *= sy  # fy
+                intrinsic[2] *= sx  # cx
+                intrinsic[3] *= sy  # cy
+
     # Depth stored as uint16 in millimeters; convert to float32 meters.
     # If already float, assume meters and skip conversion.
     if depth_image is not None and depth_image.dtype == np.uint16:

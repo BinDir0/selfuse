@@ -14,7 +14,7 @@ from torchvision import transforms
 
 from src.model.common.normalizer import LinearNormalizer
 from src.utils.pytorch_util import dict_apply
-from .data_transforms import process_state_action, process_image
+from .data_transforms import process_state_action, process_image, resize_frames
 from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from .collator import ConcatDataCollator
 from .wds_dataset import (
@@ -55,6 +55,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
         video_base_fps: float = 30.0,
+        target_image_size: Optional[List[int]] = None,
         debug_capture_raw_sample: bool = False,
         debug_capture_processed_sample: bool = False,
         debug_profile_timing: bool = False,
@@ -74,6 +75,10 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.val_wds_datasets = val_wds_datasets
         self.return_dataset_info = return_dataset_info
         self.video_base_fps = float(video_base_fps)
+        # (H, W) tuple or None. Resize all RGB frames to this resolution
+        # before HF processor. Required when world model is enabled so that
+        # temporal attention patches share identical spatial semantics.
+        self.target_image_size = tuple(target_image_size) if target_image_size else None
         self.debug_capture_raw_sample = bool(debug_capture_raw_sample)
         self.debug_capture_processed_sample = bool(debug_capture_processed_sample)
         self.debug_profile_timing = bool(debug_profile_timing)
@@ -203,6 +208,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             intrinsic,
             self.aug_transform,
             self.depth_clip_range,
+            target_size=self.target_image_size,
         )
         ensure_mapping_finite(
             {"image": image, "depth_images": depth_images},
@@ -338,6 +344,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             future_pad_mode=self.window_config.future_pad_mode,
             lowdim_slices=self.lowdim_slices,
             return_dataset_info=self.return_dataset_info,
+            target_image_size=list(self.target_image_size) if self.target_image_size else None,
             debug_capture_raw_sample=self.debug_capture_raw_sample,
             debug_capture_processed_sample=self.debug_capture_processed_sample,
             debug_profile_timing=self.debug_profile_timing,

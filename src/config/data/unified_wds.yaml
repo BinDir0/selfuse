@@ -1,6 +1,11 @@
 # @package _global_
 
 data:
+  # Target image size [H, W] for resizing all VLA RGB images before HF processor.
+  # When world model (future frame prediction) is enabled, this MUST be set
+  # to ensure temporal attention patches align across frames.
+  # Set to null to skip resizing (original resolution preserved).
+  target_image_size: null
   ignore_index: -100
   max_vlm_tokens: 768
   tokenizer_padding: max_length
@@ -54,6 +59,7 @@ dataset:
     future_pad_mode: truncate
     shuffle_buffer: 4096
     video_base_fps: ${data.video_base_fps}
+    target_image_size: ${data.target_image_size}
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
     wds_datasets: ${vlm_wds_datasets}
