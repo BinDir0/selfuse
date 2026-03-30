@@ -33,11 +33,17 @@ class DummyBackbone(nn.Module):
         self.image_token_id = 100
         self.state_token_id = 101
         self.action_token_id = 102
+        self.future_frame_token_id = 103
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.num_layers = num_layers
         self.tokenizer = type("T", (), {"eos_token_id": 2})()
+        self.base_model = nn.Module()
+        self.base_model.model = nn.Module()
+        self.base_model.model.visual = nn.Module()
+        self.base_model.model.visual.spatial_merge_size = 1
+        self.base_model.model.visual.temporal_patch_size = 1
         self.embed = nn.Embedding(vocab_size, hidden_size, padding_idx=0)
         self.hidden_proj = nn.Linear(hidden_size, hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
@@ -53,6 +59,7 @@ class DummyBackbone(nn.Module):
         mm_token_type_ids,
         state_slot_embeds,
         action_slot_embeds,
+        future_frame_slot_embeds=None,
         state_token_id=None,
         action_token_id=None,
         use_cache=True,
@@ -73,6 +80,11 @@ class DummyBackbone(nn.Module):
             slot = mask.long().cumsum(dim=1) - 1
             idx = slot.clamp(min=0, max=action_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             embeds = torch.where(mask.unsqueeze(-1), torch.gather(action_slot_embeds, 1, idx), embeds)
+        if future_frame_slot_embeds is not None:
+            mask = input_ids == self.future_frame_token_id
+            slot = mask.long().cumsum(dim=1) - 1
+            idx = slot.clamp(min=0, max=future_frame_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
+            embeds = torch.where(mask.unsqueeze(-1), torch.gather(future_frame_slot_embeds, 1, idx), embeds)
 
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
@@ -599,7 +611,7 @@ class TestLossValues:
         model = build_model()
         batch = build_batch()
         output = model("train", batch)
-        assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
+        assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss", "wm_loss"}
 
     def test_total_loss_is_weighted_sum(self):
         """total_loss should equal weighted combination of sub-losses."""
@@ -610,7 +622,8 @@ class TestLossValues:
         expected = (w.ce_loss_weight * output["ce_loss"]
                     + w.diffusion_loss_weight * output["diffusion_loss"]
                     + w.reg_loss_weight * output["reg_loss"]
-                    + w.flow_loss_weight * output["flow_loss"])
+                    + w.flow_loss_weight * output["flow_loss"]
+                    + w.wm_loss_weight * output["wm_loss"])
         torch.testing.assert_close(output["total_loss"], expected, rtol=1e-4, atol=1e-6)
 
     def test_all_losses_finite(self):
@@ -628,3 +641,4 @@ class TestLossValues:
         output = model("train", batch)
         assert output["flow_loss"].item() == 0.0
         assert output["diffusion_loss"].item() == 0.0
+        assert output["wm_loss"].item() == 0.0

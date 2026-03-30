@@ -18,6 +18,7 @@ class DummyBackbone(nn.Module):
         self.image_token_id = 100
         self.state_token_id = 101
         self.action_token_id = 102
+        self.future_frame_token_id = 103
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -26,6 +27,8 @@ class DummyBackbone(nn.Module):
         self.base_model.model = nn.Module()
         self.base_model.model.visual = nn.Module()
         self.base_model.model.visual.blocks = nn.ModuleList([nn.Identity(), nn.Identity()])
+        self.base_model.model.visual.spatial_merge_size = 1
+        self.base_model.model.visual.temporal_patch_size = 1
         self.language_model = nn.Module()
         self.language_model.layers = nn.ModuleList(
             [nn.Linear(hidden_size, hidden_size), nn.Linear(hidden_size, hidden_size)]
@@ -45,6 +48,7 @@ class DummyBackbone(nn.Module):
         mm_token_type_ids,
         state_slot_embeds,
         action_slot_embeds,
+        future_frame_slot_embeds=None,
         state_token_id=None,
         action_token_id=None,
         use_cache=True,
@@ -67,6 +71,12 @@ class DummyBackbone(nn.Module):
             gather_index = action_slot.clamp(min=0, max=action_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             action_values = torch.gather(action_slot_embeds, dim=1, index=gather_index)
             embeds = torch.where(action_mask.unsqueeze(-1), action_values, embeds)
+        if future_frame_slot_embeds is not None:
+            ff_mask = input_ids == self.future_frame_token_id
+            ff_slot = ff_mask.long().cumsum(dim=1) - 1
+            gather_index = ff_slot.clamp(min=0, max=future_frame_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
+            ff_values = torch.gather(future_frame_slot_embeds, dim=1, index=gather_index)
+            embeds = torch.where(ff_mask.unsqueeze(-1), ff_values, embeds)
 
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
@@ -228,7 +238,7 @@ def test_legendvla_scaffold_forward():
     model = make_model(diffloss=None)
     batch = make_vla_batch()
     output = model("train", batch)
-    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
+    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss", "wm_loss"}
     assert output["total_loss"].ndim == 0
 
 
@@ -262,7 +272,7 @@ def test_legendvla_compile_blocks_smoke():
     batch = make_vla_batch(batch_size=1)
     output = model("train", batch)
 
-    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
+    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss", "wm_loss"}
     assert output["total_loss"].ndim == 0
 
 
