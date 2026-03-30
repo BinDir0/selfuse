@@ -187,7 +187,11 @@ class UnifiedVLACollator:
                     if n_obs is None:
                         n_obs = n_obs_cur
                     videos.append(torch.cat([obs, s["future_frames"]], dim=0))
-                processed = processor.video_processor(videos=videos, return_tensors="pt")
+                processed = processor.video_processor(
+                    videos=videos,
+                    return_tensors="pt",
+                    do_sample_frames=False,
+                )
                 pv = processed["pixel_values_videos"]
                 if pv.ndim == 3:
                     pv = pv.reshape(-1, pv.shape[-1])

@@ -34,11 +34,17 @@ class DummyBatchProcessor:
         self.action_token = "<action>"
         self.action_token_id = 102
 
-    def encode_messages(self, messages_batch, batch_samples, add_generation_prompt):
+    def encode_messages(
+        self,
+        messages_batch,
+        batch_samples,
+        add_generation_prompt,
+        return_rendered_texts: bool = False,
+    ):
         del messages_batch
         if add_generation_prompt:
             batch_size = len(batch_samples)
-            return {
+            batch = {
                 "input_ids": torch.tensor([[10, 11]] * batch_size, dtype=torch.long),
                 "attention_mask": torch.tensor([[1, 1]] * batch_size, dtype=torch.long),
                 "pixel_values": torch.randn(batch_size, 3, 8, 8),
@@ -47,22 +53,25 @@ class DummyBatchProcessor:
                 "video_grid_thw": None,
                 "mm_token_type_ids": torch.zeros(batch_size, 2, dtype=torch.long),
             }
-
-        return {
-            "input_ids": torch.tensor([
-                [1, 2, 102, 102, 0],
-                [10, 11, 12, 13, 14],
-            ], dtype=torch.long),
-            "attention_mask": torch.tensor([
-                [1, 1, 1, 1, 0],
-                [1, 1, 1, 1, 1],
-            ], dtype=torch.long),
-            "pixel_values": torch.randn(2, 3, 8, 8),
-            "image_grid_thw": torch.tensor([[1, 2, 2], [1, 2, 2]], dtype=torch.long),
-            "pixel_values_videos": None,
-            "video_grid_thw": None,
-            "mm_token_type_ids": torch.zeros(2, 5, dtype=torch.long),
-        }
+        else:
+            batch = {
+                "input_ids": torch.tensor([
+                    [1, 2, 102, 102, 0],
+                    [10, 11, 12, 13, 14],
+                ], dtype=torch.long),
+                "attention_mask": torch.tensor([
+                    [1, 1, 1, 1, 0],
+                    [1, 1, 1, 1, 1],
+                ], dtype=torch.long),
+                "pixel_values": torch.randn(2, 3, 8, 8),
+                "image_grid_thw": torch.tensor([[1, 2, 2], [1, 2, 2]], dtype=torch.long),
+                "pixel_values_videos": None,
+                "video_grid_thw": None,
+                "mm_token_type_ids": torch.zeros(2, 5, dtype=torch.long),
+            }
+        if return_rendered_texts:
+            batch["rendered_texts"] = ["dummy" for _ in range(len(batch_samples))]
+        return batch
 
     def build_labels(self, input_ids, attention_mask, answer_start_idx):
         labels = input_ids.clone()
@@ -396,6 +405,30 @@ class TestProcessorPromptBuilding:
         text = "Pick Up The CUP"
         clean_text = text.replace(".", "").lower()
         assert clean_text == "Pick Up The CUP".lower()
+
+    def test_future_frame_tokens_follow_temporal_patch_count(self):
+        formatter = Qwen3VLChatFormatter(
+            future_frame_token="<future_frame>",
+            ff_tokens_per_frame=3,
+        )
+        formatter.ff_temporal_patch_size = 2
+        sample = {
+            "is_vla_data": torch.tensor(True),
+            "instruction": "Open drawer",
+            "intrinsic": torch.tensor([1.0, 1.0, 0.5, 0.5]),
+            "n_states": torch.tensor(2, dtype=torch.int32),
+            "n_actions": torch.tensor(2, dtype=torch.int32),
+            "vision_type": "video",
+            "images": torch.zeros(2, 8, 8, 3, dtype=torch.uint8),
+            "video_fps": torch.tensor(15.0),
+            "future_frames": torch.zeros(4, 8, 8, 3, dtype=torch.uint8),
+        }
+
+        messages = formatter.build_messages(sample, prompt_only=False)
+        assistant_text = messages[1]["content"][0]["text"]
+
+        assert assistant_text.startswith("<action><action>")
+        assert assistant_text.count("<future_frame>") == 6
 
 
 # ======================================================================

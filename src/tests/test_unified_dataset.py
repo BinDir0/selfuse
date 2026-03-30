@@ -24,6 +24,7 @@ def make_vla_sample(idx):
         "actions_valid_mask": torch.ones(32, 48, dtype=torch.bool),
         "n_states": torch.tensor(16, dtype=torch.int32),
         "n_actions": torch.tensor(32, dtype=torch.int32),
+        "n_future_frames": torch.tensor(0, dtype=torch.int32),
         "answer_start_idx": torch.tensor(1),
         "is_vla_data": torch.tensor(True),
         "has_depth_values": torch.tensor(False),
@@ -45,7 +46,7 @@ def make_vlm_sample(idx):
 VLA_KEYS = {
     "input_ids", "labels", "attention_mask", "pixel_values",
     "states", "actions", "actions_valid_mask",
-    "n_states", "n_actions", "answer_start_idx",
+    "n_states", "n_actions", "n_future_frames", "answer_start_idx",
     "is_vla_data",
 }
 
@@ -70,6 +71,9 @@ class MockVlaDataset(torch.utils.data.IterableDataset):
         self.window_config = DummyWindowConfig()
         self.action_ndim = 48
         self.depth_image_shape = (4, 4)
+        self.debug_capture_raw_sample = False
+        self.debug_capture_processed_sample = False
+        self.debug_profile_timing = False
 
     def __iter__(self):
         return iter(self.samples)

@@ -24,6 +24,7 @@ def _shape_meta():
             },
         },
         "action": {"shape": [48], "type": "fingertips", "horizon": 4, "stride": 1},
+        "future_frame": {"horizon": 3, "stride": 1},
     }
 
 
@@ -90,7 +91,7 @@ def test_sample_to_data_keeps_truncated_action_shape_metadata():
     mocked_image = np.zeros((1, 4, 4, 3), dtype=np.uint8)
 
     with patch("src.dataset.vla_dataset.process_state_action", return_value=(mocked_state, mocked_action)):
-        with patch("src.dataset.vla_dataset.process_image", return_value=(mocked_image, None)):
+        with patch("src.dataset.vla_dataset.process_image", return_value=(mocked_image, None, sample["intrinsic"])):
             data = dataset.sample_to_data(sample)
 
     assert data["images"].shape == (1, 4, 4, 3)
@@ -125,7 +126,7 @@ def test_sample_to_data_returns_raw_fields_when_collator_is_set():
     mocked_image = np.zeros((1, 4, 4, 3), dtype=np.uint8)
 
     with patch("src.dataset.vla_dataset.process_state_action", return_value=(mocked_state, mocked_action)):
-        with patch("src.dataset.vla_dataset.process_image", return_value=(mocked_image, None)):
+        with patch("src.dataset.vla_dataset.process_image", return_value=(mocked_image, None, sample["intrinsic"])):
             data = dataset.sample_to_data(sample)
 
     assert "input_ids" not in data
@@ -134,6 +135,40 @@ def test_sample_to_data_returns_raw_fields_when_collator_is_set():
     assert data["vision_type"] == "video"
     assert data["video_fps"] == np.array(30.0, dtype=np.float32)
     assert data["n_actions"] == np.array(2, dtype=np.int32)
+
+
+def test_sample_to_data_pads_future_frames_and_tracks_valid_count():
+    dataset = VLAWdsDataset(
+        wds_datasets=[{"name": "demo", "shard_urls": "/tmp/unused/shard-*.tar"}],
+        shape_meta=_shape_meta(),
+        mode="val",
+    )
+    sample = {
+        "wrist_state": np.zeros((2, 18), dtype=np.float32),
+        "hand_state": np.zeros((2, 30), dtype=np.float32),
+        "wrist_action": np.zeros((2, 18), dtype=np.float32),
+        "hand_action": np.zeros((2, 30), dtype=np.float32),
+        "extrinsic": np.eye(4, dtype=np.float32).reshape(-1),
+        "intrinsic": np.ones(4, dtype=np.float32),
+        "instruction": ["pick up object"],
+        "instruction_num": 1,
+        "image": np.zeros((1, 4, 4, 3), dtype=np.uint8),
+        "future_frames": np.full((2, 4, 4, 3), 7, dtype=np.uint8),
+        "valid_future_frame_len": 2,
+    }
+
+    mocked_state = np.zeros((2, 48), dtype=np.float32)
+    mocked_action = np.ones((2, 48), dtype=np.float32)
+    mocked_image = np.zeros((1, 4, 4, 3), dtype=np.uint8)
+
+    with patch("src.dataset.vla_dataset.process_state_action", return_value=(mocked_state, mocked_action)):
+        with patch("src.dataset.vla_dataset.process_image", return_value=(mocked_image, None, sample["intrinsic"])):
+            data = dataset.sample_to_data(sample)
+
+    assert data["future_frames"].shape == (3, 4, 4, 3)
+    assert data["n_future_frames"] == np.array(2, dtype=np.int32)
+    assert np.all(data["future_frames"][:2] == 7)
+    assert np.all(data["future_frames"][2] == 0)
 
 
 def test_build_wds_pipeline_expands_listconfig_globs_into_one_subset(tmp_path):
