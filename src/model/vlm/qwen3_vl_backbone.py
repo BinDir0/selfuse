@@ -289,6 +289,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         state_token: str = "<state>",
         action_token: str = "<action>",
         camera_token: str = "",
+        future_frame_token: str = "",
         use_lora: bool = False,
         lora: dict[str, Any] | None = None,
         use_quantization: bool = False,
@@ -297,6 +298,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         low_cpu_mem_usage: bool = True,
         text_attn_implementation: str = "sdpa",
         vision_attn_implementation: str = "flash_attention_2",
+        mem_temporal_attention: dict[str, Any] | None = None,
     ):
         super().__init__()
         try:
@@ -311,9 +313,12 @@ class Qwen3VLBackboneWrapper(nn.Module):
             trust_remote_code=trust_remote_code,
         )
         tokenizer = processor.tokenizer
-        tokenizer.add_special_tokens({"additional_special_tokens": [state_token, action_token]})
+        special_tokens = [state_token, action_token]
         if camera_token:
-            tokenizer.add_special_tokens({"additional_special_tokens": [camera_token]})
+            special_tokens.append(camera_token)
+        if future_frame_token:
+            special_tokens.append(future_frame_token)
+        tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         resolved_dtype = self._resolve_torch_dtype(torch_dtype)
         quantization_config = None
         if use_quantization:
@@ -374,12 +379,19 @@ class Qwen3VLBackboneWrapper(nn.Module):
         self.camera_token_id = (
             tokenizer.convert_tokens_to_ids(camera_token) if camera_token else None
         )
+        self.future_frame_token_id = (
+            tokenizer.convert_tokens_to_ids(future_frame_token) if future_frame_token else None
+        )
         self.num_heads = text_config.num_attention_heads
         self.num_kv_heads = text_config.num_key_value_heads
         self.head_dim = int(getattr(text_config, "head_dim", self.hidden_size // self.num_heads))
 
         if freeze_backbone:
             self.freeze_non_lora_parameters()
+
+        self.has_mem_blocks = False
+        if mem_temporal_attention and mem_temporal_attention.get("enabled", False):
+            self.inject_mem_temporal_attention(mem_temporal_attention)
 
     def _apply_lora(self, lora_cfg: dict, use_quantization: bool) -> None:
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -468,6 +480,38 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if callable(disable_method):
             disable_method()
 
+    def inject_mem_temporal_attention(self, mem_cfg: dict[str, Any]) -> None:
+        """Replace selected ViT blocks with MEMVisionBlock wrappers for temporal attention.
+
+        Reference: MEM (Torne et al., 2025), arxiv 2603.03596
+        Wraps every N-th block with factorized spatial-then-temporal attention.
+        """
+        from src.model.vision.temporal_attention import MEMVisionBlock, TemporalCausalAttentionPass
+
+        visual = self.base_model.model.visual
+        every_n = int(mem_cfg["every_n_layers"])
+        max_temporal_len = int(mem_cfg.get("max_temporal_len", 32))
+        hidden_size = visual.config.hidden_size
+
+        for i in range(len(visual.blocks)):
+            if (i + 1) % every_n == 0:
+                ta = TemporalCausalAttentionPass(
+                    hidden_size=hidden_size,
+                    max_temporal_len=max_temporal_len,
+                )
+                visual.blocks[i] = MEMVisionBlock(visual.blocks[i], ta)
+        self.has_mem_blocks = True
+
+    def set_mem_grid_thw(self, grid_thw: torch.Tensor | None) -> None:
+        """Set transient grid_thw on all MEMVisionBlock temporal attention modules."""
+        if not self.has_mem_blocks:
+            return
+        from src.model.vision.temporal_attention import MEMVisionBlock
+
+        for block in self.base_model.model.visual.blocks:
+            if isinstance(block, MEMVisionBlock):
+                block.temporal_attn.current_grid_thw = grid_thw
+
     def encode_visual_features(
         self,
         input_ids: torch.LongTensor,
@@ -490,6 +534,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             combined_pv = torch.cat([pixel_values, pixel_values_videos], dim=0)
             combined_grid = torch.cat([image_grid_thw, video_grid_thw], dim=0)
 
+            self.set_mem_grid_thw(combined_grid)
             combined_out = base_model.get_image_features(
                 pixel_values=combined_pv,
                 image_grid_thw=combined_grid,
@@ -535,6 +580,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
 
         # Single-modality paths: only one ViT call needed.
         if has_images:
+            self.set_mem_grid_thw(image_grid_thw)
             image_outputs = base_model.get_image_features(
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
@@ -548,6 +594,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             return inputs_embeds, image_mask[..., 0], image_outputs.deepstack_features
 
         if has_videos:
+            self.set_mem_grid_thw(video_grid_thw)
             video_outputs = base_model.get_video_features(
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
@@ -569,6 +616,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         state_slot_embeds: torch.Tensor | None,
         action_slot_embeds: torch.Tensor | None,
         camera_slot_embeds: torch.Tensor | None = None,
+        future_frame_slot_embeds: torch.Tensor | None = None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
     ) -> torch.Tensor:
@@ -587,6 +635,10 @@ class Qwen3VLBackboneWrapper(nn.Module):
             cam_mask = (input_ids == self.camera_token_id).unsqueeze(-1).expand_as(inputs_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(cam_mask, camera_slot_embeds.to(inputs_embeds.dtype))
 
+        if future_frame_slot_embeds is not None and self.future_frame_token_id is not None:
+            ff_mask = (input_ids == self.future_frame_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(ff_mask, future_frame_slot_embeds.to(inputs_embeds.dtype))
+
         return inputs_embeds
 
     def build_inputs_embeds(
@@ -600,6 +652,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         state_slot_embeds: torch.Tensor | None,
         action_slot_embeds: torch.Tensor | None,
         camera_slot_embeds: torch.Tensor | None = None,
+        future_frame_slot_embeds: torch.Tensor | None = None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
     ) -> BackboneEmbedOutput:
@@ -620,6 +673,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             state_slot_embeds=state_slot_embeds,
             action_slot_embeds=action_slot_embeds,
             camera_slot_embeds=camera_slot_embeds,
+            future_frame_slot_embeds=future_frame_slot_embeds,
             state_token_id=state_token_id,
             action_token_id=action_token_id,
         )
@@ -641,6 +695,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         state_slot_embeds: torch.Tensor | None,
         action_slot_embeds: torch.Tensor | None,
         camera_slot_embeds: torch.Tensor | None = None,
+        future_frame_slot_embeds: torch.Tensor | None = None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
         use_cache: bool = False,
@@ -659,6 +714,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             state_slot_embeds=state_slot_embeds,
             action_slot_embeds=action_slot_embeds,
             camera_slot_embeds=camera_slot_embeds,
+            future_frame_slot_embeds=future_frame_slot_embeds,
             state_token_id=state_token_id,
             action_token_id=action_token_id,
         )
