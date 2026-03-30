@@ -72,11 +72,21 @@ def build_clip_manifest_records(
     *,
     source_id: str,
     split: str,
+    seq_folder_root: str | Path | None = None,
 ) -> List[ClipManifestRecord]:
     from lib.pipeline.video_index import collect_videos_from_factories
 
     descriptors = collect_videos_from_factories(list(shard_dirs))
+    if seq_folder_root is not None:
+        remap_descriptor_seq_folders(descriptors, seq_folder_root)
     return build_manifest_records_from_descriptors(descriptors, source_id=source_id, split=split)
+
+
+def remap_descriptor_seq_folders(descriptors, seq_folder_root: str | Path):
+    seq_root = Path(seq_folder_root)
+    for descriptor in descriptors:
+        factory_name = Path(descriptor.root_dir).name
+        descriptor.seq_folder = str((seq_root / factory_name / "outputs" / descriptor.clip_id).resolve())
 
 
 def build_manifest_records_from_descriptors(

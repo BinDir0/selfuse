@@ -25,6 +25,14 @@ def get_parser():
     parser.add_argument("--mano_device", type=str, default="cuda:0", help="Device for MANO forward pass")
     parser.add_argument("--mano_gpus", type=str, default=None, help="Optional comma-separated GPU list for MANO workers")
     parser.add_argument("--mano_dir", type=str, default=None, help="Optional MANO model directory")
+    parser.add_argument("--source_fps", type=float, default=5.0, help="FPS of the existing stage outputs referenced by seq_folder")
+    parser.add_argument("--target_fps", type=float, default=30.0, help="FPS of the RGB frames referenced by descriptor_manifest")
+    parser.add_argument(
+        "--interpolate_labels",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Interpolate source labels onto descriptor frames instead of truncating to the source sequence length",
+    )
     return parser
 
 
@@ -45,6 +53,9 @@ def main():
         mano_device=args.mano_device,
         mano_gpus=args.mano_gpus,
         mano_dir=args.mano_dir,
+        source_fps=args.source_fps,
+        target_fps=args.target_fps,
+        interpolate_labels=args.interpolate_labels,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

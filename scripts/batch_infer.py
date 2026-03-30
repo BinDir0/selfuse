@@ -26,7 +26,11 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*pkg_resources.*")
 warnings.filterwarnings("ignore", message=".*timm.models.layers.*")
 
-SHARED_TMP_DIR = Path("/share_data/guantianrui/tmp")
+_env_tmp = os.environ.get("HAWOR_BATCH_TMPDIR")
+if _env_tmp:
+    SHARED_TMP_DIR = Path(_env_tmp).expanduser().resolve()
+else:
+    SHARED_TMP_DIR = (PROJECT_ROOT / ".tmp").resolve()
 SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
 os.environ["TEMP"] = str(SHARED_TMP_DIR)

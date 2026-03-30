@@ -37,24 +37,43 @@ _worker_feature_cache_dir = None
 _worker_episode_cache = {}
 _worker_shard_fd_cache = {}
 _worker_shard_tar_cache = {}
+_worker_interpolate_labels = True
+_worker_source_fps = 5.0
+_worker_target_fps = 30.0
 
 
-def _feature_cache_path(seq_folder: str, feature_cache_dir: str) -> str:
-    digest = hashlib.md5(seq_folder.encode("utf-8")).hexdigest()
+def _feature_cache_path(seq_folder: str, frame_count: int, feature_cache_dir: str, *, interpolate_labels: bool, source_fps: float, target_fps: float) -> str:
+    cache_key = f"{seq_folder}|{frame_count}|interp={int(interpolate_labels)}|src={source_fps:.6f}|dst={target_fps:.6f}"
+    digest = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
     return os.path.join(feature_cache_dir, f"{digest}.joblib")
 
 
-def _load_cached_features(seq_folder: str, frame_count: int, feature_cache_dir: str):
+def _load_cached_features(seq_folder: str, frame_count: int, feature_cache_dir: str, *, interpolate_labels: bool, source_fps: float, target_fps: float):
     if not feature_cache_dir:
         return None
-    path = _feature_cache_path(seq_folder, feature_cache_dir)
+    path = _feature_cache_path(
+        seq_folder,
+        frame_count,
+        feature_cache_dir,
+        interpolate_labels=interpolate_labels,
+        source_fps=source_fps,
+        target_fps=target_fps,
+    )
     if not os.path.exists(path):
         return None
     try:
         payload = joblib.load(path)
     except Exception:
         return None
+    if payload.get("cache_version") != 2:
+        return None
     if payload.get("seq_folder") != seq_folder or payload.get("frame_count") != frame_count:
+        return None
+    if bool(payload.get("interpolate_labels", False)) != bool(interpolate_labels):
+        return None
+    if float(payload.get("source_fps", 0.0)) != float(source_fps):
+        return None
+    if float(payload.get("target_fps", 0.0)) != float(target_fps):
         return None
     return {
         "frame_count": payload["frame_count"],
@@ -63,17 +82,37 @@ def _load_cached_features(seq_folder: str, frame_count: int, feature_cache_dir: 
     }
 
 
-def _write_cached_features(seq_folder: str, feature_cache_dir: str, episode_data: dict):
+def _write_cached_features(
+    seq_folder: str,
+    frame_count: int,
+    feature_cache_dir: str,
+    episode_data: dict,
+    *,
+    interpolate_labels: bool,
+    source_fps: float,
+    target_fps: float,
+):
     if not feature_cache_dir:
         return
     os.makedirs(feature_cache_dir, exist_ok=True)
-    path = _feature_cache_path(seq_folder, feature_cache_dir)
+    path = _feature_cache_path(
+        seq_folder,
+        frame_count,
+        feature_cache_dir,
+        interpolate_labels=interpolate_labels,
+        source_fps=source_fps,
+        target_fps=target_fps,
+    )
     tmp_path = f"{path}.tmp.{os.getpid()}"
     payload = {
+        "cache_version": 2,
         "seq_folder": seq_folder,
         "frame_count": episode_data["frame_count"],
         "lowdim_all": episode_data["lowdim_all"],
         "presence_per_frame": episode_data["presence_per_frame"].astype(np.uint8),
+        "interpolate_labels": bool(interpolate_labels),
+        "source_fps": float(source_fps),
+        "target_fps": float(target_fps),
     }
     try:
         joblib.dump(payload, tmp_path)
@@ -83,10 +122,72 @@ def _write_cached_features(seq_folder: str, feature_cache_dir: str, episode_data
             os.remove(tmp_path)
 
 
-def load_descriptor_episode_features(ep: dict, mano_right, mano_left, device, feature_cache_dir: str | None):
+def _make_uniform_timestamps(frame_count: int, fps: float) -> np.ndarray:
+    if frame_count <= 0:
+        return np.empty((0,), dtype=np.float32)
+    return np.arange(frame_count, dtype=np.float32) / np.float32(fps)
+
+
+def _resample_linear(values, target_count: int, *, source_fps: float, target_fps: float) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    if target_count <= 0 or values.shape[0] == 0:
+        return np.empty((0,) + tuple(values.shape[1:]), dtype=np.float32)
+    if values.shape[0] == target_count and float(source_fps) == float(target_fps):
+        return values.astype(np.float32, copy=False)
+    if values.shape[0] == 1:
+        return np.repeat(values.astype(np.float32, copy=False), target_count, axis=0)
+
+    source_times = _make_uniform_timestamps(values.shape[0], source_fps)
+    target_times = np.clip(
+        _make_uniform_timestamps(target_count, target_fps),
+        source_times[0],
+        source_times[-1],
+    )
+    flat = values.reshape(values.shape[0], -1)
+    out = np.empty((target_count, flat.shape[1]), dtype=np.float32)
+    for dim_idx in range(flat.shape[1]):
+        out[:, dim_idx] = np.interp(target_times, source_times, flat[:, dim_idx])
+    return out.reshape((target_count,) + tuple(values.shape[1:]))
+
+
+def _resample_nearest(values, target_count: int, *, source_fps: float, target_fps: float) -> np.ndarray:
+    values = np.asarray(values)
+    if target_count <= 0 or values.shape[0] == 0:
+        return np.empty((0,) + tuple(values.shape[1:]), dtype=values.dtype)
+    if values.shape[0] == target_count and float(source_fps) == float(target_fps):
+        return values
+
+    target_times = _make_uniform_timestamps(target_count, target_fps)
+    nearest_idx = np.rint(target_times * np.float32(source_fps)).astype(np.int64)
+    nearest_idx = np.clip(nearest_idx, 0, values.shape[0] - 1)
+    return values[nearest_idx]
+
+
+def load_descriptor_episode_features(
+    ep: dict,
+    mano_right,
+    mano_left,
+    device,
+    feature_cache_dir: str | None,
+    *,
+    interpolate_labels: bool,
+    source_fps: float,
+    target_fps: float,
+):
     seq_folder = ep["seq_folder"]
     frame_count = int(ep.get("num_valid_frames", ep["frame_end"] - ep.get("frame_start", 0)))
-    cached = _load_cached_features(seq_folder, frame_count, feature_cache_dir) if feature_cache_dir else None
+    cached = (
+        _load_cached_features(
+            seq_folder,
+            frame_count,
+            feature_cache_dir,
+            interpolate_labels=interpolate_labels,
+            source_fps=source_fps,
+            target_fps=target_fps,
+        )
+        if feature_cache_dir
+        else None
+    )
     if cached is not None:
         return cached
 
@@ -99,12 +200,15 @@ def load_descriptor_episode_features(ep: dict, mano_right, mano_left, device, fe
     pred_hand_pose = prediction["pred_hand_pose"]
     pred_betas = prediction["pred_betas"]
     pred_valid = prediction["pred_valid"]
-    num_frames = int(pred_trans.shape[1])
-    frame_count = min(frame_count, num_frames)
-    if frame_count <= 0:
+    source_frame_count = int(pred_trans.shape[1])
+    if source_frame_count <= 0 or frame_count <= 0:
         return None
+    if not interpolate_labels:
+        frame_count = min(frame_count, source_frame_count)
+        if frame_count <= 0:
+            return None
 
-    wrist_state = _compute_wrist_state(pred_trans, pred_rot)[:frame_count]
+    wrist_state = _compute_wrist_state(pred_trans, pred_rot)[:source_frame_count]
     hand_state = _compute_hand_state(
         pred_trans,
         pred_rot,
@@ -113,14 +217,50 @@ def load_descriptor_episode_features(ep: dict, mano_right, mano_left, device, fe
         mano_right,
         mano_left,
         device,
-    )[:frame_count]
+    )[:source_frame_count]
     camera_ep = {"crop_dir": seq_folder, "episode_id": ep["episode_id"]}
-    extrinsics, intrinsic = _load_episode_camera_features(camera_ep, num_frames)
-    presence_per_frame = _compute_presence_per_frame(pred_valid, num_frames)[:frame_count]
+    extrinsics, intrinsic = _load_episode_camera_features(camera_ep, source_frame_count)
+    presence_per_frame = _compute_presence_per_frame(pred_valid, source_frame_count)[:source_frame_count]
+
+    if interpolate_labels:
+        wrist_state = torch.from_numpy(
+            _resample_linear(
+                wrist_state.cpu().numpy(),
+                frame_count,
+                source_fps=source_fps,
+                target_fps=target_fps,
+            )
+        )
+        hand_state = torch.from_numpy(
+            _resample_linear(
+                hand_state.cpu().numpy(),
+                frame_count,
+                source_fps=source_fps,
+                target_fps=target_fps,
+            )
+        )
+        extrinsics = _resample_linear(
+            extrinsics,
+            frame_count,
+            source_fps=source_fps,
+            target_fps=target_fps,
+        )
+        presence_per_frame = _resample_nearest(
+            presence_per_frame,
+            frame_count,
+            source_fps=source_fps,
+            target_fps=target_fps,
+        )
+    else:
+        wrist_state = wrist_state[:frame_count]
+        hand_state = hand_state[:frame_count]
+        extrinsics = extrinsics[:frame_count]
+        presence_per_frame = presence_per_frame[:frame_count]
+
     lowdim_all = _build_lowdim_features(
         wrist_state,
         hand_state,
-        extrinsics[:frame_count],
+        extrinsics,
         intrinsic,
     )
 
@@ -129,7 +269,15 @@ def load_descriptor_episode_features(ep: dict, mano_right, mano_left, device, fe
         "lowdim_all": lowdim_all[:frame_count],
         "presence_per_frame": presence_per_frame[:frame_count],
     }
-    _write_cached_features(seq_folder, feature_cache_dir, episode_data)
+    _write_cached_features(
+        seq_folder,
+        frame_count,
+        feature_cache_dir,
+        episode_data,
+        interpolate_labels=interpolate_labels,
+        source_fps=source_fps,
+        target_fps=target_fps,
+    )
     return episode_data
 
 
@@ -216,10 +364,11 @@ def add_sample_bytes_to_tar(tar_writer, key: str, image_bytes: bytes, lowdim, me
     tar_writer.addfile(meta_info, io.BytesIO(meta_bytes))
 
 
-def _worker_init(device_specs, mano_dir, feature_cache_dir):
+def _worker_init(device_specs, mano_dir, feature_cache_dir, interpolate_labels, source_fps, target_fps):
     global _worker_mano_right, _worker_mano_left, _worker_device
     global _worker_feature_cache_dir, _worker_episode_cache
     global _worker_shard_fd_cache, _worker_shard_tar_cache
+    global _worker_interpolate_labels, _worker_source_fps, _worker_target_fps
 
     identity = current_process()._identity
     worker_idx = identity[0] - 1 if identity else 0
@@ -232,6 +381,9 @@ def _worker_init(device_specs, mano_dir, feature_cache_dir):
     _worker_episode_cache = {}
     _worker_shard_fd_cache = {}
     _worker_shard_tar_cache = {}
+    _worker_interpolate_labels = bool(interpolate_labels)
+    _worker_source_fps = float(source_fps)
+    _worker_target_fps = float(target_fps)
 
 
 def _worker_process_shard(task):
@@ -250,6 +402,9 @@ def _worker_process_shard(task):
                     _worker_mano_left,
                     _worker_device,
                     _worker_feature_cache_dir,
+                    interpolate_labels=_worker_interpolate_labels,
+                    source_fps=_worker_source_fps,
+                    target_fps=_worker_target_fps,
                 )
 
             episode_data = _worker_episode_cache[cache_key]
@@ -314,7 +469,12 @@ def _worker_process_shard(task):
     }
 
 
-def _prepare_manifest_episode(record: ClipManifestRecord, require_annotation: bool, annotation_root: str | None):
+def _prepare_manifest_episode(
+    record: ClipManifestRecord,
+    require_annotation: bool,
+    annotation_root: str | None,
+    interpolate_labels: bool,
+):
     seq_folder = Path(record.descriptor.seq_folder)
     world_res_path = seq_folder / "world_space_res.pth"
     if not world_res_path.exists():
@@ -325,7 +485,11 @@ def _prepare_manifest_episode(record: ClipManifestRecord, require_annotation: bo
     except Exception:
         return None, "invalid_world_res"
 
-    num_frames = min(int(np.asarray(pred_trans).shape[1]), record.descriptor.frame_count)
+    source_frame_count = int(np.asarray(pred_trans).shape[1])
+    if interpolate_labels:
+        num_frames = int(record.descriptor.frame_count)
+    else:
+        num_frames = min(source_frame_count, record.descriptor.frame_count)
     if num_frames <= 0:
         return None, "empty_frames"
 
@@ -348,6 +512,7 @@ def _prepare_manifest_episode(record: ClipManifestRecord, require_annotation: bo
         "split": record.split,
         "descriptor": record.descriptor,
         "num_valid_frames": num_frames,
+        "source_frame_count": source_frame_count,
         "instruction": instruction,
         "instruction_num": len(instruction),
         "language": language,
@@ -361,6 +526,7 @@ def prepare_manifest_episodes(
     require_annotation: bool,
     max_episodes: int | None,
     preprocess_workers: int,
+    interpolate_labels: bool,
 ):
     records = load_clip_manifest(manifest_path)
     if max_episodes is not None:
@@ -378,13 +544,16 @@ def prepare_manifest_episodes(
     }
 
     if preprocess_workers <= 1:
-        iterator = (_prepare_manifest_episode(record, require_annotation, annotation_root) for record in records)
+        iterator = (
+            _prepare_manifest_episode(record, require_annotation, annotation_root, interpolate_labels)
+            for record in records
+        )
     else:
         mp_context = get_context()
         pool = mp_context.Pool(preprocess_workers)
         iterator = pool.imap(
             _prepare_manifest_episode_star,
-            ((record, require_annotation, annotation_root) for record in records),
+            ((record, require_annotation, annotation_root, interpolate_labels) for record in records),
             chunksize=32,
         )
 
@@ -423,13 +592,19 @@ def run_manifest_build(
     mano_device: str,
     mano_gpus: str | None,
     mano_dir: str | None,
+    source_fps: float,
+    target_fps: float,
+    interpolate_labels: bool,
 ):
+    if source_fps <= 0 or target_fps <= 0:
+        raise ValueError("source_fps and target_fps must be > 0")
     episodes, prepare_stats = prepare_manifest_episodes(
         manifest_path,
         annotation_root=annotation_root,
         require_annotation=require_annotation,
         max_episodes=max_episodes,
         preprocess_workers=preprocess_workers,
+        interpolate_labels=interpolate_labels,
     )
     if not episodes:
         raise RuntimeError(f"No valid manifest episodes found: {prepare_stats}")
@@ -458,14 +633,14 @@ def run_manifest_build(
     }
 
     if writer_workers <= 1:
-        _worker_init(mano_device_specs, mano_dir, feature_cache_dir)
+        _worker_init(mano_device_specs, mano_dir, feature_cache_dir, interpolate_labels, source_fps, target_fps)
         result_iter = (_worker_process_shard(task) for task in shard_tasks)
     else:
         mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
         pool = mp_context.Pool(
             writer_workers,
             initializer=_worker_init,
-            initargs=(mano_device_specs, mano_dir, feature_cache_dir),
+            initargs=(mano_device_specs, mano_dir, feature_cache_dir, interpolate_labels, source_fps, target_fps),
         )
         result_iter = pool.imap_unordered(_worker_process_shard, shard_tasks)
 
@@ -485,4 +660,9 @@ def run_manifest_build(
         "totals": totals,
         "planned_shards": len(shard_tasks),
         "planned_frames": sum(ep["num_valid_frames"] for ep in repeated),
+        "label_upsampling": {
+            "enabled": bool(interpolate_labels),
+            "source_fps": float(source_fps),
+            "target_fps": float(target_fps),
+        },
     }

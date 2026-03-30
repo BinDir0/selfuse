@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import tarfile
 import time
 from multiprocessing import get_context
 from pathlib import Path
@@ -119,6 +120,12 @@ def build_parser():
         help="Precompute per-episode lowdim features before shard writing to improve GPU utilization and rerun speed",
     )
     parser.add_argument("--writer_workers", type=int, default=8, help="Number of parallel shard writers")
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip already completed shards after validating their tar contents",
+    )
     parser.add_argument("--shard_manifest_out", default=None, help="Optional JSON manifest of planned shards")
     parser.add_argument("--auto_infill", action="store_true", help="Run infill for missing world_space_res.pth")
     parser.add_argument(
@@ -437,17 +444,105 @@ def print_writer_config(writer_workers, mano_device_specs):
         print(f"Writing shards with {writer_workers} worker(s) on MANO device {mano_device_specs[0]}...")
 
 
-def run_shard_writers(shard_tasks, writer_workers, mano_device, mano_device_specs, args, feature_cache_dir):
+def _validate_completed_shard(task):
+    output_path = task["output_path"]
+    expected_frames = int(task["frame_count"])
+    if not os.path.exists(output_path):
+        return False
+    if expected_frames <= 0:
+        return True
+
+    image_keys = set()
+    lowdim_keys = set()
+    meta_keys = set()
+    image_count = 0
+    lowdim_count = 0
+    meta_count = 0
+
+    try:
+        with tarfile.open(output_path, "r") as tar_reader:
+            for member in tar_reader:
+                if not member.isfile():
+                    continue
+                name = member.name
+                if name.endswith(".image.jpg"):
+                    image_count += 1
+                    image_keys.add(name[: -len(".image.jpg")])
+                elif name.endswith(".lowdim.npy"):
+                    lowdim_count += 1
+                    lowdim_keys.add(name[: -len(".lowdim.npy")])
+                elif name.endswith(".meta.json"):
+                    meta_count += 1
+                    meta_keys.add(name[: -len(".meta.json")])
+    except (OSError, tarfile.TarError):
+        return False
+
+    if image_count != expected_frames or lowdim_count != expected_frames or meta_count != expected_frames:
+        return False
+    if len(image_keys) != expected_frames or len(lowdim_keys) != expected_frames or len(meta_keys) != expected_frames:
+        return False
+    return image_keys == lowdim_keys == meta_keys
+
+
+def _split_completed_shards(shard_tasks, resume):
+    if not resume:
+        return [], list(shard_tasks)
+
+    completed = []
+    pending = []
+    for task in tqdm(shard_tasks, desc="Resume scan"):
+        if _validate_completed_shard(task):
+            completed.append(task)
+        else:
+            pending.append(task)
+
+    completed_frames = sum(int(task["frame_count"]) for task in completed)
+    print(
+        f"Resume scan: reuse {len(completed)} completed shard(s)"
+        f" / {completed_frames} frame(s); rebuild {len(pending)} shard(s)"
+    )
+    return completed, pending
+
+
+def _collect_pending_episode_stats(episode_stats, pending_shard_tasks):
+    pending_crop_dirs = {
+        episode_slice["crop_dir"]
+        for task in pending_shard_tasks
+        for episode_slice in task["episode_slices"]
+    }
+    return [ep for ep in episode_stats if ep["crop_dir"] in pending_crop_dirs]
+
+
+def run_shard_writers(
+    shard_tasks,
+    writer_workers,
+    mano_device,
+    mano_device_specs,
+    args,
+    feature_cache_dir,
+    completed_shards=None,
+    pending_shard_tasks=None,
+):
     """Execute shard writers and aggregate progress."""
+    if completed_shards is None or pending_shard_tasks is None:
+        completed_shards, pending_shard_tasks = _split_completed_shards(shard_tasks, args.resume)
     totals = {
-        "total_frames": 0,
-        "total_shards": 0,
+        "total_frames": sum(int(task["frame_count"]) for task in completed_shards),
+        "total_shards": len(completed_shards),
         "total_episodes_written": 0,
         "total_skipped": 0,
         "total_shard_elapsed_sec": 0.0,
+        "reused_shards": len(completed_shards),
+        "reused_frames": sum(int(task["frame_count"]) for task in completed_shards),
     }
+    if not pending_shard_tasks:
+        print("All planned shards are already complete; nothing to rebuild.")
+        return totals
+
     pool = None
     started_at = time.perf_counter()
+    built_frames = 0
+    built_shards = 0
 
     if writer_workers <= 1:
         _worker_init(
@@ -458,7 +553,7 @@ def run_shard_writers(shard_tasks, writer_workers, mano_device, mano_device_spec
             require_feature_cache=bool(feature_cache_dir and args.precompute_features),
             eager_model_init=not bool(feature_cache_dir and args.precompute_features),
         )
-        results_iter = (_worker_process_shard(task) for task in shard_tasks)
+        results_iter = (_worker_process_shard(task) for task in pending_shard_tasks)
     else:
         mp_context = get_context("spawn") if mano_device.type == "cuda" else get_context()
         pool = mp_context.Pool(
@@ -473,20 +568,22 @@ def run_shard_writers(shard_tasks, writer_workers, mano_device, mano_device_spec
                 not bool(feature_cache_dir and args.precompute_features),
             ),
         )
-        results_iter = pool.imap_unordered(_worker_process_shard, shard_tasks)
+        results_iter = pool.imap_unordered(_worker_process_shard, pending_shard_tasks)
 
     try:
-        with tqdm(results_iter, total=len(shard_tasks), desc="Shards") as pbar:
+        with tqdm(results_iter, total=len(pending_shard_tasks), desc="Shards") as pbar:
             for result in pbar:
                 totals["total_frames"] += result["frames_written"]
                 totals["total_shards"] += 1 if result["frames_written"] > 0 else 0
                 totals["total_episodes_written"] += result["episodes_written"]
                 totals["total_skipped"] += result["skipped_episodes"]
                 totals["total_shard_elapsed_sec"] += float(result.get("elapsed_sec", 0.0))
+                built_frames += result["frames_written"]
+                built_shards += 1 if result["frames_written"] > 0 else 0
                 elapsed = max(time.perf_counter() - started_at, 1e-6)
                 pbar.set_postfix(
-                    shard_s=f"{totals['total_shards'] / elapsed:.2f}",
-                    frame_s=f"{totals['total_frames'] / elapsed:.1f}",
+                    shard_s=f"{built_shards / elapsed:.2f}",
+                    frame_s=f"{built_frames / elapsed:.1f}",
                     last_s=f"{float(result.get('elapsed_sec', 0.0)):.2f}",
                 )
     finally:
@@ -496,9 +593,9 @@ def run_shard_writers(shard_tasks, writer_workers, mano_device, mano_device_spec
 
     elapsed = max(time.perf_counter() - started_at, 1e-6)
     print(
-        f"Shard throughput: {totals['total_shards'] / elapsed:.2f} shard/s, "
-        f"{totals['total_frames'] / elapsed:.1f} frame/s, "
-        f"avg shard worker time={totals['total_shard_elapsed_sec'] / max(len(shard_tasks), 1):.2f}s"
+        f"Shard throughput: {built_shards / elapsed:.2f} shard/s, "
+        f"{built_frames / elapsed:.1f} frame/s, "
+        f"avg shard worker time={totals['total_shard_elapsed_sec'] / max(len(pending_shard_tasks), 1):.2f}s"
     )
     return totals
 
@@ -508,6 +605,8 @@ def print_summary(output_dir, totals):
     print("\nDone!")
     print(f"  Episodes touched: {totals['total_episodes_written']}")
     print(f"  Skipped episode slices: {totals['total_skipped']}")
+    print(f"  Reused shards: {totals.get('reused_shards', 0)}")
+    print(f"  Reused frames: {totals.get('reused_frames', 0)}")
     print(f"  Frames: {totals['total_frames']}")
     print(f"  Shards: {totals['total_shards']}")
     print(f"  Output: {output_dir}")
@@ -540,10 +639,12 @@ def main():
     shard_tasks = plan_shards(episode_stats, args.frames_per_shard, args.output_dir)
     print(f"Planned {len(shard_tasks)} shards from {sum(ep['num_valid_frames'] for ep in episode_stats)} frames")
     write_shard_manifest(shard_tasks, args.shard_manifest_out)
+    completed_shards, pending_shard_tasks = _split_completed_shards(shard_tasks, args.resume)
+    pending_episode_stats = _collect_pending_episode_stats(episode_stats, pending_shard_tasks)
 
     mano_device, mano_device_specs, writer_workers = resolve_mano_runtime(args, writer_workers)
     precompute_started_at = time.perf_counter()
-    precompute_stats = precompute_episode_features(episode_stats, mano_device_specs, args, feature_cache_dir)
+    precompute_stats = precompute_episode_features(pending_episode_stats, mano_device_specs, args, feature_cache_dir)
     precompute_elapsed = time.perf_counter() - precompute_started_at
     feature_cache_precomputed = bool(feature_cache_dir and args.precompute_features)
     if precompute_stats is not None and precompute_stats["episodes_failed"] > 0:
@@ -561,6 +662,8 @@ def main():
         mano_device_specs,
         args,
         feature_cache_dir,
+        completed_shards=completed_shards,
+        pending_shard_tasks=pending_shard_tasks,
     )
     build_elapsed = time.perf_counter() - build_started_at
     print_summary(args.output_dir, totals)

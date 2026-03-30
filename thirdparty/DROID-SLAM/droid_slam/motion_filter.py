@@ -82,7 +82,7 @@ class MotionFilter:
             _, delta, weight = self.update(self.net[None], self.inp[None], corr)
 
             # check motion magnitue / add new frame to video
-            if (delta.norm(dim=-1).mean() > self.thresh).item():
+            if delta.norm(dim=-1).mean().item() > self.thresh:
                 self.count = 0
                 net, inp = self.__context_encoder(inputs[:,[0]])
                 self.net, self.inp, self.fmap = net, inp, gmap

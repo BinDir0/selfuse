@@ -23,7 +23,11 @@ def _configure_process_environment():
     warnings.filterwarnings("ignore", message=".*timm.models.layers.*")
     warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
 
-    shared_tmp_dir = Path("/share_data/guantianrui/tmp")
+    env_tmp = os.environ.get("HAWOR_BATCH_TMPDIR")
+    if env_tmp:
+        shared_tmp_dir = Path(env_tmp).expanduser().resolve()
+    else:
+        shared_tmp_dir = (PROJECT_ROOT / ".tmp").resolve()
     shared_tmp_dir.mkdir(parents=True, exist_ok=True)
     os.environ["TMPDIR"] = str(shared_tmp_dir)
     os.environ["TEMP"] = str(shared_tmp_dir)

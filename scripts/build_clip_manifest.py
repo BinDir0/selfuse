@@ -25,6 +25,12 @@ def get_parser():
     parser.add_argument("--include_dirs", type=str, nargs="*", default=None, help="Optional shard-group directory names to include")
     parser.add_argument("--manifest_out", type=str, required=True, help="Output JSONL manifest path")
     parser.add_argument("--shard_dirs_out", type=str, default=None, help="Optional output text file listing resolved shard dirs")
+    parser.add_argument(
+        "--seq_folder_root",
+        type=str,
+        default=None,
+        help="Optional root containing <factory>/outputs/<clip_id> stage outputs to override descriptor.seq_folder",
+    )
     return parser
 
 
@@ -38,6 +44,7 @@ def main():
         build_clip_manifest_records,
         build_manifest_records_from_descriptors,
         discover_shard_dirs,
+        remap_descriptor_seq_folders,
         write_clip_manifest,
         write_shard_dir_list,
     )
@@ -64,6 +71,8 @@ def main():
                 prepared=None,
             )
         )
+        if args.seq_folder_root:
+            remap_descriptor_seq_folders(descriptors, args.seq_folder_root)
         records = build_manifest_records_from_descriptors(
             descriptors,
             source_id=source_id,
@@ -93,6 +102,7 @@ def main():
             shard_dirs,
             source_id=args.source_id,
             split=args.split,
+            seq_folder_root=args.seq_folder_root,
         )
     if not records:
         raise RuntimeError("No clips found while building manifest")

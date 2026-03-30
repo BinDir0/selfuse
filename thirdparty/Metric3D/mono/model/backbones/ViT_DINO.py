@@ -245,13 +245,10 @@ class SwiGLUFFNFused(SwiGLU):
 
 try:
     from xformers.ops import memory_efficient_attention, unbind, fmha
-    from xformers.components.attention import ScaledDotProduct
-    from xformers.components import MultiHeadDispatch
-    #import numpy.bool
-    XFORMERS_AVAILABLE = True
+    XFORMERS_MEMEFF_AVAILABLE = True
 except ImportError:
     logger.warning("xFormers not available")
-    XFORMERS_AVAILABLE = False
+    XFORMERS_MEMEFF_AVAILABLE = False
 
 
 class Attention(nn.Module):
@@ -301,7 +298,7 @@ class Attention(nn.Module):
 
 class MemEffAttention(Attention):
     def forward(self, x: Tensor, attn_bias=None) -> Tensor:
-        if not XFORMERS_AVAILABLE:
+        if not XFORMERS_MEMEFF_AVAILABLE:
         #if True:
             assert attn_bias is None, "xFormers is required for nested tensors usage"
             return super().forward(x, attn_bias)
@@ -321,13 +318,13 @@ class MemEffAttention(Attention):
         return x
 
 try:
-    from xformers.ops import fmha
     from xformers.ops import scaled_index_add, index_select_cat
-    #import numpy.bool
-    XFORMERS_AVAILABLE = True
+    XFORMERS_NESTED_AVAILABLE = bool(XFORMERS_MEMEFF_AVAILABLE)
 except ImportError:
     logger.warning("xFormers not available")
-    XFORMERS_AVAILABLE = False
+    XFORMERS_NESTED_AVAILABLE = False
+
+XFORMERS_AVAILABLE = XFORMERS_MEMEFF_AVAILABLE
 
 class Block(nn.Module):
     def __init__(
@@ -543,7 +540,7 @@ class NestedTensorBlock(Block):
         if isinstance(x_or_x_list, Tensor):
             return super().forward(x_or_x_list, attn_bias)
         elif isinstance(x_or_x_list, list):
-            assert XFORMERS_AVAILABLE, "Please install xFormers for nested tensors usage"
+            assert XFORMERS_NESTED_AVAILABLE, "Please install xFormers for nested tensors usage"
             return self.forward_nested(x_or_x_list)
         else:
             raise AssertionError
