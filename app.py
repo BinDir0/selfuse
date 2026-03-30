@@ -3,6 +3,7 @@ import gradio as gr
 import os
 import sys
 import subprocess
+import shutil
 import joblib
 from collections import deque
 from pathlib import Path
@@ -91,8 +92,8 @@ def render_reconstruction_progress(input_video, img_focal):
         "Infiller",
     )
 
-    detail_orig_hidden = gr.update(visible=False)
-    detail_cam_hidden = gr.update(visible=False)
+    detail_orig_hidden = None
+    detail_cam_hidden = None
 
     def yield_ui(
         s1, s2, s3, s4, status_html: str, detail_video_original, detail_video_cam
@@ -129,14 +130,26 @@ def render_reconstruction_progress(input_video, img_focal):
     # Keep UI simple: single GPU by default
     gpus = "0"
 
-    # Temporary run folder for batch_infer logs/status
-    # Put UI run logs/status under repo-local `.tmp/` (already gitignored),
-    # so we don't create `batch_ui_runs/` artifacts.
-    run_root = repo_root / ".tmp" / f"ui_runs_{int(time.time())}_{os.getpid()}"
+    # Store all UI pipeline artifacts under shared path requested by user.
+    # (Use /share_data/jixinhao as canonical path.)
+    shared_root = Path("/share_data/jixinhao")
+    run_root = shared_root / "ui_preview_runs" / f"ui_runs_{int(time.time())}_{os.getpid()}"
     run_root.mkdir(parents=True, exist_ok=True)
 
+    # Copy uploaded video into shared run folder, so stage outputs are also
+    # generated under /share_data/jixinhao instead of /tmp/gradio.
+    inputs_dir = run_root / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    src_video = Path(path).resolve()
+    dst_video = inputs_dir / src_video.name
+    if src_video != dst_video:
+        shutil.copy2(str(src_video), str(dst_video))
+    path = str(dst_video)
+
     video_list_file = run_root / "videos.txt"
-    video_list_file.write_text(str(Path(path).resolve()) + "\n")
+    video_list_file.write_text(path + "\n")
+    ui_outputs_dir = run_root / "ui_outputs"
+    ui_outputs_dir.mkdir(parents=True, exist_ok=True)
 
     frame_source = None
     start_idx = 0
@@ -227,14 +240,14 @@ def render_reconstruction_progress(input_video, img_focal):
         )
         return
 
-        yield yield_ui(
+    yield yield_ui(
         done(1, titles[0], dt1),
         running(2, titles[1]),
         pending(3, titles[2]),
         pending(4, titles[3]),
         "",
-            detail_orig_hidden,
-            detail_cam_hidden,
+        detail_orig_hidden,
+        detail_cam_hidden,
     )
 
     # --- Stage 2 (motion) ---
@@ -418,6 +431,25 @@ def render_reconstruction_progress(input_video, img_focal):
             t_w2c=t_w2c_sla_all[vis_start:vis_end],
             interactive=False,
         )
+        # Some viewer versions save `video.mp4` instead of `video_0.mp4`.
+        if not vis_video_cam_path or not os.path.isfile(vis_video_cam_path):
+            candidates = (
+                os.path.join(output_pth_cam, "aitviewer", "video.mp4"),
+                os.path.join(output_pth_cam, "aitviewer", "video_0.mp4"),
+            )
+            for c in candidates:
+                if os.path.isfile(c):
+                    vis_video_cam_path = c
+                    break
+        stable_cam_path = None
+        if vis_video_cam_path and os.path.isfile(vis_video_cam_path):
+            stable_cam_path = str(ui_outputs_dir / "cam.mp4")
+            shutil.copy2(vis_video_cam_path, stable_cam_path)
+        stable_orig_path = None
+        if path and os.path.isfile(path):
+            src_ext = Path(path).suffix or ".mp4"
+            stable_orig_path = str(ui_outputs_dir / f"original{src_ext}")
+            shutil.copy2(path, stable_orig_path)
         dt_vis = time.perf_counter() - t_vis
     except Exception as ex:
         yield yield_ui(
@@ -442,12 +474,9 @@ def render_reconstruction_progress(input_video, img_focal):
         done(2, titles[1], dt2),
         done(3, titles[2], dt3),
         done(4, titles[3], dt4),
-        "<span class='bingo'>✓ Bingo</span>",
-        gr.update(value=path, visible=True),
-        gr.update(
-            value=vis_video_cam_path,
-            visible=bool(vis_video_cam_path and os.path.isfile(vis_video_cam_path)),
-        ),
+        f"<span class='bingo'>✓ Bingo</span><br><span style='font-size:11px;opacity:.75'>{os.path.basename(stable_cam_path or vis_video_cam_path or '')}</span>",
+        stable_orig_path or path,
+        stable_cam_path or vis_video_cam_path,
     )
 
 
@@ -502,12 +531,12 @@ with gr.Blocks(
         detail_video_original = gr.Video(
             label="Original",
             interactive=False,
-            visible=False,
+            visible=True,
         )
         detail_video_cam = gr.Video(
             label="Cam",
             interactive=False,
-            visible=False,
+            visible=True,
         )
 
     submit.click(
@@ -528,6 +557,7 @@ with gr.Blocks(
 
 demo.launch(
     debug=True,
+    allowed_paths=["/share_data/jixinhao/ui_preview_runs"],
     css="""
 
 .gradio-container {

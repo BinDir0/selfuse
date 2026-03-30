@@ -1,1 +1,1 @@
-example/bad_nan_episode_crop005
+example/video_0.mp4
