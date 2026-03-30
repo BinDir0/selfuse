@@ -40,6 +40,20 @@ class InfillerState:
     cam_space_cache: dict
     r_c2w_sla_all: torch.Tensor
     t_c2w_sla_all: torch.Tensor
+    slam_path: str
+    use_dpvo_infiller: bool
+
+
+def _use_dpvo_infiller_mode(seq_folder: str) -> bool:
+    """与 scripts/scripts_test_video/hawor_video.py 一致：dpvo 应对视频帧用 tstamp 插值相机。"""
+    if os.environ.get("HAWOR_INFILLER_DPVO_MODE", "").strip() == "1":
+        return True
+    backend_txt = os.path.join(seq_folder, "SLAM", "slam_backend.txt")
+    if os.path.isfile(backend_txt):
+        with open(backend_txt, "r", encoding="utf-8") as bf:
+            if bf.read().strip().lower() == "dpvo":
+                return True
+    return False
 
 
 def _forward_fill_hand_time(x: np.ndarray) -> tuple[np.ndarray, int]:
@@ -203,6 +217,9 @@ def _resolve_seq_folder(args, seq_folder):
 def _prepare_infiller_state(seq_folder, start_idx, end_idx, frame_chunks_all, frame_source, rebuild_cam_space_cache):
     num_frames = len(frame_source)
     slam_path = os.path.join(seq_folder, "SLAM", f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
+    use_dpvo_infiller = _use_dpvo_infiller_mode(seq_folder)
+    if use_dpvo_infiller and not QUIET_MODE:
+        vprint("[infiller] DPVO: SLAM cameras from hawor_slam_w_scale npz use per-frame timestamp interpolation")
 
     _r_w2c_sla_all, _t_w2c_sla_all, r_c2w_sla_all, t_c2w_sla_all = load_slam_cam(slam_path)
 
@@ -211,7 +228,11 @@ def _prepare_infiller_state(seq_folder, start_idx, end_idx, frame_chunks_all, fr
     pred_hand_pose = torch.zeros(2, num_frames, 45)
     pred_betas = torch.zeros(2, num_frames, 10)
     pred_valid = torch.zeros((2, pred_betas.size(1)))
-    max_slam_frames = min(pred_trans.shape[1], r_c2w_sla_all.shape[0], t_c2w_sla_all.shape[0])
+    # 稀疏 traj（DPVO）：不能把视频帧号当作 traj 行下标；投影阶段走插值，这里 max_slam_frames 仅作视频长度上界。
+    if use_dpvo_infiller:
+        max_slam_frames = num_frames
+    else:
+        max_slam_frames = min(pred_trans.shape[1], r_c2w_sla_all.shape[0], t_c2w_sla_all.shape[0])
     cam_space_cache = _load_or_build_cam_space_cache(
         seq_folder,
         frame_chunks_all,
@@ -228,6 +249,8 @@ def _prepare_infiller_state(seq_folder, start_idx, end_idx, frame_chunks_all, fr
         cam_space_cache=cam_space_cache,
         r_c2w_sla_all=r_c2w_sla_all,
         t_c2w_sla_all=t_c2w_sla_all,
+        slam_path=slam_path,
+        use_dpvo_infiller=use_dpvo_infiller,
     )
 
 
@@ -240,7 +263,9 @@ def _project_cam_space_chunks_to_world(state, frame_chunks_all):
         for frame_ck in frame_chunks:
             frame_ck = np.asarray(frame_ck)
             original_key = f"{int(frame_ck[0])}_{int(frame_ck[-1])}"
-            valid_frame_mask = frame_ck < state.max_slam_frames
+            # DPVO：稀疏 traj，按视频帧用 tstamp 插值；上界为 num_frames。非 DPVO：帧号须落在 traj 行范围内。
+            upper = state.num_frames if state.use_dpvo_infiller else state.max_slam_frames
+            valid_frame_mask = frame_ck < upper
             if valid_frame_mask.sum() == 0:
                 continue
 
@@ -250,8 +275,13 @@ def _project_cam_space_chunks_to_world(state, frame_chunks_all):
             infiller_debug(f"from frame {frame_ck[0]} to {frame_ck[-1]}")
             data_out = {name: torch.from_numpy(value) for name, value in pred_dict.items()}
 
-            r_c2w_sla = state.r_c2w_sla_all[frame_ck]
-            t_c2w_sla = state.t_c2w_sla_all[frame_ck]
+            if state.use_dpvo_infiller:
+                r_c2w_sla, t_c2w_sla = interpolate_slam_cameras_at_video_frames(
+                    state.slam_path, frame_ck
+                )
+            else:
+                r_c2w_sla = state.r_c2w_sla_all[frame_ck]
+                t_c2w_sla = state.t_c2w_sla_all[frame_ck]
             data_world = cam2world_convert(r_c2w_sla, t_c2w_sla, data_out, "right" if idx > 0 else "left")
 
             state.pred_trans[[idx], frame_ck] = data_world["init_trans"]
