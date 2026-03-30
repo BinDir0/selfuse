@@ -68,6 +68,23 @@ class FutureFrameTargetEncoder(nn.Module):
 
     # -- Forward --
 
+    def set_ema_mem_grid_thw(self, grid_thw: torch.Tensor) -> None:
+        """Set grid_thw on MEM temporal attention blocks inside the EMA ViT.
+
+        Must be called before forward_self_vit so that MEM temporal causal
+        attention knows the per-entry (T, H, W) structure of the combined
+        observation + future frame sequence.
+        """
+        if self.ema is None:
+            return
+        try:
+            from src.model.vision.temporal_attention import MEMVisionBlock
+        except ImportError:
+            return
+        for block in self.ema.module.blocks:
+            if isinstance(block, MEMVisionBlock):
+                block.temporal_attn.current_grid_thw = grid_thw
+
     @torch.no_grad()
     def forward(
         self,
@@ -100,6 +117,7 @@ class FutureFrameTargetEncoder(nn.Module):
         (total_merged_tokens, out_hidden_size) tensor after the spatial merger.
         """
         assert self.ema is not None, "Call init_ema() before forward."
+        self.set_ema_mem_grid_thw(grid_thw)
         # Source: huggingface/transformers, Qwen3VLVisionModel.forward
         output = self.ema.module(pixel_values, grid_thw=grid_thw, return_dict=True)
         return output.pooler_output.detach(), grid_thw

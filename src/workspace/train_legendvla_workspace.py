@@ -121,7 +121,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             cfg.policy.world_model_cfg = OmegaConf.to_container(wm, resolve=True)
             cfg.policy.loss_config.wm_loss_weight = float(wm.loss_weight)
 
-            # Data collator: formatter and batch processor
+            # Data collator: formatter and batch processor.
+            # ff_temporal_patch_size is derived from the processor at runtime
+            # by the collator (see UnifiedVLACollator.__init__), not set here.
             cfg.data_collator.formatter.future_frame_token = ff_token
             cfg.data_collator.formatter.ff_tokens_per_frame = int(wm.ff_tokens_per_frame)
             cfg.data_collator.batch_processor.future_frame_token = ff_token
@@ -848,9 +850,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Camera intrinsic as token embedding.
         if "camera_intrinsic" in batch:
             inputs["camera_intrinsic"] = batch["camera_intrinsic"].to(self.dtype)
-        # World model: future frame images
-        if "future_frames" in batch:
-            inputs["future_frames"] = batch["future_frames"]
+        # World model: preprocessed future frame pixel values for target encoder.
+        # ff_n_obs_frames is present only when obs+future are packed as one
+        # temporal sequence (self_vit with MEM temporal attention).
+        if "ff_pixel_values" in batch:
+            inputs["ff_pixel_values"] = batch["ff_pixel_values"].to(self.dtype)
+            inputs["ff_grid_thw"] = batch["ff_grid_thw"]
+            if "ff_n_obs_frames" in batch:
+                inputs["ff_n_obs_frames"] = batch["ff_n_obs_frames"]
             inputs["n_future_frames"] = batch["n_future_frames"]
         return inputs
 

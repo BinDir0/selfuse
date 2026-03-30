@@ -84,6 +84,10 @@ class Qwen3VLChatFormatter:
         self.camera_intrinsic_mode = camera_intrinsic_mode
         self.future_frame_token = future_frame_token
         self.ff_tokens_per_frame = ff_tokens_per_frame
+        # Set by the collator from the processor's temporal_patch_size
+        # so that token count accounts for temporal packing. Default 1
+        # (no packing) until overridden.
+        self.ff_temporal_patch_size = 1
         self.lowercase_vla_text = lowercase_vla_text
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
@@ -132,13 +136,17 @@ class Qwen3VLChatFormatter:
                 n_states=sample["n_states"],
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
-            # Always emit K * M future_frame tokens when future_frames is present,
-            # regardless of n_future_frames. This keeps masked_scatter source/mask
-            # aligned across samples with different valid counts. n_future_frames
-            # is only used for loss validity masking.
+            # Emit future_frame tokens for world model slot embeddings.
+            # When the target encoder uses temporal packing (self_vit with
+            # MEM), tps raw frames share one temporal patch; the merged
+            # spatial token count per patch is ff_tokens_per_frame.
+            # Total tokens = (K // tps) * ff_tokens_per_frame.
+            # n_future_frames is only used for loss validity masking.
             if self.ff_tokens_per_frame > 0 and "future_frames" in sample:
                 K = int(sample["future_frames"].shape[0])  # padded to horizon
-                assistant_text += self.future_frame_token * (K * self.ff_tokens_per_frame)
+                tps = self.ff_temporal_patch_size
+                T_future = K // tps
+                assistant_text += self.future_frame_token * (T_future * self.ff_tokens_per_frame)
         else:
             user_text = str(sample["question"]).strip()
             assistant_text = str(sample["answer"]).strip()

@@ -214,8 +214,16 @@ policy:
 world_model:
   enabled: false
 
+  # The collator combines observation frames + future frames into one
+  # temporal sequence for the target encoder (self_vit mode). MEM
+  # temporal causal attention then attends across both observation and
+  # future frames within the ViT.
+  # IMPORTANT: The observation frame count (data.shape_meta.obs.rgb.horizon)
+  # and future_frame.horizon must each be divisible by Qwen3-VL's
+  # temporal_patch_size (2) so that the obs/future feature split after
+  # the ViT spatial merger aligns cleanly with temporal patch boundaries.
   future_frame:
-    horizon: 4
+    horizon: 4     # must be divisible by temporal_patch_size (2)
     stride: 16
 
   ff_tokens_per_frame: 49

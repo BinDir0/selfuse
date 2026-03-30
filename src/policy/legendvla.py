@@ -329,61 +329,6 @@ class LegendVLA(nn.Module):
         if self.use_world_model and target_encoder is not None and hasattr(target_encoder, "update_ema"):
             target_encoder.update_ema(self.backbone.base_model.model.visual)
 
-    @torch.no_grad()
-    def preprocess_future_frame_pixels(
-        self,
-        future_frames: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Convert raw future frame images to the flat patch format the ViT expects.
-
-        Applies rescale, CLIP normalization, temporal duplication, and 3D patch
-        reshaping to match the Qwen3-VL processor output format consumed by
-        Qwen3VLVisionPatchEmbed (Conv3d with kernel [tps, ps, ps]).
-
-        Args:
-            future_frames: (B, K, H, W, C) uint8 tensor.
-
-        Returns:
-            pixel_values: (total_3d_patches, C * tps * ps * ps) float tensor.
-            grid_thw: (B*K, 3) long tensor with [T=1, H_patches, W_patches] per entry.
-        """
-        visual = self.backbone.base_model.model.visual
-        patch_size = visual.patch_size
-        tps = getattr(visual, "temporal_patch_size", 2)
-
-        B, K = future_frames.shape[:2]
-        # (B*K, H, W, C) -> (B*K, C, H, W) float [0, 1]
-        flat = future_frames.reshape(B * K, *future_frames.shape[2:])
-        pv = flat.permute(0, 3, 1, 2).contiguous().float() / 255.0
-
-        # CLIP normalization (standard for Qwen3-VL image processor)
-        # Source: transformers.image_utils.OPENAI_CLIP_MEAN / OPENAI_CLIP_STD
-        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=pv.device, dtype=pv.dtype)
-        std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=pv.device, dtype=pv.dtype)
-        pv = (pv - mean[None, :, None, None]) / std[None, :, None, None]
-
-        BK, C, H_px, W_px = pv.shape
-        H_p = H_px // patch_size
-        W_p = W_px // patch_size
-
-        # Temporal duplication: (BK, C, H, W) -> (BK, C, tps, H, W)
-        pv = pv.unsqueeze(2).expand(-1, -1, tps, -1, -1).contiguous()
-
-        # Reshape into 3D patches matching PatchEmbed.forward:
-        #   view(-1, C, tps, ps, ps) expects (total_patches, C * tps * ps * ps)
-        # Source: transformers/models/qwen3_vl/modeling_qwen3_vl.py, Qwen3VLVisionPatchEmbed
-        pv = pv.reshape(BK, C, tps, H_p, patch_size, W_p, patch_size)
-        pv = pv.permute(0, 3, 5, 1, 2, 4, 6)  # (BK, H_p, W_p, C, tps, ps, ps)
-        pv = pv.reshape(BK * H_p * W_p, C * tps * patch_size * patch_size)
-
-        # grid_thw: T=1 (temporal patches collapsed), H=H_patches, W=W_patches
-        grid_thw = torch.tensor(
-            [[1, H_p, W_p]] * BK,
-            dtype=torch.long,
-            device=pv.device,
-        )
-        return pv, grid_thw
-
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
         answer_start_idx = batch.get("answer_start_idx")
         assert answer_start_idx is not None, (
@@ -448,41 +393,42 @@ class LegendVLA(nn.Module):
                 )
             slot_embeds["action"] = action_embeds
 
-        if self.use_world_model and "future_frames" in batch:
+        if self.use_world_model and "ff_pixel_values" in batch:
             target_encoder = self.target_encoder
-            future_frames = batch["future_frames"]  # (B, K, H, W, C) uint8
+            flat_pv = batch["ff_pixel_values"]
+            grid_thw = batch["ff_grid_thw"]
 
-            # Encode targets via frozen/EMA encoder (also cached for loss)
             with torch.no_grad():
-                B, K = future_frames.shape[:2]
-                flat_pv, grid_thw = self.preprocess_future_frame_pixels(future_frames)
-                target_features, _ = target_encoder(flat_pv, grid_thw)
-                target_features = target_features.detach()
+                all_features, _ = target_encoder(flat_pv, grid_thw)
+                all_features = all_features.detach()
 
-            # Cache clean targets for loss computation
+            sms = self.backbone.base_model.model.visual.spatial_merge_size
+            B_vla = grid_thw.shape[0]
+            merged_spatial = int((grid_thw[0, 1] * grid_thw[0, 2]).item()) // (sms * sms)
+
+            if "ff_n_obs_frames" in batch:
+                # Combined obs+future temporal sequence (self_vit with MEM).
+                # The collator packed obs and future into one video entry.
+                # Split the ViT output to keep only future-frame features.
+                tps = getattr(self.backbone.base_model.model.visual, "temporal_patch_size", 2)
+                T_total = int(grid_thw[0, 0].item())
+                T_obs = int(batch["ff_n_obs_frames"][0].item()) // tps
+                obs_tokens = T_obs * merged_spatial
+                future_tokens = (T_total - T_obs) * merged_spatial
+
+                all_features = all_features.reshape(B_vla, T_total * merged_spatial, -1)
+                target_features = all_features[:, obs_tokens:, :].reshape(-1, all_features.shape[-1])
+            else:
+                # Future frames processed independently (no temporal packing).
+                target_features = all_features
+                future_tokens = target_features.shape[0] // B_vla
+
             batch["_wm_target_features"] = target_features
             batch["_wm_ff_grid_thw"] = grid_thw
 
-            # Project to VLM space via merger (noisy for slot embedding)
             noisy_features = target_features + torch.randn_like(target_features) * self.ff_noise_std
-            ff_embeds = self.ff_patch_merger(noisy_features)  # (total_tokens, vlm_hidden_size)
-
-            # Reshape to (B, K*M, vlm_hidden_size) for masked_scatter
-            sms = self.backbone.base_model.model.visual.spatial_merge_size
-            tokens_per_frame = int((grid_thw[0, 1] * grid_thw[0, 2]).item()) // (sms * sms)
-
-            # Validate that actual merged token count matches the configured
-            # ff_tokens_per_frame used by the formatter for token generation.
-            wm_cfg = getattr(self, "_world_model_cfg", None)
-            if wm_cfg is not None:
-                expected_tpf = int(wm_cfg.get("ff_tokens_per_frame", tokens_per_frame))
-                assert tokens_per_frame == expected_tpf, (
-                    f"ff_tokens_per_frame mismatch: config={expected_tpf}, "
-                    f"actual={tokens_per_frame} (from grid_thw={grid_thw[0].tolist()}, sms={sms}). "
-                    f"Check future frame image resolution vs config."
-                )
-
-            ff_embeds = ff_embeds.reshape(B, K * tokens_per_frame, -1)
+            ff_embeds = self.ff_patch_merger(noisy_features)
+            ff_embeds = ff_embeds.reshape(B_vla, future_tokens, -1)
             slot_embeds["future_frame"] = ff_embeds
 
         return slot_embeds
