@@ -246,6 +246,7 @@ world_model:
     z_channels: ${dims.diffloss_z_channels}
     depth: 4
     width: 1024
+    num_sampling_steps: "100"
     use_flow_matching: true
     flow_sig_min: ${flow.sig_min}
     num_inference_steps: ${flow.num_inference_steps}
