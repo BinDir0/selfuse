@@ -371,15 +371,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.model, self.optimizer, self.lr_scheduler
         )
         
-        # Compile after FSDP2 wrapping to avoid _orig_mod KeyError in accelerate.
-        self.maybe_compile_model(accelerator)
-
-        # Resume training from checkpoint after accelerator prepare
+        # Resume training from checkpoint after accelerator prepare but BEFORE
+        # compile, so that the state_dict keys don't have the _orig_mod prefix
+        # that torch.compile introduces.
         if cfg.training.resume_checkpoint_path:
             accelerator.load_state(cfg.training.resume_checkpoint_path)
             self.update_step = self.training_state.update_step
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
+
+        # Compile after FSDP2 wrapping and checkpoint loading.
+        self.maybe_compile_model(accelerator)
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2

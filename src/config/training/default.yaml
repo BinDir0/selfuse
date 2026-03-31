@@ -20,7 +20,7 @@ training:
   lr_warmup_steps: 2000
   train_vlm: True
   train_depth: False
-  resume_checkpoint_path:
+  resume_checkpoint_path: /share_data/chenzhang/projects/diffloss-ar/outputs/2026.03.30/15.47_legendvla_qwen3_vl_legendvla_qwen3_vl/step_checkpoints/update_step_20000
   finetune_checkpoint_path:
   normalizer_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/normalizer/2026.03.16-relative-mixed/normalizer.pkl
   max_train_steps: null
@@ -72,14 +72,14 @@ training:
       every_n: 1           # checkpoint every N-th action expert layer
 optimizer:
   action:
-    lr: 3e-4
+    lr: 1.5e-4
     betas: [0.9, 0.95]
     weight_decay: 1e-2
   vlm:
-    lr: 1e-4
+    lr: 5e-5
     betas: [0.9, 0.95]
     weight_decay: 5e-3
   diffloss:
-    lr: 8e-4
+    lr: 4e-4
     betas: [0.9, 0.95]
     weight_decay: 1e-2
