@@ -183,19 +183,17 @@ def build_legacy_episode_index_from_processed_root(
         raise FileNotFoundError(f"BuildAI processed root not found: {root}")
 
     seq_folders = []
-    for factory_dir in sorted(root.glob("factory*")):
-        outputs_dir = factory_dir / "outputs"
-        if not outputs_dir.is_dir():
+    for world_res in sorted(root.rglob("world_space_res.pth")):
+        seq_folder = world_res.parent.resolve()
+        parent = seq_folder.parent
+        if parent.name != "outputs":
+            continue
+        factory_dir = parent.parent
+        if not factory_dir.name.startswith("factory"):
             continue
         if not matches_factory_range(str(factory_dir), factory_range):
             continue
-        for seq_folder in sorted(outputs_dir.iterdir()):
-            if not seq_folder.is_dir():
-                continue
-            world_res = seq_folder / "world_space_res.pth"
-            if not world_res.exists():
-                continue
-            seq_folders.append(seq_folder.resolve())
+        seq_folders.append(seq_folder)
 
     legacy_index = {}
     for episode_index, seq_folder in enumerate(seq_folders):
@@ -208,6 +206,11 @@ def build_legacy_episode_index_from_processed_root(
             "split": "unknown",
             "legacy_episode_index": episode_index,
         }
+    if not legacy_index:
+        raise RuntimeError(
+            "Failed to auto-discover any BuildAI seq_folder under "
+            f"{root}. Expected paths like factoryXXX/outputs/<clip_id>/world_space_res.pth"
+        )
     return legacy_index
 
 
@@ -289,9 +292,18 @@ def _build_buildai_clip_info(clip_id: str) -> dict:
     factory_id = int(match.group(1))
     seq_folder = Path(_WORKER_BUILDAI_ROOT) / f"factory{factory_id:03d}" / "outputs" / clip_id
     if not seq_folder.is_dir():
-        raise FileNotFoundError(
-            f"BuildAI seq_folder not found for {clip_id}: {seq_folder}"
-        )
+        candidates = sorted(Path(_WORKER_BUILDAI_ROOT).rglob(f"outputs/{clip_id}"))
+        candidates = [path.resolve() for path in candidates if path.is_dir()]
+        if len(candidates) == 1:
+            seq_folder = candidates[0]
+        elif len(candidates) > 1:
+            raise FileNotFoundError(
+                f"Multiple BuildAI seq_folder candidates found for {clip_id}: {candidates[:3]}"
+            )
+        else:
+            raise FileNotFoundError(
+                f"BuildAI seq_folder not found for {clip_id} under {_WORKER_BUILDAI_ROOT}"
+            )
     return {
         "clip_id": clip_id,
         "episode_id": clip_id,
@@ -318,7 +330,8 @@ def _build_legacy_buildai_clip_info(sample_key: str, clip_id: str, meta: dict | 
             "Legacy BuildAI episode index "
             f"{episode_index} was not found. Pass --legacy_buildai_input_dir "
             "and, if needed, --legacy_episode_list / --legacy_factory_range / --legacy_episode_cache "
-            "to reconstruct the old builder ordering."
+            "to reconstruct the old builder ordering. "
+            f"Currently loaded legacy episode count: {len(_WORKER_LEGACY_EPISODES)}"
         )
     return clip_info
 
@@ -403,6 +416,24 @@ def _worker_process_shard(shard_path: str) -> dict:
     return process_shard(shard_path)
 
 
+def source_contains_legacy_buildai_keys(shard_paths: list[str], sample_limit: int = 32) -> bool:
+    checked = 0
+    for shard_path in shard_paths:
+        for sample in iter_shard_samples(shard_path):
+            meta = None
+            try:
+                meta = json.loads(sample["meta_bytes"].decode("utf-8"))
+            except Exception:
+                meta = None
+            clip_id = _sample_clip_id(sample, meta)
+            checked += 1
+            if LEGACY_BUILDAI_EP_RE.match(clip_id):
+                return True
+            if checked >= sample_limit:
+                return False
+    return False
+
+
 def build_report(
     source_dir: Path,
     output_dir: Path,
@@ -485,6 +516,12 @@ def main():
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
+    if source_contains_legacy_buildai_keys(shard_paths) and not legacy_episodes:
+        raise RuntimeError(
+            "Detected legacy buildai_epXXXX shard keys, but no legacy BuildAI episodes "
+            f"were discovered under {buildai_processed_root}. "
+            "Check --buildai_processed_root or pass --legacy_buildai_input_dir / --legacy_episode_cache."
+        )
 
     mano_device_obj = torch.device(args.mano_device if torch.cuda.is_available() else "cpu")
     device_specs = normalize_mano_devices(str(mano_device_obj), args.mano_gpus if mano_device_obj.type == "cuda" else None)
