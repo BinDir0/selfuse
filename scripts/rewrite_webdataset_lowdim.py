@@ -37,7 +37,7 @@ from lib.pipeline.quality_metrics import parse_frame_index  # noqa: E402
 
 
 DEFAULT_WORKERS = max(1, min(4, os.cpu_count() or 1))
-BUILDAI_CLIP_RE = re.compile(r"^f(\d{3})_")
+BUILDAI_CLIP_RE = re.compile(r"^factory(\d{3})_worker(\d{3})_")
 LEGACY_BUILDAI_EP_RE = re.compile(r"^buildai_ep(\d+)$")
 _WORKER_CLIP_INDEX = None
 _WORKER_LEGACY_EPISODES = None
@@ -58,7 +58,7 @@ def build_parser():
     parser.add_argument(
         "--buildai_processed_root",
         required=True,
-        help="BuildAI processed root containing factoryXXX/outputs/<clip_id> stage outputs.",
+        help="BuildAI processed root containing factory_<id>/worker_<id>/processed/<clip_id> stage outputs.",
     )
     parser.add_argument(
         "--legacy_buildai_input_dir",
@@ -183,17 +183,21 @@ def build_legacy_episode_index_from_processed_root(
         raise FileNotFoundError(f"BuildAI processed root not found: {root}")
 
     seq_folders = []
-    for world_res in sorted(root.rglob("world_space_res.pth")):
-        seq_folder = world_res.parent.resolve()
-        parent = seq_folder.parent
-        if parent.name != "outputs":
-            continue
-        factory_dir = parent.parent
-        if not factory_dir.name.startswith("factory"):
+    for factory_dir in sorted(root.glob("factory_*")):
+        if not factory_dir.is_dir():
             continue
         if not matches_factory_range(str(factory_dir), factory_range):
             continue
-        seq_folders.append(seq_folder)
+        for worker_dir in sorted(factory_dir.glob("worker_*")):
+            processed_dir = worker_dir / "processed"
+            if not processed_dir.is_dir():
+                continue
+            for seq_folder in sorted(processed_dir.iterdir()):
+                if not seq_folder.is_dir():
+                    continue
+                if not (seq_folder / "world_space_res.pth").is_file():
+                    continue
+                seq_folders.append(seq_folder.resolve())
 
     legacy_index = {}
     for episode_index, seq_folder in enumerate(seq_folders):
@@ -209,7 +213,7 @@ def build_legacy_episode_index_from_processed_root(
     if not legacy_index:
         raise RuntimeError(
             "Failed to auto-discover any BuildAI seq_folder under "
-            f"{root}. Expected paths like factoryXXX/outputs/<clip_id>/world_space_res.pth"
+            f"{root}. Expected paths like factory_<id>/worker_<id>/processed/<clip_id>/world_space_res.pth"
         )
     return legacy_index
 
@@ -287,23 +291,21 @@ def _build_buildai_clip_info(clip_id: str) -> dict:
     match = BUILDAI_CLIP_RE.match(clip_id)
     if not match:
         raise ValueError(
-            f"Clip id does not look like BuildAI format fXXX_...: {clip_id}"
+            f"Clip id does not look like BuildAI format factoryXXX_workerXXX_...: {clip_id}"
         )
     factory_id = int(match.group(1))
-    seq_folder = Path(_WORKER_BUILDAI_ROOT) / f"factory{factory_id:03d}" / "outputs" / clip_id
+    worker_id = int(match.group(2))
+    seq_folder = (
+        Path(_WORKER_BUILDAI_ROOT)
+        / f"factory_{factory_id:03d}"
+        / f"worker_{worker_id:03d}"
+        / "processed"
+        / clip_id
+    )
     if not seq_folder.is_dir():
-        candidates = sorted(Path(_WORKER_BUILDAI_ROOT).rglob(f"outputs/{clip_id}"))
-        candidates = [path.resolve() for path in candidates if path.is_dir()]
-        if len(candidates) == 1:
-            seq_folder = candidates[0]
-        elif len(candidates) > 1:
-            raise FileNotFoundError(
-                f"Multiple BuildAI seq_folder candidates found for {clip_id}: {candidates[:3]}"
-            )
-        else:
-            raise FileNotFoundError(
-                f"BuildAI seq_folder not found for {clip_id} under {_WORKER_BUILDAI_ROOT}"
-            )
+        raise FileNotFoundError(
+            f"BuildAI seq_folder not found for {clip_id}: {seq_folder}"
+        )
     return {
         "clip_id": clip_id,
         "episode_id": clip_id,
@@ -491,6 +493,10 @@ def main():
     legacy_episode_cache = args.legacy_episode_cache
     if legacy_episode_cache:
         legacy_episode_cache = str(Path(legacy_episode_cache).resolve())
+    else:
+        default_cache = buildai_processed_root / "_vla_episodes_cache.json"
+        if default_cache.is_file():
+            legacy_episode_cache = str(default_cache)
 
     if args.legacy_buildai_input_dir or legacy_episode_cache:
         legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
