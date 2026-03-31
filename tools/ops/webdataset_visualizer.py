@@ -34,12 +34,90 @@ SAMPLE_MEMBER_SUFFIXES = (
 )
 
 LOWDIM_SEGMENTS = (
-    ("wrist_state", 0, 18),
-    ("hand_state", 18, 48),
-    ("wrist_action", 48, 66),
-    ("hand_action", 66, 96),
-    ("extrinsics", 96, 112),
-    ("intrinsic", 112, 116),
+    {
+        "name": "left_wrist_world",
+        "start": 0,
+        "end": 3,
+        "description": "Left wrist joint position in world coordinates.",
+    },
+    {
+        "name": "right_wrist_world",
+        "start": 3,
+        "end": 6,
+        "description": "Right wrist joint position in world coordinates.",
+    },
+    {
+        "name": "left_root_rot6d",
+        "start": 6,
+        "end": 12,
+        "description": "Left MANO root orientation in rot6d, expressed in world coordinates.",
+    },
+    {
+        "name": "right_root_rot6d",
+        "start": 12,
+        "end": 18,
+        "description": "Right MANO root orientation in rot6d, expressed in world coordinates.",
+    },
+    {
+        "name": "left_fingertips_world",
+        "start": 18,
+        "end": 33,
+        "description": "Left fingertip 3D points from MANO joints, shape (5, 3), world coordinates.",
+    },
+    {
+        "name": "right_fingertips_world",
+        "start": 33,
+        "end": 48,
+        "description": "Right fingertip 3D points from MANO joints, shape (5, 3), world coordinates.",
+    },
+    {
+        "name": "next_left_wrist_world",
+        "start": 48,
+        "end": 51,
+        "description": "Next-frame left wrist joint position in world coordinates.",
+    },
+    {
+        "name": "next_right_wrist_world",
+        "start": 51,
+        "end": 54,
+        "description": "Next-frame right wrist joint position in world coordinates.",
+    },
+    {
+        "name": "next_left_root_rot6d",
+        "start": 54,
+        "end": 60,
+        "description": "Next-frame left root orientation in rot6d.",
+    },
+    {
+        "name": "next_right_root_rot6d",
+        "start": 60,
+        "end": 66,
+        "description": "Next-frame right root orientation in rot6d.",
+    },
+    {
+        "name": "next_left_fingertips_world",
+        "start": 66,
+        "end": 81,
+        "description": "Next-frame left fingertips, shape (5, 3), world coordinates.",
+    },
+    {
+        "name": "next_right_fingertips_world",
+        "start": 81,
+        "end": 96,
+        "description": "Next-frame right fingertips, shape (5, 3), world coordinates.",
+    },
+    {
+        "name": "camera_w2c",
+        "start": 96,
+        "end": 112,
+        "description": "Camera extrinsic as a 4x4 world-to-camera matrix, flattened row-major.",
+    },
+    {
+        "name": "camera_intrinsic",
+        "start": 112,
+        "end": 116,
+        "description": "Pinhole intrinsic [fx, fy, cx, cy].",
+    },
 )
 
 FRAME_SUFFIX_RE = re.compile(r"_f\d+$")
@@ -51,6 +129,7 @@ MANO_JOINT_TREE = [
     [(0, 13), (13, 14), (14, 15), (15, 16)],
     [(0, 17), (17, 18), (18, 19), (19, 20)],
 ]
+FINGERTIP_INDICES = np.array([4, 8, 12, 16, 20], dtype=np.int64)
 
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -436,6 +515,10 @@ HTML_PAGE = """<!DOCTYPE html>
               <div id="lowdimSummary">-</div>
             </div>
             <div class="kv-row">
+              <div class="kv-key">Render Notes</div>
+              <div id="renderNotes">-</div>
+            </div>
+            <div class="kv-row">
               <div class="kv-key">Errors</div>
               <div id="errorSummary">None</div>
             </div>
@@ -487,8 +570,8 @@ HTML_PAGE = """<!DOCTYPE html>
       return document.getElementById(id);
     }
 
-    function sampleCacheKey(sampleId, renderMode) {
-      return `${sampleId}:${renderMode}`;
+    function sampleCacheKey(sampleId, renderMode, warmImage = true) {
+      return `${sampleId}:${renderMode}:${warmImage ? "warm" : "cold"}`;
     }
 
     function escapeHtml(value) {
@@ -731,6 +814,7 @@ HTML_PAGE = """<!DOCTYPE html>
       el("instructionText").textContent = "-";
       el("metaSummary").textContent = "-";
       el("lowdimSummary").textContent = "-";
+      el("renderNotes").textContent = "-";
       el("errorSummary").textContent = message || "None";
       el("metaPre").textContent = "-";
       el("lowdimPre").textContent = "-";
@@ -754,19 +838,15 @@ HTML_PAGE = """<!DOCTYPE html>
       return image;
     }
 
-    function preloadPayload(sampleId, renderMode) {
-      const cacheKey = sampleCacheKey(sampleId, renderMode);
+    function preloadPayload(sampleId, renderMode, options = {}) {
+      const warmImage = options.warmImage !== false;
+      const cacheKey = sampleCacheKey(sampleId, renderMode, warmImage);
       if (state.samplePayloadCache.has(cacheKey)) {
         return state.samplePayloadCache.get(cacheKey);
       }
-      const promise = fetchJson(`/api/sample/${sampleId}?render_mode=${encodeURIComponent(renderMode)}`)
-        .then((payload) => {
-          if (payload.image_url) {
-            const image = new Image();
-            image.src = payload.image_url;
-          }
-          return payload;
-        })
+      const promise = fetchJson(
+        `/api/sample/${sampleId}?render_mode=${encodeURIComponent(renderMode)}&warm_image=${warmImage ? "1" : "0"}`
+      )
         .catch((error) => {
           state.samplePayloadCache.delete(cacheKey);
           throw error;
@@ -789,11 +869,12 @@ HTML_PAGE = """<!DOCTYPE html>
         currentEpisodeIdx + 1 < positions.length
           ? positions[currentEpisodeIdx + 1].start
           : state.filtered.length;
-      const prefetchCount = Math.min(24, endExclusive - start);
-      for (let offset = 0; offset < prefetchCount; offset += 1) {
+      const prefetchCount = renderMode === "mano" ? 2 : 6;
+      const maxOffset = Math.min(prefetchCount + 1, endExclusive - start);
+      for (let offset = 1; offset < maxOffset; offset += 1) {
         const idx = start + ((state.currentPosition - start + offset) % Math.max(1, endExclusive - start));
         const item = state.filtered[idx];
-        void preloadPayload(item.id, renderMode);
+        void preloadPayload(item.id, renderMode, { warmImage: false });
       }
     }
 
@@ -813,9 +894,11 @@ HTML_PAGE = """<!DOCTYPE html>
         el("lowdimSummary").textContent = `error: ${lowdimInfo.error}`;
       } else {
         el("lowdimSummary").textContent =
-          `shape=${lowdimInfo.shape} | dtype=${lowdimInfo.dtype} | min=${lowdimInfo.min} | max=${lowdimInfo.max} | mean=${lowdimInfo.mean}`;
+          `shape=${lowdimInfo.shape} | dtype=${lowdimInfo.dtype} | coord=${lowdimInfo.coordinate_system || "world"} | min=${lowdimInfo.min} | max=${lowdimInfo.max} | mean=${lowdimInfo.mean}`;
       }
 
+      el("renderNotes").textContent =
+        (data.render_notes && data.render_notes.length > 0) ? data.render_notes.join(" | ") : "-";
       el("errorSummary").textContent = (data.errors && data.errors.length > 0) ? data.errors.join(" | ") : "None";
       el("metaPre").textContent = data.meta_pretty || "-";
       el("lowdimPre").textContent = data.lowdim_preview || "-";
@@ -841,6 +924,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <td class="mono">${escapeHtml(seg.name)}</td>
           <td class="mono">${seg.start}:${seg.end}</td>
           <td class="mono">${escapeHtml(seg.shape)}</td>
+          <td>${escapeHtml(seg.description || "-")}</td>
           <td class="mono">${escapeHtml(seg.preview)}</td>
         </tr>
       `).join("");
@@ -851,6 +935,7 @@ HTML_PAGE = """<!DOCTYPE html>
               <th>Segment</th>
               <th>Slice</th>
               <th>Shape</th>
+              <th>Description</th>
               <th>Preview</th>
             </tr>
           </thead>
@@ -872,7 +957,7 @@ HTML_PAGE = """<!DOCTYPE html>
         el("sampleKey").textContent = summary.key;
         el("sampleSummary").textContent = "Loading sample detail...";
         const renderMode = el("renderModeSelect").value;
-        const data = await preloadPayload(summary.id, renderMode);
+        const data = await preloadPayload(summary.id, renderMode, { warmImage: true });
         if (loadToken !== state.loadToken) {
           return;
         }
@@ -1221,14 +1306,15 @@ def build_lowdim_segments(lowdim_array: np.ndarray) -> list[dict]:
         ]
 
     segments = []
-    for name, start, end in LOWDIM_SEGMENTS:
-        segment = flat[start:end]
+    for item in LOWDIM_SEGMENTS:
+        segment = flat[item["start"] : item["end"]]
         segments.append(
             {
-                "name": name,
-                "start": start,
-                "end": end,
+                "name": item["name"],
+                "start": item["start"],
+                "end": item["end"],
                 "shape": str(tuple(segment.shape)),
+                "description": item["description"],
                 "preview": ", ".join(f"{value:.4f}" for value in segment[: min(6, len(segment))].tolist()),
             }
         )
@@ -1256,6 +1342,7 @@ def summarize_lowdim(lowdim_bytes: Optional[bytes]):
     return {
         "shape": str(tuple(array.shape)),
         "dtype": str(array.dtype),
+        "coordinate_system": "world",
         "min": round(float(array.min()), 6) if array.size > 0 else None,
         "max": round(float(array.max()), 6) if array.size > 0 else None,
         "mean": round(float(array.mean()), 6) if array.size > 0 else None,
@@ -1273,6 +1360,22 @@ def rot6_to_rotmat(r6: np.ndarray) -> np.ndarray:
     b2 = a2 / (np.linalg.norm(a2) + 1e-8)
     b3 = np.cross(b1, b2)
     return np.stack([b1, b2, b3], axis=1).astype(np.float32)
+
+
+def _decode_lowdim_fields(lowdim_array: np.ndarray) -> dict[str, np.ndarray]:
+    flat = lowdim_array.reshape(-1).astype(np.float32)
+    if flat.shape[0] < 116:
+        raise ValueError(f"Lowdim vector too short for decode: {flat.shape[0]}")
+    return {
+        "left_wrist_world": flat[0:3],
+        "right_wrist_world": flat[3:6],
+        "left_root_rot6d": flat[6:12],
+        "right_root_rot6d": flat[12:18],
+        "left_fingertips_world": flat[18:33].reshape(5, 3),
+        "right_fingertips_world": flat[33:48].reshape(5, 3),
+        "camera_w2c": flat[96:112].reshape(4, 4),
+        "camera_intrinsic": flat[112:116],
+    }
 
 
 def _presence_flags(presence: Optional[int]) -> tuple[bool, bool]:
@@ -1300,12 +1403,8 @@ def _encode_image_data_url(image_bgr: np.ndarray) -> str:
 
 
 def _extract_camera_from_lowdim(lowdim_array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    flat = lowdim_array.reshape(-1).astype(np.float32)
-    if flat.shape[0] < 116:
-        raise ValueError(f"Lowdim vector too short for camera decode: {flat.shape[0]}")
-    c2w = flat[96:112].reshape(4, 4)
-    intrinsic = flat[112:116]
-    return c2w, intrinsic
+    decoded = _decode_lowdim_fields(lowdim_array)
+    return decoded["camera_w2c"], decoded["camera_intrinsic"]
 
 
 def _world_to_camera(points_world: np.ndarray, c2w: np.ndarray) -> np.ndarray:
@@ -1322,6 +1421,36 @@ def _project_points(points_world: np.ndarray, c2w: np.ndarray, intrinsic: np.nda
     uv[:, 0] = fx * (pts_cam[:, 0] / (z + 1e-8)) + cx
     uv[:, 1] = fy * (pts_cam[:, 1] / (z + 1e-8)) + cy
     return uv, valid
+
+
+def _camera_positive_depth_score(points_world: np.ndarray, c2w: np.ndarray) -> tuple[int, float]:
+    pts_cam = _world_to_camera(points_world, c2w)
+    valid = pts_cam[:, 2] > 1e-6
+    if not np.any(valid):
+        return 0, float("-inf")
+    positive_count = int(valid.sum())
+    median_depth = float(np.median(pts_cam[valid, 2]))
+    return positive_count, -abs(median_depth - 0.6)
+
+
+def _resolve_camera_c2w(extrinsic_raw: np.ndarray, points_world: np.ndarray) -> tuple[np.ndarray, str]:
+    raw = extrinsic_raw.astype(np.float32)
+    candidates = [("c2w", raw)]
+    try:
+        candidates.append(("w2c", np.linalg.inv(raw)))
+    except np.linalg.LinAlgError:
+        pass
+
+    best_name = candidates[0][0]
+    best_c2w = candidates[0][1]
+    best_score = (-1, float("-inf"))
+    for name, c2w in candidates:
+        score = _camera_positive_depth_score(points_world, c2w)
+        if score > best_score:
+            best_score = score
+            best_name = name
+            best_c2w = c2w
+    return best_c2w, best_name
 
 
 def _clip_uv_mask(uv: np.ndarray, valid: np.ndarray, image_shape) -> np.ndarray:
@@ -1352,23 +1481,20 @@ def _draw_axes(image_bgr: np.ndarray, origin_world: np.ndarray, rotmat_world: np
             cv2.arrowedLine(image_bgr, origin, tuple(uv[axis_idx + 1].astype(np.int32)), axis_colors[axis_idx], 2, tipLength=0.2)
 
 
-def _render_keypoint_overlay(image_bytes: bytes, lowdim_array: np.ndarray, presence: Optional[int]) -> str:
+def _render_keypoint_overlay(image_bytes: bytes, keypoint_frame: dict, presence: Optional[int]) -> str:
     import cv2
 
     image_bgr = _decode_image_bgr(image_bytes)
     overlay = image_bgr.copy()
-    flat = lowdim_array.reshape(-1).astype(np.float32)
-    if flat.shape[0] < 116:
-        raise ValueError(f"lowdim shape invalid for keypoint overlay: {lowdim_array.shape}")
-
-    c2w, intrinsic = _extract_camera_from_lowdim(flat)
+    c2w = keypoint_frame["c2w"]
+    intrinsic = keypoint_frame["intrinsic"]
     left_present, right_present = _presence_flags(presence)
-    wrist_left = flat[0:3]
-    wrist_right = flat[3:6]
-    rot_left = rot6_to_rotmat(flat[6:12])
-    rot_right = rot6_to_rotmat(flat[12:18])
-    tips_left = flat[18:33].reshape(5, 3)
-    tips_right = flat[33:48].reshape(5, 3)
+    wrist_left = keypoint_frame["left_wrist"]
+    wrist_right = keypoint_frame["right_wrist"]
+    rot_left = keypoint_frame["left_rotmat"]
+    rot_right = keypoint_frame["right_rotmat"]
+    tips_left = keypoint_frame["left_tips"]
+    tips_right = keypoint_frame["right_tips"]
 
     hands = []
     if left_present:
@@ -1519,6 +1645,111 @@ class ViewerApp:
         print(f"Loaded {len(clip_to_seq)} clip -> seq_folder mappings", flush=True)
         return clip_to_seq
 
+    def _resolve_seq_folder_for_clip(self, clip_id: Optional[str]) -> str:
+        if not clip_id:
+            raise ValueError(
+                "clip_id missing from meta.json; this shard likely predates the manifest-based builder"
+            )
+        if not self.clip_to_seq_folder:
+            raise ValueError(
+                "descriptor manifest not loaded; rerun with --descriptor_manifest <clip_manifest.jsonl>"
+            )
+        seq_folder = self.clip_to_seq_folder.get(clip_id)
+        if not seq_folder:
+            raise KeyError(f"clip_id not found in descriptor manifest: {clip_id}")
+        return seq_folder
+
+    def _get_mano_frame(self, summary: SampleSummary) -> dict:
+        if not summary.clip_id:
+            raise ValueError("clip_id missing from meta.json; cannot resolve world_space_res.pth")
+        try:
+            frame_idx = parse_frame_index(summary.key)
+        except ValueError as error:
+            raise ValueError(
+                f"sample key is missing a frame suffix like _f000123: {summary.key}"
+            ) from error
+
+        mano_cache = self._compute_mano_clip_cache(summary.clip_id)
+        if frame_idx >= mano_cache["left_vertices"].shape[0]:
+            raise IndexError(
+                f"frame index {frame_idx} exceeds MANO cache length {mano_cache['left_vertices'].shape[0]}"
+            )
+        return {
+            "frame_idx": frame_idx,
+            "left_verts": mano_cache["left_vertices"][frame_idx],
+            "left_joints": mano_cache["left_joints"][frame_idx],
+            "right_verts": mano_cache["right_vertices"][frame_idx],
+            "right_joints": mano_cache["right_joints"][frame_idx],
+        }
+
+    def _build_keypoint_frame(self, summary: SampleSummary, lowdim_array: np.ndarray) -> dict:
+        fields = _decode_lowdim_fields(lowdim_array)
+        notes = [
+            "All 3D lowdim fields are stored in the HaWoR/SLAM world frame."
+        ]
+        keypoint_frame = {
+            "c2w": fields["camera_w2c"],
+            "intrinsic": fields["camera_intrinsic"],
+            "left_wrist": fields["left_wrist_world"],
+            "right_wrist": fields["right_wrist_world"],
+            "left_tips": fields["left_fingertips_world"],
+            "right_tips": fields["right_fingertips_world"],
+            "left_rotmat": rot6_to_rotmat(fields["left_root_rot6d"]),
+            "right_rotmat": rot6_to_rotmat(fields["right_root_rot6d"]),
+            "anchor_source": "lowdim_wrist_world",
+            "notes": notes,
+        }
+
+        points_world = np.concatenate(
+            [
+                keypoint_frame["left_wrist"][None, :],
+                keypoint_frame["right_wrist"][None, :],
+                keypoint_frame["left_tips"],
+                keypoint_frame["right_tips"],
+            ],
+            axis=0,
+        )
+        keypoint_frame["c2w"], camera_convention = _resolve_camera_c2w(
+            fields["camera_w2c"], points_world
+        )
+        notes.append(
+            "camera extrinsic is interpreted as "
+            + ("camera-to-world (c2w)." if camera_convention == "c2w" else "world-to-camera (w2c) and inverted for display.")
+        )
+
+        if not self.clip_to_seq_folder:
+            notes.append(
+                "Descriptor manifest not loaded, so keypoint mode uses lowdim wrist/tip world coordinates directly."
+            )
+            return keypoint_frame
+        if not summary.clip_id:
+            notes.append(
+                "clip_id is missing from meta.json, so keypoint mode cannot verify lowdim joints against MANO cache."
+            )
+            return keypoint_frame
+
+        try:
+            mano_frame = self._get_mano_frame(summary)
+        except Exception as error:
+            notes.append(
+                f"Failed to resolve MANO joints for this frame ({error}); using lowdim wrist/tip world coordinates directly."
+            )
+            return keypoint_frame
+
+        keypoint_frame["left_wrist"] = np.asarray(mano_frame["left_joints"][0], dtype=np.float32)
+        keypoint_frame["right_wrist"] = np.asarray(mano_frame["right_joints"][0], dtype=np.float32)
+        keypoint_frame["left_tips"] = np.asarray(
+            mano_frame["left_joints"][FINGERTIP_INDICES], dtype=np.float32
+        )
+        keypoint_frame["right_tips"] = np.asarray(
+            mano_frame["right_joints"][FINGERTIP_INDICES], dtype=np.float32
+        )
+        keypoint_frame["anchor_source"] = "mano_joint_wrist"
+        notes.append(
+            "Keypoint mode is using MANO joint 0 as the wrist anchor and MANO fingertip joints for better geometric alignment."
+        )
+        return keypoint_frame
+
     def _ensure_mano_runtime(self):
         if self._mano_runtime is not None:
             return self._mano_runtime
@@ -1547,11 +1778,7 @@ class ViewerApp:
             if clip_id in self._mano_clip_cache:
                 return self._mano_clip_cache[clip_id]
 
-        seq_folder = self.clip_to_seq_folder.get(clip_id)
-        if not seq_folder:
-            raise RuntimeError(
-                "MANO render requires --descriptor_manifest so clip_id can be resolved to seq_folder"
-            )
+        seq_folder = self._resolve_seq_folder_for_clip(clip_id)
 
         world_path = Path(seq_folder) / "world_space_res.pth"
         if not world_path.exists():
@@ -1644,24 +1871,22 @@ class ViewerApp:
         if render_mode == "keypoint":
             if lowdim_array is None:
                 raise ValueError("lowdim.npy is required for keypoint render")
-            return _render_keypoint_overlay(sample["image_bytes"], lowdim_array, presence)
+            keypoint_frame = self._build_keypoint_frame(summary, lowdim_array)
+            return _render_keypoint_overlay(sample["image_bytes"], keypoint_frame, presence)
 
         if render_mode == "mano":
             if lowdim_array is None:
                 raise ValueError("lowdim.npy is required for mano render")
-            if not summary.clip_id:
-                raise ValueError("clip_id missing from meta.json; cannot resolve MANO source")
-            c2w, intrinsic = _extract_camera_from_lowdim(lowdim_array)
-            frame_idx = parse_frame_index(summary.key)
-            mano_cache = self._compute_mano_clip_cache(summary.clip_id)
-            if frame_idx >= mano_cache["left_vertices"].shape[0]:
-                raise IndexError(f"Frame index {frame_idx} exceeds MANO cache length for clip {summary.clip_id}")
-            mano_frame = {
-                "left_verts": mano_cache["left_vertices"][frame_idx],
-                "left_joints": mano_cache["left_joints"][frame_idx],
-                "right_verts": mano_cache["right_vertices"][frame_idx],
-                "right_joints": mano_cache["right_joints"][frame_idx],
-            }
+            mano_frame = self._get_mano_frame(summary)
+            _, intrinsic = _extract_camera_from_lowdim(lowdim_array)
+            points_world = np.concatenate(
+                [
+                    np.asarray(mano_frame["left_joints"], dtype=np.float32),
+                    np.asarray(mano_frame["right_joints"], dtype=np.float32),
+                ],
+                axis=0,
+            )
+            c2w, _ = _resolve_camera_c2w(_decode_lowdim_fields(lowdim_array)["camera_w2c"], points_world)
             return _render_mano_overlay(sample["image_bytes"], c2w, intrinsic, mano_frame, presence)
 
         raise ValueError(f"Unsupported render mode: {render_mode}")
@@ -1710,11 +1935,11 @@ class ViewerApp:
     def index_payload(self):
         return [asdict(summary) for summary in self.summaries]
 
-    def sample_payload(self, sample_id: int, render_mode: str):
+    def sample_payload(self, sample_id: int, render_mode: str, warm_image: bool = True):
         if sample_id not in self.summary_by_id:
             raise KeyError(f"Unknown sample id: {sample_id}")
 
-        payload_cache_key = (sample_id, render_mode)
+        payload_cache_key = (sample_id, f"{render_mode}:{'warm' if warm_image else 'cold'}")
         with self._cache_lock:
             cached_payload = self._sample_payload_cache.get(payload_cache_key)
         if cached_payload is not None:
@@ -1736,11 +1961,24 @@ class ViewerApp:
             errors.append(f"lowdim load failed: {lowdim_summary['error']}")
 
         lowdim_array = lowdim_summary.get("array")
+        render_notes = []
+        if lowdim_array is not None:
+            if render_mode == "keypoint":
+                render_notes = self._build_keypoint_frame(summary, lowdim_array)["notes"]
+            elif render_mode == "mano":
+                render_notes = [
+                    "MANO mode projects vertices and joints reconstructed from world_space_res.pth through the lowdim camera extrinsic."
+                ]
+                if not self.clip_to_seq_folder:
+                    render_notes.append(
+                        "descriptor manifest is required for MANO mode because clip_id must resolve to seq_folder"
+                    )
 
         image_url = None
         try:
-            self.rendered_image_bytes(summary.id, render_mode)
             image_url = f"/api/image/{summary.id}?render_mode={render_mode}"
+            if warm_image:
+                self.rendered_image_bytes(summary.id, render_mode)
         except Exception as error:
             errors.append(f"{render_mode} render failed: {error}")
             if sample["image_bytes"] is not None:
@@ -1764,10 +2002,12 @@ class ViewerApp:
                 "error": lowdim_summary.get("error"),
                 "shape": lowdim_summary.get("shape"),
                 "dtype": lowdim_summary.get("dtype"),
+                "coordinate_system": lowdim_summary.get("coordinate_system"),
                 "min": lowdim_summary.get("min"),
                 "max": lowdim_summary.get("max"),
                 "mean": lowdim_summary.get("mean"),
             },
+            "render_notes": render_notes,
             "lowdim_preview": lowdim_summary.get("preview"),
             "lowdim_segments": lowdim_summary.get("segments", []),
         }
@@ -1788,8 +2028,18 @@ def build_parser():
     parser.add_argument("--filter-key", default="", help="Initial substring filter on key / clip_id / instruction")
     parser.add_argument("--filter-presence", type=int, default=None, choices=[0, 1, 2, 3], help="Initial presence filter")
     parser.add_argument("--start-index", type=int, default=0, help="Initial sample index to open")
-    parser.add_argument("--render-mode", default="keypoint", choices=["keypoint", "mano"], help="Initial render mode")
-    parser.add_argument("--descriptor-manifest", type=str, default=None, help="Optional clip manifest for MANO render")
+    parser.add_argument(
+        "--render-mode",
+        default="keypoint",
+        choices=["keypoint", "mano"],
+        help="Initial render mode. keypoint is lightweight; mano is the geometry-accurate view.",
+    )
+    parser.add_argument(
+        "--descriptor-manifest",
+        type=str,
+        default=None,
+        help="Optional clip manifest. Required for MANO render and for accurate keypoint wrist anchors.",
+    )
     parser.add_argument("--mano-dir", type=str, default=None, help="Optional MANO model directory override")
     parser.add_argument("--mano-device", type=str, default="cpu", help="Device for MANO rendering, e.g. cpu or cuda:0")
     return parser
@@ -1886,7 +2136,12 @@ def make_handler(app: ViewerApp):
                 try:
                     sample_id = int(sample_id_str)
                     render_mode = query.get("render_mode", [app.default_render_mode])[0]
-                    payload = app.sample_payload(sample_id, render_mode=render_mode)
+                    warm_image = query.get("warm_image", ["1"])[0] != "0"
+                    payload = app.sample_payload(
+                        sample_id,
+                        render_mode=render_mode,
+                        warm_image=warm_image,
+                    )
                 except Exception as error:
                     self._send_json({"error": str(error)}, status=404)
                     return

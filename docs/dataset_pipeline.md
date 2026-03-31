@@ -186,6 +186,27 @@ python scripts/build_vla_from_manifest.py \
   --frames_per_shard 10000
 ```
 
+Final WebDataset samples contain:
+
+- `*.image.jpg`: the frame bytes
+- `*.lowdim.npy`: one `float32[116]` vector per frame
+- `*.meta.json`: per-frame metadata such as `clip_id`, `instruction`, `instruction_num`, `language`, and `presence`
+
+`lowdim[116]` is laid out as:
+
+- `0:3` left wrist joint position in world coordinates
+- `3:6` right wrist joint position in world coordinates
+- `6:12` left root orientation as rot6d
+- `12:18` right root orientation as rot6d
+- `18:33` left fingertip positions `(5, 3)` in world coordinates
+- `33:48` right fingertip positions `(5, 3)` in world coordinates
+- `48:66` next-frame wrist position + rot6d
+- `66:96` next-frame fingertip positions
+- `96:112` camera `w2c` extrinsic flattened as `4x4`
+- `112:116` camera intrinsic `[fx, fy, cx, cy]`
+
+The coordinates above are in the HaWoR/SLAM world frame, while the camera extrinsic is stored as a `World2Cam` homogeneous transform.
+
 ### Validate a Run
 
 ```bash
@@ -222,6 +243,9 @@ Acceptance criteria:
 - The final dataset builder shards by approximate frame budget, but each shard contains whole episodes only.
 - The manifest-based builder does not rely on old BuildAI directory rescans.
 - If annotation is delayed, you can generate the final dataset later from the frozen manifest without rerunning preprocess or HaWoR stages.
+- `tools/ops/webdataset_visualizer.py` supports two modes:
+  - `keypoint`: lightweight overlay from the stored lowdim wrist/fingertip world coordinates; with `--descriptor_manifest` it can cross-check against MANO cache and unlock better diagnostics
+  - `mano`: projects MANO mesh/joints reconstructed from `world_space_res.pth`; this is the more reliable mode for checking geometric accuracy
 - Built-in adapters now include `buildai`, `flat_shard`, `image_sequence`, and `video_folder`.
 - Example configs live under:
   - `configs/dataset_pipeline_buildai.example.yaml`

@@ -27,7 +27,7 @@ def quat_to_4x4(traj_row, scale):
 
 
 def interpolate_extrinsics(tstamps, traj, scale, total_frames):
-    """Interpolate SLAM keyframe extrinsics to all frames."""
+    """Interpolate SLAM keyframe extrinsics to all frames as world-to-camera matrices."""
     tstamps = tstamps.astype(np.float64)
     num_keyframes = len(tstamps)
 
@@ -36,7 +36,7 @@ def interpolate_extrinsics(tstamps, traj, scale, total_frames):
 
     if num_keyframes == 1:
         mat = quat_to_4x4(traj[0], scale)
-        return np.tile(mat, (total_frames, 1, 1))
+        return np.tile(np.linalg.inv(mat).astype(np.float32), (total_frames, 1, 1))
 
     translations = traj[:, :3] * scale
     quats_xyzw = traj[:, 3:7]
@@ -56,7 +56,7 @@ def interpolate_extrinsics(tstamps, traj, scale, total_frames):
     mats[:, :3, :3] = interp_rots
     mats[:, :3, 3] = interp_trans
     mats[:, 3, 3] = 1.0
-    return mats
+    return np.linalg.inv(mats).astype(np.float32)
 
 
 def normalize_slam_keyframes(tstamps, traj):

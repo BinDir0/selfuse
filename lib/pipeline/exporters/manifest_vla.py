@@ -20,9 +20,8 @@ from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
 from lib.pipeline.frame_sources import read_frame_bytes_from_descriptor
 from lib.pipeline.exporters.webdataset_features import (
     _build_lowdim_features,
-    _compute_hand_state,
+    _compute_joint_states,
     _compute_presence_per_frame,
-    _compute_wrist_state,
     _load_episode_camera_features,
     _load_world_space_prediction,
     build_mano_models,
@@ -37,6 +36,7 @@ _worker_feature_cache_dir = None
 _worker_episode_cache = {}
 _worker_shard_fd_cache = {}
 _worker_shard_tar_cache = {}
+MANIFEST_FEATURE_CACHE_VERSION = 2
 
 
 def _feature_cache_path(seq_folder: str, feature_cache_dir: str) -> str:
@@ -54,7 +54,11 @@ def _load_cached_features(seq_folder: str, frame_count: int, feature_cache_dir: 
         payload = joblib.load(path)
     except Exception:
         return None
-    if payload.get("seq_folder") != seq_folder or payload.get("frame_count") != frame_count:
+    if (
+        payload.get("cache_version") != MANIFEST_FEATURE_CACHE_VERSION
+        or payload.get("seq_folder") != seq_folder
+        or payload.get("frame_count") != frame_count
+    ):
         return None
     return {
         "frame_count": payload["frame_count"],
@@ -70,6 +74,7 @@ def _write_cached_features(seq_folder: str, feature_cache_dir: str, episode_data
     path = _feature_cache_path(seq_folder, feature_cache_dir)
     tmp_path = f"{path}.tmp.{os.getpid()}"
     payload = {
+        "cache_version": MANIFEST_FEATURE_CACHE_VERSION,
         "seq_folder": seq_folder,
         "frame_count": episode_data["frame_count"],
         "lowdim_all": episode_data["lowdim_all"],
@@ -104,8 +109,7 @@ def load_descriptor_episode_features(ep: dict, mano_right, mano_left, device, fe
     if frame_count <= 0:
         return None
 
-    wrist_state = _compute_wrist_state(pred_trans, pred_rot)[:frame_count]
-    hand_state = _compute_hand_state(
+    wrist_state, hand_state = _compute_joint_states(
         pred_trans,
         pred_rot,
         pred_hand_pose,
@@ -113,7 +117,9 @@ def load_descriptor_episode_features(ep: dict, mano_right, mano_left, device, fe
         mano_right,
         mano_left,
         device,
-    )[:frame_count]
+    )
+    wrist_state = wrist_state[:frame_count]
+    hand_state = hand_state[:frame_count]
     camera_ep = {"crop_dir": seq_folder, "episode_id": ep["episode_id"]}
     extrinsics, intrinsic = _load_episode_camera_features(camera_ep, num_frames)
     presence_per_frame = _compute_presence_per_frame(pred_valid, num_frames)[:frame_count]
@@ -274,6 +280,9 @@ def _worker_process_shard(task):
                     "instruction_num": int(episode_slice.get("instruction_num", 0)),
                     "language": episode_slice.get("language"),
                     "presence": int(episode_data["presence_per_frame"][frame_idx]),
+                    "lowdim_schema": "hawor_wrist_world_v2",
+                    "wrist_translation_semantics": "mano_joint_0_world",
+                    "camera_extrinsic_convention": "w2c",
                 }
                 key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
                 if tar_writer is None:

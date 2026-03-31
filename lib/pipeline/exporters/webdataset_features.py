@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FINGERTIP_INDICES = [4, 8, 12, 16, 20]
 DEFAULT_INTRINSIC = np.array([500.0, 500.0, 320.0, 240.0], dtype=np.float32)
 LOWDIM_SIZE = 116
+EPISODE_FEATURE_CACHE_VERSION = 2
 
 
 def run_mano_forward(mano_model, trans, root_orient, hand_pose, betas, device):
@@ -86,7 +87,7 @@ def _load_cached_episode_features(ep, extracted_dir, feature_cache_dir):
     except Exception:
         return None
 
-    if cached.get("cache_version") != 1 or cached.get("crop_dir") != ep["crop_dir"]:
+    if cached.get("cache_version") != EPISODE_FEATURE_CACHE_VERSION or cached.get("crop_dir") != ep["crop_dir"]:
         return None
 
     frame_index = load_or_build_frame_index(extracted_dir, rescan=False)
@@ -117,15 +118,15 @@ def _load_world_space_prediction(ep, world_res_path):
     }
 
 
-def _compute_wrist_state(pred_trans, pred_rot):
+def _compute_wrist_state(left_joints, right_joints, pred_rot):
     rot6d = axis_angle_to_rot6d(pred_rot.float())
     return torch.cat(
-        [pred_trans[0].float(), pred_trans[1].float(), rot6d[0], rot6d[1]],
+        [left_joints[:, 0, :].float(), right_joints[:, 0, :].float(), rot6d[0], rot6d[1]],
         dim=-1,
     )
 
 
-def _compute_hand_tips(mano_model, pred_trans, pred_rot, pred_hand_pose, pred_betas, hand_index, device):
+def _compute_hand_joints(mano_model, pred_trans, pred_rot, pred_hand_pose, pred_betas, hand_index, device):
     num_frames = int(pred_trans.shape[1])
     hand_pose = pred_hand_pose[hand_index].float().reshape(1, num_frames, 15, 3)
     output = run_mano_forward(
@@ -136,12 +137,22 @@ def _compute_hand_tips(mano_model, pred_trans, pred_rot, pred_hand_pose, pred_be
         pred_betas[hand_index].float().unsqueeze(0),
         device,
     )
-    return output[:, :, FINGERTIP_INDICES, :]
+    return output[0]
 
 
-def _compute_hand_state(pred_trans, pred_rot, pred_hand_pose, pred_betas, mano_right, mano_left, device):
+def _compute_hand_state(left_joints, right_joints):
+    num_frames = int(left_joints.shape[0])
+    left_tips = left_joints[:, FINGERTIP_INDICES, :]
+    right_tips = right_joints[:, FINGERTIP_INDICES, :]
+    return torch.cat(
+        [left_tips.reshape(num_frames, 15), right_tips.reshape(num_frames, 15)],
+        dim=-1,
+    )
+
+
+def _compute_joint_states(pred_trans, pred_rot, pred_hand_pose, pred_betas, mano_right, mano_left, device):
     num_frames = int(pred_trans.shape[1])
-    right_tips = _compute_hand_tips(
+    right_joints = _compute_hand_joints(
         mano_right,
         pred_trans,
         pred_rot,
@@ -150,7 +161,7 @@ def _compute_hand_state(pred_trans, pred_rot, pred_hand_pose, pred_betas, mano_r
         hand_index=1,
         device=device,
     )
-    left_tips = _compute_hand_tips(
+    left_joints = _compute_hand_joints(
         mano_left,
         pred_trans,
         pred_rot,
@@ -159,10 +170,9 @@ def _compute_hand_state(pred_trans, pred_rot, pred_hand_pose, pred_betas, mano_r
         hand_index=0,
         device=device,
     )
-    return torch.cat(
-        [left_tips[0].reshape(num_frames, 15), right_tips[0].reshape(num_frames, 15)],
-        dim=-1,
-    )
+    wrist_state = _compute_wrist_state(left_joints, right_joints, pred_rot)
+    hand_state = _compute_hand_state(left_joints, right_joints)
+    return wrist_state, hand_state
 
 
 def _shift_next_frame_action(state):
@@ -270,7 +280,7 @@ def _write_episode_feature_cache(ep, feature_cache_dir, episode_data):
     cache_path = get_episode_feature_cache_path(ep, feature_cache_dir)
     cache_tmp_path = f"{cache_path}.tmp.{os.getpid()}"
     cache_payload = {
-        "cache_version": 1,
+        "cache_version": EPISODE_FEATURE_CACHE_VERSION,
         "crop_dir": ep["crop_dir"],
         "frame_ids": episode_data["frame_ids"],
         "lowdim_all": episode_data["lowdim_all"],
@@ -314,8 +324,7 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
     pred_valid = prediction["pred_valid"]
     num_frames = int(pred_trans.shape[1])
 
-    wrist_state = _compute_wrist_state(pred_trans, pred_rot)
-    hand_state = _compute_hand_state(
+    wrist_state, hand_state = _compute_joint_states(
         pred_trans,
         pred_rot,
         pred_hand_pose,
