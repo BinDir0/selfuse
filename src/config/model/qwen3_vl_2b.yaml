@@ -154,8 +154,8 @@ policy:
   ar_action_train_config:
     _target_: src.policy.legendvla.ARActionTrainConfig
     noise_std: 0.02
-    chunk_size: 8
-    diffloss_repeat: 1
+    chunk_size: 4
+    diffloss_repeat: 16
   loss_config:
     _target_: src.policy.legendvla.LossConfig
     ce_loss_weight: 0.1

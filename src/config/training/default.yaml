@@ -62,7 +62,7 @@ training:
   # or `True` to enable all with every_n=1 (backward compatible).
   gradient_checkpointing:
     text:
-      enabled: True
+      enabled: False
       every_n: 2           # checkpoint every N-th text layer (1 = all layers)
     vision:
       enabled: False
