@@ -100,6 +100,8 @@ _RETURN_JSON_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_IMAGE_TAG_RE = re.compile(r"<image>", re.IGNORECASE)
+
 
 def strip_format_instructions(text):
     """Remove coordinate-format boilerplate from question text."""
@@ -136,6 +138,28 @@ def normalize_abs_coords_in_text(text, img_width, img_height):
     return text
 
 
+# MCQ: "Choices: [A. foo, B. bar, ...]. ..." -> "Choices:\nA. foo\nB. bar\n..."
+_CHOICES_BRACKET_RE = re.compile(
+    r"(Choices:\s*)\[([^\]]+)\]\s*(\.)?(\s*)",
+    re.IGNORECASE,
+)
+
+
+def reformat_choices_bracket_list(text: str) -> str:
+    """Remove square brackets around options; one option per line after 'Choices:'."""
+
+    def _sub(m: re.Match) -> str:
+        lead, body, dot_after, sp_after = m.group(1), m.group(2), m.group(3), m.group(4)
+        options = re.split(r",\s*(?=[A-Z]\.)", body.strip())
+        options = [o.strip() for o in options if o.strip()]
+        if len(options) < 2:
+            return m.group(0)
+        tail = (dot_after or "") + (sp_after or "")
+        return f"{lead.rstrip()}\n" + "\n".join(options) + tail
+
+    return _CHOICES_BRACKET_RE.sub(_sub, text)
+
+
 def bbox_to_text(y_min, x_min, y_max, x_max):
     """Qwen3-VL JSON format: [{"bbox_2d": [x1, y1, x2, y2]}] in 0-1000."""
     x1 = round(x_min * 1000)
@@ -155,16 +179,67 @@ def trajectory_to_text(points):
 
 def load_image_safe(image_path):
     """Safely load an image."""
-    full_path = os.path.join(ROBOINTER_ROOT, image_path)
-    if os.path.exists(full_path):
-        try:
-            return Image.open(full_path).convert('RGB')
-        except Exception:
-            return None
+    candidates = [os.path.join(ROBOINTER_ROOT, image_path)]
+    # Train planning JPEGs may be extracted under task_planning_full/ (merged zip) instead of task_planning/.
+    alt = image_path.replace(
+        "Task_planning/image/train/manipvqa/task_planning/",
+    )
+    if alt != image_path:
+        candidates.append(os.path.join(ROBOINTER_ROOT, alt))
+
+    for full_path in candidates:
+        if os.path.exists(full_path):
+            try:
+                return Image.open(full_path).convert('RGB')
+            except Exception:
+                continue
     return None
 
-def process_entry(entry, task_type):
-    """Process a single entry based on task type."""
+
+def _uniform_frame_indices(n_frames: int, max_frames: int | None) -> list[int]:
+    """Evenly spaced indices along [0, n_frames-1]; length min(n_frames, max_frames)."""
+    if max_frames is None or max_frames <= 0 or n_frames <= max_frames:
+        return list(range(n_frames))
+    if max_frames == 1:
+        return [0]
+    return sorted(
+        {
+            int(round(i * (n_frames - 1) / (max_frames - 1)))
+            for i in range(max_frames)
+        }
+    )
+
+
+def subsample_matching_image_tags(text: str, n_orig: int, indices_kept: list[int]) -> str:
+    """Drop <image> tokens at positions not in indices_kept when tag count equals n_orig."""
+    if not text or n_orig <= len(indices_kept):
+        return text
+    tags = list(_IMAGE_TAG_RE.finditer(text))
+    if len(tags) != n_orig:
+        return text
+    drop = set(range(n_orig)) - set(indices_kept)
+    parts: list[str] = []
+    last = 0
+    for fi, m in enumerate(tags):
+        if fi in drop:
+            parts.append(text[last:m.start()])
+            end = m.end()
+            if end < len(text) and text[end] == "\n":
+                end += 1
+            last = end
+        else:
+            parts.append(text[last:m.end()])
+            last = m.end()
+    parts.append(text[last:])
+    return "".join(parts)
+
+
+def process_entry(entry, task_type, max_video_frames: int | None = None):
+    """Process a single entry based on task type.
+
+    max_video_frames: if set, cap number of loaded frames by uniform temporal subsampling.
+    Trajectory GT points are subsampled only when len(gt) equals the pre-subsample frame count.
+    """
     try:
         # Load images
         image_paths = entry['images']
@@ -180,6 +255,11 @@ def process_entry(entry, task_type):
             
         if not images:
             return None
+
+        n_orig = len(images)
+        frame_idx = _uniform_frame_indices(n_orig, max_video_frames)
+        if len(frame_idx) < n_orig:
+            images = [images[i] for i in frame_idx]
 
         # Get dimensions from first image (assume all same size for video/multi-frame)
         orig_w, orig_h = images[0].size
@@ -236,7 +316,14 @@ def process_entry(entry, task_type):
                     gt_data = eval(gt_str)
             else:
                 gt_data = gt_str
-                
+
+            if (
+                len(frame_idx) < n_orig
+                and isinstance(gt_data, list)
+                and len(gt_data) == n_orig
+            ):
+                gt_data = [gt_data[i] for i in frame_idx]
+
             points = [normalize_point(p, norm_w, norm_h) for p in gt_data]
             assistant_text = trajectory_to_text(points)
             
@@ -257,14 +344,18 @@ def process_entry(entry, task_type):
             if msg['from'] in ['human', 'huamn']:
                 human_msg = msg['value']
                 break
+
+        if len(frame_idx) < n_orig:
+            human_msg = subsample_matching_image_tags(human_msg, n_orig, frame_idx)
                 
         # Clean up <image> tags and format instructions
         # Handle various image tag formats and ensure text is preserved
         human_msg = human_msg.replace("<image>\n", "").replace("\n<image>", "").replace("<image>", "")
         human_msg = strip_format_instructions(human_msg)
         # Normalize any absolute pixel coordinates in question/choices to 0-1000 tuples
-        human_msg = normalize_abs_coords_in_text(human_msg, norm_w, norm_h).strip()
-        
+        human_msg = normalize_abs_coords_in_text(human_msg, norm_w, norm_h)
+        human_msg = reformat_choices_bracket_list(human_msg).strip()
+
         return {
             "images": images,
             "texts": [{"user": human_msg, "assistant": assistant_text}],
@@ -310,7 +401,16 @@ def get_worker_next_shard_idx(output_dir, worker_id, shard_prefix="shard"):
             
     return max_idx + 1
 
-def process_batch_wrapper(samples, output_dir, worker_id, maxcount, maxsize, image_quality, shard_prefix):
+def process_batch_wrapper(
+    samples,
+    output_dir,
+    worker_id,
+    maxcount,
+    maxsize,
+    image_quality,
+    shard_prefix,
+    max_video_frames,
+):
     """Wrapper to handle the task_type extraction from item and writing."""
     
     # Determine start index
@@ -329,7 +429,7 @@ def process_batch_wrapper(samples, output_dir, worker_id, maxcount, maxsize, ima
         # Extract task type which we attached earlier
         task_type = entry.pop('_task_type_internal', 'unknown')
         
-        processed = process_entry(entry, task_type)
+        processed = process_entry(entry, task_type, max_video_frames=max_video_frames)
         if not processed:
             continue
             
@@ -428,7 +528,8 @@ def process_split(files, output_dir, args, task_mapping, shard_prefix="shard"):
             args.maxcount,
             args.maxsize,
             args.image_quality,
-            shard_prefix
+            shard_prefix,
+            None if args.max_video_frames <= 0 else args.max_video_frames,
         ))
 
     # 4. Run Pool
@@ -444,10 +545,20 @@ def main():
     parser.add_argument("--maxcount", type=int, default=20000, help="Max samples per shard")
     parser.add_argument("--maxsize", type=int, default=int(1e9), help="Max approximate bytes per shard")
     parser.add_argument("--image_quality", type=int, default=95, help="JPEG quality for image encoding")
-    
+    parser.add_argument(
+        "--max_video_frames",
+        type=int,
+        default=6,
+        help="Cap frames per sample with uniform temporal subsampling (e.g. 8->6). Use 0 to keep all frames.",
+    )
+
     args = parser.parse_args()
 
     print("Processing Generation, Understanding, and Task_planning...")
+    if args.max_video_frames > 0:
+        print(f"Multi-frame cap: max_video_frames={args.max_video_frames} (uniform subsampling)")
+    else:
+        print("Multi-frame cap: disabled (max_video_frames<=0)")
     
     # Determine splits to process
     splits = []

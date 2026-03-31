@@ -2,12 +2,15 @@
 Convert ShareRobot Affordance and Trajectory datasets to WebDataset format.
 
 Converts bbox and trajectory coordinates to normalized [0,1] format for PaliGemma.
+Planning splits long frame lists via uniform temporal subsampling (see --max_planning_frames).
 """
 import os
+import re
 import json
 import glob
 import argparse
 import multiprocessing as mp
+from typing import Optional
 from PIL import Image
 from wds_utils import ShardWriter, split_train_test
 
@@ -23,8 +26,14 @@ SHAREROBOT_ROOT = "/share_data/guantianrui/datasets/VLM/ShareRobot"
 # 2. Output directory for WebDataset format
 OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/Webdataset/sharerobot"
 
-# 3. Only process affordance and trajectory (planning has multiple images per sample)
+# 3. Subdatasets to export (planning is multi-image; paths need prefix handling in load_image_safe)
 PROCESS_SUBDATASETS = ['affordance', 'trajectory', 'planning']
+
+# Planning JSONs use paths like rt_frames_success/... relative to planning/, but unpacked
+# releases may nest files under this extra prefix inside planning/images/.
+PLANNING_RT_FRAMES_REL_PREFIX = os.path.join(
+    "mnt", "hpfs", "baaiei", "jyShi", "ShareRobot", "planning"
+)
 
 # 4. Train/test split ratio
 VAL_RATIO = 0.001  # 0.1% for validation
@@ -33,7 +42,50 @@ SEED = 42
 # 5. Test mode: Set to a number to only process first N samples (None = process all)
 MAX_SAMPLES = None  # Set to None to process all samples, or a number like 100 for testing
 
+# 6. Planning: if n_images exceeds this, uniformly subsample to this many (CLI can override).
+DEFAULT_MAX_PLANNING_FRAMES = 6
+
 # =========================================================
+
+_IMAGE_TAG_RE = re.compile(r"<image>", re.IGNORECASE)
+
+
+def _uniform_frame_indices(n_frames: int, max_frames: Optional[int]) -> list[int]:
+    """Evenly spaced indices over [0, n_frames-1]; length at most max_frames."""
+    if max_frames is None or max_frames <= 0 or n_frames <= max_frames:
+        return list(range(n_frames))
+    if max_frames == 1:
+        return [0]
+    return sorted(
+        {
+            int(round(i * (n_frames - 1) / (max_frames - 1)))
+            for i in range(max_frames)
+        }
+    )
+
+
+def subsample_matching_image_tags(text: str, n_orig: int, indices_kept: list[int]) -> str:
+    """Remove <image> tokens at frame indices not in indices_kept when tag count equals n_orig."""
+    if not text or n_orig <= len(indices_kept):
+        return text
+    tags = list(_IMAGE_TAG_RE.finditer(text))
+    if len(tags) != n_orig:
+        return text
+    drop = set(range(n_orig)) - set(indices_kept)
+    parts: list[str] = []
+    last = 0
+    for fi, m in enumerate(tags):
+        if fi in drop:
+            parts.append(text[last : m.start()])
+            end = m.end()
+            if end < len(text) and text[end] == "\n":
+                end += 1
+            last = end
+        else:
+            parts.append(text[last : m.end()])
+            last = m.end()
+    parts.append(text[last:])
+    return "".join(parts)
 
 
 def normalize_bbox(bbox, width, height):
@@ -98,10 +150,12 @@ def load_image_safe(base_path, image_path):
         os.path.join(SHAREROBOT_ROOT, 'images', image_path),
     ]
     
-    # Fallback for planning images that might be extracted in trajectory/images
-    if image_path.startswith('rt_frames_success/'):
+    # Planning: actual files often live under planning/images/<PLANNING_RT_FRAMES_REL_PREFIX>/rt_frames_success/...
+    if image_path.startswith("rt_frames_success/"):
+        possible_paths.append(os.path.join(base_path, PLANNING_RT_FRAMES_REL_PREFIX, image_path))
+        # Fallback for copies extracted under trajectory/images (no rt_frames_success prefix there)
         possible_paths.append(
-            os.path.join(SHAREROBOT_ROOT, 'trajectory', 'images', image_path.replace('rt_frames_success/', ''))
+            os.path.join(SHAREROBOT_ROOT, "trajectory", "images", image_path.replace("rt_frames_success/", ""))
         )
 
     for full_path in possible_paths:
@@ -149,24 +203,27 @@ def process_trajectory_sample(sample, image_base_path):
         return None
 
 
-def process_planning_sample(sample, image_base_path):
-    """Process a single planning sample (multi-image)."""
+def process_planning_sample(
+    sample,
+    image_base_path,
+    max_planning_frames: Optional[int] = None,
+):
+    """Process a single planning sample (multi-image).
+
+    When len(images) > max_planning_frames, keep a uniform temporal subset of frames
+    and drop matching <image> tokens if their count matches the original frame count.
+    """
     try:
         image_paths = sample.get('image', [])
         if isinstance(image_paths, str):
             image_paths = [image_paths]
-            
-        images = []
-        for img_path in image_paths:
-            img = load_image_safe(image_base_path, img_path)
-            if img is None:
-                return None
-            images.append(img)
-            
-        if not images:
+
+        n_orig = len(image_paths)
+        if n_orig == 0:
             return None
-            
-        # Parse conversation
+
+        frame_idx = _uniform_frame_indices(n_orig, max_planning_frames)
+
         human_msg = ""
         gpt_msg = ""
         for conv in sample.get('conversations', []):
@@ -174,10 +231,27 @@ def process_planning_sample(sample, image_base_path):
                 human_msg = conv['value']
             elif conv['from'] == 'gpt':
                 gpt_msg = conv['value']
-                
+
+        if len(frame_idx) < n_orig:
+            human_msg = subsample_matching_image_tags(human_msg, n_orig, frame_idx)
+
+        image_paths = [image_paths[i] for i in frame_idx]
+
+        images = []
+        for img_path in image_paths:
+            img = load_image_safe(image_base_path, img_path)
+            if img is None:
+                return None
+            images.append(img)
+
         # Clean up <image> tags
-        human_msg = human_msg.replace("<image>\n", "").replace("\n<image>", "").replace("<image>", "").strip()
-        
+        human_msg = (
+            human_msg.replace("<image>\n", "")
+            .replace("\n<image>", "")
+            .replace("<image>", "")
+            .strip()
+        )
+
         return images, [{"user": human_msg, "assistant": gpt_msg}]
     except Exception:
         return None
@@ -185,7 +259,7 @@ def process_planning_sample(sample, image_base_path):
 
 def process_chunk(args):
     """Worker function to process a chunk of samples and write to WebDataset shards."""
-    chunk, output_dir, worker_id, split, image_quality, maxcount, maxsize = args
+    chunk, output_dir, worker_id, split, image_quality, maxcount, maxsize, max_planning_frames = args
     sw = ShardWriter(output_dir, split=split, worker_id=worker_id,
                      maxcount=maxcount, maxsize=maxsize, image_quality=image_quality)
     for local_idx, (sample, subdataset, image_base_path) in enumerate(chunk):
@@ -196,7 +270,9 @@ def process_chunk(args):
             result = process_trajectory_sample(sample, image_base_path)
             source = "trajectory"
         elif subdataset == 'planning':
-            result = process_planning_sample(sample, image_base_path)
+            result = process_planning_sample(
+                sample, image_base_path, max_planning_frames=max_planning_frames
+            )
             source = "planning"
         else:
             continue
@@ -211,15 +287,28 @@ def process_chunk(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Convert ShareRobot to WebDataset format")
-    parser.add_argument("--num_workers", type=int, default=16, help="Number of parallel workers")
+    parser.add_argument("--num_workers", type=int, default=32, help="Number of parallel workers")
     parser.add_argument("--maxcount", type=int, default=20000, help="Max samples per shard")
     parser.add_argument("--maxsize", type=float, default=1e9, help="Max shard size in bytes")
     parser.add_argument("--image_quality", type=int, default=95, help="JPEG quality")
+    parser.add_argument(
+        "--max_planning_frames",
+        type=int,
+        default=DEFAULT_MAX_PLANNING_FRAMES,
+        help="Planning only: if n_images exceeds this, uniformly subsample to this many. "
+        "Use 0 to keep all frames.",
+    )
     args = parser.parse_args()
+
+    max_pf = None if args.max_planning_frames <= 0 else args.max_planning_frames
 
     print("=" * 80)
     print("ShareRobot to WebDataset Format Conversion")
     print("=" * 80)
+    if max_pf:
+        print(f"Planning frame cap: max_planning_frames={max_pf} (uniform subsampling)")
+    else:
+        print("Planning frame cap: disabled (all frames kept)")
 
     # Load all data
     all_data = []
@@ -279,6 +368,7 @@ def main():
                 args.image_quality,
                 args.maxcount,
                 int(args.maxsize),
+                max_pf,
             ))
 
         print(f"Using {len(chunks)} workers")
