@@ -98,7 +98,7 @@ data_collator:
 dataloader:
   loader:
     batch_size: 16
-    num_workers: 4
+    num_workers: 6
     pin_memory: True
     persistent_workers: True
     prefetch_factor: 16
