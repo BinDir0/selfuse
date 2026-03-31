@@ -5,7 +5,7 @@ data:
   # When world model (future frame prediction) is enabled, this MUST be set
   # to ensure temporal attention patches align across frames.
   # Set to null to skip resizing (original resolution preserved).
-  target_image_size: null
+  target_image_size: [384, 384]
   ignore_index: -100
   max_vlm_tokens: 768
   tokenizer_padding: max_length
@@ -82,9 +82,9 @@ data_collator:
     model_name_or_path: ${pretrained.model_name_or_path}
     processor_init_kwargs:
       trust_remote_code: ${pretrained.trust_remote_code}
+    processor_call_kwargs:
       min_pixels: 147456
       max_pixels: 147456
-    processor_call_kwargs:
       text_kwargs:
         padding: ${data.tokenizer_padding}
         max_length: ${data.max_vlm_tokens}
