@@ -422,6 +422,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
                         self.tracker.track()
+                    step_skipped = False
                     with accelerator.accumulate(self.model):
                         # Forward pass
                         with accelerator.autocast():
@@ -455,11 +456,32 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             if should_record:
                                 part_grad_norms = norms
 
-                        # Standard training
-                        self.optimizer.step()
-                        self.lr_scheduler.step()
+                            # NaN/Inf guard: clip_grad_norm_ returns a scalar
+                            # norm that DTensor dispatch already reduces across
+                            # all FSDP2 shards, so every rank sees the same
+                            # value. No extra all_reduce needed — all ranks
+                            # will make the same skip/no-skip decision.
+                            if any(
+                                not math.isfinite(scalar_metric_value(n))
+                                for n in norms.values()
+                            ):
+                                step_skipped = True
+                                if accelerator.is_main_process:
+                                    print(
+                                        f"[WARN] Non-finite grad norm at "
+                                        f"update_step={self.update_step} "
+                                        f"global_step={self.global_step}: "
+                                        f"{({k: scalar_metric_value(v) for k, v in norms.items()})}. "
+                                        f"Skipping step."
+                                    )
+
+                        if not step_skipped:
+                            self.optimizer.step()
+                            self.lr_scheduler.step()
                         self.optimizer.zero_grad(set_to_none=True)
 
+                    if step_skipped:
+                        continue
                     self.global_step += 1
                     if accelerator.sync_gradients:
                         self.update_step += 1
