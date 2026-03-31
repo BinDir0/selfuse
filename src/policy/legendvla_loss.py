@@ -326,12 +326,15 @@ def compute_diffloss_loss(
     action_gt = action_gt.repeat_interleave(repeat_factor, dim=0)
     diffloss_mask = diffloss_mask.repeat_interleave(repeat_factor, dim=0)
     latent_condition_embeds = model.latent_condition_projector(vla_hidden_z)
+    # repeat_interleave gives each position an independent noise sample;
+    # diffloss internally computes masked mean over all positions, so the
+    # returned loss is already a correct per-element average — no division.
     diff_loss = model.diffloss(
         action_gt,
         latent_condition_embeds,
         mask=diffloss_mask.to(dtype=action_gt.dtype),
     )
-    return diff_loss / repeat_factor
+    return diff_loss
 
 
 def build_flow_inputs(

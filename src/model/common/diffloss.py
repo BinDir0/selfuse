@@ -409,6 +409,10 @@ class DiffLoss(nn.Module):
             return None
         while mask.ndim < loss.ndim:
             mask = mask.unsqueeze(-1)
+        # Expand so mask.sum() counts all valid elements (B*C), not just
+        # valid samples (B). Without this, masked loss would be sum-over-C
+        # instead of mean-over-C when mask has fewer dims than loss.
+        mask = mask.expand_as(loss)
         return mask.to(dtype=loss.dtype)
 
     def diffusion_loss(self, target, z, mask=None):
