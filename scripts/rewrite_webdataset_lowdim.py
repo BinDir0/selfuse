@@ -171,6 +171,46 @@ def build_legacy_episode_index(
     return legacy_index
 
 
+def build_legacy_episode_index_from_processed_root(
+    processed_root: str,
+    *,
+    factory_range: str | None,
+) -> dict[int, dict]:
+    from lib.pipeline.exporters.webdataset_discovery import matches_factory_range
+
+    root = Path(processed_root).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"BuildAI processed root not found: {root}")
+
+    seq_folders = []
+    for factory_dir in sorted(root.glob("factory*")):
+        outputs_dir = factory_dir / "outputs"
+        if not outputs_dir.is_dir():
+            continue
+        if not matches_factory_range(str(factory_dir), factory_range):
+            continue
+        for seq_folder in sorted(outputs_dir.iterdir()):
+            if not seq_folder.is_dir():
+                continue
+            world_res = seq_folder / "world_space_res.pth"
+            if not world_res.exists():
+                continue
+            seq_folders.append(seq_folder.resolve())
+
+    legacy_index = {}
+    for episode_index, seq_folder in enumerate(seq_folders):
+        clip_id = seq_folder.name
+        legacy_index[episode_index] = {
+            "clip_id": clip_id,
+            "episode_id": clip_id,
+            "seq_folder": str(seq_folder),
+            "source_id": "buildai",
+            "split": "unknown",
+            "legacy_episode_index": episode_index,
+        }
+    return legacy_index
+
+
 def _ensure_worker_models():
     global _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT
     from lib.pipeline.exporters.webdataset_features import build_mano_models
@@ -429,10 +469,18 @@ def main():
             factory_range=args.legacy_factory_range,
             cache_file=legacy_episode_cache,
         )
-        if legacy_episode_cache:
-            legacy_episode_source = legacy_episode_cache
-        else:
-            legacy_episode_source = legacy_input_dir
+        if legacy_episodes:
+            if legacy_episode_cache:
+                legacy_episode_source = legacy_episode_cache
+            else:
+                legacy_episode_source = legacy_input_dir
+
+    if not legacy_episodes:
+        legacy_episodes = build_legacy_episode_index_from_processed_root(
+            str(buildai_processed_root),
+            factory_range=args.legacy_factory_range,
+        )
+        legacy_episode_source = f"{buildai_processed_root} [auto-scan]"
 
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
