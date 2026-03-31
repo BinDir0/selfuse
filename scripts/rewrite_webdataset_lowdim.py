@@ -7,6 +7,7 @@ import argparse
 import io
 import json
 import os
+import re
 import tarfile
 from multiprocessing import get_context
 from pathlib import Path
@@ -35,12 +36,14 @@ from lib.pipeline.quality_metrics import parse_frame_index  # noqa: E402
 
 
 DEFAULT_WORKERS = max(1, min(4, os.cpu_count() or 1))
+BUILDAI_CLIP_RE = re.compile(r"^f(\d{3})_")
 _WORKER_CLIP_INDEX = None
 _WORKER_FEATURE_CACHE_DIR = None
 _WORKER_DEVICE = None
 _WORKER_MANO_RIGHT = None
 _WORKER_MANO_LEFT = None
 _WORKER_MANO_DIR = None
+_WORKER_BUILDAI_ROOT = None
 _WORKER_EPISODE_CACHE = {}
 _WORKER_OUTPUT_DIR = None
 
@@ -49,7 +52,11 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Rewrite WebDataset shards with corrected lowdim semantics")
     parser.add_argument("--source_shard_dir", required=True, help="Source directory containing shard tar files")
     parser.add_argument("--output_dir", required=True, help="Output directory for rewritten shards")
-    parser.add_argument("--descriptor_manifest", required=True, help="Frozen clip manifest JSONL used to build the shards")
+    parser.add_argument(
+        "--buildai_processed_root",
+        required=True,
+        help="BuildAI processed root containing factoryXXX/outputs/<clip_id> stage outputs.",
+    )
     parser.add_argument("--report_out", default=None, help="Optional JSON report path")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
     parser.add_argument("--mano_device", type=str, default="cuda:0", help="Device for MANO forward pass")
@@ -85,28 +92,6 @@ def validate_io_dirs(source_dir: Path, output_dir: Path):
         raise AssertionError("--source_shard_dir must not be inside --output_dir")
 
 
-def build_clip_index(manifest_path: str) -> dict[str, dict]:
-    from lib.pipeline.clip_manifest import load_clip_manifest
-
-    records = load_clip_manifest(manifest_path)
-    clip_index = {}
-    for record in records:
-        clip_id = str(record.clip_id)
-        if clip_id in clip_index:
-            raise ValueError(f"Duplicate clip_id in descriptor manifest: {clip_id}")
-        clip_index[clip_id] = {
-            "clip_id": clip_id,
-            "episode_id": clip_id,
-            "seq_folder": str(Path(record.descriptor.seq_folder).resolve()),
-            "num_valid_frames": int(record.descriptor.frame_count),
-            "source_id": record.source_id,
-            "split": record.split,
-        }
-    if not clip_index:
-        raise RuntimeError(f"No clips found in descriptor manifest: {manifest_path}")
-    return clip_index
-
-
 def _sample_clip_id(sample: dict, meta: dict | None) -> str:
     if meta is not None:
         clip_id = meta.get("clip_id")
@@ -123,9 +108,9 @@ def _encode_lowdim(lowdim) -> bytes:
 
 def _build_updated_meta(meta: dict, clip_info: dict, presence: int) -> bytes:
     updated = dict(meta)
-    updated.setdefault("dataset_name", clip_info["source_id"])
+    updated.setdefault("dataset_name", clip_info.get("source_id") or "buildai")
     updated["clip_id"] = clip_info["clip_id"]
-    updated.setdefault("split", clip_info["split"])
+    updated.setdefault("split", clip_info.get("split") or "unknown")
     updated["presence"] = int(presence)
     updated["lowdim_schema"] = "hawor_wrist_world_v2"
     updated["wrist_translation_semantics"] = "mano_joint_0_world"
@@ -144,10 +129,17 @@ def _ensure_worker_models():
     _WORKER_MANO_LEFT.eval()
 
 
-def _worker_init(device_specs, mano_dir, clip_index: dict[str, dict], feature_cache_dir: str | None, output_dir: str):
+def _worker_init(
+    device_specs,
+    mano_dir,
+    clip_index: dict[str, dict],
+    feature_cache_dir: str | None,
+    output_dir: str,
+    buildai_root: str,
+):
     global _WORKER_CLIP_INDEX, _WORKER_FEATURE_CACHE_DIR, _WORKER_DEVICE
     global _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT, _WORKER_EPISODE_CACHE
-    global _WORKER_MANO_DIR, _WORKER_OUTPUT_DIR
+    global _WORKER_MANO_DIR, _WORKER_OUTPUT_DIR, _WORKER_BUILDAI_ROOT
 
     from multiprocessing import current_process
     import torch
@@ -163,6 +155,7 @@ def _worker_init(device_specs, mano_dir, clip_index: dict[str, dict], feature_ca
     _WORKER_MANO_DIR = mano_dir
     _WORKER_EPISODE_CACHE = {}
     _WORKER_OUTPUT_DIR = output_dir
+    _WORKER_BUILDAI_ROOT = buildai_root
 
 
 def _get_episode_data(clip_id: str):
@@ -173,11 +166,14 @@ def _get_episode_data(clip_id: str):
 
     clip_info = _WORKER_CLIP_INDEX.get(clip_id)
     if clip_info is None:
-        raise KeyError(f"Clip {clip_id} not found in descriptor manifest")
+        raise KeyError(f"Clip {clip_id} not found in BuildAI index")
 
     _ensure_worker_models()
+    feature_request = dict(clip_info)
+    if feature_request.get("num_valid_frames") is None:
+        feature_request.pop("num_valid_frames", None)
     episode_data = load_descriptor_episode_features(
-        clip_info,
+        feature_request,
         _WORKER_MANO_RIGHT,
         _WORKER_MANO_LEFT,
         _WORKER_DEVICE,
@@ -187,6 +183,37 @@ def _get_episode_data(clip_id: str):
         raise RuntimeError(f"Failed to load corrected features for clip {clip_id}")
     _WORKER_EPISODE_CACHE[clip_id] = episode_data
     return episode_data
+
+
+def _build_buildai_clip_info(clip_id: str) -> dict:
+    match = BUILDAI_CLIP_RE.match(clip_id)
+    if not match:
+        raise ValueError(
+            f"Clip id does not look like BuildAI format fXXX_...: {clip_id}"
+        )
+    factory_id = int(match.group(1))
+    seq_folder = Path(_WORKER_BUILDAI_ROOT) / f"factory{factory_id:03d}" / "outputs" / clip_id
+    if not seq_folder.is_dir():
+        raise FileNotFoundError(
+            f"BuildAI seq_folder not found for {clip_id}: {seq_folder}"
+        )
+    return {
+        "clip_id": clip_id,
+        "episode_id": clip_id,
+        "seq_folder": str(seq_folder.resolve()),
+        "source_id": "buildai",
+        "split": "unknown",
+    }
+
+
+def _resolve_clip_info(clip_id: str):
+    clip_info = _WORKER_CLIP_INDEX.get(clip_id)
+    if clip_info is not None:
+        return clip_info
+
+    clip_info = _build_buildai_clip_info(clip_id)
+    _WORKER_CLIP_INDEX[clip_id] = clip_info
+    return clip_info
 
 
 def process_shard(shard_path: str) -> dict:
@@ -208,9 +235,7 @@ def process_shard(shard_path: str) -> dict:
 
             clip_id = _sample_clip_id(sample, meta)
             frame_idx = parse_frame_index(sample["key"])
-            clip_info = _WORKER_CLIP_INDEX.get(clip_id)
-            if clip_info is None:
-                raise KeyError(f"Sample {sample['key']} resolved to clip {clip_id}, but it is missing from the descriptor manifest")
+            clip_info = _resolve_clip_info(clip_id)
 
             episode_data = _get_episode_data(clip_id)
             if frame_idx >= int(episode_data["lowdim_all"].shape[0]):
@@ -258,11 +283,17 @@ def _worker_process_shard(shard_path: str) -> dict:
     return process_shard(shard_path)
 
 
-def build_report(source_dir: Path, output_dir: Path, manifest_path: Path, shard_results: list[dict], feature_cache_dir: Path) -> dict:
-    return {
+def build_report(
+    source_dir: Path,
+    output_dir: Path,
+    buildai_processed_root: Path,
+    shard_results: list[dict],
+    feature_cache_dir: Path,
+) -> dict:
+    report = {
         "source_shard_dir": str(source_dir.resolve()),
         "output_dir": str(output_dir.resolve()),
-        "descriptor_manifest": str(manifest_path.resolve()),
+        "buildai_processed_root": str(buildai_processed_root.resolve()),
         "feature_cache_dir": str(feature_cache_dir.resolve()),
         "shards_total": len(shard_results),
         "shards_written": int(sum(item["shard_written"] for item in shard_results)),
@@ -276,6 +307,7 @@ def build_report(source_dir: Path, output_dir: Path, manifest_path: Path, shard_
             for item in shard_results
         },
     }
+    return report
 
 
 def main():
@@ -292,14 +324,14 @@ def main():
 
     output_dir = Path(args.output_dir)
     validate_io_dirs(source_dir, output_dir)
-    manifest_path = Path(args.descriptor_manifest)
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"Descriptor manifest not found: {manifest_path}")
+    buildai_processed_root = Path(args.buildai_processed_root).resolve()
+    if not buildai_processed_root.is_dir():
+        raise FileNotFoundError(f"BuildAI processed root not found: {buildai_processed_root}")
 
     feature_cache_dir = Path(args.feature_cache_dir) if args.feature_cache_dir else output_dir / "_episode_feature_cache"
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    clip_index = build_clip_index(str(manifest_path))
+    clip_index = {}
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
@@ -310,14 +342,28 @@ def main():
         args.workers = min(args.workers, len(device_specs))
 
     if args.workers <= 1:
-        _worker_init(device_specs, args.mano_dir, clip_index, str(feature_cache_dir), str(output_dir))
+        _worker_init(
+            device_specs,
+            args.mano_dir,
+            clip_index,
+            str(feature_cache_dir),
+            str(output_dir),
+            str(buildai_processed_root),
+        )
         shard_results = [process_shard(shard_path) for shard_path in tqdm(shard_paths, desc="Rewrite shards")]
     else:
         mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
         with mp_context.Pool(
             args.workers,
             initializer=_worker_init,
-            initargs=(device_specs, args.mano_dir, clip_index, str(feature_cache_dir), str(output_dir)),
+            initargs=(
+                device_specs,
+                args.mano_dir,
+                clip_index,
+                str(feature_cache_dir),
+                str(output_dir),
+                str(buildai_processed_root),
+            ),
         ) as pool:
             shard_results = list(
                 tqdm(
@@ -327,7 +373,7 @@ def main():
                 )
             )
 
-    report = build_report(source_dir, output_dir, manifest_path, shard_results, feature_cache_dir)
+    report = build_report(source_dir, output_dir, buildai_processed_root, shard_results, feature_cache_dir)
     if args.report_out:
         report_path = Path(args.report_out)
         report_path.parent.mkdir(parents=True, exist_ok=True)
