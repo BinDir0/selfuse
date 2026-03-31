@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from lib.pipeline.exporters.webdataset_rewriter import (  # noqa: E402
     iter_shard_paths,
     iter_shard_samples,
+    parse_episode_index,
     validate_sample_record,
     write_sample_to_tar,
 )
@@ -37,7 +38,9 @@ from lib.pipeline.quality_metrics import parse_frame_index  # noqa: E402
 
 DEFAULT_WORKERS = max(1, min(4, os.cpu_count() or 1))
 BUILDAI_CLIP_RE = re.compile(r"^f(\d{3})_")
+LEGACY_BUILDAI_EP_RE = re.compile(r"^buildai_ep(\d+)$")
 _WORKER_CLIP_INDEX = None
+_WORKER_LEGACY_EPISODES = None
 _WORKER_FEATURE_CACHE_DIR = None
 _WORKER_DEVICE = None
 _WORKER_MANO_RIGHT = None
@@ -56,6 +59,26 @@ def build_parser():
         "--buildai_processed_root",
         required=True,
         help="BuildAI processed root containing factoryXXX/outputs/<clip_id> stage outputs.",
+    )
+    parser.add_argument(
+        "--legacy_buildai_input_dir",
+        default=None,
+        help="Optional old builder input_dir for resolving legacy buildai_epXXXX sample keys.",
+    )
+    parser.add_argument(
+        "--legacy_episode_list",
+        default=None,
+        help="Optional episode_list used by the old builder when producing legacy buildai_epXXXX shards.",
+    )
+    parser.add_argument(
+        "--legacy_factory_range",
+        default=None,
+        help="Optional factory range like 1-50 used by the old builder when producing legacy buildai_epXXXX shards.",
+    )
+    parser.add_argument(
+        "--legacy_episode_cache",
+        default=None,
+        help="Optional path to the old builder _vla_episodes_cache.json for resolving buildai_epXXXX keys.",
     )
     parser.add_argument("--report_out", default=None, help="Optional JSON report path")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
@@ -118,6 +141,36 @@ def _build_updated_meta(meta: dict, clip_info: dict, presence: int) -> bytes:
     return json.dumps(updated, ensure_ascii=False).encode("utf-8")
 
 
+def build_legacy_episode_index(
+    input_dir: str,
+    *,
+    episode_list: str | None,
+    factory_range: str | None,
+    cache_file: str | None,
+) -> dict[int, dict]:
+    from lib.pipeline.exporters.webdataset_discovery import discover_episodes
+
+    episodes = discover_episodes(
+        input_dir,
+        episode_list=episode_list,
+        cache_file=cache_file,
+        require_world_res=True,
+        factory_range=factory_range,
+    )
+    legacy_index = {}
+    for ep in episodes:
+        episode_index = int(ep["episode_index"])
+        legacy_index[episode_index] = {
+            "clip_id": str(ep["episode_id"]),
+            "episode_id": str(ep["episode_id"]),
+            "seq_folder": str(Path(ep["crop_dir"]).resolve()),
+            "source_id": "buildai",
+            "split": "unknown",
+            "legacy_episode_index": episode_index,
+        }
+    return legacy_index
+
+
 def _ensure_worker_models():
     global _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT
     from lib.pipeline.exporters.webdataset_features import build_mano_models
@@ -133,11 +186,12 @@ def _worker_init(
     device_specs,
     mano_dir,
     clip_index: dict[str, dict],
+    legacy_episodes: dict[int, dict] | None,
     feature_cache_dir: str | None,
     output_dir: str,
     buildai_root: str,
 ):
-    global _WORKER_CLIP_INDEX, _WORKER_FEATURE_CACHE_DIR, _WORKER_DEVICE
+    global _WORKER_CLIP_INDEX, _WORKER_LEGACY_EPISODES, _WORKER_FEATURE_CACHE_DIR, _WORKER_DEVICE
     global _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT, _WORKER_EPISODE_CACHE
     global _WORKER_MANO_DIR, _WORKER_OUTPUT_DIR, _WORKER_BUILDAI_ROOT
 
@@ -149,6 +203,7 @@ def _worker_init(
     device_str = device_specs[worker_idx % len(device_specs)]
     _WORKER_DEVICE = torch.device(device_str)
     _WORKER_CLIP_INDEX = clip_index
+    _WORKER_LEGACY_EPISODES = legacy_episodes or {}
     _WORKER_FEATURE_CACHE_DIR = feature_cache_dir
     _WORKER_MANO_RIGHT = None
     _WORKER_MANO_LEFT = None
@@ -206,12 +261,37 @@ def _build_buildai_clip_info(clip_id: str) -> dict:
     }
 
 
-def _resolve_clip_info(clip_id: str):
+def _build_legacy_buildai_clip_info(sample_key: str, clip_id: str, meta: dict | None) -> dict:
+    episode_index = None
+    if meta is not None and meta.get("episode_index") is not None:
+        episode_index = int(meta["episode_index"])
+    else:
+        match = LEGACY_BUILDAI_EP_RE.match(clip_id)
+        if match:
+            episode_index = int(match.group(1))
+        else:
+            episode_index = int(parse_episode_index(sample_key))
+
+    clip_info = _WORKER_LEGACY_EPISODES.get(episode_index)
+    if clip_info is None:
+        raise KeyError(
+            "Legacy BuildAI episode index "
+            f"{episode_index} was not found. Pass --legacy_buildai_input_dir "
+            "and, if needed, --legacy_episode_list / --legacy_factory_range / --legacy_episode_cache "
+            "to reconstruct the old builder ordering."
+        )
+    return clip_info
+
+
+def _resolve_clip_info(sample_key: str, clip_id: str, meta: dict | None):
     clip_info = _WORKER_CLIP_INDEX.get(clip_id)
     if clip_info is not None:
         return clip_info
 
-    clip_info = _build_buildai_clip_info(clip_id)
+    if BUILDAI_CLIP_RE.match(clip_id):
+        clip_info = _build_buildai_clip_info(clip_id)
+    else:
+        clip_info = _build_legacy_buildai_clip_info(sample_key, clip_id, meta)
     _WORKER_CLIP_INDEX[clip_id] = clip_info
     return clip_info
 
@@ -235,7 +315,7 @@ def process_shard(shard_path: str) -> dict:
 
             clip_id = _sample_clip_id(sample, meta)
             frame_idx = parse_frame_index(sample["key"])
-            clip_info = _resolve_clip_info(clip_id)
+            clip_info = _resolve_clip_info(sample["key"], clip_id, meta)
 
             episode_data = _get_episode_data(clip_id)
             if frame_idx >= int(episode_data["lowdim_all"].shape[0]):
@@ -287,6 +367,7 @@ def build_report(
     source_dir: Path,
     output_dir: Path,
     buildai_processed_root: Path,
+    legacy_episode_source: str | None,
     shard_results: list[dict],
     feature_cache_dir: Path,
 ) -> dict:
@@ -307,6 +388,8 @@ def build_report(
             for item in shard_results
         },
     }
+    if legacy_episode_source:
+        report["legacy_episode_source"] = legacy_episode_source
     return report
 
 
@@ -332,6 +415,25 @@ def main():
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
     clip_index = {}
+    legacy_episodes = {}
+    legacy_episode_source = None
+    legacy_episode_cache = args.legacy_episode_cache
+    if legacy_episode_cache:
+        legacy_episode_cache = str(Path(legacy_episode_cache).resolve())
+
+    if args.legacy_buildai_input_dir or legacy_episode_cache:
+        legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
+        legacy_episodes = build_legacy_episode_index(
+            legacy_input_dir,
+            episode_list=args.legacy_episode_list,
+            factory_range=args.legacy_factory_range,
+            cache_file=legacy_episode_cache,
+        )
+        if legacy_episode_cache:
+            legacy_episode_source = legacy_episode_cache
+        else:
+            legacy_episode_source = legacy_input_dir
+
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
@@ -346,6 +448,7 @@ def main():
             device_specs,
             args.mano_dir,
             clip_index,
+            legacy_episodes,
             str(feature_cache_dir),
             str(output_dir),
             str(buildai_processed_root),
@@ -360,6 +463,7 @@ def main():
                 device_specs,
                 args.mano_dir,
                 clip_index,
+                legacy_episodes,
                 str(feature_cache_dir),
                 str(output_dir),
                 str(buildai_processed_root),
@@ -373,7 +477,14 @@ def main():
                 )
             )
 
-    report = build_report(source_dir, output_dir, buildai_processed_root, shard_results, feature_cache_dir)
+    report = build_report(
+        source_dir,
+        output_dir,
+        buildai_processed_root,
+        legacy_episode_source,
+        shard_results,
+        feature_cache_dir,
+    )
     if args.report_out:
         report_path = Path(args.report_out)
         report_path.parent.mkdir(parents=True, exist_ok=True)
