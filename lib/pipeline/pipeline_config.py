@@ -87,6 +87,9 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         ("frames_per_shard", 10000),
         ("repeat_episodes", 1),
         ("mano_device", "cuda:0"),
+        ("source_fps", 5.0),
+        ("target_fps", 30.0),
+        ("interpolate_labels", True),
     ):
         _maybe_set(build_cfg, key, raw.get(key))
         build_cfg.setdefault(key, default)

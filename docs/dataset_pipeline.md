@@ -183,7 +183,10 @@ python scripts/build_vla_from_manifest.py \
   --annotation_root /path/to/annotations \
   --output_dir /path/to/final_dataset \
   --require_annotation \
-  --frames_per_shard 10000
+  --frames_per_shard 10000 \
+  --source_fps 5.0 \
+  --target_fps 30.0 \
+  --interpolate_labels
 ```
 
 Final WebDataset samples contain:
@@ -206,6 +209,8 @@ Final WebDataset samples contain:
 - `112:116` camera intrinsic `[fx, fy, cx, cy]`
 
 The coordinates above are in the HaWoR/SLAM world frame, while the camera extrinsic is stored as a `World2Cam` homogeneous transform.
+
+For datasets where stage outputs were generated on a lower-FPS stream such as 5 FPS but the descriptor manifest references denser RGB frames such as 30 FPS, pass `--source_fps`, `--target_fps`, and `--interpolate_labels` so the final build resamples wrist pose, fingertip positions, camera extrinsics, and presence flags onto the descriptor timeline.
 
 ### Validate a Run
 

@@ -41,3 +41,8 @@ filter:
   # max_camera_rotation_step: 1.0
 
 require_annotation: false
+
+build:
+  source_fps: 5.0
+  target_fps: 30.0
+  interpolate_labels: true

@@ -280,6 +280,9 @@ def _get_episode_data(clip_id: str):
         _WORKER_MANO_LEFT,
         _WORKER_DEVICE,
         _WORKER_FEATURE_CACHE_DIR,
+        source_fps=5.0,
+        target_fps=5.0,
+        interpolate_labels=False,
     )
     if episode_data is None:
         raise RuntimeError(f"Failed to load corrected features for clip {clip_id}")
