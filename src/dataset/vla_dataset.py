@@ -48,7 +48,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         use_relative_action: bool = False,
         mode: str = "train",
         depth_clip_range=None,
-        shuffle_buffer: int = 8192,
+        shuffle_buffer: int = 16384,
         history_pad_mode: str = "repeat",
         future_pad_mode: str = "repeat",
         lowdim_slices: Optional[Dict] = None,

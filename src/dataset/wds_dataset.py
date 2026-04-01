@@ -380,12 +380,18 @@ def select_lowdim_files(fname):
 
 
 def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
-                       preprocess_fn=None, shuffle_buffer=4096, mode='train',
-                       use_sliding_window=True, lowdim_only=False):
+                       preprocess_fn=None, shuffle_buffer=16384, mode='train',
+                       use_sliding_window=True, lowdim_only=False,
+                       include_post_stages=True):
     """Build a WebDataset pipeline for a single dataset.
 
-    Training: resampled infinite stream, shard shuffle, buffer shuffle.
+    Training: resampled infinite stream with shard-level shuffle.
     Validation: finite single-pass, deterministic order, no shuffle.
+
+    When *include_post_stages* is False the pipeline stops after
+    sliding-window compose (or decode), omitting shuffle / media
+    materialization / preprocess. This allows build_blended_dataset
+    to attach a single shared shuffle buffer after RandomMix.
 
     Args:
         shard_urls: list of shard tar paths, a braceexpand pattern string,
@@ -397,6 +403,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         mode: 'train' or 'val'
         use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
         lowdim_only: if True, only decode lowdim.npy and meta.json (skip image/depth)
+        include_post_stages: if False, skip shuffle / materialize / preprocess
     """
     if config is None:
         config = WindowConfig()
@@ -407,20 +414,18 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     assert shard_urls, f"No shards found: {shard_patterns_metadata}"
 
     is_train = (mode == 'train')
-    # resampled mode shuffles shards internally, but newer webdataset
-    # versions still require an explicit shardshuffle value.
-    #
-    # NOTE (webdataset==1.0.2):
-    # - resampled=True enters ResampledShards in shardlists.py
-    # - default deterministic=False, and its seed mixes worker_seed/epoch
-    #   with pid/time_ns/os.urandom, so shard sampling is time-dependent
-    # - this is not fully controlled by torch/manual seed alone
     select_files = select_lowdim_files if lowdim_only else None
 
+    # resampled=True uses ResampledShards (shardlists.py) whose seed mixes
+    # worker_seed/epoch with pid/time_ns/os.urandom, giving each worker/node
+    # an independent random shard sequence. Explicit node/worker splitters
+    # are therefore redundant and would only discard generated URLs.
+    # Ref: webdataset/shardlists.py ResampledShards.__iter__
     pipeline = wds.WebDataset(
         shard_urls,
         shardshuffle=False,
-        nodesplitter=wds.split_by_node,
+        nodesplitter=no_split if is_train else wds.split_by_node,
+        workersplitter=no_split if is_train else wds.shardlists.split_by_worker,
         resampled=is_train,
         empty_check=False,
         select_files=select_files,
@@ -436,12 +441,13 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
             lambda src: sliding_window_compose(src, config, lowdim_slices, lowdim_only)
         )
 
+    if not include_post_stages:
+        return pipeline
+
     # Shuffle before media materialization so the buffer retains lightweight
     # window descriptors with shared frame refs rather than copied image arrays.
-    # NOTE (webdataset==1.0.2): shuffle() without seed uses
-    # random.Random(int((pid + time) * 1e9)), which is also time-dependent.
     if is_train and shuffle_buffer and shuffle_buffer > 0:
-        pipeline = pipeline.shuffle(shuffle_buffer)
+        pipeline = pipeline.shuffle(shuffle_buffer, initial=shuffle_buffer // 2)
 
     # Materialize media after shuffle: VLA path decodes from frame refs,
     # non-sliding-window path (VLM) decodes raw bytes in-place.
@@ -458,12 +464,14 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
 
 
 def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
-                          preprocess_fn=None, shuffle_buffer=4096, mode='train',
+                          preprocess_fn=None, shuffle_buffer=16384, mode='train',
                           use_sliding_window=True, lowdim_only=False):
     """Build a blended dataset from multiple WebDataset sources.
 
-    Training: weighted random mixing across sources.
-    Validation: sequential concatenation for single-pass evaluation.
+    Training: per-subset pipelines (no per-subset shuffle) mixed via
+    RandomMix, then a single shared shuffle buffer + media decode +
+    preprocess. This keeps memory independent of subset count N.
+    Validation: per-subset pipelines concatenated for single-pass evaluation.
 
     Args:
         datasets_config: list of dicts with keys:
@@ -482,25 +490,50 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
     if lowdim_slices is None:
         lowdim_slices = LOWDIM_SLICES
 
+    is_train = (mode == 'train')
+
     subsets = []
     weights = []
     for c in datasets_config:
         urls = c["shard_urls"]
+        # Train: each subset produces raw samples (no shuffle / materialize /
+        # preprocess); these stages are applied once after RandomMix.
         pipe = build_wds_pipeline(
-            urls, config, lowdim_slices, preprocess_fn, shuffle_buffer, mode=mode,
-            use_sliding_window=use_sliding_window, lowdim_only=lowdim_only)
+            urls, config, lowdim_slices,
+            preprocess_fn=preprocess_fn if not is_train else None,
+            shuffle_buffer=shuffle_buffer,
+            mode=mode,
+            use_sliding_window=use_sliding_window,
+            lowdim_only=lowdim_only,
+            include_post_stages=not is_train,
+        )
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))
 
     assert subsets, "No shards found across all datasets."
 
-    if len(subsets) == 1:
-        return subsets[0]
-
-    if mode == 'train':
-        return wds.RandomMix(subsets, weights, longest=False)
-    else:
+    if not is_train:
         def chain_pipelines():
             for pipe in subsets:
                 yield from pipe
         return chain_pipelines()
+
+    # Train: RandomMix → single shuffle → materialize → preprocess.
+    # RandomMix is an IterableDataset (not FluidInterface), so wrap
+    # with DataPipeline to append callable stages.
+    mixed = subsets[0] if len(subsets) == 1 else wds.RandomMix(subsets, weights, longest=False)
+
+    stages = [mixed]
+    if shuffle_buffer and shuffle_buffer > 0:
+        stages.append(wds.shuffle(shuffle_buffer, initial=shuffle_buffer // 2))
+
+    if not lowdim_only:
+        if use_sliding_window:
+            stages.append(wds.map(materialize_sample_media))
+        else:
+            stages.append(wds.map(decode_media_fields))
+
+    if preprocess_fn is not None:
+        stages.append(wds.map(preprocess_fn))
+
+    return wds.DataPipeline(*stages)

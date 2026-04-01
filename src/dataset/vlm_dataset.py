@@ -22,7 +22,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         weights: List[float] = [0.5, 0.5, 0.5],
         seed: int = 42,
         mode: str = 'train',
-        shuffle_buffer: int = 4096,
+        shuffle_buffer: int = 16384,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
     ):
