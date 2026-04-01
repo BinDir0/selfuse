@@ -47,12 +47,11 @@ class UnifiedVLACollator:
         if self.formatter.action_token != self.batch_processor.action_token:
             raise ValueError("Formatter and batch processor must share the same action token.")
 
-        # Derive temporal_patch_size from the processor so the formatter
-        # can compute the correct <future_frame> token count when obs+future
-        # are packed into one temporal sequence for the target encoder.
+        # Sync temporal_patch_size from the processor so the formatter's
+        # token count matches BatchProcessor.process_future_frames() truncation.
         if self.formatter.ff_tokens_per_frame > 0:
             video_proc = getattr(self.batch_processor.processor, "video_processor", None)
-            tps = getattr(video_proc, "temporal_patch_size", 1) if video_proc else 1
+            tps = getattr(video_proc, "temporal_patch_size", 2) if video_proc else 2
             self.formatter.ff_temporal_patch_size = tps
 
     def collate_values(self, values: list[Any]) -> Any:
@@ -150,71 +149,15 @@ class UnifiedVLACollator:
             batch[key] = self.collate_values([sample[key] for sample in samples])
 
         # When camera_intrinsic_mode=token, pass intrinsic tensor for camera_encoder.
-        # Shape: [B, 1, 4] — one <camera> token per sample, 4D intrinsic [fx, fy, cx, cy].
-        # VLM samples carry zero-filled intrinsic; their input_ids have no <camera> token
-        # so masked_scatter is a no-op for those rows.
         if self.formatter.camera_intrinsic_mode == "token":
             intrinsics = [s["intrinsic"] for s in samples]
             batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
 
-        # Preprocess future frames for the target encoder.
-        # VLM samples never carry future_frames, so B_vla-sized batching
-        # is correct — masked_scatter only targets <future_frame> tokens.
-        ff_samples_raw = [s for s in samples if "future_frames" in s]
-        if ff_samples_raw:
-            processor = self.batch_processor.processor
-            tps = self.formatter.ff_temporal_patch_size
-
-            if tps > 1:
-                # Combined obs+future as a temporal sequence (video).
-                # This enables MEM temporal causal attention across
-                # observation and future frames in the self_vit target
-                # encoder. The HF video processor handles temporal packing.
-                videos = []
-                n_obs = None
-                for s in ff_samples_raw:
-                    obs = s["images"] if s["images"].ndim == 4 else s["images"].unsqueeze(0)
-                    n_obs_cur = obs.shape[0]
-                    assert n_obs_cur % tps == 0, (
-                        f"Observation frame count ({n_obs_cur}) must be divisible by "
-                        f"temporal_patch_size ({tps}) so obs/future features split "
-                        f"cleanly after the ViT spatial merger."
-                    )
-                    assert s["future_frames"].shape[0] % tps == 0, (
-                        f"Future frame count ({s['future_frames'].shape[0]}) must be "
-                        f"divisible by temporal_patch_size ({tps})."
-                    )
-                    if n_obs is None:
-                        n_obs = n_obs_cur
-                    videos.append(torch.cat([obs, s["future_frames"]], dim=0))
-                processed = processor.video_processor(
-                    videos=videos,
-                    return_tensors="pt",
-                    do_sample_frames=False,
-                )
-                pv = processed["pixel_values_videos"]
-                if pv.ndim == 3:
-                    pv = pv.reshape(-1, pv.shape[-1])
-                batch["ff_pixel_values"] = pv
-                batch["ff_grid_thw"] = processed["video_grid_thw"]
-                batch["ff_n_obs_frames"] = torch.tensor(
-                    [n_obs] * len(ff_samples_raw), dtype=torch.long,
-                )
-            else:
-                # Independent per-frame processing (no temporal packing).
-                ff_values = [s["future_frames"] for s in ff_samples_raw]
-                ff_stacked = self.collate_values(ff_values)
-                if not isinstance(ff_stacked, torch.Tensor):
-                    import numpy as np
-                    ff_stacked = torch.from_numpy(np.stack(ff_values))
-                B_vla, K = ff_stacked.shape[:2]
-                image_list = [ff_stacked[b, k] for b in range(B_vla) for k in range(K)]
-                processed = processor.image_processor(images=image_list, return_tensors="pt")
-                pv = processed["pixel_values"]
-                if pv.ndim == 3:
-                    pv = pv.reshape(-1, pv.shape[-1])
-                batch["ff_pixel_values"] = pv
-                batch["ff_grid_thw"] = processed["image_grid_thw"]
+        # Future frame pixel processing is delegated to the BatchProcessor.
+        # tps truncation and video_processor call happen there.
+        if self.formatter.ff_tokens_per_frame > 0:
+            ff_result = self.batch_processor.process_future_frames(samples)
+            batch.update(ff_result)
 
         if self.debug_capture_texts:
             batch["debug_prompt_messages"] = prompt_messages

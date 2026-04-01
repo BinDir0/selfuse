@@ -85,9 +85,9 @@ class Qwen3VLChatFormatter:
         self.future_frame_token = future_frame_token
         self.ff_tokens_per_frame = ff_tokens_per_frame
         # Set by the collator from the processor's temporal_patch_size
-        # so that token count accounts for temporal packing. Default 1
-        # (no packing) until overridden.
-        self.ff_temporal_patch_size = 1
+        # so that token count accounts for temporal packing. Default 2
+        # to match Qwen3-VL's fixed temporal_patch_size.
+        self.ff_temporal_patch_size = 2
         self.lowercase_vla_text = lowercase_vla_text
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
@@ -137,16 +137,15 @@ class Qwen3VLChatFormatter:
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
             # Emit future_frame tokens for world model slot embeddings.
-            # When the target encoder uses temporal packing (self_vit with
-            # MEM), tps raw frames share one temporal patch; the merged
-            # spatial token count per patch is ff_tokens_per_frame.
-            # Total tokens = (K // tps) * ff_tokens_per_frame.
-            # n_future_frames is only used for loss validity masking.
+            # K = valid future frame count (no padding, from vla_dataset).
+            # Truncation formula matches Qwen3VLBatchProcessor.process_future_frames().
             if self.ff_tokens_per_frame > 0 and "future_frames" in sample:
-                K = int(sample["future_frames"].shape[0])  # padded to horizon
+                K = int(sample["future_frames"].shape[0])
                 tps = self.ff_temporal_patch_size
                 T_future = K // tps
-                assistant_text += self.future_frame_token * (T_future * self.ff_tokens_per_frame)
+                if T_future > 0:
+                    assistant_text += self.future_frame_token * (T_future * self.ff_tokens_per_frame)
+                    user_text += " Predict the future visual observations."
         else:
             user_text = str(sample["question"]).strip()
             assistant_text = str(sample["answer"]).strip()
@@ -315,3 +314,49 @@ class Qwen3VLBatchProcessor:
         positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
         labels = labels.masked_fill(positions < answer_start_idx.unsqueeze(1), self.ignore_index)
         return labels
+
+    def process_future_frames(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
+        """Process future frames for the world model target encoder.
+
+        Contract:
+        - Only samples with a "future_frames" key are processed.
+        - Future frame count is truncated to the nearest multiple of
+          temporal_patch_size (tps) to satisfy Qwen3-VL's temporal patching.
+          tps truncation happens HERE, not in vla_dataset.
+        - Returns {ff_pixel_values, ff_grid_thw} or empty dict if no valid frames.
+        - Truncation formula: n_ff = (K // tps) * tps. Must match the
+          token count in Qwen3VLChatFormatter.build_messages().
+        """
+        video_proc = getattr(self.processor, "video_processor", None)
+        tps = getattr(video_proc, "temporal_patch_size", 2) if video_proc else 2
+
+        ff_samples = [s for s in samples if "future_frames" in s]
+        if not ff_samples:
+            return {}
+
+        videos = []
+        for s in ff_samples:
+            ff = s["future_frames"]
+            n_ff = (ff.shape[0] // tps) * tps
+            if n_ff == 0:
+                continue
+            videos.append(ff[:n_ff])
+
+        if not videos:
+            return {}
+
+        # Source: Qwen3-VL video_processor call convention
+        # videos: list of [T, H, W, C] uint8 tensors
+        processed = self.processor.video_processor(
+            videos=videos,
+            return_tensors="pt",
+            do_sample_frames=False,
+        )
+        pv = processed["pixel_values_videos"]
+        if pv.ndim == 3:
+            pv = pv.reshape(-1, pv.shape[-1])
+
+        return {
+            "ff_pixel_values": pv,
+            "ff_grid_thw": processed["video_grid_thw"],
+        }
