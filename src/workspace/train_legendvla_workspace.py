@@ -103,6 +103,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         """
         wm = cfg.get("world_model", None)
         if wm is None or not wm.get("enabled", False):
+            # When the world_model config block exists but enabled=false,
+            # oc.select still resolves future_frame.horizon to the actual
+            # value (not the default 0). Force it to 0 so the dataset
+            # skips future frame sampling entirely.
+            if wm is not None:
+                from omegaconf import open_dict
+                with open_dict(cfg):
+                    cfg.data.shape_meta.future_frame.horizon = 0
             return
 
         ff_token = "<future_frame>"
@@ -850,14 +858,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Camera intrinsic as token embedding.
         if "camera_intrinsic" in batch:
             inputs["camera_intrinsic"] = batch["camera_intrinsic"].to(self.dtype)
-        # World model: preprocessed future frame pixel values for target encoder.
-        # ff_n_obs_frames is present only when obs+future are packed as one
-        # temporal sequence (self_vit with MEM temporal attention).
+        # World model: future-frame-only pixel values for target encoder.
+        # BatchProcessor.process_future_frames() already applied tps truncation.
         if "ff_pixel_values" in batch:
             inputs["ff_pixel_values"] = batch["ff_pixel_values"].to(self.dtype)
             inputs["ff_grid_thw"] = batch["ff_grid_thw"]
-            if "ff_n_obs_frames" in batch:
-                inputs["ff_n_obs_frames"] = batch["ff_n_obs_frames"]
             inputs["n_future_frames"] = batch["n_future_frames"]
         return inputs
 

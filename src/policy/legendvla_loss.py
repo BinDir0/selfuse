@@ -453,21 +453,17 @@ def compute_world_model_loss(
     target_features = target_features[:total]
 
     # Validity mask from n_future_frames.
-    # When obs+future are packed as a temporal sequence (self_vit with MEM),
-    # temporal_patch_size raw frames share one temporal patch. Convert raw
-    # valid frame counts to valid temporal patches before computing tokens.
+    # ff_pixel_values contains future-frame-only pixels; tps truncation
+    # was done in BatchProcessor.process_future_frames(). Convert raw valid
+    # frame counts to tps-truncated temporal patches before computing tokens.
     n_ff = batch["n_future_frames"][is_vla]
     grid_thw = batch.get("_wm_ff_grid_thw")
     if grid_thw is not None:
         sms = model.backbone.base_model.model.visual.spatial_merge_size
         merged_spatial = int((grid_thw[0, 1] * grid_thw[0, 2]).item()) // (sms * sms)
-        if "ff_n_obs_frames" in batch:
-            # Temporal packing: n_ff raw frames → n_ff // tps temporal patches
-            tps = getattr(model.backbone.base_model.model.visual, "temporal_patch_size", 2)
-            valid_tokens_per_sample = (n_ff // tps) * merged_spatial
-        else:
-            # Per-frame processing: each frame has merged_spatial tokens
-            valid_tokens_per_sample = n_ff * merged_spatial
+        tps = getattr(model.backbone.base_model.model.visual, "temporal_patch_size", 2)
+        # Future-frame-only: n_ff raw frames → n_ff // tps temporal patches
+        valid_tokens_per_sample = (n_ff // tps) * merged_spatial
     else:
         valid_tokens_per_sample = n_ff * (total // max(n_ff.sum().item(), 1))
     valid_mask_list = []

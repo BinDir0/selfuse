@@ -436,7 +436,6 @@ def preprocess_batch(batch: dict[str, torch.Tensor], dtype: torch.dtype, device:
     optional_fields = {
         "ff_pixel_values": lambda value: value.to(device=device, dtype=dtype),
         "ff_grid_thw": lambda value: value.to(device=device),
-        "ff_n_obs_frames": lambda value: value.to(device=device),
         "n_future_frames": lambda value: value.to(device=device),
     }
     for key, move_fn in optional_fields.items():
