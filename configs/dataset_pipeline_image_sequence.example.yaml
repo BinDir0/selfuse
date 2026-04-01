@@ -17,7 +17,7 @@ runtimes:
   hawor_python: /path/to/hawor/bin/python
   slam_python: /path/to/any4/bin/python
 
-batch_infer:
+infer:
   common:
     gpus: 0
     workers_per_gpu: 1
@@ -37,6 +37,9 @@ build:
   frames_per_shard: 10000
   repeat_episodes: 1
   mano_device: cuda:0
+  source_fps: 30.0
+  target_fps: 30.0
+  interpolate_labels: false
 
 validation:
   max_clips: 100

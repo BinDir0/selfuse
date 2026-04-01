@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lib.pipeline.clip_manifest import discover_shard_dirs
+from lib.pipeline.clip_manifest import discover_shard_dirs, remap_descriptor_seq_folders
 from lib.pipeline.datasets.base import (
     AdapterPrepareResult,
     AdapterValidationResult,
@@ -81,7 +81,16 @@ class BuildAIDatasetAdapter(BaseDatasetAdapter):
                 int(dataset_cfg["end_factory_id"]),
             )
         shard_dirs = discover_shard_dirs(shard_root, include_dirs=include_dirs)
-        return collect_videos_from_factories(shard_dirs)
+        descriptors = collect_videos_from_factories(shard_dirs)
+
+        seq_folder_root = (
+            adapter_cfg.get("seq_folder_root")
+            or paths_cfg.get("seq_folder_root")
+            or paths_cfg.get("stage_output_root")
+        )
+        if seq_folder_root:
+            remap_descriptor_seq_folders(descriptors, seq_folder_root)
+        return descriptors
 
     def validate_source(
         self,
@@ -99,6 +108,11 @@ class BuildAIDatasetAdapter(BaseDatasetAdapter):
         shard_root = Path(paths_cfg["shard_root"])
         present_dirs = [name for name in expected_dirs if (shard_root / name).is_dir()]
         missing_dirs = [name for name in expected_dirs if not (shard_root / name).is_dir()]
+        seq_folder_root = (
+            adapter_cfg.get("seq_folder_root")
+            or paths_cfg.get("seq_folder_root")
+            or paths_cfg.get("stage_output_root")
+        )
         return AdapterValidationResult(
             ok=len(missing_dirs) == 0,
             summary={
@@ -106,5 +120,6 @@ class BuildAIDatasetAdapter(BaseDatasetAdapter):
                 "expected_group_count": len(expected_dirs),
                 "present_group_count": len(present_dirs),
                 "missing_groups": missing_dirs,
+                "seq_folder_root": seq_folder_root,
             },
         )

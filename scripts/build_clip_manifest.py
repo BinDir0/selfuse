@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a frozen clip manifest snapshot from shard directories."""
+"""Advanced helper for building a frozen clip manifest snapshot."""
 
 import argparse
 import json
@@ -16,7 +16,9 @@ from lib.pipeline.pipeline_config import normalize_pipeline_config
 
 
 def get_parser():
-    parser = argparse.ArgumentParser(description="Build clip manifest from dataset adapter or shard directories")
+    parser = argparse.ArgumentParser(
+        description="Advanced helper: build clip manifest from dataset adapter or shard directories"
+    )
     parser.add_argument("--config", type=str, default=None, help="Optional pipeline YAML config with dataset adapter settings")
     source_group = parser.add_mutually_exclusive_group(required=False)
     source_group.add_argument("--shard_root", type=str, help="Root directory containing shard-group directories")

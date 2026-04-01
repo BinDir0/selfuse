@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI wrapper for the WebDataset exporter."""
+"""Legacy CLI wrapper for the old BuildAI-oriented WebDataset exporter."""
 
 import sys
 from pathlib import Path

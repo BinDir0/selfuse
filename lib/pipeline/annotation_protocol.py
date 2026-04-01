@@ -23,8 +23,8 @@ class ClipAnnotation:
     raw_payload: dict
 
 
-def annotation_path(annotation_root: str | Path, clip_id: str) -> Path:
-    return Path(annotation_root) / f"{clip_id}{ANNOTATION_SUFFIX}"
+def annotation_path(annotation_root: str | Path, clip_id: str, *, annotation_suffix: str = ANNOTATION_SUFFIX) -> Path:
+    return Path(annotation_root) / f"{clip_id}{annotation_suffix}"
 
 
 def _normalize_string_list(values) -> list[str]:
@@ -69,9 +69,14 @@ def _normalize_instruction(payload: dict, hierarchy: dict) -> list[str]:
     return [hierarchy[key] for key in HIERARCHY_KEYS if key in hierarchy]
 
 
-def load_clip_annotation(annotation_root: str | Path, clip_id: str) -> tuple[Optional[ClipAnnotation], Optional[str], str]:
+def load_clip_annotation(
+    annotation_root: str | Path,
+    clip_id: str,
+    *,
+    annotation_suffix: str = ANNOTATION_SUFFIX,
+) -> tuple[Optional[ClipAnnotation], Optional[str], str]:
     """Load one clip-level annotation sidecar."""
-    path = annotation_path(annotation_root, clip_id)
+    path = annotation_path(annotation_root, clip_id, annotation_suffix=annotation_suffix)
     if not path.exists():
         return None, "missing_annotation", str(path)
 

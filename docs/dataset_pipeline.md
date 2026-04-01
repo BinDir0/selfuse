@@ -1,86 +1,137 @@
 # Dataset Pipeline
 
-This repository now supports a production dataset pipeline that connects raw-source preprocessing, clip-level manifest freezing, annotation sidecars, HaWoR stage inference, quality filtering, final WebDataset build, and validation.
+This repository has one official dataset-production entrypoint:
 
-The pipeline is adapter-driven. A new dataset should normally require only:
-
-- one dataset adapter
-- one YAML config
-- optional preprocess / annotation bridge scripts
-
-## Goal
-
-The pipeline is designed for production use, not just one-off BuildAI exports.
-
-The stable contract is:
-
-1. Raw videos enter an external source-specific preprocess pipeline.
-2. Preprocess emits JPEG tar shard groups plus per-clip `seq_folder` directories.
-3. HaWoR stages run against a frozen clip manifest snapshot.
-4. Annotation is written as one sidecar JSON per clip.
-5. HaWoR stages run and produce clip-local outputs under each `seq_folder`.
-6. Optional quality filtering drops bad clips by rewriting the manifest.
-7. Final build reads the filtered manifest, stage outputs, and sidecars to produce the trainable WebDataset.
-
-BuildAI is treated as one source adapter. The intermediate and final contracts are source-agnostic.
-
-## Adapter Model
-
-Each dataset plugs into the pipeline through a small adapter interface:
-
-- `prepare(...)`
-- `build_descriptors(...)`
-- `resolve_annotation_context(...)`
-- `validate_source(...)`
-
-The canonical handoff is the frozen clip manifest. Downstream stages do not need to know whether the source came from BuildAI tar shards, image-sequence clips, or video folders with extracted frames.
-
-## Storage Contract
-
-### 1. Preprocess Output
-
-The preprocess stage should emit a shard root like:
-
-```text
-<shard_root>/
-  group001/
-    shard-000000.tar
-    shard-000001.tar
-    ...
-  group002/
-    shard-000000.tar
-    ...
+```bash
+python scripts/run_dataset_pipeline.py --config <config.yaml> --stages prepare,annotate,infer,filter,build,validate
 ```
 
-Each clip must also have a `seq_folder` resolved by the descriptor. HaWoR stage outputs continue to live under that clip-local directory, for example:
+The pipeline is adapter-driven. Different source datasets are normalized into a frozen clip manifest internally, then the same HaWoR stages, filtering, build, and validation logic run on top of that shared boundary.
 
-```text
-<seq_folder>/
-  img/
-  tracking_result.pth
-  cam_space_res.pth
-  SLAM/
-  world_space_res.pth
+## Official Workflow
+
+Use these official stages:
+
+- `prepare`: source-specific preprocess plus frozen manifest creation
+- `annotate`: clip-level language sidecars
+- `infer`: `detect_track`, `motion`, `slam`, and `infiller`
+- `filter`: clip-level quality filtering before final build
+- `build`: final WebDataset export
+- `validate`: manifest outputs and final dataset checks
+
+Recommended full run:
+
+```bash
+python scripts/run_dataset_pipeline.py \
+  --config configs/dataset_pipeline_buildai.example.yaml \
+  --stages prepare,annotate,infer,filter,build,validate
 ```
 
-### 2. Frozen Clip Manifest
+Useful partial runs:
 
-`scripts/build_clip_manifest.py` writes a JSONL manifest. Each row freezes:
+```bash
+# Prepare only
+python scripts/run_dataset_pipeline.py \
+  --config configs/dataset_pipeline_buildai.example.yaml \
+  --stages prepare
 
-- `clip_id`
-- `source_id`
-- `split`
-- `group_id`
-- the full `ClipDescriptor`
+# Annotation can run as soon as prepare finishes
+python scripts/run_dataset_pipeline.py \
+  --config configs/dataset_pipeline_buildai.example.yaml \
+  --stages annotate
 
-This is the critical orchestration boundary. All downstream stages consume the manifest instead of rescanning live shard directories.
+# Run HaWoR inference only
+python scripts/run_dataset_pipeline.py \
+  --config configs/dataset_pipeline_buildai.example.yaml \
+  --stages infer
 
-The built-in descriptors currently support:
+# Rebuild from existing stage outputs
+python scripts/run_dataset_pipeline.py \
+  --config configs/dataset_pipeline_buildai.example.yaml \
+  --stages build,validate
+```
 
-- `tar_shard`
-- `image_sequence`
+Legacy stage names such as `preprocess`, `manifest`, `detect_motion`, `slam`, and `infiller` are still accepted for compatibility, but they are deprecated. Prefer `prepare` and `infer`.
 
-### 3. Annotation Sidecars
+## Standard Config Shape
+
+For new configs, prefer the standard nested shape:
+
+```yaml
+dataset:
+  adapter: buildai
+  source_id: buildai
+  split: train
+  start_factory_id: 1
+  end_factory_id: 2
+
+paths:
+  shard_root: /path/to/shards
+  annotation_root: /path/to/annotations
+  final_dataset_root: /path/to/final_dataset
+  log_root: /path/to/pipeline_runs
+
+runtimes:
+  hawor_python: /path/to/hawor/bin/python
+  slam_python: /path/to/any4/bin/python
+
+infer:
+  common:
+    gpus: 0,1,2,3
+    workers_per_gpu: 1
+    resume: true
+    checkpoint: /path/to/hawor.ckpt
+    infiller_weight: /path/to/infiller.pt
+  detect_motion:
+    chunk_batch_size: 64
+  slam:
+    any4d_batch_size: 32
+  infiller:
+    infiller_window_batch_size: 64
+
+annotation:
+  command: >
+    echo "Read {manifest} and write {annotation_root}/<clip_id>.annotation.json"
+
+filter:
+  stages: detect_track,motion,slam,infiller
+  workers: 8
+  drop_nonfinite_world_res: true
+  drop_nonfinite_slam: true
+
+build:
+  require_annotation: true
+  preprocess_workers: 8
+  writer_workers: 4
+  frames_per_shard: 10000
+  repeat_episodes: 1
+  mano_device: cuda:0
+  source_fps: 5.0
+  target_fps: 30.0
+  interpolate_labels: true
+
+validation:
+  max_clips: 200
+  dataset_sample_checks: 20
+```
+
+Notes:
+
+- `infer:` is the preferred config block for HaWoR stage execution.
+- Old `batch_infer:` configs and compact top-level shorthands are still supported.
+- `annotation.command` receives `{manifest}`, `{active_manifest}`, `{annotation_root}`, `{run_dir}`, `{hawor_python}`, `{slam_python}`, and `{project_root}`.
+- For BuildAI-like datasets, `paths.shard_root` and `paths.seq_folder_root` may point to different roots. This supports cases where 30 FPS RGB shards and 5 FPS stage outputs live in separate directory trees.
+
+## Runtime Separation
+
+The pipeline assumes two Python runtimes:
+
+- `hawor_python` for `detect_track`, `motion`, `infiller`, build, and validation
+- `slam_python` for `slam`
+
+Do not merge them unless you have already unified the environments yourself. The orchestrator dispatches each stage with the interpreter configured under `runtimes`.
+
+## Annotation Sidecars
 
 Annotation is stored as:
 
@@ -88,7 +139,7 @@ Annotation is stored as:
 <annotation_root>/<clip_id>.annotation.json
 ```
 
-Recommended schema:
+Minimum recommended fields:
 
 ```json
 {
@@ -96,58 +147,98 @@ Recommended schema:
   "status": "Valid",
   "language": "en",
   "instruction": [
-    "Assemble plastic model pieces.",
-    "Detach and join small white plastic components from a sprue on a dark work surface."
-  ],
-  "hierarchy": {
-    "level1": "Assemble plastic model pieces.",
-    "level2": "Detach and join small white plastic components from a sprue on a dark work surface.",
-    "level3": "Manipulate a white plastic model sprue containing multiple ribbed, rectangular parts with tabs and slots; carefully break off individual pieces and align them for assembly.",
-    "level4": "Hold the main sprue steady with the left hand while the right hand pinches and snaps off a small ribbed component near the center of the sprue; then reposition the detached piece to interlock it with another nearby component.",
-    "level5": "Grip the central section of the white plastic sprue with the left hand. Use the right thumb and index finger to press and detach a rectangular ribbed piece with a tab. Place the detached piece aside temporarily. Pick up a second nearby piece with the right hand. Align its slot with the tab of the first piece. Press them together until they click into place. Repeat with adjacent parts."
-  }
+    "Assemble plastic model pieces."
+  ]
 }
 ```
 
 Rules:
 
-- `status` must be `"Valid"` for the clip to be accepted when annotation is required.
-- `language` is optional but should be filled for multilingual training.
-- `instruction` is the preferred normalized field.
-- If `instruction` is absent, build falls back to `hierarchy` and then `global_analysis.level1..level5`.
+- `status` should be `"Valid"` when `build.require_annotation` is enabled
+- `instruction` is the preferred normalized field
+- if `instruction` is absent, build falls back to hierarchy-style fields when available
 
-## Runtime Separation
+## Supported Source Types
 
-The pipeline assumes two Python runtimes:
+Built-in adapters:
 
-- `hawor_python`: `detect_track`, `motion`, `infiller`, final build, validation
-- `slam_python`: `slam`
+- `buildai`
+- `flat_shard`
+- `image_sequence`
+- `legacy_buildai`
+- `video_folder`
 
-Do not merge these environments. The orchestrator dispatches each stage with the correct interpreter from config.
+Adapter responsibility:
 
-## Entry Points
+- source-specific preprocess if needed
+- produce clip descriptors with frame references
+- resolve each clip's `seq_folder`
+- expose optional annotation context
 
-### Whole Pipeline
+For a new dataset:
 
-Use:
+1. Add or extend one dataset adapter under `lib/pipeline/datasets/`.
+2. Make that adapter produce `ClipDescriptor` objects.
+3. Point a standard config at that adapter.
+4. Use `run_dataset_pipeline.py` as the official entrypoint.
+
+Do not add a second full build stack per dataset unless the data shape truly cannot be normalized through descriptors and adapters.
+
+### Legacy BuildAI 100K
+
+The old processed layout is now supported through the `legacy_buildai` adapter.
+
+Expected structure:
+
+```text
+<processed_root>/
+  factory_001/
+    worker_001/
+      processed/
+        factory001_worker001_00010_crop018/
+          extracted_images/
+          world_space_res.pth
+          SLAM/
+```
+
+Use the example config:
 
 ```bash
 python scripts/run_dataset_pipeline.py \
-  --config configs/dataset_pipeline_buildai.example.yaml \
-  --stages preprocess,manifest,annotate,detect_motion,slam,infiller,filter,build,validate
+  --config configs/dataset_pipeline_legacy_buildai.example.yaml \
+  --stages prepare,build,validate
 ```
 
-The config controls:
+For old BuildAI, the typical build settings are:
 
-- adapter selection
-- preprocess repo path and config
-- runtime Python executables
-- batch inference arguments
-- annotation command hook
-- final build arguments
-- validation limits
+- `build.source_fps: 5.0`
+- `build.target_fps: 30.0`
+- `build.interpolate_labels: true`
 
-### Build Frozen Manifest
+This uses `extracted_images/` as the 30 FPS descriptor frame source and resamples 5 FPS stage outputs onto that timeline during final build.
+
+## Internal Manifest Boundary
+
+The pipeline still uses a frozen clip manifest internally. That is intentional.
+
+Why it stays:
+
+- it freezes the clip list before expensive stage runs
+- it decouples source layout from downstream HaWoR stages
+- it lets annotation, filtering, and build operate on the same stable clip set
+- it allows rebuilds without rescanning the source
+
+Why it should feel less complex now:
+
+- normal users should not need to manually operate on manifests
+- the orchestrator creates and consumes the manifest for the official path
+- direct manifest scripts are now considered advanced tools, not the default workflow
+
+## Advanced Workflow
+
+Use these scripts only when you explicitly want to split the workflow by hand.
+
+Build a frozen manifest:
 
 ```bash
 python scripts/build_clip_manifest.py \
@@ -156,15 +247,7 @@ python scripts/build_clip_manifest.py \
   --shard_dirs_out /path/to/run/shard_dirs.txt
 ```
 
-Legacy shard scanning mode is still supported for existing BuildAI-style roots.
-
-### Run Annotation From Manifest
-
-Annotation consumes the frozen manifest only. It does not depend on `detect_motion`, `slam`, `infiller`, or `filter`, so it can be run as soon as `manifest` completes.
-
-The orchestrator passes the base manifest as `{manifest}` to the annotation command template even if later stages switch to a filtered manifest.
-
-### Run HaWoR Stages From Manifest
+Run stage inference from a manifest:
 
 ```bash
 python scripts/batch_infer.py \
@@ -173,9 +256,7 @@ python scripts/batch_infer.py \
   --gpus 0,1,2,3
 ```
 
-Run `slam` separately with the `any4` environment, then `infiller` back in the `hawor` environment.
-
-### Build Final Dataset
+Build the final dataset directly from a manifest:
 
 ```bash
 python scripts/build_vla_from_manifest.py \
@@ -189,13 +270,17 @@ python scripts/build_vla_from_manifest.py \
   --interpolate_labels
 ```
 
-Final WebDataset samples contain:
+This direct manifest path is the build kernel behind the orchestrator. Use it for advanced split workflows, reruns, or debugging.
 
-- `*.image.jpg`: the frame bytes
-- `*.lowdim.npy`: one `float32[116]` vector per frame
-- `*.meta.json`: per-frame metadata such as `clip_id`, `instruction`, `instruction_num`, `language`, and `presence`
+## Dataset Schema
 
-`lowdim[116]` is laid out as:
+Each final WebDataset sample contains:
+
+- `*.image.jpg`: RGB frame bytes
+- `*.lowdim.npy`: `float32[116]`
+- `*.meta.json`: frame metadata such as `clip_id`, `instruction`, `instruction_num`, `language`, and `presence`
+
+`lowdim[116]` layout:
 
 - `0:3` left wrist joint position in world coordinates
 - `3:6` right wrist joint position in world coordinates
@@ -203,16 +288,42 @@ Final WebDataset samples contain:
 - `12:18` right root orientation as rot6d
 - `18:33` left fingertip positions `(5, 3)` in world coordinates
 - `33:48` right fingertip positions `(5, 3)` in world coordinates
-- `48:66` next-frame wrist position + rot6d
-- `66:96` next-frame fingertip positions
-- `96:112` camera `w2c` extrinsic flattened as `4x4`
+- `48:66` next-frame wrist state
+- `66:96` next-frame fingertip state
+- `96:112` camera extrinsic as flattened `w2c` `4x4`
 - `112:116` camera intrinsic `[fx, fy, cx, cy]`
 
-The coordinates above are in the HaWoR/SLAM world frame, while the camera extrinsic is stored as a `World2Cam` homogeneous transform.
+Important conventions:
 
-For datasets where stage outputs were generated on a lower-FPS stream such as 5 FPS but the descriptor manifest references denser RGB frames such as 30 FPS, pass `--source_fps`, `--target_fps`, and `--interpolate_labels` so the final build resamples wrist pose, fingertip positions, camera extrinsics, and presence flags onto the descriptor timeline.
+- wrist translation uses MANO wrist joint world coordinates, not raw `pred_trans`
+- fingertip coordinates are in the HaWoR/SLAM world frame
+- camera extrinsic is `World2Cam`
 
-### Validate a Run
+If stage outputs were generated at a lower FPS than the descriptor frames, use:
+
+- `build.source_fps`
+- `build.target_fps`
+- `build.interpolate_labels`
+
+This resamples wrist pose, fingertip positions, camera extrinsics, and presence flags onto the descriptor frame timeline during final build.
+
+Typical choices:
+
+- BuildAI-style 5 FPS stage outputs over 30 FPS RGB descriptors: `5.0 / 30.0 / true`
+- video or image datasets where stages and descriptors use the same frames: matching FPS values and `interpolate_labels: false`
+- If your annotations are named like `<clip_id>_qwen-annotation.json`, set `build.annotation_suffix: _qwen-annotation.json`
+
+## Validation
+
+Validate a completed run with:
+
+```bash
+python scripts/run_dataset_pipeline.py \
+  --config configs/dataset_pipeline_buildai.example.yaml \
+  --stages validate
+```
+
+Or directly:
 
 ```bash
 python scripts/validate_pipeline_run.py \
@@ -223,37 +334,38 @@ python scripts/validate_pipeline_run.py \
   --dataset_sample_checks 20
 ```
 
-## Production Rollout Test
+Recommended smoke test before full production:
 
-Before full-scale production, run a smoke test with a small but representative slice.
+1. Run on 2 to 5 representative source groups.
+2. Finish `prepare`, `annotate`, `infer`, `filter`, `build`, and `validate`.
+3. Inspect at least 20 samples across multiple shards.
+4. Confirm images, lowdim, and language all refer to the same clip and frame.
 
-Recommended test:
+## Maintenance And Legacy Tools
 
-1. Select 2 to 5 source groups with real diversity.
-2. Run the full pipeline end-to-end, including annotation sidecar generation.
-3. Limit validation to the first 100 to 200 clips for a fast first pass.
-4. Manually inspect at least 20 final dataset samples across multiple shards.
-5. Confirm dataset metadata contains `clip_id`, `instruction`, `instruction_num`, `language`, and `presence`.
+These are useful, but they are not part of the official mainline workflow.
 
-Acceptance criteria:
+- `scripts/filter_webdataset.py`
+  - analyze and filter already-built WDS shards
+- `scripts/repack_webdataset.py`
+  - repack kept samples into new shard sizes after WDS filtering
+- `scripts/rewrite_webdataset_lowdim.py`
+  - repair old BuildAI 10K WebDataset lowdim semantics
+  - this is a BuildAI-specific legacy repair tool, not a normal pipeline step
+- `scripts/build_vla_dataset.py`
+  - old BuildAI-oriented builder wrapper
+  - kept only as a legacy fallback, not the recommended build path
 
-- manifest clip count matches expected preprocess output
-- `detect_track`, `motion`, `slam`, and `infiller` all validate cleanly
-- missing annotation count is zero when `require_annotation=true`
-- final dataset shards are readable and contain expected schema
-- at least one repeated spot-check verifies image bytes, lowdim features, and instruction text refer to the same clip
+## Example Configs
 
-## Notes
+Standard examples:
 
-- The final dataset builder shards by approximate frame budget, but each shard contains whole episodes only.
-- The manifest-based builder does not rely on old BuildAI directory rescans.
-- If annotation is delayed, you can generate the final dataset later from the frozen manifest without rerunning preprocess or HaWoR stages.
-- `tools/ops/webdataset_visualizer.py` supports two modes:
-  - `keypoint`: lightweight overlay from the stored lowdim wrist/fingertip world coordinates; with `--descriptor_manifest` it can cross-check against MANO cache and unlock better diagnostics
-  - `mano`: projects MANO mesh/joints reconstructed from `world_space_res.pth`; this is the more reliable mode for checking geometric accuracy
-- Built-in adapters now include `buildai`, `flat_shard`, `image_sequence`, and `video_folder`.
-- Example configs live under:
-  - `configs/dataset_pipeline_buildai.example.yaml`
-  - `configs/dataset_pipeline_flat_shard.example.yaml`
-  - `configs/dataset_pipeline_image_sequence.example.yaml`
-  - `configs/dataset_pipeline_video_folder.example.yaml`
+- `configs/dataset_pipeline_buildai.example.yaml`
+- `configs/dataset_pipeline_flat_shard.example.yaml`
+- `configs/dataset_pipeline_image_sequence.example.yaml`
+- `configs/dataset_pipeline_legacy_buildai.example.yaml`
+- `configs/dataset_pipeline_video_folder.example.yaml`
+
+Compact shorthand example:
+
+- `configs/dataset_pipeline_buildai.compact.example.yaml`

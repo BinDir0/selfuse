@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build VLA WebDataset from BuildAI 10K + HaWoR outputs."""
+"""Legacy BuildAI-oriented VLA WebDataset builder."""
 
 import argparse
 import json
@@ -89,7 +89,9 @@ PRECOMPUTE_FRAMES_PER_BATCH = 16384
 
 def build_parser():
     """Build CLI parser for WebDataset export."""
-    parser = argparse.ArgumentParser(description="Build VLA WebDataset from BuildAI + HaWoR")
+    parser = argparse.ArgumentParser(
+        description="Legacy BuildAI-oriented builder. Prefer scripts/run_dataset_pipeline.py or scripts/build_vla_from_manifest.py"
+    )
     parser.add_argument("--input_dir", default="/share_data/lvjianan/datasets/BuildAI-processed/")
     parser.add_argument("--output_dir", default="/share_data/guantianrui/datasets/BuildAI-VLA/")
     parser.add_argument("--episode_list", default=None, help="Text file with one episode path per line")

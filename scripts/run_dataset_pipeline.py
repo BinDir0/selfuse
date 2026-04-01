@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Production orchestrator for raw-source -> clip shards -> HaWoR -> final dataset."""
+"""Official orchestrator for dataset preparation, inference, filtering, and build."""
 
 from __future__ import annotations
 
@@ -23,7 +23,16 @@ from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
 from lib.pipeline.pipeline_config import normalize_pipeline_config
 
 
-STAGE_ORDER = [
+OFFICIAL_STAGE_ORDER = [
+    "prepare",
+    "annotate",
+    "infer",
+    "filter",
+    "build",
+    "validate",
+]
+
+INTERNAL_STAGE_ORDER = [
     "preprocess",
     "manifest",
     "annotate",
@@ -35,6 +44,13 @@ STAGE_ORDER = [
     "validate",
 ]
 
+STAGE_ALIAS_MAP = {
+    "prepare": ["preprocess", "manifest"],
+    "infer": ["detect_motion", "slam", "infiller"],
+}
+
+LEGACY_STAGE_NAMES = {"preprocess", "manifest", "detect_motion", "slam", "infiller"}
+
 BATCH_INFER_NEGATIVE_BOOL_FLAGS = {
     "resume",
     "detect_half_precision",
@@ -44,13 +60,15 @@ BATCH_INFER_NEGATIVE_BOOL_FLAGS = {
 
 
 def get_parser():
-    parser = argparse.ArgumentParser(description="Run the whole dataset production pipeline")
+    parser = argparse.ArgumentParser(
+        description="Run the official dataset pipeline. Preferred stages: prepare, annotate, infer, filter, build, validate"
+    )
     parser.add_argument("--config", type=str, required=True, help="YAML pipeline config")
     parser.add_argument(
         "--stages",
         type=str,
-        default=",".join(STAGE_ORDER),
-        help="Comma-separated stage list",
+        default=",".join(OFFICIAL_STAGE_ORDER),
+        help="Comma-separated stage list. Preferred: prepare,annotate,infer,filter,build,validate",
     )
     parser.add_argument("--run_tag", type=str, default=None, help="Optional run tag override")
     return parser
@@ -106,12 +124,44 @@ def stream_command(name: str, cmd: list[str], log_path: Path, *, cwd: str | Path
             raise RuntimeError(f"{name} failed with exit code {return_code}")
 
 
-def selected_stages(raw: str) -> list[str]:
-    stages = [stage.strip() for stage in raw.split(",") if stage.strip()]
-    invalid = [stage for stage in stages if stage not in STAGE_ORDER]
+def selected_stages(raw: str) -> dict:
+    requested = [stage.strip() for stage in raw.split(",") if stage.strip()]
+    valid = set(OFFICIAL_STAGE_ORDER) | set(INTERNAL_STAGE_ORDER)
+    invalid = [stage for stage in requested if stage not in valid]
     if invalid:
-        raise ValueError(f"Unknown stages: {invalid}. Valid stages: {STAGE_ORDER}")
-    return stages
+        raise ValueError(
+            f"Unknown stages: {invalid}. Valid official stages: {OFFICIAL_STAGE_ORDER}. "
+            f"Legacy compatibility stages: {sorted(LEGACY_STAGE_NAMES)}"
+        )
+
+    expanded = set()
+    requested_public = []
+    deprecated = []
+    for stage in requested:
+        if stage in STAGE_ALIAS_MAP:
+            canonical = stage
+            internal_names = STAGE_ALIAS_MAP[stage]
+        else:
+            if stage in LEGACY_STAGE_NAMES:
+                deprecated.append(stage)
+            if stage in ("preprocess", "manifest"):
+                canonical = "prepare"
+            elif stage in ("detect_motion", "slam", "infiller"):
+                canonical = "infer"
+            else:
+                canonical = stage
+            internal_names = [stage]
+
+        if canonical not in requested_public:
+            requested_public.append(canonical)
+        expanded.update(internal_names)
+
+    return {
+        "requested_tokens": requested,
+        "requested_public": requested_public,
+        "internal": [stage for stage in INTERNAL_STAGE_ORDER if stage in expanded],
+        "deprecated": deprecated,
+    }
 
 def format_annotation_command(template: str, context: dict) -> list[str]:
     command = template.format(**context)
@@ -121,12 +171,16 @@ def format_annotation_command(template: str, context: dict) -> list[str]:
 def main():
     args = get_parser().parse_args()
     config = normalize_pipeline_config(load_yaml(args.config))
-    stages = selected_stages(args.stages)
+    stage_selection = selected_stages(args.stages)
+    requested_stage_tokens = stage_selection["requested_tokens"]
+    stages = stage_selection["internal"]
+    public_stages = stage_selection["requested_public"]
+    deprecated_stages = stage_selection["deprecated"]
 
     dataset_cfg = config.get("dataset", {})
     paths_cfg = config.get("paths", {})
     runtimes_cfg = config.get("runtimes", {})
-    batch_cfg = config.get("batch_infer", {})
+    infer_cfg = config.get("infer", config.get("batch_infer", {}))
     build_cfg = config.get("build", {})
     filter_cfg = config.get("filter", {})
     adapter_cfg = config.get("adapter_config", config.get("buildai", {}))
@@ -172,11 +226,20 @@ def main():
         "active_manifest_path": str(manifest_path.resolve()),
         "annotation_root": annotation_root,
         "final_dataset_root": str(final_dataset_root.resolve()),
-        "stages": stages,
+        "stages": public_stages,
+        "requested_stage_tokens": requested_stage_tokens,
+        "expanded_internal_stages": stages,
     }
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     active_manifest_path = manifest_path
     annotation_manifest_path = manifest_path
+
+    if deprecated_stages:
+        print(
+            "Warning: legacy stage names are deprecated. "
+            f"Use official stages from {OFFICIAL_STAGE_ORDER}. "
+            f"Received legacy names: {sorted(set(deprecated_stages))}"
+        )
 
     def run_logged(name: str, cmd: list[str], *, cwd: str | Path | None = None):
         print(f"\n[{name}] {shlex.join(cmd)}\n")
@@ -260,7 +323,7 @@ def main():
         run_logged("annotate", format_annotation_command(annotation_command, context))
 
     common_batch_args = cli_args_from_mapping(
-        batch_cfg.get("common"),
+        infer_cfg.get("common"),
         negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
     )
     if "detect_motion" in stages:
@@ -273,7 +336,7 @@ def main():
             "detect_track,motion",
             *common_batch_args,
             *cli_args_from_mapping(
-                batch_cfg.get("detect_motion"),
+                infer_cfg.get("detect_motion"),
                 negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
             ),
         ]
@@ -289,7 +352,7 @@ def main():
             "slam",
             *common_batch_args,
             *cli_args_from_mapping(
-                batch_cfg.get("slam"),
+                infer_cfg.get("slam"),
                 negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
             ),
         ]
@@ -305,7 +368,7 @@ def main():
             "infiller",
             *common_batch_args,
             *cli_args_from_mapping(
-                batch_cfg.get("infiller"),
+                infer_cfg.get("infiller"),
                 negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
             ),
         ]
@@ -366,6 +429,8 @@ def main():
         ]
         if annotation_root:
             validate_cmd.extend(["--annotation_root", str(annotation_root)])
+            if build_cfg.get("annotation_suffix"):
+                validate_cmd.extend(["--annotation_suffix", str(build_cfg["annotation_suffix"])])
         run_logged("validate", validate_cmd)
 
     print(f"\nRun complete: {run_dir}")

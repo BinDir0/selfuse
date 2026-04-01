@@ -1,4 +1,4 @@
-"""Helpers for compact dataset-pipeline configuration files."""
+"""Helpers for standard and compact dataset-pipeline configuration files."""
 
 from __future__ import annotations
 
@@ -48,15 +48,27 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
     _maybe_set(dataset_cfg, "end_factory_id", raw.get("end_factory_id"))
 
     paths_cfg = _as_dict(raw.get("paths"))
-    for key in ("buildai_repo_root", "buildai_config", "shard_root", "annotation_root", "final_dataset_root", "log_root"):
+    for key in (
+        "buildai_repo_root",
+        "buildai_config",
+        "shard_root",
+        "processed_root",
+        "seq_folder_root",
+        "annotation_root",
+        "final_dataset_root",
+        "log_root",
+    ):
         _maybe_set(paths_cfg, key, raw.get(key))
 
     runtimes_cfg = _as_dict(raw.get("runtimes"))
     for key in ("buildai_shell", "hawor_python", "slam_python"):
         _maybe_set(runtimes_cfg, key, raw.get(key))
 
-    batch_cfg = _as_dict(raw.get("batch_infer"))
-    common_cfg = _as_dict(batch_cfg.get("common"))
+    legacy_batch_cfg = _as_dict(raw.get("batch_infer"))
+    infer_cfg = _as_dict(raw.get("infer"))
+
+    common_cfg = _as_dict(legacy_batch_cfg.get("common"))
+    common_cfg.update(_as_dict(infer_cfg.get("common")))
     for key in (
         "gpus",
         "workers_per_gpu",
@@ -70,13 +82,16 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
     ):
         _maybe_set(common_cfg, key, raw.get(key))
 
-    detect_motion_cfg = _as_dict(batch_cfg.get("detect_motion"))
+    detect_motion_cfg = _as_dict(legacy_batch_cfg.get("detect_motion"))
+    detect_motion_cfg.update(_as_dict(infer_cfg.get("detect_motion")))
     detect_motion_cfg.update(_as_dict(raw.get("detect_motion")))
 
-    slam_cfg = _as_dict(batch_cfg.get("slam"))
+    slam_cfg = _as_dict(legacy_batch_cfg.get("slam"))
+    slam_cfg.update(_as_dict(infer_cfg.get("slam")))
     slam_cfg.update(_as_dict(raw.get("slam")))
 
-    infiller_cfg = _as_dict(batch_cfg.get("infiller"))
+    infiller_cfg = _as_dict(legacy_batch_cfg.get("infiller"))
+    infiller_cfg.update(_as_dict(infer_cfg.get("infiller")))
     infiller_cfg.update(_as_dict(raw.get("infiller")))
 
     build_cfg = _as_dict(raw.get("build"))
@@ -87,6 +102,7 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         ("frames_per_shard", 10000),
         ("repeat_episodes", 1),
         ("mano_device", "cuda:0"),
+        ("annotation_suffix", ".annotation.json"),
         ("source_fps", 5.0),
         ("target_fps", 30.0),
         ("interpolate_labels", True),
@@ -125,17 +141,20 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         adapter_cfg.setdefault("setup_decord", False)
         adapter_cfg.setdefault("clean_stage3_output", False)
 
+    normalized_infer_cfg = {
+        "common": common_cfg,
+        "detect_motion": detect_motion_cfg,
+        "slam": slam_cfg,
+        "infiller": infiller_cfg,
+    }
+
     return {
         "dataset": dataset_cfg,
         "paths": paths_cfg,
         "runtimes": runtimes_cfg,
         "adapter_config": adapter_cfg,
-        "batch_infer": {
-            "common": common_cfg,
-            "detect_motion": detect_motion_cfg,
-            "slam": slam_cfg,
-            "infiller": infiller_cfg,
-        },
+        "infer": normalized_infer_cfg,
+        "batch_infer": normalized_infer_cfg,
         "annotation": annotation_cfg,
         "build": build_cfg,
         "filter": filter_cfg,

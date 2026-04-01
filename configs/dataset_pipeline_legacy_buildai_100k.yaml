@@ -1,27 +1,19 @@
 dataset:
-  adapter: buildai
-  source_id: buildai
+  adapter: legacy_buildai
+  source_id: legacy_buildai_100k
   split: train
   start_factory_id: 1
-  end_factory_id: 2
+  end_factory_id: 85
 
 paths:
-  buildai_repo_root: /root/buildai_processing
-  buildai_config: /root/buildai_processing/pipeline_config_egocentric10k.yaml
-  shard_root: /share_data/guantianrui/datasets/Egocentric-10K_stage3_jpg
-  annotation_root: /share_data/guantianrui/datasets/buildai_annotations
-  final_dataset_root: /share_data/guantianrui/datasets/BuildAI-VLA-production
+  processed_root: /share_data/lvjianan/datasets/BuildAI-processed
+  annotation_root: /share_data/guantianrui/datasets/BuildAI-100K-annotations
+  final_dataset_root: /share_data/guantianrui/datasets/BuildAI-100K-legacy-vla
   log_root: /share_data/guantianrui/dataset_pipeline_logs
 
 runtimes:
-  buildai_shell: /bin/bash
   hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
   slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4/bin/python3.10
-
-adapter_config:
-  stages: 1,2,3
-  setup_decord: false
-  clean_stage3_output: false
 
 infer:
   common:
@@ -43,11 +35,20 @@ infer:
 
 annotation:
   command: >
-    echo "Provide an external annotation command here that reads {manifest}
-    and writes sidecars into {annotation_root}"
+    echo "Read {manifest} and write {annotation_root}/<clip_id>.annotation.json"
+
+filter:
+  stages: detect_track,motion,slam,infiller
+  workers: 8
+  drop_nonfinite_world_res: true
+  drop_nonfinite_slam: true
+  # Optional thresholds:
+  # max_hand_translation_step: 0.35
+  # max_camera_translation_step: 0.5
+  # max_camera_rotation_step: 1.0
 
 build:
-  require_annotation: true
+  require_annotation: false
   preprocess_workers: 8
   writer_workers: 4
   frames_per_shard: 10000

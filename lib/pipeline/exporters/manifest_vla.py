@@ -552,6 +552,7 @@ def _prepare_manifest_episode(
     record: ClipManifestRecord,
     require_annotation: bool,
     annotation_root: str | None,
+    annotation_suffix: str,
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
@@ -575,7 +576,11 @@ def _prepare_manifest_episode(
     language = None
     instruction = []
     if annotation_root:
-        annotation, error_code, _ = load_clip_annotation(annotation_root, record.clip_id)
+        annotation, error_code, _ = load_clip_annotation(
+            annotation_root,
+            record.clip_id,
+            annotation_suffix=annotation_suffix,
+        )
         if annotation is None:
             if require_annotation:
                 return None, error_code
@@ -605,6 +610,7 @@ def prepare_manifest_episodes(
     manifest_path: str,
     *,
     annotation_root: str | None,
+    annotation_suffix: str,
     require_annotation: bool,
     max_episodes: int | None,
     preprocess_workers: int,
@@ -633,6 +639,7 @@ def prepare_manifest_episodes(
                 record,
                 require_annotation,
                 annotation_root,
+                annotation_suffix,
                 source_fps,
                 target_fps,
                 interpolate_labels,
@@ -645,7 +652,15 @@ def prepare_manifest_episodes(
         iterator = pool.imap(
             _prepare_manifest_episode_star,
             (
-                (record, require_annotation, annotation_root, source_fps, target_fps, interpolate_labels)
+                (
+                    record,
+                    require_annotation,
+                    annotation_root,
+                    annotation_suffix,
+                    source_fps,
+                    target_fps,
+                    interpolate_labels,
+                )
                 for record in records
             ),
             chunksize=32,
@@ -677,6 +692,7 @@ def run_manifest_build(
     manifest_path: str,
     output_dir: str,
     annotation_root: str | None,
+    annotation_suffix: str,
     require_annotation: bool,
     max_episodes: int | None,
     repeat_episodes: int,
@@ -693,6 +709,7 @@ def run_manifest_build(
     episodes, prepare_stats = prepare_manifest_episodes(
         manifest_path,
         annotation_root=annotation_root,
+        annotation_suffix=annotation_suffix,
         require_annotation=require_annotation,
         max_episodes=max_episodes,
         preprocess_workers=preprocess_workers,

@@ -16,6 +16,7 @@ _BUILTIN_ADAPTER_MODULES = {
     "buildai": "lib.pipeline.datasets.buildai",
     "flat_shard": "lib.pipeline.datasets.flat_shard",
     "image_sequence": "lib.pipeline.datasets.image_sequence",
+    "legacy_buildai": "lib.pipeline.datasets.legacy_buildai",
     "video_folder": "lib.pipeline.datasets.video_folder",
 }
 

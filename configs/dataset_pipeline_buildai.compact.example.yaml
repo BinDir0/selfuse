@@ -1,3 +1,4 @@
+# Compact shorthand form. Prefer the standard nested examples for new configs.
 adapter: buildai
 source_id: buildai_100k_0324
 split: train

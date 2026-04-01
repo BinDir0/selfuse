@@ -10,6 +10,8 @@ import numpy as np
 LOWDIM_SIZE = 116
 LEFT_HAND_TRANSLATION_SLICE = slice(0, 3)
 RIGHT_HAND_TRANSLATION_SLICE = slice(3, 6)
+LEFT_FINGERTIPS_SLICE = slice(18, 33)
+RIGHT_FINGERTIPS_SLICE = slice(33, 48)
 EXTRINSIC_SLICE = slice(96, 112)
 FRAME_INDEX_PATTERN = re.compile(r"_f(\d+)$")
 
@@ -134,5 +136,26 @@ def extract_lowdim_components(lowdim: np.ndarray) -> dict:
     return {
         "left_translation": array[LEFT_HAND_TRANSLATION_SLICE],
         "right_translation": array[RIGHT_HAND_TRANSLATION_SLICE],
+        "left_fingertips": array[LEFT_FINGERTIPS_SLICE].reshape(5, 3),
+        "right_fingertips": array[RIGHT_FINGERTIPS_SLICE].reshape(5, 3),
         "extrinsic": array[EXTRINSIC_SLICE].reshape(4, 4),
+    }
+
+
+def transform_points_world_to_camera(points, extrinsic) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    mat = np.asarray(extrinsic, dtype=np.float32).reshape(4, 4)
+    rot = mat[:3, :3]
+    trans = mat[:3, 3]
+    return (pts @ rot.T) + trans
+
+
+def camera_space_abs_metrics(points_world, extrinsic) -> dict:
+    points_cam = transform_points_world_to_camera(points_world, extrinsic)
+    abs_points = np.abs(points_cam)
+    return {
+        "max_abs": float(abs_points.max()) if abs_points.size else 0.0,
+        "max_abs_x": float(abs_points[:, 0].max()) if abs_points.size else 0.0,
+        "max_abs_y": float(abs_points[:, 1].max()) if abs_points.size else 0.0,
+        "max_abs_z": float(abs_points[:, 2].max()) if abs_points.size else 0.0,
     }

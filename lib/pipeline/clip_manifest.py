@@ -101,6 +101,24 @@ def build_manifest_records_from_descriptors(
     return records
 
 
+def remap_descriptor_seq_folders(descriptors, seq_folder_root: str | Path):
+    """Override descriptor.seq_folder using a new root when rebuilding manifests."""
+    root = Path(seq_folder_root).resolve()
+    for descriptor in descriptors:
+        group_name = Path(descriptor.root_dir).name if descriptor.root_dir else ""
+        candidates = [
+            root / group_name / "outputs" / descriptor.clip_id,
+            root / group_name / descriptor.clip_id,
+            root / descriptor.clip_id,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                descriptor.seq_folder = str(candidate.resolve())
+                break
+        else:
+            descriptor.seq_folder = str(candidates[0])
+
+
 def write_clip_manifest(records: Iterable[ClipManifestRecord], output_path: str | Path):
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)

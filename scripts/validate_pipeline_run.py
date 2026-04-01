@@ -15,6 +15,12 @@ def get_parser():
     parser = argparse.ArgumentParser(description="Validate a whole-pipeline run")
     parser.add_argument("--descriptor_manifest", type=str, required=True, help="Frozen clip manifest JSONL")
     parser.add_argument("--annotation_root", type=str, default=None, help="Clip annotation sidecar directory")
+    parser.add_argument(
+        "--annotation_suffix",
+        type=str,
+        default=".annotation.json",
+        help="Annotation sidecar suffix, e.g. .annotation.json or _qwen-annotation.json",
+    )
     parser.add_argument("--dataset_dir", type=str, default=None, help="Final dataset shard directory")
     parser.add_argument(
         "--stages",
@@ -58,7 +64,7 @@ def validate_manifest_outputs(records, stages):
     return stats
 
 
-def validate_annotations(records, annotation_root):
+def validate_annotations(records, annotation_root, annotation_suffix):
     from lib.pipeline.annotation_protocol import load_clip_annotation
 
     if not annotation_root:
@@ -72,7 +78,11 @@ def validate_annotations(records, annotation_root):
         "empty_instruction": 0,
     }
     for record in records:
-        annotation, error_code, _ = load_clip_annotation(annotation_root, record.clip_id)
+        annotation, error_code, _ = load_clip_annotation(
+            annotation_root,
+            record.clip_id,
+            annotation_suffix=annotation_suffix,
+        )
         if annotation is not None:
             stats["valid"] += 1
         else:
@@ -129,7 +139,7 @@ def main():
             "clips_checked": len(records),
         },
         "stages": validate_manifest_outputs(records, stages),
-        "annotations": validate_annotations(records, args.annotation_root),
+        "annotations": validate_annotations(records, args.annotation_root, args.annotation_suffix),
         "dataset": validate_dataset(args.dataset_dir, args.dataset_sample_checks),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))

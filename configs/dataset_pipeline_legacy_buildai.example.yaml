@@ -1,15 +1,14 @@
 dataset:
-  adapter: flat_shard
-  source_id: demo_flat_shards
+  adapter: legacy_buildai
+  source_id: legacy_buildai_100k
   split: train
-
-adapter_config:
-  shard_dir: /share_data/example/flat_shards
-  seq_folder_root: /share_data/example/flat_shards/outputs
+  start_factory_id: 1
+  end_factory_id: 85
 
 paths:
-  annotation_root: /share_data/example/flat_annotations
-  final_dataset_root: /share_data/example/final_vla_dataset
+  processed_root: /share_data/lvjianan/datasets/BuildAI-processed
+  annotation_root: /share_data/example/legacy_buildai_annotations
+  final_dataset_root: /share_data/example/legacy_buildai_vla
   log_root: /share_data/example/dataset_pipeline_logs
 
 runtimes:
@@ -18,9 +17,11 @@ runtimes:
 
 infer:
   common:
-    gpus: 0
+    gpus: 0,1,2,3
     workers_per_gpu: 1
     resume: true
+    checkpoint: /path/to/hawor.ckpt
+    infiller_weight: /path/to/infiller.pt
   detect_motion: {}
   slam: {}
   infiller: {}
@@ -36,15 +37,15 @@ filter:
   drop_nonfinite_slam: true
 
 build:
-  require_annotation: true
+  require_annotation: false
   preprocess_workers: 8
   writer_workers: 4
   frames_per_shard: 10000
   repeat_episodes: 1
   mano_device: cuda:0
-  source_fps: 30.0
+  source_fps: 5.0
   target_fps: 30.0
-  interpolate_labels: false
+  interpolate_labels: true
 
 validation:
   max_clips: 100

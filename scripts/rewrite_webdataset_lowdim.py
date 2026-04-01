@@ -55,6 +55,8 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Rewrite WebDataset shards with corrected lowdim semantics")
     parser.add_argument("--source_shard_dir", required=True, help="Source directory containing shard tar files")
     parser.add_argument("--output_dir", required=True, help="Output directory for rewritten shards")
+    parser.add_argument("--shard_start", type=int, default=0, help="Inclusive shard index in sorted shard order")
+    parser.add_argument("--shard_end", type=int, default=None, help="Exclusive shard index in sorted shard order")
     parser.add_argument(
         "--buildai_processed_root",
         required=True,
@@ -82,6 +84,12 @@ def build_parser():
     )
     parser.add_argument("--report_out", default=None, help="Optional JSON report path")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip shards whose rewritten output tar already exists",
+    )
     parser.add_argument("--mano_device", type=str, default="cuda:0", help="Device for MANO forward pass")
     parser.add_argument("--mano_gpus", type=str, default=None, help="Optional comma-separated GPU list for MANO workers")
     parser.add_argument("--mano_dir", type=str, default=None, help="Optional MANO model directory")
@@ -446,12 +454,23 @@ def build_report(
     legacy_episode_source: str | None,
     shard_results: list[dict],
     feature_cache_dir: Path,
+    *,
+    shard_start: int,
+    shard_end: int,
+    selected_shards: int,
+    reused_shards: int,
 ) -> dict:
     report = {
         "source_shard_dir": str(source_dir.resolve()),
         "output_dir": str(output_dir.resolve()),
         "buildai_processed_root": str(buildai_processed_root.resolve()),
         "feature_cache_dir": str(feature_cache_dir.resolve()),
+        "shard_range": {
+            "start": int(shard_start),
+            "end": int(shard_end),
+        },
+        "selected_shards": int(selected_shards),
+        "reused_shards": int(reused_shards),
         "shards_total": len(shard_results),
         "shards_written": int(sum(item["shard_written"] for item in shard_results)),
         "frames_rewritten": int(sum(item["frames_rewritten"] for item in shard_results)),
@@ -467,6 +486,39 @@ def build_report(
     if legacy_episode_source:
         report["legacy_episode_source"] = legacy_episode_source
     return report
+
+
+def select_shard_paths(shard_paths: list[str], output_dir: Path, shard_start: int, shard_end: int | None, resume: bool):
+    total = len(shard_paths)
+    if shard_start < 0:
+        raise ValueError("--shard_start must be >= 0")
+    if shard_end is not None and shard_end < 0:
+        raise ValueError("--shard_end must be >= 0")
+    if shard_end is not None and shard_end < shard_start:
+        raise ValueError("--shard_end must be >= --shard_start")
+    if shard_start > total:
+        raise ValueError(f"--shard_start ({shard_start}) exceeds shard count ({total})")
+
+    selected_end = total if shard_end is None else min(shard_end, total)
+    selected = shard_paths[shard_start:selected_end]
+    pending = []
+    reused = []
+    for shard_path in selected:
+        output_path = output_dir / os.path.basename(shard_path)
+        if resume and output_path.is_file():
+            reused.append(shard_path)
+        else:
+            pending.append(shard_path)
+
+    print(
+        "Shard selection:"
+        f" total={total}"
+        f" range=[{shard_start}, {selected_end})"
+        f" selected={len(selected)}"
+        f" reused={len(reused)}"
+        f" pending={len(pending)}"
+    )
+    return pending, reused, selected_end
 
 
 def main():
@@ -537,6 +589,14 @@ def main():
     if mano_device_obj.type == "cuda":
         args.workers = min(args.workers, len(device_specs))
 
+    shard_paths, reused_shards, selected_end = select_shard_paths(
+        shard_paths,
+        output_dir,
+        args.shard_start,
+        args.shard_end,
+        args.resume,
+    )
+
     if args.workers <= 1:
         _worker_init(
             device_specs,
@@ -578,6 +638,10 @@ def main():
         legacy_episode_source,
         shard_results,
         feature_cache_dir,
+        shard_start=args.shard_start,
+        shard_end=selected_end,
+        selected_shards=len(shard_paths) + len(reused_shards),
+        reused_shards=len(reused_shards),
     )
     if args.report_out:
         report_path = Path(args.report_out)

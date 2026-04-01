@@ -13,23 +13,22 @@ log_root: /share_data/guantianrui/dataset_pipeline_logs
 hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
 slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4/bin/python3.10
 
-gpus: 0,1,2,3
-resume: true
-checkpoint: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/hawor.ckpt
-infiller_weight: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/infiller.pt
-
-detect_motion:
-  chunk_batch_size: 64
-  num_workers: 16
-  detect_batch_size: 128
-  detect_io_workers: 8
-
-slam:
-  any4d_batch_size: 32
-  depth_predict_all_frames: true
-
-infiller:
-  infiller_window_batch_size: 64
+infer:
+  common:
+    gpus: 0,1,2,3
+    resume: true
+    checkpoint: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/hawor.ckpt
+    infiller_weight: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/infiller.pt
+  detect_motion:
+    chunk_batch_size: 64
+    num_workers: 16
+    detect_batch_size: 128
+    detect_io_workers: 8
+  slam:
+    any4d_batch_size: 32
+    depth_predict_all_frames: true
+  infiller:
+    infiller_window_batch_size: 64
 
 filter:
   stages: detect_track,motion,slam,infiller

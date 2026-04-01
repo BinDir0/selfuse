@@ -12,10 +12,18 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def get_parser():
-    parser = argparse.ArgumentParser(description="Build VLA dataset from clip manifest + HaWoR outputs")
+    parser = argparse.ArgumentParser(
+        description="Advanced helper: build VLA dataset from frozen clip manifest + HaWoR outputs"
+    )
     parser.add_argument("--descriptor_manifest", type=str, required=True, help="Frozen clip manifest JSONL path")
     parser.add_argument("--output_dir", type=str, required=True, help="Final WebDataset output directory")
     parser.add_argument("--annotation_root", type=str, default=None, help="Clip annotation sidecar directory")
+    parser.add_argument(
+        "--annotation_suffix",
+        type=str,
+        default=".annotation.json",
+        help="Annotation sidecar suffix, e.g. .annotation.json or _qwen-annotation.json",
+    )
     parser.add_argument("--require_annotation", action="store_true", help="Drop clips with missing or invalid annotations")
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--repeat_episodes", type=int, default=1, help="Repeat the manifest entries this many times")
@@ -44,6 +52,7 @@ def main():
         manifest_path=args.descriptor_manifest,
         output_dir=args.output_dir,
         annotation_root=args.annotation_root,
+        annotation_suffix=args.annotation_suffix,
         require_annotation=args.require_annotation,
         max_episodes=args.max_episodes,
         repeat_episodes=args.repeat_episodes,
