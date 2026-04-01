@@ -261,17 +261,18 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         })
 
         # Future frames for world model supervision (raw uint8, no augmentation).
-        # Pad to full horizon K so all VLA samples share the same tensor shape
-        # for collation. Invalid trailing frames are masked via n_future_frames.
+        # Only valid frames are kept; no zero-padding. tps truncation happens
+        # downstream in BatchProcessor.process_future_frames().
         K = self.future_frame_horizon
         if K > 0 and "future_frames" in sample:
             ff = sample["future_frames"]
-            n_valid = int(sample.get("valid_future_frame_len", ff.shape[0]))
-            if ff.shape[0] < K:
-                pad = np.zeros((K - ff.shape[0], *ff.shape[1:]), dtype=ff.dtype)
-                ff = np.concatenate([ff, pad], axis=0)
-            data["future_frames"] = ff[:K]
-            data["n_future_frames"] = np.array(min(n_valid, K), dtype=np.int32)
+            n_valid = min(int(sample.get("valid_future_frame_len", ff.shape[0])), K)
+            if n_valid > 0:
+                ff = ff[:n_valid]
+                if self.target_image_size is not None:
+                    ff = resize_frames(ff, self.target_image_size)
+                data["future_frames"] = ff
+            data["n_future_frames"] = np.array(n_valid, dtype=np.int32)
         else:
             data["n_future_frames"] = np.array(0, dtype=np.int32)
         if self.return_dataset_info:
