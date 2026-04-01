@@ -195,6 +195,35 @@ def gather_history_frames(past, buf, horizon, stride, pad_mode):
     return frames
 
 
+def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
+    """Gather future frame references from the sliding window buffer.
+
+    Unified helper for both action-chunk and future-frame gathering.
+    Action chunks use offset_base=0 (buf[0] is the first target),
+    future frames use offset_base=stride (skip current frame).
+
+    Args:
+        buf: deque of frames, buf[0] is the current frame.
+        horizon: number of references to gather.
+        stride: temporal stride between references.
+        pad_mode: "repeat" (pad with last available) or "truncate" (skip).
+        offset_base: starting offset into buf for the first reference.
+
+    Returns:
+        (refs, valid_count): gathered references and how many came from buf.
+    """
+    refs = []
+    valid_count = 0
+    for i in range(horizon):
+        offset = offset_base + i * stride
+        if offset < len(buf):
+            refs.append(buf[offset])
+            valid_count += 1
+        elif pad_mode == "repeat":
+            refs.append(buf[len(buf) - 1])
+    return refs, valid_count
+
+
 def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False):
     """Build a training sample from the sliding window buffer.
 
@@ -214,15 +243,10 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     meta = current["meta.json"]
 
     # --- Action chunk: gather only action-horizon lowdim targets ---
-    action_refs = []
-    valid_action_len = 0
-    for i in range(config.action_horizon):
-        offset = i * config.action_stride
-        if offset < len(buf):
-            action_refs.append(buf[offset])
-            valid_action_len += 1
-        elif config.future_pad_mode == "repeat":
-            action_refs.append(buf[len(buf) - 1])
+    action_refs, valid_action_len = gather_future_refs(
+        buf, config.action_horizon, config.action_stride, config.future_pad_mode,
+        offset_base=0,
+    )
     lowdims = np.stack([frame["lowdim.npy"] for frame in action_refs], axis=0)
     len_lowdims = lowdims.shape[0]
     if config.future_pad_mode == "repeat":
@@ -261,13 +285,10 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     # --- Future frames for world model supervision ---
     future_frame_refs = None
     if not lowdim_only and config.future_frame_horizon > 0:
-        ff_refs = []
-        for i in range(config.future_frame_horizon):
-            offset = (i + 1) * config.future_frame_stride
-            if offset < len(buf):
-                ff_refs.append(buf[offset])
-            elif config.future_pad_mode == "repeat":
-                ff_refs.append(buf[len(buf) - 1])
+        ff_refs, _ = gather_future_refs(
+            buf, config.future_frame_horizon, config.future_frame_stride,
+            config.future_pad_mode, offset_base=config.future_frame_stride,
+        )
         if ff_refs:
             future_frame_refs = tuple(ff_refs)
 

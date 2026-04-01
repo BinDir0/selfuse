@@ -10,6 +10,7 @@ from src.dataset.wds_dataset import (
     WindowConfig,
     LOWDIM_SLICES,
     build_sample_from_window,
+    gather_future_refs,
     materialize_sample_media,
     sliding_window_compose,
 )
@@ -380,6 +381,36 @@ def test_depth_none_when_missing():
     sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
     materialize_sample_media(sample)
     assert "depth" not in sample or sample["depth"] is None
+
+
+def test_gather_future_refs_basic():
+    """gather_future_refs collects refs from buf with correct offsets."""
+    buf = collections.deque([make_frame(i) for i in range(10)])
+    refs, valid_count = gather_future_refs(buf, horizon=3, stride=2, pad_mode="repeat", offset_base=0)
+    assert valid_count == 3
+    assert len(refs) == 3
+    assert refs[0]["lowdim.npy"][0] == 0.0
+    assert refs[1]["lowdim.npy"][0] == 2.0
+    assert refs[2]["lowdim.npy"][0] == 4.0
+
+
+def test_gather_future_refs_with_offset_base():
+    """offset_base shifts the starting position (used for future frames)."""
+    buf = collections.deque([make_frame(i) for i in range(20)])
+    refs, valid_count = gather_future_refs(buf, horizon=3, stride=4, pad_mode="repeat", offset_base=4)
+    assert valid_count == 3
+    assert refs[0]["lowdim.npy"][0] == 4.0
+    assert refs[1]["lowdim.npy"][0] == 8.0
+    assert refs[2]["lowdim.npy"][0] == 12.0
+
+
+def test_gather_future_refs_repeat_padding():
+    """When buf is shorter than needed, repeat last frame."""
+    buf = collections.deque([make_frame(i) for i in range(3)])
+    refs, valid_count = gather_future_refs(buf, horizon=4, stride=1, pad_mode="repeat", offset_base=0)
+    assert valid_count == 3
+    assert len(refs) == 4
+    assert refs[3]["lowdim.npy"][0] == 2.0
 
 
 # ---------------------------------------------------------------------------
