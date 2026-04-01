@@ -177,32 +177,19 @@ class LegendVLA(nn.Module):
             # out of optimizer groups and gradient sync.
             self.target_encoder = target_encoder
 
-            # Slot embedding projector.
-            # For self_vit: EMA encoder output (pooler_output) is already post-merger
-            # with dim = out_hidden_size = vlm_hidden_size, so no projection needed.
-            # Source: huggingface/transformers, Qwen3VLVisionPatchMerger — the merger
-            # expects pre-merge patches (total_patches, vision_hidden_size) as input,
-            # NOT post-merger features.
-            encoder_type = target_encoder.encoder_type if target_encoder is not None else ""
-            if encoder_type == "self_vit":
-                self.ff_patch_merger = nn.Identity()
-                if target_encoder is not None:
-                    target_encoder.init_ema(
-                        self.backbone.base_model.model.visual,
-                        momentum=cfg.get("ema_momentum", 0.996),
-                    )
-            else:
-                from src.model.action.action_head import FutureFramePatchMerger
-                self.ff_patch_merger = FutureFramePatchMerger(
-                    input_dim=cfg.get("ff_merger_input_dim", 768),
-                    output_dim=self.vlm_hidden_size,
+            # For self_vit: EMA encoder output (pooler_output) is already
+            # post-merger with dim = out_hidden_size = vlm_hidden_size.
+            # No additional projection is needed.
+            if target_encoder is not None and target_encoder.encoder_type == "self_vit":
+                target_encoder.init_ema(
+                    self.backbone.base_model.model.visual,
+                    momentum=cfg.get("ema_momentum", 0.996),
                 )
         else:
             self.wm_condition_projector = None
             self.wm_diffloss = None
             self.future_frame_token_index = None
             self.target_encoder = None
-            self.ff_patch_merger = None
 
     def compile_blocks(
         self,
@@ -316,11 +303,6 @@ class LegendVLA(nn.Module):
         if not self.use_world_model:
             return []
         modules = [m for m in [self.wm_condition_projector, self.wm_diffloss] if m is not None]
-        # ff_patch_merger only if NOT tied with backbone's merger (non-self_vit)
-        target_encoder = self.target_encoder
-        if target_encoder is not None and target_encoder.encoder_type != "self_vit":
-            if self.ff_patch_merger is not None:
-                modules.append(self.ff_patch_merger)
         return [p for m in modules for p in m.parameters() if p.requires_grad]
 
     def update_ema(self) -> None:
@@ -402,34 +384,21 @@ class LegendVLA(nn.Module):
                 all_features, _ = target_encoder(flat_pv, grid_thw)
                 all_features = all_features.detach()
 
-            sms = self.backbone.base_model.model.visual.spatial_merge_size
-            B_vla = grid_thw.shape[0]
-            merged_spatial = int((grid_thw[0, 1] * grid_thw[0, 2]).item()) // (sms * sms)
-
-            if "ff_n_obs_frames" in batch:
-                # Combined obs+future temporal sequence (self_vit with MEM).
-                # The collator packed obs and future into one video entry.
-                # Split the ViT output to keep only future-frame features.
-                tps = getattr(self.backbone.base_model.model.visual, "temporal_patch_size", 2)
-                T_total = int(grid_thw[0, 0].item())
-                T_obs = int(batch["ff_n_obs_frames"][0].item()) // tps
-                obs_tokens = T_obs * merged_spatial
-                future_tokens = (T_total - T_obs) * merged_spatial
-
-                all_features = all_features.reshape(B_vla, T_total * merged_spatial, -1)
-                target_features = all_features[:, obs_tokens:, :].reshape(-1, all_features.shape[-1])
-            else:
-                # Future frames processed independently (no temporal packing).
-                target_features = all_features
-                future_tokens = target_features.shape[0] // B_vla
+            # ff_pixel_values contains future-frame-only pixels (no obs).
+            # BatchProcessor.process_future_frames() already applied tps truncation.
+            # Features stay flat (total_ff_tokens, hidden) because entries may
+            # have different token counts when future frame lengths vary.
+            # The backbone's masked_scatter consumes elements in batch-row-major
+            # order, which matches this flat layout naturally.
+            target_features = all_features
 
             batch["_wm_target_features"] = target_features
             batch["_wm_ff_grid_thw"] = grid_thw
 
             noisy_features = target_features + torch.randn_like(target_features) * self.ff_noise_std
-            ff_embeds = self.ff_patch_merger(noisy_features)
-            ff_embeds = ff_embeds.reshape(B_vla, future_tokens, -1)
-            slot_embeds["future_frame"] = ff_embeds
+            # target encoder (self_vit EMA) output is already post-merger
+            # with dim = out_hidden_size = vlm_hidden_size, no extra projection.
+            slot_embeds["future_frame"] = noisy_features
 
         return slot_embeds
 

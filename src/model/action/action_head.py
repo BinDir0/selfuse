@@ -175,26 +175,3 @@ class MLPProjector(nn.Module):
         return emb
 
 
-class FutureFramePatchMerger(nn.Module):
-    """Project target encoder patch features into the VLM embedding space.
-
-    Architecture mirrors Qwen3VLVisionPatchMerger exactly:
-      LayerNorm → Linear → GELU → Linear
-    Source: huggingface/transformers, Qwen3VLVisionPatchMerger
-
-    For self_vit mode this class is NOT instantiated — weights are tied
-    with the backbone's visual.merger directly. This class is used only
-    for non-self_vit encoder types (dinov2, vae) where the feature dim
-    differs from the backbone merger's input dim.
-    """
-
-    def __init__(self, input_dim: int, output_dim: int):
-        super().__init__()
-        self.norm = nn.LayerNorm(input_dim, eps=1e-6)
-        self.linear_fc1 = nn.Linear(input_dim, input_dim)
-        self.act_fn = nn.GELU()
-        self.linear_fc2 = nn.Linear(input_dim, output_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (total_tokens, input_dim)
-        return self.linear_fc2(self.act_fn(self.linear_fc1(self.norm(x))))

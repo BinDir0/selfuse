@@ -57,12 +57,11 @@ class DummyBackbone(nn.Module):
         del state_token_id, action_token_id, use_cache, output_hidden_states, past_key_values
 
         embeds = self.embed(input_ids)
-        slot_specs = (
+        # State/action slot embeds are 3D (B, T, H) — uniform per sample.
+        for token_id, slot_embeds_cur in (
             (self.state_token_id, state_slot_embeds),
             (self.action_token_id, action_slot_embeds),
-            (self.future_frame_token_id, future_frame_slot_embeds),
-        )
-        for token_id, slot_embeds_cur in slot_specs:
+        ):
             if slot_embeds_cur is None:
                 continue
             mask = input_ids == token_id
@@ -70,6 +69,11 @@ class DummyBackbone(nn.Module):
             gather_index = slot.clamp(min=0, max=slot_embeds_cur.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             slot_values = torch.gather(slot_embeds_cur, dim=1, index=gather_index)
             embeds = torch.where(mask.unsqueeze(-1), slot_values, embeds)
+        # Future frame slot embeds are 2D (total_tokens, H) — variable per
+        # sample. Use masked_scatter to match real backbone behavior.
+        if future_frame_slot_embeds is not None:
+            ff_mask = (input_ids == self.future_frame_token_id).unsqueeze(-1).expand_as(embeds)
+            embeds = embeds.masked_scatter(ff_mask, future_frame_slot_embeds.to(embeds.dtype))
 
         hidden = self.hidden_proj(embeds)
         batch_size, seq_len, _ = hidden.shape
@@ -239,7 +243,9 @@ def test_world_model_build_slot_embeddings_exposes_future_frame_slots():
 
     assert model.target_encoder.init_called
     assert slot_embeds["future_frame"] is not None
-    assert slot_embeds["future_frame"].shape == (1, 3, model.vlm_hidden_size)
+    # future_frame slot embeds are 2D flat (total_tokens, hidden) to support
+    # variable per-sample token counts with masked_scatter in the backbone.
+    assert slot_embeds["future_frame"].shape == (3, model.vlm_hidden_size)
     assert batch["_wm_target_features"].shape == (3, model.vlm_hidden_size)
 
 

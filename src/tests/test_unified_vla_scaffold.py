@@ -71,12 +71,11 @@ class DummyBackbone(nn.Module):
             gather_index = action_slot.clamp(min=0, max=action_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             action_values = torch.gather(action_slot_embeds, dim=1, index=gather_index)
             embeds = torch.where(action_mask.unsqueeze(-1), action_values, embeds)
+        # Future frame slot embeds are 2D (total_tokens, H) — variable per
+        # sample. Use masked_scatter to match real backbone behavior.
         if future_frame_slot_embeds is not None:
-            ff_mask = input_ids == self.future_frame_token_id
-            ff_slot = ff_mask.long().cumsum(dim=1) - 1
-            gather_index = ff_slot.clamp(min=0, max=future_frame_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
-            ff_values = torch.gather(future_frame_slot_embeds, dim=1, index=gather_index)
-            embeds = torch.where(ff_mask.unsqueeze(-1), ff_values, embeds)
+            ff_mask = (input_ids == self.future_frame_token_id).unsqueeze(-1).expand_as(embeds)
+            embeds = embeds.masked_scatter(ff_mask, future_frame_slot_embeds.to(embeds.dtype))
 
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
