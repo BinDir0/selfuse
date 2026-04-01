@@ -24,6 +24,8 @@ import torch
 from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
+from src.model.common.model_average import _unshard_params
+
 
 class FutureFrameTargetEncoder(nn.Module):
 
@@ -59,12 +61,26 @@ class FutureFrameTargetEncoder(nn.Module):
             source_visual,
             multi_avg_fn=get_ema_multi_avg_fn(momentum),
         )
+        # AveragedModel registers n_averaged as a persistent torch.long buffer.
+        # FSDP2's fully_shard() does not convert integer buffers to DTensor,
+        # but accelerate's fsdp2_load_full_state_dict assumes every state_dict
+        # entry has .device_mesh. Re-register as non-persistent so it is
+        # excluded from state_dict() and avoids the crash.
+        if hasattr(self.ema, 'n_averaged'):
+            n_avg = self.ema.n_averaged.clone()
+            del self.ema._buffers['n_averaged']
+            self.ema.register_buffer('n_averaged', n_avg, persistent=False)
         self.ema.requires_grad_(False)
 
     @torch.no_grad()
     def update_ema(self, source_visual: nn.Module) -> None:
         if self.ema is not None:
-            self.ema.update_parameters(source_visual)
+            # Under FSDP2 both the live backbone and the EMA copy have DTensor
+            # parameters after accelerator.prepare(). AveragedModel.update_parameters
+            # does in-place mul_/add_ across both param sets, so both must be
+            # temporarily unsharded to avoid Tensor/DTensor copy_ mismatches.
+            with _unshard_params(source_visual), _unshard_params(self.ema.module):
+                self.ema.update_parameters(source_visual)
 
     # -- Forward --
 

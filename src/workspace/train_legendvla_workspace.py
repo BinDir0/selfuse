@@ -25,7 +25,7 @@ from transformers import get_scheduler
 import accelerate
 from accelerate import Accelerator
 from accelerate.utils import ProfileKwargs, InitProcessGroupKwargs
-
+from src.workspace.eval_utils import _unwrap_model
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager
@@ -683,7 +683,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         # steps; during gradient accumulation optimizer.step()
                         # is a no-op so calling update_ema() would lower the
                         # effective momentum (momentum^accum_steps).
-                        unwrapped = accelerator.unwrap_model(self.model)
+                        unwrapped = _unwrap_model(self)
                         if unwrapped.use_world_model:
                             unwrapped.update_ema()
 
