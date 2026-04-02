@@ -35,6 +35,7 @@ from src.utils.training_utils import (
     capture_output_to_training_log,
     DeviceTransferWrapper,
     FullMemoryTracker,
+    GarbageCollection,
     params_l2_norm,
     scalar_metric_value,
 )
@@ -529,6 +530,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             profile_context = accelerator.profile()
 
         # Training loop
+        gc_handler = GarbageCollection(gc_freq=1000)
         training_start_time = None
         total_samples_processed = 0
         log_interval = int(getattr(cfg.training, "log_interval", 50))
@@ -728,12 +730,14 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if cfg.training.profile and accelerator.is_main_process:
                         prof.step()
 
+                    gc_handler.run(self.global_step)
                     step_perf_end = time.perf_counter()
 
                 if cfg.training.max_train_steps and self.update_step >= cfg.training.max_train_steps:
                     break
                 self.epoch += 1
 
+        gc_handler.finalize()
         accelerator.end_training()
 
     # Combine validation and sampling, so we can process data only once.

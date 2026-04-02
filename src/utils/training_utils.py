@@ -1,8 +1,10 @@
+import gc
 import os
 import sys
 import threading
 import pty
 import re
+import time
 from contextlib import contextmanager
 from functools import wraps
 import torch
@@ -146,6 +148,44 @@ def grads_l2_norm(params):
         return None
     norm = torch.nn.utils.get_total_norm(grads, norm_type=2.0)
     return scalar_metric_value(norm)
+
+
+# Adapted from TorchTitan to avoid GC stragglers in distributed training.
+# All ranks disable automatic GC and collect at the same deterministic step,
+# so no single rank stalls while others wait at the next NCCL collective.
+# Source: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py#L49-L73
+class GarbageCollection:
+    def __init__(self, gc_freq: int = 1000, debug: bool = False):
+        assert gc_freq > 0, "gc_freq must be a positive integer"
+        self.gc_freq = gc_freq
+        self.debug = debug
+        gc.disable()
+        self.collect("Initial GC collection")
+        if debug:
+            from torch.utils.viz._cycles import warn_tensor_cycles
+            if torch.distributed.get_rank() == 0:
+                warn_tensor_cycles()
+
+    def run(self, step_count: int):
+        if self.debug:
+            self.collect(
+                "Force GC to perform collection to obtain debug information",
+                generation=2,
+            )
+            gc.collect()
+        elif step_count > 1 and step_count % self.gc_freq == 0:
+            self.collect("Performing periodic GC collection")
+
+    def finalize(self):
+        gc.enable()
+
+    @staticmethod
+    def collect(reason: str, generation: int = 1):
+        begin = time.monotonic()
+        gc.collect(generation)
+        elapsed = time.monotonic() - begin
+        if elapsed > 0.05:
+            print(f"[GC] {reason} took {elapsed:.2f}s")
 
 
 class FullMemoryTracker:
