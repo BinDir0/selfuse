@@ -1,15 +1,16 @@
 """Frozen target encoder for future frame dense feature supervision.
 
 Provides per-patch merged features as prediction targets for the world model
-DiffLoss. Three encoder backends are planned:
+DiffLoss. Currently only the "self_vit" backend is supported:
 
-  - "self_vit": EMA copy of the backbone Qwen3-VL ViT + merger.
-    Zero extra model parameters; EMA updated once per optimizer step.
-  - "dinov2": frozen DINOv2 ViT (not yet implemented).
-  - "vae": frozen video VAE encoder (not yet implemented).
+  - "self_vit" with use_ema=True: EMA copy of the backbone Qwen3-VL ViT +
+    merger. Zero extra model parameters; EMA updated once per optimizer step.
+  - "self_vit" with use_ema=False (freeze): frozen snapshot of the backbone
+    at init time. No EMA updates; parameters stay at initial checkpoint values.
 
 For self_vit mode:
-  - EMA must be initialized after backbone construction via init_ema().
+  - When use_ema=True, call init_ema() after backbone construction.
+  - When use_ema=False, call init_frozen() after backbone construction.
   - forward receives preprocessed pixel_values (same format as backbone ViT
     input, produced by the HF Qwen3-VL processor) and grid_thw.
   - Returns flat (total_merged_tokens, feature_dim) per-patch features.
@@ -19,6 +20,8 @@ the existing ModelAveraging class in src/model/common/model_average.py.
 """
 
 from __future__ import annotations
+
+import copy
 
 import torch
 from torch import nn
@@ -33,22 +36,22 @@ class FutureFrameTargetEncoder(nn.Module):
         self,
         encoder_type: str,
         feature_dim: int,
+        use_ema: bool = True,
         model_name_or_path: str = "",
     ):
         super().__init__()
+        assert encoder_type == "self_vit", (
+            f"Only 'self_vit' encoder is supported, got '{encoder_type}'"
+        )
         self.encoder_type = encoder_type
         self.feature_dim = feature_dim
+        self.use_ema = use_ema
         self.model_name_or_path = model_name_or_path
-        # EMA is created lazily via init_ema() after the backbone is ready.
-        # Stored as a registered submodule so .to(device) propagates automatically.
+        # Lazily initialized via init_ema() or init_frozen().
         self.ema: AveragedModel | None = None
+        self.frozen_visual: nn.Module | None = None
 
-        if encoder_type == "dinov2":
-            raise NotImplementedError("DINOv2 target encoder not yet implemented")
-        if encoder_type == "vae":
-            raise NotImplementedError("VAE target encoder not yet implemented")
-
-    # -- EMA lifecycle (self_vit mode) --
+    # -- EMA lifecycle (use_ema=True) --
 
     def init_ema(self, source_visual: nn.Module, momentum: float = 0.996) -> None:
         """Deep-copy the backbone visual module as the EMA target encoder.
@@ -56,6 +59,7 @@ class FutureFrameTargetEncoder(nn.Module):
         Uses torch.optim.swa_utils.AveragedModel with EMA averaging function,
         consistent with src/model/common/model_average.py.
         """
+        assert self.use_ema, "init_ema() requires use_ema=True"
         # Source: torch.optim.swa_utils.AveragedModel
         self.ema = AveragedModel(
             source_visual,
@@ -82,22 +86,39 @@ class FutureFrameTargetEncoder(nn.Module):
             with _unshard_params(source_visual), _unshard_params(self.ema.module):
                 self.ema.update_parameters(source_visual)
 
+    # -- Frozen lifecycle (use_ema=False) --
+
+    def init_frozen(self, source_visual: nn.Module) -> None:
+        """Deep-copy the backbone visual module as a frozen target encoder.
+
+        No EMA updates; the copy stays at the initial checkpoint values.
+        """
+        assert not self.use_ema, "init_frozen() requires use_ema=False"
+        self.frozen_visual = copy.deepcopy(source_visual)
+        self.frozen_visual.requires_grad_(False)
+
     # -- Forward --
 
-    def set_ema_mem_grid_thw(self, grid_thw: torch.Tensor) -> None:
-        """Set grid_thw on MEM temporal attention blocks inside the EMA ViT.
+    def visual_module(self) -> nn.Module:
+        """Return the underlying visual module (EMA or frozen)."""
+        if self.use_ema:
+            assert self.ema is not None, "Call init_ema() before forward."
+            return self.ema.module
+        assert self.frozen_visual is not None, "Call init_frozen() before forward."
+        return self.frozen_visual
 
-        Must be called before forward_self_vit so that MEM temporal causal
-        attention knows the per-entry (T, H, W) structure of the combined
+    def set_mem_grid_thw(self, grid_thw: torch.Tensor) -> None:
+        """Set grid_thw on MEM temporal attention blocks inside the target ViT.
+
+        Must be called before forward so that MEM temporal causal attention
+        knows the per-entry (T, H, W) structure of the combined
         observation + future frame sequence.
         """
-        if self.ema is None:
-            return
         try:
             from src.model.vision.temporal_attention import MEMVisionBlock
         except ImportError:
             return
-        for block in self.ema.module.blocks:
+        for block in self.visual_module().blocks:
             if isinstance(block, MEMVisionBlock):
                 block.temporal_attn.current_grid_thw = grid_thw
 
@@ -118,22 +139,10 @@ class FutureFrameTargetEncoder(nn.Module):
             features: (total_merged_tokens, feature_dim) detached.
             grid_thw: passthrough for downstream token-count bookkeeping.
         """
-        if self.encoder_type == "self_vit":
-            return self.forward_self_vit(pixel_values, grid_thw)
-        raise ValueError(f"Unknown encoder_type: {self.encoder_type}")
-
-    def forward_self_vit(
-        self,
-        pixel_values: torch.Tensor,
-        grid_thw: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """EMA ViT + merger -> flat per-patch features.
-
-        Reference: Qwen3VLVisionModel.forward returns pooler_output as a flat
-        (total_merged_tokens, out_hidden_size) tensor after the spatial merger.
-        """
-        assert self.ema is not None, "Call init_ema() before forward."
-        self.set_ema_mem_grid_thw(grid_thw)
+        self.set_mem_grid_thw(grid_thw)
+        visual = self.visual_module()
         # Source: huggingface/transformers, Qwen3VLVisionModel.forward
-        output = self.ema.module(pixel_values, grid_thw=grid_thw, return_dict=True)
+        # Returns pooler_output as flat (total_merged_tokens, out_hidden_size)
+        # after the spatial merger.
+        output = visual(pixel_values, grid_thw=grid_thw, return_dict=True)
         return output.pooler_output.detach(), grid_thw

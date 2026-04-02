@@ -94,6 +94,7 @@ class DummyTargetEncoder(nn.Module):
         super().__init__()
         self.encoder_type = "self_vit"
         self.feature_dim = feature_dim
+        self.use_ema = True
         self.init_called = False
         self.update_calls = 0
         self.register_buffer("basis", torch.linspace(0.1, 1.0, feature_dim), persistent=False)

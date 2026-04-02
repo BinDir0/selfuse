@@ -173,18 +173,22 @@ class LegendVLA(nn.Module):
             self.future_frame_token_index = int(ff_token_id) if ff_token_id is not None else None
 
             # Target encoder as a normal submodule so .to(device) propagates.
-            # All params are requires_grad=False after init_ema, so they stay
+            # All params are requires_grad=False after init, so they stay
             # out of optimizer groups and gradient sync.
             self.target_encoder = target_encoder
 
             # For self_vit: EMA encoder output (pooler_output) is already
             # post-merger with dim = out_hidden_size = vlm_hidden_size.
             # No additional projection is needed.
-            if target_encoder is not None and target_encoder.encoder_type == "self_vit":
-                target_encoder.init_ema(
-                    self.backbone.base_model.model.visual,
-                    momentum=cfg.get("ema_momentum", 0.996),
-                )
+            if target_encoder is not None:
+                source_visual = self.backbone.base_model.model.visual
+                if target_encoder.use_ema:
+                    target_encoder.init_ema(
+                        source_visual,
+                        momentum=cfg.get("ema_momentum", 0.996),
+                    )
+                else:
+                    target_encoder.init_frozen(source_visual)
         else:
             self.wm_condition_projector = None
             self.wm_diffloss = None
@@ -308,7 +312,7 @@ class LegendVLA(nn.Module):
     def update_ema(self) -> None:
         """Update EMA target encoder from backbone visual module. Call after optimizer.step()."""
         target_encoder = self.target_encoder
-        if self.use_world_model and target_encoder is not None and hasattr(target_encoder, "update_ema"):
+        if self.use_world_model and target_encoder is not None and target_encoder.use_ema:
             target_encoder.update_ema(self.backbone.base_model.model.visual)
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:

@@ -484,22 +484,28 @@ class Qwen3VLBackboneWrapper(nn.Module):
         """Replace selected ViT blocks with MEMVisionBlock wrappers for temporal attention.
 
         Reference: MEM (Torne et al., 2025), arxiv 2603.03596
-        Wraps every N-th block with factorized spatial-then-temporal attention.
+        Wraps every N-th block with factorized temporal-then-spatial attention.
+        Temporal attention shares the spatial block's norm1, QKV, and output
+        projection — zero new learnable parameters.
         """
         from src.model.vision.temporal_attention import MEMVisionBlock, TemporalCausalAttentionPass
 
         visual = self.base_model.model.visual
-        every_n = int(mem_cfg["every_n_layers"])
-        max_temporal_len = int(mem_cfg.get("max_temporal_len", 32))
+        every_n = mem_cfg["every_n_layers"]
+        max_temporal_len = mem_cfg.get("max_temporal_len", 32)
+        base = mem_cfg.get("sinusoidal_pe_base", 10000.0)
         hidden_size = visual.config.hidden_size
 
         for i in range(len(visual.blocks)):
             if (i + 1) % every_n == 0:
+                spatial_block = visual.blocks[i]
                 ta = TemporalCausalAttentionPass(
+                    spatial_block=spatial_block,
                     hidden_size=hidden_size,
                     max_temporal_len=max_temporal_len,
+                    base=base,
                 )
-                visual.blocks[i] = MEMVisionBlock(visual.blocks[i], ta)
+                visual.blocks[i] = MEMVisionBlock(spatial_block, ta)
         self.has_mem_blocks = True
 
     def set_mem_grid_thw(self, grid_thw: torch.Tensor | None) -> None:

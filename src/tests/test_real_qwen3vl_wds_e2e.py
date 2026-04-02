@@ -584,6 +584,7 @@ def test_real_qwen3vl_world_model_forward_backward(tmp_path: Path):
             target_encoder=FutureFrameTargetEncoder(
                 encoder_type="self_vit",
                 feature_dim=backbone_hidden_size,
+                use_ema=True,
             ),
             wm_condition_projector=MLPProjector(
                 input_dim=backbone_hidden_size,
