@@ -135,10 +135,12 @@ def _is_index_stale(index: dict, factory_dir: str) -> bool:
     current_shards = sorted([f for f in os.listdir(factory_dir) if f.endswith(".tar")])
     if current_shards != index.get("shards", []):
         return True
-    # Check if index has frame offsets (new format with dicts instead of strings)
+    # Require the legacy full-frame cache format: videos[...]["frames"] with offset/size entries.
     videos = index.get("videos", {})
     if videos:
         first_video = next(iter(videos.values()))
+        if "frames" not in first_video:
+            return True
         frames = first_video.get("frames", [])
         if frames and isinstance(frames[0], str):
             return True  # Old format without offsets — rebuild
