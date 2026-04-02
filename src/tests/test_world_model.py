@@ -31,6 +31,7 @@ class DummyBackbone(nn.Module):
         self.base_model.model.visual = nn.Module()
         self.base_model.model.visual.spatial_merge_size = 1
         self.base_model.model.visual.temporal_patch_size = 1
+        self.base_model.model.visual.temporal_patch_size = 1
         self.embed = nn.Embedding(vocab_size, hidden_size, padding_idx=0)
         self.hidden_proj = nn.Linear(hidden_size, hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
@@ -210,14 +211,25 @@ def build_world_model_batch() -> dict[str, torch.Tensor]:
     input_ids = torch.tensor([[100, 10, 101, 101, 102, 102, 103, 103, 103, 0]], dtype=torch.long)
     attention_mask = (input_ids != 0).long()
     action_dim = 12
+    # Obs video: 2 temporal patches of 1x1 spatial, patch_dim=4
+    obs_pv = torch.tensor([
+        [10.0, 10.0, 10.0, 10.0],
+        [20.0, 20.0, 20.0, 20.0],
+    ], dtype=torch.float32)
+    # Future frames: 3 temporal patches of 1x1 spatial, patch_dim=4
+    ff_pv = torch.tensor([
+        [100.0, 100.0, 100.0, 100.0],
+        [200.0, 200.0, 200.0, 200.0],
+        [300.0, 300.0, 300.0, 300.0],
+    ], dtype=torch.float32)
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": torch.full_like(input_ids, -100),
         "pixel_values": torch.randn(1, 3, 16, 16),
         "image_grid_thw": torch.ones(1, 3, dtype=torch.long),
-        "pixel_values_videos": None,
-        "video_grid_thw": None,
+        "pixel_values_videos": obs_pv,
+        "video_grid_thw": torch.tensor([[2, 1, 1]], dtype=torch.long),
         "mm_token_type_ids": torch.zeros_like(input_ids),
         "states": torch.randn(1, 2, action_dim),
         "actions": torch.randn(1, 2, action_dim),
@@ -226,11 +238,9 @@ def build_world_model_batch() -> dict[str, torch.Tensor]:
         "is_vla_data": torch.tensor([True], dtype=torch.bool),
         "n_states": torch.tensor([2], dtype=torch.long),
         "n_actions": torch.tensor([2], dtype=torch.long),
-        "ff_pixel_values": torch.tensor(
-            [[1.0, 0.0, 0.0, 0.0], [2.0, 0.0, 0.0, 0.0], [3.0, 0.0, 0.0, 0.0]],
-            dtype=torch.float32,
-        ),
-        "ff_grid_thw": torch.tensor([[1, 1, 1]], dtype=torch.long),
+        "ff_pixel_values": ff_pv,
+        "ff_grid_thw": torch.tensor([[3, 1, 1]], dtype=torch.long),
+        "ff_video_indices": torch.tensor([0], dtype=torch.long),
         "n_future_frames": torch.tensor([2], dtype=torch.long),
     }
 
@@ -285,3 +295,106 @@ def test_world_model_update_ema_delegates_to_target_encoder():
     model.update_ema()
 
     assert model.target_encoder.update_calls == 1
+
+
+# ======================================================================
+# encode_world_model_targets: concat ordering and split
+# ======================================================================
+
+
+def test_encode_world_model_targets_concat_ordering():
+    """Verify obs+future concat ordering and that only future features are returned."""
+    model = build_world_model()
+    batch = build_world_model_batch()
+
+    target_features, ff_only_grid = model.encode_world_model_targets(batch)
+
+    # 3 ff patches of 1x1 spatial with sms=1 → 3 merged tokens
+    assert target_features.shape == (3, model.vlm_hidden_size)
+    assert ff_only_grid.tolist() == [[3, 1, 1]]
+
+    # DummyTargetEncoder: output[i] = mean(input[i]) + basis
+    # Combined input = [obs(10), obs(20), ff(100), ff(200), ff(300)]
+    # After split, target_features should contain only ff-derived features.
+    basis = model.target_encoder.basis
+    torch.testing.assert_close(target_features[0], 100.0 + basis)
+    torch.testing.assert_close(target_features[1], 200.0 + basis)
+    torch.testing.assert_close(target_features[2], 300.0 + basis)
+
+
+def test_encode_world_model_targets_multi_sample():
+    """Verify per-sample concat and split with multiple obs/ff entries."""
+    model = build_world_model()
+
+    # 2 obs videos with different temporal lengths
+    obs_pv = torch.tensor([
+        [10.0, 10.0, 10.0, 10.0],   # obs video 0, patch 0
+        [20.0, 20.0, 20.0, 20.0],   # obs video 0, patch 1
+        [30.0, 30.0, 30.0, 30.0],   # obs video 1, patch 0
+    ], dtype=torch.float32)
+
+    # 2 ff entries mapping to different videos
+    ff_pv = torch.tensor([
+        [100.0, 100.0, 100.0, 100.0],  # ff entry 0 (→ video 0), 1 patch
+        [200.0, 200.0, 200.0, 200.0],  # ff entry 1 (→ video 1), patch 0
+        [300.0, 300.0, 300.0, 300.0],  # ff entry 1 (→ video 1), patch 1
+    ], dtype=torch.float32)
+
+    batch = {
+        "pixel_values_videos": obs_pv,
+        "video_grid_thw": torch.tensor([[2, 1, 1], [1, 1, 1]], dtype=torch.long),
+        "ff_pixel_values": ff_pv,
+        "ff_grid_thw": torch.tensor([[1, 1, 1], [2, 1, 1]], dtype=torch.long),
+        "ff_video_indices": torch.tensor([0, 1], dtype=torch.long),
+    }
+
+    target_features, ff_only_grid = model.encode_world_model_targets(batch)
+
+    # Entry 0: combined [obs0_p0, obs0_p1, ff0_p0] → 3 patches, obs=2, ff=1
+    # Entry 1: combined [obs1_p0, ff1_p0, ff1_p1] → 3 patches, obs=1, ff=2
+    # Total ff tokens: 1 + 2 = 3
+    assert target_features.shape == (3, model.vlm_hidden_size)
+    assert ff_only_grid.tolist() == [[1, 1, 1], [2, 1, 1]]
+
+    # Verify feature values match ff inputs (not obs inputs)
+    basis = model.target_encoder.basis
+    torch.testing.assert_close(target_features[0], 100.0 + basis)  # from ff entry 0
+    torch.testing.assert_close(target_features[1], 200.0 + basis)  # from ff entry 1, patch 0
+    torch.testing.assert_close(target_features[2], 300.0 + basis)  # from ff entry 1, patch 1
+
+
+def test_encode_world_model_targets_non_contiguous_video_indices():
+    """ff_video_indices can skip video entries (e.g., when only some VLA samples have future frames)."""
+    model = build_world_model()
+
+    # 3 obs videos, but only videos 0 and 2 have future frames
+    obs_pv = torch.tensor([
+        [10.0, 10.0, 10.0, 10.0],   # obs video 0
+        [20.0, 20.0, 20.0, 20.0],   # obs video 1
+        [30.0, 30.0, 30.0, 30.0],   # obs video 2
+    ], dtype=torch.float32)
+
+    ff_pv = torch.tensor([
+        [100.0, 100.0, 100.0, 100.0],  # ff entry 0 → video 0
+        [300.0, 300.0, 300.0, 300.0],  # ff entry 1 → video 2
+    ], dtype=torch.float32)
+
+    batch = {
+        "pixel_values_videos": obs_pv,
+        "video_grid_thw": torch.tensor([[1, 1, 1], [1, 1, 1], [1, 1, 1]], dtype=torch.long),
+        "ff_pixel_values": ff_pv,
+        "ff_grid_thw": torch.tensor([[1, 1, 1], [1, 1, 1]], dtype=torch.long),
+        "ff_video_indices": torch.tensor([0, 2], dtype=torch.long),
+    }
+
+    target_features, ff_only_grid = model.encode_world_model_targets(batch)
+
+    assert target_features.shape == (2, model.vlm_hidden_size)
+    assert ff_only_grid.tolist() == [[1, 1, 1], [1, 1, 1]]
+
+    # Entry 0 concat: [obs_video0(10), ff0(100)] → ff feature from 100
+    # Entry 1 concat: [obs_video2(30), ff1(300)] → ff feature from 300
+    # Obs video 1 (20) is never used because no ff maps to it.
+    basis = model.target_encoder.basis
+    torch.testing.assert_close(target_features[0], 100.0 + basis)
+    torch.testing.assert_close(target_features[1], 300.0 + basis)

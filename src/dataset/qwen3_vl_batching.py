@@ -343,24 +343,31 @@ class Qwen3VLBatchProcessor:
         - Future frame count is truncated to the nearest multiple of
           temporal_patch_size (tps) to satisfy Qwen3-VL's temporal patching.
           tps truncation happens HERE, not in vla_dataset.
-        - Returns {ff_pixel_values, ff_grid_thw} or empty dict if no valid frames.
+        - Returns {ff_pixel_values, ff_grid_thw, ff_video_indices} or
+          empty dict if no valid frames.
+        - ff_video_indices maps each ff entry to its corresponding index
+          in the batch's video_grid_thw, so build_slot_embeddings can
+          extract obs pixel_values for GPU-side obs+future concat.
         - Truncation formula: n_ff = (K // tps) * tps. Must match the
           token count in Qwen3VLChatFormatter.build_messages().
         """
         video_proc = getattr(self.processor, "video_processor", None)
         tps = getattr(video_proc, "temporal_patch_size", 2) if video_proc else 2
 
-        ff_samples = [s for s in samples if "future_frames" in s]
-        if not ff_samples:
-            return {}
-
         videos = []
-        for s in ff_samples:
+        ff_video_indices = []
+        video_idx = -1
+        for s in samples:
+            if s.get("vision_type") == "video":
+                video_idx += 1
+            if "future_frames" not in s:
+                continue
             ff = s["future_frames"]
             n_ff = (ff.shape[0] // tps) * tps
             if n_ff == 0:
                 continue
             videos.append(ff[:n_ff])
+            ff_video_indices.append(video_idx)
 
         if not videos:
             return {}
@@ -372,11 +379,8 @@ class Qwen3VLBatchProcessor:
             return_tensors="pt",
             do_sample_frames=False,
         )
-        pv = processed["pixel_values_videos"]
-        if pv.ndim == 3:
-            pv = pv.reshape(-1, pv.shape[-1])
-
         return {
-            "ff_pixel_values": pv,
+            "ff_pixel_values": processed["pixel_values_videos"],
             "ff_grid_thw": processed["video_grid_thw"],
+            "ff_video_indices": torch.tensor(ff_video_indices, dtype=torch.long),
         }
