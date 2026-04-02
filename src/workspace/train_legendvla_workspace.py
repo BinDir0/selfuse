@@ -444,12 +444,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             collate_fn=dataset.get_collator(),
             **cfg.dataloader.loader,
         )
-        # Validation dataloader
+        # Validation dataloader — NOT managed by accelerate.
+        # Each rank reads its own shards via wds.split_by_node.
+        # Unequal batch counts across ranks are safe because
+        # eval_with_averaged_model pre-unshards all FSDP params,
+        # making every forward pass purely local (no collective).
         val_dataset = dataset.get_validation_dataset()
-        val_dataset.distribute(
-            rank=accelerator.process_index,
-            world_size=accelerator.num_processes,
-        )
         val_dataloader = DataLoader(
             dataset=val_dataset,
             collate_fn=val_dataset.get_collator(),
@@ -540,7 +540,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 if accelerator.is_main_process:
                     print(f"Training epoch {self.epoch} started")
                 dataloader = train_dataloader
+                step_perf_end = time.perf_counter()
                 for batch_idx, batch in enumerate(dataloader):
+                    data_wait_sec = time.perf_counter() - step_perf_end
                     # Enforce steps_per_epoch limit
                     if batch_idx >= steps_per_epoch:
                         break
@@ -668,6 +670,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         step_log.update({
                             'elapsed_time_sec': elapsed_time_sec,
                             'step_time_sec': step_time_sec,
+                            'data_wait_sec': data_wait_sec,
                             'avg_samples_per_sec': total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
                             'samples_per_sec': batch_size_local / step_time_sec if step_time_sec > 0 else 0,
                         })
@@ -714,6 +717,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     if cfg.training.profile and accelerator.is_main_process:
                         prof.step()
+
+                    step_perf_end = time.perf_counter()
 
                 if cfg.training.max_train_steps and self.update_step >= cfg.training.max_train_steps:
                     break

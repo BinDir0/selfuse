@@ -34,16 +34,35 @@ def _to_numpy(value):
 
 @contextmanager
 def eval_with_averaged_model(accelerator, model, averaged_model):
+    """Set up model for FSDP2-safe evaluation.
+
+    Two independent concerns handled here:
+
+    1. **FSDP unshard** (unconditional): explicitly unshard all FSDP
+       modules before the eval loop so that every forward pass is purely
+       local — no per-forward collective all-gather.  Combined with
+       ``reshard_after_forward=False`` this means ranks with unequal or
+       even zero validation batches will NOT deadlock.  The unshard
+       itself is the only collective; all ranks participate because it
+       runs before the iteration loop.
+    2. **Averaged-weight swap** (conditional): when EMA/SWA shadow
+       parameters exist, swap them in for evaluation and restore the
+       originals on exit.
     """
-    Context manager that temporarily swaps in averaged (EMA/SWA) weights
-    for evaluation, then restores originals.  FSDP2-safe.
-    """
+    from src.model.common.model_average import _collect_fsdp_modules
+
+    fsdp_modules = _collect_fsdp_modules(model)
+    for m in fsdp_modules:
+        m.unshard()
+
     model.eval()
-    with averaged_model.use_averaged_params():
-        try:
+    try:
+        with averaged_model.use_averaged_params():
             yield
-        finally:
-            model.train()
+    finally:
+        model.train()
+        for m in fsdp_modules:
+            m.reshard()
 
 
 def save_checkpoint_accelerator(workspace, accelerator, path=None, tag='latest'):

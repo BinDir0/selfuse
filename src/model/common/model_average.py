@@ -137,36 +137,25 @@ class ModelAveraging:
 
     @contextmanager
     def use_averaged_params(self):
-        """
-        Context manager that temporarily swaps model parameters with the
-        averaged (EMA/SWA) shadow copy.  Works with both plain and FSDP2 models.
+        """Temporarily swap model parameters with the averaged (EMA/SWA) shadow copy.
 
-        Under FSDP2 the swap happens while parameters are unsharded; reshard()
-        is called on exit to restore the FSDP invariant.
+        Caller must ensure FSDP parameters are already unsharded before
+        entering this context (e.g. via eval_with_averaged_model which
+        handles unshard/reshard independently).
         """
         if self.shadow is None:
             yield
             return
 
         originals: Dict[str, torch.Tensor] = {}
-        fsdp_modules = _collect_fsdp_modules(self.model)
-
-        # Unshard so we can write full tensors.
-        for m in fsdp_modules:
-            m.unshard()
-
         try:
-            # Swap in averaged weights.
             for name, param in self.model.named_parameters():
                 originals[name] = param.data.clone()
                 param.data.copy_(self.shadow[name].to(param.device, param.dtype))
             yield
         finally:
-            # Restore original weights.
             for name, param in self.model.named_parameters():
                 param.data.copy_(originals[name])
-            for m in fsdp_modules:
-                m.reshard()
 
     def averaged_state_dict(self) -> Dict[str, torch.Tensor]:
         """Return a copy of the averaged parameters (always full, on avg_device)."""
