@@ -715,6 +715,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     if self.global_step % 100 == 0 and accelerator.is_main_process:
                         print(f"Global step {self.global_step} completed")
 
+                    if self.global_step % 500 == 0 and accelerator.is_main_process:
+                        import psutil
+                        proc = psutil.Process()
+                        children = proc.children(recursive=True)
+                        worker_rss = [(c.pid, c.memory_info().rss / 1e9) for c in children]
+                        worker_rss.sort(key=lambda x: -x[1])
+                        print(f"[Step {self.global_step}] Main RSS: {proc.memory_info().rss/1e9:.2f}GB")
+                        for pid, rss in worker_rss[:6]:
+                            print(f"  Worker PID {pid}: {rss:.2f}GB")
+
                     if cfg.training.profile and accelerator.is_main_process:
                         prof.step()
 

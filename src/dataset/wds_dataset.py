@@ -447,7 +447,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     # Shuffle before media materialization so the buffer retains lightweight
     # window descriptors with shared frame refs rather than copied image arrays.
     if is_train and shuffle_buffer and shuffle_buffer > 0:
-        pipeline = pipeline.shuffle(shuffle_buffer, initial=shuffle_buffer // 2)
+        pipeline = pipeline.shuffle(shuffle_buffer, initial=shuffle_buffer)
 
     # Materialize media after shuffle: VLA path decodes from frame refs,
     # non-sliding-window path (VLM) decodes raw bytes in-place.
@@ -525,7 +525,7 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
 
     stages = [mixed]
     if shuffle_buffer and shuffle_buffer > 0:
-        stages.append(wds.shuffle(shuffle_buffer, initial=shuffle_buffer // 2))
+        stages.append(wds.shuffle(shuffle_buffer, initial=shuffle_buffer))
 
     if not lowdim_only:
         if use_sliding_window:
