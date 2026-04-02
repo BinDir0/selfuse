@@ -54,6 +54,89 @@ def _new_video_summary(shard_file: str, video_key: str, frame_sort: str, ext: st
     }
 
 
+def _legacy_frame_name(frame_entry) -> Optional[str]:
+    if isinstance(frame_entry, str):
+        return frame_entry
+    if isinstance(frame_entry, dict):
+        name = frame_entry.get("name")
+        if isinstance(name, str):
+            return name
+    return None
+
+
+def _upgrade_legacy_video_entry(video_key: str, info: dict) -> Optional[dict]:
+    shard_file = info.get("shard")
+    if not shard_file:
+        return None
+
+    frame_count = int(info.get("frame_count") or info.get("num_frames") or 0)
+    frame_ext = ".jpg"
+    frame_index_width = 6
+    frame_start_idx = 0
+
+    min_frame_idx = None
+    for frame_entry in info.get("frames") or []:
+        frame_name = _legacy_frame_name(frame_entry)
+        if not frame_name:
+            continue
+        parsed = _parse_frame_name(Path(frame_name).name)
+        if parsed is None:
+            continue
+        _, frame_sort, ext = parsed
+        frame_idx = int(frame_sort[1:])
+        if min_frame_idx is None or frame_idx < min_frame_idx:
+            min_frame_idx = frame_idx
+            frame_start_idx = frame_idx
+        frame_ext = f".{ext.lower()}"
+        frame_index_width = max(1, len(frame_sort) - 1)
+
+    if frame_count <= 0:
+        frames = info.get("frames") or []
+        frame_count = len(frames)
+    if min_frame_idx is None:
+        frame_start_idx = int(info.get("frame_start_idx", 0) or 0)
+
+    return {
+        "shard": shard_file,
+        "video_name": info.get("video_name") or video_key,
+        "frame_count": frame_count,
+        "frame_ext": info.get("frame_ext") or frame_ext,
+        "frame_index_width": int(info.get("frame_index_width") or frame_index_width),
+        "frame_start_idx": int(info.get("frame_start_idx") or frame_start_idx),
+    }
+
+
+def _upgrade_legacy_index(index: dict, factory_dir: str) -> tuple[dict, bool]:
+    if int(index.get("format_version", 0)) == VIDEO_INDEX_FORMAT_VERSION:
+        return index, False
+
+    legacy_videos = index.get("videos", {})
+    if not isinstance(legacy_videos, dict) or not legacy_videos:
+        return index, False
+
+    upgraded_videos = {}
+    for video_key, info in legacy_videos.items():
+        if not isinstance(info, dict):
+            return index, False
+        upgraded = _upgrade_legacy_video_entry(video_key, info)
+        if upgraded is None:
+            return index, False
+        upgraded_videos[video_key] = upgraded
+
+    shards = index.get("shards")
+    if not isinstance(shards, list) or not shards:
+        shards = _list_tar_shards(factory_dir)
+
+    upgraded_index = {
+        "format_version": VIDEO_INDEX_FORMAT_VERSION,
+        "videos": upgraded_videos,
+        "shards": shards,
+        "num_videos": len(upgraded_videos),
+        "num_shards": len(shards),
+    }
+    return upgraded_index, True
+
+
 def build_video_index(factory_dir: str, *, show_progress: bool = True) -> dict:
     """Scan all tar shards in a factory directory and group frames by video.
 
@@ -152,6 +235,7 @@ def load_or_build_index(factory_dir: str, force_rebuild: bool = False, *, show_p
         "elapsed_sec": 0.0,
         "num_videos": 0,
         "num_shards": 0,
+        "upgraded_legacy_cache": False,
     }
     start_time = time.monotonic()
 
@@ -159,8 +243,16 @@ def load_or_build_index(factory_dir: str, force_rebuild: bool = False, *, show_p
         try:
             with open(cache_path, 'r') as f:
                 index = json.load(f)
+            index, upgraded_legacy_cache = _upgrade_legacy_index(index, factory_dir)
             if not _is_index_stale(index, factory_dir):
+                if upgraded_legacy_cache:
+                    try:
+                        with open(cache_path, 'w') as f:
+                            json.dump(index, f, ensure_ascii=False)
+                    except OSError:
+                        pass
                 summary["cache_hit"] = True
+                summary["upgraded_legacy_cache"] = upgraded_legacy_cache
                 summary["elapsed_sec"] = time.monotonic() - start_time
                 summary["num_videos"] = int(index.get("num_videos", len(index.get("videos", {}))))
                 summary["num_shards"] = int(index.get("num_shards", len(index.get("shards", []))))
@@ -305,7 +397,10 @@ def collect_videos_from_factories(
     results_by_idx: Dict[int, List[VideoDescriptor]] = {}
     cache_hits = 0
     built = 0
+    upgraded = 0
     total_videos = 0
+    indexed_factory_dirs = list(enumerate(factory_dirs))
+    indexed_factory_dirs.sort(key=lambda item: len(_list_tar_shards(item[1])))
     with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
         future_to_idx = {
             executor.submit(
@@ -314,7 +409,7 @@ def collect_videos_from_factories(
                 force_rebuild=force_rebuild,
                 show_progress=False,
             ): idx
-            for idx, factory_dir in enumerate(factory_dirs)
+            for idx, factory_dir in indexed_factory_dirs
         }
         with tqdm(as_completed(future_to_idx), total=len(future_to_idx), desc="Load shard indexes", unit="factory") as pbar:
             for future in pbar:
@@ -323,10 +418,12 @@ def collect_videos_from_factories(
                 results_by_idx[idx] = descriptors
                 cache_hits += int(summary["cache_hit"])
                 built += int(summary["built"])
+                upgraded += int(summary.get("upgraded_legacy_cache", False))
                 total_videos += int(summary["num_videos"])
                 pbar.set_postfix(
                     cache=cache_hits,
                     built=built,
+                    upgraded=upgraded,
                     videos=total_videos,
                     workers=resolved_workers,
                 )
