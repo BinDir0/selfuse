@@ -26,7 +26,6 @@ class ClipDescriptor:
     fps: Optional[float] = None
     width: Optional[int] = None
     height: Optional[int] = None
-    frame_count_override: Optional[int] = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -43,8 +42,6 @@ class ClipDescriptor:
 
     @property
     def frame_count(self) -> int:
-        if self.frame_count_override is not None:
-            return int(self.frame_count_override)
         return len(self.frame_names)
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,7 +71,6 @@ class ClipDescriptor:
                 fps=data.get("fps"),
                 width=data.get("width"),
                 height=data.get("height"),
-                frame_count_override=data.get("frame_count_override"),
                 extra=data.get("extra") or {},
             )
 
@@ -93,7 +89,6 @@ class ClipDescriptor:
             fps=data.get("fps"),
             width=data.get("width"),
             height=data.get("height"),
-            frame_count_override=data.get("frame_count_override"),
             extra=data.get("extra") or {},
         )
 
@@ -108,7 +103,6 @@ class ClipDescriptor:
         shard_path: str,
         frame_names: list[str],
         frame_offsets: Optional[list[list[int]]] = None,
-        frame_count_override: Optional[int] = None,
         extra: Optional[dict[str, Any]] = None,
     ) -> "ClipDescriptor":
         return cls(
@@ -120,7 +114,6 @@ class ClipDescriptor:
             frame_names=list(frame_names),
             frame_offsets=frame_offsets,
             shard_path=shard_path,
-            frame_count_override=frame_count_override,
             extra=extra or {},
         )
 
@@ -138,7 +131,6 @@ class ClipDescriptor:
         fps: Optional[float] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
-        frame_count_override: Optional[int] = None,
         extra: Optional[dict[str, Any]] = None,
     ) -> "ClipDescriptor":
         return cls(
@@ -153,6 +145,5 @@ class ClipDescriptor:
             fps=fps,
             width=width,
             height=height,
-            frame_count_override=frame_count_override,
             extra=extra or {},
         )

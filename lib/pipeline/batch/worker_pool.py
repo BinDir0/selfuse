@@ -170,7 +170,7 @@ class StageWorkerPool:
     def _estimate_video_work(self, video_path: str, stage: str) -> int:
         descriptor = self.descriptor_map.get(video_path)
         if descriptor is not None:
-            return int(descriptor.frame_count)
+            return len(descriptor.frame_names)
 
         if stage != "detect_track":
             try:
