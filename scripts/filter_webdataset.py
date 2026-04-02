@@ -116,6 +116,7 @@ def _new_clip_stats(clip_id: str) -> dict:
         "frames_total": 0,
         "frames_kept_candidate": 0,
         "presence_nonzero_frames": 0,
+        "incomplete_sample_frames": 0,
         "nonfinite_lowdim_frames": 0,
         "invalid_meta_frames": 0,
         "invalid_lowdim_frames": 0,
@@ -229,6 +230,7 @@ def _finalize_clip_metrics(stats: dict) -> dict:
             else 0.0
         ),
         "instruction_num_max": int(stats["instruction_num_max"]),
+        "incomplete_sample_frames": int(stats["incomplete_sample_frames"]),
         "nonfinite_lowdim_frames": int(stats["nonfinite_lowdim_frames"]),
         "invalid_meta_frames": int(stats["invalid_meta_frames"]),
         "invalid_lowdim_frames": int(stats["invalid_lowdim_frames"]),
@@ -292,6 +294,8 @@ def resolve_auto_thresholds(clip_metrics: list[dict], args_dict: dict) -> dict:
 
 def decide_clip_keep(metrics: dict, args_dict: dict) -> tuple[bool, list[str]]:
     reasons = []
+    if metrics["incomplete_sample_frames"] > 0:
+        reasons.append("incomplete_sample")
     if metrics["invalid_meta_frames"] > 0:
         reasons.append("invalid_meta")
     if metrics["invalid_lowdim_frames"] > 0:
@@ -338,6 +342,14 @@ def _sample_clip_id(sample: dict, meta: dict | None) -> str:
     return sample["key"].rsplit("_f", 1)[0]
 
 
+def _sample_missing_fields(sample: dict) -> list[str]:
+    missing = []
+    for field_name in ("image_bytes", "lowdim_bytes", "meta_bytes"):
+        if sample.get(field_name) is None:
+            missing.append(field_name)
+    return missing
+
+
 def _flush_analyze_clip_block(
     *,
     clip_id: str | None,
@@ -363,6 +375,7 @@ def analyze_shard(shard_path: str) -> dict:
         "shard_name": shard_name,
         "samples_total": 0,
         "clips_total": 0,
+        "incomplete_samples": 0,
         "clip_metrics": [],
     }
 
@@ -372,13 +385,14 @@ def analyze_shard(shard_path: str) -> dict:
     try:
         for sample in iter_shard_samples(shard_path):
             shard_result["samples_total"] += 1
-            validate_sample_record(sample)
+            missing_fields = _sample_missing_fields(sample)
 
             meta = None
-            try:
-                meta = json.loads(sample["meta_bytes"].decode("utf-8"))
-            except Exception:
-                meta = None
+            if "meta_bytes" not in missing_fields:
+                try:
+                    meta = json.loads(sample["meta_bytes"].decode("utf-8"))
+                except Exception:
+                    meta = None
             clip_id = _sample_clip_id(sample, meta)
 
             if current_clip_id is None:
@@ -392,6 +406,18 @@ def analyze_shard(shard_path: str) -> dict:
                 )
                 current_clip_id = clip_id
                 current_clip_stats = _new_clip_stats(clip_id)
+
+            if missing_fields:
+                shard_result["incomplete_samples"] += 1
+                current_clip_stats["incomplete_sample_frames"] += 1
+                if "meta_bytes" in missing_fields:
+                    current_clip_stats["invalid_meta_frames"] += 1
+                if "image_bytes" in missing_fields or "lowdim_bytes" in missing_fields:
+                    current_clip_stats["invalid_lowdim_frames"] += 1
+                _update_clip_stats(current_clip_stats, sample["key"], {}, None, count_invalid_lowdim=False)
+                continue
+
+            validate_sample_record(sample)
 
             if meta is None:
                 current_clip_stats["invalid_meta_frames"] += 1
@@ -421,6 +447,7 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
         "shard_name": shard_name,
         "output_path": output_path,
         "samples_total": 0,
+        "incomplete_samples": 0,
         "frames_written": 0,
         "clips_written": 0,
         "shard_written": 0,
@@ -433,6 +460,11 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
     try:
         for sample in iter_shard_samples(shard_path):
             result["samples_total"] += 1
+            missing_fields = _sample_missing_fields(sample)
+            if missing_fields:
+                result["incomplete_samples"] += 1
+                continue
+
             validate_sample_record(sample)
 
             meta = None
@@ -521,13 +553,16 @@ def build_report(
         "shards_written": 0,
         "frames_written": 0,
         "clips_written": 0,
+        "incomplete_samples": 0,
     }
+    total_incomplete_samples = 0
 
     decision_by_clip = {item["clip_id"]: item for item in clip_decisions}
 
     for result in analysis_results:
         total_samples += result["samples_total"]
         total_clips += result["clips_total"]
+        total_incomplete_samples += int(result.get("incomplete_samples", 0))
         shard_kept = 0
         shard_dropped = 0
         for item in result["clip_metrics"]:
@@ -539,6 +574,7 @@ def build_report(
         shards[result["shard_name"]] = {
             "samples_total": result["samples_total"],
             "clips_total": result["clips_total"],
+            "incomplete_samples": int(result.get("incomplete_samples", 0)),
             "kept_clips": shard_kept,
             "dropped_clips": shard_dropped,
         }
@@ -568,6 +604,7 @@ def build_report(
             rewrite["shards_written"] += rewrite_item["shard_written"]
             rewrite["frames_written"] += rewrite_item["frames_written"]
             rewrite["clips_written"] += rewrite_item["clips_written"]
+            rewrite["incomplete_samples"] += int(rewrite_item.get("incomplete_samples", 0))
 
     report = {
         "source_shard_dir": str(source_shard_dir.resolve()),
@@ -586,6 +623,7 @@ def build_report(
         "auto_thresholds": threshold_info,
         "total_shards": len(analysis_results),
         "total_samples": total_samples,
+        "total_incomplete_samples": total_incomplete_samples,
         "total_clips": total_clips,
         "kept_clips": kept_clips,
         "dropped_clips": total_clips - kept_clips,
