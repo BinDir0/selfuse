@@ -75,7 +75,6 @@ class Qwen3VLChatFormatter:
         camera_token: str = "<camera>",
         camera_intrinsic_mode: str = "text",
         future_frame_token: str = "<future_frame>",
-        ff_tokens_per_frame: int = 0,
         lowercase_vla_text: bool = True,
     ):
         self.state_token = state_token
@@ -83,11 +82,11 @@ class Qwen3VLChatFormatter:
         self.camera_token = camera_token
         self.camera_intrinsic_mode = camera_intrinsic_mode
         self.future_frame_token = future_frame_token
-        self.ff_tokens_per_frame = ff_tokens_per_frame
-        # Set by the collator from the processor's temporal_patch_size
-        # so that token count accounts for temporal packing. Default 2
-        # to match Qwen3-VL's fixed temporal_patch_size.
-        self.ff_temporal_patch_size = 2
+        # Must be set by the collator from the real processor before
+        # build_messages is called on samples with future_frames.
+        self.patch_size: int | None = None
+        self.spatial_merge_size: int | None = None
+        self.temporal_patch_size: int | None = None
         self.lowercase_vla_text = lowercase_vla_text
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
@@ -114,7 +113,7 @@ class Qwen3VLChatFormatter:
             camera_part = f"Camera intrinsic: {intrinsic_str}."
         return (
             f"Task: {clean_text}. {camera_part} "
-            f"States: {state_slots} Predict the next action sequence."
+            f"States: {state_slots}."
         )
 
     def build_messages(self, sample: dict[str, Any], prompt_only: bool = False) -> list[dict[str, Any]]:
@@ -137,15 +136,36 @@ class Qwen3VLChatFormatter:
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
             # Emit future_frame tokens for world model slot embeddings.
-            # K = valid future frame count (no padding, from vla_dataset).
-            # Truncation formula matches Qwen3VLBatchProcessor.process_future_frames().
-            if self.ff_tokens_per_frame > 0 and "future_frames" in sample:
-                K = int(sample["future_frames"].shape[0])
-                tps = self.ff_temporal_patch_size
-                T_future = K // tps
+            # Token count is computed from the actual frame shape and
+            # processor geometry (patch_size, spatial_merge_size, temporal_patch_size),
+            # all read from the real processor by the collator at init.
+            has_future_frames = False
+            if "future_frames" in sample:
+                if self.patch_size is None or self.spatial_merge_size is None or self.temporal_patch_size is None:
+                    raise RuntimeError(
+                        "patch_size, spatial_merge_size, temporal_patch_size must be set "
+                        "from the real processor before formatting samples with future_frames"
+                    )
+                ff = sample["future_frames"]
+                tps = self.temporal_patch_size
+                T_future = ff.shape[0] // tps
                 if T_future > 0:
-                    assistant_text += self.future_frame_token * (T_future * self.ff_tokens_per_frame)
-                    user_text += " Predict the future visual observations."
+                    H, W = ff.shape[1], ff.shape[2]
+                    divisor = self.patch_size * self.spatial_merge_size
+                    assert H % divisor == 0 and W % divisor == 0, (
+                        f"future_frames H={H}, W={W} must be divisible by "
+                        f"patch_size({self.patch_size}) * spatial_merge_size({self.spatial_merge_size}) = {divisor}"
+                    )
+                    tokens_per_temporal_patch = (
+                        (H // self.patch_size // self.spatial_merge_size)
+                        * (W // self.patch_size // self.spatial_merge_size)
+                    )
+                    assistant_text += self.future_frame_token * (T_future * tokens_per_temporal_patch)
+                    has_future_frames = True
+            if has_future_frames:
+                user_text += " Predict the next action sequence and future visual observations."
+            else:
+                user_text += " Predict the next action sequence."
         else:
             user_text = str(sample["question"]).strip()
             assistant_text = str(sample["answer"]).strip()

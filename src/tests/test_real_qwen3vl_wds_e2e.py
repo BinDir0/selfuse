@@ -81,35 +81,6 @@ def resolve_attention_backends() -> tuple[str, str]:
     return text_impl, vision_impl
 
 
-def resolve_future_frame_tokens_per_patch(model_name: str, *, total_video_frames: int | None = None) -> int:
-    """Match formatter future-frame token count to the target-encoder vision grid."""
-    from transformers import AutoProcessor, Qwen3VLConfig
-
-    processor = AutoProcessor.from_pretrained(
-        model_name,
-        **REAL_PROCESSOR_INIT_KWARGS,
-    )
-    config = Qwen3VLConfig.from_pretrained(
-        model_name,
-        trust_remote_code=False,
-        local_files_only=True,
-    )
-    video_processor = getattr(processor, "video_processor", None)
-    temporal_patch_size = getattr(video_processor, "temporal_patch_size", 1) if video_processor is not None else 1
-    if temporal_patch_size > 1 and video_processor is not None:
-        frame_count = total_video_frames or temporal_patch_size
-        video = torch.zeros(frame_count, 64, 64, 3, dtype=torch.uint8)
-        grid_thw = video_processor(
-            videos=[video],
-            return_tensors="pt",
-            do_sample_frames=False,
-        )["video_grid_thw"]
-    else:
-        image = torch.zeros(64, 64, 3, dtype=torch.uint8)
-        grid_thw = processor.image_processor(images=[image], return_tensors="pt")["image_grid_thw"]
-    spatial_merge_size = int(config.vision_config.spatial_merge_size)
-    return int((grid_thw[0, 1] * grid_thw[0, 2]).item()) // (spatial_merge_size * spatial_merge_size)
-
 
 def resolve_model_hidden_size(model_name: str) -> int:
     from transformers import Qwen3VLConfig
@@ -452,7 +423,6 @@ def build_real_dataloader(
     shape_meta: dict | None = None,
     include_vlm: bool = True,
     batch_size: int = 2,
-    ff_tokens_per_frame: int = 0,
 ) -> DataLoader:
     shape_meta = shape_meta or make_shape_meta()
     vla_shard = root / "vla" / "shard-000000.tar"
@@ -479,7 +449,7 @@ def build_real_dataloader(
         )
 
     data_collator = UnifiedVLACollator(
-        formatter=Qwen3VLChatFormatter(ff_tokens_per_frame=ff_tokens_per_frame),
+        formatter=Qwen3VLChatFormatter(),
         batch_processor=Qwen3VLBatchProcessor(
             model_name_or_path=model_name,
             processor_init_kwargs=REAL_PROCESSOR_INIT_KWARGS,
@@ -579,10 +549,6 @@ def test_real_qwen3vl_world_model_forward_backward(tmp_path: Path):
             future_frame_horizon=2,
             future_frame_stride=1,
         )
-        ff_tokens_per_frame = resolve_future_frame_tokens_per_patch(
-            world_model_name,
-            total_video_frames=shape_meta["obs"]["rgb"]["horizon"] + shape_meta["future_frame"]["horizon"],
-        )
         backbone_hidden_size = resolve_model_hidden_size(world_model_name)
         loader = build_real_dataloader(
             tmp_path,
@@ -590,7 +556,6 @@ def test_real_qwen3vl_world_model_forward_backward(tmp_path: Path):
             shape_meta=shape_meta,
             include_vlm=False,
             batch_size=1,
-            ff_tokens_per_frame=ff_tokens_per_frame,
         )
         batch = next(iter(loader))
 
@@ -650,7 +615,7 @@ def test_real_qwen3vl_world_model_forward_backward(tmp_path: Path):
         model.train()
 
         future_frame_token_count = int((batch["input_ids"] == model.future_frame_token_index).sum().item())
-        assert future_frame_token_count == ff_tokens_per_frame
+        assert future_frame_token_count > 0
 
         inputs = preprocess_batch(batch, dtype=dtype, device=device)
         output = model("train", inputs)

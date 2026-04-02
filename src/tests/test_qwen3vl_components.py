@@ -407,11 +407,12 @@ class TestProcessorPromptBuilding:
         assert clean_text == "Pick Up The CUP".lower()
 
     def test_future_frame_tokens_follow_temporal_patch_count(self):
-        formatter = Qwen3VLChatFormatter(
-            future_frame_token="<future_frame>",
-            ff_tokens_per_frame=3,
-        )
-        formatter.ff_temporal_patch_size = 2
+        # 64x64 frames, patch_size=16, spatial_merge_size=2 → 2x2=4 tokens per temporal patch
+        # 4 frames, tps=2 → T_future=2 → 2*4=8 tokens
+        formatter = Qwen3VLChatFormatter(future_frame_token="<future_frame>")
+        formatter.patch_size = 16
+        formatter.spatial_merge_size = 2
+        formatter.temporal_patch_size = 2
         sample = {
             "is_vla_data": torch.tensor(True),
             "instruction": "Open drawer",
@@ -419,9 +420,9 @@ class TestProcessorPromptBuilding:
             "n_states": torch.tensor(2, dtype=torch.int32),
             "n_actions": torch.tensor(2, dtype=torch.int32),
             "vision_type": "video",
-            "images": torch.zeros(2, 8, 8, 3, dtype=torch.uint8),
+            "images": torch.zeros(2, 64, 64, 3, dtype=torch.uint8),
             "video_fps": torch.tensor(15.0),
-            "future_frames": torch.zeros(4, 8, 8, 3, dtype=torch.uint8),
+            "future_frames": torch.zeros(4, 64, 64, 3, dtype=torch.uint8),
         }
 
         messages = formatter.build_messages(sample, prompt_only=False)
@@ -429,16 +430,15 @@ class TestProcessorPromptBuilding:
         user_text = messages[0]["content"][-1]["text"]
 
         assert assistant_text.startswith("<action><action>")
-        assert assistant_text.count("<future_frame>") == 6
-        assert "Predict the future visual observations." in user_text
+        assert assistant_text.count("<future_frame>") == 8
+        assert "future visual observations" in user_text
 
     def test_future_frame_tokens_zero_when_truncated_to_zero(self):
         """K < tps → T_future = 0 → no future_frame tokens, no prompt hint."""
-        formatter = Qwen3VLChatFormatter(
-            future_frame_token="<future_frame>",
-            ff_tokens_per_frame=3,
-        )
-        formatter.ff_temporal_patch_size = 2
+        formatter = Qwen3VLChatFormatter(future_frame_token="<future_frame>")
+        formatter.patch_size = 16
+        formatter.spatial_merge_size = 2
+        formatter.temporal_patch_size = 2
         sample = {
             "is_vla_data": torch.tensor(True),
             "instruction": "Open drawer",
@@ -446,9 +446,9 @@ class TestProcessorPromptBuilding:
             "n_states": torch.tensor(2, dtype=torch.int32),
             "n_actions": torch.tensor(2, dtype=torch.int32),
             "vision_type": "video",
-            "images": torch.zeros(2, 8, 8, 3, dtype=torch.uint8),
+            "images": torch.zeros(2, 64, 64, 3, dtype=torch.uint8),
             "video_fps": torch.tensor(15.0),
-            "future_frames": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
+            "future_frames": torch.zeros(1, 64, 64, 3, dtype=torch.uint8),
         }
 
         messages = formatter.build_messages(sample, prompt_only=False)
@@ -456,15 +456,14 @@ class TestProcessorPromptBuilding:
         user_text = messages[0]["content"][-1]["text"]
 
         assert "<future_frame>" not in assistant_text
-        assert "Predict the future visual observations" not in user_text
+        assert "future visual observations" not in user_text
 
     def test_future_frame_tokens_odd_frame_count(self):
-        """K=3, tps=2 → T_future=1 → ff_tokens_per_frame tokens emitted."""
-        formatter = Qwen3VLChatFormatter(
-            future_frame_token="<future_frame>",
-            ff_tokens_per_frame=3,
-        )
-        formatter.ff_temporal_patch_size = 2
+        """K=3, tps=2 → T_future=1 → 1*4=4 tokens emitted."""
+        formatter = Qwen3VLChatFormatter(future_frame_token="<future_frame>")
+        formatter.patch_size = 16
+        formatter.spatial_merge_size = 2
+        formatter.temporal_patch_size = 2
         sample = {
             "is_vla_data": torch.tensor(True),
             "instruction": "Open drawer",
@@ -472,15 +471,15 @@ class TestProcessorPromptBuilding:
             "n_states": torch.tensor(2, dtype=torch.int32),
             "n_actions": torch.tensor(2, dtype=torch.int32),
             "vision_type": "video",
-            "images": torch.zeros(2, 8, 8, 3, dtype=torch.uint8),
+            "images": torch.zeros(2, 64, 64, 3, dtype=torch.uint8),
             "video_fps": torch.tensor(15.0),
-            "future_frames": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
+            "future_frames": torch.zeros(3, 64, 64, 3, dtype=torch.uint8),
         }
 
         messages = formatter.build_messages(sample, prompt_only=False)
         assistant_text = messages[1]["content"][0]["text"]
 
-        assert assistant_text.count("<future_frame>") == 3
+        assert assistant_text.count("<future_frame>") == 4
 
 
 # ======================================================================
@@ -509,3 +508,4 @@ class TestPrefixKVCacheCast:
         empty_kv = torch.zeros(0, 2, 0, 7, 0)
         cache = PrefixKVCache(keys=empty_kv, values=empty_kv, mask=mask, lengths=torch.tensor([7, 7]))
         assert cache.kv_seq_len == 7
+
