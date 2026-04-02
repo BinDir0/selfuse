@@ -1,0 +1,13 @@
+# @package _global_
+world_model:
+  enabled: false
+  ff_token: ""
+  future_frame:
+    horizon: 0
+    stride: 1
+  mem_temporal_attention:
+    enabled: false
+  target_encoder: null
+  wm_condition_projector: null
+  wm_diffloss: null
+  loss_weight: 1.0

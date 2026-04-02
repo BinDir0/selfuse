@@ -48,9 +48,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def __init__(self, cfg: OmegaConf):
         super().__init__(cfg)
 
-        # Wire world model config into policy/data components before instantiation.
-        self.apply_world_model_config(cfg)
-
         # set seed
         seed = cfg.training.seed
         torch.manual_seed(seed)
@@ -91,50 +88,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.objective_func = "train_" + cfg.training.objective
         self.compile_cfg = cfg.training.get("compile", {})
         print(f"Training with objective function: {self.objective_func}")
-
-    @staticmethod
-    def apply_world_model_config(cfg: OmegaConf) -> None:
-        """Wire world_model.* into policy and data_collator when enabled.
-
-        Called before any hydra.utils.instantiate so that all components
-        see a fully resolved config. When world_model.enabled is false
-        (the default), the policy submodule fields stay null and the
-        feature is completely inactive.
-        """
-        wm = cfg.get("world_model", None)
-        if wm is None or not wm.get("enabled", False):
-            # When the world_model config block exists but enabled=false,
-            # oc.select still resolves future_frame.horizon to the actual
-            # value (not the default 0). Force it to 0 so the dataset
-            # skips future frame sampling entirely.
-            if wm is not None:
-                from omegaconf import open_dict
-                with open_dict(cfg):
-                    cfg.data.shape_meta.future_frame.horizon = 0
-            return
-
-        ff_token = "<future_frame>"
-        from omegaconf import open_dict
-        with open_dict(cfg):
-            # Backbone: register the future_frame special token
-            cfg.policy.backbone.future_frame_token = ff_token
-            # Backbone: MEM temporal attention injection
-            if wm.get("mem_temporal_attention", {}).get("enabled", False):
-                cfg.policy.backbone.mem_temporal_attention = wm.mem_temporal_attention
-
-            # Policy world model submodules (Hydra will instantiate _target_ dicts)
-            cfg.policy.target_encoder = wm.target_encoder
-            cfg.policy.wm_condition_projector = wm.wm_condition_projector
-            cfg.policy.wm_diffloss = wm.wm_diffloss
-            cfg.policy.world_model_cfg = OmegaConf.to_container(wm, resolve=True)
-            cfg.policy.loss_config.wm_loss_weight = float(wm.loss_weight)
-
-            # Data collator: formatter and batch processor.
-            # ff_temporal_patch_size is derived from the processor at runtime
-            # by the collator (see UnifiedVLACollator.__init__), not set here.
-            cfg.data_collator.formatter.future_frame_token = ff_token
-            cfg.data_collator.formatter.ff_tokens_per_frame = int(wm.ff_tokens_per_frame)
-            cfg.data_collator.batch_processor.future_frame_token = ff_token
 
     def maybe_compile_model(self, accelerator):
         if not self.compile_cfg.get("enabled", False):

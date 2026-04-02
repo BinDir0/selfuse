@@ -7,7 +7,7 @@ data:
   # Set to null to skip resizing (original resolution preserved).
   target_image_size: [384, 384]
   ignore_index: -100
-  max_vlm_tokens: 768
+  max_vlm_tokens: 896
   tokenizer_padding: max_length
   depth_clip_range: [0.0, 5.0]
   video_base_fps: 30.0
@@ -15,7 +15,7 @@ data:
   n_obs_image_stride: 30
   n_obs_state_steps: 6
   n_obs_state_stride: 30
-  n_action_steps: 32
+  n_action_steps: 64
   n_action_stride: 1
   shape_meta:
     obs:
@@ -82,9 +82,11 @@ data_collator:
     camera_token: ${added_slot_tokens.camera}
     camera_intrinsic_mode: ${camera_intrinsic_mode}
     lowercase_vla_text: True
+    future_frame_token: ${world_model.ff_token}
   batch_processor:
     _target_: src.dataset.qwen3_vl_batching.Qwen3VLBatchProcessor
     model_name_or_path: ${pretrained.model_name_or_path}
+    future_frame_token: ${world_model.ff_token}
     processor_init_kwargs:
       trust_remote_code: ${pretrained.trust_remote_code}
     processor_call_kwargs:
