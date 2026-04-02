@@ -1,0 +1,2 @@
+# DINOv3 需较新 timm
+timm>=1.0.20

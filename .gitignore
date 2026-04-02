@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# venv
+venv/
+.venv/
+env/
+
+# tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 训练产物（按需删改：若要提交小 checkpoint 可再加例外规则）
+wandb/
+runs/
+outputs/
+lightning_logs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# 常见大包 / 本地数据（按项目取消注释）
+# data/
+# _DATA/
