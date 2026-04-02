@@ -56,4 +56,11 @@ $PYTHON_PATH -m accelerate.commands.launch \
     experiment=legendvla_qwen3_vl \
     training.max_train_steps=10 \
     training.eval_every=5 \
+    data.dataloader.loader.num_workers=0 \
+    data.dataloader.loader.persistent_workers=False \
+    data.dataloader.loader.prefetch_factor=null \
     2>&1 | tee debug_training.log
+# NOTE: num_workers=0 forces data loading in the main process so debugpy
+# breakpoints in __getitem__ / collator / transforms will be hit.
+# persistent_workers and prefetch_factor must be disabled when num_workers=0,
+# otherwise PyTorch raises ValueError at DataLoader init.
