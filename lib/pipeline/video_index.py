@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tarfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -18,6 +19,7 @@ from lib.pipeline.datasets.descriptors import ClipDescriptor as VideoDescriptor
 # Regex to split frame filename into video_key + frame_number
 # e.g. "f001_w012_v00029_i000_f000000.jpg" -> key="f001_w012_v00029_i000", frame="f000000"
 _FRAME_RE = re.compile(r'^(.+)_(f\d+)\.(jpg|jpeg|png)$', re.IGNORECASE)
+DEFAULT_INDEX_WORKERS = max(1, min(8, os.cpu_count() or 1))
 
 
 def _parse_frame_name(name: str):
@@ -31,7 +33,7 @@ def _parse_frame_name(name: str):
     return None
 
 
-def build_video_index(factory_dir: str) -> dict:
+def build_video_index(factory_dir: str, *, show_progress: bool = True) -> dict:
     """Scan all tar shards in a factory directory and group frames by video.
 
     Args:
@@ -60,7 +62,7 @@ def build_video_index(factory_dir: str) -> dict:
     videos: Dict[str, dict] = {}
 
     n_frames_total = 0
-    pbar = tqdm(shard_files, desc="Scanning shards", unit="shard")
+    pbar = tqdm(shard_files, desc=f"Scanning {factory_path.name}", unit="shard", disable=not show_progress)
     for shard_file in pbar:
         shard_path = str(factory_path / shard_file)
         json_meta: Dict[str, str] = {}
@@ -85,7 +87,7 @@ def build_video_index(factory_dir: str) -> dict:
                         "size": member.size,
                     })
                     n_frames_total += 1
-                    if n_frames_total % 500 == 0:
+                    if show_progress and n_frames_total % 500 == 0:
                         pbar.set_postfix(videos=len(videos), frames=n_frames_total)
 
                 elif name.endswith('.json') and member.isreg():
@@ -109,7 +111,8 @@ def build_video_index(factory_dir: str) -> dict:
                         except Exception:
                             pass
 
-    pbar.set_postfix(videos=len(videos), frames=n_frames_total)
+    if show_progress:
+        pbar.set_postfix(videos=len(videos), frames=n_frames_total)
     pbar.close()
 
     # Sort frames within each video and set num_frames
@@ -149,7 +152,7 @@ def _is_index_stale(index: dict, factory_dir: str) -> bool:
     return False
 
 
-def load_or_build_index(factory_dir: str, force_rebuild: bool = False) -> dict:
+def load_or_build_index(factory_dir: str, force_rebuild: bool = False, *, show_progress: bool = True) -> dict:
     """Load cached video index, or build and cache it if missing/stale.
 
     Args:
@@ -171,7 +174,7 @@ def load_or_build_index(factory_dir: str, force_rebuild: bool = False) -> dict:
             pass
 
     # Build fresh index
-    index = build_video_index(factory_dir)
+    index = build_video_index(factory_dir, show_progress=show_progress)
 
     # Cache it
     try:
@@ -183,7 +186,12 @@ def load_or_build_index(factory_dir: str, force_rebuild: bool = False) -> dict:
     return index
 
 
-def collect_videos_from_factory(factory_dir: str) -> List[VideoDescriptor]:
+def collect_videos_from_factory(
+    factory_dir: str,
+    *,
+    force_rebuild: bool = False,
+    show_progress: bool = True,
+) -> List[VideoDescriptor]:
     """Collect all videos from a factory directory as VideoDescriptors.
 
     Args:
@@ -193,7 +201,7 @@ def collect_videos_from_factory(factory_dir: str) -> List[VideoDescriptor]:
         List of VideoDescriptor, one per video found.
     """
     factory_dir = str(Path(factory_dir).resolve())
-    index = load_or_build_index(factory_dir)
+    index = load_or_build_index(factory_dir, force_rebuild=force_rebuild, show_progress=show_progress)
 
     descriptors = []
     for video_key, info in sorted(index["videos"].items()):
@@ -220,10 +228,54 @@ def collect_videos_from_factory(factory_dir: str) -> List[VideoDescriptor]:
     return descriptors
 
 
-def collect_videos_from_factories(factory_dirs: List[str]) -> List[VideoDescriptor]:
-    """Collect videos from multiple factory directories."""
+def _resolve_index_workers(factory_dirs: List[str], workers: int | None) -> int:
+    if not factory_dirs:
+        return 1
+    if workers is not None:
+        return max(1, min(int(workers), len(factory_dirs)))
+    env_value = os.getenv("HAWOR_SCAN_WORKERS", "").strip()
+    if env_value:
+        try:
+            return max(1, min(int(env_value), len(factory_dirs)))
+        except ValueError:
+            pass
+    return max(1, min(DEFAULT_INDEX_WORKERS, len(factory_dirs)))
+
+
+def collect_videos_from_factories(
+    factory_dirs: List[str],
+    *,
+    workers: int | None = None,
+    force_rebuild: bool = False,
+) -> List[VideoDescriptor]:
+    """Collect videos from multiple factory directories.
+
+    Results are cached per-factory at ``<factory_dir>/_video_index.json``.
+    This helper loads/builds those indexes in parallel to reduce manifest scan latency.
+    """
+    if not factory_dirs:
+        return []
+
+    if len(factory_dirs) == 1:
+        return collect_videos_from_factory(factory_dirs[0], force_rebuild=force_rebuild, show_progress=True)
+
+    resolved_workers = _resolve_index_workers(factory_dirs, workers)
+    results_by_idx: Dict[int, List[VideoDescriptor]] = {}
+    with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+        future_to_idx = {
+            executor.submit(
+                collect_videos_from_factory,
+                factory_dir,
+                force_rebuild=force_rebuild,
+                show_progress=False,
+            ): idx
+            for idx, factory_dir in enumerate(factory_dirs)
+        }
+        for future in tqdm(as_completed(future_to_idx), total=len(future_to_idx), desc="Load shard indexes", unit="factory"):
+            idx = future_to_idx[future]
+            results_by_idx[idx] = future.result()
+
     all_descriptors = []
-    for factory_dir in factory_dirs:
-        descriptors = collect_videos_from_factory(factory_dir)
-        all_descriptors.extend(descriptors)
+    for idx in range(len(factory_dirs)):
+        all_descriptors.extend(results_by_idx[idx])
     return all_descriptors
