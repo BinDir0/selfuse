@@ -486,6 +486,8 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         vlm_sample["n_actions"] = torch.tensor(0, dtype=torch.int32)
         vlm_sample["depth_values"] = torch.zeros(*shape_meta["depth_values"])
         vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)
+        if "intrinsic" not in vlm_sample:
+            vlm_sample["intrinsic"] = torch.zeros(4, dtype=torch.float32)
         if self.vla_dataset.debug_capture_raw_sample:
             vlm_sample["debug_raw_sample"] = None
         if self.vla_dataset.debug_capture_processed_sample:

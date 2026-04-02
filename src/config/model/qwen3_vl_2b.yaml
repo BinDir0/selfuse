@@ -14,6 +14,12 @@ pretrained:
 added_slot_tokens:
   state: <state>
   action: <action>
+  camera: <camera>
+
+# Camera intrinsic input mode:
+#   "text"  — intrinsic as formatted text in the prompt (default, backward-compatible)
+#   "token" — intrinsic encoded via camera_encoder and injected as <camera> slot token
+camera_intrinsic_mode: text
 
 runtime:
   use_lora: False
@@ -38,6 +44,7 @@ policy:
     torch_dtype: ${pretrained.torch_dtype}
     state_token: ${added_slot_tokens.state}
     action_token: ${added_slot_tokens.action}
+    camera_token: ${added_slot_tokens.camera}
     use_lora: ${runtime.use_lora}
     lora:
       r: 16
@@ -54,6 +61,19 @@ policy:
       bnb_4bit_quant_type: nf4
       bnb_4bit_use_double_quant: True
       bnb_4bit_compute_dtype: ${pretrained.torch_dtype}
+  camera_intrinsic_mode: ${camera_intrinsic_mode}
+  # Camera encoder: only used when camera_intrinsic_mode=token.
+  # Encodes [fx, fy, cx, cy] (4D) into a single <camera> slot embedding.
+  # This follows the VITRA-style continuous-parameter token idea, but keeps
+  # intrinsic directly instead of converting it to FOV first.
+  camera_encoder: null
+    # _target_: src.model.action.action_head.MLPProjector
+    # input_dim: 4
+    # output_dim: ${dims.vlm_hidden_size}
+    # width: ${dims.vlm_hidden_size}
+    # depth: 2
+    # final_layer_norm: False
+    # use_mlp_layer_norm: False
   state_encoder:
     _target_: src.model.action.action_head.FourierActionEncoder
     action_dim: ${dims.state_dim}

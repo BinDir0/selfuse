@@ -18,6 +18,8 @@ training:
   resume: False
   lr_scheduler: cosine
   lr_warmup_steps: 2000
+  vlm_freeze_steps: 0              # update steps to train only random-init params before VLM joins optimization (0 = no staged freeze)
+  vlm_rewarmup_steps: 0            # VLM-only warmup steps after freeze ends (0 = instant restore to base VLM lr)
   train_vlm: True
   train_depth: False
   resume_checkpoint_path: 

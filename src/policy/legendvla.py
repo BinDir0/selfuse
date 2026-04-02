@@ -67,9 +67,16 @@ class LegendVLA(nn.Module):
         loss_config: LossConfig = LossConfig(),
         ar_action_train_config: ARActionTrainConfig = ARActionTrainConfig(),
         knowledge_insulation: bool | int = True,
+        # Camera intrinsic as token embedding (optional)
+        camera_intrinsic_mode: str = "text",
+        camera_encoder: nn.Module | None = None,        
     ):
         super().__init__()
         self.shape_meta = shape_meta
+
+        # Camera intrinsic encoding
+        self.camera_intrinsic_mode = camera_intrinsic_mode
+        self.camera_encoder = camera_encoder
 
         # Backbone and derived attributes
         self.backbone = backbone
@@ -227,6 +234,9 @@ class LegendVLA(nn.Module):
             self.flow_expert,
             self.action_decoder,
         ]
+        camera_encoder = getattr(self, "camera_encoder", None)
+        if camera_encoder is not None:
+            modules.append(camera_encoder)
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
     @property
@@ -297,7 +307,11 @@ class LegendVLA(nn.Module):
         return positions.expand(batch_size, -1)
 
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
-        slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None}
+        slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None, "camera": None}
+        
+        if self.camera_intrinsic_mode == "token" and self.camera_encoder is not None and "camera_intrinsic" in batch:
+            camera_embeds = self.camera_encoder(batch["camera_intrinsic"])
+            slot_embeds["camera"] = camera_embeds
         if "states" in batch:
             state_embeds = self.state_encoder(batch["states"])
             slot_embeds["state"] = state_embeds
@@ -320,6 +334,7 @@ class LegendVLA(nn.Module):
             mm_token_type_ids=batch["mm_token_type_ids"],
             state_slot_embeds=slot_embeds.get("state"),
             action_slot_embeds=slot_embeds.get("action"),
+            camera_slot_embeds=slot_embeds.get("camera"),
         )
         output.prefix_cache = slice_prefix_cache_from_full_kv(
             output.past_key_values_hf,

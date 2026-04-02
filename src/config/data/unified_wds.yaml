@@ -76,6 +76,8 @@ data_collator:
     _target_: src.dataset.qwen3_vl_batching.Qwen3VLChatFormatter
     state_token: ${added_slot_tokens.state}
     action_token: ${added_slot_tokens.action}
+    camera_token: ${added_slot_tokens.camera}
+    camera_intrinsic_mode: ${camera_intrinsic_mode}
     lowercase_vla_text: True
   batch_processor:
     _target_: src.dataset.qwen3_vl_batching.Qwen3VLBatchProcessor

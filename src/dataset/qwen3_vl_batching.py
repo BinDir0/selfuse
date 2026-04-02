@@ -72,10 +72,14 @@ class Qwen3VLChatFormatter:
         self,
         state_token: str = "<state>",
         action_token: str = "<action>",
+        camera_token: str = "<camera>",
+        camera_intrinsic_mode: str = "text",
         lowercase_vla_text: bool = True,
     ):
         self.state_token = state_token
         self.action_token = action_token
+        self.camera_token = camera_token
+        self.camera_intrinsic_mode = camera_intrinsic_mode
         self.lowercase_vla_text = lowercase_vla_text
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
@@ -90,14 +94,18 @@ class Qwen3VLChatFormatter:
         clean_text = str(instruction).replace(".", "").strip()
         if self.lowercase_vla_text:
             clean_text = clean_text.lower()
-        intrinsic_values = intrinsic.tolist()
-        intrinsic_str = (
-            f"fx:{intrinsic_values[0]:.2f} fy:{intrinsic_values[1]:.2f} "
-            f"cx:{intrinsic_values[2]:.2f} cy:{intrinsic_values[3]:.2f}"
-        )
         state_slots = self.state_token * int(n_states.item())
+        if self.camera_intrinsic_mode == "token":
+            camera_part = f"Camera intrinsic: {self.camera_token}."
+        else:
+            intrinsic_values = intrinsic.tolist()
+            intrinsic_str = (
+                f"fx:{intrinsic_values[0]:.2f} fy:{intrinsic_values[1]:.2f} "
+                f"cx:{intrinsic_values[2]:.2f} cy:{intrinsic_values[3]:.2f}"
+            )
+            camera_part = f"Camera intrinsic: {intrinsic_str}."
         return (
-            f"Task: {clean_text}. Camera intrinsic: {intrinsic_str}. "
+            f"Task: {clean_text}. {camera_part} "
             f"States: {state_slots} Predict the next action sequence."
         )
 

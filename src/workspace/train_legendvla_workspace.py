@@ -108,6 +108,121 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             print(f"Compiling blocks with kwargs: {compile_kwargs}")
 
         self.model.compile_blocks(compile_kwargs)
+    @staticmethod
+    def _build_lr_scheduler(
+        optimizer,
+        schedule_name: str,
+        num_warmup_steps: int,
+        num_training_steps: int,
+        vlm_group_indices: set[int],
+        vlm_freeze_steps: int = 0,
+        vlm_rewarmup_steps: int = 0,
+    ):
+        """Build a per-group LambdaLR scheduler.
+
+        Non-VLM groups follow the standard warmup → cosine/linear decay.
+        VLM groups can stay at lr=0 for ``vlm_freeze_steps``, then optionally
+        run their own warmup over ``vlm_rewarmup_steps``, and finally follow
+        the same cosine/linear decay for the remaining budget.
+        """
+        from functools import partial
+        from torch.optim.lr_scheduler import LambdaLR
+        from transformers.optimization import (
+            _get_cosine_schedule_with_warmup_lr_lambda,
+            _get_linear_schedule_with_warmup_lr_lambda,
+        )
+
+        schedule_fn = {
+            "cosine": _get_cosine_schedule_with_warmup_lr_lambda,
+            "linear": _get_linear_schedule_with_warmup_lr_lambda,
+        }
+        if schedule_name not in schedule_fn:
+            raise ValueError(f"Unsupported lr_scheduler: {schedule_name}")
+        lr_lambda_fn = schedule_fn[schedule_name]
+        # cosine variant requires num_cycles; linear ignores it via **kwargs
+        extra_kwargs = {"num_cycles": 0.5} if schedule_name == "cosine" else {}
+
+        base_lambda = partial(
+            lr_lambda_fn,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            **extra_kwargs,
+        )
+
+        def make_lambda(group_idx: int):
+            if group_idx not in vlm_group_indices:
+                return base_lambda
+
+            if vlm_freeze_steps <= 0 and vlm_rewarmup_steps <= 0:
+                return base_lambda
+
+            if vlm_freeze_steps >= num_training_steps:
+                return lambda step: 0.0
+
+            vlm_total = max(1, num_training_steps - vlm_freeze_steps)
+            vlm_warmup = min(max(0, vlm_rewarmup_steps), vlm_total)
+            vlm_base_lambda = partial(
+                lr_lambda_fn,
+                num_warmup_steps=vlm_warmup,
+                num_training_steps=vlm_total,
+                **extra_kwargs,
+            )
+
+            def vlm_lambda(step: int) -> float:
+                if step < vlm_freeze_steps:
+                    return 0.0
+                shifted_step = step - vlm_freeze_steps
+                return vlm_base_lambda(shifted_step)
+
+            return vlm_lambda
+
+        num_groups = len(optimizer.param_groups)
+        lr_lambdas = [make_lambda(i) for i in range(num_groups)]
+        return LambdaLR(optimizer, lr_lambdas)
+
+    @staticmethod
+    def _unwrap_optimizer(optimizer):
+        return getattr(optimizer, "optimizer", optimizer)
+
+    @staticmethod
+    def _get_vlm_stage_steps(training_cfg) -> tuple[int, int]:
+        freeze_steps = int(training_cfg.get("vlm_freeze_steps", 0))
+        rewarmup_steps = int(training_cfg.get("vlm_rewarmup_steps", 0))
+        return freeze_steps, rewarmup_steps
+
+    def _is_vlm_freeze_active(self) -> bool:
+        return bool(self._vlm_group_indices) and self.update_step < self._vlm_freeze_updates
+
+    def _maybe_reset_vlm_optimizer_state(self, accelerator) -> None:
+        if (
+            self._vlm_optimizer_state_reset_done
+            or not self._vlm_group_indices
+            or self._vlm_freeze_updates <= 0
+            or self.update_step < self._vlm_freeze_updates
+        ):
+            return
+
+        optimizer = self._unwrap_optimizer(self.optimizer)
+        num_cleared = 0
+        for group_idx in self._vlm_group_indices:
+            for param in optimizer.param_groups[group_idx]["params"]:
+                if optimizer.state.pop(param, None) is not None:
+                    num_cleared += 1
+
+        self._vlm_optimizer_state_reset_done = True
+        if accelerator.is_main_process:
+            print(
+                f"Reset optimizer state for {num_cleared} VLM parameters "
+                f"at update_step={self.update_step} before VLM re-warmup."
+            )
+
+    def _get_param_group_lrs(self) -> tuple[list[float], list[int]]:
+        optimizer = self._unwrap_optimizer(self.optimizer)
+        current_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+        non_vlm_group_indices = [
+            idx for idx in range(len(current_lrs)) if idx not in self._vlm_group_indices
+        ]
+        return current_lrs, non_vlm_group_indices
         
     def reset_run_seed(self, accelerator):
         """Reset runtime seed before building dataset/dataloader."""
@@ -250,13 +365,18 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             model.freeze_non_lora_weights_in_ae()
 
         # VLM optimizer (if training VLM)
+        self._vlm_group_indices = set()
         if cfg.training.train_vlm:
             vlm_trained_parameters = model.trainable_vlm_parameters
             vlm_trainable_parameters = self.get_grouped_parameters(
                 vlm_trained_parameters,
                 cfg.optimizer.vlm,
             )
+            start_idx = len(all_trainable_parameters)
             all_trainable_parameters.extend(vlm_trainable_parameters)
+            self._vlm_group_indices = set(
+                range(start_idx, start_idx + len(vlm_trainable_parameters))
+            )
         else:
             model.freeze_non_lora_weights_in_vlm()
 
@@ -285,7 +405,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     f"Parameter '{name}' requires grad but is NOT in the optimizer parameters list"
 
         self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
-
+        self._vlm_freeze_updates, self._vlm_rewarmup_updates = self._get_vlm_stage_steps(cfg.training)
+        self._vlm_optimizer_state_reset_done = (
+            self._vlm_freeze_updates <= 0 or not self._vlm_group_indices
+        )
         # ============================================================
         # WebDataset: dataset and dataloader creation
         # ============================================================
@@ -351,13 +474,23 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # to keep the effective schedule correct.
         max_train_steps = max_train_steps * accelerator.num_processes
         num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
+        vlm_freeze_steps = self._vlm_freeze_updates * accelerator.num_processes
+        vlm_rewarmup_steps = self._vlm_rewarmup_updates * accelerator.num_processes
         if accelerator.is_main_process:
             print(f"num_warmup_steps: {num_warmup_steps}, max_train_steps: {max_train_steps}")
-        self.lr_scheduler = get_scheduler(
-            name=cfg.training.lr_scheduler,
+            if self._vlm_freeze_updates > 0:
+                print(
+                    f"VLM staged training: freeze for {self._vlm_freeze_updates} update steps, "
+                    f"then re-warmup for {self._vlm_rewarmup_updates} steps"
+                )
+        self.lr_scheduler = self._build_lr_scheduler(
             optimizer=self.optimizer,
+            schedule_name=cfg.training.lr_scheduler,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=max_train_steps,
+            vlm_group_indices=self._vlm_group_indices,
+            vlm_freeze_steps=vlm_freeze_steps,
+            vlm_rewarmup_steps=vlm_rewarmup_steps,
         )
 
         # Configure checkpoint manager
@@ -379,7 +512,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.update_step = self.training_state.update_step
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
-
+            if self._vlm_group_indices and self._vlm_freeze_updates > 0:
+                self._vlm_optimizer_state_reset_done = self.update_step > self._vlm_freeze_updates
         # Compile after FSDP2 wrapping and checkpoint loading.
         self.maybe_compile_model(accelerator)
 
@@ -439,6 +573,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             accelerator.sync_gradients
                             and (self.update_step % log_interval == 0)
                         )
+                        vlm_freeze_active = self._is_vlm_freeze_active()
                         # Per-component gradient clipping to prevent cross-component interference.
                         # clip_grad_norm_ returns the total norm before clipping.
                         part_grad_norms = None
@@ -446,9 +581,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             max_norm = cfg.training.clipping.max_grad_norm
                             part_params = {
                                 "action_expert": self.model.action_expert_parameters,
-                                "vlm": self.model.trainable_vlm_parameters,
                                 "diffloss": self.model.diffloss_parameters,
                             }
+                            if cfg.training.train_vlm and not vlm_freeze_active:
+                                part_params["vlm"] = self.model.trainable_vlm_parameters
                             norms = {
                                 name: accelerator.clip_grad_norm_(params, max_norm)
                                 for name, params in part_params.items()
@@ -476,6 +612,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                     )
 
                         if not step_skipped:
+                            self._maybe_reset_vlm_optimizer_state(accelerator)
                             self.optimizer.step()
                             self.lr_scheduler.step()
                         self.optimizer.zero_grad(set_to_none=True)
@@ -507,15 +644,18 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     step_log = None
                     if should_record or should_eval or should_ckpt or should_interval_ckpt:
-                        current_lr = self.lr_scheduler.get_last_lr()[0]
-
+                        current_group_lrs, non_vlm_group_indices = self._get_param_group_lrs()
+                        current_lr = current_group_lrs[non_vlm_group_indices[0]] if non_vlm_group_indices else current_group_lrs[0]
                         step_log = {
                             'global_step': self.global_step,
                             'update_step': self.update_step,
                             'epoch': self.epoch,
                             'lr': current_lr,
+                            'lr_non_vlm': current_lr,
+                            'vlm_freeze_active': float(self._is_vlm_freeze_active()),
                         }
-
+                        if self._vlm_group_indices:
+                            step_log['lr_vlm'] = current_group_lrs[min(self._vlm_group_indices)]       
                     if should_record:
                         # Logging
                         raw_loss_cpu = {}
@@ -534,9 +674,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         if part_grad_norms is not None:
                             step_log.update({
                                 'grad_norm_action_expert': part_grad_norms["action_expert"],
-                                'grad_norm_vlm': part_grad_norms["vlm"],
                                 'grad_norm_diffloss': part_grad_norms["diffloss"],
                             })
+                            if "vlm" in part_grad_norms:
+                                step_log['grad_norm_vlm'] = part_grad_norms["vlm"]
                         with torch.no_grad():
                             if cfg.training.train_vlm:
                                 vlm_params = self.model.trainable_vlm_parameters
@@ -620,6 +761,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             inputs["actions_valid_mask"] = batch["actions_valid_mask"]
         if self.objective_func != "train_flow":
             inputs["labels"] = batch["labels"]
+        # Camera intrinsic as token embedding.
+        if "camera_intrinsic" in batch:
+            inputs["camera_intrinsic"] = batch["camera_intrinsic"].to(self.dtype)
         return inputs
 
     def get_grouped_parameters(self, param_list, cfg):

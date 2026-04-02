@@ -274,6 +274,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         torch_dtype: str | None = None,
         state_token: str = "<state>",
         action_token: str = "<action>",
+        camera_token: str = "",
         use_lora: bool = False,
         lora: dict[str, Any] | None = None,
         use_quantization: bool = False,
@@ -297,7 +298,8 @@ class Qwen3VLBackboneWrapper(nn.Module):
         )
         tokenizer = processor.tokenizer
         tokenizer.add_special_tokens({"additional_special_tokens": [state_token, action_token]})
-
+        if camera_token:
+            tokenizer.add_special_tokens({"additional_special_tokens": [camera_token]})
         resolved_dtype = self._resolve_torch_dtype(torch_dtype)
         quantization_config = None
         if use_quantization:
@@ -355,6 +357,9 @@ class Qwen3VLBackboneWrapper(nn.Module):
         self.video_token_id = tokenizer.convert_tokens_to_ids(self.video_token)
         self.state_token_id = tokenizer.convert_tokens_to_ids(state_token)
         self.action_token_id = tokenizer.convert_tokens_to_ids(action_token)
+        self.camera_token_id = (
+            tokenizer.convert_tokens_to_ids(camera_token) if camera_token else None
+        )
         self.num_heads = text_config.num_attention_heads
         self.num_kv_heads = text_config.num_key_value_heads
         self.head_dim = int(getattr(text_config, "head_dim", self.hidden_size // self.num_heads))
@@ -549,6 +554,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         inputs_embeds: torch.Tensor,
         state_slot_embeds: torch.Tensor | None,
         action_slot_embeds: torch.Tensor | None,
+        camera_slot_embeds: torch.Tensor | None = None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
     ) -> torch.Tensor:
@@ -562,6 +568,10 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if action_slot_embeds is not None:
             action_mask = (input_ids == action_token_id).unsqueeze(-1).expand_as(inputs_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(action_mask, action_slot_embeds.to(inputs_embeds.dtype))
+        
+        if camera_slot_embeds is not None and self.camera_token_id is not None:
+            cam_mask = (input_ids == self.camera_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(cam_mask, camera_slot_embeds.to(inputs_embeds.dtype))
 
         return inputs_embeds
 
@@ -575,6 +585,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         mm_token_type_ids: torch.Tensor | None,
         state_slot_embeds: torch.Tensor | None,
         action_slot_embeds: torch.Tensor | None,
+        camera_slot_embeds: torch.Tensor | None = None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
     ) -> BackboneEmbedOutput:
@@ -594,6 +605,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             inputs_embeds=inputs_embeds,
             state_slot_embeds=state_slot_embeds,
             action_slot_embeds=action_slot_embeds,
+            camera_slot_embeds=camera_slot_embeds,
             state_token_id=state_token_id,
             action_token_id=action_token_id,
         )
@@ -614,6 +626,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         mm_token_type_ids: torch.Tensor | None,
         state_slot_embeds: torch.Tensor | None,
         action_slot_embeds: torch.Tensor | None,
+        camera_slot_embeds: torch.Tensor | None = None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
         use_cache: bool = False,
@@ -630,6 +643,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             mm_token_type_ids=mm_token_type_ids,
             state_slot_embeds=state_slot_embeds,
             action_slot_embeds=action_slot_embeds,
+            camera_slot_embeds=camera_slot_embeds,
             state_token_id=state_token_id,
             action_token_id=action_token_id,
         )

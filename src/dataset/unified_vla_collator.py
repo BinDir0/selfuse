@@ -135,6 +135,16 @@ class UnifiedVLACollator:
         for key in sorted(common_keys - reserved_keys):
             batch[key] = self.collate_values([sample[key] for sample in samples])
 
+        # When camera_intrinsic_mode=token, pass intrinsic tensor for camera_encoder.
+        # Shape: [B, 1, 4] — one <camera> token per sample, 4D intrinsic [fx, fy, cx, cy].
+        # VLM samples carry zero-filled intrinsic; their input_ids have no <camera> token
+        # so masked_scatter is a no-op for those rows.
+        if self.formatter.camera_intrinsic_mode == "token":
+            intrinsics = [s["intrinsic"] for s in samples]
+            batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
+
+
+
         if self.debug_capture_texts:
             batch["debug_full_messages"] = full_messages
             batch["debug_prompt_messages"] = prompt_messages

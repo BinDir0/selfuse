@@ -276,6 +276,9 @@ class LegendVLAInference(nn.Module):
             "is_vla_data": batch["is_vla_data"],
         }
 
+        if "camera_intrinsic" in batch:
+            inputs["camera_intrinsic"] = batch["camera_intrinsic"].to(self.dtype)
+
         if self.mode == "flow":
             inputs["answer_start_idx"] = batch["answer_start_idx"]
             inputs["actions"] = batch["actions"].to(self.dtype)
