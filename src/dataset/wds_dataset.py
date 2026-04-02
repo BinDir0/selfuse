@@ -285,7 +285,7 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     # --- Future frames for world model supervision ---
     future_frame_refs = None
     if not lowdim_only and config.future_frame_horizon > 0:
-        ff_refs, _ = gather_future_refs(
+        ff_refs, valid_ff_len = gather_future_refs(
             buf, config.future_frame_horizon, config.future_frame_stride,
             config.future_pad_mode, offset_base=config.future_frame_stride,
         )
@@ -324,7 +324,7 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
         result["image_frame_refs"] = image_frame_refs
     if future_frame_refs is not None:
         result["future_frame_refs"] = future_frame_refs
-        result["valid_future_frame_len"] = len(future_frame_refs)
+        result["valid_future_frame_len"] = valid_ff_len
     return result
 
 
