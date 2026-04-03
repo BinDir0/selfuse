@@ -1136,6 +1136,11 @@ def parse_frame_index(sample_key: str) -> int:
     return int(match.group(1))
 
 
+def sanitize_filename(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return sanitized or "episode"
+
+
 def split_sample_member_name(member_name: str):
     for suffix, field_name in SAMPLE_MEMBER_SUFFIXES:
         if member_name.endswith(suffix):
@@ -1967,6 +1972,95 @@ class ViewerApp:
             self._render_cache[render_cache_key] = image_bytes
         return image_bytes
 
+    def rendered_image_bgr(self, sample_id: int, render_mode: str) -> np.ndarray:
+        import cv2
+
+        rendered = self.rendered_image_bytes(sample_id, render_mode)
+        image = cv2.imdecode(np.frombuffer(rendered, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError(f"Failed to decode rendered JPEG for sample_id={sample_id}")
+        return image
+
+    def summaries_grouped_by_episode(self) -> list[tuple[str, list[SampleSummary]]]:
+        grouped: dict[str, list[SampleSummary]] = {}
+        for summary in self.summaries:
+            grouped.setdefault(summary.episode_key, []).append(summary)
+
+        ordered = []
+        for episode_key in self.episode_keys:
+            items = grouped.get(episode_key, [])
+            items.sort(key=lambda summary: parse_frame_index(summary.key))
+            if items:
+                ordered.append((episode_key, items))
+        return ordered
+
+    def export_videos(self, *, render_mode: str, output_path: Optional[str], fps: int) -> list[str]:
+        import cv2
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None
+
+        groups = self.summaries_grouped_by_episode()
+        if not groups:
+            raise ValueError("No episodes available for video export")
+
+        output_root = Path(output_path).expanduser().resolve() if output_path else (Path.cwd() / "webdataset_visualizer_videos")
+        outputs: list[str] = []
+
+        if len(groups) == 1 and output_root.suffix.lower() == ".mp4":
+            output_root.parent.mkdir(parents=True, exist_ok=True)
+            targets = [(groups[0][0], groups[0][1], output_root)]
+        else:
+            if output_root.suffix:
+                raise ValueError(
+                    "When exporting multiple episodes, --video-out must be a directory or be omitted"
+                )
+            output_root.mkdir(parents=True, exist_ok=True)
+            suffix = "demo_rx" if self.apply_demo_rx else "raw"
+            targets = [
+                (
+                    episode_key,
+                    summaries,
+                    output_root / f"{sanitize_filename(episode_key)}.{render_mode}.{suffix}.mp4",
+                )
+                for episode_key, summaries in groups
+            ]
+
+        for episode_key, summaries, target_path in targets:
+            first_frame = self.rendered_image_bgr(summaries[0].id, render_mode)
+            height, width = first_frame.shape[:2]
+            writer = cv2.VideoWriter(
+                str(target_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                float(fps),
+                (width, height),
+            )
+            if not writer.isOpened():
+                raise RuntimeError(f"Failed to open video writer for {target_path}")
+            try:
+                writer.write(first_frame)
+                iterator = summaries[1:]
+                if tqdm is not None:
+                    iterator = tqdm(
+                        iterator,
+                        desc=f"Render video {episode_key}",
+                        unit="frame",
+                    )
+                for summary in iterator:
+                    frame = self.rendered_image_bgr(summary.id, render_mode)
+                    if frame.shape[:2] != (height, width):
+                        raise ValueError(
+                            f"Inconsistent frame size in episode {episode_key}: "
+                            f"expected {(height, width)}, got {frame.shape[:2]}"
+                        )
+                    writer.write(frame)
+            finally:
+                writer.release()
+            outputs.append(str(target_path))
+
+        return outputs
+
     def config_payload(self):
         return {
             "input_path": self.input_path,
@@ -2081,6 +2175,12 @@ class ViewerApp:
 def build_parser():
     parser = argparse.ArgumentParser(description="Local web viewer for WebDataset shards")
     parser.add_argument("--input", required=True, help="Path to a .tar shard or directory containing .tar shards")
+    parser.add_argument(
+        "--output-mode",
+        default="web",
+        choices=["web", "video"],
+        help="Use the interactive web viewer or export offline mp4 video(s) with the same renderer.",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8765, help="Port to bind")
     parser.add_argument("--shuffle", action="store_true", help="Shuffle sample order after indexing")
@@ -2104,6 +2204,13 @@ def build_parser():
     )
     parser.add_argument("--mano-dir", type=str, default=None, help="Optional MANO model directory override")
     parser.add_argument("--mano-device", type=str, default="cpu", help="Device for MANO rendering, e.g. cpu or cuda:0")
+    parser.add_argument(
+        "--video-out",
+        type=str,
+        default=None,
+        help="Offline video output path. Single episode: may be a .mp4 file; multiple episodes: use a directory.",
+    )
+    parser.add_argument("--video-fps", type=int, default=30, help="FPS for offline video export")
     parser.add_argument(
         "--apply-demo-rx",
         action="store_true",
@@ -2253,6 +2360,20 @@ def main():
     app = ViewerApp(args)
     if not app.summaries:
         raise SystemExit("No samples matched the current filters.")
+
+    if args.output_mode == "video":
+        outputs = app.export_videos(
+            render_mode=args.render_mode,
+            output_path=args.video_out,
+            fps=args.video_fps,
+        )
+        print(
+            f"Exported {len(outputs)} video(s) from {len(app.episode_keys)} episode(s) "
+            f"using render_mode={args.render_mode} apply_demo_rx={app.apply_demo_rx}"
+        )
+        for path in outputs:
+            print(f"Video output: {path}")
+        return
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     print(
