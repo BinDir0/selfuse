@@ -508,6 +508,7 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
                 sample["image_bytes"],
                 sample["lowdim_bytes"],
                 sample["meta_bytes"],
+                mano_bytes=sample.get("mano_bytes"),
             )
             result["frames_written"] += 1
             clip_wrote_frames = True

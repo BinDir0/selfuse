@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Local web viewer for inspecting WebDataset shards.
 
+Deprecated:
+    Prefer ``tools/ops/rerun_webdataset_visualizer.py`` for the default
+    shard/episode inspection workflow. This web viewer remains as a fallback
+    for environments where Rerun is unavailable.
+
 Example:
     python tools/ops/webdataset_visualizer.py \
         --input /path/to/shards_or_single_tar \
@@ -27,11 +32,24 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import re
 
+from lib.pipeline.exporters.mano_codec import (
+    MANO_CENTER_IDX,
+    MANO_FLAT_HAND_MEAN,
+    MANO_PCA_DIMS,
+    MANO_SCHEMA,
+    build_manopth_models,
+    decode_mano_sample_array,
+    rot6d_to_axis_angle,
+    run_manopth_mano,
+)
+
 SAMPLE_MEMBER_SUFFIXES = (
     (".image.jpg", "image_bytes"),
     (".lowdim.npy", "lowdim_bytes"),
+    (".mano.npy", "mano_bytes"),
     (".meta.json", "meta_bytes"),
 )
+REQUIRED_SAMPLE_FIELDS = ("image_bytes", "lowdim_bytes", "meta_bytes")
 
 LOWDIM_SEGMENTS = (
     {
@@ -887,7 +905,9 @@ HTML_PAGE = """<!DOCTYPE html>
       el("clipId").textContent = data.clip_id ? `clip_id=${data.clip_id}` : "clip_id=<missing>";
       el("sampleSummary").textContent = `${data.key} | shard=${data.shard_name} | presence=${data.presence ?? "?"} | render=${data.render_mode}`;
       el("instructionText").textContent = data.instruction_display || "-";
-      el("metaSummary").textContent = `instruction_num=${data.instruction_num ?? "?"} | presence=${data.presence ?? "?"} | mano_manifest=${state.config.mano_manifest_loaded}`;
+      const manoInfo = data.mano || {};
+      const manoStatus = manoInfo.schema || manoInfo.error || "absent";
+      el("metaSummary").textContent = `instruction_num=${data.instruction_num ?? "?"} | presence=${data.presence ?? "?"} | mano=${manoStatus}`;
 
       const lowdimInfo = data.lowdim || {};
       if (lowdimInfo.error) {
@@ -1115,6 +1135,7 @@ def new_sample_record(sample_key: str):
         "key": sample_key,
         "image_bytes": None,
         "lowdim_bytes": None,
+        "mano_bytes": None,
         "meta_bytes": None,
     }
 
@@ -1176,7 +1197,7 @@ def sample_key_to_episode_key(sample_key: str) -> str:
 
 def build_sample_summary(sample: dict, shard_path: str, sample_id: int) -> SampleSummary:
     meta, meta_error = decode_meta(sample["meta_bytes"])
-    missing_fields = [field_name for _, field_name in SAMPLE_MEMBER_SUFFIXES if sample.get(field_name) is None]
+    missing_fields = [field_name for field_name in REQUIRED_SAMPLE_FIELDS if sample.get(field_name) is None]
     instruction_text = truncate_text(normalize_instruction(meta))
     clip_id = None if meta is None else meta.get("clip_id")
     instruction_num = None if meta is None else meta.get("instruction_num")
@@ -1352,6 +1373,31 @@ def summarize_lowdim(lowdim_bytes: Optional[bytes]):
     }
 
 
+def summarize_mano(mano_bytes: Optional[bytes]):
+    if mano_bytes is None:
+        return {
+            "error": "missing mano.npy",
+        }
+    try:
+        array = np.load(io.BytesIO(mano_bytes), allow_pickle=False)
+        decoded = decode_mano_sample_array(array)
+    except Exception as error:
+        return {
+            "error": str(error),
+        }
+
+    flat = array.reshape(-1).astype(np.float32)
+    preview_values = [round(float(value), 6) for value in flat[: min(24, flat.size)].tolist()]
+    return {
+        "shape": str(tuple(array.shape)),
+        "dtype": str(array.dtype),
+        "schema": MANO_SCHEMA,
+        "preview": json.dumps(preview_values, ensure_ascii=False, indent=2),
+        "array": array,
+        "decoded": decoded,
+    }
+
+
 def rot6_to_rotmat(r6: np.ndarray) -> np.ndarray:
     a1 = r6[:3].astype(np.float32)
     a2 = r6[3:6].astype(np.float32)
@@ -1520,23 +1566,45 @@ def _render_keypoint_overlay(image_bytes: bytes, keypoint_frame: dict, presence:
     return _encode_image_data_url(rendered)
 
 
-def _run_mano_outputs(mano_model, trans, root_orient, hand_pose, betas, device):
-    import torch
-    from hawor.utils.geometry import aa_to_rotmat
+def _build_mano_frame_from_sample(lowdim_array: np.ndarray, mano_array: np.ndarray, runtime: dict) -> dict:
+    fields = _decode_lowdim_fields(lowdim_array)
+    decoded = decode_mano_sample_array(mano_array)
 
-    batch_size, num_frames, _ = root_orient.shape
-    num_joints = 15
-    params = {
-        "global_orient": aa_to_rotmat(root_orient.reshape(batch_size * num_frames, 3)).view(batch_size * num_frames, 1, 3, 3),
-        "hand_pose": aa_to_rotmat(hand_pose.reshape(batch_size * num_frames * num_joints, 3)).view(batch_size * num_frames, num_joints, 3, 3),
-        "transl": trans.reshape(batch_size * num_frames, 3),
-        "betas": betas.reshape(batch_size * num_frames, -1),
+    left_root = rot6d_to_axis_angle(fields["left_root_rot6d"])
+    right_root = rot6d_to_axis_angle(fields["right_root_rot6d"])
+    left_verts, left_joints = run_manopth_mano(
+        runtime["mano_left"],
+        wrist_world=fields["left_wrist_world"][None, :],
+        root_rot_axis_angle=np.asarray(left_root, dtype=np.float32)[None, :],
+        hand_pose_pca=decoded["left_pose_pca"][None, :],
+        betas=decoded["left_betas"][None, :],
+        device=runtime["device"],
+    )
+    right_verts, right_joints = run_manopth_mano(
+        runtime["mano_right"],
+        wrist_world=fields["right_wrist_world"][None, :],
+        root_rot_axis_angle=np.asarray(right_root, dtype=np.float32)[None, :],
+        hand_pose_pca=decoded["right_pose_pca"][None, :],
+        betas=decoded["right_betas"][None, :],
+        device=runtime["device"],
+    )
+    points_world = np.concatenate(
+        [
+            np.asarray(left_joints[0], dtype=np.float32),
+            np.asarray(right_joints[0], dtype=np.float32),
+        ],
+        axis=0,
+    )
+    c2w, camera_convention = _resolve_camera_c2w(fields["camera_w2c"], points_world)
+    return {
+        "c2w": c2w,
+        "intrinsic": fields["camera_intrinsic"],
+        "camera_convention": camera_convention,
+        "left_verts": np.asarray(left_verts[0], dtype=np.float32),
+        "left_joints": np.asarray(left_joints[0], dtype=np.float32),
+        "right_verts": np.asarray(right_verts[0], dtype=np.float32),
+        "right_joints": np.asarray(right_joints[0], dtype=np.float32),
     }
-    with torch.no_grad():
-        output = mano_model(**{k: v.float().to(device) for k, v in params.items()}, pose2rot=False)
-    vertices = output.vertices.reshape(batch_size, num_frames, -1, 3).cpu().numpy()
-    joints = output.joints.reshape(batch_size, num_frames, -1, 3).cpu().numpy()
-    return vertices, joints
 
 
 def _draw_mano_hand(image_bgr: np.ndarray, overlay: np.ndarray, verts_world: np.ndarray, joints_world: np.ndarray, c2w: np.ndarray, intrinsic: np.ndarray, point_color, joint_color):
@@ -1624,7 +1692,7 @@ class ViewerApp:
         self.mano_device = args.mano_device
         self.clip_to_seq_folder = self._load_clip_lookup(args.descriptor_manifest)
         self._mano_runtime = None
-        self._mano_clip_cache: dict[str, dict] = {}
+        self._mano_sample_cache: dict[int, dict] = {}
         self._cache_lock = threading.RLock()
         self._sample_keys_by_shard: dict[str, set[str]] = {}
         for summary in self.summaries:
@@ -1659,30 +1727,19 @@ class ViewerApp:
             raise KeyError(f"clip_id not found in descriptor manifest: {clip_id}")
         return seq_folder
 
-    def _get_mano_frame(self, summary: SampleSummary) -> dict:
-        if not summary.clip_id:
-            raise ValueError("clip_id missing from meta.json; cannot resolve world_space_res.pth")
-        try:
-            frame_idx = parse_frame_index(summary.key)
-        except ValueError as error:
-            raise ValueError(
-                f"sample key is missing a frame suffix like _f000123: {summary.key}"
-            ) from error
+    def _get_mano_frame(self, summary: SampleSummary, lowdim_array: np.ndarray, mano_array: np.ndarray) -> dict:
+        with self._cache_lock:
+            cached = self._mano_sample_cache.get(summary.id)
+        if cached is not None:
+            return cached
 
-        mano_cache = self._compute_mano_clip_cache(summary.clip_id)
-        if frame_idx >= mano_cache["left_vertices"].shape[0]:
-            raise IndexError(
-                f"frame index {frame_idx} exceeds MANO cache length {mano_cache['left_vertices'].shape[0]}"
-            )
-        return {
-            "frame_idx": frame_idx,
-            "left_verts": mano_cache["left_vertices"][frame_idx],
-            "left_joints": mano_cache["left_joints"][frame_idx],
-            "right_verts": mano_cache["right_vertices"][frame_idx],
-            "right_joints": mano_cache["right_joints"][frame_idx],
-        }
+        frame = _build_mano_frame_from_sample(lowdim_array, mano_array, self._ensure_mano_runtime())
+        frame["frame_idx"] = parse_frame_index(summary.key)
+        with self._cache_lock:
+            self._mano_sample_cache[summary.id] = frame
+        return frame
 
-    def _build_keypoint_frame(self, summary: SampleSummary, lowdim_array: np.ndarray) -> dict:
+    def _build_keypoint_frame(self, summary: SampleSummary, lowdim_array: np.ndarray, mano_array: Optional[np.ndarray] = None) -> dict:
         fields = _decode_lowdim_fields(lowdim_array)
         notes = [
             "All 3D lowdim fields are stored in the HaWoR/SLAM world frame."
@@ -1717,27 +1774,22 @@ class ViewerApp:
             + ("camera-to-world (c2w)." if camera_convention == "c2w" else "world-to-camera (w2c) and inverted for display.")
         )
 
-        if not self.clip_to_seq_folder:
+        if mano_array is None:
             notes.append(
-                "Descriptor manifest not loaded, so keypoint mode uses lowdim wrist/tip world coordinates directly."
-            )
-            return keypoint_frame
-        if not summary.clip_id:
-            notes.append(
-                "clip_id is missing from meta.json, so keypoint mode cannot verify lowdim joints against MANO cache."
+                "mano.npy is missing, so keypoint mode uses lowdim wrist/tip world coordinates directly."
             )
             return keypoint_frame
 
         try:
-            mano_frame = self._get_mano_frame(summary)
+            mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array)
         except Exception as error:
             notes.append(
-                f"Failed to resolve MANO joints for this frame ({error}); using lowdim wrist/tip world coordinates directly."
+                f"Failed to decode mano.npy for this frame ({error}); using lowdim wrist/tip world coordinates directly."
             )
             return keypoint_frame
 
-        keypoint_frame["left_wrist"] = np.asarray(mano_frame["left_joints"][0], dtype=np.float32)
-        keypoint_frame["right_wrist"] = np.asarray(mano_frame["right_joints"][0], dtype=np.float32)
+        keypoint_frame["left_wrist"] = np.asarray(mano_frame["left_joints"][MANO_CENTER_IDX], dtype=np.float32)
+        keypoint_frame["right_wrist"] = np.asarray(mano_frame["right_joints"][MANO_CENTER_IDX], dtype=np.float32)
         keypoint_frame["left_tips"] = np.asarray(
             mano_frame["left_joints"][FINGERTIP_INDICES], dtype=np.float32
         )
@@ -1755,7 +1807,6 @@ class ViewerApp:
             return self._mano_runtime
 
         import torch
-        from lib.pipeline.exporters.webdataset_features import build_mano_models
 
         requested = self.mano_device
         if requested.startswith("cuda") and not torch.cuda.is_available():
@@ -1763,66 +1814,19 @@ class ViewerApp:
             requested = "cpu"
         device = torch.device(requested)
         print(f"Initializing MANO runtime on {device} ...", flush=True)
-        mano_right, mano_left = build_mano_models(device, mano_dir=self.mano_dir)
-        mano_right.eval()
-        mano_left.eval()
+        mano_right, mano_left = build_manopth_models(
+            device,
+            mano_dir=self.mano_dir,
+            center_idx=MANO_CENTER_IDX,
+            flat_hand_mean=MANO_FLAT_HAND_MEAN,
+            ncomps=MANO_PCA_DIMS,
+        )
         self._mano_runtime = {
             "device": device,
             "mano_right": mano_right,
             "mano_left": mano_left,
         }
         return self._mano_runtime
-
-    def _compute_mano_clip_cache(self, clip_id: str) -> dict:
-        with self._cache_lock:
-            if clip_id in self._mano_clip_cache:
-                return self._mano_clip_cache[clip_id]
-
-        seq_folder = self._resolve_seq_folder_for_clip(clip_id)
-
-        world_path = Path(seq_folder) / "world_space_res.pth"
-        if not world_path.exists():
-            raise FileNotFoundError(f"world_space_res.pth not found for clip {clip_id}: {world_path}")
-
-        import joblib
-        import torch
-
-        pred_trans, pred_rot, pred_hand_pose, pred_betas, _ = joblib.load(world_path)
-        pred_trans = torch.as_tensor(np.asarray(pred_trans), dtype=torch.float32)
-        pred_rot = torch.as_tensor(np.asarray(pred_rot), dtype=torch.float32)
-        pred_hand_pose = torch.as_tensor(np.asarray(pred_hand_pose), dtype=torch.float32)
-        pred_betas = torch.as_tensor(np.asarray(pred_betas), dtype=torch.float32)
-
-        runtime = self._ensure_mano_runtime()
-        device = runtime["device"]
-        num_frames = int(pred_trans.shape[1])
-
-        left_vertices, left_joints = _run_mano_outputs(
-            runtime["mano_left"],
-            pred_trans[0:1],
-            pred_rot[0:1],
-            pred_hand_pose[0:1].reshape(1, num_frames, 15, 3),
-            pred_betas[0:1],
-            device,
-        )
-        right_vertices, right_joints = _run_mano_outputs(
-            runtime["mano_right"],
-            pred_trans[1:2],
-            pred_rot[1:2],
-            pred_hand_pose[1:2].reshape(1, num_frames, 15, 3),
-            pred_betas[1:2],
-            device,
-        )
-
-        cache = {
-            "left_vertices": left_vertices[0],
-            "left_joints": left_joints[0],
-            "right_vertices": right_vertices[0],
-            "right_joints": right_joints[0],
-        }
-        with self._cache_lock:
-            self._mano_clip_cache[clip_id] = cache
-        return cache
 
     def _ensure_shard_samples_loaded(self, shard_path: str):
         with self._cache_lock:
@@ -1864,30 +1868,23 @@ class ViewerApp:
             raise KeyError(f"Sample key not found in shard {summary.shard_path}: {summary.key}")
         return cached
 
-    def _render_image(self, *, render_mode: str, summary: SampleSummary, sample: dict, lowdim_array: Optional[np.ndarray], presence: Optional[int]):
+    def _render_image(self, *, render_mode: str, summary: SampleSummary, sample: dict, lowdim_array: Optional[np.ndarray], mano_array: Optional[np.ndarray], presence: Optional[int]):
         if sample["image_bytes"] is None:
             raise ValueError("missing image.jpg")
 
         if render_mode == "keypoint":
             if lowdim_array is None:
                 raise ValueError("lowdim.npy is required for keypoint render")
-            keypoint_frame = self._build_keypoint_frame(summary, lowdim_array)
+            keypoint_frame = self._build_keypoint_frame(summary, lowdim_array, mano_array=mano_array)
             return _render_keypoint_overlay(sample["image_bytes"], keypoint_frame, presence)
 
         if render_mode == "mano":
             if lowdim_array is None:
                 raise ValueError("lowdim.npy is required for mano render")
-            mano_frame = self._get_mano_frame(summary)
-            _, intrinsic = _extract_camera_from_lowdim(lowdim_array)
-            points_world = np.concatenate(
-                [
-                    np.asarray(mano_frame["left_joints"], dtype=np.float32),
-                    np.asarray(mano_frame["right_joints"], dtype=np.float32),
-                ],
-                axis=0,
-            )
-            c2w, _ = _resolve_camera_c2w(_decode_lowdim_fields(lowdim_array)["camera_w2c"], points_world)
-            return _render_mano_overlay(sample["image_bytes"], c2w, intrinsic, mano_frame, presence)
+            if mano_array is None:
+                raise ValueError("mano.npy is required for mano render")
+            mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array)
+            return _render_mano_overlay(sample["image_bytes"], mano_frame["c2w"], mano_frame["intrinsic"], mano_frame, presence)
 
         raise ValueError(f"Unsupported render mode: {render_mode}")
 
@@ -1906,11 +1903,14 @@ class ViewerApp:
         meta, _ = decode_meta(sample["meta_bytes"])
         lowdim_summary = summarize_lowdim(sample["lowdim_bytes"])
         lowdim_array = lowdim_summary.get("array")
+        mano_summary = summarize_mano(sample.get("mano_bytes"))
+        mano_array = mano_summary.get("array")
         image_bytes = self._render_image(
             render_mode=render_mode,
             summary=summary,
             sample=sample,
             lowdim_array=lowdim_array,
+            mano_array=mano_array,
             presence=None if meta is None else meta.get("presence"),
         )
         with self._cache_lock:
@@ -1959,19 +1959,23 @@ class ViewerApp:
         lowdim_summary = summarize_lowdim(sample["lowdim_bytes"])
         if "error" in lowdim_summary:
             errors.append(f"lowdim load failed: {lowdim_summary['error']}")
+        mano_summary = summarize_mano(sample.get("mano_bytes"))
+        if render_mode == "mano" and "error" in mano_summary:
+            errors.append(f"mano load failed: {mano_summary['error']}")
 
         lowdim_array = lowdim_summary.get("array")
+        mano_array = mano_summary.get("array")
         render_notes = []
         if lowdim_array is not None:
             if render_mode == "keypoint":
-                render_notes = self._build_keypoint_frame(summary, lowdim_array)["notes"]
+                render_notes = self._build_keypoint_frame(summary, lowdim_array, mano_array=mano_array)["notes"]
             elif render_mode == "mano":
                 render_notes = [
-                    "MANO mode projects vertices and joints reconstructed from world_space_res.pth through the lowdim camera extrinsic."
+                    "MANO mode reconstructs vertices and joints from the per-sample mano.npy payload using manopth."
                 ]
-                if not self.clip_to_seq_folder:
+                if mano_array is None:
                     render_notes.append(
-                        "descriptor manifest is required for MANO mode because clip_id must resolve to seq_folder"
+                        "This sample does not contain mano.npy, so MANO render cannot proceed."
                     )
 
         image_url = None
@@ -2006,6 +2010,13 @@ class ViewerApp:
                 "min": lowdim_summary.get("min"),
                 "max": lowdim_summary.get("max"),
                 "mean": lowdim_summary.get("mean"),
+            },
+            "mano": {
+                "error": mano_summary.get("error"),
+                "shape": mano_summary.get("shape"),
+                "dtype": mano_summary.get("dtype"),
+                "schema": mano_summary.get("schema"),
+                "preview": mano_summary.get("preview"),
             },
             "render_notes": render_notes,
             "lowdim_preview": lowdim_summary.get("preview"),

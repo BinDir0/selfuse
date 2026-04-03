@@ -10,8 +10,10 @@ import tarfile
 SAMPLE_MEMBER_SUFFIXES = (
     (".image.jpg", "image_bytes"),
     (".lowdim.npy", "lowdim_bytes"),
+    (".mano.npy", "mano_bytes"),
     (".meta.json", "meta_bytes"),
 )
+REQUIRED_SAMPLE_FIELDS = ("image_bytes", "lowdim_bytes", "meta_bytes")
 EPISODE_INDEX_PATTERN = re.compile(r"_ep(\d+)_f\d+$")
 
 
@@ -36,6 +38,7 @@ def _new_sample_record(sample_key):
         "key": sample_key,
         "image_bytes": None,
         "lowdim_bytes": None,
+        "mano_bytes": None,
         "meta_bytes": None,
     }
 
@@ -72,7 +75,7 @@ def iter_shard_samples(shard_path):
 
 def validate_sample_record(sample):
     """Validate that a grouped sample has all expected payloads."""
-    missing = [field_name for _, field_name in SAMPLE_MEMBER_SUFFIXES if sample.get(field_name) is None]
+    missing = [field_name for field_name in REQUIRED_SAMPLE_FIELDS if sample.get(field_name) is None]
     if missing:
         raise ValueError(f"Incomplete sample {sample['key']}: missing {', '.join(missing)}")
 
@@ -91,10 +94,12 @@ def _make_tar_info(name, payload):
     return tar_info
 
 
-def write_sample_to_tar(tar_writer, sample_key, image_bytes, lowdim_bytes, meta_bytes):
+def write_sample_to_tar(tar_writer, sample_key, image_bytes, lowdim_bytes, meta_bytes, mano_bytes=None):
     """Write one sample payload into a target tar."""
     tar_writer.addfile(_make_tar_info(f"{sample_key}.image.jpg", image_bytes), io.BytesIO(image_bytes))
     tar_writer.addfile(_make_tar_info(f"{sample_key}.lowdim.npy", lowdim_bytes), io.BytesIO(lowdim_bytes))
+    if mano_bytes is not None:
+        tar_writer.addfile(_make_tar_info(f"{sample_key}.mano.npy", mano_bytes), io.BytesIO(mano_bytes))
     tar_writer.addfile(_make_tar_info(f"{sample_key}.meta.json", meta_bytes), io.BytesIO(meta_bytes))
 
 

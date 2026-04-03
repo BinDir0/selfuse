@@ -85,6 +85,7 @@ def _worker_prepare_episode_features(episode_slice):
             rescan_frame_index=_worker_rescan_frame_index,
             feature_cache_dir=_worker_feature_cache_dir,
             require_cache=False,
+            mano_dir=_worker_mano_dir,
         )
         _worker_episode_cache[cache_key] = episode_data
 
@@ -148,6 +149,7 @@ def _worker_process_shard(task):
                         rescan_frame_index=_worker_rescan_frame_index,
                         feature_cache_dir=_worker_feature_cache_dir,
                         require_cache=_worker_require_feature_cache,
+                        mano_dir=_worker_mano_dir,
                     )
 
                 episode_data = _worker_episode_cache[cache_key]
@@ -176,11 +178,11 @@ def _worker_process_shard(task):
                         break
 
                 while pending:
-                    key, image_bytes, lowdim_bytes, meta_bytes = pending.popleft().result()
+                    key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes = pending.popleft().result()
                     if tar_writer is None:
                         os.makedirs(os.path.dirname(output_path), exist_ok=True)
                         tar_writer = tarfile.open(tmp_path, "w")
-                    add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, meta_bytes)
+                    add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes)
                     frames_written += 1
                     submit_next()
 

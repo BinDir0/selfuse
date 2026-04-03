@@ -32,6 +32,7 @@ from lib.pipeline.exporters.webdataset_features import (
     _load_world_space_prediction,
     build_mano_models,
 )
+from lib.pipeline.exporters.mano_codec import build_mano_pca_frame_features, mano_meta_fields
 from lib.pipeline.exporters.webdataset_geometry import axis_angle_to_rot6d
 from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
 
@@ -39,11 +40,12 @@ from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
 _worker_mano_right = None
 _worker_mano_left = None
 _worker_device = None
+_worker_mano_dir = None
 _worker_feature_cache_dir = None
 _worker_episode_cache = {}
 _worker_shard_fd_cache = {}
 _worker_shard_tar_cache = {}
-MANIFEST_FEATURE_CACHE_VERSION = 3
+MANIFEST_FEATURE_CACHE_VERSION = 4
 
 
 def _feature_cache_path(seq_folder: str, feature_cache_dir: str) -> str:
@@ -81,6 +83,7 @@ def _load_cached_features(
     return {
         "frame_count": payload["frame_count"],
         "lowdim_all": payload["lowdim_all"],
+        "mano_all": payload["mano_all"],
         "presence_per_frame": payload["presence_per_frame"],
     }
 
@@ -107,6 +110,7 @@ def _write_cached_features(
         "target_fps": float(target_fps),
         "interpolate_labels": bool(interpolate_labels),
         "lowdim_all": episode_data["lowdim_all"],
+        "mano_all": episode_data["mano_all"],
         "presence_per_frame": episode_data["presence_per_frame"].astype(np.uint8),
     }
     try:
@@ -205,6 +209,8 @@ def _resample_episode_features(
     wrist_state,
     hand_state,
     pred_rot,
+    pred_hand_pose,
+    pred_betas,
     extrinsics,
     presence_per_frame,
     target_count: int,
@@ -219,6 +225,9 @@ def _resample_episode_features(
         return (
             wrist_state[:frame_count],
             hand_state[:frame_count],
+            pred_rot[:, :frame_count],
+            pred_hand_pose[:, :frame_count],
+            pred_betas[:, :frame_count],
             np.asarray(extrinsics[:frame_count], dtype=np.float32),
             np.asarray(presence_per_frame[:frame_count]),
         )
@@ -229,6 +238,18 @@ def _resample_episode_features(
     wrist_positions = _resample_linear_sequence(wrist_state[:, :6].cpu().numpy(), target_count, source_fps, target_fps)
     hand_state_resampled = _resample_linear_sequence(hand_state.cpu().numpy(), target_count, source_fps, target_fps)
     pred_rot_resampled = _resample_axis_angle_batch(pred_rot.float().cpu().numpy(), target_count, source_fps, target_fps)
+    pred_hand_pose_resampled = _resample_axis_angle_batch(
+        pred_hand_pose.float().cpu().numpy().reshape(-1, source_count, 3),
+        target_count,
+        source_fps,
+        target_fps,
+    ).reshape(2, target_count, 45)
+    pred_betas_resampled = _resample_linear_sequence(
+        pred_betas.float().cpu().numpy().transpose(1, 0, 2),
+        target_count,
+        source_fps,
+        target_fps,
+    ).transpose(1, 0, 2)
     rot6d = axis_angle_to_rot6d(torch.from_numpy(pred_rot_resampled)).cpu().numpy().astype(np.float32)
     wrist_state_resampled = np.concatenate(
         [
@@ -243,6 +264,9 @@ def _resample_episode_features(
     return (
         torch.from_numpy(wrist_state_resampled),
         torch.from_numpy(hand_state_resampled.astype(np.float32)),
+        torch.from_numpy(pred_rot_resampled.astype(np.float32)),
+        torch.from_numpy(pred_hand_pose_resampled.astype(np.float32)),
+        torch.from_numpy(pred_betas_resampled.astype(np.float32)),
         extrinsics_resampled.astype(np.float32, copy=False),
         np.asarray(presence_resampled),
     )
@@ -254,6 +278,7 @@ def load_descriptor_episode_features(
     mano_left,
     device,
     feature_cache_dir: str | None,
+    mano_dir: str | None,
     *,
     source_fps: float,
     target_fps: float,
@@ -330,10 +355,12 @@ def load_descriptor_episode_features(
     camera_ep = {"crop_dir": seq_folder, "episode_id": ep["episode_id"]}
     extrinsics, intrinsic = _load_episode_camera_features(camera_ep, source_frame_count)
     presence_per_frame = _compute_presence_per_frame(pred_valid, source_frame_count)
-    wrist_state, hand_state, extrinsics, presence_per_frame = _resample_episode_features(
+    wrist_state, hand_state, pred_rot, pred_hand_pose, pred_betas, extrinsics, presence_per_frame = _resample_episode_features(
         wrist_state[:source_frame_count],
         hand_state[:source_frame_count],
         pred_rot[:, :source_frame_count],
+        pred_hand_pose[:, :source_frame_count],
+        pred_betas[:, :source_frame_count],
         extrinsics[:source_frame_count],
         presence_per_frame[:source_frame_count],
         frame_count,
@@ -347,10 +374,16 @@ def load_descriptor_episode_features(
         extrinsics[:frame_count],
         intrinsic,
     )
+    mano_all = build_mano_pca_frame_features(
+        pred_hand_pose[:, :frame_count].cpu().numpy(),
+        pred_betas[:, :frame_count].cpu().numpy(),
+        mano_dir=mano_dir,
+    )
 
     episode_data = {
         "frame_count": frame_count,
         "lowdim_all": lowdim_all[:frame_count],
+        "mano_all": mano_all[:frame_count],
         "presence_per_frame": presence_per_frame[:frame_count],
     }
     _write_cached_features(
@@ -432,7 +465,7 @@ def repeat_manifest_episodes(episodes: list[dict], repeat_count: int) -> list[di
     return repeated
 
 
-def add_sample_bytes_to_tar(tar_writer, key: str, image_bytes: bytes, lowdim, meta: dict):
+def add_sample_bytes_to_tar(tar_writer, key: str, image_bytes: bytes, lowdim, mano, meta: dict):
     img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
     img_info.size = len(image_bytes)
     tar_writer.addfile(img_info, io.BytesIO(image_bytes))
@@ -444,6 +477,13 @@ def add_sample_bytes_to_tar(tar_writer, key: str, image_bytes: bytes, lowdim, me
     lowdim_info.size = len(lowdim_bytes)
     tar_writer.addfile(lowdim_info, io.BytesIO(lowdim_bytes))
 
+    mano_buf = io.BytesIO()
+    np.save(mano_buf, np.asarray(mano, dtype=np.float32), allow_pickle=False)
+    mano_bytes = mano_buf.getvalue()
+    mano_info = tarfile.TarInfo(name=f"{key}.mano.npy")
+    mano_info.size = len(mano_bytes)
+    tar_writer.addfile(mano_info, io.BytesIO(mano_bytes))
+
     meta_bytes = json.dumps(meta, ensure_ascii=False).encode("utf-8")
     meta_info = tarfile.TarInfo(name=f"{key}.meta.json")
     meta_info.size = len(meta_bytes)
@@ -451,7 +491,7 @@ def add_sample_bytes_to_tar(tar_writer, key: str, image_bytes: bytes, lowdim, me
 
 
 def _worker_init(device_specs, mano_dir, feature_cache_dir):
-    global _worker_mano_right, _worker_mano_left, _worker_device
+    global _worker_mano_right, _worker_mano_left, _worker_device, _worker_mano_dir
     global _worker_feature_cache_dir, _worker_episode_cache
     global _worker_shard_fd_cache, _worker_shard_tar_cache
 
@@ -459,6 +499,7 @@ def _worker_init(device_specs, mano_dir, feature_cache_dir):
     worker_idx = identity[0] - 1 if identity else 0
     device_str = device_specs[worker_idx % len(device_specs)]
     _worker_device = torch.device(device_str)
+    _worker_mano_dir = mano_dir
     _worker_mano_right, _worker_mano_left = build_mano_models(_worker_device, mano_dir=mano_dir)
     _worker_mano_right.eval()
     _worker_mano_left.eval()
@@ -501,6 +542,7 @@ def _worker_process_shard(task):
                     _worker_mano_left,
                     _worker_device,
                     _worker_feature_cache_dir,
+                    _worker_mano_dir,
                     source_fps=float(episode_slice.get("source_fps", 5.0)),
                     target_fps=float(episode_slice.get("target_fps", 30.0)),
                     interpolate_labels=bool(episode_slice.get("interpolate_labels", False)),
@@ -533,6 +575,7 @@ def _worker_process_shard(task):
                         "lowdim_schema": "hawor_wrist_world_v2",
                         "wrist_translation_semantics": "mano_joint_0_world",
                         "camera_extrinsic_convention": "w2c",
+                        **mano_meta_fields(),
                     }
                     key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
                     clip_samples.append(
@@ -540,6 +583,7 @@ def _worker_process_shard(task):
                             key,
                             image_bytes,
                             episode_data["lowdim_all"][frame_idx],
+                            episode_data["mano_all"][frame_idx],
                             meta,
                         )
                     )
@@ -561,12 +605,13 @@ def _worker_process_shard(task):
                 os.makedirs(os.path.dirname(task["output_path"]), exist_ok=True)
                 tar_writer = tarfile.open(task["tmp_path"], "w")
 
-            for key, image_bytes, lowdim, meta in clip_samples:
+            for key, image_bytes, lowdim, mano, meta in clip_samples:
                 add_sample_bytes_to_tar(
                     tar_writer,
                     key,
                     image_bytes,
                     lowdim,
+                    mano,
                     meta,
                 )
                 frames_written += 1

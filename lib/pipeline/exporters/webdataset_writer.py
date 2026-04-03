@@ -7,6 +7,8 @@ import tarfile
 
 import numpy as np
 
+from .mano_codec import mano_meta_fields
+
 
 LOWDIM_SIZE = 116
 LOWDIM_DTYPE = np.dtype(np.float32)
@@ -79,6 +81,7 @@ def iter_episode_samples(ep, episode_data, frame_start, frame_end):
                 "lowdim_schema": "hawor_wrist_world_v2",
                 "wrist_translation_semantics": "mano_joint_0_world",
                 "camera_extrinsic_convention": "w2c",
+                **mano_meta_fields(),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -93,7 +96,13 @@ def iter_episode_samples(ep, episode_data, frame_start, frame_end):
         presence = int(episode_data["presence_per_frame"][frame_idx])
         meta_bytes = f"{meta_prefix}{presence}}}".encode("utf-8")
         sample_key = f"buildai_ep{ep['episode_index']:06d}_f{frame_idx:05d}"
-        yield sample_key, frame_path, episode_data["lowdim_all"][frame_idx], meta_bytes
+        yield (
+            sample_key,
+            frame_path,
+            episode_data["lowdim_all"][frame_idx],
+            episode_data["mano_all"][frame_idx],
+            meta_bytes,
+        )
 
 
 def _encode_lowdim_npy(lowdim):
@@ -106,19 +115,32 @@ def _encode_lowdim_npy(lowdim):
     return lowdim_buf.getvalue()
 
 
-def prepare_sample_payload(key, frame_path, lowdim, meta_bytes):
+def _encode_array_npy(array):
+    buf = io.BytesIO()
+    np.save(buf, np.asarray(array, dtype=np.float32), allow_pickle=False)
+    return buf.getvalue()
+
+
+def prepare_sample_payload(key, frame_path, lowdim, mano, meta_bytes):
     with open(frame_path, "rb") as image_file:
         image_bytes = image_file.read()
     lowdim_bytes = _encode_lowdim_npy(lowdim)
-    return key, image_bytes, lowdim_bytes, meta_bytes
+    mano_bytes = _encode_array_npy(mano)
+    return key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes
 
 
-def add_sample_to_tar(tar_writer, key, frame_path, lowdim, meta_bytes):
-    key, image_bytes, lowdim_bytes, meta_bytes = prepare_sample_payload(key, frame_path, lowdim, meta_bytes)
-    add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, meta_bytes)
+def add_sample_to_tar(tar_writer, key, frame_path, lowdim, mano, meta_bytes):
+    key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes = prepare_sample_payload(
+        key,
+        frame_path,
+        lowdim,
+        mano,
+        meta_bytes,
+    )
+    add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes)
 
 
-def add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, meta_bytes):
+def add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes):
     img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
     img_info.size = len(image_bytes)
     tar_writer.addfile(img_info, io.BytesIO(image_bytes))
@@ -126,6 +148,10 @@ def add_prepared_sample_to_tar(tar_writer, key, image_bytes, lowdim_bytes, meta_
     lowdim_info = tarfile.TarInfo(name=f"{key}.lowdim.npy")
     lowdim_info.size = len(lowdim_bytes)
     tar_writer.addfile(lowdim_info, io.BytesIO(lowdim_bytes))
+
+    mano_info = tarfile.TarInfo(name=f"{key}.mano.npy")
+    mano_info.size = len(mano_bytes)
+    tar_writer.addfile(mano_info, io.BytesIO(mano_bytes))
 
     meta_info = tarfile.TarInfo(name=f"{key}.meta.json")
     meta_info.size = len(meta_bytes)

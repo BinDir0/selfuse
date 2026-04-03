@@ -10,6 +10,7 @@ import joblib
 import numpy as np
 import torch
 
+from .mano_codec import build_mano_pca_frame_features
 from .webdataset_discovery import get_episode_feature_cache_path, load_or_build_frame_index
 from .webdataset_geometry import axis_angle_to_rot6d, interpolate_extrinsics, normalize_slam_keyframes
 
@@ -18,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FINGERTIP_INDICES = [4, 8, 12, 16, 20]
 DEFAULT_INTRINSIC = np.array([500.0, 500.0, 320.0, 240.0], dtype=np.float32)
 LOWDIM_SIZE = 116
-EPISODE_FEATURE_CACHE_VERSION = 2
+EPISODE_FEATURE_CACHE_VERSION = 3
 
 
 def run_mano_forward(mano_model, trans, root_orient, hand_pose, betas, device):
@@ -98,6 +99,7 @@ def _load_cached_episode_features(ep, extracted_dir, feature_cache_dir):
         "frame_index": frame_index,
         "frame_ids": cached["frame_ids"],
         "lowdim_all": cached["lowdim_all"],
+        "mano_all": cached["mano_all"],
         "presence_per_frame": cached["presence_per_frame"],
     }
 
@@ -284,6 +286,7 @@ def _write_episode_feature_cache(ep, feature_cache_dir, episode_data):
         "crop_dir": ep["crop_dir"],
         "frame_ids": episode_data["frame_ids"],
         "lowdim_all": episode_data["lowdim_all"],
+        "mano_all": episode_data["mano_all"],
         "presence_per_frame": episode_data["presence_per_frame"].astype(np.uint8),
     }
     try:
@@ -295,7 +298,16 @@ def _write_episode_feature_cache(ep, feature_cache_dir, episode_data):
             os.remove(cache_tmp_path)
 
 
-def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=False, feature_cache_dir=None, require_cache=False):
+def load_episode_features(
+    ep,
+    mano_right,
+    mano_left,
+    device,
+    rescan_frame_index=False,
+    feature_cache_dir=None,
+    require_cache=False,
+    mano_dir=None,
+):
     """Load one episode and compute per-frame lowdim features."""
     crop_dir = ep["crop_dir"]
     world_res_path = os.path.join(crop_dir, "world_space_res.pth")
@@ -323,6 +335,11 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
     pred_betas = prediction["pred_betas"]
     pred_valid = prediction["pred_valid"]
     num_frames = int(pred_trans.shape[1])
+    mano_all = build_mano_pca_frame_features(
+        pred_hand_pose.cpu().numpy(),
+        pred_betas.cpu().numpy(),
+        mano_dir=mano_dir,
+    )
 
     wrist_state, hand_state = _compute_joint_states(
         pred_trans,
@@ -354,6 +371,7 @@ def load_episode_features(ep, mano_right, mano_left, device, rescan_frame_index=
         )
     if episode_data is None:
         return None
+    episode_data["mano_all"] = mano_all
 
     _write_episode_feature_cache(ep, feature_cache_dir, episode_data)
     return episode_data

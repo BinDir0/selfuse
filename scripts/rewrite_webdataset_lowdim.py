@@ -288,6 +288,7 @@ def _get_episode_data(clip_id: str):
         _WORKER_MANO_LEFT,
         _WORKER_DEVICE,
         _WORKER_FEATURE_CACHE_DIR,
+        _WORKER_MANO_DIR,
         source_fps=5.0,
         target_fps=5.0,
         interpolate_labels=False,
@@ -403,6 +404,7 @@ def process_shard(shard_path: str) -> dict:
                 sample["image_bytes"],
                 lowdim_bytes,
                 meta_bytes,
+                mano_bytes=sample.get("mano_bytes"),
             )
             frames_rewritten += 1
             clips_touched.add(clip_id)
