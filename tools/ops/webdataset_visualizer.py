@@ -1739,10 +1739,8 @@ class ViewerApp:
         self.apply_demo_rx = bool(args.apply_demo_rx)
         self.keypoint_source = args.keypoint_source
         self.processed_root = args.processed_root
-        self.descriptor_manifest = args.descriptor_manifest
         self.mano_dir = args.mano_dir
         self.mano_device = args.mano_device
-        self.clip_to_seq_folder = self._load_clip_lookup(args.descriptor_manifest)
         self._legacy_episode_cache = None
         self._demo_source_cache: dict[str, dict] = {}
         self._demo_mano_models = None
@@ -1757,17 +1755,6 @@ class ViewerApp:
         self._render_bgr_cache: dict[tuple[int, str], np.ndarray] = {}
         self._render_jpeg_cache: dict[tuple[int, str], bytes] = {}
         self._sample_payload_cache: dict[tuple[int, str], dict] = {}
-
-    def _load_clip_lookup(self, manifest_path: Optional[str]) -> dict[str, str]:
-        if not manifest_path:
-            return {}
-        from lib.pipeline.clip_manifest import load_clip_manifest
-
-        print(f"Loading descriptor manifest: {manifest_path}", flush=True)
-        records = load_clip_manifest(manifest_path)
-        clip_to_seq = {record.clip_id: record.descriptor.seq_folder for record in records}
-        print(f"Loaded {len(clip_to_seq)} clip -> seq_folder mappings", flush=True)
-        return clip_to_seq
 
     def _load_legacy_episode_cache(self) -> list[dict]:
         if self._legacy_episode_cache is not None:
@@ -1785,15 +1772,10 @@ class ViewerApp:
     def _resolve_demo_seq_folder(self, meta: Optional[dict]) -> str:
         if not meta:
             raise ValueError("meta.json is missing; cannot resolve demo source episode")
-        clip_id = meta.get("clip_id")
-        if clip_id and self.clip_to_seq_folder:
-            seq_folder = self.clip_to_seq_folder.get(str(clip_id))
-            if seq_folder:
-                return str(seq_folder)
         episode_index = meta.get("episode_index")
         if episode_index is None:
             raise ValueError(
-                "Unable to resolve source episode: need clip manifest or meta.episode_index with --processed-root"
+                "Unable to resolve source episode: need meta.episode_index with --processed-root"
             )
         episodes = self._load_legacy_episode_cache()
         episode_idx = int(episode_index)
@@ -1909,20 +1891,6 @@ class ViewerApp:
         with self._cache_lock:
             self._demo_source_cache[seq_folder] = demo_source
         return demo_source
-
-    def _resolve_seq_folder_for_clip(self, clip_id: Optional[str]) -> str:
-        if not clip_id:
-            raise ValueError(
-                "clip_id missing from meta.json; this shard likely predates the manifest-based builder"
-            )
-        if not self.clip_to_seq_folder:
-            raise ValueError(
-                "descriptor manifest not loaded; rerun with --descriptor_manifest <clip_manifest.jsonl>"
-            )
-        seq_folder = self.clip_to_seq_folder.get(clip_id)
-        if not seq_folder:
-            raise KeyError(f"clip_id not found in descriptor manifest: {clip_id}")
-        return seq_folder
 
     def _get_mano_frame(self, summary: SampleSummary, lowdim_array: np.ndarray, mano_array: np.ndarray) -> dict:
         with self._cache_lock:
@@ -2410,7 +2378,6 @@ class ViewerApp:
             "start_index": self.start_index,
             "default_render_mode": self.default_render_mode,
             "available_render_modes": ["keypoint", "mano"],
-            "mano_manifest_loaded": bool(self.clip_to_seq_folder),
             "apply_demo_rx": self.apply_demo_rx,
             "keypoint_source": self.keypoint_source,
         }
@@ -2554,12 +2521,6 @@ def build_parser():
         type=str,
         default=None,
         help="Legacy processed root used to resolve source seq_folder for demo-aligned keypoint diagnostics.",
-    )
-    parser.add_argument(
-        "--descriptor-manifest",
-        type=str,
-        default=None,
-        help="Optional clip manifest. Required for MANO render and for accurate keypoint wrist anchors.",
     )
     parser.add_argument("--mano-dir", type=str, default=None, help="Optional MANO model directory override")
     parser.add_argument("--mano-device", type=str, default="cpu", help="Device for MANO rendering, e.g. cpu or cuda:0")

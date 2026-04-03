@@ -56,6 +56,10 @@ _WORKER_CAMERA_MODE = None
 _WORKER_CAMERA_CACHE = {}
 
 
+def _log(message: str):
+    print(message, flush=True)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Rewrite only camera slices in WebDataset lowdim.npy payloads")
     parser.add_argument("--source_shard_dir", required=True, help="Source directory containing shard tar files")
@@ -71,6 +75,12 @@ def build_parser():
     parser.add_argument("--shard_start", type=int, default=0, help="Inclusive shard index in sorted shard order")
     parser.add_argument("--shard_end", type=int, default=None, help="Exclusive shard index in sorted shard order")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
+    parser.add_argument(
+        "--scan_processed_root",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Force an additional processed_root scan even when _vla_episodes_cache.json is available",
+    )
     parser.add_argument(
         "--resume",
         action=argparse.BooleanOptionalAction,
@@ -128,13 +138,17 @@ def _encode_lowdim(lowdim) -> bytes:
 def _load_episode_cache(processed_root: Path):
     cache_path = processed_root / "_vla_episodes_cache.json"
     if not cache_path.is_file():
+        _log(f"Episode cache not found under {processed_root}; will scan processed_root directly.")
         return [], None
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        _log(f"Episode cache is unreadable: {cache_path}; will scan processed_root directly.")
         return [], None
     if not isinstance(payload, list):
+        _log(f"Episode cache has unexpected format: {cache_path}; will scan processed_root directly.")
         return [], None
+    _log(f"Loaded episode cache: {cache_path} ({len(payload)} entries)")
     return payload, str(cache_path)
 
 
@@ -147,11 +161,12 @@ def _iter_seq_folders(processed_root: Path):
             yield seq_folder.resolve()
 
 
-def build_episode_indices(processed_root: Path):
+def build_episode_indices(processed_root: Path, *, scan_processed_root: bool):
     clip_index = {}
     episode_index = {}
     cached_episodes, cache_path = _load_episode_cache(processed_root)
 
+    _log("Building clip / episode indices...")
     for idx, ep in enumerate(cached_episodes):
         crop_dir = ep.get("crop_dir")
         episode_id = ep.get("episode_id")
@@ -169,14 +184,33 @@ def build_episode_indices(processed_root: Path):
         except (TypeError, ValueError):
             pass
 
-    for seq_folder in _iter_seq_folders(processed_root):
-        record = {
-            "clip_id": seq_folder.name,
-            "episode_id": seq_folder.name,
-            "seq_folder": str(seq_folder),
-        }
-        clip_index.setdefault(record["clip_id"], record)
+    scanned_seq_folders = 0
+    should_scan = scan_processed_root or not cached_episodes
+    if should_scan:
+        if cached_episodes and scan_processed_root:
+            _log("scan_processed_root enabled; supplementing cache with seq_folder scan.")
+        else:
+            _log("No usable episode cache found; scanning processed_root for seq folders.")
+        for seq_folder in tqdm(_iter_seq_folders(processed_root), desc="Index seq folders", unit="seq", dynamic_ncols=True):
+            record = {
+                "clip_id": seq_folder.name,
+                "episode_id": seq_folder.name,
+                "seq_folder": str(seq_folder),
+            }
+            clip_index.setdefault(record["clip_id"], record)
+            scanned_seq_folders += 1
+            if scanned_seq_folders <= 5 or scanned_seq_folders % 5000 == 0:
+                _log(
+                    f"Index progress: scanned_seq_folders={scanned_seq_folders} "
+                    f"clip_index={len(clip_index)} episode_index={len(episode_index)}"
+                )
+    else:
+        _log("Using cached episode index only; skipping processed_root scan.")
 
+    _log(
+        f"Finished index build: scanned_seq_folders={scanned_seq_folders} "
+        f"clip_index={len(clip_index)} episode_index={len(episode_index)}"
+    )
     return clip_index, episode_index, cache_path
 
 
@@ -382,6 +416,8 @@ def select_shard_paths(shard_paths: list[str], output_dir: Path, shard_start: in
         f" selected={len(selected)}"
         f" reused={len(reused)}"
         f" pending={len(pending)}"
+        ,
+        flush=True,
     )
     return pending, reused, selected_end
 
@@ -447,13 +483,27 @@ def main():
     if not processed_root.is_dir():
         raise FileNotFoundError(f"Processed root not found: {processed_root}")
 
-    clip_index, episode_index, cache_path = build_episode_indices(processed_root)
+    _log(
+        "Rewrite camera config:"
+        f" source={source_dir}"
+        f" output={output_dir}"
+        f" processed_root={processed_root}"
+        f" camera_mode={args.camera_mode}"
+        f" workers={args.workers}"
+        f" scan_processed_root={args.scan_processed_root}"
+    )
+    clip_index, episode_index, cache_path = build_episode_indices(
+        processed_root,
+        scan_processed_root=args.scan_processed_root,
+    )
     if not clip_index and not episode_index:
         raise RuntimeError(f"Failed to discover source episodes under {processed_root}")
 
+    _log(f"Scanning shard list from {source_dir} ...")
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
+    _log(f"Discovered {len(shard_paths)} shard(s)")
 
     shard_paths, reused_shards, selected_end = select_shard_paths(
         shard_paths,
@@ -463,22 +513,41 @@ def main():
         args.resume,
     )
 
+    if not shard_paths:
+        _log("No pending shards to rewrite.")
+
     if args.workers <= 1:
         _worker_init(str(output_dir), clip_index, episode_index, args.camera_mode)
-        shard_results = [process_shard(shard_path) for shard_path in tqdm(shard_paths, desc="Rewrite camera")]
+        shard_results = []
+        for shard_path in tqdm(shard_paths, desc="Rewrite camera", unit="shard", dynamic_ncols=True):
+            result = process_shard(shard_path)
+            shard_results.append(result)
+            _log(
+                f"Finished {result['shard_name']}: "
+                f"frames={result['frames_rewritten']} clips={result['clips_touched']}"
+            )
     else:
+        _log(f"Starting worker pool: workers={args.workers}")
         with get_context().Pool(
             args.workers,
             initializer=_worker_init,
             initargs=(str(output_dir), clip_index, episode_index, args.camera_mode),
         ) as pool:
-            shard_results = list(
-                tqdm(
-                    pool.imap_unordered(_worker_process_shard, shard_paths),
-                    total=len(shard_paths),
-                    desc="Rewrite camera",
-                )
-            )
+            shard_results = []
+            for result in tqdm(
+                pool.imap_unordered(_worker_process_shard, shard_paths),
+                total=len(shard_paths),
+                desc="Rewrite camera",
+                unit="shard",
+                dynamic_ncols=True,
+            ):
+                shard_results.append(result)
+                if len(shard_results) <= 5 or len(shard_results) % 10 == 0 or len(shard_results) == len(shard_paths):
+                    _log(
+                        f"Rewrite progress: done={len(shard_results)}/{len(shard_paths)} "
+                        f"latest={result['shard_name']} frames={result['frames_rewritten']} "
+                        f"clips={result['clips_touched']}"
+                    )
 
     report = build_report(
         source_dir,
@@ -498,6 +567,8 @@ def main():
         report_path = Path(args.report_out)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        _log(f"Wrote report to {report_path}")
+    _log("Rewrite complete.")
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
