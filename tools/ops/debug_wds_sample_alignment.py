@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.clip_manifest import load_clip_manifest
 from lib.pipeline.exporters.manifest_vla import load_descriptor_episode_features
-from lib.pipeline.exporters.webdataset_discovery import discover_episodes, load_episode_stats
+from lib.pipeline.exporters.webdataset_discovery import load_episode_stats
 from lib.pipeline.exporters.webdataset_features import build_mano_models, load_episode_features
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples, validate_sample_record
 from lib.pipeline.frame_sources import read_frame_bytes_from_descriptor
@@ -73,7 +73,11 @@ def find_sample(tar_paths: list[str], *, sample_key: str | None, sample_index: i
 
 
 def _load_legacy_episode(processed_root: str, episode_index: int) -> dict:
-    episodes = discover_episodes(processed_root, require_world_res=True)
+    cache_path = Path(processed_root) / "_vla_episodes_cache.json"
+    if not cache_path.exists():
+        raise FileNotFoundError(f"Legacy episode cache not found: {cache_path}")
+    with cache_path.open("r", encoding="utf-8") as handle:
+        episodes = json.load(handle)
     if episode_index < 0 or episode_index >= len(episodes):
         raise KeyError(f"episode_index out of range under processed_root: {episode_index}")
     stats = load_episode_stats(episodes[episode_index], rescan_frame_index=False)
@@ -146,10 +150,10 @@ def _load_recomputed_episode(source_kind: str, episode_info: dict, *, device: st
 
 def _load_source_image_bytes(source_kind: str, episode_info: dict, frame_idx: int) -> bytes | None:
     if source_kind == "legacy":
-        frame_path = episode_info["frame_index"].get(frame_idx)
-        if frame_path is None or not os.path.exists(frame_path):
+        frame_path = Path(episode_info["crop_dir"]) / "extracted_images" / f"{frame_idx}.jpg"
+        if not frame_path.exists():
             return None
-        with open(frame_path, "rb") as handle:
+        with frame_path.open("rb") as handle:
             return handle.read()
     return read_frame_bytes_from_descriptor(episode_info["descriptor"], frame_idx)
 
