@@ -416,6 +416,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         print("--> Configure WebDataset dataset and dataloader...")
         dataset = hydra.utils.instantiate(cfg.dataset)
         self.use_relative_action = dataset.vla_dataset.use_relative_action
+        self.relative_action_mode = dataset.vla_dataset.relative_action_mode
         print("--> dataset instantiated")
         accelerator.wait_for_everyone()
 

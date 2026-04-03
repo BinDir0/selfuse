@@ -42,6 +42,7 @@ def build_metadata(
     output_path,
     args,
     use_relative_action,
+    relative_action_mode,
     history_pad_mode,
     future_pad_mode,
     selection_metadata,
@@ -60,6 +61,7 @@ def build_metadata(
         "sampling": {
             "mode": "val",
             "use_relative_action": bool(use_relative_action),
+            "relative_action_mode": relative_action_mode,
             "history_pad_mode": history_pad_mode,
             "future_pad_mode": future_pad_mode,
             "max_total_shards": args.max_total_shards,
@@ -185,6 +187,7 @@ def main():
     shape_meta_cfg = cfg.data.shape_meta if "data" in cfg and "shape_meta" in cfg.data else cfg.shape_meta
     shape_meta = OmegaConf.to_container(shape_meta_cfg, resolve=True)
     use_relative_action = vla_cfg.get("use_relative_action", False)
+    relative_action_mode = vla_cfg.get("relative_action_mode", "anchor")
     history_pad_mode = vla_cfg.get("history_pad_mode", "repeat")
     future_pad_mode = vla_cfg.get("future_pad_mode", "repeat")
 
@@ -192,6 +195,7 @@ def main():
         wds_datasets=wds_datasets,
         shape_meta=shape_meta,
         use_relative_action=use_relative_action,
+        relative_action_mode=relative_action_mode,
         mode="val",
         max_total_shards=args.max_total_shards,
         min_shards_per_dataset=args.min_shards_per_dataset,
@@ -244,6 +248,7 @@ def main():
             output_path=output_path,
             args=args,
             use_relative_action=use_relative_action,
+            relative_action_mode=relative_action_mode,
             history_pad_mode=history_pad_mode,
             future_pad_mode=future_pad_mode,
             selection_metadata=selection_metadata,
