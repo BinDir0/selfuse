@@ -144,34 +144,3 @@ def slice_prefix_cache_from_full_kv(full_kv: Any, prefix_lengths: torch.Tensor) 
     )
 
 
-def gather_action_position_ids(
-    input_ids: torch.Tensor,
-    action_token_id: int,
-    position_ids: torch.Tensor | None,
-    n_actions: torch.Tensor,
-    action_len: int | None = None,
-) -> torch.Tensor:
-    n_actions = n_actions.to(dtype=torch.long, device=input_ids.device)
-    max_actions = int(n_actions.max().item()) if n_actions.numel() > 0 else 0
-    if action_len is not None:
-        max_actions = max(max_actions, action_len)
-    if max_actions == 0:
-        return torch.zeros(input_ids.shape[0], 0, dtype=torch.long, device=input_ids.device)
-
-    if position_ids is None:
-        fallback = torch.arange(max_actions, device=input_ids.device, dtype=torch.long).unsqueeze(0)
-        return fallback.expand(input_ids.shape[0], -1)
-
-    if position_ids.ndim == 3:
-        position_ids = position_ids[0]
-
-    gathered = torch.zeros(input_ids.shape[0], max_actions, dtype=torch.long, device=input_ids.device)
-    action_mask = input_ids == action_token_id
-
-    for batch_idx in range(input_ids.shape[0]):
-        valid_positions = position_ids[batch_idx][action_mask[batch_idx]]
-        limit = min(int(n_actions[batch_idx].item()), int(valid_positions.numel()), max_actions)
-        if limit > 0:
-            gathered[batch_idx, :limit] = valid_positions[:limit].to(dtype=torch.long)
-
-    return gathered

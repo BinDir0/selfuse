@@ -53,9 +53,17 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         self.collator = collator
 
     def get_collator(self):
-        """Build a data collator for batching."""
+        """Build a collator copy configured for this dataset's mode."""
         assert self.collator is not None, "Collator is not set"
-        return self.collator.for_mode(self.mode)
+        from copy import deepcopy
+        from src.dataset.unified_vla_collator import UnifiedVLACollator
+        return UnifiedVLACollator(
+            formatter=self.collator.formatter,
+            batch_processor=deepcopy(self.collator.batch_processor),
+            mode=self.mode,
+            debug_capture_texts=self.collator.debug_capture_texts,
+            debug_profile_timing=self.collator.debug_profile_timing,
+        )
 
     def get_validation_dataset(self):
         """Create a new WebDataset instance for validation."""

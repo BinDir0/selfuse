@@ -6,6 +6,7 @@ import math
 import warnings
 import time
 from collections import Counter
+from copy import deepcopy
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -13,6 +14,7 @@ import torch
 from torchvision import transforms
 
 from src.model.common.normalizer import LinearNormalizer
+from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image, resize_frames
 from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
@@ -356,9 +358,15 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         return val_dataset
 
     def get_collator(self):
-        """Build a data collator for batching."""
+        """Build a collator copy configured for this dataset's mode."""
         assert self.collator is not None, "Collator not set"
-        return self.collator.for_mode(self.mode)
+        return UnifiedVLACollator(
+            formatter=self.collator.formatter,
+            batch_processor=deepcopy(self.collator.batch_processor),
+            mode=self.mode,
+            debug_capture_texts=self.collator.debug_capture_texts,
+            debug_profile_timing=self.collator.debug_profile_timing,
+        )
 
 
 class UnifiedWdsDataset(torch.utils.data.IterableDataset):

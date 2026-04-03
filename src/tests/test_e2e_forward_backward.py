@@ -336,7 +336,7 @@ class TestEndToEndForwardBackward:
             num_parallel_chunks=4,
         )
 
-        base_position_ids = model.build_action_position_ids(batch, backbone_output.position_ids)
+        base_position_ids = model.build_action_position_ids(batch)
         expected_position_ids = base_position_ids.repeat(1, 4)
         torch.testing.assert_close(model.flow_expert.last_action_position_ids, expected_position_ids)
         assert model.flow_expert.last_num_parallel_chunks == 4

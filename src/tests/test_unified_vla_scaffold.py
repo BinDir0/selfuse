@@ -4,7 +4,7 @@ from torch import nn
 from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.common.modules import TimeEmbedding
-from src.model.vlm.prefix_cache import BackboneStreamOutput, gather_action_position_ids
+from src.model.vlm.prefix_cache import BackboneStreamOutput
 from src.tests.dummy_flow_expert import DummyFlowExpert
 
 
@@ -222,13 +222,6 @@ def make_model(diffloss=None):
         rtc_config=RTCConfig(delay_strategy="uniform", max_delay=2),
         loss_config=LossConfig(),
     )
-
-
-def test_gather_action_position_ids_uses_backbone_positions():
-    input_ids = torch.tensor([[1, 102, 102, 0]], dtype=torch.long)
-    position_ids = torch.tensor([[[0, 5, 6, 0]], [[0, 5, 6, 0]], [[0, 5, 6, 0]]], dtype=torch.long)
-    gathered = gather_action_position_ids(input_ids, 102, position_ids, torch.tensor([2]))
-    assert gathered.tolist() == [[5, 6]]
 
 
 def test_legendvla_scaffold_forward():

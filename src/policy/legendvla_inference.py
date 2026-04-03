@@ -37,22 +37,6 @@ def _build_action_valid_mask(batch: dict[str, Any], action_dim: int) -> torch.Te
     return step_mask.unsqueeze(-1).expand(-1, -1, action_dim)
 
 
-def _gather_action_hidden_states(
-    hidden_states: torch.Tensor,
-    input_ids: torch.Tensor,
-    action_token_id: int,
-    action_len: int,
-) -> torch.Tensor:
-    batch_size, _, hidden_size = hidden_states.shape
-    gathered = hidden_states.new_zeros(batch_size, action_len, hidden_size)
-    action_mask = input_ids == action_token_id
-    for batch_idx in range(batch_size):
-        action_hidden = hidden_states[batch_idx][action_mask[batch_idx]]
-        limit = min(action_len, int(action_hidden.shape[0]))
-        if limit > 0:
-            gathered[batch_idx, :limit] = action_hidden[:limit]
-    return gathered
-
 
 def _last_valid_indices(attention_mask: torch.Tensor) -> torch.Tensor:
     seq_len = attention_mask.shape[1]
@@ -190,8 +174,7 @@ def infer_ar_action(
         backbone_output = model.forward_backbone_stream(step_batch, slot_embeds)
         action_hidden = _gather_action_hidden_states(
             hidden_states=backbone_output.last_hidden_states,
-            input_ids=step_batch["input_ids"],
-            action_token_id=model.action_token_index,
+            answer_start_idx=step_batch["answer_start_idx"],
             action_len=action_len,
         )
         current_hidden = action_hidden[:, step_idx, :]

@@ -9,7 +9,6 @@ from torch import nn
 from src.utils.compile_utils import compile_module_list
 from src.model.vlm.prefix_cache import (
     BackboneStreamOutput,
-    gather_action_position_ids,
     slice_prefix_cache_from_full_kv,
 )
 
@@ -249,62 +248,21 @@ class LegendVLA(nn.Module):
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
-        input_ids = batch["input_ids"]
-        attention_mask = batch.get("attention_mask")
         answer_start_idx = batch.get("answer_start_idx")
-        action_mask = input_ids == self.action_token_index
-        has_action_tokens = action_mask.any(dim=1)
+        assert answer_start_idx is not None, (
+            "answer_start_idx is required in batch. "
+            "Ensure the collator provides it."
+        )
+        return answer_start_idx.to(device=batch["input_ids"].device, dtype=torch.long)
 
-        if answer_start_idx is not None:
-            prefix_lengths = answer_start_idx.to(device=input_ids.device, dtype=torch.long)
-        elif attention_mask is not None:
-            prefix_lengths = attention_mask.to(dtype=torch.long).sum(dim=1)
-        else:
-            prefix_lengths = torch.full(
-                (input_ids.shape[0],),
-                input_ids.shape[1],
-                dtype=torch.long,
-                device=input_ids.device,
-            )
-
-        if torch.any(has_action_tokens):
-            action_start_idx = action_mask.to(dtype=torch.long).argmax(dim=1)
-            prefix_lengths = torch.where(has_action_tokens, action_start_idx, prefix_lengths)
-        return prefix_lengths
-
-    def build_action_position_ids(
-        self,
-        batch: dict,
-        backbone_position_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def build_action_position_ids(self, batch: dict) -> torch.Tensor:
         if "actions" not in batch:
             raise ValueError("Action position ids require an `actions` tensor in the batch.")
-
-        n_actions = batch.get("n_actions")
-        if n_actions is None:
-            n_actions = torch.full(
-                (batch["actions"].shape[0],),
-                batch["actions"].shape[1],
-                dtype=torch.long,
-                device=batch["actions"].device,
-            )
-
-        gathered = gather_action_position_ids(
-            input_ids=batch["input_ids"],
-            action_token_id=self.action_token_index,
-            position_ids=backbone_position_ids,
-            n_actions=n_actions,
-            action_len=batch["actions"].shape[1],
-        )
-        if gathered.numel() > 0:
-            return gathered
-
         batch_size = batch["actions"].shape[0]
         action_len = batch["actions"].shape[1]
         device = batch["actions"].device
         base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
-        positions = base + torch.arange(action_len, device=device).unsqueeze(0)
-        return positions.expand(batch_size, -1)
+        return base + torch.arange(action_len, device=device).unsqueeze(0)
 
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
         slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None, "camera": None}
@@ -375,7 +333,7 @@ class LegendVLA(nn.Module):
         )
         action_embeds = self.action_encoder(flow_inputs["noisy_actions"])
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
-        action_position_ids = self.build_action_position_ids(batch, backbone_output.position_ids)
+        action_position_ids = self.build_action_position_ids(batch)
         action_mask = action_mask.repeat(1, num_parallel_chunks)
         action_position_ids = action_position_ids.repeat(1, num_parallel_chunks)
         if action_embeds.shape[1] != action_mask.shape[1]:

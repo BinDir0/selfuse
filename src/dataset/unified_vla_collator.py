@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import time
 from typing import Any
 
@@ -30,6 +29,7 @@ class UnifiedVLACollator:
         self,
         formatter: Qwen3VLChatFormatter,
         batch_processor: Qwen3VLBatchProcessor,
+        mode: str = "train",
         debug_capture_texts: bool = False,
         debug_profile_timing: bool = False,
     ):
@@ -38,16 +38,14 @@ class UnifiedVLACollator:
         self.ignore_index = batch_processor.ignore_index
         self.debug_capture_texts = bool(debug_capture_texts)
         self.debug_profile_timing = bool(debug_profile_timing)
+        self.mode = mode
+        self.prompt_only_input = "infer" in mode
+        self.batch_processor.padding_side = "left" if mode == "infer-ar" else "right"
 
         if self.formatter.state_token != self.batch_processor.state_token:
             raise ValueError("Formatter and batch processor must share the same state token.")
         if self.formatter.action_token != self.batch_processor.action_token:
             raise ValueError("Formatter and batch processor must share the same action token.")
-
-    def for_mode(self, mode: str) -> "UnifiedVLACollator":
-        collator = deepcopy(self)
-        collator.batch_processor.padding_side = "left" if mode == "infer-ar" else "right"
-        return collator
 
     def collate_values(self, values: list[Any]) -> Any:
         if isinstance(values[0], torch.Tensor):
@@ -57,27 +55,20 @@ class UnifiedVLACollator:
     def collate_raw(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         """Build one batch from raw dataset samples.
 
-        The collator runs two related encodes:
-        - A full-conversation encode for the actual model inputs.
-        - A prompt-only encode for all samples to locate where assistant generation starts.
+        Two encoding strategies depending on ``prompt_only_input``:
 
-        `add_generation_prompt` is intentionally different across the two passes:
-        - Full conversations use `False` because assistant targets are already present in the rendered messages.
-        - Prompt-only inputs use `True` so the rendered prompt ends exactly at the assistant prefix where
-          generation should begin.
+        - **Training** (``prompt_only_input=False``):
+          Full-conversation encode (with assistant content) for model inputs,
+          plus a prompt-only encode to locate ``answer_start_idx``.
+        - **Inference** (``prompt_only_input=True``):
+          Prompt-only encode with ``add_generation_prompt=True`` only.
+          No assistant content in ``input_ids``; downstream modules use
+          ``answer_start_idx`` to locate the generation boundary.
         """
         collate_start = time.perf_counter()
-        full_messages = [self.formatter.build_messages(sample, prompt_only=False) for sample in samples]
-        # Keep the original assistant turn only. Appending a fresh assistant prefix here would shift labels.
-        full_batch = self.batch_processor.encode_messages(
-            messages_batch=full_messages,
-            batch_samples=samples,
-            add_generation_prompt=False,
-            return_rendered_texts=self.debug_capture_texts,
-        )
 
+        # Prompt-only encode: always needed for answer_start_idx.
         prompt_messages = [self.formatter.build_messages(sample, prompt_only=True) for sample in samples]
-        # Append the assistant prefix so prompt length matches the generation start for both VLM and VLA samples.
         prompt_batch = self.batch_processor.encode_messages(
             messages_batch=prompt_messages,
             batch_samples=samples,
@@ -85,11 +76,23 @@ class UnifiedVLACollator:
             return_rendered_texts=self.debug_capture_texts,
         )
 
-        input_ids = full_batch["input_ids"].to(dtype=torch.long)
-        attention_mask = full_batch["attention_mask"].to(dtype=torch.long)
-        mm_token_type_ids = full_batch["mm_token_type_ids"].to(dtype=torch.long)
-        image_grid_thw = full_batch["image_grid_thw"]
-        video_grid_thw = full_batch["video_grid_thw"]
+        if self.prompt_only_input:
+            main_batch = prompt_batch
+            full_messages = None
+        else:
+            full_messages = [self.formatter.build_messages(sample, prompt_only=False) for sample in samples]
+            main_batch = self.batch_processor.encode_messages(
+                messages_batch=full_messages,
+                batch_samples=samples,
+                add_generation_prompt=False,
+                return_rendered_texts=self.debug_capture_texts,
+            )
+
+        input_ids = main_batch["input_ids"].to(dtype=torch.long)
+        attention_mask = main_batch["attention_mask"].to(dtype=torch.long)
+        mm_token_type_ids = main_batch["mm_token_type_ids"].to(dtype=torch.long)
+        image_grid_thw = main_batch["image_grid_thw"]
+        video_grid_thw = main_batch["video_grid_thw"]
 
         is_vla_mask = torch.stack([sample["is_vla_data"] for sample in samples]).to(
             device=input_ids.device,
@@ -98,22 +101,23 @@ class UnifiedVLACollator:
         answer_start_idx = prompt_batch["attention_mask"].sum(dim=1).to(device=input_ids.device, dtype=torch.long)
         labels = torch.full_like(input_ids, self.ignore_index)
 
-        vlm_indices = (~is_vla_mask).nonzero(as_tuple=False).flatten().tolist()
-        if vlm_indices:
-            vlm_answer_start_idx = answer_start_idx[vlm_indices]
-            labels[vlm_indices] = self.batch_processor.build_labels(
-                input_ids=input_ids[vlm_indices],
-                attention_mask=attention_mask[vlm_indices],
-                answer_start_idx=vlm_answer_start_idx,
-            ).to(device=input_ids.device)
+        if not self.prompt_only_input:
+            vlm_indices = (~is_vla_mask).nonzero(as_tuple=False).flatten().tolist()
+            if vlm_indices:
+                vlm_answer_start_idx = answer_start_idx[vlm_indices]
+                labels[vlm_indices] = self.batch_processor.build_labels(
+                    input_ids=input_ids[vlm_indices],
+                    attention_mask=attention_mask[vlm_indices],
+                    answer_start_idx=vlm_answer_start_idx,
+                ).to(device=input_ids.device)
 
         batch: dict[str, Any] = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
-            "pixel_values": full_batch["pixel_values"],
+            "pixel_values": main_batch["pixel_values"],
             "image_grid_thw": image_grid_thw.to(dtype=torch.long) if image_grid_thw is not None else None,
-            "pixel_values_videos": full_batch["pixel_values_videos"],
+            "pixel_values_videos": main_batch["pixel_values_videos"],
             "video_grid_thw": video_grid_thw.to(dtype=torch.long) if video_grid_thw is not None else None,
             "mm_token_type_ids": mm_token_type_ids,
             "answer_start_idx": answer_start_idx,
@@ -143,13 +147,12 @@ class UnifiedVLACollator:
             intrinsics = [s["intrinsic"] for s in samples]
             batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
 
-
-
         if self.debug_capture_texts:
-            batch["debug_full_messages"] = full_messages
             batch["debug_prompt_messages"] = prompt_messages
-            batch["debug_full_texts"] = full_batch["rendered_texts"]
             batch["debug_prompt_texts"] = prompt_batch["rendered_texts"]
+            if full_messages is not None:
+                batch["debug_full_messages"] = full_messages
+                batch["debug_full_texts"] = main_batch["rendered_texts"]
 
         if self.debug_profile_timing:
             sample_profiles = [

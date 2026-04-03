@@ -16,7 +16,6 @@ from src.model.vlm.prefix_cache import (
     LayerKV,
     PrefixKVCache,
     build_prefix_mask,
-    gather_action_position_ids,
     get_hf_cache_layers,
     slice_prefix_cache_from_full_kv,
 )
@@ -233,16 +232,21 @@ class TestUnifiedVLACollatorRaw:
         assert batch["states"].shape == (2, 4, 48)
         assert batch["actions"].shape == (2, 4, 48)
 
-    def test_for_mode_updates_batch_processor_padding_side(self):
-        collator = UnifiedVLACollator(
+    def test_mode_sets_padding_side_and_prompt_only(self):
+        train_collator = UnifiedVLACollator(
             formatter=Qwen3VLChatFormatter(),
             batch_processor=DummyBatchProcessor(),
         )
+        infer_ar_collator = UnifiedVLACollator(
+            formatter=Qwen3VLChatFormatter(),
+            batch_processor=DummyBatchProcessor(),
+            mode="infer-ar",
+        )
 
-        infer_ar_collator = collator.for_mode("infer-ar")
-
-        assert collator.batch_processor.padding_side == "right"
+        assert train_collator.batch_processor.padding_side == "right"
+        assert train_collator.prompt_only_input is False
         assert infer_ar_collator.batch_processor.padding_side == "left"
+        assert infer_ar_collator.prompt_only_input is True
 
 
 
@@ -343,45 +347,6 @@ class TestSlicePrefixCache:
         prefix_lengths = torch.tensor([5])
         prefix_cache = slice_prefix_cache_from_full_kv(None, prefix_lengths)
         assert prefix_cache.num_layers == 0
-
-
-class TestGatherActionPositionIds:
-    """Verify action position ID gathering from backbone position IDs."""
-
-    def test_basic_gather(self):
-        input_ids = torch.tensor([[1, 2, 102, 102, 0]])
-        position_ids = torch.tensor([[[0, 1, 2, 3, 0]]])
-        n_actions = torch.tensor([2])
-        gathered = gather_action_position_ids(input_ids, 102, position_ids, n_actions)
-        assert gathered.shape == (1, 2)
-        assert gathered[0].tolist() == [2, 3]
-
-    def test_no_action_tokens(self):
-        input_ids = torch.tensor([[1, 2, 3]])
-        position_ids = torch.tensor([[[0, 1, 2]]])
-        n_actions = torch.tensor([0])
-        gathered = gather_action_position_ids(input_ids, 102, position_ids, n_actions)
-        assert gathered.shape == (1, 0)
-
-    def test_none_position_ids_fallback(self):
-        input_ids = torch.tensor([[1, 102, 102]])
-        n_actions = torch.tensor([2])
-        gathered = gather_action_position_ids(input_ids, 102, None, n_actions)
-        assert gathered.shape == (1, 2)
-        assert gathered[0].tolist() == [0, 1]
-
-    def test_batch_with_different_action_counts(self):
-        input_ids = torch.tensor([
-            [1, 102, 102, 102, 0],
-            [1, 2, 102, 102, 0],
-        ])
-        position_ids = torch.tensor([[[0, 1, 2, 3, 0], [0, 1, 2, 3, 0]]])
-        n_actions = torch.tensor([3, 2])
-        gathered = gather_action_position_ids(input_ids, 102, position_ids, n_actions)
-        assert gathered.shape == (2, 3)
-        assert gathered[0].tolist() == [1, 2, 3]
-        assert gathered[1, :2].tolist() == [2, 3]
-        assert gathered[1, 2].item() == 0  # padded
 
 
 # ======================================================================
