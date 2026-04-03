@@ -113,10 +113,16 @@ class Qwen3VLTextDecoderLayerWithKV(Qwen3VLTextDecoderLayer):
         use_cache: bool | None = False,
         cache_position: torch.LongTensor | None = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, _, key_states, value_states = self.self_attn(
+        # Second return value from attention_interface:
+        #   eager  -> full [B,H,Q,K] attention matrix (always computed)
+        #   flex   -> LSE tensor or None
+        #   sdpa   -> None
+        # We only collect it when the caller sets output_attentions=True
+        # AND the backend is eager (enforced at the config level).
+        hidden_states, attn_weights, key_states, value_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -132,7 +138,7 @@ class Qwen3VLTextDecoderLayerWithKV(Qwen3VLTextDecoderLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        return hidden_states, key_states, value_states
+        return hidden_states, attn_weights, key_states, value_states
 
 
 class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
@@ -178,7 +184,7 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
 
         return_dict = bool(kwargs.pop("return_dict", True))
         kwargs.pop("output_hidden_states", None)
-        kwargs.pop("output_attentions", None)
+        output_attentions = bool(kwargs.pop("output_attentions", False))
 
         base_model = self.upstream_text_model
         if inputs_embeds is None:
@@ -219,8 +225,13 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
         hidden_states = inputs_embeds
         position_embeddings = base_model.rotary_emb(hidden_states, rope_position_ids)
         layer_kv: list[tuple[torch.Tensor, torch.Tensor]] = []
+        all_attn_weights: list[torch.Tensor | None] = [] if output_attentions else []
 
         for layer_idx, decoder_layer in enumerate(self.layers):
+            # output_attentions is NOT forwarded to the attention layer because
+            # Qwen3-VL attention backends ignore it. The backend choice alone
+            # decides whether the second return value is real weights (eager),
+            # LSE (flex), or None (sdpa). We collect at this level instead.
             layer_kwargs = dict(
                 attention_mask=attention_mask,
                 position_ids=text_position_ids,
@@ -235,16 +246,18 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
                 and self.training
                 and layer_idx % self.checkpoint_every_n == 0
             ):
-                hidden_states, key_states, value_states = (
+                hidden_states, attn_weights, key_states, value_states = (
                     self._gradient_checkpointing_func(
                         decoder_layer, hidden_states, **layer_kwargs,
                     )
                 )
             else:
-                hidden_states, key_states, value_states = decoder_layer(
+                hidden_states, attn_weights, key_states, value_states = decoder_layer(
                     hidden_states, **layer_kwargs,
                 )
             layer_kv.append((key_states, value_states))
+            if output_attentions:
+                all_attn_weights.append(attn_weights)
 
             if deepstack_visual_embeds is not None and layer_idx < len(deepstack_visual_embeds):
                 hidden_states = base_model._deepstack_process(
@@ -260,6 +273,7 @@ class Qwen3VLTextModelWithKV(Qwen3VLTextModel):
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=full_layer_kv,
+            attentions=tuple(all_attn_weights) if output_attentions else None,
         )
 
 
@@ -631,6 +645,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         action_token_id: int | None = None,
         use_cache: bool = False,
         output_hidden_states: bool = True,
+        output_attentions: bool = False,
         past_key_values: Any = None,
     ) -> BackboneStreamOutput:
         del output_hidden_states
@@ -666,6 +681,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             visual_pos_masks=embed_output.visual_pos_masks,
             deepstack_visual_embeds=embed_output.deepstack_visual_embeds,
             use_cache=use_cache,
+            output_attentions=output_attentions,
             return_dict=True,
         )
 
@@ -674,4 +690,5 @@ class Qwen3VLBackboneWrapper(nn.Module):
             last_hidden_states=outputs.last_hidden_state,
             position_ids=position_ids,
             past_key_values_hf=outputs.past_key_values,
+            attention_weights=outputs.attentions,
         )

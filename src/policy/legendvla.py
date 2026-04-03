@@ -323,7 +323,9 @@ class LegendVLA(nn.Module):
             slot_embeds["action"] = action_embeds
         return slot_embeds
 
-    def forward_backbone_stream(self, batch: dict, slot_embeds: dict) -> BackboneStreamOutput:
+    def forward_backbone_stream(
+        self, batch: dict, slot_embeds: dict, output_attentions: bool = False,
+    ) -> BackboneStreamOutput:
         output = self.backbone(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
@@ -335,6 +337,7 @@ class LegendVLA(nn.Module):
             state_slot_embeds=slot_embeds.get("state"),
             action_slot_embeds=slot_embeds.get("action"),
             camera_slot_embeds=slot_embeds.get("camera"),
+            output_attentions=output_attentions,
         )
         output.prefix_cache = slice_prefix_cache_from_full_kv(
             output.past_key_values_hf,
@@ -356,6 +359,7 @@ class LegendVLA(nn.Module):
         backbone_output: BackboneStreamOutput,
         flow_inputs: dict,
         num_parallel_chunks: int,
+        output_attentions: bool = False,
     ) -> dict[str, torch.Tensor | None]:
         time_for_model = flow_inputs["time_for_model"]
         if time_for_model.ndim != 2:
@@ -384,19 +388,26 @@ class LegendVLA(nn.Module):
                 f"{action_position_ids.shape[1]} does not match action embeddings length {action_embeds.shape[1]}."
             )
         prefix_cache = backbone_output.prefix_cache
-        expert_hidden = self.flow_expert(
+        expert_output = self.flow_expert(
             action_embeds=action_embeds,
             prefix_cache=prefix_cache,
             action_position_ids=action_position_ids,
             time_cond=time_cond,
             action_mask=action_mask,
             num_parallel_chunks=num_parallel_chunks,
+            output_attentions=output_attentions,
         )
+        if output_attentions:
+            expert_hidden, expert_attn_weights = expert_output
+        else:
+            expert_hidden = expert_output
+            expert_attn_weights = None
         pred_v = self.action_decoder(expert_hidden)
         return {
             "time_cond": time_cond,
             "action_hidden_states": expert_hidden,
             "pred_v": pred_v,
+            "expert_attention_weights": expert_attn_weights,
         }
 
     def compute_loss(self, batch: dict, **kwargs) -> dict[str, torch.Tensor]:

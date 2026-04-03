@@ -86,14 +86,17 @@ class DiTQwen3DecoderLayer(nn.Module):
         prefix_value: torch.Tensor,
         time_cond: torch.Tensor,
         text_position_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        output_attentions: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         prefix_key = self.prefix_key_proj(prefix_key)
         prefix_value = self.prefix_value_proj(prefix_value)
         prefix_cache = StaticPrefixCache(prefix_key, prefix_value)
 
         residual = hidden_states
         attn_inputs, attn_gate = self.attn_adaln(hidden_states, time_cond)
-        attn_output, _ = self.self_attn(
+        # Second return is attn_weights (eager), LSE (flex), or None (sdpa).
+        # We only collect it when output_attentions=True + eager backend.
+        attn_output, attn_weights = self.self_attn(
             hidden_states=attn_inputs,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
@@ -108,7 +111,7 @@ class DiTQwen3DecoderLayer(nn.Module):
         mlp_inputs, mlp_gate = self.mlp_adaln(hidden_states, time_cond)
         mlp_output = self.mlp(mlp_inputs)
         hidden_states = residual + mlp_gate * mlp_output
-        return hidden_states
+        return hidden_states, attn_weights
 
 
 class Qwen3ActionExpert(nn.Module):
@@ -216,6 +219,46 @@ class Qwen3ActionExpert(nn.Module):
         self.gradient_checkpointing = False
         self.checkpoint_every_n = 1
 
+    @staticmethod
+    def build_4d_attention_mask(
+        full_attention_mask_bool: torch.Tensor,
+        prefix_len: int,
+        action_len: int,
+        chunk_size: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Build 4D additive attention mask equivalent to the flex_attention BlockMask.
+
+        Returns [B, 1, action_len, prefix_len + action_len] with 0 for visible
+        positions and a large negative value for masked positions.
+        """
+        device = full_attention_mask_bool.device
+        kv_len = prefix_len + action_len
+
+        # Per-KV validity: [B, 1, 1, KV]
+        valid = full_attention_mask_bool[:, None, None, :]
+
+        kv_indices = torch.arange(kv_len, device=device)
+        q_indices = torch.arange(action_len, device=device)
+
+        # Prefix positions are always visible: [1, 1, 1, KV]
+        is_prefix = (kv_indices < prefix_len).view(1, 1, 1, -1)
+
+        # Same-chunk logic for the action part: [1, 1, Q, KV]
+        q_chunks = q_indices // chunk_size
+        kv_action_offset = (kv_indices - prefix_len).clamp(min=0)
+        kv_chunks = kv_action_offset // chunk_size
+        same_chunk = q_chunks.view(1, 1, -1, 1) == kv_chunks.view(1, 1, 1, -1)
+        is_action_kv = kv_indices >= prefix_len
+        is_action_kv = is_action_kv.view(1, 1, 1, -1)
+
+        # Reproduce mask_mod: valid & (is_prefix | (is_action_kv & same_chunk))
+        bool_mask = valid & (is_prefix | (is_action_kv & same_chunk))
+
+        min_val = torch.finfo(dtype).min
+        return torch.where(bool_mask, torch.zeros((), dtype=dtype, device=device),
+                           torch.full((), min_val, dtype=dtype, device=device))
+
     def forward(
         self,
         action_embeds: torch.Tensor,
@@ -224,7 +267,8 @@ class Qwen3ActionExpert(nn.Module):
         time_cond: torch.Tensor,
         action_mask: torch.Tensor,
         num_parallel_chunks: int,
-    ) -> torch.Tensor:
+        output_attentions: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor | None]]:
         if prefix_cache is None:
             raise ValueError("Action expert requires a prefix cache.")
         if prefix_cache.num_layers < self.num_layers:
@@ -266,30 +310,44 @@ class Qwen3ActionExpert(nn.Module):
             raise ValueError(
                 f"Action length {action_len} must be divisible by num_parallel_chunks={num_parallel_chunks}."
             )
-        from torch.nn.attention.flex_attention import create_block_mask
 
         batch_size = hidden_states.shape[0]
         chunk_size = action_len // num_parallel_chunks
         full_attention_mask_bool = full_attention_mask.to(device=action_embeds.device)
 
-        def mask_mod(b, h, q_idx, kv_idx):
-            del h
-            valid = full_attention_mask_bool[b, kv_idx]
-            is_prefix = kv_idx < prefix_len
-            same_chunk = (q_idx // chunk_size) == ((kv_idx - prefix_len) // chunk_size)
-            return valid & (is_prefix | same_chunk)
+        use_flex = self.config._attn_implementation == "flex_attention"
+        if use_flex:
+            from torch.nn.attention.flex_attention import create_block_mask
 
-        # T=1 is the same code path with a single chunk, which degenerates to
-        # fully bidirectional action attention plus always-visible prefix KV.
-        attention_mask = create_block_mask(
-            mask_mod=mask_mod,
-            B=batch_size,
-            H=None,
-            Q_LEN=action_len,
-            KV_LEN=prefix_len + action_len,
-            device=action_embeds.device,
-        )
+            def mask_mod(b, h, q_idx, kv_idx):
+                del h
+                valid = full_attention_mask_bool[b, kv_idx]
+                is_prefix = kv_idx < prefix_len
+                same_chunk = (q_idx // chunk_size) == ((kv_idx - prefix_len) // chunk_size)
+                return valid & (is_prefix | same_chunk)
 
+            # T=1 is the same code path with a single chunk, which degenerates to
+            # fully bidirectional action attention plus always-visible prefix KV.
+            attention_mask = create_block_mask(
+                mask_mod=mask_mod,
+                B=batch_size,
+                H=None,
+                Q_LEN=action_len,
+                KV_LEN=prefix_len + action_len,
+                device=action_embeds.device,
+            )
+        else:
+            # Eager / sdpa: build a standard 4D additive attention mask
+            # that reproduces the same masking logic.
+            attention_mask = self.build_4d_attention_mask(
+                full_attention_mask_bool,
+                prefix_len,
+                action_len,
+                chunk_size,
+                dtype=hidden_states.dtype,
+            )
+
+        all_attn_weights: list[torch.Tensor | None] = []
         for layer_idx, layer in enumerate(self.layers):
             # Compile-friendly: pure tensor indexing on stacked cache
             prefix_key = prefix_cache.keys[layer_idx]
@@ -300,7 +358,7 @@ class Qwen3ActionExpert(nn.Module):
                 and self.training
                 and layer_idx % self.checkpoint_every_n == 0
             ):
-                hidden_states = self._gradient_checkpointing_func(
+                hidden_states, layer_attn = self._gradient_checkpointing_func(
                     layer,
                     hidden_states,
                     position_embeddings,
@@ -309,9 +367,10 @@ class Qwen3ActionExpert(nn.Module):
                     prefix_value,
                     time_cond,
                     text_position_ids,
+                    output_attentions,
                 )
             else:
-                hidden_states = layer(
+                hidden_states, layer_attn = layer(
                     hidden_states,
                     position_embeddings=position_embeddings,
                     attention_mask=attention_mask,
@@ -319,7 +378,13 @@ class Qwen3ActionExpert(nn.Module):
                     prefix_value=prefix_value,
                     time_cond=time_cond,
                     text_position_ids=text_position_ids,
+                    output_attentions=output_attentions,
                 )
+            if output_attentions:
+                all_attn_weights.append(layer_attn)
 
         hidden_states = self.norm(hidden_states)
-        return hidden_states * action_mask.unsqueeze(-1).to(dtype=hidden_states.dtype)
+        result = hidden_states * action_mask.unsqueeze(-1).to(dtype=hidden_states.dtype)
+        if output_attentions:
+            return result, all_attn_weights
+        return result

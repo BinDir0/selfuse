@@ -62,15 +62,18 @@ def _last_valid_indices(attention_mask: torch.Tensor) -> torch.Tensor:
     return last_indices.clamp(min=0)
 
 
-def prepare_prefix_memory(model, batch: dict):
+def prepare_prefix_memory(model, batch: dict, output_attentions: bool = False):
     prefix_batch = _clone_batch(batch)
     prefix_batch.pop("actions", None)
     prefix_batch.pop("actions_valid_mask", None)
     slot_embeds = model.build_slot_embeddings(prefix_batch, add_action_noise=False)
-    return model.forward_backbone_stream(prefix_batch, slot_embeds)
+    return model.forward_backbone_stream(prefix_batch, slot_embeds, output_attentions=output_attentions)
 
 
-def infer_flow_action(model, batch: dict, prev_action_chunk=None, inference_delay: int = 0):
+def infer_flow_action(
+    model, batch: dict, prev_action_chunk=None, inference_delay: int = 0,
+    output_attentions: bool = False,
+):
     working_batch = _clone_batch(batch)
     working_batch["action_token_id"] = model.action_token_index
 
@@ -95,9 +98,12 @@ def infer_flow_action(model, batch: dict, prev_action_chunk=None, inference_dela
     working_batch["actions_valid_mask"] = action_valid_mask
     working_batch["n_actions"] = action_step_mask.sum(dim=1).to(dtype=torch.long)
 
-    backbone_output = prepare_prefix_memory(model, working_batch)
+    backbone_output = prepare_prefix_memory(model, working_batch, output_attentions=output_attentions)
+    vlm_attn_weights = backbone_output.attention_weights if output_attentions else None
+
     delta_t = 1.0 / max(model.num_inference_steps, 1)
     t = torch.zeros(batch_size, device=device, dtype=generated_actions.dtype)
+    expert_attn_per_step: list | None = [] if output_attentions else None
 
     for _ in range(model.num_inference_steps):
         if use_rtc:
@@ -123,9 +129,12 @@ def infer_flow_action(model, batch: dict, prev_action_chunk=None, inference_dela
             backbone_output=backbone_output,
             flow_inputs=flow_inputs,
             num_parallel_chunks=1,
+            output_attentions=output_attentions,
         )
         generated_actions = generated_actions + delta_t * flow_output["pred_v"]
         t = (t + delta_t).clamp(max=1.0)
+        if output_attentions:
+            expert_attn_per_step.append(flow_output["expert_attention_weights"])
 
     if use_rtc:
         generated_actions = torch.where(
@@ -134,7 +143,14 @@ def infer_flow_action(model, batch: dict, prev_action_chunk=None, inference_dela
             generated_actions,
         )
 
-    return generated_actions * action_step_mask.unsqueeze(-1).to(dtype=generated_actions.dtype)
+    result = generated_actions * action_step_mask.unsqueeze(-1).to(dtype=generated_actions.dtype)
+    if output_attentions:
+        return {
+            "generated_actions": result,
+            "vlm_attention_weights": vlm_attn_weights,
+            "expert_attention_weights": expert_attn_per_step,
+        }
+    return result
 
 
 def infer_ar_action(
