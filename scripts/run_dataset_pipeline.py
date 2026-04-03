@@ -273,6 +273,7 @@ def main():
         if not records:
             raise RuntimeError(f"No clips found while building manifest for adapter={adapter_name}")
         write_clip_manifest(records, manifest_path)
+        from lib.pipeline.frame_sources import classify_descriptor_storage
 
         shard_root = paths_cfg.get("shard_root")
         if shard_root and source_type == "buildai":
@@ -292,6 +293,10 @@ def main():
                     "source_id": source_id,
                     "split": split,
                     "clip_count": len(records),
+                    "descriptor_paths": {
+                        kind: sum(1 for record in records if classify_descriptor_storage(record.descriptor) == kind)
+                        for kind in sorted({classify_descriptor_storage(record.descriptor) for record in records})
+                    },
                     "manifest_out": str(manifest_path.resolve()),
                 },
                 ensure_ascii=False,

@@ -53,6 +53,7 @@ def main():
         write_shard_dir_list,
     )
     from lib.pipeline.datasets import get_dataset_adapter
+    from lib.pipeline.frame_sources import classify_descriptor_storage
 
     args = get_parser().parse_args()
     shard_dirs = []
@@ -106,8 +107,9 @@ def main():
             shard_dirs,
             source_id=args.source_id,
             split=args.split,
-            seq_folder_root=args.seq_folder_root,
         )
+        if args.seq_folder_root:
+            remap_descriptor_seq_folders([record.descriptor for record in records], args.seq_folder_root)
     if not records:
         raise RuntimeError("No clips found while building manifest")
 
@@ -120,8 +122,12 @@ def main():
         "split": records[0].split,
         "shard_dir_count": len(shard_dirs),
         "clip_count": len(records),
+        "descriptor_paths": {},
         "manifest_out": str(Path(args.manifest_out).resolve()),
     }
+    for record in records:
+        kind = classify_descriptor_storage(record.descriptor)
+        summary["descriptor_paths"][kind] = summary["descriptor_paths"].get(kind, 0) + 1
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

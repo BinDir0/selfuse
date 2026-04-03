@@ -18,7 +18,12 @@ from tqdm import tqdm
 
 from lib.pipeline.annotation_protocol import load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
-from lib.pipeline.frame_sources import read_frame_bytes_from_descriptor
+from lib.pipeline.frame_sources import (
+    classify_descriptor_storage,
+    is_light_tar_descriptor,
+    read_frame_bytes_from_descriptor,
+    validate_descriptor_for_frame_reads,
+)
 from lib.pipeline.exporters.webdataset_features import (
     _build_lowdim_features,
     _compute_joint_states,
@@ -462,9 +467,26 @@ def _worker_init(device_specs, mano_dir, feature_cache_dir):
     _worker_shard_tar_cache = {}
 
 
+def _classify_light_descriptor_error(error: Exception) -> str:
+    if isinstance(error, KeyError):
+        return "missing_member"
+    if isinstance(error, IndexError):
+        return "invalid_light_descriptor"
+    if isinstance(error, ValueError):
+        return "invalid_light_descriptor"
+
+    message = str(error).lower()
+    if "failed to extract" in message or "no item named" in message:
+        return "missing_member"
+    if "short read" in message:
+        return "read_error"
+    return "read_error"
+
+
 def _worker_process_shard(task):
     frames_written = 0
     skipped_episodes = 0
+    skipped_clips = []
     touched_episodes = set()
     tar_writer = None
 
@@ -489,35 +511,61 @@ def _worker_process_shard(task):
                 continue
 
             descriptor = episode_slice["descriptor"]
-            for frame_idx in range(episode_slice["frame_start"], episode_slice["frame_end"]):
-                image_bytes = read_frame_bytes_from_descriptor(
-                    descriptor,
-                    frame_idx,
-                    shard_fd_cache=_worker_shard_fd_cache,
-                    shard_tar_cache=_worker_shard_tar_cache,
-                )
-                meta = {
-                    "dataset_name": episode_slice["source_id"],
-                    "clip_id": episode_slice["clip_id"],
-                    "episode_index": episode_slice["episode_index"],
-                    "split": episode_slice["split"],
-                    "instruction": list(episode_slice.get("instruction", [])),
-                    "instruction_num": int(episode_slice.get("instruction_num", 0)),
-                    "language": episode_slice.get("language"),
-                    "presence": int(episode_data["presence_per_frame"][frame_idx]),
-                    "lowdim_schema": "hawor_wrist_world_v2",
-                    "wrist_translation_semantics": "mano_joint_0_world",
-                    "camera_extrinsic_convention": "w2c",
-                }
-                key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
-                if tar_writer is None:
-                    os.makedirs(os.path.dirname(task["output_path"]), exist_ok=True)
-                    tar_writer = tarfile.open(task["tmp_path"], "w")
+            clip_samples = []
+            try:
+                for frame_idx in range(episode_slice["frame_start"], episode_slice["frame_end"]):
+                    image_bytes = read_frame_bytes_from_descriptor(
+                        descriptor,
+                        frame_idx,
+                        shard_fd_cache=_worker_shard_fd_cache,
+                        shard_tar_cache=_worker_shard_tar_cache,
+                    )
+                    meta = {
+                        "dataset_name": episode_slice["source_id"],
+                        "clip_id": episode_slice["clip_id"],
+                        "episode_index": episode_slice["episode_index"],
+                        "split": episode_slice["split"],
+                        "instruction": list(episode_slice.get("instruction", [])),
+                        "instruction_num": int(episode_slice.get("instruction_num", 0)),
+                        "language": episode_slice.get("language"),
+                        "presence": int(episode_data["presence_per_frame"][frame_idx]),
+                        "lowdim_schema": "hawor_wrist_world_v2",
+                        "wrist_translation_semantics": "mano_joint_0_world",
+                        "camera_extrinsic_convention": "w2c",
+                    }
+                    key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
+                    clip_samples.append(
+                        (
+                            key,
+                            image_bytes,
+                            episode_data["lowdim_all"][frame_idx],
+                            meta,
+                        )
+                    )
+            except Exception as error:
+                if is_light_tar_descriptor(descriptor):
+                    skipped_clips.append(
+                        {
+                            "clip_id": episode_slice["clip_id"],
+                            "shard_path": descriptor.shard_path,
+                            "descriptor_path": classify_descriptor_storage(descriptor),
+                            "reason": _classify_light_descriptor_error(error),
+                            "error": str(error),
+                        }
+                    )
+                    continue
+                raise
+
+            if tar_writer is None and clip_samples:
+                os.makedirs(os.path.dirname(task["output_path"]), exist_ok=True)
+                tar_writer = tarfile.open(task["tmp_path"], "w")
+
+            for key, image_bytes, lowdim, meta in clip_samples:
                 add_sample_bytes_to_tar(
                     tar_writer,
                     key,
                     image_bytes,
-                    episode_data["lowdim_all"][frame_idx],
+                    lowdim,
                     meta,
                 )
                 frames_written += 1
@@ -544,6 +592,8 @@ def _worker_process_shard(task):
         "frames_written": frames_written,
         "episodes_written": len(touched_episodes),
         "skipped_episodes": skipped_episodes,
+        "skipped_clips": len(skipped_clips),
+        "skipped_clip_details": skipped_clips,
         "output_path": task["output_path"],
     }
 
@@ -557,6 +607,11 @@ def _prepare_manifest_episode(
     target_fps: float,
     interpolate_labels: bool,
 ):
+    try:
+        validate_descriptor_for_frame_reads(record.descriptor)
+    except Exception:
+        return None, "invalid_descriptor"
+
     seq_folder = Path(record.descriptor.seq_folder)
     world_res_path = seq_folder / "world_space_res.pth"
     if not world_res_path.exists():
@@ -624,6 +679,7 @@ def prepare_manifest_episodes(
 
     stats = {
         "kept": 0,
+        "invalid_descriptor": 0,
         "missing_world_res": 0,
         "invalid_world_res": 0,
         "empty_frames": 0,
@@ -631,7 +687,16 @@ def prepare_manifest_episodes(
         "invalid_json": 0,
         "invalid_status": 0,
         "empty_instruction": 0,
+        "descriptor_paths": {
+            "light_tar": 0,
+            "heavy_tar": 0,
+            "image_sequence": 0,
+        },
     }
+
+    for record in records:
+        descriptor_kind = classify_descriptor_storage(record.descriptor)
+        stats["descriptor_paths"][descriptor_kind] = stats["descriptor_paths"].get(descriptor_kind, 0) + 1
 
     if preprocess_workers <= 1:
         iterator = (
@@ -740,8 +805,10 @@ def run_manifest_build(
         "frames_written": 0,
         "episodes_written": 0,
         "skipped_episodes": 0,
+        "skipped_clips": 0,
         "shards_written": 0,
     }
+    skipped_clip_details = []
 
     if writer_workers <= 1:
         _worker_init(mano_device_specs, mano_dir, feature_cache_dir)
@@ -760,7 +827,9 @@ def run_manifest_build(
             totals["frames_written"] += result["frames_written"]
             totals["episodes_written"] += result["episodes_written"]
             totals["skipped_episodes"] += result["skipped_episodes"]
+            totals["skipped_clips"] += result.get("skipped_clips", 0)
             totals["shards_written"] += 1 if result["frames_written"] > 0 else 0
+            skipped_clip_details.extend(result.get("skipped_clip_details", []))
     finally:
         if writer_workers > 1:
             pool.close()
@@ -769,6 +838,7 @@ def run_manifest_build(
     return {
         "prepare_stats": prepare_stats,
         "totals": totals,
+        "skipped_clip_details": skipped_clip_details,
         "planned_shards": len(shard_tasks),
         "planned_frames": sum(ep["num_valid_frames"] for ep in repeated),
     }

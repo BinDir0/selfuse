@@ -1,227 +1,348 @@
-"""Video discovery and indexing for WebDataset factory directories.
+"""Lightweight clip discovery and indexing for WebDataset factory directories."""
 
-Scans tar shards in a factory directory, groups frames by video,
-and provides VideoDescriptor objects for pipeline consumption.
-"""
+from __future__ import annotations
 
 import json
 import os
 import re
 import tarfile
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
 from tqdm import tqdm
+
 from lib.pipeline.datasets.descriptors import ClipDescriptor as VideoDescriptor
 
 
-# Regex to split frame filename into video_key + frame_number
-# e.g. "f001_w012_v00029_i000_f000000.jpg" -> key="f001_w012_v00029_i000", frame="f000000"
 _FRAME_RE = re.compile(r"^(.+)_(f\d+)\.(jpg|jpeg|png)$", re.IGNORECASE)
+CLIP_INDEX_FORMAT_VERSION = 2
+
+
+def _list_tar_shards(factory_dir: str) -> list[str]:
+    return sorted(name for name in os.listdir(factory_dir) if name.endswith(".tar"))
 
 
 def _parse_frame_name(name: str):
-    """Parse a frame filename into (video_key, frame_sort_key, extension).
-
-    Returns None if the filename doesn't match the expected pattern.
-    """
-    m = _FRAME_RE.match(name)
-    if m:
-        return m.group(1), m.group(2), m.group(3)
+    """Parse a frame filename into (clip_id, frame_sort_key, extension)."""
+    match = _FRAME_RE.match(name)
+    if match:
+        return match.group(1), match.group(2), match.group(3)
     return None
 
 
+def _clip_index_cache_path(factory_dir: str) -> str:
+    return os.path.join(factory_dir, "_clip_index.json")
+
+
+def _legacy_index_cache_path(factory_dir: str) -> str:
+    return os.path.join(factory_dir, "_video_index.json")
+
+
+def _new_clip_summary(shard_file: str, clip_id: str, frame_sort: str, ext: str, video_name: str | None = None) -> dict:
+    frame_idx = int(frame_sort[1:])
+    return {
+        "shard": shard_file,
+        "video_name": video_name or clip_id,
+        "frame_count": 0,
+        "frame_ext": f".{ext.lower()}",
+        "frame_index_width": max(1, len(frame_sort) - 1),
+        "frame_start_idx": frame_idx,
+        "_min_frame_idx": frame_idx,
+        "_max_frame_idx": frame_idx,
+    }
+
+
+def _basename(name: str) -> str:
+    return Path(name).name
+
+
+def _legacy_frame_name(frame_entry) -> Optional[str]:
+    if isinstance(frame_entry, str):
+        return frame_entry
+    if isinstance(frame_entry, dict):
+        name = frame_entry.get("name")
+        if isinstance(name, str):
+            return name
+    return None
+
+
+def _summarize_legacy_clip_entry(clip_id: str, info: dict) -> Optional[dict]:
+    shard_file = info.get("shard")
+    if not isinstance(shard_file, str) or not shard_file:
+        return None
+
+    if "frame_count" in info:
+        frame_count = int(info.get("frame_count") or 0)
+        return {
+            "shard": shard_file,
+            "video_name": info.get("video_name") or clip_id,
+            "frame_count": frame_count,
+            "frame_ext": info.get("frame_ext") or ".jpg",
+            "frame_index_width": int(info.get("frame_index_width") or 6),
+            "frame_start_idx": int(info.get("frame_start_idx") or 0),
+        }
+
+    frames = info.get("frames") or []
+    if not isinstance(frames, list):
+        return None
+
+    frame_count = int(info.get("num_frames") or len(frames))
+    frame_ext = ".jpg"
+    frame_index_width = 6
+    frame_start_idx = 0
+    min_frame_idx = None
+    max_frame_idx = None
+
+    for frame_entry in frames:
+        frame_name = _legacy_frame_name(frame_entry)
+        if not frame_name:
+            continue
+        parsed = _parse_frame_name(_basename(frame_name))
+        if parsed is None:
+            continue
+        _, frame_sort, ext = parsed
+        frame_idx = int(frame_sort[1:])
+        if min_frame_idx is None or frame_idx < min_frame_idx:
+            min_frame_idx = frame_idx
+            frame_start_idx = frame_idx
+        if max_frame_idx is None or frame_idx > max_frame_idx:
+            max_frame_idx = frame_idx
+        frame_ext = f".{ext.lower()}"
+        frame_index_width = max(1, len(frame_sort) - 1)
+
+    if min_frame_idx is None or max_frame_idx is None:
+        return None
+    if (max_frame_idx - min_frame_idx + 1) != frame_count:
+        return None
+
+    return {
+        "shard": shard_file,
+        "video_name": info.get("video_name") or clip_id,
+        "frame_count": frame_count,
+        "frame_ext": frame_ext,
+        "frame_index_width": frame_index_width,
+        "frame_start_idx": frame_start_idx,
+    }
+
+
+def _summarize_legacy_index(index: dict, factory_dir: str) -> Optional[dict]:
+    entries = index.get("clips")
+    if not isinstance(entries, dict):
+        entries = index.get("videos")
+    if not isinstance(entries, dict) or not entries:
+        return None
+
+    clips = {}
+    for clip_id, info in entries.items():
+        if not isinstance(info, dict):
+            return None
+        summary = _summarize_legacy_clip_entry(clip_id, info)
+        if summary is None:
+            return None
+        clips[clip_id] = summary
+
+    shards = index.get("shards")
+    if not isinstance(shards, list) or not shards:
+        shards = _list_tar_shards(factory_dir)
+
+    return {
+        "format_version": CLIP_INDEX_FORMAT_VERSION,
+        "clips": clips,
+        "shards": shards,
+        "num_videos": len(clips),
+        "num_shards": len(shards),
+    }
+
+
+def _is_clip_index_stale(index: dict, factory_dir: str) -> bool:
+    current_shards = _list_tar_shards(factory_dir)
+    if current_shards != index.get("shards", []):
+        return True
+    if int(index.get("format_version", 0)) != CLIP_INDEX_FORMAT_VERSION:
+        return True
+    clips = index.get("clips", {})
+    if clips:
+        first_clip = next(iter(clips.values()))
+        required = ("shard", "frame_count", "frame_ext", "frame_index_width", "frame_start_idx")
+        if any(key not in first_clip for key in required):
+            return True
+    return False
+
+
+def _load_json_file(path: str) -> Optional[dict]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None
+
+
+def _write_json_file(path: str, payload: dict) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+    except OSError:
+        pass
+
+
 def build_video_index(factory_dir: str) -> dict:
-    """Scan all tar shards in a factory directory and group frames by video.
-
-    Args:
-        factory_dir: Path to a factory directory containing *_shard*.tar files.
-
-    Returns:
-        dict with keys:
-            "videos": {video_key: {"shard": filename, "frames": [...], "num_frames": N, "video_name": str}}
-            "shards": [list of shard filenames]
-            "num_videos": int
-            "num_shards": int
-    """
+    """Scan tar shards and build a lightweight clip-level index."""
     factory_dir = str(factory_dir)
     factory_path = Path(factory_dir)
-
-    # Find all tar shards
-    shard_files = sorted([f for f in os.listdir(factory_dir) if f.endswith(".tar")])
-
+    shard_files = _list_tar_shards(factory_dir)
     if not shard_files:
         raise FileNotFoundError(f"No tar shards found in {factory_dir}")
 
-    # Group frames by video_key
-    videos: Dict[str, dict] = {}
-
+    clips: Dict[str, dict] = {}
     n_frames_total = 0
     pbar = tqdm(shard_files, desc="Scanning shards", unit="shard")
     for shard_file in pbar:
         shard_path = str(factory_path / shard_file)
         json_meta: Dict[str, str] = {}
-        with tarfile.open(shard_path, "r|") as tar:  # streaming mode 'r|'
-            for member in tar:
-                name = member.name
-                if name.endswith((".jpg", ".jpeg", ".png")):
-                    parsed = _parse_frame_name(name)
+        with tarfile.open(shard_path, "r|") as tar_reader:
+            for member in tar_reader:
+                if not member.isfile():
+                    continue
+
+                member_name = _basename(member.name)
+                if member_name.endswith((".jpg", ".jpeg", ".png")):
+                    parsed = _parse_frame_name(member_name)
                     if parsed is None:
                         continue
-                    video_key, frame_sort, ext = parsed
+                    clip_id, frame_sort, ext = parsed
 
-                    if video_key not in videos:
-                        videos[video_key] = {
-                            "shard": shard_file,
-                            "frames": [],
-                            "video_name": json_meta.pop(video_key, ""),
-                        }
-                    videos[video_key]["frames"].append(
-                        {
-                            "name": name,
-                            "offset": member.offset_data,
-                            "size": member.size,
-                        }
+                    if clip_id not in clips:
+                        clips[clip_id] = _new_clip_summary(
+                            shard_file,
+                            clip_id,
+                            frame_sort,
+                            ext,
+                            video_name=json_meta.pop(clip_id, None),
+                        )
+                    clip_summary = clips[clip_id]
+                    if clip_summary["shard"] != shard_file:
+                        raise RuntimeError(
+                            f"Clip {clip_id} spans multiple shards: "
+                            f"{clip_summary['shard']} and {shard_file}"
+                        )
+
+                    frame_idx = int(frame_sort[1:])
+                    if clip_summary["frame_ext"] != f".{ext.lower()}":
+                        raise RuntimeError(
+                            f"Clip {clip_id} has mixed frame extensions: "
+                            f"{clip_summary['frame_ext']} and .{ext.lower()}"
+                        )
+
+                    clip_summary["frame_count"] += 1
+                    clip_summary["frame_start_idx"] = min(clip_summary["frame_start_idx"], frame_idx)
+                    clip_summary["_min_frame_idx"] = min(int(clip_summary["_min_frame_idx"]), frame_idx)
+                    clip_summary["_max_frame_idx"] = max(int(clip_summary["_max_frame_idx"]), frame_idx)
+                    clip_summary["frame_index_width"] = max(
+                        int(clip_summary["frame_index_width"]),
+                        max(1, len(frame_sort) - 1),
                     )
                     n_frames_total += 1
                     if n_frames_total % 500 == 0:
-                        pbar.set_postfix(videos=len(videos), frames=n_frames_total)
+                        pbar.set_postfix(clips=len(clips), frames=n_frames_total)
+                elif member_name.endswith(".json"):
+                    base_name = member_name[:-5]
+                    parsed = _parse_frame_name(f"{base_name}.jpg")
+                    if parsed is None:
+                        continue
+                    clip_id = parsed[0]
+                    try:
+                        payload = tar_reader.extractfile(member)
+                        if payload is None:
+                            continue
+                        meta = json.loads(payload.read())
+                    except Exception:
+                        continue
+                    video_name = meta.get("video_name", "")
+                    if not video_name:
+                        continue
+                    if clip_id in clips and not clips[clip_id]["video_name"]:
+                        clips[clip_id]["video_name"] = video_name
+                    else:
+                        json_meta[clip_id] = video_name
 
-                elif name.endswith(".json") and member.isreg():
-                    base = name[:-5]  # remove .json
-                    parsed = _parse_frame_name(base + ".jpg")  # fake ext for parsing
-                    if parsed:
-                        video_key = parsed[0]
-                        try:
-                            f = tar.extractfile(member)
-                            if f:
-                                meta = json.loads(f.read())
-                                vn = meta.get("video_name", "")
-                                if vn:
-                                    if video_key in videos:
-                                        # Video already seen, fill directly
-                                        if not videos[video_key]["video_name"]:
-                                            videos[video_key]["video_name"] = vn
-                                    else:
-                                        # Video not seen yet, buffer for later
-                                        json_meta[video_key] = vn
-                        except Exception:
-                            pass
-
-    pbar.set_postfix(videos=len(videos), frames=n_frames_total)
+    pbar.set_postfix(clips=len(clips), frames=n_frames_total)
     pbar.close()
 
-    # Sort frames within each video and set num_frames
-    for video_key, info in videos.items():
-        info["frames"] = sorted(info["frames"], key=lambda f: f["name"])
-        info["num_frames"] = len(info["frames"])
-        if not info["video_name"]:
-            info["video_name"] = video_key
+    for clip_id, clip_summary in clips.items():
+        min_frame_idx = int(clip_summary.pop("_min_frame_idx"))
+        max_frame_idx = int(clip_summary.pop("_max_frame_idx"))
+        expected_count = max_frame_idx - min_frame_idx + 1
+        if expected_count != int(clip_summary["frame_count"]):
+            raise RuntimeError(
+                f"Clip {clip_id} in {factory_dir} has non-contiguous frame indices: "
+                f"start={min_frame_idx}, end={max_frame_idx}, frame_count={clip_summary['frame_count']}"
+            )
+        clip_summary["frame_start_idx"] = min_frame_idx
 
     return {
-        "videos": videos,
+        "format_version": CLIP_INDEX_FORMAT_VERSION,
+        "clips": clips,
         "shards": shard_files,
-        "num_videos": len(videos),
+        "num_videos": len(clips),
         "num_shards": len(shard_files),
     }
 
 
-def _index_cache_path(factory_dir: str) -> str:
-    return os.path.join(factory_dir, "_video_index.json")
-
-
-def _is_index_stale(index: dict, factory_dir: str) -> bool:
-    """Check if cached index is stale by comparing shard file list or missing offsets."""
-    current_shards = sorted([f for f in os.listdir(factory_dir) if f.endswith(".tar")])
-    if current_shards != index.get("shards", []):
-        return True
-    # Require the legacy full-frame cache format: videos[...]["frames"] with offset/size entries.
-    videos = index.get("videos", {})
-    if videos:
-        first_video = next(iter(videos.values()))
-        if "frames" not in first_video:
-            return True
-        frames = first_video.get("frames", [])
-        if frames and isinstance(frames[0], str):
-            return True  # Old format without offsets — rebuild
-    return False
-
-
 def load_or_build_index(factory_dir: str, force_rebuild: bool = False) -> dict:
-    """Load cached video index, or build and cache it if missing/stale.
+    """Load a lightweight clip index or build it from legacy cache / tar shards."""
+    clip_index_path = _clip_index_cache_path(factory_dir)
+    if not force_rebuild and os.path.exists(clip_index_path):
+        clip_index = _load_json_file(clip_index_path)
+        if clip_index is not None and not _is_clip_index_stale(clip_index, factory_dir):
+            return clip_index
 
-    Args:
-        factory_dir: Path to factory directory.
-        force_rebuild: Force rebuilding even if cache exists.
+    legacy_index_path = _legacy_index_cache_path(factory_dir)
+    if not force_rebuild and os.path.exists(legacy_index_path):
+        legacy_index = _load_json_file(legacy_index_path)
+        if legacy_index is not None:
+            clip_index = _summarize_legacy_index(legacy_index, factory_dir)
+            if clip_index is not None and not _is_clip_index_stale(clip_index, factory_dir):
+                _write_json_file(clip_index_path, clip_index)
+                return clip_index
 
-    Returns:
-        Video index dict.
-    """
-    cache_path = _index_cache_path(factory_dir)
-
-    if not force_rebuild and os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r") as f:
-                index = json.load(f)
-            if not _is_index_stale(index, factory_dir):
-                return index
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # Build fresh index
-    index = build_video_index(factory_dir)
-
-    # Cache it
-    try:
-        with open(cache_path, "w") as f:
-            json.dump(index, f, ensure_ascii=False)
-    except OSError:
-        pass  # Non-fatal: can't write cache (e.g. read-only filesystem)
-
-    return index
+    clip_index = build_video_index(factory_dir)
+    _write_json_file(clip_index_path, clip_index)
+    return clip_index
 
 
 def collect_videos_from_factory(factory_dir: str) -> List[VideoDescriptor]:
-    """Collect all videos from a factory directory as VideoDescriptors.
-
-    Args:
-        factory_dir: Path to factory directory containing tar shards.
-
-    Returns:
-        List of VideoDescriptor, one per video found.
-    """
+    """Collect all clips from a shard directory as lightweight descriptors."""
     factory_dir = str(Path(factory_dir).resolve())
     index = load_or_build_index(factory_dir)
 
     descriptors = []
-    for video_key, info in sorted(index["videos"].items()):
+    for clip_id, info in sorted(index["clips"].items()):
         shard_path = os.path.join(factory_dir, info["shard"])
-        seq_folder = os.path.join(factory_dir, "outputs", video_key)
-
-        frames = info["frames"]
-        # frames is List[dict] with keys: name, offset, size
-        frame_names = [f["name"] for f in frames]
-        frame_offsets = [[f["offset"], f["size"]] for f in frames]
-
-        desc = VideoDescriptor(
-            clip_id=video_key,
-            clip_name=info["video_name"],
-            storage_kind="tar_shard",
-            root_dir=factory_dir,
-            shard_path=shard_path,
-            frame_names=frame_names,
-            seq_folder=seq_folder,
-            frame_offsets=frame_offsets,
+        seq_folder = os.path.join(factory_dir, "outputs", clip_id)
+        descriptors.append(
+            VideoDescriptor(
+                clip_id=clip_id,
+                clip_name=info.get("video_name") or clip_id,
+                storage_kind="tar_shard",
+                root_dir=factory_dir,
+                shard_path=shard_path,
+                frame_names=[],
+                seq_folder=seq_folder,
+                frame_offsets=None,
+                frame_count_override=int(info.get("frame_count", 0)),
+                extra={
+                    "frame_ext": info.get("frame_ext", ".jpg"),
+                    "frame_start_idx": int(info.get("frame_start_idx", 0)),
+                    "frame_index_width": int(info.get("frame_index_width", 6)),
+                },
+            )
         )
-        descriptors.append(desc)
-
     return descriptors
 
 
 def collect_videos_from_factories(factory_dirs: List[str]) -> List[VideoDescriptor]:
-    """Collect videos from multiple factory directories."""
+    """Collect clips from multiple shard directories."""
     all_descriptors = []
     for factory_dir in factory_dirs:
-        descriptors = collect_videos_from_factory(factory_dir)
-        all_descriptors.extend(descriptors)
+        all_descriptors.extend(collect_videos_from_factory(factory_dir))
     return all_descriptors
