@@ -1457,7 +1457,7 @@ def _decode_image_bgr(image_bytes: bytes) -> np.ndarray:
     return image
 
 
-def _encode_image_data_url(image_bgr: np.ndarray) -> str:
+def _encode_image_jpeg(image_bgr: np.ndarray) -> bytes:
     import cv2
 
     ok, encoded = cv2.imencode(".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
@@ -1564,7 +1564,7 @@ def _draw_axes(image_bgr: np.ndarray, origin_world: np.ndarray, rotmat_world: np
             cv2.arrowedLine(image_bgr, origin, tuple(uv[axis_idx + 1].astype(np.int32)), axis_colors[axis_idx], 2, tipLength=0.2)
 
 
-def _render_keypoint_overlay(image_bytes: bytes, keypoint_frame: dict, presence: Optional[int]) -> str:
+def _render_keypoint_overlay(image_bytes: bytes, keypoint_frame: dict, presence: Optional[int]) -> np.ndarray:
     import cv2
 
     image_bgr = _decode_image_bgr(image_bytes)
@@ -1599,8 +1599,7 @@ def _render_keypoint_overlay(image_bytes: bytes, keypoint_frame: dict, presence:
                     cv2.circle(overlay, tip_uv, 4, color, -1)
             _draw_axes(overlay, wrist, rotmat, c2w, intrinsic)
 
-    rendered = cv2.addWeighted(overlay, 0.78, image_bgr, 0.22, 0)
-    return _encode_image_data_url(rendered)
+    return cv2.addWeighted(overlay, 0.78, image_bgr, 0.22, 0)
 
 
 def _build_mano_frame_from_sample(lowdim_array: np.ndarray, mano_array: np.ndarray, runtime: dict) -> dict:
@@ -1663,7 +1662,7 @@ def _draw_mano_hand(image_bgr: np.ndarray, overlay: np.ndarray, verts_world: np.
             cv2.circle(overlay, tuple(pt), 3 if idx else 5, joint_color, -1)
 
 
-def _render_mano_overlay(image_bytes: bytes, c2w: np.ndarray, intrinsic: np.ndarray, mano_frame: dict, presence: Optional[int]) -> str:
+def _render_mano_overlay(image_bytes: bytes, c2w: np.ndarray, intrinsic: np.ndarray, mano_frame: dict, presence: Optional[int]) -> np.ndarray:
     import cv2
 
     image_bgr = _decode_image_bgr(image_bytes)
@@ -1693,8 +1692,7 @@ def _render_mano_overlay(image_bytes: bytes, c2w: np.ndarray, intrinsic: np.ndar
             joint_color=(0, 200, 255),
         )
 
-    rendered = cv2.addWeighted(overlay, 0.72, image_bgr, 0.28, 0)
-    return _encode_image_data_url(rendered)
+    return cv2.addWeighted(overlay, 0.72, image_bgr, 0.28, 0)
 
 
 class ViewerApp:
@@ -1737,7 +1735,8 @@ class ViewerApp:
             self._sample_keys_by_shard.setdefault(summary.shard_path, set()).add(summary.key)
         self._sample_cache: dict[tuple[str, str], dict] = {}
         self._loaded_shards: set[str] = set()
-        self._render_cache: dict[tuple[int, str], bytes] = {}
+        self._render_bgr_cache: dict[tuple[int, str], np.ndarray] = {}
+        self._render_jpeg_cache: dict[tuple[int, str], bytes] = {}
         self._sample_payload_cache: dict[tuple[int, str], dict] = {}
 
     def _load_clip_lookup(self, manifest_path: Optional[str]) -> dict[str, str]:
@@ -1923,7 +1922,7 @@ class ViewerApp:
             raise KeyError(f"Sample key not found in shard {summary.shard_path}: {summary.key}")
         return cached
 
-    def _render_image(self, *, render_mode: str, summary: SampleSummary, sample: dict, lowdim_array: Optional[np.ndarray], mano_array: Optional[np.ndarray], presence: Optional[int]):
+    def _render_image(self, *, render_mode: str, summary: SampleSummary, sample: dict, lowdim_array: Optional[np.ndarray], mano_array: Optional[np.ndarray], presence: Optional[int]) -> np.ndarray:
         if sample["image_bytes"] is None:
             raise ValueError("missing image.jpg")
 
@@ -1943,13 +1942,13 @@ class ViewerApp:
 
         raise ValueError(f"Unsupported render mode: {render_mode}")
 
-    def rendered_image_bytes(self, sample_id: int, render_mode: str) -> bytes:
+    def rendered_image_bgr(self, sample_id: int, render_mode: str) -> np.ndarray:
         if sample_id not in self.summary_by_id:
             raise KeyError(f"Unknown sample id: {sample_id}")
 
         render_cache_key = (sample_id, render_mode)
         with self._cache_lock:
-            cached = self._render_cache.get(render_cache_key)
+            cached = self._render_bgr_cache.get(render_cache_key)
         if cached is not None:
             return cached
 
@@ -1960,7 +1959,7 @@ class ViewerApp:
         lowdim_array = lowdim_summary.get("array")
         mano_summary = summarize_mano(sample.get("mano_bytes"))
         mano_array = mano_summary.get("array")
-        image_bytes = self._render_image(
+        image_bgr = self._render_image(
             render_mode=render_mode,
             summary=summary,
             sample=sample,
@@ -1969,17 +1968,24 @@ class ViewerApp:
             presence=None if meta is None else meta.get("presence"),
         )
         with self._cache_lock:
-            self._render_cache[render_cache_key] = image_bytes
+            self._render_bgr_cache[render_cache_key] = image_bgr
+        return image_bgr
+
+    def rendered_image_bytes(self, sample_id: int, render_mode: str) -> bytes:
+        if sample_id not in self.summary_by_id:
+            raise KeyError(f"Unknown sample id: {sample_id}")
+
+        render_cache_key = (sample_id, render_mode)
+        with self._cache_lock:
+            cached = self._render_jpeg_cache.get(render_cache_key)
+        if cached is not None:
+            return cached
+
+        image_bgr = self.rendered_image_bgr(sample_id, render_mode)
+        image_bytes = _encode_image_jpeg(image_bgr)
+        with self._cache_lock:
+            self._render_jpeg_cache[render_cache_key] = image_bytes
         return image_bytes
-
-    def rendered_image_bgr(self, sample_id: int, render_mode: str) -> np.ndarray:
-        import cv2
-
-        rendered = self.rendered_image_bytes(sample_id, render_mode)
-        image = cv2.imdecode(np.frombuffer(rendered, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"Failed to decode rendered JPEG for sample_id={sample_id}")
-        return image
 
     def summaries_grouped_by_episode(self) -> list[tuple[str, list[SampleSummary]]]:
         grouped: dict[str, list[SampleSummary]] = {}
