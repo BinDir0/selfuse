@@ -1737,10 +1737,14 @@ class ViewerApp:
         self.default_render_mode = args.render_mode
         self.apply_demo_rx = bool(args.apply_demo_rx)
         self.keypoint_source = args.keypoint_source
+        self.processed_root = args.processed_root
         self.descriptor_manifest = args.descriptor_manifest
         self.mano_dir = args.mano_dir
         self.mano_device = args.mano_device
         self.clip_to_seq_folder = self._load_clip_lookup(args.descriptor_manifest)
+        self._legacy_episode_cache = None
+        self._demo_source_cache: dict[str, dict] = {}
+        self._demo_mano_models = None
         self._mano_runtime = None
         self._mano_sample_cache: dict[int, dict] = {}
         self._cache_lock = threading.RLock()
@@ -1763,6 +1767,146 @@ class ViewerApp:
         clip_to_seq = {record.clip_id: record.descriptor.seq_folder for record in records}
         print(f"Loaded {len(clip_to_seq)} clip -> seq_folder mappings", flush=True)
         return clip_to_seq
+
+    def _load_legacy_episode_cache(self) -> list[dict]:
+        if self._legacy_episode_cache is not None:
+            return self._legacy_episode_cache
+        if not self.processed_root:
+            raise ValueError(
+                "processed root not configured; rerun with --processed-root <legacy_processed_root>"
+            )
+        cache_path = Path(self.processed_root).expanduser().resolve() / "_vla_episodes_cache.json"
+        if not cache_path.exists():
+            raise FileNotFoundError(f"Legacy episode cache not found: {cache_path}")
+        self._legacy_episode_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        return self._legacy_episode_cache
+
+    def _resolve_demo_seq_folder(self, meta: Optional[dict]) -> str:
+        if not meta:
+            raise ValueError("meta.json is missing; cannot resolve demo source episode")
+        clip_id = meta.get("clip_id")
+        if clip_id and self.clip_to_seq_folder:
+            seq_folder = self.clip_to_seq_folder.get(str(clip_id))
+            if seq_folder:
+                return str(seq_folder)
+        episode_index = meta.get("episode_index")
+        if episode_index is None:
+            raise ValueError(
+                "Unable to resolve source episode: need clip manifest or meta.episode_index with --processed-root"
+            )
+        episodes = self._load_legacy_episode_cache()
+        episode_idx = int(episode_index)
+        if episode_idx < 0 or episode_idx >= len(episodes):
+            raise IndexError(f"episode_index out of range for legacy cache: {episode_idx}")
+        return str(episodes[episode_idx]["crop_dir"])
+
+    def _ensure_demo_mano_models(self):
+        if self._demo_mano_models is not None:
+            return self._demo_mano_models
+
+        import torch
+        from lib.models.mano_wrapper import MANO
+
+        use_cuda = str(self.mano_device).startswith("cuda") and torch.cuda.is_available()
+        right_cfg = {
+            "data_dir": "_DATA/data/",
+            "model_path": "_DATA/data/mano",
+            "gender": "neutral",
+            "num_hand_joints": 15,
+            "create_body_pose": False,
+        }
+        left_cfg = {
+            "data_dir": "_DATA/data_left/",
+            "model_path": "_DATA/data_left/mano_left",
+            "gender": "neutral",
+            "num_hand_joints": 15,
+            "create_body_pose": False,
+            "is_rhand": False,
+        }
+        mano_right = MANO(**right_cfg)
+        mano_left = MANO(**left_cfg)
+        mano_left.shapedirs[:, 0, :] *= -1
+        if use_cuda:
+            mano_right = mano_right.cuda()
+            mano_left = mano_left.cuda()
+        self._demo_mano_models = {
+            "use_cuda": use_cuda,
+            "mano_right": mano_right,
+            "mano_left": mano_left,
+        }
+        return self._demo_mano_models
+
+    def _load_demo_source_episode(self, seq_folder: str) -> dict:
+        with self._cache_lock:
+            cached = self._demo_source_cache.get(seq_folder)
+        if cached is not None:
+            return cached
+
+        import joblib
+        import numpy as np
+        from hawor.utils.process import run_mano, run_mano_left
+        from lib.eval_utils.custom_utils import load_slam_cam
+
+        world_res_path = Path(seq_folder) / "world_space_res.pth"
+        if not world_res_path.exists():
+            raise FileNotFoundError(f"world_space_res.pth not found: {world_res_path}")
+        pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_res_path)
+        del pred_valid
+
+        models = self._ensure_demo_mano_models()
+        outputs_left = run_mano_left(
+            pred_trans[0:1],
+            pred_rot[0:1],
+            pred_hand_pose[0:1],
+            None,
+            pred_betas[0:1],
+            use_cuda=models["use_cuda"],
+            mano_model=models["mano_left"],
+        )
+        outputs_right = run_mano(
+            pred_trans[1:2],
+            pred_rot[1:2],
+            pred_hand_pose[1:2],
+            None,
+            pred_betas[1:2],
+            use_cuda=models["use_cuda"],
+            mano_model=models["mano_right"],
+        )
+        left_joints = outputs_left["joints"][0].detach().cpu().numpy().astype(np.float32)
+        right_joints = outputs_right["joints"][0].detach().cpu().numpy().astype(np.float32)
+
+        slam_files = sorted((Path(seq_folder) / "SLAM").glob("hawor_slam_w_scale_*.npz"))
+        if not slam_files:
+            raise FileNotFoundError(f"No hawor_slam_w_scale_*.npz found under {(Path(seq_folder) / 'SLAM')}")
+        r_w2c, t_w2c, r_c2w, t_c2w = load_slam_cam(str(slam_files[0]))
+        del r_w2c, t_w2c
+        r_x = DEMO_RX_3X3
+        r_c2w = np.einsum("ij,njk->nik", r_x, r_c2w.cpu().numpy()).astype(np.float32)
+        t_c2w = np.einsum("ij,nj->ni", r_x, t_c2w.cpu().numpy()).astype(np.float32)
+        left_joints = np.einsum("ij,tnj->tni", r_x, left_joints).astype(np.float32)
+        right_joints = np.einsum("ij,tnj->tni", r_x, right_joints).astype(np.float32)
+
+        est_focal_path = Path(seq_folder) / "est_focal.txt"
+        focal = None
+        if est_focal_path.exists():
+            try:
+                focal = float(est_focal_path.read_text(encoding="utf-8").strip())
+            except ValueError:
+                focal = None
+        if focal is None:
+            slam_npz = np.load(str(slam_files[0]), allow_pickle=True)
+            focal = float(slam_npz.get("img_focal", 600.0))
+
+        demo_source = {
+            "left_joints": left_joints,
+            "right_joints": right_joints,
+            "r_c2w": r_c2w,
+            "t_c2w": t_c2w,
+            "focal": float(focal),
+        }
+        with self._cache_lock:
+            self._demo_source_cache[seq_folder] = demo_source
+        return demo_source
 
     def _resolve_seq_folder_for_clip(self, clip_id: Optional[str]) -> str:
         if not clip_id:
@@ -1796,7 +1940,40 @@ class ViewerApp:
             self._mano_sample_cache[summary.id] = frame
         return frame
 
-    def _build_keypoint_frame(self, summary: SampleSummary, lowdim_array: np.ndarray, mano_array: Optional[np.ndarray] = None) -> dict:
+    def _build_demo_keypoint_frame(self, summary: SampleSummary, sample: dict, meta: Optional[dict]) -> dict:
+        seq_folder = self._resolve_demo_seq_folder(meta)
+        source = self._load_demo_source_episode(seq_folder)
+        frame_idx = parse_frame_index(summary.key)
+        if frame_idx >= source["left_joints"].shape[0] or frame_idx >= source["r_c2w"].shape[0]:
+            raise IndexError(
+                f"frame_idx={frame_idx} out of range for source episode {seq_folder}"
+            )
+        image_bgr = _decode_image_bgr(sample["image_bytes"])
+        height, width = image_bgr.shape[:2]
+        c2w = np.eye(4, dtype=np.float32)
+        c2w[:3, :3] = source["r_c2w"][frame_idx]
+        c2w[:3, 3] = source["t_c2w"][frame_idx]
+        intrinsic = np.array(
+            [source["focal"], source["focal"], width / 2.0, height / 2.0],
+            dtype=np.float32,
+        )
+        return {
+            "c2w": c2w,
+            "intrinsic": intrinsic,
+            "left_wrist": np.asarray(source["left_joints"][frame_idx, MANO_CENTER_IDX], dtype=np.float32),
+            "right_wrist": np.asarray(source["right_joints"][frame_idx, MANO_CENTER_IDX], dtype=np.float32),
+            "left_tips": np.asarray(source["left_joints"][frame_idx, FINGERTIP_INDICES], dtype=np.float32),
+            "right_tips": np.asarray(source["right_joints"][frame_idx, FINGERTIP_INDICES], dtype=np.float32),
+        }
+
+    def _build_keypoint_frame(
+        self,
+        summary: SampleSummary,
+        sample: dict,
+        meta: Optional[dict],
+        lowdim_array: np.ndarray,
+        mano_array: Optional[np.ndarray] = None,
+    ) -> dict:
         fields = _decode_lowdim_fields(lowdim_array)
         notes = [
             "All 3D lowdim fields are stored in the HaWoR/SLAM world frame."
@@ -1863,6 +2040,67 @@ class ViewerApp:
             },
         ]
         keypoint_frame["hands"] = lowdim_hands
+
+        if self.keypoint_source in ("demo", "compare-demo"):
+            demo_frame = self._build_demo_keypoint_frame(summary, sample, meta)
+            if not self.apply_demo_rx:
+                for hand in lowdim_hands:
+                    hand["wrist"] = _apply_demo_rx_points(hand["wrist"])
+                    hand["tips"] = _apply_demo_rx_points(hand["tips"])
+                    hand["rotmat"] = _apply_demo_rx_rotmat(hand["rotmat"])
+            demo_hands = [
+                {
+                    "side": "left",
+                    "wrist": np.asarray(demo_frame["left_wrist"], dtype=np.float32),
+                    "tips": np.asarray(demo_frame["left_tips"], dtype=np.float32),
+                    "rotmat": np.asarray(keypoint_frame["left_rotmat"], dtype=np.float32),
+                    "color": (255, 255, 0),
+                    "label": "L-demo",
+                    "draw_axes": self.keypoint_source == "demo",
+                },
+                {
+                    "side": "right",
+                    "wrist": np.asarray(demo_frame["right_wrist"], dtype=np.float32),
+                    "tips": np.asarray(demo_frame["right_tips"], dtype=np.float32),
+                    "rotmat": np.asarray(keypoint_frame["right_rotmat"], dtype=np.float32),
+                    "color": (0, 255, 255),
+                    "label": "R-demo",
+                    "draw_axes": self.keypoint_source == "demo",
+                },
+            ]
+            keypoint_frame["c2w"] = np.asarray(demo_frame["c2w"], dtype=np.float32)
+            keypoint_frame["intrinsic"] = np.asarray(demo_frame["intrinsic"], dtype=np.float32)
+            if self.keypoint_source == "demo":
+                keypoint_frame["left_wrist"] = demo_hands[0]["wrist"]
+                keypoint_frame["right_wrist"] = demo_hands[1]["wrist"]
+                keypoint_frame["left_tips"] = demo_hands[0]["tips"]
+                keypoint_frame["right_tips"] = demo_hands[1]["tips"]
+                keypoint_frame["hands"] = demo_hands
+                keypoint_frame["anchor_source"] = "demo_offline_source"
+                notes.append(
+                    "keypoint_source=demo: draw direct source joints using the demo_offline camera and image-center projection."
+                )
+                return keypoint_frame
+
+            for hand in lowdim_hands:
+                hand["wrist_radius"] = 7
+                hand["tip_radius"] = 5
+                hand["line_thickness"] = 3
+                hand["draw_axes"] = False
+            for hand in demo_hands:
+                hand["wrist_radius"] = 4
+                hand["tip_radius"] = 3
+                hand["line_thickness"] = 2
+                hand["draw_axes"] = False
+            keypoint_frame["hands"] = lowdim_hands + demo_hands
+            keypoint_frame["anchor_source"] = "compare_lowdim_vs_demo"
+            notes.append(
+                "keypoint_source=compare-demo: lowdim is drawn in magenta/green, demo_offline source is drawn in yellow/cyan."
+            )
+            notes.append(
+                "Both overlays use the demo_offline-aligned camera and image-center projection to isolate keypoint generation differences."
+            )
+            return keypoint_frame
 
         mano_frame = None
         mano_error = None
@@ -2013,7 +2251,14 @@ class ViewerApp:
         if render_mode == "keypoint":
             if lowdim_array is None:
                 raise ValueError("lowdim.npy is required for keypoint render")
-            keypoint_frame = self._build_keypoint_frame(summary, lowdim_array, mano_array=mano_array)
+            meta, _ = decode_meta(sample["meta_bytes"])
+            keypoint_frame = self._build_keypoint_frame(
+                summary,
+                sample,
+                meta,
+                lowdim_array,
+                mano_array=mano_array,
+            )
             return _render_keypoint_overlay(sample["image_bytes"], keypoint_frame, presence)
 
         if render_mode == "mano":
@@ -2203,16 +2448,25 @@ class ViewerApp:
         mano_array = mano_summary.get("array")
         render_notes = []
         if lowdim_array is not None:
-            if render_mode == "keypoint":
-                render_notes = self._build_keypoint_frame(summary, lowdim_array, mano_array=mano_array)["notes"]
-            elif render_mode == "mano":
-                render_notes = [
-                    "MANO mode reconstructs vertices and joints from the per-sample mano.npy payload using manopth."
-                ]
-                if mano_array is None:
-                    render_notes.append(
-                        "This sample does not contain mano.npy, so MANO render cannot proceed."
-                    )
+            try:
+                if render_mode == "keypoint":
+                    render_notes = self._build_keypoint_frame(
+                        summary,
+                        sample,
+                        meta,
+                        lowdim_array,
+                        mano_array=mano_array,
+                    )["notes"]
+                elif render_mode == "mano":
+                    render_notes = [
+                        "MANO mode reconstructs vertices and joints from the per-sample mano.npy payload using manopth."
+                    ]
+                    if mano_array is None:
+                        render_notes.append(
+                            "This sample does not contain mano.npy, so MANO render cannot proceed."
+                        )
+            except Exception as error:
+                errors.append(f"{render_mode} note generation failed: {error}")
 
         image_url = None
         try:
@@ -2290,8 +2544,14 @@ def build_parser():
     parser.add_argument(
         "--keypoint-source",
         default="auto",
-        choices=["auto", "lowdim", "mano", "compare"],
-        help="For keypoint mode: use lowdim, MANO, or draw both for diagnosis. auto keeps the previous behavior.",
+        choices=["auto", "lowdim", "mano", "compare", "demo", "compare-demo"],
+        help="For keypoint mode: use lowdim, MANO, demo_offline-aligned source points, or draw comparisons.",
+    )
+    parser.add_argument(
+        "--processed-root",
+        type=str,
+        default=None,
+        help="Legacy processed root used to resolve source seq_folder for demo-aligned keypoint diagnostics.",
     )
     parser.add_argument(
         "--descriptor-manifest",
