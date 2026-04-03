@@ -1878,6 +1878,7 @@ class ViewerApp:
             notes.append(
                 f"Requested keypoint_source={self.keypoint_source}, but MANO decode is unavailable ({mano_error}); falling back to lowdim."
             )
+            return keypoint_frame
         elif mano_frame is None:
             notes.append(
                 "MANO is unavailable for this frame, so keypoint mode uses lowdim wrist/tip world coordinates directly."
