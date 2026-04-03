@@ -1488,47 +1488,12 @@ def _project_points(points_world: np.ndarray, c2w: np.ndarray, intrinsic: np.nda
     return uv, valid
 
 
-def _camera_positive_depth_score(points_world: np.ndarray, c2w: np.ndarray) -> tuple[int, float]:
-    pts_cam = _world_to_camera(points_world, c2w)
-    valid = pts_cam[:, 2] > 1e-6
-    if not np.any(valid):
-        return 0, float("-inf")
-    positive_count = int(valid.sum())
-    median_depth = float(np.median(pts_cam[valid, 2]))
-    return positive_count, -abs(median_depth - 0.6)
-
-
-def _resolve_camera_c2w(
-    extrinsic_raw: np.ndarray,
-    points_world: np.ndarray,
-    camera_convention_hint: Optional[str] = None,
-) -> tuple[np.ndarray, str]:
+def _resolve_camera_c2w(extrinsic_raw: np.ndarray) -> tuple[np.ndarray, str]:
     raw = extrinsic_raw.astype(np.float32)
-    hint = None if camera_convention_hint is None else str(camera_convention_hint).strip().lower()
-    if hint == "c2w":
-        return raw, "c2w(meta)"
-    if hint == "w2c":
-        try:
-            return np.linalg.inv(raw), "w2c(meta)"
-        except np.linalg.LinAlgError:
-            return raw, "w2c(meta-invalid)"
-
-    candidates = [("c2w", raw)]
     try:
-        candidates.append(("w2c", np.linalg.inv(raw)))
-    except np.linalg.LinAlgError:
-        pass
-
-    best_name = candidates[0][0]
-    best_c2w = candidates[0][1]
-    best_score = (-1, float("-inf"))
-    for name, c2w in candidates:
-        score = _camera_positive_depth_score(points_world, c2w)
-        if score > best_score:
-            best_score = score
-            best_name = name
-            best_c2w = c2w
-    return best_c2w, best_name
+        return np.linalg.inv(raw), "w2c(fixed)"
+    except np.linalg.LinAlgError as error:
+        raise ValueError(f"Failed to invert WDS camera_w2c matrix: {error}") from error
 
 
 def _apply_demo_rx_points(points_world: np.ndarray) -> np.ndarray:
@@ -1633,7 +1598,6 @@ def _build_mano_frame_from_sample(
     lowdim_array: np.ndarray,
     mano_array: np.ndarray,
     runtime: dict,
-    camera_convention_hint: Optional[str] = None,
 ) -> dict:
     fields = _decode_lowdim_fields(lowdim_array)
     decoded = decode_mano_sample_array(mano_array)
@@ -1656,18 +1620,7 @@ def _build_mano_frame_from_sample(
         betas=decoded["right_betas"][None, :],
         device=runtime["device"],
     )
-    points_world = np.concatenate(
-        [
-            np.asarray(left_joints[0], dtype=np.float32),
-            np.asarray(right_joints[0], dtype=np.float32),
-        ],
-        axis=0,
-    )
-    c2w, camera_convention = _resolve_camera_c2w(
-        fields["camera_w2c"],
-        points_world,
-        camera_convention_hint=camera_convention_hint,
-    )
+    c2w, camera_convention = _resolve_camera_c2w(fields["camera_w2c"])
     return {
         "c2w": c2w,
         "intrinsic": fields["camera_intrinsic"],
@@ -1930,7 +1883,6 @@ class ViewerApp:
             lowdim_array,
             mano_array,
             self._ensure_mano_runtime(),
-            camera_convention_hint=None if meta is None else meta.get("camera_extrinsic_convention"),
         )
         if self.apply_demo_rx:
             frame["c2w"] = _apply_demo_rx_c2w(frame["c2w"])
@@ -2005,22 +1957,11 @@ class ViewerApp:
             ],
             axis=0,
         )
-        keypoint_frame["c2w"], camera_convention = _resolve_camera_c2w(
-            fields["camera_w2c"],
-            points_world,
-            camera_convention_hint=None if meta is None else meta.get("camera_extrinsic_convention"),
-        )
-        notes.append(
-            "camera extrinsic is interpreted as "
-            + (
-                "camera-to-world (c2w)."
-                if camera_convention.startswith("c2w")
-                else "world-to-camera (w2c) and inverted for display."
-            )
-        )
+        keypoint_frame["c2w"], camera_convention = _resolve_camera_c2w(fields["camera_w2c"])
+        notes.append("camera extrinsic is interpreted as fixed world-to-camera (w2c) and inverted for display.")
         if meta is not None and meta.get("camera_extrinsic_convention") is not None:
             notes.append(
-                f"camera_extrinsic_convention hint from meta.json = {meta.get('camera_extrinsic_convention')!r}; resolved as {camera_convention}."
+                f"meta.json declares camera_extrinsic_convention={meta.get('camera_extrinsic_convention')!r}; visualizer now always uses w2c."
             )
 
         if self.apply_demo_rx:

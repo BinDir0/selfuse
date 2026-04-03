@@ -307,8 +307,9 @@ class EpisodeViewerBackend:
     def build_keypoint_frame(self, summary: wv.SampleSummary, lowdim_array: np.ndarray, mano_array: Optional[np.ndarray] = None) -> dict:
         fields = wv._decode_lowdim_fields(lowdim_array)
         notes = ["All 3D lowdim fields are stored in the HaWoR/SLAM world frame."]
+        c2w, _ = wv._resolve_camera_c2w(fields["camera_w2c"])
         keypoint_frame = {
-            "c2w": fields["camera_w2c"],
+            "c2w": c2w,
             "intrinsic": fields["camera_intrinsic"],
             "left_wrist": fields["left_wrist_world"],
             "right_wrist": fields["right_wrist_world"],
@@ -319,20 +320,7 @@ class EpisodeViewerBackend:
             "anchor_source": "lowdim_wrist_world",
             "notes": notes,
         }
-        points_world = np.concatenate(
-            [
-                keypoint_frame["left_wrist"][None, :],
-                keypoint_frame["right_wrist"][None, :],
-                keypoint_frame["left_tips"],
-                keypoint_frame["right_tips"],
-            ],
-            axis=0,
-        )
-        keypoint_frame["c2w"], camera_convention = wv._resolve_camera_c2w(fields["camera_w2c"], points_world)
-        notes.append(
-            "camera extrinsic is interpreted as "
-            + ("camera-to-world (c2w)." if camera_convention == "c2w" else "world-to-camera (w2c) and inverted for display.")
-        )
+        notes.append("camera extrinsic is interpreted as fixed world-to-camera (w2c) and inverted for display.")
 
         if mano_array is None:
             return keypoint_frame
