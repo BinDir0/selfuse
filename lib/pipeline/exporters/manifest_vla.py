@@ -45,7 +45,7 @@ _worker_feature_cache_dir = None
 _worker_episode_cache = {}
 _worker_shard_fd_cache = {}
 _worker_shard_tar_cache = {}
-MANIFEST_FEATURE_CACHE_VERSION = 4
+MANIFEST_FEATURE_CACHE_VERSION = 5
 
 
 def _feature_cache_path(seq_folder: str, feature_cache_dir: str) -> str:

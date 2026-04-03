@@ -12,14 +12,14 @@ import torch
 
 from .mano_codec import build_mano_pca_frame_features
 from .webdataset_discovery import get_episode_feature_cache_path, load_or_build_frame_index
-from .webdataset_geometry import axis_angle_to_rot6d, interpolate_extrinsics, normalize_slam_keyframes
+from .webdataset_geometry import axis_angle_to_rot6d, interpolate_extrinsics, normalize_slam_keyframes, quat_to_4x4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 FINGERTIP_INDICES = [4, 8, 12, 16, 20]
 DEFAULT_INTRINSIC = np.array([500.0, 500.0, 320.0, 240.0], dtype=np.float32)
 LOWDIM_SIZE = 116
-EPISODE_FEATURE_CACHE_VERSION = 3
+EPISODE_FEATURE_CACHE_VERSION = 4
 
 
 def run_mano_forward(mano_model, trans, root_orient, hand_pose, betas, device):
@@ -199,15 +199,37 @@ def _load_episode_camera_features(ep, num_frames):
         scale = float(slam_data["scale"])
         img_focal = float(slam_data["img_focal"])
         img_center = slam_data["img_center"]
-        tstamps, traj = normalize_slam_keyframes(tstamps, traj)
-        if len(tstamps) == 0:
-            raise ValueError("no valid SLAM keyframes after alignment")
+        frame_index = load_or_build_frame_index(os.path.join(ep["crop_dir"], "extracted_images"), rescan=False)
+        image_center = None
+        if frame_index:
+            first_frame_path = frame_index.get(min(frame_index))
+            if first_frame_path and os.path.exists(first_frame_path):
+                import cv2
 
-        extrinsics = interpolate_extrinsics(tstamps, traj, scale, num_frames)
+                first_image = cv2.imread(first_frame_path, cv2.IMREAD_COLOR)
+                if first_image is not None:
+                    h0, w0 = first_image.shape[:2]
+                    image_center = np.array([float(w0) / 2.0, float(h0) / 2.0], dtype=np.float32)
+
         intrinsic = np.array(
-            [img_focal, img_focal, float(img_center[0]), float(img_center[1])],
+            [
+                img_focal,
+                img_focal,
+                float(image_center[0]) if image_center is not None else float(img_center[0]),
+                float(image_center[1]) if image_center is not None else float(img_center[1]),
+            ],
             dtype=np.float32,
         )
+
+        traj = np.asarray(traj, dtype=np.float32)
+        if traj.shape[0] == num_frames:
+            c2w = np.stack([quat_to_4x4(traj_row, scale) for traj_row in traj], axis=0)
+            extrinsics = np.linalg.inv(c2w).astype(np.float32)
+        else:
+            tstamps, traj = normalize_slam_keyframes(tstamps, traj)
+            if len(tstamps) == 0:
+                raise ValueError("no valid SLAM keyframes after alignment")
+            extrinsics = interpolate_extrinsics(tstamps, traj, scale, num_frames)
     except Exception as error:
         print(f"  Warning: SLAM load failed for {ep['episode_id']}: {error}")
 
