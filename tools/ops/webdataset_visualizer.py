@@ -38,6 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.exporters.mano_codec import (
+    DEFAULT_MANO_DIR,
     MANO_CENTER_IDX,
     MANO_FLAT_HAND_MEAN,
     MANO_PCA_DIMS,
@@ -1808,16 +1809,17 @@ class ViewerApp:
         from lib.models.mano_wrapper import MANO
 
         use_cuda = str(self.mano_device).startswith("cuda") and torch.cuda.is_available()
+        mano_root = str(Path(self.mano_dir or DEFAULT_MANO_DIR).expanduser().resolve())
         right_cfg = {
-            "data_dir": "_DATA/data/",
-            "model_path": "_DATA/data/mano",
+            "data_dir": mano_root,
+            "model_path": mano_root,
             "gender": "neutral",
             "num_hand_joints": 15,
             "create_body_pose": False,
         }
         left_cfg = {
-            "data_dir": "_DATA/data_left/",
-            "model_path": "_DATA/data_left/mano_left",
+            "data_dir": mano_root,
+            "model_path": mano_root,
             "gender": "neutral",
             "num_hand_joints": 15,
             "create_body_pose": False,
