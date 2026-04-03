@@ -32,6 +32,7 @@ from lib.pipeline.exporters.webdataset_features import (
     _load_world_space_prediction,
     build_mano_models,
 )
+from lib.pipeline.exporters.webdataset_geometry import axis_angle_to_rot6d
 from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
 
 
