@@ -1,4 +1,4 @@
-"""timm ViT/DINO 骨干，输出 patch tokens（可选保留 CLS+register）。"""
+"""timm ViT/DINO 骨干，输出 patch tokens"""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class DinoVisionBackbone(nn.Module):
         return int(self.forward(x).shape[1])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, 3, H, W) -> (B, N, C). N: patch 数（默认无 CLS/register）；C: embed_dim。"""
+        """x: (B, 3, H, W) -> (B, N, C). N: patch 数（无 CLS/register）；C: embed_dim。"""
         feat = self.vit.forward_features(x)
         if feat.dim() != 3:
             raise RuntimeError(f"Expected (B, L, C), got shape {tuple(feat.shape)}")

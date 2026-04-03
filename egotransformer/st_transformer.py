@@ -1,4 +1,4 @@
-"""(B,T,S,D) token grid：展平为 (B,T*S,D) 做 TransformerEncoder，时空可学习偏置。"""
+"""(B,T,S,D) token grid：展平为 (B,T*S,D) 做 TransformerEncoder"""
 
 from __future__ import annotations
 
