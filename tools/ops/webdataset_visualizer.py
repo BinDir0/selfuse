@@ -1572,32 +1572,45 @@ def _render_keypoint_overlay(image_bytes: bytes, keypoint_frame: dict, presence:
     c2w = keypoint_frame["c2w"]
     intrinsic = keypoint_frame["intrinsic"]
     left_present, right_present = _presence_flags(presence)
-    wrist_left = keypoint_frame["left_wrist"]
-    wrist_right = keypoint_frame["right_wrist"]
-    rot_left = keypoint_frame["left_rotmat"]
-    rot_right = keypoint_frame["right_rotmat"]
-    tips_left = keypoint_frame["left_tips"]
-    tips_right = keypoint_frame["right_tips"]
 
-    hands = []
-    if left_present:
-        hands.append(("left", wrist_left, rot_left, tips_left, (255, 255, 0)))
-    if right_present:
-        hands.append(("right", wrist_right, rot_right, tips_right, (0, 255, 255)))
-
-    for _, wrist, rotmat, tips, color in hands:
+    for hand in keypoint_frame["hands"]:
+        if hand["side"] == "left" and not left_present:
+            continue
+        if hand["side"] == "right" and not right_present:
+            continue
+        wrist = hand["wrist"]
+        rotmat = hand["rotmat"]
+        tips = hand["tips"]
+        color = tuple(int(v) for v in hand["color"])
+        tip_radius = int(hand.get("tip_radius", 4))
+        wrist_radius = int(hand.get("wrist_radius", 6))
+        line_thickness = int(hand.get("line_thickness", 2))
+        draw_axes = bool(hand.get("draw_axes", False))
+        label = hand.get("label")
         points_world = np.concatenate([wrist[None, :], tips], axis=0)
         uv, valid = _project_points(points_world, c2w, intrinsic)
         mask = _clip_uv_mask(uv, valid, image_bgr.shape)
         if mask[0]:
             wrist_uv = tuple(uv[0].astype(np.int32))
-            cv2.circle(overlay, wrist_uv, 6, color, -1)
+            cv2.circle(overlay, wrist_uv, wrist_radius, color, -1)
+            if label:
+                cv2.putText(
+                    overlay,
+                    label,
+                    (wrist_uv[0] + 8, wrist_uv[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
             for tip_idx in range(1, 6):
                 if mask[tip_idx]:
                     tip_uv = tuple(uv[tip_idx].astype(np.int32))
-                    cv2.line(overlay, wrist_uv, tip_uv, color, 2)
-                    cv2.circle(overlay, tip_uv, 4, color, -1)
-            _draw_axes(overlay, wrist, rotmat, c2w, intrinsic)
+                    cv2.line(overlay, wrist_uv, tip_uv, color, line_thickness)
+                    cv2.circle(overlay, tip_uv, tip_radius, color, -1)
+            if draw_axes:
+                _draw_axes(overlay, wrist, rotmat, c2w, intrinsic)
 
     return cv2.addWeighted(overlay, 0.78, image_bgr, 0.22, 0)
 
@@ -1723,6 +1736,7 @@ class ViewerApp:
         self.episode_keys = sorted({summary.episode_key for summary in self.summaries})
         self.default_render_mode = args.render_mode
         self.apply_demo_rx = bool(args.apply_demo_rx)
+        self.keypoint_source = args.keypoint_source
         self.descriptor_manifest = args.descriptor_manifest
         self.mano_dir = args.mano_dir
         self.mano_device = args.mano_device
@@ -1828,32 +1842,101 @@ class ViewerApp:
             keypoint_frame["left_rotmat"] = _apply_demo_rx_rotmat(keypoint_frame["left_rotmat"])
             keypoint_frame["right_rotmat"] = _apply_demo_rx_rotmat(keypoint_frame["right_rotmat"])
 
+        lowdim_hands = [
+            {
+                "side": "left",
+                "wrist": np.asarray(keypoint_frame["left_wrist"], dtype=np.float32),
+                "tips": np.asarray(keypoint_frame["left_tips"], dtype=np.float32),
+                "rotmat": np.asarray(keypoint_frame["left_rotmat"], dtype=np.float32),
+                "color": (255, 0, 255),
+                "label": "L-lowdim",
+                "draw_axes": self.keypoint_source in ("auto", "lowdim"),
+            },
+            {
+                "side": "right",
+                "wrist": np.asarray(keypoint_frame["right_wrist"], dtype=np.float32),
+                "tips": np.asarray(keypoint_frame["right_tips"], dtype=np.float32),
+                "rotmat": np.asarray(keypoint_frame["right_rotmat"], dtype=np.float32),
+                "color": (0, 255, 0),
+                "label": "R-lowdim",
+                "draw_axes": self.keypoint_source in ("auto", "lowdim"),
+            },
+        ]
+        keypoint_frame["hands"] = lowdim_hands
+
+        mano_frame = None
+        mano_error = None
         if mano_array is None:
+            mano_error = "mano.npy is missing"
+        else:
+            try:
+                mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array)
+            except Exception as error:
+                mano_error = str(error)
+
+        if mano_frame is None and self.keypoint_source in ("mano", "compare"):
             notes.append(
-                "mano.npy is missing, so keypoint mode uses lowdim wrist/tip world coordinates directly."
+                f"Requested keypoint_source={self.keypoint_source}, but MANO decode is unavailable ({mano_error}); falling back to lowdim."
+            )
+        elif mano_frame is None:
+            notes.append(
+                "MANO is unavailable for this frame, so keypoint mode uses lowdim wrist/tip world coordinates directly."
             )
             return keypoint_frame
 
-        try:
-            mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array)
-        except Exception as error:
+        mano_hands = [
+            {
+                "side": "left",
+                "wrist": np.asarray(mano_frame["left_joints"][MANO_CENTER_IDX], dtype=np.float32),
+                "tips": np.asarray(mano_frame["left_joints"][FINGERTIP_INDICES], dtype=np.float32),
+                "rotmat": np.asarray(keypoint_frame["left_rotmat"], dtype=np.float32),
+                "color": (255, 255, 0),
+                "label": "L-mano",
+                "draw_axes": self.keypoint_source == "mano",
+            },
+            {
+                "side": "right",
+                "wrist": np.asarray(mano_frame["right_joints"][MANO_CENTER_IDX], dtype=np.float32),
+                "tips": np.asarray(mano_frame["right_joints"][FINGERTIP_INDICES], dtype=np.float32),
+                "rotmat": np.asarray(keypoint_frame["right_rotmat"], dtype=np.float32),
+                "color": (0, 255, 255),
+                "label": "R-mano",
+                "draw_axes": self.keypoint_source == "mano",
+            },
+        ]
+
+        if self.keypoint_source == "lowdim":
+            notes.append("keypoint_source=lowdim: draw raw lowdim wrist/tip positions only.")
+            return keypoint_frame
+
+        if self.keypoint_source == "compare":
+            for hand in lowdim_hands:
+                hand["wrist_radius"] = 7
+                hand["tip_radius"] = 5
+                hand["line_thickness"] = 3
+                hand["draw_axes"] = False
+            for hand in mano_hands:
+                hand["wrist_radius"] = 4
+                hand["tip_radius"] = 3
+                hand["line_thickness"] = 2
+                hand["draw_axes"] = False
+            keypoint_frame["hands"] = lowdim_hands + mano_hands
+            keypoint_frame["anchor_source"] = "compare_lowdim_vs_mano"
             notes.append(
-                f"Failed to decode mano.npy for this frame ({error}); using lowdim wrist/tip world coordinates directly."
+                "keypoint_source=compare: lowdim is drawn in magenta/green, MANO is drawn in yellow/cyan."
             )
             return keypoint_frame
 
-        keypoint_frame["left_wrist"] = np.asarray(mano_frame["left_joints"][MANO_CENTER_IDX], dtype=np.float32)
-        keypoint_frame["right_wrist"] = np.asarray(mano_frame["right_joints"][MANO_CENTER_IDX], dtype=np.float32)
-        keypoint_frame["left_tips"] = np.asarray(
-            mano_frame["left_joints"][FINGERTIP_INDICES], dtype=np.float32
-        )
-        keypoint_frame["right_tips"] = np.asarray(
-            mano_frame["right_joints"][FINGERTIP_INDICES], dtype=np.float32
-        )
-        keypoint_frame["anchor_source"] = "mano_joint_wrist"
-        notes.append(
-            "Keypoint mode is using MANO joint 0 as the wrist anchor and MANO fingertip joints for better geometric alignment."
-        )
+        if self.keypoint_source in ("mano", "auto"):
+            keypoint_frame["left_wrist"] = mano_hands[0]["wrist"]
+            keypoint_frame["right_wrist"] = mano_hands[1]["wrist"]
+            keypoint_frame["left_tips"] = mano_hands[0]["tips"]
+            keypoint_frame["right_tips"] = mano_hands[1]["tips"]
+            keypoint_frame["hands"] = mano_hands
+            keypoint_frame["anchor_source"] = "mano_joint_wrist"
+            notes.append(
+                "Keypoint mode is using MANO joint 0 as the wrist anchor and MANO fingertip joints."
+            )
         return keypoint_frame
 
     def _ensure_mano_runtime(self):
@@ -2081,6 +2164,7 @@ class ViewerApp:
             "available_render_modes": ["keypoint", "mano"],
             "mano_manifest_loaded": bool(self.clip_to_seq_folder),
             "apply_demo_rx": self.apply_demo_rx,
+            "keypoint_source": self.keypoint_source,
         }
 
     def index_payload(self):
@@ -2201,6 +2285,12 @@ def build_parser():
         default="keypoint",
         choices=["keypoint", "mano"],
         help="Initial render mode. keypoint is lightweight; mano is the geometry-accurate view.",
+    )
+    parser.add_argument(
+        "--keypoint-source",
+        default="auto",
+        choices=["auto", "lowdim", "mano", "compare"],
+        help="For keypoint mode: use lowdim, MANO, or draw both for diagnosis. auto keeps the previous behavior.",
     )
     parser.add_argument(
         "--descriptor-manifest",
