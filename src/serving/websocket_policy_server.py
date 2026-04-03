@@ -160,9 +160,10 @@ class RuntimeEngine:
 
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """The high-level entry point for inference."""
-        prepared = self.policy.prepare_process(obs)
-        inputs = self.policy.build_model_inputs(prepared)
+        batch = self.policy.prepare_process(obs)
+        inputs = self.policy.build_model_inputs(batch)
         inputs = self._move_to_device(inputs)
+
         with self._autocast_context(), torch.inference_mode():
             pred_actions = self.policy(inputs)
         pred_actions = self.policy.post_process(pred_actions.cpu())
@@ -180,30 +181,34 @@ class EnvWrapper:
         intrinsic_key: str = "camera_intrinsics",
         instruction_key: str = "instruction",
         states_key: str = "states",
+        prev_action_chunk_key: str = "action_rtc",
     ) -> None:
-        self._policy = policy
-        self._image_key = image_key
-        self._depth_key = depth_key
-        self._intrinsic_key = intrinsic_key
-        self._instruction_key = instruction_key
-        self._states_key = states_key
+        self.policy = policy
+        self.image_key = image_key
+        self.depth_key = depth_key
+        self.intrinsic_key = intrinsic_key
+        self.instruction_key = instruction_key
+        self.states_key = states_key
+        self.prev_action_chunk_key = prev_action_chunk_key
         self.metadata = getattr(policy, "metadata", {})
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._policy, name)
+        return getattr(self.policy, name)
 
     def __dir__(self) -> list[str]:
-        return sorted(set(dir(self._policy)) | set(super().__dir__()))
+        return sorted(set(dir(self.policy)) | set(super().__dir__()))
 
     def infer(self, obs: dict) -> dict:
         mapped_obs = {
-            "image": obs.get(self._image_key),
-            "depth": obs.get(self._depth_key),
-            "intrinsic": obs.get(self._intrinsic_key),
-            "instruction": obs.get(self._instruction_key),
-            "states": obs.get(self._states_key),
+            "image": obs.get(self.image_key),
+            "depth": obs.get(self.depth_key),
+            "intrinsic": obs.get(self.intrinsic_key),
+            "instruction": obs.get(self.instruction_key),
+            "states": obs.get(self.states_key),
+            # RTC condition: executed action prefix (None on first step)
+            "prev_action_chunk": obs.get(self.prev_action_chunk_key),
         }
-        return self._policy.infer(mapped_obs)
+        return self.policy.infer(mapped_obs)
 
 
 
@@ -240,6 +245,7 @@ def create_env_wrapper(policy: Any, wrapper_cfg: Any) -> Any:
         intrinsic_key=wrapper_cfg.intrinsic_key,
         instruction_key=wrapper_cfg.instruction_key,
         states_key=wrapper_cfg.states_key,
+        prev_action_chunk_key=wrapper_cfg.prev_action_chunk_key,
     )
 
 

@@ -36,7 +36,7 @@ def test_prepare_process_repeat_matches_training_side_contract():
         "answer_start_idx",
         "is_vla_data",
     ]:
-        assert torch.equal(prepared["batch"][key], expected_batch[key])
+        assert torch.equal(prepared[key], expected_batch[key])
 
 
 def test_prepare_process_truncate_matches_training_side_contract():
@@ -65,13 +65,13 @@ def test_prepare_process_truncate_matches_training_side_contract():
         "answer_start_idx",
         "is_vla_data",
     ]:
-        assert torch.equal(prepared["batch"][key], expected_batch[key])
+        assert torch.equal(prepared[key], expected_batch[key])
 
 
 def test_prepare_process_uses_default_instruction_when_obs_instruction_missing():
     wrapper = build_wrapper_stub(history_pad_mode="truncate")
     prepared = wrapper.prepare_process(make_obs([[1.0, 1.0]], instruction=None))
-    assert prepared["batch"]["n_states"].item() == 1
+    assert prepared["n_states"].item() == 1
 
 
 def test_configure_batch_processor_text_kwargs_updates_nested_text_kwargs():

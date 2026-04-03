@@ -123,6 +123,7 @@ def build_wrapper_stub(
     wrapper.action_dim = 2
     wrapper.state_horizon = 4
     wrapper.state_dim = 2
+    wrapper.image_horizon = 1
     wrapper.image_stride = 1
     wrapper.video_base_fps = 30.0
     wrapper.history_pad_mode = history_pad_mode

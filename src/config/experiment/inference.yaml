@@ -34,8 +34,8 @@ policy:
   checkpoint_path: ???  # required: path to trained model checkpoint
   mode: flow
   use_mixed_precision: True
-  tokenizer_padding: longest
-  max_length: null
+  tokenizer_padding: max_length
+  max_length: 768
   default_instruction: null
   flow_sampling_steps: ${flow.num_inference_steps}
   ar_max_new_tokens: null
@@ -52,3 +52,4 @@ env_wrapper:
   intrinsic_key: camera_intrinsics
   instruction_key: instruction
   states_key: states
+  prev_action_chunk_key: action_rtc

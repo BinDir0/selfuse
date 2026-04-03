@@ -54,10 +54,15 @@ def prepare_prefix_memory(model, batch: dict, output_attentions: bool = False):
     return model.forward_backbone_stream(prefix_batch, slot_embeds, output_attentions=output_attentions)
 
 
-def infer_flow_action(
-    model, batch: dict, prev_action_chunk=None, inference_delay: int = 0,
-    output_attentions: bool = False,
-):
+def infer_flow_action(model, batch: dict, **kwargs):
+    # RTC condition: read from batch (preferred) or legacy kwargs fallback
+    prev_action_chunk = batch.pop("prev_action_chunk", None) or kwargs.get("prev_action_chunk")
+    inference_delay = batch.pop("inference_delay", None)
+    if inference_delay is None:
+        inference_delay = kwargs.get("inference_delay", 0)
+    inference_delay = int(inference_delay)
+    output_attentions = kwargs.get("output_attentions", False)
+
     working_batch = _clone_batch(batch)
     working_batch["action_token_id"] = model.action_token_index
 
@@ -172,12 +177,9 @@ def infer_ar_action(
         step_batch["actions"] = generated_actions
         slot_embeds = model.build_slot_embeddings(step_batch, add_action_noise=False)
         backbone_output = model.forward_backbone_stream(step_batch, slot_embeds)
-        action_hidden = _gather_action_hidden_states(
-            hidden_states=backbone_output.last_hidden_states,
-            answer_start_idx=step_batch["answer_start_idx"],
-            action_len=action_len,
-        )
-        current_hidden = action_hidden[:, step_idx, :]
+        hidden_states = backbone_output.last_hidden_states
+        pos = (step_batch["answer_start_idx"] - 1 + step_idx).clamp(min=0, max=hidden_states.shape[1] - 1)
+        current_hidden = hidden_states[torch.arange(batch_size, device=device), pos]
         generated_hidden.append(current_hidden)
 
         latent_condition = model.latent_condition_projector(current_hidden)
