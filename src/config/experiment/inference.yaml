@@ -26,12 +26,11 @@ serving:
   profile_skip_first: 5
 
 # Inference policy wrapper
-# model_config_name refers to the Hydra experiment config to compose
-# (e.g. "legendvla_qwen3_vl"), NOT a raw file path.
+# model_config_path: path to the training run's .hydra/config.yaml
 policy:
   _target_: src.policy.legendvla_inference_wrapper.LegendVLAInference
-  model_config_name: legendvla_qwen3_vl
-  checkpoint_path: ???  # required: path to trained model checkpoint
+  model_config_path: ???  # required: path to the training run's .hydra/config.yaml
+  checkpoint_path: ???    # required: path to trained model checkpoint
   mode: flow
   use_mixed_precision: True
   tokenizer_padding: max_length
@@ -43,7 +42,11 @@ policy:
   ar_cfg: 1.0
   normalizer_path: ${training.normalizer_path}
   use_relative_action: True
-  compile: null  # Optional compile config for the fixed block stacks.
+  compile:
+    enabled: False
+    fullgraph: False       # allow graph breaks in backbone multimodal processing
+    backend: inductor
+    mode: reduce-overhead  # CUDA graphs; requires fixed tensor shapes (batch_size=1 serving)
 
 env_wrapper:
   enabled: True

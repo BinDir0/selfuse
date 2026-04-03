@@ -16,7 +16,7 @@ from src.utils.checkpoint_util import load_checkpoint
 
 log = logging.getLogger(__name__)
 
-_CONFIG_DIR = str(pathlib.Path(__file__).resolve().parents[1] / "config")
+OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 class LegendVLAInference(nn.Module):
@@ -29,7 +29,7 @@ class LegendVLAInference(nn.Module):
 
     def __init__(
         self,
-        model_config_name: str = "legendvla_qwen3_vl",
+        model_config_path: str,
         checkpoint_path: str = None,
         mode: str = "flow",
         use_mixed_precision: bool = True,
@@ -47,7 +47,7 @@ class LegendVLAInference(nn.Module):
         super().__init__()
         self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
 
-        model_cfg = self.compose_model_config(model_config_name)
+        model_cfg = OmegaConf.load(model_config_path)
 
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
@@ -100,24 +100,6 @@ class LegendVLAInference(nn.Module):
                 else compile
             )
 
-    @staticmethod
-    def compose_model_config(experiment_name: str) -> OmegaConf:
-        """Compose a full training config using Hydra compose API.
-
-        This properly resolves defaults, interpolations, and cross-file references,
-        unlike raw OmegaConf.load() which skips defaults composition.
-        """
-        from hydra import compose, initialize_config_dir
-        from hydra.core.global_hydra import GlobalHydra
-
-        GlobalHydra.instance().clear()
-        with initialize_config_dir(config_dir=_CONFIG_DIR, version_base=None):
-            cfg = compose(
-                config_name="train_config",
-                overrides=[f"experiment={experiment_name}"],
-            )
-        return cfg
-
     @property
     def shape_meta(self) -> dict:
         return self.get_model_core().shape_meta
@@ -139,8 +121,8 @@ class LegendVLAInference(nn.Module):
             for key, value in self.compile_cfg.items()
             if key != "enabled" and value is not None
         }
-        log.info("Compiling blocks with kwargs=%s", compile_kwargs)
-        self.get_model_core().compile_blocks(compile_kwargs)
+        log.info("Compiling model with kwargs=%s", compile_kwargs)
+        self.model = torch.compile(self.model, **compile_kwargs)
         self._model_compiled = True
 
     def configure_batch_processor_text_kwargs(
