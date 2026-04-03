@@ -328,7 +328,7 @@ def evaluation(workspace, accelerator, dataloader, step_log):
     wrist_trans_dim = 6  # 2 wrists * 3 xyz, fixed layout
 
     with (
-        # torch.compiler.set_stance("force_eager"),
+        torch.compiler.set_stance("force_eager"),
         torch.no_grad(),
         eval_with_averaged_model(accelerator, workspace.model, workspace.model_averaging),
     ):

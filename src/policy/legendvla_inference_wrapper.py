@@ -41,7 +41,6 @@ class LegendVLAInference(nn.Module):
         normalizer_path: str = None,
         use_relative_action: bool = False,
         compile: Any = None,
-        relative_action_mode: str = "anchor",
     ) -> None:
         super().__init__()
         self.dtype = torch.bfloat16 if use_mixed_precision else torch.float32
@@ -67,7 +66,7 @@ class LegendVLAInference(nn.Module):
 
         self.normalizer = self.load_normalizer(normalizer_path) if normalizer_path else None
         self.use_relative_action = use_relative_action
-        self.relative_action_mode = relative_action_mode
+
         self.mode = mode
         self.default_instruction = default_instruction
         self.action_horizon = int(self.model.shape_meta["action"]["horizon"])

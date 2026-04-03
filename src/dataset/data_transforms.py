@@ -22,41 +22,27 @@ from src.utils.geometry import (
 from src.model.common.normalizer import LinearNormalizer
 
 
-def get_relative_action(state, action, mode="anchor"):
+def get_relative_action(state, action):
     '''
     Args:
         state: np.ndarray, shape: [wrist_dim + hand_dim]
         action: np.ndarray, shape: [H, wrist_dim + hand_dim]
-        mode: str, 'anchor' or 'step'
     Returns:
         action: np.ndarray, shape: [H, wrist_dim + hand_dim]
     '''
-    relative_action = action.copy()
-    if mode == "step":
-        prev_action = np.concatenate([state[None], action[:-1]], axis=0)
-    else:
-        prev_action = np.broadcast_to(state, action.shape)
-
+    action = action.copy() # avoid modifying the original action
     for idx in range(2):
-        wrist_action_homo_mat = homo_matrix_from_trans_6drot(
-            action[..., idx * 3: idx * 3 + 3],
-            action[..., 6 + idx * 6: 6 + idx * 6 + 6],
-        )
-        wrist_state_homo_mat = homo_matrix_from_trans_6drot(
-            prev_action[..., idx * 3: idx * 3 + 3],
-            prev_action[..., 6 + idx * 6: 6 + idx * 6 + 6],
-        )
+        wrist_action_homo_mat = homo_matrix_from_trans_6drot(action[..., idx*3 : idx*3+3], action[..., 6+idx*6 : 6+idx*6+6])
+        wrist_state_homo_mat = homo_matrix_from_trans_6drot(state[idx*3 : idx*3+3], state[6+idx*6 : 6+idx*6+6])
         wrist_action_homo_mat = np.linalg.pinv(wrist_state_homo_mat) @ wrist_action_homo_mat
         trans, rot_6d = homo_matrix_to_trans_6drot(wrist_action_homo_mat)
-        relative_action[..., idx * 3: idx * 3 + 3] = trans
-        relative_action[..., 6 + idx * 6: 6 + idx * 6 + 6] = rot_6d
+        action[..., idx*3 : idx*3+3] = trans
+        action[..., 6+idx*6 : 6+idx*6+6] = rot_6d
 
-    relative_action[..., 18:] = action[..., 18:] - prev_action[..., 18:]
+    action[..., 18:] = action[..., 18:] - state[18:]
+    return action
 
-    return relative_action
-
-
-def get_absolute_action(state, relative_action, mode="anchor"):
+def get_absolute_action(state, relative_action):
     '''
     Convert relative action back to absolute action.
     This is the inverse operation of get_relative_action.
@@ -65,7 +51,6 @@ def get_absolute_action(state, relative_action, mode="anchor"):
         state: torch.Tensor or np.ndarray, shape: [wrist_dim + hand_dim] - current state
             state is in the first frame's camera coordinate system, where wrist is in cam frame and hand is in wrist frame
         relative_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] - relative action
-        mode: str, 'anchor' or 'step'
 
     Returns:
         absolute_action: torch.Tensor or np.ndarray, shape: [H, wrist_dim + hand_dim] - absolute action
@@ -75,29 +60,20 @@ def get_absolute_action(state, relative_action, mode="anchor"):
         absolute_action = relative_action.clone()
     else:
         absolute_action = relative_action.copy()
-    prev_state = state
-    for step_idx in range(relative_action.shape[0]):
-        relative_step = relative_action[step_idx]
-        for idx in range(2):
-            wrist_relative_action_homo_mat = homo_matrix_from_trans_6drot(
-                relative_step[..., idx * 3: idx * 3 + 3],
-                relative_step[..., 6 + idx * 6: 6 + idx * 6 + 6],
-            )
-            wrist_state_homo_mat = homo_matrix_from_trans_6drot(
-                prev_state[..., idx * 3: idx * 3 + 3],
-                prev_state[..., 6 + idx * 6: 6 + idx * 6 + 6],
-            )
-            wrist_action_homo_mat = wrist_state_homo_mat @ wrist_relative_action_homo_mat
-            trans, rot_6d = homo_matrix_to_trans_6drot(wrist_action_homo_mat)
-            absolute_action[step_idx, idx * 3: idx * 3 + 3] = trans
-            absolute_action[step_idx, 6 + idx * 6: 6 + idx * 6 + 6] = rot_6d
 
-        absolute_action[step_idx, 18:] = relative_step[18:] + prev_state[18:]
-        if mode == "step":
-            if isinstance(absolute_action, torch.Tensor):
-                prev_state = absolute_action[step_idx].clone()
-            else:
-                prev_state = absolute_action[step_idx].copy()
+    # For wrist parameters, absolute action = state @ relative action
+    # This is the inverse of: relative = pinv(state) @ action
+    for idx in range(2):
+        wrist_relative_action_homo_mat = homo_matrix_from_trans_6drot(relative_action[..., idx*3 : idx*3+3], relative_action[..., 6+idx*6 : 6+idx*6+6])
+        wrist_state_homo_mat = homo_matrix_from_trans_6drot(state[idx*3 : idx*3+3], state[6+idx*6 : 6+idx*6+6])
+        wrist_action_homo_mat = wrist_state_homo_mat @ wrist_relative_action_homo_mat
+        trans, rot_6d = homo_matrix_to_trans_6drot(wrist_action_homo_mat)
+        absolute_action[..., idx*3 : idx*3+3] = trans
+        absolute_action[..., 6+idx*6 : 6+idx*6+6] = rot_6d
+
+    # For hand parameters, absolute action = relative action + state
+    # This is the inverse of: relative = action - state
+    absolute_action[..., 18:] = relative_action[..., 18:] + state[18:]
 
     return absolute_action
 
@@ -158,7 +134,6 @@ def process_state_action(
     normalizer : Optional[LinearNormalizer] = None,
     motion_type = 'mano',
     use_relative_action = False,
-    relative_action_mode: str = "anchor",
 ):
     '''
     Args:
@@ -171,7 +146,6 @@ def process_state_action(
         normalizer: Optional[LinearNormalizer]
         motion_type: str, 'mano' or 'keypoint'
         use_relative_action: bool
-        relative_action_mode: str, passed to get_relative_action as mode ('anchor' or 'step')
     Returns:
         state: np.ndarray, shape: [N_state, wrist_dim + hand_dim]
         action: np.ndarray, shape: [N_action, wrist_dim + hand_dim]
@@ -207,9 +181,7 @@ def process_state_action(
     processed_state = np.concatenate([processed_wrist_state, processed_hand_state], axis=-1)
     processed_action = np.concatenate([processed_wrist_action, processed_hand_action], axis=-1)
     if use_relative_action:
-        processed_action = get_relative_action(
-            processed_state[-1], processed_action, mode=relative_action_mode
-        )
+        processed_action = get_relative_action(processed_state[-1], processed_action)
 
     if normalizer is not None:
         if not use_relative_action: # Use unified normalizer for both state and action

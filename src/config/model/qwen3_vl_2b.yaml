@@ -14,7 +14,7 @@ pretrained:
 added_slot_tokens:
   state: <state>
   action: <action>
-  camera: null
+  camera: <camera>
 
 # Camera intrinsic input mode:
 #   "text"  — intrinsic as formatted text in the prompt (default, backward-compatible)

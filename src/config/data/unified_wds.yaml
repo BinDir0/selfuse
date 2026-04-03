@@ -53,7 +53,6 @@ dataset:
     shape_meta: ${data.shape_meta}
     objective: ${objective}
     use_relative_action: True
-    relative_action_mode: anchor # anchor or step
     depth_clip_range: ${data.depth_clip_range}
     val_wds_datasets: ${val_vla_wds_datasets}
     history_pad_mode: repeat

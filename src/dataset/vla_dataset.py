@@ -46,7 +46,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         shape_meta: Dict,
         objective: Optional[str] = None,
         use_relative_action: bool = False,
-        relative_action_mode: str = "anchor",
         mode: str = "train",
         depth_clip_range=None,
         shuffle_buffer: int = 16384,
@@ -69,7 +68,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.depth_image_shape = shape_meta["obs"]["depth"]["shape"]
         self.objective = objective
         self.use_relative_action = use_relative_action
-        self.relative_action_mode = relative_action_mode
         self.mode = mode
         self.depth_clip_range = depth_clip_range
         self.shuffle_buffer = shuffle_buffer
@@ -196,7 +194,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             hand_ndim=self.hand_ndim,
             motion_type=self.motion_type,
             use_relative_action=self.use_relative_action,
-            relative_action_mode=self.relative_action_mode,
         )
         ensure_mapping_finite(
             {"state": state, "action": action},
@@ -340,7 +337,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             shape_meta=self.shape_meta,
             objective=self.objective,
             use_relative_action=self.use_relative_action,
-            relative_action_mode=self.relative_action_mode,
             mode="val",
             depth_clip_range=self.depth_clip_range,
             shuffle_buffer=0,
@@ -530,7 +526,6 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         wds_datasets: List[Dict],
         shape_meta: Dict,
         use_relative_action: bool = False,
-        relative_action_mode: str = "anchor",
         mode: str = "val",
         max_total_shards: Optional[int] = None,
         min_shards_per_dataset: int = 8,
@@ -545,7 +540,6 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         self.motion_type = shape_meta["obs"]["state"]["type"]
         self.hand_ndim = shape_meta["obs"]["state"]["hand"]["shape"][-1] // 2
         self.use_relative_action = use_relative_action
-        self.relative_action_mode = relative_action_mode
         self.mode = mode
         self.max_total_shards = max_total_shards
         self.min_shards_per_dataset = min_shards_per_dataset
@@ -585,7 +579,6 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             hand_ndim=self.hand_ndim,
             motion_type=self.motion_type,
             use_relative_action=self.use_relative_action,
-            relative_action_mode=self.relative_action_mode,
         )
 
         if not self.use_relative_action:
