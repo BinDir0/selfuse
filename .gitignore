@@ -20,6 +20,7 @@ share/python-wheels/
 *.egg
 *.pdf
 MANIFEST
+data/mano/
 
 # venv
 venv/
@@ -56,3 +57,4 @@ lightning_logs/
 # 常见大包 / 本地数据（按项目取消注释）
 # data/
 # _DATA/
+
