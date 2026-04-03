@@ -35,7 +35,7 @@ def get_relative_action(state, action, mode="anchor"):
     if mode == "step":
         prev_action = np.concatenate([state[None], action[:-1]], axis=0)
     else:
-        prev_action = state
+        prev_action = np.broadcast_to(state, action.shape)
 
     for idx in range(2):
         wrist_action_homo_mat = homo_matrix_from_trans_6drot(
