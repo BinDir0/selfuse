@@ -148,6 +148,14 @@ MANO_JOINT_TREE = [
     [(0, 17), (17, 18), (18, 19), (19, 20)],
 ]
 FINGERTIP_INDICES = np.array([4, 8, 12, 16, 20], dtype=np.int64)
+DEMO_RX_3X3 = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, -1.0],
+    ],
+    dtype=np.float32,
+)
 
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -1499,6 +1507,25 @@ def _resolve_camera_c2w(extrinsic_raw: np.ndarray, points_world: np.ndarray) -> 
     return best_c2w, best_name
 
 
+def _apply_demo_rx_points(points_world: np.ndarray) -> np.ndarray:
+    points = np.asarray(points_world, dtype=np.float32)
+    if points.ndim == 1:
+        return DEMO_RX_3X3 @ points
+    return (DEMO_RX_3X3 @ points.T).T.astype(np.float32)
+
+
+def _apply_demo_rx_rotmat(rotmat_world: np.ndarray) -> np.ndarray:
+    rotmat = np.asarray(rotmat_world, dtype=np.float32).reshape(3, 3)
+    return (DEMO_RX_3X3 @ rotmat).astype(np.float32)
+
+
+def _apply_demo_rx_c2w(c2w: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(c2w, dtype=np.float32).reshape(4, 4).copy()
+    matrix[:3, :3] = DEMO_RX_3X3 @ matrix[:3, :3]
+    matrix[:3, 3] = DEMO_RX_3X3 @ matrix[:3, 3]
+    return matrix
+
+
 def _clip_uv_mask(uv: np.ndarray, valid: np.ndarray, image_shape) -> np.ndarray:
     h, w = image_shape[:2]
     return valid & (uv[:, 0] >= 0) & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h)
@@ -1687,6 +1714,7 @@ class ViewerApp:
         self.start_index = min(max(args.start_index, 0), max(len(self.summaries) - 1, 0))
         self.episode_keys = sorted({summary.episode_key for summary in self.summaries})
         self.default_render_mode = args.render_mode
+        self.apply_demo_rx = bool(args.apply_demo_rx)
         self.descriptor_manifest = args.descriptor_manifest
         self.mano_dir = args.mano_dir
         self.mano_device = args.mano_device
@@ -1734,6 +1762,12 @@ class ViewerApp:
             return cached
 
         frame = _build_mano_frame_from_sample(lowdim_array, mano_array, self._ensure_mano_runtime())
+        if self.apply_demo_rx:
+            frame["c2w"] = _apply_demo_rx_c2w(frame["c2w"])
+            frame["left_verts"] = _apply_demo_rx_points(frame["left_verts"])
+            frame["left_joints"] = _apply_demo_rx_points(frame["left_joints"])
+            frame["right_verts"] = _apply_demo_rx_points(frame["right_verts"])
+            frame["right_joints"] = _apply_demo_rx_points(frame["right_joints"])
         frame["frame_idx"] = parse_frame_index(summary.key)
         with self._cache_lock:
             self._mano_sample_cache[summary.id] = frame
@@ -1744,6 +1778,8 @@ class ViewerApp:
         notes = [
             "All 3D lowdim fields are stored in the HaWoR/SLAM world frame."
         ]
+        if self.apply_demo_rx:
+            notes.append("Applied demo-style Rx=diag(1,-1,-1) to world points and camera pose for display.")
         keypoint_frame = {
             "c2w": fields["camera_w2c"],
             "intrinsic": fields["camera_intrinsic"],
@@ -1773,6 +1809,15 @@ class ViewerApp:
             "camera extrinsic is interpreted as "
             + ("camera-to-world (c2w)." if camera_convention == "c2w" else "world-to-camera (w2c) and inverted for display.")
         )
+
+        if self.apply_demo_rx:
+            keypoint_frame["c2w"] = _apply_demo_rx_c2w(keypoint_frame["c2w"])
+            keypoint_frame["left_wrist"] = _apply_demo_rx_points(keypoint_frame["left_wrist"])
+            keypoint_frame["right_wrist"] = _apply_demo_rx_points(keypoint_frame["right_wrist"])
+            keypoint_frame["left_tips"] = _apply_demo_rx_points(keypoint_frame["left_tips"])
+            keypoint_frame["right_tips"] = _apply_demo_rx_points(keypoint_frame["right_tips"])
+            keypoint_frame["left_rotmat"] = _apply_demo_rx_rotmat(keypoint_frame["left_rotmat"])
+            keypoint_frame["right_rotmat"] = _apply_demo_rx_rotmat(keypoint_frame["right_rotmat"])
 
         if mano_array is None:
             notes.append(
@@ -1930,6 +1975,7 @@ class ViewerApp:
             "default_render_mode": self.default_render_mode,
             "available_render_modes": ["keypoint", "mano"],
             "mano_manifest_loaded": bool(self.clip_to_seq_folder),
+            "apply_demo_rx": self.apply_demo_rx,
         }
 
     def index_payload(self):
@@ -2053,6 +2099,11 @@ def build_parser():
     )
     parser.add_argument("--mano-dir", type=str, default=None, help="Optional MANO model directory override")
     parser.add_argument("--mano-device", type=str, default="cpu", help="Device for MANO rendering, e.g. cpu or cuda:0")
+    parser.add_argument(
+        "--apply-demo-rx",
+        action="store_true",
+        help="Apply the same Rx=diag(1,-1,-1) world/camera transform used by demo_offline before rendering.",
+    )
     return parser
 
 
