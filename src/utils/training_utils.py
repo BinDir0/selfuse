@@ -150,17 +150,32 @@ def grads_l2_norm(params):
     return scalar_metric_value(norm)
 
 
-# Adapted from TorchTitan to avoid GC stragglers in distributed training.
-# All ranks disable automatic GC and collect at the same deterministic step,
-# so no single rank stalls while others wait at the next NCCL collective.
-# Source: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py#L49-L73
+# Adapted from TorchTitan + TorchTNT to avoid GC stragglers in distributed
+# training.  All ranks disable automatic GC and collect at the same
+# deterministic step, so no single rank stalls at the next NCCL collective.
+#
+# Two-tier collection (following TorchTNT's pattern):
+#   - gen-1 every ``gc_freq`` steps   — lightweight, catches short-lived cycles
+#   - gen-2 every ``full_gc_freq`` steps — full sweep, prevents long-lived
+#     reference-cycle memory buildup that gen-1 alone cannot reclaim
+#
+# Sources:
+#   https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py
+#   https://github.com/pytorch/tnt  (torchtnt.framework.callbacks.GarbageCollector)
 class GarbageCollection:
-    def __init__(self, gc_freq: int = 1000, debug: bool = False):
+    def __init__(
+        self,
+        gc_freq: int = 100,
+        full_gc_freq: int = 1000,
+        debug: bool = False,
+    ):
         assert gc_freq > 0, "gc_freq must be a positive integer"
+        assert full_gc_freq >= gc_freq, "full_gc_freq should be >= gc_freq"
         self.gc_freq = gc_freq
+        self.full_gc_freq = full_gc_freq
         self.debug = debug
         gc.disable()
-        self.collect("Initial GC collection")
+        self.collect("Initial GC collection", generation=2)
         if debug:
             from torch.utils.viz._cycles import warn_tensor_cycles
             if torch.distributed.get_rank() == 0:
@@ -173,7 +188,13 @@ class GarbageCollection:
                 generation=2,
             )
             gc.collect()
-        elif step_count > 1 and step_count % self.gc_freq == 0:
+            return
+
+        if step_count < 2:
+            return
+        if step_count % self.full_gc_freq == 0:
+            self.collect("Performing full (gen-2) GC collection", generation=2)
+        elif step_count % self.gc_freq == 0:
             self.collect("Performing periodic GC collection")
 
     def finalize(self):
