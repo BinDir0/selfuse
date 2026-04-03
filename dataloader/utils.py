@@ -11,12 +11,13 @@ import numpy as np
 from PIL import Image
 
 # slice definitions for the lowdim vector
-LOWDIM_DIM = 128
+LOWDIM_DIM = 148
 
 STATE_WRIST_SLICE = slice(0, 18)
 STATE_HAND_SLICE = slice(18, 108)
-EXTRINSIC_SLICE = slice(108, 124)
-INTRINSIC_SLICE = slice(124, 128)
+STATE_SHAPE_SLICE = slice(108, 128)
+EXTRINSIC_SLICE = slice(128, 144)
+INTRINSIC_SLICE = slice(144, 148)
 
 LEFT_TRANSLATION_SLICE = slice(0, 3)
 RIGHT_TRANSLATION_SLICE = slice(3, 6)
@@ -24,6 +25,8 @@ LEFT_ROTATION_SLICE = slice(6, 12)
 RIGHT_ROTATION_SLICE = slice(12, 18)
 LEFT_HAND_SLICE = slice(0, 45)
 RIGHT_HAND_SLICE = slice(45, 90)
+LEFT_SHAPE_SLICE = slice(0, 10)
+RIGHT_SHAPE_SLICE = slice(10, 20)
 
 
 def is_glob_pattern(path: str) -> bool:
@@ -93,6 +96,7 @@ def split_lowdim(lowdim: np.ndarray) -> Dict[str, np.ndarray]:
 
     state_wrist = vector[STATE_WRIST_SLICE].copy()
     state_hand = vector[STATE_HAND_SLICE].copy()
+    state_shape = vector[STATE_SHAPE_SLICE].copy()
     extrinsic_flat = vector[EXTRINSIC_SLICE].copy()
     intrinsic = vector[INTRINSIC_SLICE].copy()
 
@@ -100,6 +104,7 @@ def split_lowdim(lowdim: np.ndarray) -> Dict[str, np.ndarray]:
         "lowdim": vector,
         "state_wrist": state_wrist,
         "state_hand": state_hand,
+        "state_shape": state_shape,
         "extrinsic": extrinsic_flat,
         "extrinsic_4x4": extrinsic_flat.reshape(4, 4).copy(),
         "intrinsic": intrinsic,
@@ -109,6 +114,8 @@ def split_lowdim(lowdim: np.ndarray) -> Dict[str, np.ndarray]:
         "right_rot6": state_wrist[RIGHT_ROTATION_SLICE].copy(),
         "left_hand_pose45": state_hand[LEFT_HAND_SLICE].copy(),
         "right_hand_pose45": state_hand[RIGHT_HAND_SLICE].copy(),
+        "left_shape": state_shape[LEFT_SHAPE_SLICE].copy(),
+        "right_shape": state_shape[RIGHT_SHAPE_SLICE].copy(),
     }
 
 # this function provides a unique episode encoding

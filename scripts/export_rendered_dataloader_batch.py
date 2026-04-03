@@ -1,12 +1,12 @@
 """
 Render one batch with MANO and export the generated video.
 Usage: python3 scripts/export_rendered_dataloader_batch.py \
-  --dataset /share_data/zhangtingrui/datasets/taco_v2 \
+  --dataset /share_data/zhangtingrui/datasets/taco_v3 \
   --window-size 30 \
   --stride 15 \
   --batch-size 4 \
   --fps 10 \
-  --output-dir outputs/rendered_batch
+  --output-dir outputs/rendered_batch_v3
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from dataloader import EpisodeWindowDataLoader
 from dataloader.utils import sanitize_key
 from vis.mano_render import get_cached_mano_layers, render_hand_on_frame
 
-DEFAULT_DATASET_PATH = "/share_data/zhangtingrui/datasets/taco_v2"
+DEFAULT_DATASET_PATH = "/share_data/zhangtingrui/datasets/taco_v3"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -97,6 +97,8 @@ def render_sample_frames(
     right_rot6 = _select_row(batch, "right_rot6", batch_idx)
     left_hand_pose45 = _select_row(batch, "left_hand_pose45", batch_idx)
     right_hand_pose45 = _select_row(batch, "right_hand_pose45", batch_idx)
+    left_shape = _select_row(batch, "left_shape", batch_idx)
+    right_shape = _select_row(batch, "right_shape", batch_idx)
     extrinsic = _select_row(batch, "extrinsic_4x4", batch_idx)
     intrinsic = _select_row(batch, "intrinsic", batch_idx)
 
@@ -108,6 +110,10 @@ def render_sample_frames(
             mano_params={
                 "left": left_hand_pose45[frame_idx],
                 "right": right_hand_pose45[frame_idx],
+            },
+            shape_params={
+                "left": left_shape[frame_idx],
+                "right": right_shape[frame_idx],
             },
             wrist_params={
                 "left_translation": left_translation[frame_idx],

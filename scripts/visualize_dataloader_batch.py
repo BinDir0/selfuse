@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 from dataloader import EpisodeWindowDataLoader
 
-DEFAULT_DATASET_PATH = "/share_data/zhangtingrui/datasets/taco_v2"
+DEFAULT_DATASET_PATH = "/share_data/zhangtingrui/datasets/taco_v3"
 RESAMPLING_BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 
 

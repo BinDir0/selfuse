@@ -9,6 +9,8 @@ MANO (B,T,·)
     right_rot6 : B x T x 6
     left_hand_pose45 : B x T x 45
     right_hand_pose45 : B x T x 45
+    left_shape : B x T x 10
+    right_shape : B x T x 10
 
 Accepts dataset with the following structure in tar shards:
 taco_v2/
@@ -28,12 +30,13 @@ taco_v2_episodexxx_f00045.meta.json
     "presence": 3,   # 0 none, 1 left, 2 right, 3 both
 }
 
-# taco_ep000123_f00045.lowdim.npy   shape=(128,), dtype=float32
+# taco_ep000123_f00045.lowdim.npy   shape=(148,), dtype=float32
 lowdim = concat([
-    wrist,  # 18 = [left_trans(3), right_trans(3), left_rot(6), right_rot(6)]
+    wrist,   # 18 = [left_trans(3), right_trans(3), left_rot(6), right_rot(6)]
     # 6drot is the first two columns of a 3x3 transformation matrix（wrist2world）.
-    hand,   # 90 = [left_hand(45), right_hand(45)]
-            # in left: [thumb_fingertips([x, y, z] 3), index_fingertips(3), ...]
+    hand,    # 90 = [left_hand(45), right_hand(45)]
+             # in left: [thumb_fingertips([x, y, z] 3), index_fingertips(3), ...]
+    shape,   # 20 = [left_shape(10), right_shape(10)]
     # The coordinates above are in the world coordinate system.
     extrinsic,     # 16, flatten(4x4) homogeneous transformation matrix World2Cam
     intrinsic,     # 4, [fx, fy, cx, cy]
@@ -179,12 +182,19 @@ def build_window_batch(episode_name: str, episode_frames: List[Dict], start: int
         # "lowdim": np.stack([frame["lowdim"] for frame in window_frames], axis=0),
         "state_wrist": np.stack([frame["state_wrist"] for frame in window_frames], axis=0),
         "state_hand": np.stack([frame["state_hand"] for frame in window_frames], axis=0),
+        "state_shape": np.stack([frame["state_shape"] for frame in window_frames], axis=0),
+        # wrist translations
         "left_translation": np.stack([frame["left_translation"] for frame in window_frames], axis=0),
         "right_translation": np.stack([frame["right_translation"] for frame in window_frames], axis=0),
+        # wrist rotations (6d representation)
         "left_rot6": np.stack([frame["left_rot6"] for frame in window_frames], axis=0),
         "right_rot6": np.stack([frame["right_rot6"] for frame in window_frames], axis=0),
+        # hand pose parameters
         "left_hand_pose45": np.stack([frame["left_hand_pose45"] for frame in window_frames], axis=0),
         "right_hand_pose45": np.stack([frame["right_hand_pose45"] for frame in window_frames], axis=0),
+        # hand shape parameters(betas)
+        "left_shape": np.stack([frame["left_shape"] for frame in window_frames], axis=0),
+        "right_shape": np.stack([frame["right_shape"] for frame in window_frames], axis=0),
         # camera parameters
         "extrinsic": np.stack([frame["extrinsic"] for frame in window_frames], axis=0),
         "extrinsic_4x4": np.stack([frame["extrinsic_4x4"] for frame in window_frames], axis=0),
@@ -359,4 +369,3 @@ class EpisodeWindowDataLoader(DataLoader):
             episode_filter=episode_filter,
         )
         super().__init__(dataset, **kwargs)
-
