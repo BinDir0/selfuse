@@ -1,7 +1,7 @@
-"""lowdim 拆出来的腕位姿 + ``extrinsic_4x4``（World→Cam）换算成训练用的 MANO 形参字典。
+"""由 lowdim 的 wrist、外参与 shape 构造相机系 MANO 监督 dict。
 
-``trans`` / ``root_orient`` 在相机系；``betas`` 原样用 ``left_shape`` / ``right_shape``。
-"""
+手指在数据里为 MANO PCA 系数（45/手），与轴角 hand_pose 不同参量化；未做 PCA 反变换时
+``hand_pose`` 目标为 0。"""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def rotmat_to_axis_angle(R: torch.Tensor) -> torch.Tensor:
 
 
 def _left_mano_root_fix(R: torch.Tensor) -> torch.Tensor:
-    """左手 root：右乘 diag(-1,1,1)，和常见 MANO 左手约定对齐用的。"""
+    """左手全局旋转：R @ diag(-1, 1, 1)。"""
     *b, _, _ = R.shape
     fix = R.new_tensor([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]).view(1, 3, 3).expand(*b, 3, 3)
     return R @ fix
@@ -82,7 +82,7 @@ def lowdim_wrist_to_mano_cam(
     apply_left_root_fix: bool = True,
     hand_pose_fill: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """输入 (B,T,·) 与 (B,T,4,4)；返回和 MANO 头同名的四个 key。"""
+    """Batch 维 (B,T,·)、外参 (B,T,4,4)；返回 trans、root_orient、hand_pose、betas。"""
     R_w2c = extrinsic_4x4[..., :3, :3]
     t_w2c = extrinsic_4x4[..., :3, 3]
     Rw2world = rot6d_to_rotmat(rot6)

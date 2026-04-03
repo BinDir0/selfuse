@@ -75,12 +75,7 @@ def wds_batch_to_training_batch(
     image_scale: float = 1.0 / 255.0,
     apply_left_root_fix: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """
-    EpisodeWindowDataLoader collate 后 -> video / existence / 相机系 MANO 风格 mano_*。
-
-    ``trans`` / ``root_orient`` / ``betas`` 由 world 腕位姿与外参变换得到；``hand_pose`` 在 lowdim 中
-    为世界系 3D 点而非轴角，此处目标为 **零**（请用 ``--mano-pose-weight 0`` 或后续接 fitting）。
-    """
+    """Collate 后的 batch → video、existence、相机系 mano 目标（trans/root/beta 来自 lowdim 换算）。"""
     video = _to_float_tensor(batch["video"], device)
     if video.dim() == 5 and video.max() > 1.5:
         video = video * image_scale

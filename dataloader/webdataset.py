@@ -7,7 +7,7 @@ MANO (B,T,·)
     right_translation : B x T x 3
     left_rot6 : B x T x 6
     right_rot6 : B x T x 6
-    left_hand_pose45 : B x T x 45
+    left_hand_pose45 : B x T x 45   # MANO 手指 PCA，每手 45
     right_hand_pose45 : B x T x 45
     left_shape : B x T x 10
     right_shape : B x T x 10
@@ -30,16 +30,13 @@ taco_v2_episodexxx_f00045.meta.json
     "presence": 3,   # 0 none, 1 left, 2 right, 3 both
 }
 
-# taco_ep000123_f00045.lowdim.npy   shape=(148,), dtype=float32
+# lowdim.npy float32，长度 148 或 128（无 shape 段时为 128）
 lowdim = concat([
-    wrist,   # 18 = [left_trans(3), right_trans(3), left_rot(6), right_rot(6)]
-    # 6drot is the first two columns of a 3x3 transformation matrix（wrist2world）.
-    hand,    # 90 = [left_hand(45), right_hand(45)]
-             # in left: [thumb_fingertips([x, y, z] 3), index_fingertips(3), ...]
-    shape,   # 20 = [left_shape(10), right_shape(10)]
-    # The coordinates above are in the world coordinate system.
-    extrinsic,     # 16, flatten(4x4) homogeneous transformation matrix World2Cam
-    intrinsic,     # 4, [fx, fy, cx, cy]
+    wrist,     # 18: left_t3, right_t3, left_rot6, right_rot6（wrist→world）
+    hand,      # 90: 左 45 + 右 45，MANO 手指 PCA
+    shape,     # 20: 仅 148 维布局；左 beta10 + 右 beta10
+    extrinsic, # 16: World→Cam，4x4 展平
+    intrinsic, # 4: fx, fy, cx, cy
 ])
 
 """

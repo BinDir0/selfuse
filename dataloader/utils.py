@@ -10,14 +10,19 @@ import json
 import numpy as np
 from PIL import Image
 
-# slice definitions for the lowdim vector
-LOWDIM_DIM = 148
+# 128：wrist(18)+hand(90)+extrinsic(16)+intrinsic(4)。148：中间多 shape(20)。以导出脚本为准。
+LOWDIM_DIM_V2 = 128
+LOWDIM_DIM_V3 = 148
+LOWDIM_DIM = LOWDIM_DIM_V3
 
 STATE_WRIST_SLICE = slice(0, 18)
 STATE_HAND_SLICE = slice(18, 108)
+# v3 only:
 STATE_SHAPE_SLICE = slice(108, 128)
-EXTRINSIC_SLICE = slice(128, 144)
-INTRINSIC_SLICE = slice(144, 148)
+EXTRINSIC_SLICE_V3 = slice(128, 144)
+INTRINSIC_SLICE_V3 = slice(144, 148)
+EXTRINSIC_SLICE_V2 = slice(108, 124)
+INTRINSIC_SLICE_V2 = slice(124, 128)
 
 LEFT_TRANSLATION_SLICE = slice(0, 3)
 RIGHT_TRANSLATION_SLICE = slice(3, 6)
@@ -86,19 +91,26 @@ def normalize_episode_name(meta: Dict) -> str:
         return episode_name[: -len(frame_suffix)]
     return episode_name
 
-# unpack lowdim vector into mano parameters and camera parameters
-# Note: possible for mano parameters to be zero, which means the hand is absent
-# refer to the presence field in meta.json for further processing
 def split_lowdim(lowdim: np.ndarray) -> Dict[str, np.ndarray]:
+    """解析 lowdim 向量；hand 为左右各 45 维 MANO 手指 PCA 系数。"""
     vector = np.asarray(lowdim, dtype=np.float32).reshape(-1)
-    if vector.shape != (LOWDIM_DIM,):
-        raise ValueError(f"Invalid lowdim shape: expected ({LOWDIM_DIM},), got {vector.shape}")
-
-    state_wrist = vector[STATE_WRIST_SLICE].copy()
-    state_hand = vector[STATE_HAND_SLICE].copy()
-    state_shape = vector[STATE_SHAPE_SLICE].copy()
-    extrinsic_flat = vector[EXTRINSIC_SLICE].copy()
-    intrinsic = vector[INTRINSIC_SLICE].copy()
+    n = int(vector.shape[0])
+    if n == LOWDIM_DIM_V3:
+        state_wrist = vector[STATE_WRIST_SLICE].copy()
+        state_hand = vector[STATE_HAND_SLICE].copy()
+        state_shape = vector[STATE_SHAPE_SLICE].copy()
+        extrinsic_flat = vector[EXTRINSIC_SLICE_V3].copy()
+        intrinsic = vector[INTRINSIC_SLICE_V3].copy()
+    elif n == LOWDIM_DIM_V2:
+        state_wrist = vector[STATE_WRIST_SLICE].copy()
+        state_hand = vector[STATE_HAND_SLICE].copy()
+        state_shape = np.zeros(20, dtype=np.float32)
+        extrinsic_flat = vector[EXTRINSIC_SLICE_V2].copy()
+        intrinsic = vector[INTRINSIC_SLICE_V2].copy()
+    else:
+        raise ValueError(
+            f"Invalid lowdim length: expected {LOWDIM_DIM_V2} or {LOWDIM_DIM_V3}, got {vector.shape}"
+        )
 
     return {
         "lowdim": vector,
