@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.clip_manifest import load_clip_manifest
 from lib.pipeline.exporters.manifest_vla import load_descriptor_episode_features
-from lib.pipeline.exporters.webdataset_discovery import load_episode_stats
+from lib.pipeline.exporters.webdataset_discovery import load_episode_stats, load_or_build_frame_index
 from lib.pipeline.exporters.webdataset_features import build_mano_models, load_episode_features
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples, validate_sample_record
 from lib.pipeline.frame_sources import read_frame_bytes_from_descriptor
@@ -83,6 +83,8 @@ def _load_legacy_episode(processed_root: str, episode_index: int) -> dict:
     stats = load_episode_stats(episodes[episode_index], rescan_frame_index=False)
     if stats is None:
         raise RuntimeError(f"Failed to load stats for episode_index={episode_index}")
+    extracted_dir = Path(stats["crop_dir"]) / "extracted_images"
+    stats["frame_index"] = load_or_build_frame_index(str(extracted_dir), rescan=False)
     return stats
 
 
@@ -150,8 +152,8 @@ def _load_recomputed_episode(source_kind: str, episode_info: dict, *, device: st
 
 def _load_source_image_bytes(source_kind: str, episode_info: dict, recomputed: dict, frame_idx: int) -> bytes | None:
     if source_kind == "legacy":
-        frame_index = recomputed.get("frame_index") or {}
-        frame_path = frame_index.get(frame_idx)
+        frame_index = episode_info.get("frame_index") or {}
+        frame_path = frame_index.get(int(frame_idx))
         if frame_path is None:
             fallback = Path(episode_info["crop_dir"]) / "extracted_images" / f"{frame_idx}.jpg"
             frame_path = str(fallback) if fallback.exists() else None
