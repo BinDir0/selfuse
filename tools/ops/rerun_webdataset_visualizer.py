@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import sys
 
 import cv2
@@ -62,6 +63,39 @@ def load_rerun():
     return rr
 
 
+def _slugify(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._-") or "episode"
+
+
+def resolve_rrd_output_path(rrd_out: str | None, *, episode_key: str, render_mode: str) -> Path:
+    if rrd_out:
+        path = Path(rrd_out).expanduser()
+    else:
+        path = Path.cwd() / f"{_slugify(episode_key)}_{render_mode}.rrd"
+    if path.suffix.lower() != ".rrd":
+        path = path.with_suffix(".rrd")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
+def configure_recording(rr, *, output_mode: str, rrd_out: str | None, episode_key: str, render_mode: str) -> Path | None:
+    rr.init(
+        "hawor_webdataset_viewer",
+        spawn=output_mode in {"online", "both"},
+    )
+
+    if output_mode not in {"offline", "both"}:
+        return None
+
+    rrd_path = resolve_rrd_output_path(
+        rrd_out,
+        episode_key=episode_key,
+        render_mode=render_mode,
+    )
+    rr.save(rrd_path)
+    return rrd_path
+
+
 def send_default_blueprint(rr):
     try:
         import rerun.blueprint as rrb
@@ -98,6 +132,18 @@ def build_parser():
         default="keypoint",
         choices=["keypoint", "skeleton", "mesh"],
         help="Visualization mode for the selected episode.",
+    )
+    parser.add_argument(
+        "--output-mode",
+        default="online",
+        choices=["online", "offline", "both"],
+        help="Send the same recording to a live viewer, an offline .rrd, or both.",
+    )
+    parser.add_argument(
+        "--rrd-out",
+        type=str,
+        default=None,
+        help="Offline .rrd output path. Used for offline/both; defaults to ./<episode>_<render>.rrd",
     )
     parser.add_argument(
         "--descriptor-manifest",
@@ -362,9 +408,12 @@ def main():
         raise SystemExit(f"No frames found for episode {selected_episode_key}")
 
     rr = load_rerun()
-    rr.init(
-        "hawor_webdataset_viewer",
-        spawn=True,
+    rrd_path = configure_recording(
+        rr,
+        output_mode=args.output_mode,
+        rrd_out=args.rrd_out,
+        episode_key=selected_episode_key,
+        render_mode=args.render_mode,
     )
     send_default_blueprint(rr)
     log_static_scene(rr)
@@ -380,6 +429,8 @@ def main():
         f"Input={Path(args.input).expanduser().resolve()} descriptor_manifest={args.descriptor_manifest or '-'}",
         flush=True,
     )
+    if rrd_path is not None:
+        print(f"Saved Rerun recording to: {rrd_path}", flush=True)
 
 
 if __name__ == "__main__":

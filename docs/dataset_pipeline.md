@@ -341,6 +341,52 @@ Recommended smoke test before full production:
 3. Inspect at least 20 samples across multiple shards.
 4. Confirm images, lowdim, and language all refer to the same clip and frame.
 
+## Inspecting Built Samples
+
+For frame-level inspection of final WebDataset shards, prefer the Rerun viewer:
+
+```bash
+pip install -r requirements-rerun-viewer.txt
+
+python tools/ops/rerun_webdataset_visualizer.py \
+  --input /path/to/final_dataset/train \
+  --render-mode keypoint
+```
+
+Offline `.rrd` export uses the same recording path as the live viewer:
+
+```bash
+python tools/ops/rerun_webdataset_visualizer.py \
+  --input /path/to/final_dataset/train \
+  --render-mode mesh \
+  --output-mode offline \
+  --rrd-out /path/to/inspect_mesh.rrd
+```
+
+Use `--output-mode both` to save the `.rrd` and open the live viewer from the same run.
+
+If the filters match multiple episodes, the script will list candidates in the terminal and ask you to choose one. You can also select directly with:
+
+- `--clip-id <clip_id>`
+- `--episode-key <episode_key>`
+- `--episode-index <1-based-index>`
+
+Render modes:
+
+- `keypoint`: wrist plus five fingertips
+- `skeleton`: full MANO 21-joint skeleton
+- `mesh`: full MANO mesh with 2D joint overlay
+
+`skeleton` and `mesh` now replay MANO directly from each sample's `mano.npy`, so no descriptor manifest is required:
+
+```bash
+python tools/ops/rerun_webdataset_visualizer.py \
+  --input /path/to/final_dataset/train \
+  --render-mode mesh
+```
+
+The older `tools/ops/webdataset_visualizer.py` HTTP viewer is still available as a fallback, but it is no longer the preferred inspection path.
+
 ## Maintenance And Legacy Tools
 
 These are useful, but they are not part of the official mainline workflow.
