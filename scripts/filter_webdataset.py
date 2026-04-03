@@ -39,6 +39,7 @@ DEFAULT_WORKERS = max(1, min(8, os.cpu_count() or 1))
 _WORKER_ARGS = None
 _WORKER_OUTPUT_DIR = None
 _WORKER_KEEP_BY_CLIP = None
+_SHARD_DATA_EXCEPTIONS = (OSError, tarfile.TarError, ValueError)
 
 
 def build_parser():
@@ -369,6 +370,13 @@ def _flush_analyze_clip_block(
     return shard_result
 
 
+def _serialize_shard_error(exc: Exception) -> dict:
+    return {
+        "type": exc.__class__.__name__,
+        "message": str(exc),
+    }
+
+
 def analyze_shard(shard_path: str) -> dict:
     shard_name = os.path.basename(shard_path)
     shard_result = {
@@ -377,6 +385,7 @@ def analyze_shard(shard_path: str) -> dict:
         "clips_total": 0,
         "incomplete_samples": 0,
         "clip_metrics": [],
+        "shard_error": None,
     }
 
     current_clip_id = None
@@ -428,13 +437,17 @@ def analyze_shard(shard_path: str) -> dict:
                 except Exception:
                     lowdim = None
                 _update_clip_stats(current_clip_stats, sample["key"], meta, lowdim)
-        shard_result = _flush_analyze_clip_block(
-            clip_id=current_clip_id,
-            clip_stats=current_clip_stats,
-            shard_result=shard_result,
-        )
-    except Exception:
-        raise
+    except _SHARD_DATA_EXCEPTIONS as exc:
+        shard_result["clips_total"] = 0
+        shard_result["clip_metrics"] = []
+        shard_result["shard_error"] = _serialize_shard_error(exc)
+        return shard_result
+
+    shard_result = _flush_analyze_clip_block(
+        clip_id=current_clip_id,
+        clip_stats=current_clip_stats,
+        shard_result=shard_result,
+    )
 
     return shard_result
 
@@ -451,6 +464,7 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
         "frames_written": 0,
         "clips_written": 0,
         "shard_written": 0,
+        "shard_error": None,
     }
 
     tar_writer = None
@@ -500,12 +514,16 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
 
         if current_clip_id is not None and current_keep and clip_wrote_frames:
             result["clips_written"] += 1
-    except Exception:
+    except _SHARD_DATA_EXCEPTIONS as exc:
         if tar_writer is not None:
             tar_writer.close()
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-        raise
+        result["frames_written"] = 0
+        result["clips_written"] = 0
+        result["shard_written"] = 0
+        result["shard_error"] = _serialize_shard_error(exc)
+        return result
 
     if tar_writer is not None:
         tar_writer.close()
@@ -554,8 +572,11 @@ def build_report(
         "frames_written": 0,
         "clips_written": 0,
         "incomplete_samples": 0,
+        "errored_shards": 0,
+        "errored_shard_details": [],
     }
     total_incomplete_samples = 0
+    analysis_errored_shards = []
 
     decision_by_clip = {item["clip_id"]: item for item in clip_decisions}
 
@@ -571,13 +592,22 @@ def build_report(
                 shard_kept += 1
             else:
                 shard_dropped += 1
-        shards[result["shard_name"]] = {
+        shard_summary = {
             "samples_total": result["samples_total"],
             "clips_total": result["clips_total"],
             "incomplete_samples": int(result.get("incomplete_samples", 0)),
             "kept_clips": shard_kept,
             "dropped_clips": shard_dropped,
         }
+        if result.get("shard_error") is not None:
+            shard_summary["analysis_error"] = result["shard_error"]
+            analysis_errored_shards.append(
+                {
+                    "shard_name": result["shard_name"],
+                    **result["shard_error"],
+                }
+            )
+        shards[result["shard_name"]] = shard_summary
 
     for item in clip_decisions:
         if item["keep"]:
@@ -605,6 +635,15 @@ def build_report(
             rewrite["frames_written"] += rewrite_item["frames_written"]
             rewrite["clips_written"] += rewrite_item["clips_written"]
             rewrite["incomplete_samples"] += int(rewrite_item.get("incomplete_samples", 0))
+            if rewrite_item.get("shard_error") is not None:
+                shard_summary["rewrite_error"] = rewrite_item["shard_error"]
+                rewrite["errored_shards"] += 1
+                rewrite["errored_shard_details"].append(
+                    {
+                        "shard_name": shard_name,
+                        **rewrite_item["shard_error"],
+                    }
+                )
 
     report = {
         "source_shard_dir": str(source_shard_dir.resolve()),
@@ -627,6 +666,8 @@ def build_report(
         "total_clips": total_clips,
         "kept_clips": kept_clips,
         "dropped_clips": total_clips - kept_clips,
+        "analysis_errored_shard_count": len(analysis_errored_shards),
+        "analysis_errored_shards": analysis_errored_shards,
         "reason_counts": dict(sorted(reason_counts.items())),
         "shards": shards,
         "dropped": dropped,
