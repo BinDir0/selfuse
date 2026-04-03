@@ -1498,8 +1498,21 @@ def _camera_positive_depth_score(points_world: np.ndarray, c2w: np.ndarray) -> t
     return positive_count, -abs(median_depth - 0.6)
 
 
-def _resolve_camera_c2w(extrinsic_raw: np.ndarray, points_world: np.ndarray) -> tuple[np.ndarray, str]:
+def _resolve_camera_c2w(
+    extrinsic_raw: np.ndarray,
+    points_world: np.ndarray,
+    camera_convention_hint: Optional[str] = None,
+) -> tuple[np.ndarray, str]:
     raw = extrinsic_raw.astype(np.float32)
+    hint = None if camera_convention_hint is None else str(camera_convention_hint).strip().lower()
+    if hint == "c2w":
+        return raw, "c2w(meta)"
+    if hint == "w2c":
+        try:
+            return np.linalg.inv(raw), "w2c(meta)"
+        except np.linalg.LinAlgError:
+            return raw, "w2c(meta-invalid)"
+
     candidates = [("c2w", raw)]
     try:
         candidates.append(("w2c", np.linalg.inv(raw)))
@@ -1616,7 +1629,12 @@ def _render_keypoint_overlay(image_bytes: bytes, keypoint_frame: dict, presence:
     return cv2.addWeighted(overlay, 0.78, image_bgr, 0.22, 0)
 
 
-def _build_mano_frame_from_sample(lowdim_array: np.ndarray, mano_array: np.ndarray, runtime: dict) -> dict:
+def _build_mano_frame_from_sample(
+    lowdim_array: np.ndarray,
+    mano_array: np.ndarray,
+    runtime: dict,
+    camera_convention_hint: Optional[str] = None,
+) -> dict:
     fields = _decode_lowdim_fields(lowdim_array)
     decoded = decode_mano_sample_array(mano_array)
 
@@ -1645,7 +1663,11 @@ def _build_mano_frame_from_sample(lowdim_array: np.ndarray, mano_array: np.ndarr
         ],
         axis=0,
     )
-    c2w, camera_convention = _resolve_camera_c2w(fields["camera_w2c"], points_world)
+    c2w, camera_convention = _resolve_camera_c2w(
+        fields["camera_w2c"],
+        points_world,
+        camera_convention_hint=camera_convention_hint,
+    )
     return {
         "c2w": c2w,
         "intrinsic": fields["camera_intrinsic"],
@@ -1892,13 +1914,24 @@ class ViewerApp:
             self._demo_source_cache[seq_folder] = demo_source
         return demo_source
 
-    def _get_mano_frame(self, summary: SampleSummary, lowdim_array: np.ndarray, mano_array: np.ndarray) -> dict:
+    def _get_mano_frame(
+        self,
+        summary: SampleSummary,
+        lowdim_array: np.ndarray,
+        mano_array: np.ndarray,
+        meta: Optional[dict] = None,
+    ) -> dict:
         with self._cache_lock:
             cached = self._mano_sample_cache.get(summary.id)
         if cached is not None:
             return cached
 
-        frame = _build_mano_frame_from_sample(lowdim_array, mano_array, self._ensure_mano_runtime())
+        frame = _build_mano_frame_from_sample(
+            lowdim_array,
+            mano_array,
+            self._ensure_mano_runtime(),
+            camera_convention_hint=None if meta is None else meta.get("camera_extrinsic_convention"),
+        )
         if self.apply_demo_rx:
             frame["c2w"] = _apply_demo_rx_c2w(frame["c2w"])
             frame["left_verts"] = _apply_demo_rx_points(frame["left_verts"])
@@ -1973,12 +2006,22 @@ class ViewerApp:
             axis=0,
         )
         keypoint_frame["c2w"], camera_convention = _resolve_camera_c2w(
-            fields["camera_w2c"], points_world
+            fields["camera_w2c"],
+            points_world,
+            camera_convention_hint=None if meta is None else meta.get("camera_extrinsic_convention"),
         )
         notes.append(
             "camera extrinsic is interpreted as "
-            + ("camera-to-world (c2w)." if camera_convention == "c2w" else "world-to-camera (w2c) and inverted for display.")
+            + (
+                "camera-to-world (c2w)."
+                if camera_convention.startswith("c2w")
+                else "world-to-camera (w2c) and inverted for display."
+            )
         )
+        if meta is not None and meta.get("camera_extrinsic_convention") is not None:
+            notes.append(
+                f"camera_extrinsic_convention hint from meta.json = {meta.get('camera_extrinsic_convention')!r}; resolved as {camera_convention}."
+            )
 
         if self.apply_demo_rx:
             keypoint_frame["c2w"] = _apply_demo_rx_c2w(keypoint_frame["c2w"])
@@ -2078,7 +2121,7 @@ class ViewerApp:
             mano_error = "mano.npy is missing"
         else:
             try:
-                mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array)
+                mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array, meta=meta)
             except Exception as error:
                 mano_error = str(error)
 
@@ -2236,7 +2279,8 @@ class ViewerApp:
                 raise ValueError("lowdim.npy is required for mano render")
             if mano_array is None:
                 raise ValueError("mano.npy is required for mano render")
-            mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array)
+            meta, _ = decode_meta(sample["meta_bytes"])
+            mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array, meta=meta)
             return _render_mano_overlay(sample["image_bytes"], mano_frame["c2w"], mano_frame["intrinsic"], mano_frame, presence)
 
         raise ValueError(f"Unsupported render mode: {render_mode}")
