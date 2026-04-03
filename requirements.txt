@@ -1,2 +1,7 @@
 # DINOv3 需较新 timm
+numpy<1.24
+pillow
 timm>=1.0.20
+opencv-python>=4.5.0
+webdataset
+decord
