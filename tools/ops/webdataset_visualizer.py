@@ -21,6 +21,7 @@ import json
 import os
 import random
 import socket
+import sys
 import tarfile
 import threading
 from dataclasses import asdict, dataclass
@@ -31,6 +32,10 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import re
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.exporters.mano_codec import (
     MANO_CENTER_IDX,
