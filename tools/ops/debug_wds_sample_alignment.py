@@ -148,12 +148,16 @@ def _load_recomputed_episode(source_kind: str, episode_info: dict, *, device: st
     )
 
 
-def _load_source_image_bytes(source_kind: str, episode_info: dict, frame_idx: int) -> bytes | None:
+def _load_source_image_bytes(source_kind: str, episode_info: dict, recomputed: dict, frame_idx: int) -> bytes | None:
     if source_kind == "legacy":
-        frame_path = Path(episode_info["crop_dir"]) / "extracted_images" / f"{frame_idx}.jpg"
-        if not frame_path.exists():
+        frame_index = recomputed.get("frame_index") or {}
+        frame_path = frame_index.get(frame_idx)
+        if frame_path is None:
+            fallback = Path(episode_info["crop_dir"]) / "extracted_images" / f"{frame_idx}.jpg"
+            frame_path = str(fallback) if fallback.exists() else None
+        if frame_path is None or not os.path.exists(frame_path):
             return None
-        with frame_path.open("rb") as handle:
+        with open(frame_path, "rb") as handle:
             return handle.read()
     return read_frame_bytes_from_descriptor(episode_info["descriptor"], frame_idx)
 
@@ -190,7 +194,7 @@ def compare_sample(sample: dict, meta: dict, source_kind: str, episode_info: dic
         if best_lowdim is None or lowdim_max_abs < best_lowdim["lowdim_max_abs_diff"]:
             best_lowdim = lowdim_record
 
-        source_image = _load_source_image_bytes(source_kind, episode_info, source_frame_idx)
+        source_image = _load_source_image_bytes(source_kind, episode_info, recomputed, source_frame_idx)
         source_hash = md5_bytes(source_image)
         image_record = {
             "source_frame_idx": source_frame_idx,
