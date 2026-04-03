@@ -5,11 +5,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import json
 import os
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -74,14 +72,14 @@ def find_sample(tar_paths: list[str], *, sample_key: str | None, sample_index: i
     raise IndexError(f"Sample index out of range: {sample_index}")
 
 
-def _build_legacy_episode_lookup(processed_root: str) -> dict[int, dict]:
+def _load_legacy_episode(processed_root: str, episode_index: int) -> dict:
     episodes = discover_episodes(processed_root, require_world_res=True)
-    lookup = {}
-    for ep in episodes:
-        stats = load_episode_stats(ep, rescan_frame_index=False)
-        if stats is not None:
-            lookup[int(stats["episode_index"])] = stats
-    return lookup
+    if episode_index < 0 or episode_index >= len(episodes):
+        raise KeyError(f"episode_index out of range under processed_root: {episode_index}")
+    stats = load_episode_stats(episodes[episode_index], rescan_frame_index=False)
+    if stats is None:
+        raise RuntimeError(f"Failed to load stats for episode_index={episode_index}")
+    return stats
 
 
 def _resolve_source_episode(meta: dict, *, processed_root: str | None, descriptor_manifest: str | None) -> tuple[str, dict]:
@@ -104,10 +102,7 @@ def _resolve_source_episode(meta: dict, *, processed_root: str | None, descripto
 
     if "episode_index" not in meta:
         raise KeyError("meta.json does not contain episode_index")
-    lookup = _build_legacy_episode_lookup(processed_root)
-    episode = lookup.get(int(meta["episode_index"]))
-    if episode is None:
-        raise KeyError(f"episode_index not found under processed_root: {meta['episode_index']}")
+    episode = _load_legacy_episode(processed_root, int(meta["episode_index"]))
     return "legacy", episode
 
 
