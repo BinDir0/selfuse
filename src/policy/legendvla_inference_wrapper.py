@@ -11,6 +11,8 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
+from src.utils.checkpoint_util import load_checkpoint
+
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ class LegendVLAInference(nn.Module):
 
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
-            self.load_checkpoint(checkpoint_path)
+            load_checkpoint(self.model, checkpoint_path)
         if self.dtype != torch.float32:
             self.model.to(dtype=self.dtype)
             log.info("Cast model weights to %s", self.dtype)
@@ -158,18 +160,6 @@ class LegendVLAInference(nn.Module):
         processor_call_kwargs["padding"] = tokenizer_padding
         if max_length is not None:
             processor_call_kwargs["max_length"] = max_length
-
-    def load_checkpoint(self, path: str) -> None:
-        path = pathlib.Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        state_dict = torch.load(path, map_location="cpu")
-        for key in ["model", "module", "model_state_dict"]:
-            if key in state_dict:
-                state_dict = state_dict[key]
-                break
-        self.model.load_state_dict(state_dict)
-        log.info("Loaded checkpoint from %s", path)
 
     def load_normalizer(self, path: str) -> dict:
         path = pathlib.Path(path)
