@@ -8,7 +8,9 @@ python train.py \
 
 torchrun --standalone --nproc_per_node=8 train.py \
   --data-path /share_data/zhangtingrui/datasets/taco_v2 \
-  --episodes-file splits/train.txt
+  --episodes-file splits/train.txt \
+  --run-dir runs/my_exp1 \
+  --tensorboard-dir runs/my_exp1/tb
 
 
 """
