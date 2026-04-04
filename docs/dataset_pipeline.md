@@ -346,12 +346,15 @@ Recommended smoke test before full production:
 For frame-level inspection of final WebDataset shards, prefer the Rerun viewer:
 
 ```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements-rerun-viewer.txt
 
 python tools/ops/rerun_webdataset_visualizer.py \
   --input /path/to/final_dataset/train \
   --render-mode keypoint
 ```
+
+`requirements-rerun-viewer.txt` is intentionally viewer-only. It does not pull in the full RoWaH training/inference stack, so you can install it in a separate environment as long as that environment already has a compatible `torch` build.
 
 Offline `.rrd` export uses the same recording path as the live viewer:
 

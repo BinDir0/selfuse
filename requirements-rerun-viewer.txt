@@ -1,2 +1,16 @@
--r requirements.txt
+# Viewer-only dependencies for tools/ops/rerun_webdataset_visualizer.py
+#
+# Install a torch build that matches your platform/CUDA first, for example:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# This file intentionally does not include the repo's full training/inference
+# stack, so it can live in a separate viewer environment.
+
+numpy==2.2.6
+opencv-python
+joblib
+tqdm
+scipy
+smplx==0.1.28
 rerun-sdk==0.27.3
+git+https://github.com/hassony2/manopth.git
