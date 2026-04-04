@@ -41,6 +41,11 @@ def get_parser():
         default=True,
         help="Interpolate source labels onto descriptor frames instead of truncating to the source sequence length",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip non-empty shard tar files that already exist in output_dir",
+    )
     return parser
 
 
@@ -65,6 +70,7 @@ def main():
         source_fps=args.source_fps,
         target_fps=args.target_fps,
         interpolate_labels=args.interpolate_labels,
+        resume=args.resume,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

@@ -869,6 +869,7 @@ def run_manifest_build(
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
+    resume: bool = False,
 ):
     episodes, prepare_stats = prepare_manifest_episodes(
         manifest_path,
@@ -888,6 +889,17 @@ def run_manifest_build(
     shard_tasks = plan_manifest_shards(repeated, frames_per_shard, output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
+    existing_shard_tasks = []
+    pending_shard_tasks = shard_tasks
+    if resume:
+        existing_shard_tasks = [
+            task
+            for task in shard_tasks
+            if os.path.exists(task["output_path"]) and os.path.getsize(task["output_path"]) > 0
+        ]
+        existing_output_paths = {task["output_path"] for task in existing_shard_tasks}
+        pending_shard_tasks = [task for task in shard_tasks if task["output_path"] not in existing_output_paths]
+
     feature_cache_dir = None
     if repeat_episodes > 1:
         feature_cache_dir = os.path.join(output_dir, "_episode_feature_cache")
@@ -906,38 +918,42 @@ def run_manifest_build(
         "skipped_episodes": 0,
         "skipped_clips": 0,
         "shards_written": 0,
+        "shards_reused": len(existing_shard_tasks),
+        "frames_reused": int(sum(task["frame_count"] for task in existing_shard_tasks)),
     }
     skipped_clip_details = []
 
-    if writer_workers <= 1:
-        _worker_init(mano_device_specs, mano_dir, feature_cache_dir)
-        result_iter = (_worker_process_shard(task) for task in shard_tasks)
-    else:
-        mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
-        pool = mp_context.Pool(
-            writer_workers,
-            initializer=_worker_init,
-            initargs=(mano_device_specs, mano_dir, feature_cache_dir),
-        )
-        result_iter = pool.imap_unordered(_worker_process_shard, shard_tasks)
+    if pending_shard_tasks:
+        if writer_workers <= 1:
+            _worker_init(mano_device_specs, mano_dir, feature_cache_dir)
+            result_iter = (_worker_process_shard(task) for task in pending_shard_tasks)
+        else:
+            mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
+            pool = mp_context.Pool(
+                writer_workers,
+                initializer=_worker_init,
+                initargs=(mano_device_specs, mano_dir, feature_cache_dir),
+            )
+            result_iter = pool.imap_unordered(_worker_process_shard, pending_shard_tasks)
 
-    try:
-        for result in tqdm(result_iter, total=len(shard_tasks), desc="Build shards"):
-            totals["frames_written"] += result["frames_written"]
-            totals["episodes_written"] += result["episodes_written"]
-            totals["skipped_episodes"] += result["skipped_episodes"]
-            totals["skipped_clips"] += result.get("skipped_clips", 0)
-            totals["shards_written"] += 1 if result["frames_written"] > 0 else 0
-            skipped_clip_details.extend(result.get("skipped_clip_details", []))
-    finally:
-        if writer_workers > 1:
-            pool.close()
-            pool.join()
+        try:
+            for result in tqdm(result_iter, total=len(pending_shard_tasks), desc="Build shards"):
+                totals["frames_written"] += result["frames_written"]
+                totals["episodes_written"] += result["episodes_written"]
+                totals["skipped_episodes"] += result["skipped_episodes"]
+                totals["skipped_clips"] += result.get("skipped_clips", 0)
+                totals["shards_written"] += 1 if result["frames_written"] > 0 else 0
+                skipped_clip_details.extend(result.get("skipped_clip_details", []))
+        finally:
+            if writer_workers > 1:
+                pool.close()
+                pool.join()
 
     return {
         "prepare_stats": prepare_stats,
         "totals": totals,
         "skipped_clip_details": skipped_clip_details,
         "planned_shards": len(shard_tasks),
+        "pending_shards": len(pending_shard_tasks),
         "planned_frames": sum(ep["num_valid_frames"] for ep in repeated),
     }
