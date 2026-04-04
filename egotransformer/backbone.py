@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 
@@ -17,11 +19,17 @@ class DinoVisionBackbone(nn.Module):
         super().__init__()
         import timm
 
-        self.vit = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            num_classes=0,
-        )
+        hub = logging.getLogger("huggingface_hub")
+        prev = hub.level
+        hub.setLevel(logging.ERROR)
+        try:
+            self.vit = timm.create_model(
+                model_name,
+                pretrained=pretrained,
+                num_classes=0,
+            )
+        finally:
+            hub.setLevel(prev)
         self.use_cls_token = use_cls_token
         self.embed_dim = self.vit.num_features
 

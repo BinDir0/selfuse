@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Tuple
 
@@ -59,17 +60,24 @@ def build_mano_pca_layer(
         if mano_root is None:
             mano_root = os.environ.get("MANO_ROOT", _DEFAULT_MANO_ROOT)
 
-    return ManoLayer(
-        mano_root=mano_root,
-        use_pca=True,
-        ncomps=int(pca_dim),
-        flat_hand_mean=flat_hand_mean,
-        side=hand_side,
-        center_idx=center_idx,
-        root_rot_mode="axisang",
-        joint_rot_mode="axisang",
-        robust_rot=False,
-    )
+    # manopth loads read-only numpy from pickle; torch warns but buffers are not written in-place here.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*given NumPy array is not writable.*",
+            category=UserWarning,
+        )
+        return ManoLayer(
+            mano_root=mano_root,
+            use_pca=True,
+            ncomps=int(pca_dim),
+            flat_hand_mean=flat_hand_mean,
+            side=hand_side,
+            center_idx=center_idx,
+            root_rot_mode="axisang",
+            joint_rot_mode="axisang",
+            robust_rot=False,
+        )
 
 
 def get_cached_mano_pca_decode_layers(

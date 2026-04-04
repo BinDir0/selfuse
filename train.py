@@ -84,7 +84,7 @@ def _parse_args() -> argparse.Namespace:
     d.add_argument("--workers", type=int, default=0)
 
     o = p.add_argument_group("optim")
-    o.add_argument("--epochs", type=int, default=20)
+    o.add_argument("--epochs", type=int, default=10)
     o.add_argument("--lr", type=float, default=3e-4)
     o.add_argument("--weight-decay", type=float, default=0.01)
     o.add_argument("--grad-clip", type=float, default=0.0)
@@ -600,7 +600,7 @@ def main() -> None:
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True,
+            find_unused_parameters=False,
         )
 
     optim = None

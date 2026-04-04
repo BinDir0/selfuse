@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import torch
 import torch.nn as nn
 
@@ -35,7 +37,10 @@ class SpatioTemporalTransformer(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+        enc_kw: dict = {"num_layers": depth}
+        if "enable_nested_tensor" in inspect.signature(nn.TransformerEncoder).parameters:
+            enc_kw["enable_nested_tensor"] = False
+        self.encoder = nn.TransformerEncoder(encoder_layer, **enc_kw)
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
