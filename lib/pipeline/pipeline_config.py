@@ -121,13 +121,20 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         ("workers", 8),
         ("drop_nonfinite_world_res", True),
         ("drop_nonfinite_slam", True),
+        ("drop_nonfinite_lowdim", True),
+        ("camera_space_abs_percentile", 99.0),
+        ("camera_space_abs_scale", 3.0),
     ):
         _maybe_set(filter_cfg, key, raw.get(key))
         filter_cfg.setdefault(key, default)
     for key in (
+        "min_instruction_num",
+        "min_presence_ratio",
         "max_hand_translation_step",
         "max_camera_translation_step",
         "max_camera_rotation_step",
+        "max_camera_space_wrist_abs",
+        "max_camera_space_hand_abs",
     ):
         _maybe_set(filter_cfg, key, raw.get(key))
 

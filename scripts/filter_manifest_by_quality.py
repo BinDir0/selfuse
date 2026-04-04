@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Filter a clip manifest using completed stage outputs and quality thresholds."""
+"""Filter a clip manifest using build-equivalent quality metrics."""
 
 from __future__ import annotations
 
@@ -8,30 +8,26 @@ import json
 import os
 import sys
 from collections import Counter
-from multiprocessing import get_context
+from multiprocessing import current_process, get_context
 from pathlib import Path
-
-import joblib
-import numpy as np
-from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.clip_manifest import load_clip_manifest, write_clip_manifest  # noqa: E402
-from lib.pipeline.exporters.webdataset_geometry import interpolate_extrinsics, normalize_slam_keyframes  # noqa: E402
-from lib.pipeline.quality_metrics import is_finite_array, max_camera_step, max_translation_step  # noqa: E402
-from lib.pipeline.stage_api import get_track_range, validate_stage_output  # noqa: E402
 
 
 DEFAULT_STAGES = "detect_track,motion,slam,infiller"
 DEFAULT_WORKERS = max(1, min(8, os.cpu_count() or 1))
 _WORKER_CONFIG = None
+_WORKER_MANO_RIGHT = None
+_WORKER_MANO_LEFT = None
+_WORKER_DEVICE = None
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Filter a manifest using finished stage outputs")
+    parser = argparse.ArgumentParser(description="Filter a manifest using build-equivalent quality thresholds")
     parser.add_argument("--input_manifest", required=True, help="Input manifest JSONL")
     parser.add_argument("--output_manifest", required=True, help="Output manifest JSONL for kept clips")
     parser.add_argument("--report_out", default=None, help="Optional JSON report path")
@@ -41,13 +37,31 @@ def build_parser():
         "--drop_nonfinite_world_res",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Drop clips when world_space_res contains NaN/Inf",
+        help="Legacy compatibility flag retained in reports; build-equivalent filtering uses lowdim semantics",
     )
     parser.add_argument(
         "--drop_nonfinite_slam",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Drop clips when interpolated camera extrinsics contain NaN/Inf",
+        help="Legacy compatibility flag retained in reports; build-equivalent filtering uses lowdim semantics",
+    )
+    parser.add_argument(
+        "--drop_nonfinite_lowdim",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop clips containing any NaN/Inf lowdim frame after build-equivalent feature generation",
+    )
+    parser.add_argument(
+        "--min_instruction_num",
+        type=int,
+        default=None,
+        help="Optional minimum instruction_num required to keep a clip",
+    )
+    parser.add_argument(
+        "--min_presence_ratio",
+        type=float,
+        default=None,
+        help="Optional minimum fraction of frames with presence > 0",
     )
     parser.add_argument(
         "--max_hand_translation_step",
@@ -67,6 +81,49 @@ def build_parser():
         default=None,
         help="Optional max allowed per-frame camera rotation delta (Frobenius norm)",
     )
+    parser.add_argument(
+        "--max_camera_space_wrist_abs",
+        type=float,
+        default=None,
+        help="Optional max absolute camera-space coordinate allowed for wrist positions in meters",
+    )
+    parser.add_argument(
+        "--max_camera_space_hand_abs",
+        type=float,
+        default=None,
+        help="Optional max absolute camera-space coordinate allowed for stored hand keypoints in meters",
+    )
+    parser.add_argument(
+        "--camera_space_abs_percentile",
+        type=float,
+        default=99.0,
+        help="Percentile used for automatic camera-space absolute-value thresholds",
+    )
+    parser.add_argument(
+        "--camera_space_abs_scale",
+        type=float,
+        default=3.0,
+        help="Scale multiplier applied to the chosen percentile for automatic camera-space thresholds",
+    )
+    parser.add_argument("--annotation_root", default=None, help="Clip annotation sidecar directory")
+    parser.add_argument(
+        "--annotation_suffix",
+        type=str,
+        default=".annotation.json",
+        help="Annotation sidecar suffix, e.g. .annotation.json or _qwen-annotation.json",
+    )
+    parser.add_argument("--require_annotation", action="store_true", help="Drop clips with missing or invalid annotations")
+    parser.add_argument("--mano_device", type=str, default="cuda:0", help="Device for MANO forward pass")
+    parser.add_argument("--mano_gpus", type=str, default=None, help="Optional comma-separated GPU list for MANO workers")
+    parser.add_argument("--mano_dir", type=str, default=None, help="Optional MANO model directory")
+    parser.add_argument("--source_fps", type=float, default=5.0, help="FPS of the stage outputs in seq_folder")
+    parser.add_argument("--target_fps", type=float, default=30.0, help="FPS of the RGB frames referenced by the manifest")
+    parser.add_argument(
+        "--interpolate_labels",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Interpolate source labels onto descriptor frames instead of truncating to the source sequence length",
+    )
     parser.add_argument("--dry_run", action="store_true", help="Analyze only; do not write output manifest")
     return parser
 
@@ -78,185 +135,135 @@ def parse_stage_list(raw: str) -> list[str]:
     return stages
 
 
-def _load_world_prediction(seq_folder: Path):
-    world_file = seq_folder / "world_space_res.pth"
-    pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_file)
+def _new_result(record) -> dict:
     return {
-        "pred_trans": np.asarray(pred_trans, dtype=np.float32),
-        "pred_rot": np.asarray(pred_rot, dtype=np.float32),
-        "pred_hand_pose": np.asarray(pred_hand_pose, dtype=np.float32),
-        "pred_betas": np.asarray(pred_betas, dtype=np.float32),
-        "pred_valid": np.asarray(pred_valid),
-    }
-
-
-def _validate_world_prediction(prediction: dict):
-    pred_trans = prediction["pred_trans"]
-    pred_rot = prediction["pred_rot"]
-    pred_hand_pose = prediction["pred_hand_pose"]
-    pred_betas = prediction["pred_betas"]
-    pred_valid = prediction["pred_valid"]
-    if pred_trans.ndim != 3 or pred_trans.shape[:1] != (2,) or pred_trans.shape[-1] != 3:
-        raise ValueError(f"pred_trans shape invalid: {pred_trans.shape}")
-    if pred_rot.ndim != 3 or pred_rot.shape[:1] != (2,) or pred_rot.shape[-1] != 3:
-        raise ValueError(f"pred_rot shape invalid: {pred_rot.shape}")
-    if pred_hand_pose.ndim != 3 or pred_hand_pose.shape[:1] != (2,) or pred_hand_pose.shape[-1] != 45:
-        raise ValueError(f"pred_hand_pose shape invalid: {pred_hand_pose.shape}")
-    if pred_betas.ndim != 3 or pred_betas.shape[:1] != (2,) or pred_betas.shape[-1] != 10:
-        raise ValueError(f"pred_betas shape invalid: {pred_betas.shape}")
-    if pred_valid.ndim not in (1, 2):
-        raise ValueError(f"pred_valid shape invalid: {pred_valid.shape}")
-    if pred_valid.ndim == 2 and pred_valid.shape[0] != 2:
-        raise ValueError(f"pred_valid shape invalid: {pred_valid.shape}")
-
-
-def _normalize_pred_valid(pred_valid: np.ndarray, num_frames: int) -> np.ndarray:
-    valid = np.asarray(pred_valid, dtype=np.float32)
-    if valid.ndim == 1:
-        valid = np.tile(valid.reshape(1, -1), (2, 1))
-    if valid.shape[1] != num_frames:
-        raise ValueError(f"pred_valid frame count mismatch: {valid.shape[1]} vs {num_frames}")
-    return valid > 0.5
-
-
-def _load_interpolated_camera_extrinsics(seq_folder: Path, start_idx: int, end_idx: int, num_frames: int) -> np.ndarray:
-    slam_file = seq_folder / "SLAM" / f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz"
-    slam_data = np.load(str(slam_file), allow_pickle=True)
-    if "tstamp" not in slam_data or "traj" not in slam_data or "scale" not in slam_data:
-        raise ValueError(f"Invalid SLAM npz keys in {slam_file}")
-    tstamps = np.asarray(slam_data["tstamp"], dtype=np.int64)
-    traj = np.asarray(slam_data["traj"], dtype=np.float32)
-    scale = float(slam_data["scale"])
-    tstamps, traj = normalize_slam_keyframes(tstamps, traj)
-    if len(tstamps) == 0 or len(traj) == 0:
-        raise ValueError(f"No valid SLAM keyframes in {slam_file}")
-    return interpolate_extrinsics(tstamps, traj, scale, num_frames)
-
-
-def evaluate_record(record, stages: list[str], config: dict) -> dict:
-    seq_folder = Path(record.descriptor.seq_folder)
-    result = {
         "clip_id": record.clip_id,
-        "seq_folder": str(seq_folder),
+        "seq_folder": str(Path(record.descriptor.seq_folder)),
         "keep": False,
+        "build_ready": False,
+        "drop_category": None,
         "reasons": [],
+        "build_reasons": [],
+        "quality_reasons": [],
         "metrics": {},
     }
 
+
+def _append_build_reason(result: dict, reason: str, metric_key: str | None = None, metric_value=None) -> dict:
+    result["build_reasons"].append(reason)
+    result["reasons"] = list(result["build_reasons"])
+    result["drop_category"] = "build_invalid"
+    if metric_key is not None:
+        result["metrics"][metric_key] = metric_value
+    return result
+
+
+def _validate_build_inputs(record, stages: list[str], result: dict) -> tuple[bool, tuple[int, int] | None]:
+    from lib.pipeline.stage_api import get_track_range, validate_stage_output
+
+    seq_folder = Path(record.descriptor.seq_folder)
     try:
         start_idx, end_idx = get_track_range(seq_folder, fast=False)
     except Exception as error:
-        result["reasons"].append("missing_track_range")
-        result["metrics"]["track_range_error"] = str(error)
-        return result
+        _append_build_reason(result, "missing_track_range", "track_range_error", str(error))
+        return False, None
 
     result["metrics"]["track_range"] = [int(start_idx), int(end_idx)]
     for stage in stages:
         try:
             validate_stage_output(stage, seq_folder, start_idx, end_idx)
         except Exception as error:
-            result["reasons"].append(f"invalid_stage_output:{stage}")
-            result["metrics"][f"{stage}_error"] = str(error)
-            return result
+            _append_build_reason(result, f"invalid_stage_output:{stage}", f"{stage}_error", str(error))
+            return False, None
+    return True, (int(start_idx), int(end_idx))
 
-    try:
-        prediction = _load_world_prediction(seq_folder)
-        _validate_world_prediction(prediction)
-    except Exception as error:
-        result["reasons"].append("invalid_world_res")
-        result["metrics"]["world_res_error"] = str(error)
+
+def evaluate_record(record, config: dict) -> dict:
+    from lib.pipeline.exporters.manifest_vla import (
+        compute_descriptor_episode_quality_metrics,
+        prepare_manifest_record_for_build,
+    )
+
+    result = _new_result(record)
+    ok, _track_range = _validate_build_inputs(record, config["stages"], result)
+    if not ok:
         return result
 
-    pred_trans = prediction["pred_trans"]
-    pred_rot = prediction["pred_rot"]
-    pred_hand_pose = prediction["pred_hand_pose"]
-    pred_betas = prediction["pred_betas"]
-    pred_valid = _normalize_pred_valid(prediction["pred_valid"], pred_trans.shape[1])
-
-    nonfinite_fields = [
-        name
-        for name, value in (
-            ("pred_trans", pred_trans),
-            ("pred_rot", pred_rot),
-            ("pred_hand_pose", pred_hand_pose),
-            ("pred_betas", pred_betas),
-            ("pred_valid", pred_valid),
-        )
-        if not is_finite_array(value)
-    ]
-    if nonfinite_fields:
-        result["metrics"]["nonfinite_world_res_fields"] = nonfinite_fields
-        if config["drop_nonfinite_world_res"]:
-            result["reasons"].append("nonfinite_world_res")
-            return result
-
-    num_frames = int(pred_trans.shape[1])
-    result["metrics"]["num_frames"] = num_frames
-    left_hand = max_translation_step(pred_trans[0], valid_mask=pred_valid[0])
-    right_hand = max_translation_step(pred_trans[1], valid_mask=pred_valid[1])
-    result["metrics"]["left_hand"] = left_hand
-    result["metrics"]["right_hand"] = right_hand
-    result["metrics"]["max_hand_translation_step"] = max(left_hand["max_step"], right_hand["max_step"])
-    if (
-        config["max_hand_translation_step"] is not None
-        and result["metrics"]["max_hand_translation_step"] > config["max_hand_translation_step"]
-    ):
-        result["reasons"].append("hand_translation_step_exceeded")
-
-    need_camera_metrics = (
-        "slam" in stages
-        or config["drop_nonfinite_slam"]
-        or config["max_camera_translation_step"] is not None
-        or config["max_camera_rotation_step"] is not None
+    episode, error_code = prepare_manifest_record_for_build(
+        record,
+        require_annotation=bool(config["require_annotation"]),
+        annotation_root=config["annotation_root"],
+        annotation_suffix=config["annotation_suffix"],
+        source_fps=float(config["source_fps"]),
+        target_fps=float(config["target_fps"]),
+        interpolate_labels=bool(config["interpolate_labels"]),
     )
-    if need_camera_metrics:
-        try:
-            extrinsics = _load_interpolated_camera_extrinsics(seq_folder, start_idx, end_idx, num_frames)
-        except Exception as error:
-            result["reasons"].append("invalid_slam_extrinsics")
-            result["metrics"]["slam_error"] = str(error)
-            return result
+    if episode is None:
+        return _append_build_reason(result, str(error_code))
 
-        if not is_finite_array(extrinsics):
-            result["metrics"]["nonfinite_slam"] = True
-            if config["drop_nonfinite_slam"]:
-                result["reasons"].append("nonfinite_slam")
-                return result
+    metrics = compute_descriptor_episode_quality_metrics(
+        episode,
+        _WORKER_MANO_RIGHT,
+        _WORKER_MANO_LEFT,
+        _WORKER_DEVICE,
+        feature_cache_dir=None,
+        mano_dir=config["mano_dir"],
+        source_fps=float(config["source_fps"]),
+        target_fps=float(config["target_fps"]),
+        interpolate_labels=bool(config["interpolate_labels"]),
+    )
+    if metrics is None:
+        return _append_build_reason(result, "invalid_episode_features")
 
-        camera_metrics = max_camera_step(extrinsics)
-        result["metrics"]["camera"] = camera_metrics
-        if (
-            config["max_camera_translation_step"] is not None
-            and camera_metrics["max_translation_step"] > config["max_camera_translation_step"]
-        ):
-            result["reasons"].append("camera_translation_step_exceeded")
-        if (
-            config["max_camera_rotation_step"] is not None
-            and camera_metrics["max_rotation_step"] > config["max_camera_rotation_step"]
-        ):
-            result["reasons"].append("camera_rotation_step_exceeded")
-
-    result["keep"] = not result["reasons"]
+    result["metrics"] = {
+        **result["metrics"],
+        **metrics,
+        "instruction_num": int(episode.get("instruction_num", 0)),
+        "num_valid_frames": int(episode.get("num_valid_frames", 0)),
+    }
+    result["build_ready"] = True
     return result
 
 
 def _worker_init(config: dict):
-    global _WORKER_CONFIG
+    import torch
+    from lib.pipeline.exporters.webdataset_features import build_mano_models
+
+    global _WORKER_CONFIG, _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT, _WORKER_DEVICE
     _WORKER_CONFIG = config
+
+    identity = current_process()._identity
+    worker_idx = identity[0] - 1 if identity else 0
+    device_str = config["mano_device_specs"][worker_idx % len(config["mano_device_specs"])]
+    _WORKER_DEVICE = torch.device(device_str)
+    _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT = build_mano_models(_WORKER_DEVICE, mano_dir=config["mano_dir"])
+    _WORKER_MANO_RIGHT.eval()
+    _WORKER_MANO_LEFT.eval()
 
 
 def _worker_eval(task):
     index, record = task
-    result = evaluate_record(record, _WORKER_CONFIG["stages"], _WORKER_CONFIG)
+    result = evaluate_record(record, _WORKER_CONFIG)
     result["index"] = index
     return result
 
 
-def build_report(results: list[dict], input_manifest: Path, output_manifest: Path, config: dict) -> dict:
-    reason_counts = Counter()
+def build_report(
+    results: list[dict],
+    input_manifest: Path,
+    output_manifest: Path,
+    criteria: dict,
+    threshold_info: dict,
+) -> dict:
     kept = 0
+    build_invalid_reason_counts = Counter()
+    quality_reason_counts = Counter()
     dropped = []
+    build_ready = 0
+
     for item in results:
+        if item["build_ready"]:
+            build_ready += 1
         if item["keep"]:
             kept += 1
             continue
@@ -264,57 +271,129 @@ def build_report(results: list[dict], input_manifest: Path, output_manifest: Pat
             {
                 "clip_id": item["clip_id"],
                 "seq_folder": item["seq_folder"],
+                "drop_category": item["drop_category"],
                 "reasons": item["reasons"],
                 "metrics": item["metrics"],
             }
         )
-        reason_counts.update(item["reasons"])
+        if item["drop_category"] == "quality":
+            quality_reason_counts.update(item["quality_reasons"])
+        else:
+            build_invalid_reason_counts.update(item["build_reasons"])
 
+    resolved_criteria = {
+        "drop_nonfinite_lowdim": bool(criteria["drop_nonfinite_lowdim"]),
+        "min_instruction_num": criteria["min_instruction_num"],
+        "min_presence_ratio": criteria["min_presence_ratio"],
+        "max_hand_translation_step": criteria["max_hand_translation_step"],
+        "max_camera_translation_step": criteria["max_camera_translation_step"],
+        "max_camera_rotation_step": criteria["max_camera_rotation_step"],
+        "max_camera_space_wrist_abs": threshold_info["resolved"]["max_camera_space_wrist_abs"],
+        "max_camera_space_hand_abs": threshold_info["resolved"]["max_camera_space_hand_abs"],
+    }
     return {
         "input_manifest": str(input_manifest.resolve()),
         "output_manifest": str(output_manifest.resolve()),
         "criteria": {
-            "stages": list(config["stages"]),
-            "drop_nonfinite_world_res": bool(config["drop_nonfinite_world_res"]),
-            "drop_nonfinite_slam": bool(config["drop_nonfinite_slam"]),
-            "max_hand_translation_step": config["max_hand_translation_step"],
-            "max_camera_translation_step": config["max_camera_translation_step"],
-            "max_camera_rotation_step": config["max_camera_rotation_step"],
+            "stages": list(criteria["stages"]),
+            "annotation_root": criteria["annotation_root"],
+            "annotation_suffix": criteria["annotation_suffix"],
+            "require_annotation": bool(criteria["require_annotation"]),
+            "source_fps": float(criteria["source_fps"]),
+            "target_fps": float(criteria["target_fps"]),
+            "interpolate_labels": bool(criteria["interpolate_labels"]),
+            "drop_nonfinite_world_res": bool(criteria["drop_nonfinite_world_res"]),
+            "drop_nonfinite_slam": bool(criteria["drop_nonfinite_slam"]),
+            **resolved_criteria,
         },
+        "auto_thresholds": threshold_info,
         "total_clips": len(results),
+        "build_ready_clips": build_ready,
         "kept_clips": kept,
         "dropped_clips": len(results) - kept,
-        "reason_counts": dict(sorted(reason_counts.items())),
+        "dropped_quality_clips": sum(1 for item in results if item["drop_category"] == "quality"),
+        "build_invalid_clips": sum(1 for item in results if item["drop_category"] == "build_invalid"),
+        "quality_reason_counts": dict(sorted(quality_reason_counts.items())),
+        "build_invalid_reason_counts": dict(sorted(build_invalid_reason_counts.items())),
         "dropped": dropped,
     }
 
 
 def run_filter(args) -> dict:
+    import torch
+    from tqdm import tqdm
+    from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
+    from lib.pipeline.quality_metrics import decide_clip_quality, resolve_auto_quality_thresholds
+
     records = load_clip_manifest(args.input_manifest)
+    mano_device_obj = torch.device(args.mano_device if torch.cuda.is_available() else "cpu")
+    mano_device_specs = normalize_mano_devices(
+        str(mano_device_obj),
+        args.mano_gpus if mano_device_obj.type == "cuda" else None,
+    )
+    worker_count = int(args.workers)
+    if mano_device_obj.type == "cuda":
+        worker_count = min(worker_count, len(mano_device_specs))
+
     config = {
         "stages": parse_stage_list(args.stages),
+        "annotation_root": args.annotation_root,
+        "annotation_suffix": args.annotation_suffix,
+        "require_annotation": bool(args.require_annotation),
+        "source_fps": float(args.source_fps),
+        "target_fps": float(args.target_fps),
+        "interpolate_labels": bool(args.interpolate_labels),
         "drop_nonfinite_world_res": bool(args.drop_nonfinite_world_res),
         "drop_nonfinite_slam": bool(args.drop_nonfinite_slam),
+        "drop_nonfinite_lowdim": bool(args.drop_nonfinite_lowdim),
+        "min_instruction_num": args.min_instruction_num,
+        "min_presence_ratio": args.min_presence_ratio,
         "max_hand_translation_step": args.max_hand_translation_step,
         "max_camera_translation_step": args.max_camera_translation_step,
         "max_camera_rotation_step": args.max_camera_rotation_step,
+        "max_camera_space_wrist_abs": args.max_camera_space_wrist_abs,
+        "max_camera_space_hand_abs": args.max_camera_space_hand_abs,
+        "camera_space_abs_percentile": args.camera_space_abs_percentile,
+        "camera_space_abs_scale": args.camera_space_abs_scale,
+        "mano_dir": args.mano_dir,
+        "mano_device_specs": mano_device_specs,
     }
 
     tasks = list(enumerate(records))
-    if args.workers <= 1:
-        results = [dict(evaluate_record(record, config["stages"], config), index=index) for index, record in tqdm(tasks, desc="Filter manifest")]
+    if worker_count <= 1:
+        _worker_init(config)
+        results = [dict(evaluate_record(record, config), index=index) for index, record in tqdm(tasks, desc="Filter manifest")]
     else:
-        mp_context = get_context()
-        with mp_context.Pool(args.workers, initializer=_worker_init, initargs=(config,)) as pool:
-            results = list(tqdm(pool.imap(_worker_eval, tasks, chunksize=8), total=len(tasks), desc="Filter manifest"))
+        mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
+        with mp_context.Pool(worker_count, initializer=_worker_init, initargs=(config,)) as pool:
+            results = list(tqdm(pool.imap(_worker_eval, tasks, chunksize=1), total=len(tasks), desc="Filter manifest"))
 
     results.sort(key=lambda item: item["index"])
+    clip_metrics = [item["metrics"] for item in results if item["build_ready"]]
+    threshold_info = resolve_auto_quality_thresholds(clip_metrics, config)
+    resolved_criteria = dict(config)
+    resolved_criteria.update(threshold_info["resolved"])
+
+    for item in results:
+        if not item["build_ready"]:
+            continue
+        keep, reasons = decide_clip_quality(
+            item["metrics"],
+            resolved_criteria,
+            include_incomplete_sample_reason=False,
+            include_invalid_meta_reason=False,
+        )
+        item["keep"] = bool(keep)
+        item["quality_reasons"] = list(reasons)
+        item["reasons"] = list(reasons)
+        item["drop_category"] = None if keep else "quality"
+
     kept_records = [record for record, result in zip(records, results) if result["keep"]]
 
     if not args.dry_run:
         write_clip_manifest(kept_records, args.output_manifest)
 
-    report = build_report(results, Path(args.input_manifest), Path(args.output_manifest), config)
+    report = build_report(results, Path(args.input_manifest), Path(args.output_manifest), config, threshold_info)
     if args.report_out:
         report_path = Path(args.report_out)
         report_path.parent.mkdir(parents=True, exist_ok=True)

@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lib.pipeline.batch.cli import build_batch_infer_parser
 from lib.pipeline.clip_manifest import build_manifest_records_from_descriptors, write_clip_manifest, write_shard_dir_list
 from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
 from lib.pipeline.pipeline_config import normalize_pipeline_config
@@ -105,6 +106,94 @@ def cli_args_from_mapping(mapping: dict | None, *, negative_bool_flags: set[str]
     return args
 
 
+def parser_supported_option_dests(parser: argparse.ArgumentParser) -> set[str]:
+    return {
+        action.dest
+        for action in parser._actions
+        if action.option_strings and action.dest != "help"
+    }
+
+
+def validate_cli_mapping_keys(
+    *,
+    label: str,
+    mapping: dict | None,
+    supported_keys: set[str],
+    reserved_keys: set[str] | None = None,
+) -> list[str]:
+    if not mapping:
+        return []
+
+    reserved_keys = reserved_keys or set()
+    invalid = sorted(key for key in mapping if key not in supported_keys or key in reserved_keys)
+    if not invalid:
+        return []
+    return [f"{label}: unsupported keys {invalid}"]
+
+
+def validate_pipeline_cli_alignment(*, stages: list[str], infer_cfg: dict, build_cfg: dict, filter_cfg: dict, validation_cfg: dict):
+    errors = []
+
+    if any(stage in stages for stage in ("detect_motion", "slam", "infiller")):
+        infer_supported = parser_supported_option_dests(build_batch_infer_parser())
+        infer_reserved = {"descriptor_manifest", "video_list", "video_dir", "run_dir"}
+        errors.extend(
+            validate_cli_mapping_keys(
+                label=f"infer.{section}",
+                mapping=infer_cfg.get(section),
+                supported_keys=infer_supported,
+                reserved_keys=infer_reserved,
+            )
+            for section in ("common", "detect_motion", "slam", "infiller")
+        )
+
+    if "build" in stages:
+        from scripts.build_vla_from_manifest import get_parser as get_build_parser
+
+        build_supported = parser_supported_option_dests(get_build_parser())
+        build_reserved = {"descriptor_manifest", "output_dir", "annotation_root"}
+        errors.extend(
+            validate_cli_mapping_keys(
+                label="build",
+                mapping=build_cfg,
+                supported_keys=build_supported,
+                reserved_keys=build_reserved,
+            )
+        )
+
+    if "filter" in stages:
+        from scripts.filter_manifest_by_quality import build_parser as get_filter_parser
+
+        filter_supported = parser_supported_option_dests(get_filter_parser())
+        filter_reserved = {"input_manifest", "output_manifest", "report_out"}
+        errors.extend(
+            validate_cli_mapping_keys(
+                label="filter",
+                mapping=filter_cfg,
+                supported_keys=filter_supported,
+                reserved_keys=filter_reserved,
+            )
+        )
+
+    if "validate" in stages:
+        from scripts.validate_pipeline_run import get_parser as get_validate_parser
+
+        validate_supported = parser_supported_option_dests(get_validate_parser())
+        validate_reserved = {"descriptor_manifest", "dataset_dir", "annotation_root", "annotation_suffix"}
+        errors.extend(
+            validate_cli_mapping_keys(
+                label="validation",
+                mapping=validation_cfg,
+                supported_keys=validate_supported,
+                reserved_keys=validate_reserved,
+            )
+        )
+
+    flat_errors = [entry for group in errors for entry in (group if isinstance(group, list) else [group]) if entry]
+    if flat_errors:
+        raise ValueError("Pipeline config contains unsupported child CLI keys:\n- " + "\n- ".join(flat_errors))
+
+
 def stream_command(name: str, cmd: list[str], log_path: Path, *, cwd: str | Path | None = None, env: dict | None = None):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_handle:
@@ -175,7 +264,8 @@ def format_annotation_command(template: str, context: dict) -> list[str]:
 
 def main():
     args = get_parser().parse_args()
-    config = normalize_pipeline_config(load_yaml(args.config))
+    config_path = Path(args.config).resolve()
+    config = normalize_pipeline_config(load_yaml(config_path))
     stage_selection = selected_stages(args.stages)
     requested_stage_tokens = stage_selection["requested_tokens"]
     stages = stage_selection["internal"]
@@ -191,6 +281,14 @@ def main():
     adapter_cfg = config.get("adapter_config", config.get("buildai", {}))
     annotation_cfg = config.get("annotation", {})
     validation_cfg = config.get("validation", {})
+
+    validate_pipeline_cli_alignment(
+        stages=stages,
+        infer_cfg=infer_cfg,
+        build_cfg=build_cfg,
+        filter_cfg=filter_cfg,
+        validation_cfg=validation_cfg,
+    )
 
     run_root = Path(paths_cfg.get("log_root", PROJECT_ROOT / "pipeline_runs"))
     run_tag = args.run_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -222,7 +320,7 @@ def main():
     prepared = None
 
     run_summary = {
-        "config": str(Path(args.config).resolve()),
+        "config": str(config_path),
         "run_dir": str(run_dir.resolve()),
         "resume": bool(args.resume),
         "source_type": source_type,
@@ -343,6 +441,8 @@ def main():
             str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
             "--descriptor_manifest",
             str(active_manifest_path),
+            "--run_dir",
+            str(run_dir),
             "--stages",
             "detect_track,motion",
             *common_batch_args,
@@ -359,6 +459,8 @@ def main():
             str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
             "--descriptor_manifest",
             str(active_manifest_path),
+            "--run_dir",
+            str(run_dir),
             "--stages",
             "slam",
             *common_batch_args,
@@ -375,6 +477,8 @@ def main():
             str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
             "--descriptor_manifest",
             str(active_manifest_path),
+            "--run_dir",
+            str(run_dir),
             "--stages",
             "infiller",
             *common_batch_args,
@@ -386,6 +490,18 @@ def main():
         run_logged("infiller", infiller_cmd)
 
     if "filter" in stages:
+        filter_runtime_cfg = dict(filter_cfg)
+        filter_runtime_cfg.setdefault("annotation_root", annotation_root)
+        filter_runtime_cfg.setdefault("annotation_suffix", build_cfg.get("annotation_suffix"))
+        filter_runtime_cfg.setdefault("require_annotation", build_cfg.get("require_annotation"))
+        filter_runtime_cfg.setdefault("source_fps", build_cfg.get("source_fps"))
+        filter_runtime_cfg.setdefault("target_fps", build_cfg.get("target_fps"))
+        filter_runtime_cfg.setdefault("interpolate_labels", build_cfg.get("interpolate_labels"))
+        filter_runtime_cfg.setdefault("mano_device", build_cfg.get("mano_device"))
+        if build_cfg.get("mano_gpus") is not None:
+            filter_runtime_cfg.setdefault("mano_gpus", build_cfg.get("mano_gpus"))
+        if build_cfg.get("mano_dir") is not None:
+            filter_runtime_cfg.setdefault("mano_dir", build_cfg.get("mano_dir"))
         filter_cmd = [
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "filter_manifest_by_quality.py"),
@@ -395,7 +511,7 @@ def main():
             str(filtered_manifest_path),
             "--report_out",
             str(filter_report_path),
-            *cli_args_from_mapping(filter_cfg),
+            *cli_args_from_mapping(filter_runtime_cfg),
         ]
         run_logged("filter", filter_cmd)
         active_manifest_path = filtered_manifest_path

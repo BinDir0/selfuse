@@ -159,3 +159,257 @@ def camera_space_abs_metrics(points_world, extrinsic) -> dict:
         "max_abs_y": float(abs_points[:, 1].max()) if abs_points.size else 0.0,
         "max_abs_z": float(abs_points[:, 2].max()) if abs_points.size else 0.0,
     }
+
+
+def new_clip_quality_stats(clip_id: str) -> dict:
+    return {
+        "clip_id": clip_id,
+        "frames_total": 0,
+        "frames_kept_candidate": 0,
+        "presence_nonzero_frames": 0,
+        "incomplete_sample_frames": 0,
+        "nonfinite_lowdim_frames": 0,
+        "invalid_meta_frames": 0,
+        "invalid_lowdim_frames": 0,
+        "instruction_num_max": 0,
+        "max_hand_translation_step": 0.0,
+        "max_camera_translation_step": 0.0,
+        "max_camera_rotation_step": 0.0,
+        "max_camera_space_wrist_abs": 0.0,
+        "max_camera_space_hand_abs": 0.0,
+        "_prev_frame_idx": None,
+        "_prev_left": None,
+        "_prev_right": None,
+        "_prev_extrinsic": None,
+        "_prev_finite": False,
+    }
+
+
+def update_clip_quality_stats(
+    stats: dict,
+    frame_idx: int,
+    instruction_num: int,
+    presence: int,
+    lowdim,
+    *,
+    count_invalid_lowdim: bool = True,
+) -> None:
+    stats["frames_total"] += 1
+    stats["instruction_num_max"] = max(stats["instruction_num_max"], int(instruction_num))
+    if int(presence) > 0:
+        stats["presence_nonzero_frames"] += 1
+
+    if lowdim is None:
+        if count_invalid_lowdim:
+            stats["invalid_lowdim_frames"] += 1
+        stats["_prev_frame_idx"] = int(frame_idx)
+        stats["_prev_left"] = None
+        stats["_prev_right"] = None
+        stats["_prev_extrinsic"] = None
+        stats["_prev_finite"] = False
+        return
+
+    try:
+        lowdim_array = np.asarray(lowdim, dtype=np.float32).reshape(-1)
+    except Exception:
+        lowdim_array = None
+    if lowdim_array is None or lowdim_array.shape != (LOWDIM_SIZE,):
+        if count_invalid_lowdim:
+            stats["invalid_lowdim_frames"] += 1
+        stats["_prev_frame_idx"] = int(frame_idx)
+        stats["_prev_left"] = None
+        stats["_prev_right"] = None
+        stats["_prev_extrinsic"] = None
+        stats["_prev_finite"] = False
+        return
+
+    if not is_finite_array(lowdim_array):
+        stats["nonfinite_lowdim_frames"] += 1
+        stats["_prev_frame_idx"] = int(frame_idx)
+        stats["_prev_left"] = None
+        stats["_prev_right"] = None
+        stats["_prev_extrinsic"] = None
+        stats["_prev_finite"] = False
+        return
+
+    stats["frames_kept_candidate"] += 1
+    parts = extract_lowdim_components(lowdim_array)
+    current_left = parts["left_translation"]
+    current_right = parts["right_translation"]
+    left_fingertips = parts["left_fingertips"]
+    right_fingertips = parts["right_fingertips"]
+    current_extrinsic = parts["extrinsic"]
+
+    wrist_camera_metrics = camera_space_abs_metrics(
+        np.stack([current_left, current_right], axis=0),
+        current_extrinsic,
+    )
+    hand_camera_metrics = camera_space_abs_metrics(
+        np.concatenate([left_fingertips, right_fingertips], axis=0),
+        current_extrinsic,
+    )
+    stats["max_camera_space_wrist_abs"] = max(
+        stats["max_camera_space_wrist_abs"],
+        wrist_camera_metrics["max_abs"],
+    )
+    stats["max_camera_space_hand_abs"] = max(
+        stats["max_camera_space_hand_abs"],
+        hand_camera_metrics["max_abs"],
+    )
+
+    prev_idx = stats["_prev_frame_idx"]
+    if stats["_prev_finite"] and prev_idx is not None:
+        frame_gap = max(1, int(frame_idx) - int(prev_idx))
+        left_step = float(np.linalg.norm(current_left - stats["_prev_left"]) / frame_gap)
+        right_step = float(np.linalg.norm(current_right - stats["_prev_right"]) / frame_gap)
+        prev_rot = stats["_prev_extrinsic"][:3, :3]
+        prev_trans = stats["_prev_extrinsic"][:3, 3]
+        curr_rot = current_extrinsic[:3, :3]
+        curr_trans = current_extrinsic[:3, 3]
+        camera_translation_step = float(np.linalg.norm(curr_trans - prev_trans) / frame_gap)
+        camera_rotation_step = float(np.linalg.norm((curr_rot - prev_rot).reshape(-1)) / frame_gap)
+
+        stats["max_hand_translation_step"] = max(
+            stats["max_hand_translation_step"],
+            left_step,
+            right_step,
+        )
+        stats["max_camera_translation_step"] = max(
+            stats["max_camera_translation_step"],
+            camera_translation_step,
+        )
+        stats["max_camera_rotation_step"] = max(
+            stats["max_camera_rotation_step"],
+            camera_rotation_step,
+        )
+
+    stats["_prev_frame_idx"] = int(frame_idx)
+    stats["_prev_left"] = current_left
+    stats["_prev_right"] = current_right
+    stats["_prev_extrinsic"] = current_extrinsic
+    stats["_prev_finite"] = True
+
+
+def finalize_clip_quality_metrics(stats: dict) -> dict:
+    return {
+        "frames_total": int(stats["frames_total"]),
+        "frames_kept_candidate": int(stats["frames_kept_candidate"]),
+        "presence_ratio": (
+            float(stats["presence_nonzero_frames"]) / float(stats["frames_total"])
+            if stats["frames_total"] > 0
+            else 0.0
+        ),
+        "instruction_num_max": int(stats["instruction_num_max"]),
+        "incomplete_sample_frames": int(stats["incomplete_sample_frames"]),
+        "nonfinite_lowdim_frames": int(stats["nonfinite_lowdim_frames"]),
+        "invalid_meta_frames": int(stats["invalid_meta_frames"]),
+        "invalid_lowdim_frames": int(stats["invalid_lowdim_frames"]),
+        "max_hand_translation_step": float(stats["max_hand_translation_step"]),
+        "max_camera_translation_step": float(stats["max_camera_translation_step"]),
+        "max_camera_rotation_step": float(stats["max_camera_rotation_step"]),
+        "max_camera_space_wrist_abs": float(stats["max_camera_space_wrist_abs"]),
+        "max_camera_space_hand_abs": float(stats["max_camera_space_hand_abs"]),
+    }
+
+
+def summarize_metric_distribution(values) -> dict | None:
+    finite = np.asarray(
+        [float(value) for value in values if value is not None and np.isfinite(value)],
+        dtype=np.float64,
+    )
+    if finite.size == 0:
+        return None
+    return {
+        "count": int(finite.size),
+        "p50": float(np.percentile(finite, 50)),
+        "p90": float(np.percentile(finite, 90)),
+        "p95": float(np.percentile(finite, 95)),
+        "p99": float(np.percentile(finite, 99)),
+        "max": float(finite.max()),
+    }
+
+
+def resolve_auto_quality_thresholds(clip_metrics: list[dict], criteria: dict) -> dict:
+    resolved = {
+        "max_camera_space_wrist_abs": criteria["max_camera_space_wrist_abs"],
+        "max_camera_space_hand_abs": criteria["max_camera_space_hand_abs"],
+    }
+    summaries = {}
+    percentile = float(criteria["camera_space_abs_percentile"])
+    scale = float(criteria["camera_space_abs_scale"])
+
+    candidate_metrics = [metrics for metrics in clip_metrics if metrics["frames_kept_candidate"] > 0]
+    wrist_values = [metrics["max_camera_space_wrist_abs"] for metrics in candidate_metrics]
+    hand_values = [metrics["max_camera_space_hand_abs"] for metrics in candidate_metrics]
+    wrist_summary = summarize_metric_distribution(wrist_values)
+    hand_summary = summarize_metric_distribution(hand_values)
+    if wrist_summary is not None:
+        summaries["max_camera_space_wrist_abs"] = wrist_summary
+    if hand_summary is not None:
+        summaries["max_camera_space_hand_abs"] = hand_summary
+
+    if resolved["max_camera_space_wrist_abs"] is None and wrist_summary is not None:
+        resolved["max_camera_space_wrist_abs"] = float(
+            np.percentile(np.asarray(wrist_values, dtype=np.float64), percentile) * scale
+        )
+    if resolved["max_camera_space_hand_abs"] is None and hand_summary is not None:
+        resolved["max_camera_space_hand_abs"] = float(
+            np.percentile(np.asarray(hand_values, dtype=np.float64), percentile) * scale
+        )
+
+    return {
+        "resolved": resolved,
+        "distribution": summaries,
+        "auto_rule": {
+            "percentile": percentile,
+            "scale": scale,
+        },
+    }
+
+
+def decide_clip_quality(
+    metrics: dict,
+    criteria: dict,
+    *,
+    include_incomplete_sample_reason: bool = True,
+    include_invalid_meta_reason: bool = True,
+) -> tuple[bool, list[str]]:
+    reasons = []
+    if include_incomplete_sample_reason and metrics["incomplete_sample_frames"] > 0:
+        reasons.append("incomplete_sample")
+    if include_invalid_meta_reason and metrics["invalid_meta_frames"] > 0:
+        reasons.append("invalid_meta")
+    if metrics["invalid_lowdim_frames"] > 0:
+        reasons.append("invalid_lowdim")
+    if criteria["drop_nonfinite_lowdim"] and metrics["nonfinite_lowdim_frames"] > 0:
+        reasons.append("nonfinite_lowdim")
+    if criteria["min_instruction_num"] is not None and metrics["instruction_num_max"] < criteria["min_instruction_num"]:
+        reasons.append("instruction_num_below_min")
+    if criteria["min_presence_ratio"] is not None and metrics["presence_ratio"] < criteria["min_presence_ratio"]:
+        reasons.append("presence_ratio_below_min")
+    if (
+        criteria["max_hand_translation_step"] is not None
+        and metrics["max_hand_translation_step"] > criteria["max_hand_translation_step"]
+    ):
+        reasons.append("hand_translation_step_exceeded")
+    if (
+        criteria["max_camera_translation_step"] is not None
+        and metrics["max_camera_translation_step"] > criteria["max_camera_translation_step"]
+    ):
+        reasons.append("camera_translation_step_exceeded")
+    if (
+        criteria["max_camera_rotation_step"] is not None
+        and metrics["max_camera_rotation_step"] > criteria["max_camera_rotation_step"]
+    ):
+        reasons.append("camera_rotation_step_exceeded")
+    if (
+        criteria["max_camera_space_wrist_abs"] is not None
+        and metrics["max_camera_space_wrist_abs"] > criteria["max_camera_space_wrist_abs"]
+    ):
+        reasons.append("camera_space_wrist_abs_exceeded")
+    if (
+        criteria["max_camera_space_hand_abs"] is not None
+        and metrics["max_camera_space_hand_abs"] > criteria["max_camera_space_hand_abs"]
+    ):
+        reasons.append("camera_space_hand_abs_exceeded")
+    return not reasons, reasons

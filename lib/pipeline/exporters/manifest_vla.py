@@ -38,6 +38,11 @@ from lib.pipeline.exporters.webdataset_features import (
 from lib.pipeline.exporters.mano_codec import build_mano_pca_frame_features, mano_meta_fields
 from lib.pipeline.exporters.webdataset_geometry import axis_angle_to_rot6d
 from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
+from lib.pipeline.quality_metrics import (
+    finalize_clip_quality_metrics,
+    new_clip_quality_stats,
+    update_clip_quality_stats,
+)
 
 
 _worker_mano_right = None
@@ -419,6 +424,56 @@ def load_descriptor_episode_features(
     return episode_data
 
 
+def compute_descriptor_episode_quality_metrics(
+    ep: dict,
+    mano_right,
+    mano_left,
+    device,
+    feature_cache_dir: str | None,
+    mano_dir: str | None,
+    *,
+    source_fps: float,
+    target_fps: float,
+    interpolate_labels: bool,
+):
+    episode_data = load_descriptor_episode_features(
+        ep,
+        mano_right,
+        mano_left,
+        device,
+        feature_cache_dir,
+        mano_dir,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        interpolate_labels=interpolate_labels,
+    )
+    if episode_data is None:
+        return None
+
+    frame_count = int(episode_data["frame_count"])
+    lowdim_all = np.asarray(episode_data["lowdim_all"])
+    presence_per_frame = np.asarray(episode_data["presence_per_frame"])
+    if (
+        frame_count <= 0
+        or lowdim_all.ndim != 2
+        or lowdim_all.shape[0] < frame_count
+        or presence_per_frame.shape[0] < frame_count
+    ):
+        return None
+
+    stats = new_clip_quality_stats(ep["clip_id"])
+    instruction_num = int(ep.get("instruction_num", 0))
+    for frame_idx in range(frame_count):
+        update_clip_quality_stats(
+            stats,
+            frame_idx,
+            instruction_num,
+            int(presence_per_frame[frame_idx]),
+            lowdim_all[frame_idx],
+        )
+    return finalize_clip_quality_metrics(stats)
+
+
 def plan_manifest_shards(episodes: list[dict], frames_per_shard: int, output_dir: str):
     tasks = []
     shard_slices = []
@@ -770,6 +825,27 @@ def _prepare_manifest_episode(
         "instruction_num": len(instruction),
         "language": language,
     }, None
+
+
+def prepare_manifest_record_for_build(
+    record: ClipManifestRecord,
+    *,
+    require_annotation: bool,
+    annotation_root: str | None,
+    annotation_suffix: str,
+    source_fps: float,
+    target_fps: float,
+    interpolate_labels: bool,
+):
+    return _prepare_manifest_episode(
+        record,
+        require_annotation,
+        annotation_root,
+        annotation_suffix,
+        source_fps,
+        target_fps,
+        interpolate_labels,
+    )
 
 
 def prepare_manifest_episodes(
