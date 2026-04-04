@@ -121,7 +121,7 @@ def _parse_args() -> argparse.Namespace:
         "--mano-joint-loss-weight",
         type=float,
         default=1.0,
-        help="3D joint MSE (m^2) via ManoLayer; 0=off; requires hand PCA decode",
+        help="3D joint MSE (m^2) via ManoLayer; default 1.0 (on); 0 disables; needs hand PCA decode (no --no-decode-hand-pca)",
     )
     m.add_argument(
         "--mano-joint-chunk",
@@ -147,6 +147,23 @@ def _parse_args() -> argparse.Namespace:
     r.add_argument("--seed", type=int, default=42)
     r.add_argument("--no-progress", action="store_true")
     r.add_argument(
+        "--no-ddp-find-unused",
+        action="store_true",
+        help="DDP with find_unused_parameters=False (faster; may error if a batch skips MANO heads)",
+    )
+    r.add_argument(
+        "--ddp-read-all-shards",
+        action="store_true",
+        help="DDP: force each rank to iterate all tar shards (also the default when using "
+        "--episodes-file under DDP; avoids ranks stalling on shards with no allowlisted episodes).",
+    )
+    r.add_argument(
+        "--ddp-shard-striping",
+        action="store_true",
+        help="DDP: shard striping by rank only (disables read-all-shards even with --episodes-file). "
+        "May leave fast ranks waiting at the first all_reduce.",
+    )
+    r.add_argument(
         "--eval-only",
         action="store_true",
         help="validation only; needs --resume and --val-episodes-file",
@@ -169,6 +186,14 @@ def _prepare_ddp_master_addr(world_size: int) -> None:
         os.environ["MASTER_ADDR"] = "127.0.0.1"
 
 
+def _ddp_read_all_shards_effective(args: argparse.Namespace, use_dist: bool, world_size: int) -> bool:
+    if args.ddp_shard_striping:
+        return False
+    if args.ddp_read_all_shards:
+        return True
+    return bool(use_dist and world_size > 1 and args.episodes_file.strip())
+
+
 def _build_loader(
     data_path: str,
     *,
@@ -182,6 +207,7 @@ def _build_loader(
     episode_filter: str | None,
     dist_rank: int = 0,
     dist_world_size: int = 1,
+    ddp_read_all_shards: bool = False,
 ) -> DataLoader:
     ef = episodes_file.strip()
     sf = (episode_filter or "").strip() or None
@@ -196,6 +222,7 @@ def _build_loader(
         episode_filter=sf,
         dist_rank=dist_rank,
         dist_world_size=dist_world_size,
+        ddp_read_all_shards=ddp_read_all_shards,
         batch_size=batch_size,
         num_workers=workers,
         pin_memory=pin_memory,
@@ -225,6 +252,7 @@ def main() -> None:
     is_rank0 = rank == 0
     if use_dist:
         _prepare_ddp_master_addr(world_size)
+        os.environ.setdefault("NCCL_SOCKET_FAMILY", "AF_INET")
         dist.init_process_group(backend="nccl")
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
@@ -266,14 +294,14 @@ def main() -> None:
     resume_path = args.resume.strip()
     if resume_path:
         sd = torch.load(resume_path, map_location=device)
-        model.loadmodule_state_dict(sd, strict=True)
+        model.load_state_dict(sd, strict=True)
 
     if use_dist:
         model = DDP(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=False,
+            find_unused_parameters=not args.no_ddp_find_unused,
         )
 
     optim = None
@@ -286,6 +314,13 @@ def main() -> None:
 
     loader = None
     if not args.eval_only:
+        ddp_read_all = _ddp_read_all_shards_effective(args, use_dist, world_size)
+        if is_rank0 and use_dist and world_size > 1 and args.episodes_file.strip() and ddp_read_all:
+            log_line(
+                "DDP: each rank reads all tar shards (non-empty --episodes-file). "
+                "Pass --ddp-shard-striping to use per-rank shards only.",
+                log_path,
+            )
         try:
             loader = _build_loader(
                 args.data_path,
@@ -299,6 +334,7 @@ def main() -> None:
                 episode_filter=args.episode_filter,
                 dist_rank=rank,
                 dist_world_size=world_size,
+                ddp_read_all_shards=ddp_read_all,
             )
         except ValueError as e:
             raise SystemExit(str(e)) from e

@@ -251,7 +251,7 @@ def iter_lowdim_samples_in_shard(shard_path: Path) -> Iterator[Tuple[str, Dict[s
 
 
 def iter_normalized_episode_names_in_shard(shard_path: Path) -> Iterator[str]:
-    """只读各帧 meta.json，不加载图像与 lowdim（用于快速列举 episode）。"""
+    """Yield normalized episode names by reading only meta.json per frame (no images/lowdim)."""
     with tarfile.open(shard_path, "r:*") as tar:
         for member in tar:
             if not member.isfile():
@@ -363,6 +363,7 @@ class EpisodeWindowDataset(IterableDataset):
         episode_list_file: Optional[str] = None,
         dist_rank: int = 0,
         dist_world_size: int = 1,
+        ddp_read_all_shards: bool = False,
     ) -> None:
         super().__init__()
         if window_size < 1:
@@ -387,7 +388,7 @@ class EpisodeWindowDataset(IterableDataset):
         else:
             self._episode_allowlist = None
         shards = discover_shards(self.dataset_path, self.shard_glob)
-        if ws > 1:
+        if ws > 1 and not ddp_read_all_shards:
             shards = shards[rk::ws]
         self.shards = shards
 
@@ -413,6 +414,7 @@ class EpisodeWindowDataLoader(DataLoader):
         episode_list_file: Optional[str] = None,
         dist_rank: int = 0,
         dist_world_size: int = 1,
+        ddp_read_all_shards: bool = False,
         **kwargs,
     ) -> None:
         if kwargs.get("shuffle"):
@@ -427,5 +429,6 @@ class EpisodeWindowDataLoader(DataLoader):
             episode_list_file=episode_list_file,
             dist_rank=dist_rank,
             dist_world_size=dist_world_size,
+            ddp_read_all_shards=ddp_read_all_shards,
         )
         super().__init__(dataset, **kwargs)

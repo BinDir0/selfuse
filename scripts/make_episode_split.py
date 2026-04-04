@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """
-扫描tar，列出 normalize 后的 episode_name，并划分 train.txt / test.txt。
-Usage:
-python scripts/make_episode_split.py \
-  --data-path /share_data/zhangtingrui/datasets/taco_v2 \
-  --holdout 10 \
-  --out-dir /share_data/jixinhao/EgoTransformer/splits
+Scan tar shards, collect normalized episode_name values, write train.txt / test.txt.
+
+Full split (train = all \\ random test holdout):
+python scripts/make_episode_split.py \\
+  --data-path /path/to/shards \\
+  --holdout 10 \\
+  --out-dir splits/full
+
+Small train for overfit (first N episodes after sort; optional disjoint test from the rest):
+python scripts/make_episode_split.py \\
+  --data-path /path/to/oakink2_v3 \\
+  --train-max 10 \\
+  --holdout 5 \\
+  --out-dir splits/overfit
 """
 
 from __future__ import annotations
@@ -38,19 +46,55 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data-path", type=str, required=True)
     p.add_argument("--shard-glob", type=str, default="*.tar")
-    p.add_argument("--holdout", type=int, default=10, help="测试集 episode 数量")
+    p.add_argument(
+        "--holdout",
+        type=int,
+        default=10,
+        help="Test episode count: random from full list, or from (all \\ train) when --train-max is set; "
+        "with --train-max, 0 copies train into test.",
+    )
+    p.add_argument(
+        "--train-max",
+        type=int,
+        default=None,
+        help="If set, train is only the first N episodes after sorting (overfit smoke); "
+        "otherwise train is full list minus holdout test.",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-dir", type=str, required=True)
     args = p.parse_args()
 
     names = collect_episode_names(args.data_path, args.shard_glob)
-    if len(names) <= args.holdout:
-        raise SystemExit(f"episodes={len(names)} <= holdout={args.holdout}")
+    if not names:
+        raise SystemExit("no episodes found")
 
     rng = random.Random(args.seed)
-    test_set = set(rng.sample(names, args.holdout))
-    train = [n for n in names if n not in test_set]
-    test = sorted(test_set)
+    names_sorted = sorted(names)
+
+    if args.train_max is not None:
+        if args.train_max < 1:
+            raise SystemExit("--train-max must be >= 1")
+        if args.train_max > len(names_sorted):
+            raise SystemExit(f"--train-max={args.train_max} > episodes={len(names_sorted)}")
+        train = names_sorted[: args.train_max]
+        train_set = set(train)
+        remaining = [n for n in names_sorted if n not in train_set]
+        if args.holdout == 0:
+            test = list(train)
+        else:
+            if len(remaining) < args.holdout:
+                raise SystemExit(
+                    f"holdout={args.holdout} but only {len(remaining)} episodes outside train"
+                )
+            test = sorted(rng.sample(remaining, args.holdout))
+    else:
+        if args.holdout < 1:
+            raise SystemExit("without --train-max, --holdout must be >= 1")
+        if len(names_sorted) <= args.holdout:
+            raise SystemExit(f"episodes={len(names_sorted)} <= holdout={args.holdout}")
+        test_set = set(rng.sample(names_sorted, args.holdout))
+        train = [n for n in names_sorted if n not in test_set]
+        test = sorted(test_set)
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
