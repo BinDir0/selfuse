@@ -56,6 +56,7 @@ try:
         decode_npy,
         decode_image_jpg,
         decode_json,
+        load_episode_name_set,
         scalar_int,
         normalize_episode_name,
         split_lowdim,
@@ -67,6 +68,7 @@ except ImportError:
         decode_npy,
         decode_image_jpg,
         decode_json,
+        load_episode_name_set,
         scalar_int,
         normalize_episode_name,
         split_lowdim,
@@ -248,16 +250,50 @@ def iter_lowdim_samples_in_shard(shard_path: Path) -> Iterator[Tuple[str, Dict[s
         yield current_key, current_fields
 
 
+def iter_normalized_episode_names_in_shard(shard_path: Path) -> Iterator[str]:
+    """只读各帧 meta.json，不加载图像与 lowdim（用于快速列举 episode）。"""
+    with tarfile.open(shard_path, "r:*") as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            parsed = parse_member_name(member.name)
+            if parsed is None:
+                continue
+            sample_key, suffix = parsed
+            if suffix != "meta.json":
+                continue
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                continue
+            raw = extracted.read()
+            key_for_msg = sample_key if sample_key is not None else member.name
+            meta = validate_converted_meta(decode_json(raw), key_for_msg)
+            yield str(meta["episode_name_normalized"])
+
+
+def _episode_keep(
+    episode_name: str,
+    episode_filter: Optional[str],
+    episode_allowlist: Optional[frozenset[str]],
+) -> bool:
+    if episode_allowlist is not None:
+        return episode_name in episode_allowlist
+    if episode_filter is not None:
+        return episode_name == episode_filter
+    return True
+
+
 def emit_episode_windows(
     episode_name: str,
     episode_frames: List[Dict],
     window_size: int,
     stride: int,
     episode_filter: Optional[str],
+    episode_allowlist: Optional[frozenset[str]],
 ) -> Iterator[Dict]:
     if not episode_frames:
         return
-    if episode_filter is not None and episode_name != episode_filter:
+    if not _episode_keep(episode_name, episode_filter, episode_allowlist):
         return
 
     ordered_frames = sorted(episode_frames, key=lambda item: item["frame_idx"])
@@ -273,6 +309,7 @@ def iter_episode_windows(
     window_size: int,
     stride: int,
     episode_filter: Optional[str],
+    episode_allowlist: Optional[frozenset[str]] = None,
 ) -> Iterator[Dict]:
     """
     Main logic for dataloading and episode windowing.
@@ -296,6 +333,7 @@ def iter_episode_windows(
                     window_size,
                     stride,
                     episode_filter,
+                    episode_allowlist,
                 )
                 current_episode_id = sample_episode_id # start tracking the new episode
                 current_frames = []
@@ -309,6 +347,7 @@ def iter_episode_windows(
             window_size,
             stride,
             episode_filter,
+            episode_allowlist,
         )
 
 
@@ -321,19 +360,36 @@ class EpisodeWindowDataset(IterableDataset):
         stride: int = 1,
         shard_glob: str = "*.tar",
         episode_filter: Optional[str] = None,
+        episode_list_file: Optional[str] = None,
+        dist_rank: int = 0,
+        dist_world_size: int = 1,
     ) -> None:
         super().__init__()
         if window_size < 1:
             raise ValueError(f"window_size must be >= 1, got {window_size}")
         if stride < 1:
             raise ValueError(f"stride must be >= 1, got {stride}")
+        if episode_list_file and episode_filter is not None:
+            raise ValueError("use either episode_list_file or episode_filter, not both")
+        ws = int(dist_world_size)
+        rk = int(dist_rank)
+        if ws < 1 or rk < 0 or rk >= ws:
+            raise ValueError(f"invalid dist rank/world_size: rank={rk}, world_size={ws}")
 
         self.dataset_path = str(dataset_path)
         self.window_size = int(window_size)
         self.stride = int(stride)
         self.shard_glob = shard_glob
         self.episode_filter = episode_filter
-        self.shards = discover_shards(self.dataset_path, self.shard_glob)
+        self._episode_allowlist: Optional[frozenset[str]]
+        if episode_list_file:
+            self._episode_allowlist = load_episode_name_set(episode_list_file)
+        else:
+            self._episode_allowlist = None
+        shards = discover_shards(self.dataset_path, self.shard_glob)
+        if ws > 1:
+            shards = shards[rk::ws]
+        self.shards = shards
 
     def __iter__(self) -> Iterator[Dict]:
         return iter_episode_windows(
@@ -341,6 +397,7 @@ class EpisodeWindowDataset(IterableDataset):
             window_size=self.window_size,
             stride=self.stride,
             episode_filter=self.episode_filter,
+            episode_allowlist=self._episode_allowlist,
         )
 
 
@@ -353,6 +410,9 @@ class EpisodeWindowDataLoader(DataLoader):
         stride: int = 1,
         shard_glob: str = "*.tar",
         episode_filter: Optional[str] = None,
+        episode_list_file: Optional[str] = None,
+        dist_rank: int = 0,
+        dist_world_size: int = 1,
         **kwargs,
     ) -> None:
         if kwargs.get("shuffle"):
@@ -364,5 +424,8 @@ class EpisodeWindowDataLoader(DataLoader):
             stride=stride,
             shard_glob=shard_glob,
             episode_filter=episode_filter,
+            episode_list_file=episode_list_file,
+            dist_rank=dist_rank,
+            dist_world_size=dist_world_size,
         )
         super().__init__(dataset, **kwargs)

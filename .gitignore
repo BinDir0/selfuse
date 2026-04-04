@@ -53,8 +53,9 @@ lightning_logs/
 *.pth
 *.ckpt
 *.safetensors
+splits/
 
 # 常见大包 / 本地数据（按项目取消注释）
-# data/
+data/
 # _DATA/
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import glob
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 import io
 import json
 
@@ -32,6 +32,20 @@ LEFT_HAND_SLICE = slice(0, 45)
 RIGHT_HAND_SLICE = slice(45, 90)
 LEFT_SHAPE_SLICE = slice(0, 10)
 RIGHT_SHAPE_SLICE = slice(10, 20)
+
+
+def load_episode_name_set(path: str | Path) -> frozenset[str]:
+    """每行一个 episode_name（与 dataloader 内 normalize 后的名字一致）；空行与 # 开头行忽略。"""
+    p = Path(path)
+    names: list[str] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        names.append(s)
+    if not names:
+        raise ValueError(f"no episode names in {p}")
+    return frozenset(names)
 
 
 def is_glob_pattern(path: str) -> bool:

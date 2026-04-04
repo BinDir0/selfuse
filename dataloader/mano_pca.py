@@ -1,4 +1,4 @@
-"""MANO 手指姿态：PCA 与轴角互转（manopth ManoLayer）。"""
+"""MANO 手指姿态：PCA 与轴角互转（manopth ManoLayer；读 pkl 走 mano/chumpy，版本见 requirements.txt）。"""
 
 from __future__ import annotations
 
