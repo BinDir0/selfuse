@@ -21,9 +21,11 @@ from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_sh
 
 LOWDIM_SIZE = 116
 WORLD_STATE_SLICE = slice(0, 18)
+NEXT_WORLD_STATE_SLICE = slice(48, 66)
 EXTRINSIC_SLICE = slice(96, 112)
 DEFAULT_WORKERS = max(1, min(8, os.cpu_count() or 1))
 DEPTH_EPS = 1e-6
+ACTION_PRESENT_EPS = 1e-8
 
 STATE_DIM_NAMES = [
     "left_wrist_x",
@@ -167,13 +169,20 @@ def load_lowdim_from_sample(sample: dict) -> np.ndarray:
     return array
 
 
-def sample_to_states(sample: dict) -> tuple[np.ndarray, np.ndarray]:
+def sample_to_states_and_action(sample: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
     validate_sample_record(sample)
     lowdim = load_lowdim_from_sample(sample)
     world_state = lowdim[WORLD_STATE_SLICE].astype(np.float32)
+    next_world_state = lowdim[NEXT_WORLD_STATE_SLICE].astype(np.float32)
     extrinsic = lowdim[EXTRINSIC_SLICE].reshape(4, 4).astype(np.float32)
     camera_state = transform_wrist_state_to_camera(world_state, extrinsic)
-    return world_state, camera_state
+    if np.max(np.abs(next_world_state)) <= ACTION_PRESENT_EPS:
+        return world_state, camera_state, None, None
+
+    next_camera_state = transform_wrist_state_to_camera(next_world_state, extrinsic)
+    world_action = (next_world_state - world_state).astype(np.float32)
+    camera_action = (next_camera_state - camera_state).astype(np.float32)
+    return world_state, camera_state, world_action, camera_action
 
 
 def allocate_shard_budgets(num_shards: int, total_samples: int, seed: int) -> np.ndarray:
@@ -190,14 +199,17 @@ def sample_shard(task: tuple[str, int, int]) -> dict:
     rng = np.random.default_rng(seed)
     world_candidates: list[np.ndarray] = []
     camera_candidates: list[np.ndarray] = []
+    world_action_candidates: list[np.ndarray | None] = []
+    camera_action_candidates: list[np.ndarray | None] = []
     samples_seen = 0
     valid_samples = 0
     invalid_samples = 0
+    action_valid_samples = 0
 
     for sample in iter_shard_samples(shard_path):
         samples_seen += 1
         try:
-            world_state, camera_state = sample_to_states(sample)
+            world_state, camera_state, world_action, camera_action = sample_to_states_and_action(sample)
         except Exception:
             invalid_samples += 1
             continue
@@ -205,27 +217,40 @@ def sample_shard(task: tuple[str, int, int]) -> dict:
         valid_samples += 1
         world_candidates.append(world_state)
         camera_candidates.append(camera_state)
+        world_action_candidates.append(world_action)
+        camera_action_candidates.append(camera_action)
+        if world_action is not None:
+            action_valid_samples += 1
 
     world_samples: list[np.ndarray] = []
     camera_samples: list[np.ndarray] = []
+    world_action_samples: list[np.ndarray] = []
+    camera_action_samples: list[np.ndarray] = []
     if budget > 0 and world_candidates:
         # Sample with replacement so each shard can honor its pre-allocated budget.
         sample_indices = rng.integers(0, len(world_candidates), size=budget)
         world_samples = [world_candidates[idx] for idx in sample_indices]
         camera_samples = [camera_candidates[idx] for idx in sample_indices]
+        world_action_samples = [world_action_candidates[idx] for idx in sample_indices if world_action_candidates[idx] is not None]
+        camera_action_samples = [camera_action_candidates[idx] for idx in sample_indices if camera_action_candidates[idx] is not None]
 
     return {
         "shard_path": shard_path,
         "budget": int(budget),
         "samples_seen": int(samples_seen),
         "valid_samples": int(valid_samples),
+        "action_valid_samples": int(action_valid_samples),
         "invalid_samples": int(invalid_samples),
         "world_states": [state.tolist() for state in world_samples],
         "camera_states": [state.tolist() for state in camera_samples],
+        "world_actions": [action.tolist() for action in world_action_samples],
+        "camera_actions": [action.tolist() for action in camera_action_samples],
     }
 
 
-def collect_states_random(tar_paths: list[str], *, sample_limit: int, seed: int, workers: int) -> tuple[np.ndarray, np.ndarray, dict]:
+def collect_states_random(
+    tar_paths: list[str], *, sample_limit: int, seed: int, workers: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     budgets = allocate_shard_budgets(len(tar_paths), sample_limit, seed)
     tasks = [(tar_paths[idx], int(budget), seed + idx + 1) for idx, budget in enumerate(budgets) if int(budget) > 0]
 
@@ -237,14 +262,18 @@ def collect_states_random(tar_paths: list[str], *, sample_limit: int, seed: int,
 
     world_states = []
     camera_states = []
+    world_actions = []
+    camera_actions = []
     samples_seen = 0
     valid_samples = 0
+    action_valid_samples = 0
     invalid_samples = 0
     shard_reports = []
 
     for result in results:
         samples_seen += result["samples_seen"]
         valid_samples += result["valid_samples"]
+        action_valid_samples += result["action_valid_samples"]
         invalid_samples += result["invalid_samples"]
         shard_reports.append(
             {
@@ -252,12 +281,16 @@ def collect_states_random(tar_paths: list[str], *, sample_limit: int, seed: int,
                 "budget": result["budget"],
                 "samples_seen": result["samples_seen"],
                 "valid_samples": result["valid_samples"],
+                "action_valid_samples": result["action_valid_samples"],
                 "invalid_samples": result["invalid_samples"],
                 "samples_selected": len(result["world_states"]),
+                "action_samples_selected": len(result["world_actions"]),
             }
         )
         world_states.extend(result["world_states"])
         camera_states.extend(result["camera_states"])
+        world_actions.extend(result["world_actions"])
+        camera_actions.extend(result["camera_actions"])
 
     if not world_states:
         raise SystemExit("No valid samples were collected for statistics.")
@@ -265,9 +298,12 @@ def collect_states_random(tar_paths: list[str], *, sample_limit: int, seed: int,
     return (
         np.asarray(world_states, dtype=np.float32).reshape(-1, 18),
         np.asarray(camera_states, dtype=np.float32).reshape(-1, 18),
+        np.asarray(world_actions, dtype=np.float32).reshape(-1, 18),
+        np.asarray(camera_actions, dtype=np.float32).reshape(-1, 18),
         {
             "samples_seen": int(samples_seen),
             "valid_samples": int(valid_samples),
+            "action_valid_samples": int(action_valid_samples),
             "invalid_samples": int(invalid_samples),
             "shard_reports": shard_reports,
             "requested_samples": int(sample_limit),
@@ -276,18 +312,23 @@ def collect_states_random(tar_paths: list[str], *, sample_limit: int, seed: int,
     )
 
 
-def collect_states_sequential(tar_paths: list[str], *, sample_limit: int | None, sample_offset: int) -> tuple[np.ndarray, np.ndarray, dict]:
+def collect_states_sequential(
+    tar_paths: list[str], *, sample_limit: int | None, sample_offset: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     world_states = []
     camera_states = []
+    world_actions = []
+    camera_actions = []
     samples_seen = 0
     valid_samples = 0
+    action_valid_samples = 0
     invalid_samples = 0
 
     for shard_path in tar_paths:
         for sample in iter_shard_samples(shard_path):
             samples_seen += 1
             try:
-                world_state, camera_state = sample_to_states(sample)
+                world_state, camera_state, world_action, camera_action = sample_to_states_and_action(sample)
             except Exception:
                 invalid_samples += 1
                 continue
@@ -300,6 +341,10 @@ def collect_states_sequential(tar_paths: list[str], *, sample_limit: int | None,
 
             world_states.append(world_state)
             camera_states.append(camera_state)
+            if world_action is not None:
+                world_actions.append(world_action)
+                camera_actions.append(camera_action)
+                action_valid_samples += 1
             valid_samples += 1
         if sample_limit is not None and len(world_states) >= sample_limit:
             break
@@ -310,9 +355,12 @@ def collect_states_sequential(tar_paths: list[str], *, sample_limit: int | None,
     return (
         np.asarray(world_states, dtype=np.float32).reshape(-1, 18),
         np.asarray(camera_states, dtype=np.float32).reshape(-1, 18),
+        np.asarray(world_actions, dtype=np.float32).reshape(-1, 18),
+        np.asarray(camera_actions, dtype=np.float32).reshape(-1, 18),
         {
             "samples_seen": int(samples_seen),
             "valid_samples": int(valid_samples),
+            "action_valid_samples": int(action_valid_samples),
             "invalid_samples": int(invalid_samples),
             "requested_samples": None if sample_limit is None else int(sample_limit),
         },
@@ -385,14 +433,14 @@ def main():
             raise SystemExit("--sample-offset is only supported in sequential mode.")
         if args.sample_limit is None:
             raise SystemExit("--sample-limit is required in random mode.")
-        world_array, camera_array, collection_report = collect_states_random(
+        world_array, camera_array, world_action_array, camera_action_array, collection_report = collect_states_random(
             tar_paths,
             sample_limit=args.sample_limit,
             seed=args.seed,
             workers=args.workers,
         )
     else:
-        world_array, camera_array, collection_report = collect_states_sequential(
+        world_array, camera_array, world_action_array, camera_action_array, collection_report = collect_states_sequential(
             tar_paths,
             sample_limit=args.sample_limit,
             sample_offset=args.sample_offset,
@@ -406,7 +454,10 @@ def main():
         "workers": int(args.workers),
         "samples_seen": collection_report["samples_seen"],
         "valid_samples_seen": collection_report["valid_samples"],
+        "action_valid_samples_seen": collection_report["action_valid_samples"],
         "invalid_samples_skipped": collection_report["invalid_samples"],
+        "state_samples_used": int(world_array.shape[0]),
+        "action_samples_used": int(world_action_array.shape[0]),
         "samples_used": int(world_array.shape[0]),
         "shards_sampled": int(collection_report.get("shards_sampled", len(tar_paths))),
         "sample_offset": int(args.sample_offset),
@@ -415,11 +466,16 @@ def main():
         "state_definition": {
             "world_18d": "left_wrist_xyz + right_wrist_xyz + left_root_rot6d + right_root_rot6d",
             "camera_18d": "same 18D state transformed by lowdim camera_w2c",
+            "world_action_18d": "lowdim next-frame wrist state minus current wrist state in world coordinates",
+            "camera_action_18d": "transform current and next wrist state with the current frame lowdim camera_w2c, then subtract",
         },
         "world_18d": compute_stats(world_array),
         "camera_18d": compute_stats(camera_array),
         "camera_depth_summary": compute_camera_depth_summary(camera_array),
     }
+    if world_action_array.shape[0] > 0:
+        payload["world_action_18d"] = compute_stats(world_action_array)
+        payload["camera_action_18d"] = compute_stats(camera_action_array)
     if "shard_reports" in collection_report:
         payload["shard_sampling"] = collection_report["shard_reports"]
 
@@ -429,8 +485,10 @@ def main():
         f"Sampling mode: {payload['sampling_mode']}",
         f"Samples seen: {payload['samples_seen']}",
         f"Valid samples seen: {payload['valid_samples_seen']}",
+        f"Action-valid samples seen: {payload['action_valid_samples_seen']}",
         f"Invalid samples skipped: {payload['invalid_samples_skipped']}",
-        f"Samples used: {payload['samples_used']}",
+        f"State samples used: {payload['state_samples_used']}",
+        f"Action samples used: {payload['action_samples_used']}",
         f"Shards sampled: {payload['shards_sampled']}",
         f"Sample offset: {payload['sample_offset']}",
         f"Sample limit: {payload['sample_limit']}",
@@ -441,6 +499,11 @@ def main():
     lines.extend(format_stats_lines("world_18d", payload["world_18d"]))
     lines.append("")
     lines.extend(format_stats_lines("camera_18d", payload["camera_18d"]))
+    if "world_action_18d" in payload:
+        lines.append("")
+        lines.extend(format_stats_lines("world_action_18d", payload["world_action_18d"]))
+        lines.append("")
+        lines.extend(format_stats_lines("camera_action_18d", payload["camera_action_18d"]))
     print("\n".join(lines), flush=True)
 
     if args.output:
