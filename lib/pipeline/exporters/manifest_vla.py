@@ -21,9 +21,9 @@ from tqdm import tqdm
 from lib.pipeline.annotation_protocol import load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
 from lib.pipeline.frame_sources import (
+    build_frame_bytes_reader,
     classify_descriptor_storage,
     is_light_tar_descriptor,
-    read_frame_bytes_from_descriptor,
     validate_descriptor_for_frame_reads,
 )
 from lib.pipeline.exporters.webdataset_features import (
@@ -35,7 +35,7 @@ from lib.pipeline.exporters.webdataset_features import (
     _load_world_space_prediction,
     build_mano_models,
 )
-from lib.pipeline.exporters.mano_codec import build_mano_pca_frame_features, mano_meta_fields
+from lib.pipeline.exporters.mano_codec import MANO_SAMPLE_SHAPE, build_mano_pca_frame_features, mano_meta_fields
 from lib.pipeline.exporters.webdataset_geometry import axis_angle_to_rot6d
 from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
 from lib.pipeline.quality_metrics import (
@@ -62,6 +62,11 @@ _LOWDIM_SAMPLE = np.zeros((LOWDIM_SIZE,), dtype=LOWDIM_DTYPE)
 _LOWDIM_BUF = io.BytesIO()
 np.save(_LOWDIM_BUF, _LOWDIM_SAMPLE, allow_pickle=False)
 _LOWDIM_NPY_HEADER = _LOWDIM_BUF.getvalue()[: -_LOWDIM_SAMPLE.nbytes]
+MANO_DTYPE = np.dtype(np.float32)
+_MANO_SAMPLE = np.zeros(MANO_SAMPLE_SHAPE, dtype=MANO_DTYPE)
+_MANO_BUF = io.BytesIO()
+np.save(_MANO_BUF, _MANO_SAMPLE, allow_pickle=False)
+_MANO_NPY_HEADER = _MANO_BUF.getvalue()[: -_MANO_SAMPLE.nbytes]
 
 
 def _feature_cache_path(seq_folder: str, feature_cache_dir: str) -> str:
@@ -303,6 +308,7 @@ def load_descriptor_episode_features(
     feature_cache_dir: str | None,
     mano_dir: str | None,
     *,
+    prediction: dict | None = None,
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
@@ -328,7 +334,8 @@ def load_descriptor_episode_features(
         if cached is not None:
             return cached
 
-    prediction = _load_world_space_prediction({"episode_id": ep["episode_id"]}, os.path.join(seq_folder, "world_space_res.pth"))
+    if prediction is None:
+        prediction = _load_world_space_prediction({"episode_id": ep["episode_id"]}, os.path.join(seq_folder, "world_space_res.pth"))
     if prediction is None:
         return None
 
@@ -432,6 +439,7 @@ def compute_descriptor_episode_quality_metrics(
     feature_cache_dir: str | None,
     mano_dir: str | None,
     *,
+    prediction: dict | None = None,
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
@@ -443,6 +451,7 @@ def compute_descriptor_episode_quality_metrics(
         device,
         feature_cache_dir,
         mano_dir,
+        prediction=prediction,
         source_fps=source_fps,
         target_fps=target_fps,
         interpolate_labels=interpolate_labels,
@@ -553,8 +562,12 @@ def _encode_lowdim_npy(lowdim) -> bytes:
 
 
 def _encode_array_npy(array) -> bytes:
+    encoded = np.asarray(array, dtype=MANO_DTYPE)
+    if encoded.shape == MANO_SAMPLE_SHAPE and encoded.flags.c_contiguous:
+        return _MANO_NPY_HEADER + encoded.tobytes()
+
     buf = io.BytesIO()
-    np.save(buf, np.asarray(array, dtype=np.float32), allow_pickle=False)
+    np.save(buf, encoded, allow_pickle=False)
     return buf.getvalue()
 
 
@@ -675,18 +688,18 @@ def _worker_process_shard(task):
                     continue
 
                 descriptor = episode_slice["descriptor"]
+                read_frame_bytes = build_frame_bytes_reader(
+                    descriptor,
+                    shard_fd_cache=_worker_shard_fd_cache,
+                    shard_tar_cache=_worker_shard_tar_cache,
+                )
                 clip_samples = []
                 pending = deque()
                 meta_prefix = _build_manifest_meta_prefix(episode_slice)
 
                 try:
                     for frame_idx in range(episode_slice["frame_start"], episode_slice["frame_end"]):
-                        image_bytes = read_frame_bytes_from_descriptor(
-                            descriptor,
-                            frame_idx,
-                            shard_fd_cache=_worker_shard_fd_cache,
-                            shard_tar_cache=_worker_shard_tar_cache,
-                        )
+                        image_bytes = read_frame_bytes(frame_idx)
                         presence = int(episode_data["presence_per_frame"][frame_idx])
                         key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
                         meta_bytes = meta_prefix + str(presence).encode("ascii") + b"}"
@@ -836,16 +849,71 @@ def prepare_manifest_record_for_build(
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
+    prediction: dict | None = None,
 ):
-    return _prepare_manifest_episode(
-        record,
-        require_annotation,
-        annotation_root,
-        annotation_suffix,
-        source_fps,
-        target_fps,
-        interpolate_labels,
-    )
+    if prediction is None:
+        return _prepare_manifest_episode(
+            record,
+            require_annotation,
+            annotation_root,
+            annotation_suffix,
+            source_fps,
+            target_fps,
+            interpolate_labels,
+        )
+
+    try:
+        source_num_frames = int(prediction["pred_trans"].shape[1])
+    except Exception:
+        return None, "invalid_world_res"
+
+    target_num_frames = int(record.descriptor.frame_count)
+    num_frames = int(target_num_frames if interpolate_labels else min(source_num_frames, target_num_frames))
+    if num_frames <= 0:
+        return None, "empty_frames"
+
+    language = None
+    instruction = []
+    if annotation_root:
+        annotation, error_code, _ = load_clip_annotation(
+            annotation_root,
+            record.clip_id,
+            annotation_suffix=annotation_suffix,
+        )
+        if annotation is None:
+            if require_annotation:
+                return None, error_code
+        else:
+            instruction = annotation.instruction
+            language = annotation.language
+
+    return {
+        "clip_id": record.clip_id,
+        "episode_id": record.clip_id,
+        "seq_folder": str(Path(record.descriptor.seq_folder)),
+        "source_id": record.source_id,
+        "split": record.split,
+        "descriptor": record.descriptor,
+        "num_valid_frames": num_frames,
+        "source_num_frames": source_num_frames,
+        "source_fps": float(source_fps),
+        "target_fps": float(target_fps),
+        "interpolate_labels": bool(interpolate_labels),
+        "instruction": instruction,
+        "instruction_num": len(instruction),
+        "language": language,
+    }, None
+
+
+def load_manifest_record_prediction(record: ClipManifestRecord):
+    seq_folder = Path(record.descriptor.seq_folder)
+    world_res_path = seq_folder / "world_space_res.pth"
+    if not world_res_path.exists():
+        return None, "missing_world_res"
+    prediction = _load_world_space_prediction({"episode_id": record.clip_id}, str(world_res_path))
+    if prediction is None:
+        return None, "invalid_world_res"
+    return prediction, None
 
 
 def prepare_manifest_episodes(
@@ -954,6 +1022,7 @@ def run_manifest_build(
     mano_device: str,
     mano_gpus: str | None,
     mano_dir: str | None,
+    feature_cache_dir: str | None,
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
@@ -988,10 +1057,11 @@ def run_manifest_build(
         existing_output_paths = {task["output_path"] for task in existing_shard_tasks}
         pending_shard_tasks = [task for task in shard_tasks if task["output_path"] not in existing_output_paths]
 
-    feature_cache_dir = None
-    if repeat_episodes > 1:
-        feature_cache_dir = os.path.join(output_dir, "_episode_feature_cache")
-        os.makedirs(feature_cache_dir, exist_ok=True)
+    resolved_feature_cache_dir = feature_cache_dir
+    if resolved_feature_cache_dir is None and repeat_episodes > 1:
+        resolved_feature_cache_dir = os.path.join(output_dir, "_episode_feature_cache")
+    if resolved_feature_cache_dir:
+        os.makedirs(resolved_feature_cache_dir, exist_ok=True)
 
     mano_device_obj = torch.device(mano_device if torch.cuda.is_available() else "cpu")
     mano_device_specs = normalize_mano_devices(str(mano_device_obj), mano_gpus if mano_device_obj.type == "cuda" else None)
@@ -1013,14 +1083,14 @@ def run_manifest_build(
 
     if pending_shard_tasks:
         if writer_workers <= 1:
-            _worker_init(mano_device_specs, mano_dir, feature_cache_dir)
+            _worker_init(mano_device_specs, mano_dir, resolved_feature_cache_dir)
             result_iter = (_worker_process_shard(task) for task in pending_shard_tasks)
         else:
             mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
             pool = mp_context.Pool(
                 writer_workers,
                 initializer=_worker_init,
-                initargs=(mano_device_specs, mano_dir, feature_cache_dir),
+                initargs=(mano_device_specs, mano_dir, resolved_feature_cache_dir),
             )
             result_iter = pool.imap_unordered(_worker_process_shard, pending_shard_tasks)
 
@@ -1044,4 +1114,5 @@ def run_manifest_build(
         "planned_shards": len(shard_tasks),
         "pending_shards": len(pending_shard_tasks),
         "planned_frames": sum(ep["num_valid_frames"] for ep in repeated),
+        "feature_cache_dir": resolved_feature_cache_dir,
     }

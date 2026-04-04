@@ -94,6 +94,8 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
     infiller_cfg.update(_as_dict(infer_cfg.get("infiller")))
     infiller_cfg.update(_as_dict(raw.get("infiller")))
 
+    multihost_cfg = _as_dict(infer_cfg.get("multihost"))
+
     build_cfg = _as_dict(raw.get("build"))
     for key, default in (
         ("require_annotation", False),
@@ -119,6 +121,7 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
     for key, default in (
         ("stages", "detect_track,motion,slam,infiller"),
         ("workers", 8),
+        ("chunksize", 16),
         ("drop_nonfinite_world_res", True),
         ("drop_nonfinite_slam", True),
         ("drop_nonfinite_lowdim", True),
@@ -156,6 +159,7 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         "detect_motion": detect_motion_cfg,
         "slam": slam_cfg,
         "infiller": infiller_cfg,
+        "multihost": multihost_cfg,
     }
 
     return {

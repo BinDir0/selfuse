@@ -7,7 +7,7 @@ import tarfile
 
 import numpy as np
 
-from .mano_codec import mano_meta_fields
+from .mano_codec import MANO_SAMPLE_SHAPE, mano_meta_fields
 
 
 LOWDIM_SIZE = 116
@@ -16,6 +16,11 @@ _LOWDIM_SAMPLE = np.zeros((LOWDIM_SIZE,), dtype=LOWDIM_DTYPE)
 _LOWDIM_BUF = io.BytesIO()
 np.save(_LOWDIM_BUF, _LOWDIM_SAMPLE, allow_pickle=False)
 _LOWDIM_NPY_HEADER = _LOWDIM_BUF.getvalue()[: -_LOWDIM_SAMPLE.nbytes]
+MANO_DTYPE = np.dtype(np.float32)
+_MANO_SAMPLE = np.zeros(MANO_SAMPLE_SHAPE, dtype=MANO_DTYPE)
+_MANO_BUF = io.BytesIO()
+np.save(_MANO_BUF, _MANO_SAMPLE, allow_pickle=False)
+_MANO_NPY_HEADER = _MANO_BUF.getvalue()[: -_MANO_SAMPLE.nbytes]
 
 
 def plan_shards(episodes, frames_per_shard, output_dir):
@@ -116,8 +121,12 @@ def _encode_lowdim_npy(lowdim):
 
 
 def _encode_array_npy(array):
+    encoded = np.asarray(array, dtype=MANO_DTYPE)
+    if encoded.shape == MANO_SAMPLE_SHAPE and encoded.flags.c_contiguous:
+        return _MANO_NPY_HEADER + encoded.tobytes()
+
     buf = io.BytesIO()
-    np.save(buf, np.asarray(array, dtype=np.float32), allow_pickle=False)
+    np.save(buf, encoded, allow_pickle=False)
     return buf.getvalue()
 
 

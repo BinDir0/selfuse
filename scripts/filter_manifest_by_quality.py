@@ -34,6 +34,17 @@ def build_parser():
     parser.add_argument("--stages", default=DEFAULT_STAGES, help="Comma-separated stage outputs that must validate")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel workers")
     parser.add_argument(
+        "--chunksize",
+        type=int,
+        default=16,
+        help="Multiprocessing chunksize for manifest evaluation; higher values reduce IPC overhead",
+    )
+    parser.add_argument(
+        "--feature_cache_dir",
+        default=None,
+        help="Optional shared feature cache directory for lowdim/MANO episode features",
+    )
+    parser.add_argument(
         "--drop_nonfinite_world_res",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -177,7 +188,8 @@ def _append_build_reason(result: dict, reason: str, metric_key: str | None = Non
     return result
 
 
-def _validate_build_inputs(record, stages: list[str], result: dict) -> tuple[bool, tuple[int, int] | None]:
+def _validate_build_inputs(record, stages: list[str], result: dict) -> tuple[bool, tuple[int, int, dict | None] | None]:
+    from lib.pipeline.exporters.manifest_vla import load_manifest_record_prediction
     from lib.pipeline.stage_api import get_track_range, validate_stage_output
 
     seq_folder = Path(record.descriptor.seq_folder)
@@ -188,25 +200,38 @@ def _validate_build_inputs(record, stages: list[str], result: dict) -> tuple[boo
         return False, None
 
     result["metrics"]["track_range"] = [int(start_idx), int(end_idx)]
+    prediction = None
     for stage in stages:
+        if stage == "infiller":
+            prediction, error_code = load_manifest_record_prediction(record)
+            if prediction is None:
+                _append_build_reason(result, f"invalid_stage_output:{stage}", f"{stage}_error", str(error_code))
+                return False, None
+            continue
         try:
             validate_stage_output(stage, seq_folder, start_idx, end_idx)
         except Exception as error:
             _append_build_reason(result, f"invalid_stage_output:{stage}", f"{stage}_error", str(error))
             return False, None
-    return True, (int(start_idx), int(end_idx))
+    return True, (int(start_idx), int(end_idx), prediction)
 
 
 def evaluate_record(record, config: dict) -> dict:
     from lib.pipeline.exporters.manifest_vla import (
         compute_descriptor_episode_quality_metrics,
+        load_manifest_record_prediction,
         prepare_manifest_record_for_build,
     )
 
     result = _new_result(record)
-    ok, _track_range = _validate_build_inputs(record, config["stages"], result)
+    ok, validate_payload = _validate_build_inputs(record, config["stages"], result)
     if not ok:
         return result
+    prediction = validate_payload[2] if validate_payload is not None and len(validate_payload) >= 3 else None
+    if prediction is None:
+        prediction, error_code = load_manifest_record_prediction(record)
+        if prediction is None:
+            return _append_build_reason(result, str(error_code))
 
     episode, error_code = prepare_manifest_record_for_build(
         record,
@@ -216,6 +241,7 @@ def evaluate_record(record, config: dict) -> dict:
         source_fps=float(config["source_fps"]),
         target_fps=float(config["target_fps"]),
         interpolate_labels=bool(config["interpolate_labels"]),
+        prediction=prediction,
     )
     if episode is None:
         return _append_build_reason(result, str(error_code))
@@ -225,8 +251,9 @@ def evaluate_record(record, config: dict) -> dict:
         _WORKER_MANO_RIGHT,
         _WORKER_MANO_LEFT,
         _WORKER_DEVICE,
-        feature_cache_dir=None,
+        feature_cache_dir=config["feature_cache_dir"],
         mano_dir=config["mano_dir"],
+        prediction=prediction,
         source_fps=float(config["source_fps"]),
         target_fps=float(config["target_fps"]),
         interpolate_labels=bool(config["interpolate_labels"]),
@@ -326,6 +353,8 @@ def build_report(
             "source_fps": float(criteria["source_fps"]),
             "target_fps": float(criteria["target_fps"]),
             "interpolate_labels": bool(criteria["interpolate_labels"]),
+            "chunksize": int(criteria["chunksize"]),
+            "feature_cache_dir": criteria["feature_cache_dir"],
             "drop_nonfinite_world_res": bool(criteria["drop_nonfinite_world_res"]),
             "drop_nonfinite_slam": bool(criteria["drop_nonfinite_slam"]),
             **resolved_criteria,
@@ -382,18 +411,28 @@ def run_filter(args) -> dict:
         "camera_space_axis_abs_cap": args.camera_space_axis_abs_cap,
         "camera_space_abs_percentile": args.camera_space_abs_percentile,
         "camera_space_abs_scale": args.camera_space_abs_scale,
+        "chunksize": int(args.chunksize),
+        "feature_cache_dir": args.feature_cache_dir,
         "mano_dir": args.mano_dir,
         "mano_device_specs": mano_device_specs,
     }
 
-    tasks = list(enumerate(records))
     if worker_count <= 1:
         _worker_init(config)
-        results = [dict(evaluate_record(record, config), index=index) for index, record in tqdm(tasks, desc="Filter manifest")]
+        results = [
+            dict(evaluate_record(record, config), index=index)
+            for index, record in tqdm(enumerate(records), total=len(records), desc="Filter manifest")
+        ]
     else:
         mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
         with mp_context.Pool(worker_count, initializer=_worker_init, initargs=(config,)) as pool:
-            results = list(tqdm(pool.imap(_worker_eval, tasks, chunksize=1), total=len(tasks), desc="Filter manifest"))
+            results = list(
+                tqdm(
+                    pool.imap(_worker_eval, enumerate(records), chunksize=int(args.chunksize)),
+                    total=len(records),
+                    desc="Filter manifest",
+                )
+            )
 
     results.sort(key=lambda item: item["index"])
     clip_metrics = [item["metrics"] for item in results if item["build_ready"]]
@@ -432,6 +471,8 @@ def main():
     args = build_parser().parse_args()
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
+    if args.chunksize < 1:
+        raise ValueError("--chunksize must be >= 1")
     if args.dry_run and Path(args.output_manifest).exists():
         print(f"Dry run: not writing {args.output_manifest}")
     report = run_filter(args)

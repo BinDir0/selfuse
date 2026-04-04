@@ -40,6 +40,22 @@ infer:
     depth_predict_all_frames: true
   infiller:
     infiller_window_batch_size: 64
+  # Optional lightweight multi-host stage queue.
+  # When enabled, host-local `gpus` below override `infer.common.gpus`.
+  # multihost:
+  #   enabled: true
+  #   mode: stage_queue
+  #   shard_factor: 2
+  #   ssh_options:
+  #     - -o
+  #     - BatchMode=yes
+  #   hosts:
+  #     - name: pro-11
+  #       ssh_target: guantianrui@pro-11
+  #       gpus: 0,1,2,3
+  #     - name: pro-38
+  #       ssh_target: guantianrui@pro-38
+  #       gpus: 0,1,2,3
 
 annotation:
   command: >

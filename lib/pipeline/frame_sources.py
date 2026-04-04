@@ -146,39 +146,85 @@ def read_frame_bytes_from_descriptor(
     shard_fd_cache: dict | None = None,
     shard_tar_cache: dict | None = None,
 ) -> bytes:
+    reader = build_frame_bytes_reader(
+        descriptor,
+        shard_fd_cache=shard_fd_cache,
+        shard_tar_cache=shard_tar_cache,
+    )
+    return reader(frame_idx)
+
+
+def build_frame_bytes_reader(
+    descriptor: ClipDescriptor,
+    *,
+    shard_fd_cache: dict | None = None,
+    shard_tar_cache: dict | None = None,
+):
     validate_descriptor_for_frame_reads(descriptor)
+    frame_count = int(descriptor.frame_count)
 
     if descriptor.storage_kind == STORAGE_TAR_SHARD:
+        shard_path = descriptor.shard_path
         if descriptor.frame_offsets is not None:
-            offset, size = descriptor.frame_offsets[frame_idx]
-            fd = None if shard_fd_cache is None else shard_fd_cache.get(descriptor.shard_path)
-            if fd is None:
-                fd = os.open(descriptor.shard_path, os.O_RDONLY)
-                if shard_fd_cache is not None:
-                    shard_fd_cache[descriptor.shard_path] = fd
-            payload = os.pread(fd, size, offset)
-            if len(payload) != size:
-                raise RuntimeError(
-                    f"Short read from shard {descriptor.shard_path} frame {_descriptor_member_name(descriptor, frame_idx)}"
-                )
-            return payload
+            frame_offsets = descriptor.frame_offsets
 
-        tar_reader = None if shard_tar_cache is None else shard_tar_cache.get(descriptor.shard_path)
-        if tar_reader is None:
-            tar_reader = tarfile.open(descriptor.shard_path, "r")
-            if shard_tar_cache is not None:
-                shard_tar_cache[descriptor.shard_path] = tar_reader
-        member_name = _descriptor_member_name(descriptor, frame_idx)
-        member = tar_reader.getmember(member_name)
-        extracted = tar_reader.extractfile(member)
-        if extracted is None:
-            raise RuntimeError(f"Failed to extract {member_name} from {descriptor.shard_path}")
-        return extracted.read()
+            def read_from_offsets(frame_idx: int) -> bytes:
+                if frame_idx < 0 or frame_idx >= frame_count:
+                    raise IndexError(
+                        f"Frame index {frame_idx} out of range [0, {frame_count}) for {descriptor.clip_id}"
+                    )
+                offset, size = frame_offsets[frame_idx]
+                fd = None if shard_fd_cache is None else shard_fd_cache.get(shard_path)
+                if fd is None:
+                    fd = os.open(shard_path, os.O_RDONLY)
+                    if shard_fd_cache is not None:
+                        shard_fd_cache[shard_path] = fd
+                payload = os.pread(fd, size, offset)
+                if len(payload) != size:
+                    raise RuntimeError(
+                        f"Short read from shard {shard_path} frame {_descriptor_member_name(descriptor, frame_idx)}"
+                    )
+                return payload
+
+            return read_from_offsets
+
+        if descriptor.frame_names:
+            frame_names = descriptor.frame_names
+        else:
+            frame_names = [_infer_tar_frame_name(descriptor, frame_idx) for frame_idx in range(frame_count)]
+
+        def read_from_tar(frame_idx: int) -> bytes:
+            if frame_idx < 0 or frame_idx >= frame_count:
+                raise IndexError(
+                    f"Frame index {frame_idx} out of range [0, {frame_count}) for {descriptor.clip_id}"
+                )
+            tar_reader = None if shard_tar_cache is None else shard_tar_cache.get(shard_path)
+            if tar_reader is None:
+                tar_reader = tarfile.open(shard_path, "r")
+                if shard_tar_cache is not None:
+                    shard_tar_cache[shard_path] = tar_reader
+            member_name = frame_names[frame_idx]
+            member = tar_reader.getmember(member_name)
+            extracted = tar_reader.extractfile(member)
+            if extracted is None:
+                raise RuntimeError(f"Failed to extract {member_name} from {shard_path}")
+            return extracted.read()
+
+        return read_from_tar
 
     if descriptor.storage_kind == STORAGE_IMAGE_SEQUENCE:
         if descriptor.frame_dir is None:
             raise ValueError(f"Descriptor {descriptor.clip_id} missing frame_dir")
-        frame_path = Path(descriptor.frame_dir) / descriptor.frame_names[frame_idx]
-        return frame_path.read_bytes()
+        frame_dir = Path(descriptor.frame_dir)
+        frame_names = descriptor.frame_names
+
+        def read_from_image_sequence(frame_idx: int) -> bytes:
+            if frame_idx < 0 or frame_idx >= frame_count:
+                raise IndexError(
+                    f"Frame index {frame_idx} out of range [0, {frame_count}) for {descriptor.clip_id}"
+                )
+            return (frame_dir / frame_names[frame_idx]).read_bytes()
+
+        return read_from_image_sequence
 
     raise ValueError(f"Unsupported descriptor storage_kind: {descriptor.storage_kind}")

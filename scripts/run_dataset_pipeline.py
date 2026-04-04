@@ -21,6 +21,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from lib.pipeline.batch.cli import build_batch_infer_parser
 from lib.pipeline.clip_manifest import build_manifest_records_from_descriptors, write_clip_manifest, write_shard_dir_list
 from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
+from lib.pipeline.multihost import (
+    MultihostStageQueueRunner,
+    MultihostStageSpec,
+    parse_multihost_config,
+    sanitize_infer_args_for_multihost,
+)
 from lib.pipeline.pipeline_config import normalize_pipeline_config
 
 
@@ -58,6 +64,7 @@ BATCH_INFER_NEGATIVE_BOOL_FLAGS = {
     "depth_predict_all_frames",
     "any4d_use_amp",
 }
+MULTIHOST_DISALLOWED_INFER_KEYS = {"descriptor_manifest", "video_list", "video_dir", "run_dir", "start", "end", "stages"}
 
 
 def get_parser():
@@ -194,6 +201,34 @@ def validate_pipeline_cli_alignment(*, stages: list[str], infer_cfg: dict, build
         raise ValueError("Pipeline config contains unsupported child CLI keys:\n- " + "\n- ".join(flat_errors))
 
 
+def validate_multihost_infer_alignment(infer_cfg: dict) -> None:
+    errors = []
+    for section in ("common", "detect_motion", "slam", "infiller"):
+        mapping = infer_cfg.get(section) or {}
+        invalid = sorted(key for key in mapping if key in MULTIHOST_DISALLOWED_INFER_KEYS)
+        if invalid:
+            errors.append(f"infer.{section}: unsupported under multihost {invalid}")
+    if errors:
+        raise ValueError("infer.multihost uses reserved batch_infer keys:\n- " + "\n- ".join(errors))
+
+
+def infer_stage_worker_count_per_gpu(*, pipeline_stage: str, infer_cfg: dict) -> int:
+    common_cfg = infer_cfg.get("common") or {}
+    stage_cfg = infer_cfg.get(pipeline_stage) or {}
+    internal_stage_map = {
+        "detect_motion": ("detect_track", "motion"),
+        "slam": ("slam",),
+        "infiller": ("infiller",),
+    }
+    internal_stages = internal_stage_map[pipeline_stage]
+    default_workers = int(stage_cfg.get("workers_per_gpu", common_cfg.get("workers_per_gpu", 1)))
+    resolved = []
+    for internal_stage in internal_stages:
+        key = f"{internal_stage}_workers_per_gpu"
+        resolved.append(int(stage_cfg.get(key, common_cfg.get(key, default_workers))))
+    return max(resolved)
+
+
 def stream_command(name: str, cmd: list[str], log_path: Path, *, cwd: str | Path | None = None, env: dict | None = None):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_handle:
@@ -300,6 +335,7 @@ def main():
     shard_dirs_list_path = run_dir / "shard_dirs.txt"
     summary_path = run_dir / "run_summary.json"
     filter_report_path = run_dir / "filter_report.json"
+    shared_feature_cache_dir = run_dir / "_episode_feature_cache"
 
     adapter_name = dataset_cfg.get("adapter") or dataset_cfg.get("source_type", "buildai")
     source_type = adapter_name
@@ -309,6 +345,12 @@ def main():
     final_dataset_root = Path(paths_cfg["final_dataset_root"])
     hawor_python = runtimes_cfg["hawor_python"]
     slam_python = runtimes_cfg.get("slam_python", hawor_python)
+    infer_multihost_cfg = parse_multihost_config(
+        infer_cfg.get("multihost"),
+        default_project_root=PROJECT_ROOT,
+        default_hawor_python=hawor_python,
+        default_slam_python=slam_python,
+    )
     adapter = get_dataset_adapter(adapter_name)
     adapter_context = DatasetAdapterContext(
         project_root=PROJECT_ROOT,
@@ -330,10 +372,13 @@ def main():
         "active_manifest_path": str(manifest_path.resolve()),
         "annotation_root": annotation_root,
         "final_dataset_root": str(final_dataset_root.resolve()),
+        "feature_cache_dir": str(shared_feature_cache_dir.resolve()),
         "stages": public_stages,
         "requested_stage_tokens": requested_stage_tokens,
         "expanded_internal_stages": stages,
     }
+    if infer_multihost_cfg.enabled:
+        run_summary["infer_multihost"] = infer_multihost_cfg.to_summary()
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     active_manifest_path = manifest_path
     annotation_manifest_path = manifest_path
@@ -435,59 +480,178 @@ def main():
         infer_cfg.get("common"),
         negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
     )
+    multihost_runner = None
+    multihost_common_batch_args = ()
+    if infer_multihost_cfg.enabled and any(stage in stages for stage in ("detect_motion", "slam", "infiller")):
+        validate_multihost_infer_alignment(infer_cfg)
+        multihost_common_batch_args = tuple(
+            cli_args_from_mapping(
+                sanitize_infer_args_for_multihost(
+                    infer_cfg.get("common"),
+                    reserved_keys=MULTIHOST_DISALLOWED_INFER_KEYS,
+                ),
+                negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
+            )
+        )
+        multihost_runner = MultihostStageQueueRunner(
+            config=infer_multihost_cfg,
+            manifest_path=active_manifest_path,
+            run_dir=run_dir,
+            infer_resume=bool((infer_cfg.get("common") or {}).get("resume", True)),
+        )
+
     if "detect_motion" in stages:
-        detect_motion_cmd = [
-            hawor_python,
-            str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
-            "--descriptor_manifest",
-            str(active_manifest_path),
-            "--run_dir",
-            str(run_dir),
-            "--stages",
-            "detect_track,motion",
-            *common_batch_args,
-            *cli_args_from_mapping(
+        detect_motion_args = tuple(
+            cli_args_from_mapping(
                 infer_cfg.get("detect_motion"),
                 negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
-            ),
-        ]
-        run_logged("detect_motion", detect_motion_cmd)
+            )
+        )
+        if multihost_runner is not None:
+            result = multihost_runner.run_stage(
+                MultihostStageSpec(
+                    pipeline_stage="detect_motion",
+                    batch_stages="detect_track,motion",
+                    runtime_key="hawor",
+                    extra_args=multihost_common_batch_args
+                    + tuple(
+                        cli_args_from_mapping(
+                            sanitize_infer_args_for_multihost(
+                                infer_cfg.get("detect_motion"),
+                                reserved_keys=MULTIHOST_DISALLOWED_INFER_KEYS,
+                            ),
+                            negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
+                        )
+                    ),
+                    worker_count_per_gpu=infer_stage_worker_count_per_gpu(
+                        pipeline_stage="detect_motion",
+                        infer_cfg=infer_cfg,
+                    ),
+                )
+            )
+            run_summary.setdefault("multihost_dispatch", {})["detect_motion"] = result["dispatch_path"]
+            summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not result["success"]:
+                raise RuntimeError(
+                    "detect_motion multihost stage failed: "
+                    + json.dumps(result["failed_shards"], ensure_ascii=False)
+                )
+        else:
+            detect_motion_cmd = [
+                hawor_python,
+                str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
+                "--descriptor_manifest",
+                str(active_manifest_path),
+                "--run_dir",
+                str(run_dir),
+                "--stages",
+                "detect_track,motion",
+                *common_batch_args,
+                *detect_motion_args,
+            ]
+            run_logged("detect_motion", detect_motion_cmd)
 
     if "slam" in stages:
-        slam_cmd = [
-            slam_python,
-            str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
-            "--descriptor_manifest",
-            str(active_manifest_path),
-            "--run_dir",
-            str(run_dir),
-            "--stages",
-            "slam",
-            *common_batch_args,
-            *cli_args_from_mapping(
+        slam_args = tuple(
+            cli_args_from_mapping(
                 infer_cfg.get("slam"),
                 negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
-            ),
-        ]
-        run_logged("slam", slam_cmd)
+            )
+        )
+        if multihost_runner is not None:
+            result = multihost_runner.run_stage(
+                MultihostStageSpec(
+                    pipeline_stage="slam",
+                    batch_stages="slam",
+                    runtime_key="slam",
+                    extra_args=multihost_common_batch_args
+                    + tuple(
+                        cli_args_from_mapping(
+                            sanitize_infer_args_for_multihost(
+                                infer_cfg.get("slam"),
+                                reserved_keys=MULTIHOST_DISALLOWED_INFER_KEYS,
+                            ),
+                            negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
+                        )
+                    ),
+                    worker_count_per_gpu=infer_stage_worker_count_per_gpu(
+                        pipeline_stage="slam",
+                        infer_cfg=infer_cfg,
+                    ),
+                )
+            )
+            run_summary.setdefault("multihost_dispatch", {})["slam"] = result["dispatch_path"]
+            summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not result["success"]:
+                raise RuntimeError(
+                    "slam multihost stage failed: "
+                    + json.dumps(result["failed_shards"], ensure_ascii=False)
+                )
+        else:
+            slam_cmd = [
+                slam_python,
+                str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
+                "--descriptor_manifest",
+                str(active_manifest_path),
+                "--run_dir",
+                str(run_dir),
+                "--stages",
+                "slam",
+                *common_batch_args,
+                *slam_args,
+            ]
+            run_logged("slam", slam_cmd)
 
     if "infiller" in stages:
-        infiller_cmd = [
-            hawor_python,
-            str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
-            "--descriptor_manifest",
-            str(active_manifest_path),
-            "--run_dir",
-            str(run_dir),
-            "--stages",
-            "infiller",
-            *common_batch_args,
-            *cli_args_from_mapping(
+        infiller_args = tuple(
+            cli_args_from_mapping(
                 infer_cfg.get("infiller"),
                 negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
-            ),
-        ]
-        run_logged("infiller", infiller_cmd)
+            )
+        )
+        if multihost_runner is not None:
+            result = multihost_runner.run_stage(
+                MultihostStageSpec(
+                    pipeline_stage="infiller",
+                    batch_stages="infiller",
+                    runtime_key="hawor",
+                    extra_args=multihost_common_batch_args
+                    + tuple(
+                        cli_args_from_mapping(
+                            sanitize_infer_args_for_multihost(
+                                infer_cfg.get("infiller"),
+                                reserved_keys=MULTIHOST_DISALLOWED_INFER_KEYS,
+                            ),
+                            negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
+                        )
+                    ),
+                    worker_count_per_gpu=infer_stage_worker_count_per_gpu(
+                        pipeline_stage="infiller",
+                        infer_cfg=infer_cfg,
+                    ),
+                )
+            )
+            run_summary.setdefault("multihost_dispatch", {})["infiller"] = result["dispatch_path"]
+            summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not result["success"]:
+                raise RuntimeError(
+                    "infiller multihost stage failed: "
+                    + json.dumps(result["failed_shards"], ensure_ascii=False)
+                )
+        else:
+            infiller_cmd = [
+                hawor_python,
+                str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
+                "--descriptor_manifest",
+                str(active_manifest_path),
+                "--run_dir",
+                str(run_dir),
+                "--stages",
+                "infiller",
+                *common_batch_args,
+                *infiller_args,
+            ]
+            run_logged("infiller", infiller_cmd)
 
     if "filter" in stages:
         filter_runtime_cfg = dict(filter_cfg)
@@ -502,6 +666,7 @@ def main():
             filter_runtime_cfg.setdefault("mano_gpus", build_cfg.get("mano_gpus"))
         if build_cfg.get("mano_dir") is not None:
             filter_runtime_cfg.setdefault("mano_dir", build_cfg.get("mano_dir"))
+        filter_runtime_cfg.setdefault("feature_cache_dir", str(shared_feature_cache_dir))
         filter_cmd = [
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "filter_manifest_by_quality.py"),
@@ -520,6 +685,8 @@ def main():
         summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if "build" in stages:
+        build_runtime_cfg = dict(build_cfg)
+        build_runtime_cfg.setdefault("feature_cache_dir", str(shared_feature_cache_dir))
         build_cmd = [
             hawor_python,
             str(PROJECT_ROOT / "scripts" / "build_vla_from_manifest.py"),
@@ -527,7 +694,7 @@ def main():
             str(active_manifest_path),
             "--output_dir",
             str(final_dataset_root),
-            *cli_args_from_mapping(build_cfg),
+            *cli_args_from_mapping(build_runtime_cfg),
         ]
         if args.resume:
             build_cmd.append("--resume")
