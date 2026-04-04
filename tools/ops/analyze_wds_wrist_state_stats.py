@@ -12,6 +12,10 @@ from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - optional dependency
+    tqdm = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -59,22 +63,16 @@ def build_parser():
     )
     parser.add_argument("--input-list", type=str, default=None, help="Optional text file with one input path per line")
     parser.add_argument(
-        "--sampling-mode",
-        default="random",
-        choices=["random", "sequential"],
-        help="random: pre-allocate a sampling budget per shard; sequential: stream valid samples in shard order.",
-    )
-    parser.add_argument(
         "--sample-limit",
         type=int,
         default=10000,
-        help="Total samples to analyze. In random mode this is the total sampling budget across all shards.",
+        help="Total random sampling budget across all matched shards.",
     )
-    parser.add_argument("--sample-offset", type=int, default=0, help="Sequential mode only: skip the first N valid samples")
     parser.add_argument("--shard-start", type=int, default=0, help="Inclusive shard index in sorted shard order")
     parser.add_argument("--shard-end", type=int, default=None, help="Exclusive shard index in sorted shard order")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for shard-budget allocation and within-shard sampling")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers for random mode")
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
     parser.add_argument("--output", type=str, default=None, help="Optional JSON output path")
     return parser
 
@@ -249,16 +247,10 @@ def sample_shard(task: tuple[str, int, int]) -> dict:
 
 
 def collect_states_random(
-    tar_paths: list[str], *, sample_limit: int, seed: int, workers: int
+    tar_paths: list[str], *, sample_limit: int, seed: int, workers: int, show_progress: bool
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     budgets = allocate_shard_budgets(len(tar_paths), sample_limit, seed)
     tasks = [(tar_paths[idx], int(budget), seed + idx + 1) for idx, budget in enumerate(budgets) if int(budget) > 0]
-
-    if workers <= 1 or len(tasks) <= 1:
-        results = [sample_shard(task) for task in tasks]
-    else:
-        with get_context("spawn").Pool(processes=min(workers, len(tasks))) as pool:
-            results = pool.map(sample_shard, tasks)
 
     world_states = []
     camera_states = []
@@ -270,27 +262,69 @@ def collect_states_random(
     invalid_samples = 0
     shard_reports = []
 
-    for result in results:
-        samples_seen += result["samples_seen"]
-        valid_samples += result["valid_samples"]
-        action_valid_samples += result["action_valid_samples"]
-        invalid_samples += result["invalid_samples"]
-        shard_reports.append(
-            {
-                "shard_path": result["shard_path"],
-                "budget": result["budget"],
-                "samples_seen": result["samples_seen"],
-                "valid_samples": result["valid_samples"],
-                "action_valid_samples": result["action_valid_samples"],
-                "invalid_samples": result["invalid_samples"],
-                "samples_selected": len(result["world_states"]),
-                "action_samples_selected": len(result["world_actions"]),
-            }
-        )
-        world_states.extend(result["world_states"])
-        camera_states.extend(result["camera_states"])
-        world_actions.extend(result["world_actions"])
-        camera_actions.extend(result["camera_actions"])
+    if tqdm is None:
+        show_progress = False
+
+    progress = tqdm(
+        total=len(tasks),
+        desc="Sampling shards",
+        unit="shard",
+        disable=(not show_progress) or len(tasks) == 0,
+    ) if tqdm is not None else None
+    if workers <= 1 or len(tasks) <= 1:
+        results_iter = (sample_shard(task) for task in tasks)
+        for result in results_iter:
+            samples_seen += result["samples_seen"]
+            valid_samples += result["valid_samples"]
+            action_valid_samples += result["action_valid_samples"]
+            invalid_samples += result["invalid_samples"]
+            shard_reports.append(
+                {
+                    "shard_path": result["shard_path"],
+                    "budget": result["budget"],
+                    "samples_seen": result["samples_seen"],
+                    "valid_samples": result["valid_samples"],
+                    "action_valid_samples": result["action_valid_samples"],
+                    "invalid_samples": result["invalid_samples"],
+                    "samples_selected": len(result["world_states"]),
+                    "action_samples_selected": len(result["world_actions"]),
+                }
+            )
+            world_states.extend(result["world_states"])
+            camera_states.extend(result["camera_states"])
+            world_actions.extend(result["world_actions"])
+            camera_actions.extend(result["camera_actions"])
+            if progress is not None:
+                progress.update(1)
+                progress.set_postfix(samples=len(world_states), actions=len(world_actions))
+    else:
+        with get_context("spawn").Pool(processes=min(workers, len(tasks))) as pool:
+            for result in pool.imap_unordered(sample_shard, tasks):
+                samples_seen += result["samples_seen"]
+                valid_samples += result["valid_samples"]
+                action_valid_samples += result["action_valid_samples"]
+                invalid_samples += result["invalid_samples"]
+                shard_reports.append(
+                    {
+                        "shard_path": result["shard_path"],
+                        "budget": result["budget"],
+                        "samples_seen": result["samples_seen"],
+                        "valid_samples": result["valid_samples"],
+                        "action_valid_samples": result["action_valid_samples"],
+                        "invalid_samples": result["invalid_samples"],
+                        "samples_selected": len(result["world_states"]),
+                        "action_samples_selected": len(result["world_actions"]),
+                    }
+                )
+                world_states.extend(result["world_states"])
+                camera_states.extend(result["camera_states"])
+                world_actions.extend(result["world_actions"])
+                camera_actions.extend(result["camera_actions"])
+                if progress is not None:
+                    progress.update(1)
+                    progress.set_postfix(samples=len(world_states), actions=len(world_actions))
+    if progress is not None:
+        progress.close()
 
     if not world_states:
         raise SystemExit("No valid samples were collected for statistics.")
@@ -308,61 +342,6 @@ def collect_states_random(
             "shard_reports": shard_reports,
             "requested_samples": int(sample_limit),
             "shards_sampled": len(tasks),
-        },
-    )
-
-
-def collect_states_sequential(
-    tar_paths: list[str], *, sample_limit: int | None, sample_offset: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
-    world_states = []
-    camera_states = []
-    world_actions = []
-    camera_actions = []
-    samples_seen = 0
-    valid_samples = 0
-    action_valid_samples = 0
-    invalid_samples = 0
-
-    for shard_path in tar_paths:
-        for sample in iter_shard_samples(shard_path):
-            samples_seen += 1
-            try:
-                world_state, camera_state, world_action, camera_action = sample_to_states_and_action(sample)
-            except Exception:
-                invalid_samples += 1
-                continue
-
-            if valid_samples < sample_offset:
-                valid_samples += 1
-                continue
-            if sample_limit is not None and len(world_states) >= sample_limit:
-                break
-
-            world_states.append(world_state)
-            camera_states.append(camera_state)
-            if world_action is not None:
-                world_actions.append(world_action)
-                camera_actions.append(camera_action)
-                action_valid_samples += 1
-            valid_samples += 1
-        if sample_limit is not None and len(world_states) >= sample_limit:
-            break
-
-    if not world_states:
-        raise SystemExit("No valid samples were collected for statistics.")
-
-    return (
-        np.asarray(world_states, dtype=np.float32).reshape(-1, 18),
-        np.asarray(camera_states, dtype=np.float32).reshape(-1, 18),
-        np.asarray(world_actions, dtype=np.float32).reshape(-1, 18),
-        np.asarray(camera_actions, dtype=np.float32).reshape(-1, 18),
-        {
-            "samples_seen": int(samples_seen),
-            "valid_samples": int(valid_samples),
-            "action_valid_samples": int(action_valid_samples),
-            "invalid_samples": int(invalid_samples),
-            "requested_samples": None if sample_limit is None else int(sample_limit),
         },
     )
 
@@ -428,28 +407,18 @@ def main():
     if not tar_paths:
         raise SystemExit("No shard tar files matched the requested shard range.")
 
-    if args.sampling_mode == "random":
-        if args.sample_offset != 0:
-            raise SystemExit("--sample-offset is only supported in sequential mode.")
-        if args.sample_limit is None:
-            raise SystemExit("--sample-limit is required in random mode.")
-        world_array, camera_array, world_action_array, camera_action_array, collection_report = collect_states_random(
-            tar_paths,
-            sample_limit=args.sample_limit,
-            seed=args.seed,
-            workers=args.workers,
-        )
-    else:
-        world_array, camera_array, world_action_array, camera_action_array, collection_report = collect_states_sequential(
-            tar_paths,
-            sample_limit=args.sample_limit,
-            sample_offset=args.sample_offset,
-        )
+    world_array, camera_array, world_action_array, camera_action_array, collection_report = collect_states_random(
+        tar_paths,
+        sample_limit=args.sample_limit,
+        seed=args.seed,
+        workers=args.workers,
+        show_progress=not args.no_progress,
+    )
 
     payload = {
         "inputs": requested_inputs,
         "shards_analyzed": len(tar_paths),
-        "sampling_mode": args.sampling_mode,
+        "sampling_mode": "random",
         "seed": int(args.seed),
         "workers": int(args.workers),
         "samples_seen": collection_report["samples_seen"],
@@ -460,8 +429,7 @@ def main():
         "action_samples_used": int(world_action_array.shape[0]),
         "samples_used": int(world_array.shape[0]),
         "shards_sampled": int(collection_report.get("shards_sampled", len(tar_paths))),
-        "sample_offset": int(args.sample_offset),
-        "sample_limit": None if args.sample_limit is None else int(args.sample_limit),
+        "sample_limit": int(args.sample_limit),
         "camera_z_convention": "camera-space z > 0 is in front of the camera; z < 0 is behind the camera.",
         "state_definition": {
             "world_18d": "left_wrist_xyz + right_wrist_xyz + left_root_rot6d + right_root_rot6d",
@@ -482,7 +450,6 @@ def main():
     lines = [
         f"Inputs: {len(requested_inputs)}",
         f"Shards analyzed: {payload['shards_analyzed']}",
-        f"Sampling mode: {payload['sampling_mode']}",
         f"Samples seen: {payload['samples_seen']}",
         f"Valid samples seen: {payload['valid_samples_seen']}",
         f"Action-valid samples seen: {payload['action_valid_samples_seen']}",
@@ -490,7 +457,6 @@ def main():
         f"State samples used: {payload['state_samples_used']}",
         f"Action samples used: {payload['action_samples_used']}",
         f"Shards sampled: {payload['shards_sampled']}",
-        f"Sample offset: {payload['sample_offset']}",
         f"Sample limit: {payload['sample_limit']}",
         "",
     ]
