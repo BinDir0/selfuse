@@ -315,54 +315,80 @@ def _worker_init(output_dir: str, clip_index: dict, episode_index: dict, camera_
     _WORKER_CAMERA_CACHE = {}
 
 
+def _append_skip(skip_details: list[dict], *, sample_key: str | None, reason: str, error: Exception | str):
+    if len(skip_details) >= 32:
+        return
+    skip_details.append(
+        {
+            "sample_key": sample_key,
+            "reason": reason,
+            "error": str(error),
+        }
+    )
+
+
 def process_shard(shard_path: str) -> dict:
     shard_name = os.path.basename(shard_path)
     output_path = os.path.join(_WORKER_OUTPUT_DIR, shard_name)
     tmp_path = f"{output_path}.tmp"
     frames_rewritten = 0
     clips_touched = set()
+    skipped_samples = 0
+    skip_details = []
     tar_writer = None
 
     try:
         for sample in iter_shard_samples(shard_path):
-            validate_sample_record(sample)
             try:
+                validate_sample_record(sample)
                 meta = json.loads(sample["meta_bytes"].decode("utf-8"))
-            except Exception:
-                meta = {}
+                clip_id = _sample_clip_id(sample, meta)
+                clip_info = _resolve_clip_info(sample["key"], clip_id, meta)
+                frame_idx = parse_frame_index(sample["key"])
 
-            clip_id = _sample_clip_id(sample, meta)
-            clip_info = _resolve_clip_info(sample["key"], clip_id, meta)
-            frame_idx = parse_frame_index(sample["key"])
+                camera = _load_camera_sequence(clip_info["seq_folder"], camera_mode=_WORKER_CAMERA_MODE)
+                if frame_idx >= int(camera["num_frames"]):
+                    raise IndexError(
+                        f"Sample {sample['key']} requests frame {frame_idx}, "
+                        f"but source episode only has {camera['num_frames']} frames"
+                    )
 
-            camera = _load_camera_sequence(clip_info["seq_folder"], camera_mode=_WORKER_CAMERA_MODE)
-            if frame_idx >= int(camera["num_frames"]):
-                raise IndexError(
-                    f"Sample {sample['key']} requests frame {frame_idx}, but source episode only has {camera['num_frames']} frames"
+                lowdim = decode_lowdim(sample["lowdim_bytes"])
+                if lowdim.shape != (LOWDIM_SIZE,):
+                    raise ValueError(f"Unexpected lowdim shape for {sample['key']}: {lowdim.shape}")
+                lowdim[EXTRINSIC_SLICE] = camera["extrinsics"][frame_idx].reshape(-1)
+                if _WORKER_CAMERA_MODE == "direct-traj-plus-image-center":
+                    lowdim[INTRINSIC_SLICE] = camera["intrinsic"]
+                lowdim_bytes = _encode_lowdim(lowdim)
+
+                if tar_writer is None:
+                    os.makedirs(_WORKER_OUTPUT_DIR, exist_ok=True)
+                    tar_writer = tarfile.open(tmp_path, "w")
+
+                write_sample_to_tar(
+                    tar_writer,
+                    sample["key"],
+                    sample["image_bytes"],
+                    lowdim_bytes,
+                    sample["meta_bytes"],
+                    mano_bytes=sample.get("mano_bytes"),
                 )
-
-            lowdim = decode_lowdim(sample["lowdim_bytes"])
-            if lowdim.shape != (LOWDIM_SIZE,):
-                raise ValueError(f"Unexpected lowdim shape for {sample['key']}: {lowdim.shape}")
-            lowdim[EXTRINSIC_SLICE] = camera["extrinsics"][frame_idx].reshape(-1)
-            if _WORKER_CAMERA_MODE == "direct-traj-plus-image-center":
-                lowdim[INTRINSIC_SLICE] = camera["intrinsic"]
-            lowdim_bytes = _encode_lowdim(lowdim)
-
-            if tar_writer is None:
-                os.makedirs(_WORKER_OUTPUT_DIR, exist_ok=True)
-                tar_writer = tarfile.open(tmp_path, "w")
-
-            write_sample_to_tar(
-                tar_writer,
-                sample["key"],
-                sample["image_bytes"],
-                lowdim_bytes,
-                sample["meta_bytes"],
-                mano_bytes=sample.get("mano_bytes"),
-            )
-            frames_rewritten += 1
-            clips_touched.add(clip_id)
+                frames_rewritten += 1
+                clips_touched.add(clip_id)
+            except Exception as error:
+                skipped_samples += 1
+                _append_skip(
+                    skip_details,
+                    sample_key=sample.get("key"),
+                    reason="sample_error",
+                    error=error,
+                )
+                if skipped_samples <= 5 or skipped_samples % 100 == 0:
+                    _log(
+                        f"Skip sample in {shard_name}: key={sample.get('key')} "
+                        f"skipped={skipped_samples} error={error}"
+                    )
+                continue
     except Exception:
         if tar_writer is not None:
             tar_writer.close()
@@ -380,11 +406,28 @@ def process_shard(shard_path: str) -> dict:
         "frames_rewritten": frames_rewritten,
         "clips_touched": len(clips_touched),
         "shard_written": 1 if frames_rewritten > 0 else 0,
+        "skipped_samples": skipped_samples,
+        "skip_details": skip_details,
+        "shard_error": None,
     }
 
 
 def _worker_process_shard(shard_path: str) -> dict:
-    return process_shard(shard_path)
+    try:
+        return process_shard(shard_path)
+    except Exception as error:
+        shard_name = os.path.basename(shard_path)
+        _log(f"Skip shard {shard_name}: {error}")
+        return {
+            "shard_name": shard_name,
+            "output_path": os.path.join(_WORKER_OUTPUT_DIR, shard_name),
+            "frames_rewritten": 0,
+            "clips_touched": 0,
+            "shard_written": 0,
+            "skipped_samples": 0,
+            "skip_details": [],
+            "shard_error": str(error),
+        }
 
 
 def select_shard_paths(shard_paths: list[str], output_dir: Path, shard_start: int, shard_end: int | None, resume: bool):
@@ -452,6 +495,8 @@ def build_report(
         "shards_written": int(sum(item["shard_written"] for item in shard_results)),
         "frames_rewritten": int(sum(item["frames_rewritten"] for item in shard_results)),
         "clips_touched": int(sum(item["clips_touched"] for item in shard_results)),
+        "skipped_samples": int(sum(item.get("skipped_samples", 0) for item in shard_results)),
+        "failed_shards": int(sum(1 for item in shard_results if item.get("shard_error"))),
         "clip_index_size": int(clip_index_size),
         "episode_index_size": int(episode_index_size),
         "episode_cache": cache_path,
@@ -459,6 +504,9 @@ def build_report(
             item["shard_name"]: {
                 "frames_rewritten": item["frames_rewritten"],
                 "clips_touched": item["clips_touched"],
+                "skipped_samples": int(item.get("skipped_samples", 0)),
+                "shard_error": item.get("shard_error"),
+                "skip_details": item.get("skip_details", []),
             }
             for item in shard_results
         },
@@ -524,7 +572,8 @@ def main():
             shard_results.append(result)
             _log(
                 f"Finished {result['shard_name']}: "
-                f"frames={result['frames_rewritten']} clips={result['clips_touched']}"
+                f"frames={result['frames_rewritten']} clips={result['clips_touched']} "
+                f"skipped_samples={result.get('skipped_samples', 0)}"
             )
     else:
         _log(f"Starting worker pool: workers={args.workers}")
@@ -546,7 +595,8 @@ def main():
                     _log(
                         f"Rewrite progress: done={len(shard_results)}/{len(shard_paths)} "
                         f"latest={result['shard_name']} frames={result['frames_rewritten']} "
-                        f"clips={result['clips_touched']}"
+                        f"clips={result['clips_touched']} skipped_samples={result.get('skipped_samples', 0)} "
+                        f"shard_error={result.get('shard_error')}"
                     )
 
     report = build_report(

@@ -20,6 +20,15 @@ FINGERTIP_INDICES = [4, 8, 12, 16, 20]
 DEFAULT_INTRINSIC = np.array([500.0, 500.0, 320.0, 240.0], dtype=np.float32)
 LOWDIM_SIZE = 116
 EPISODE_FEATURE_CACHE_VERSION = 5
+_SLAM_WARNING_COUNTS = {}
+
+
+def _log_slam_warning(kind: str, message: str):
+    count = int(_SLAM_WARNING_COUNTS.get(kind, 0)) + 1
+    _SLAM_WARNING_COUNTS[kind] = count
+    if count <= 10 or count in (20, 50, 100) or count % 500 == 0:
+        suffix = "" if count == 1 else f" [count={count}]"
+        print(f"  Warning: {message}{suffix}")
 
 
 def run_mano_forward(mano_model, trans, root_orient, hand_pose, betas, device):
@@ -217,19 +226,21 @@ def _load_episode_camera_features(ep, num_frames):
         extrinsics[:direct_count] = direct_extrinsics[:direct_count]
         if direct_count < num_frames:
             extrinsics[direct_count:] = direct_extrinsics[direct_count - 1]
-            print(
-                f"  Warning: SLAM/frame count mismatch for {ep['episode_id']}: "
+            _log_slam_warning(
+                "frame_count_mismatch_repeat",
+                f"SLAM/frame count mismatch for {ep['episode_id']}: "
                 f"traj={direct_extrinsics.shape[0]} num_frames={num_frames}; "
-                "used direct traj without interpolation and repeated the last pose."
+                "used direct traj without interpolation and repeated the last pose.",
             )
         elif direct_extrinsics.shape[0] != num_frames:
-            print(
-                f"  Warning: SLAM/frame count mismatch for {ep['episode_id']}: "
+            _log_slam_warning(
+                "frame_count_mismatch_truncate",
+                f"SLAM/frame count mismatch for {ep['episode_id']}: "
                 f"traj={direct_extrinsics.shape[0]} num_frames={num_frames}; "
-                "used direct traj without interpolation and truncated the remainder."
+                "used direct traj without interpolation and truncated the remainder.",
             )
     except Exception as error:
-        print(f"  Warning: SLAM load failed for {ep['episode_id']}: {error}")
+        _log_slam_warning("slam_load_failed", f"SLAM load failed for {ep['episode_id']}: {error}")
 
     return extrinsics, intrinsic
 

@@ -7,6 +7,8 @@ import io
 import json
 import os
 import tarfile
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import current_process, get_context
 from pathlib import Path
 
@@ -46,6 +48,14 @@ _worker_episode_cache = {}
 _worker_shard_fd_cache = {}
 _worker_shard_tar_cache = {}
 MANIFEST_FEATURE_CACHE_VERSION = 6
+WRITE_PREFETCH_THREADS = 4
+WRITE_PREFETCH_DEPTH = 16
+LOWDIM_SIZE = 116
+LOWDIM_DTYPE = np.dtype(np.float32)
+_LOWDIM_SAMPLE = np.zeros((LOWDIM_SIZE,), dtype=LOWDIM_DTYPE)
+_LOWDIM_BUF = io.BytesIO()
+np.save(_LOWDIM_BUF, _LOWDIM_SAMPLE, allow_pickle=False)
+_LOWDIM_NPY_HEADER = _LOWDIM_BUF.getvalue()[: -_LOWDIM_SAMPLE.nbytes]
 
 
 def _feature_cache_path(seq_folder: str, feature_cache_dir: str) -> str:
@@ -465,29 +475,72 @@ def repeat_manifest_episodes(episodes: list[dict], repeat_count: int) -> list[di
     return repeated
 
 
-def add_sample_bytes_to_tar(tar_writer, key: str, image_bytes: bytes, lowdim, mano, meta: dict):
+def _encode_lowdim_npy(lowdim) -> bytes:
+    array = np.asarray(lowdim, dtype=LOWDIM_DTYPE)
+    if array.shape == (LOWDIM_SIZE,):
+        return _LOWDIM_NPY_HEADER + np.ascontiguousarray(array).tobytes()
+
+    lowdim_buf = io.BytesIO()
+    np.save(lowdim_buf, array, allow_pickle=False)
+    return lowdim_buf.getvalue()
+
+
+def _encode_array_npy(array) -> bytes:
+    buf = io.BytesIO()
+    np.save(buf, np.asarray(array, dtype=np.float32), allow_pickle=False)
+    return buf.getvalue()
+
+
+def _prepare_sample_payload_from_bytes(key: str, image_bytes: bytes, lowdim, mano, meta_bytes: bytes):
+    return (
+        key,
+        image_bytes,
+        _encode_lowdim_npy(lowdim),
+        _encode_array_npy(mano),
+        meta_bytes,
+    )
+
+
+def add_prepared_sample_bytes_to_tar(
+    tar_writer,
+    key: str,
+    image_bytes: bytes,
+    lowdim_bytes: bytes,
+    mano_bytes: bytes,
+    meta_bytes: bytes,
+):
     img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
     img_info.size = len(image_bytes)
     tar_writer.addfile(img_info, io.BytesIO(image_bytes))
 
-    lowdim_buf = io.BytesIO()
-    np.save(lowdim_buf, lowdim)
-    lowdim_bytes = lowdim_buf.getvalue()
     lowdim_info = tarfile.TarInfo(name=f"{key}.lowdim.npy")
     lowdim_info.size = len(lowdim_bytes)
     tar_writer.addfile(lowdim_info, io.BytesIO(lowdim_bytes))
 
-    mano_buf = io.BytesIO()
-    np.save(mano_buf, np.asarray(mano, dtype=np.float32), allow_pickle=False)
-    mano_bytes = mano_buf.getvalue()
     mano_info = tarfile.TarInfo(name=f"{key}.mano.npy")
     mano_info.size = len(mano_bytes)
     tar_writer.addfile(mano_info, io.BytesIO(mano_bytes))
 
-    meta_bytes = json.dumps(meta, ensure_ascii=False).encode("utf-8")
     meta_info = tarfile.TarInfo(name=f"{key}.meta.json")
     meta_info.size = len(meta_bytes)
     tar_writer.addfile(meta_info, io.BytesIO(meta_bytes))
+
+
+def _build_manifest_meta_prefix(episode_slice: dict) -> bytes:
+    meta = {
+        "dataset_name": episode_slice["source_id"],
+        "clip_id": episode_slice["clip_id"],
+        "episode_index": episode_slice["episode_index"],
+        "split": episode_slice["split"],
+        "instruction": list(episode_slice.get("instruction", [])),
+        "instruction_num": int(episode_slice.get("instruction_num", 0)),
+        "language": episode_slice.get("language"),
+        "lowdim_schema": "hawor_wrist_world_v2",
+        "wrist_translation_semantics": "mano_joint_0_world",
+        "camera_extrinsic_convention": "w2c",
+        **mano_meta_fields(),
+    }
+    return (json.dumps(meta, ensure_ascii=False, separators=(",", ":"))[:-1] + ',"presence":').encode("utf-8")
 
 
 def _worker_init(device_specs, mano_dir, feature_cache_dir):
@@ -533,90 +586,90 @@ def _worker_process_shard(task):
     tar_writer = None
 
     try:
-        for episode_slice in task["episode_slices"]:
-            cache_key = episode_slice["seq_folder"]
-            if cache_key not in _worker_episode_cache:
-                _worker_episode_cache[cache_key] = load_descriptor_episode_features(
-                    episode_slice,
-                    _worker_mano_right,
-                    _worker_mano_left,
-                    _worker_device,
-                    _worker_feature_cache_dir,
-                    _worker_mano_dir,
-                    source_fps=float(episode_slice.get("source_fps", 5.0)),
-                    target_fps=float(episode_slice.get("target_fps", 30.0)),
-                    interpolate_labels=bool(episode_slice.get("interpolate_labels", False)),
-                )
+        with ThreadPoolExecutor(max_workers=WRITE_PREFETCH_THREADS) as prefetch_pool:
+            for episode_slice in task["episode_slices"]:
+                cache_key = episode_slice["seq_folder"]
+                if cache_key not in _worker_episode_cache:
+                    _worker_episode_cache[cache_key] = load_descriptor_episode_features(
+                        episode_slice,
+                        _worker_mano_right,
+                        _worker_mano_left,
+                        _worker_device,
+                        _worker_feature_cache_dir,
+                        _worker_mano_dir,
+                        source_fps=float(episode_slice.get("source_fps", 5.0)),
+                        target_fps=float(episode_slice.get("target_fps", 30.0)),
+                        interpolate_labels=bool(episode_slice.get("interpolate_labels", False)),
+                    )
 
-            episode_data = _worker_episode_cache[cache_key]
-            if episode_data is None:
-                skipped_episodes += 1
-                continue
-
-            descriptor = episode_slice["descriptor"]
-            clip_samples = []
-            try:
-                for frame_idx in range(episode_slice["frame_start"], episode_slice["frame_end"]):
-                    image_bytes = read_frame_bytes_from_descriptor(
-                        descriptor,
-                        frame_idx,
-                        shard_fd_cache=_worker_shard_fd_cache,
-                        shard_tar_cache=_worker_shard_tar_cache,
-                    )
-                    meta = {
-                        "dataset_name": episode_slice["source_id"],
-                        "clip_id": episode_slice["clip_id"],
-                        "episode_index": episode_slice["episode_index"],
-                        "split": episode_slice["split"],
-                        "instruction": list(episode_slice.get("instruction", [])),
-                        "instruction_num": int(episode_slice.get("instruction_num", 0)),
-                        "language": episode_slice.get("language"),
-                        "presence": int(episode_data["presence_per_frame"][frame_idx]),
-                        "lowdim_schema": "hawor_wrist_world_v2",
-                        "wrist_translation_semantics": "mano_joint_0_world",
-                        "camera_extrinsic_convention": "w2c",
-                        **mano_meta_fields(),
-                    }
-                    key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
-                    clip_samples.append(
-                        (
-                            key,
-                            image_bytes,
-                            episode_data["lowdim_all"][frame_idx],
-                            episode_data["mano_all"][frame_idx],
-                            meta,
-                        )
-                    )
-            except Exception as error:
-                if is_light_tar_descriptor(descriptor):
-                    skipped_clips.append(
-                        {
-                            "clip_id": episode_slice["clip_id"],
-                            "shard_path": descriptor.shard_path,
-                            "descriptor_path": classify_descriptor_storage(descriptor),
-                            "reason": _classify_light_descriptor_error(error),
-                            "error": str(error),
-                        }
-                    )
+                episode_data = _worker_episode_cache[cache_key]
+                if episode_data is None:
+                    skipped_episodes += 1
                     continue
-                raise
 
-            if tar_writer is None and clip_samples:
-                os.makedirs(os.path.dirname(task["output_path"]), exist_ok=True)
-                tar_writer = tarfile.open(task["tmp_path"], "w")
+                descriptor = episode_slice["descriptor"]
+                clip_samples = []
+                pending = deque()
+                meta_prefix = _build_manifest_meta_prefix(episode_slice)
 
-            for key, image_bytes, lowdim, mano, meta in clip_samples:
-                add_sample_bytes_to_tar(
-                    tar_writer,
-                    key,
-                    image_bytes,
-                    lowdim,
-                    mano,
-                    meta,
-                )
-                frames_written += 1
+                try:
+                    for frame_idx in range(episode_slice["frame_start"], episode_slice["frame_end"]):
+                        image_bytes = read_frame_bytes_from_descriptor(
+                            descriptor,
+                            frame_idx,
+                            shard_fd_cache=_worker_shard_fd_cache,
+                            shard_tar_cache=_worker_shard_tar_cache,
+                        )
+                        presence = int(episode_data["presence_per_frame"][frame_idx])
+                        key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
+                        meta_bytes = meta_prefix + str(presence).encode("ascii") + b"}"
+                        pending.append(
+                            prefetch_pool.submit(
+                                _prepare_sample_payload_from_bytes,
+                                key,
+                                image_bytes,
+                                episode_data["lowdim_all"][frame_idx],
+                                episode_data["mano_all"][frame_idx],
+                                meta_bytes,
+                            )
+                        )
+                        if len(pending) >= WRITE_PREFETCH_DEPTH:
+                            clip_samples.append(pending.popleft().result())
 
-            touched_episodes.add(cache_key)
+                    while pending:
+                        clip_samples.append(pending.popleft().result())
+                except Exception as error:
+                    for future in pending:
+                        future.cancel()
+                    if is_light_tar_descriptor(descriptor):
+                        skipped_clips.append(
+                            {
+                                "clip_id": episode_slice["clip_id"],
+                                "shard_path": descriptor.shard_path,
+                                "descriptor_path": classify_descriptor_storage(descriptor),
+                                "reason": _classify_light_descriptor_error(error),
+                                "error": str(error),
+                            }
+                        )
+                        continue
+                    raise
+
+                if tar_writer is None and clip_samples:
+                    os.makedirs(os.path.dirname(task["output_path"]), exist_ok=True)
+                    tar_writer = tarfile.open(task["tmp_path"], "w")
+
+                for key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes in clip_samples:
+                    add_prepared_sample_bytes_to_tar(
+                        tar_writer,
+                        key,
+                        image_bytes,
+                        lowdim_bytes,
+                        mano_bytes,
+                        meta_bytes,
+                    )
+                    frames_written += 1
+
+                touched_episodes.add(cache_key)
     except Exception:
         if tar_writer is not None:
             tar_writer.close()
