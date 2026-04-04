@@ -50,7 +50,7 @@ def infer_flow_action(model, batch: dict, **kwargs):
 
     working_batch = _clone_batch(batch)
 
-    action_valid_mask = _build_action_valid_mask(working_batch, model.action_horizon, model.action_dim)
+    action_valid_mask = _build_action_valid_mask(working_batch, model.num_action_tokens, model.action_dim)
     batch_size, action_len, _ = action_valid_mask.shape
     device = working_batch["input_ids"].device
     action_dtype = working_batch["states"].dtype

@@ -27,7 +27,7 @@ policy:
   _target_: src.policy.legendvla_inference_wrapper.LegendVLAInference
   model_config_path: /home/descfly/checkpoints/real-world-only-0403/.hydra/config.yaml  # required: path to the training run's .hydra/config.yaml
   checkpoint_path: /home/descfly/checkpoints/real-world-only-0403/update_step=85000    # required: path to trained model checkpoint
-  pretrained_vlm_path: /home/descfly/checkpoints/Qwen3VL-2B-Instruct  # override pretrained.model_name_or_path in model config (for backbone, action expert, tokenizer)
+  pretrained_vlm_path: /home/descfly/checkpoints/Qwen3-VL-2B-Instruct  # override pretrained.model_name_or_path in model config (for backbone, action expert, tokenizer)
   mode: flow
   use_mixed_precision: True
   tokenizer_padding: max_length

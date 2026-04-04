@@ -114,6 +114,7 @@ class LegendVLA(nn.Module):
         self.horizon_steps = int(shape_meta["action"]["horizon"])
         self.num_state_tokens = int(shape_meta["obs"]["state"]["horizon"])
         self.num_action_tokens = int(shape_meta["action"]["horizon"])
+        self.action_horizon = self.num_action_tokens
 
         # Expert hidden size (explicit parameter, must match action_encoder output width)
         self.action_hidden_size = action_hidden_size

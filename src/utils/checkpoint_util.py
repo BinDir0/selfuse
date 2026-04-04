@@ -3,10 +3,43 @@ import logging
 import os
 import pathlib
 import shutil
+import sys
+import types
 
 import torch
 
 log = logging.getLogger(__name__)
+
+
+def enable_pathlib_local_pickle_compat() -> None:
+    """Register a runtime shim for Python 3.13 pathlib pickle payloads.
+
+    Python 3.13 stores concrete Path classes under pathlib._local, while
+    Python 3.10 still exposes them from pathlib.py. Torch distributed
+    checkpoint metadata is read with pickle.load, so checkpoints written in a
+    newer environment can fail to deserialize in older runtimes unless that
+    module path is mapped.
+
+    Reference:
+    - CPython 3.13 pathlib package layout: Lib/pathlib/_local.py
+    - PyTorch FileSystemReader.read_metadata uses pickle.load on .metadata
+    """
+    if "pathlib._local" in sys.modules:
+        return
+
+    shim = types.ModuleType("pathlib._local")
+    for name in [
+        "Path",
+        "PosixPath",
+        "WindowsPath",
+        "PurePath",
+        "PurePosixPath",
+        "PureWindowsPath",
+    ]:
+        value = getattr(pathlib, name, None)
+        if value is not None:
+            setattr(shim, name, value)
+    sys.modules["pathlib._local"] = shim
 
 class TopKCheckpointManager:
     def __init__(self,
@@ -105,6 +138,7 @@ def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
     if fsdp_dir.exists():
         import torch.distributed.checkpoint as dcp
 
+        enable_pathlib_local_pickle_compat()
         state_dict = {"model": model.state_dict()}
         dcp.load(
             state_dict=state_dict,
