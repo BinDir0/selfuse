@@ -122,8 +122,11 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         ("drop_nonfinite_world_res", True),
         ("drop_nonfinite_slam", True),
         ("drop_nonfinite_lowdim", True),
+        ("camera_space_auto_method", "iqr_bounds"),
+        ("camera_space_iqr_multiplier", 2.5),
+        ("camera_space_axis_abs_cap", 1.5),
         ("camera_space_abs_percentile", 99.0),
-        ("camera_space_abs_scale", 3.0),
+        ("camera_space_abs_scale", 2.5),
     ):
         _maybe_set(filter_cfg, key, raw.get(key))
         filter_cfg.setdefault(key, default)

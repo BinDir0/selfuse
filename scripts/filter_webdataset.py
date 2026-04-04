@@ -98,6 +98,25 @@ def build_parser():
         help="Optional max absolute camera-space coordinate allowed for stored hand keypoints in meters",
     )
     parser.add_argument(
+        "--camera_space_auto_method",
+        type=str,
+        default="iqr_bounds",
+        choices=("iqr_bounds", "percentile_abs"),
+        help="Automatic camera-space filter mode when manual abs thresholds are not provided",
+    )
+    parser.add_argument(
+        "--camera_space_iqr_multiplier",
+        type=float,
+        default=2.5,
+        help="IQR multiplier used for automatic camera-space lower/upper bounds",
+    )
+    parser.add_argument(
+        "--camera_space_axis_abs_cap",
+        type=float,
+        default=1.5,
+        help="Hard absolute cap applied to camera-space x/y/z coordinates for wrist and hand points",
+    )
+    parser.add_argument(
         "--camera_space_abs_percentile",
         type=float,
         default=99.0,
@@ -106,7 +125,7 @@ def build_parser():
     parser.add_argument(
         "--camera_space_abs_scale",
         type=float,
-        default=3.0,
+        default=2.5,
         help="Scale multiplier applied to the chosen percentile for automatic camera-space thresholds",
     )
     return parser
@@ -446,7 +465,11 @@ def build_report(
     report = {
         "source_shard_dir": str(source_shard_dir.resolve()),
         "output_dir": str(output_dir.resolve()) if output_dir else None,
-        "mode": "two_pass_auto_threshold" if args_dict["use_auto_camera_space_thresholds"] else "two_pass_manual_threshold",
+        "mode": (
+            f"two_pass_auto_{threshold_info['auto_rule']['method']}"
+            if args_dict["use_auto_camera_space_thresholds"]
+            else "two_pass_manual_threshold"
+        ),
         "criteria": {
             "drop_nonfinite_lowdim": bool(args_dict["drop_nonfinite_lowdim"]),
             "min_instruction_num": args_dict["min_instruction_num"],
@@ -454,9 +477,14 @@ def build_report(
             "max_hand_translation_step": args_dict["max_hand_translation_step"],
             "max_camera_translation_step": args_dict["max_camera_translation_step"],
             "max_camera_rotation_step": args_dict["max_camera_rotation_step"],
+            "camera_space_auto_method": args_dict["camera_space_auto_method"],
+            "camera_space_iqr_multiplier": args_dict["camera_space_iqr_multiplier"],
             "max_camera_space_wrist_abs": threshold_info["resolved"]["max_camera_space_wrist_abs"],
             "max_camera_space_hand_abs": threshold_info["resolved"]["max_camera_space_hand_abs"],
-        },
+            "camera_space_wrist_bounds": threshold_info["resolved"]["camera_space_wrist_bounds"],
+            "camera_space_hand_bounds": threshold_info["resolved"]["camera_space_hand_bounds"],
+            "camera_space_axis_abs_cap": args_dict["camera_space_axis_abs_cap"],
+    },
         "auto_thresholds": threshold_info,
         "total_shards": len(analysis_results),
         "total_samples": total_samples,
@@ -525,6 +553,9 @@ def main():
         "max_camera_rotation_step": args.max_camera_rotation_step,
         "max_camera_space_wrist_abs": args.max_camera_space_wrist_abs,
         "max_camera_space_hand_abs": args.max_camera_space_hand_abs,
+        "camera_space_auto_method": args.camera_space_auto_method,
+        "camera_space_iqr_multiplier": args.camera_space_iqr_multiplier,
+        "camera_space_axis_abs_cap": args.camera_space_axis_abs_cap,
         "camera_space_abs_percentile": args.camera_space_abs_percentile,
         "camera_space_abs_scale": args.camera_space_abs_scale,
         "use_auto_camera_space_thresholds": (

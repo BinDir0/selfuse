@@ -14,6 +14,7 @@ LEFT_FINGERTIPS_SLICE = slice(18, 33)
 RIGHT_FINGERTIPS_SLICE = slice(33, 48)
 EXTRINSIC_SLICE = slice(96, 112)
 FRAME_INDEX_PATTERN = re.compile(r"_f(\d+)$")
+CAMERA_AXES = ("x", "y", "z")
 
 
 def is_finite_array(value) -> bool:
@@ -161,6 +162,27 @@ def camera_space_abs_metrics(points_world, extrinsic) -> dict:
     }
 
 
+def camera_space_axis_metrics(points_world, extrinsic) -> dict:
+    points_cam = transform_points_world_to_camera(points_world, extrinsic)
+    if points_cam.size == 0:
+        return {
+            "min_x": 0.0,
+            "max_x": 0.0,
+            "min_y": 0.0,
+            "max_y": 0.0,
+            "min_z": 0.0,
+            "max_z": 0.0,
+        }
+    return {
+        "min_x": float(points_cam[:, 0].min()),
+        "max_x": float(points_cam[:, 0].max()),
+        "min_y": float(points_cam[:, 1].min()),
+        "max_y": float(points_cam[:, 1].max()),
+        "min_z": float(points_cam[:, 2].min()),
+        "max_z": float(points_cam[:, 2].max()),
+    }
+
+
 def new_clip_quality_stats(clip_id: str) -> dict:
     return {
         "clip_id": clip_id,
@@ -177,6 +199,10 @@ def new_clip_quality_stats(clip_id: str) -> dict:
         "max_camera_rotation_step": 0.0,
         "max_camera_space_wrist_abs": 0.0,
         "max_camera_space_hand_abs": 0.0,
+        "_camera_space_wrist_min": np.full((3,), np.inf, dtype=np.float32),
+        "_camera_space_wrist_max": np.full((3,), -np.inf, dtype=np.float32),
+        "_camera_space_hand_min": np.full((3,), np.inf, dtype=np.float32),
+        "_camera_space_hand_max": np.full((3,), -np.inf, dtype=np.float32),
         "_prev_frame_idx": None,
         "_prev_left": None,
         "_prev_right": None,
@@ -244,7 +270,15 @@ def update_clip_quality_stats(
         np.stack([current_left, current_right], axis=0),
         current_extrinsic,
     )
+    wrist_axis_metrics = camera_space_axis_metrics(
+        np.stack([current_left, current_right], axis=0),
+        current_extrinsic,
+    )
     hand_camera_metrics = camera_space_abs_metrics(
+        np.concatenate([left_fingertips, right_fingertips], axis=0),
+        current_extrinsic,
+    )
+    hand_axis_metrics = camera_space_axis_metrics(
         np.concatenate([left_fingertips, right_fingertips], axis=0),
         current_extrinsic,
     )
@@ -255,6 +289,22 @@ def update_clip_quality_stats(
     stats["max_camera_space_hand_abs"] = max(
         stats["max_camera_space_hand_abs"],
         hand_camera_metrics["max_abs"],
+    )
+    stats["_camera_space_wrist_min"] = np.minimum(
+        stats["_camera_space_wrist_min"],
+        np.asarray([wrist_axis_metrics["min_x"], wrist_axis_metrics["min_y"], wrist_axis_metrics["min_z"]], dtype=np.float32),
+    )
+    stats["_camera_space_wrist_max"] = np.maximum(
+        stats["_camera_space_wrist_max"],
+        np.asarray([wrist_axis_metrics["max_x"], wrist_axis_metrics["max_y"], wrist_axis_metrics["max_z"]], dtype=np.float32),
+    )
+    stats["_camera_space_hand_min"] = np.minimum(
+        stats["_camera_space_hand_min"],
+        np.asarray([hand_axis_metrics["min_x"], hand_axis_metrics["min_y"], hand_axis_metrics["min_z"]], dtype=np.float32),
+    )
+    stats["_camera_space_hand_max"] = np.maximum(
+        stats["_camera_space_hand_max"],
+        np.asarray([hand_axis_metrics["max_x"], hand_axis_metrics["max_y"], hand_axis_metrics["max_z"]], dtype=np.float32),
     )
 
     prev_idx = stats["_prev_frame_idx"]
@@ -291,6 +341,10 @@ def update_clip_quality_stats(
 
 
 def finalize_clip_quality_metrics(stats: dict) -> dict:
+    def _axis_value(array, axis_idx: int, *, fallback: float) -> float:
+        value = float(array[axis_idx])
+        return fallback if not np.isfinite(value) else value
+
     return {
         "frames_total": int(stats["frames_total"]),
         "frames_kept_candidate": int(stats["frames_kept_candidate"]),
@@ -309,6 +363,18 @@ def finalize_clip_quality_metrics(stats: dict) -> dict:
         "max_camera_rotation_step": float(stats["max_camera_rotation_step"]),
         "max_camera_space_wrist_abs": float(stats["max_camera_space_wrist_abs"]),
         "max_camera_space_hand_abs": float(stats["max_camera_space_hand_abs"]),
+        "min_camera_space_wrist_x": _axis_value(stats["_camera_space_wrist_min"], 0, fallback=0.0),
+        "max_camera_space_wrist_x": _axis_value(stats["_camera_space_wrist_max"], 0, fallback=0.0),
+        "min_camera_space_wrist_y": _axis_value(stats["_camera_space_wrist_min"], 1, fallback=0.0),
+        "max_camera_space_wrist_y": _axis_value(stats["_camera_space_wrist_max"], 1, fallback=0.0),
+        "min_camera_space_wrist_z": _axis_value(stats["_camera_space_wrist_min"], 2, fallback=0.0),
+        "max_camera_space_wrist_z": _axis_value(stats["_camera_space_wrist_max"], 2, fallback=0.0),
+        "min_camera_space_hand_x": _axis_value(stats["_camera_space_hand_min"], 0, fallback=0.0),
+        "max_camera_space_hand_x": _axis_value(stats["_camera_space_hand_max"], 0, fallback=0.0),
+        "min_camera_space_hand_y": _axis_value(stats["_camera_space_hand_min"], 1, fallback=0.0),
+        "max_camera_space_hand_y": _axis_value(stats["_camera_space_hand_max"], 1, fallback=0.0),
+        "min_camera_space_hand_z": _axis_value(stats["_camera_space_hand_min"], 2, fallback=0.0),
+        "max_camera_space_hand_z": _axis_value(stats["_camera_space_hand_max"], 2, fallback=0.0),
     }
 
 
@@ -329,42 +395,173 @@ def summarize_metric_distribution(values) -> dict | None:
     }
 
 
+def summarize_iqr_distribution(values, multiplier: float) -> dict | None:
+    finite = np.asarray(
+        [float(value) for value in values if value is not None and np.isfinite(value)],
+        dtype=np.float64,
+    )
+    if finite.size == 0:
+        return None
+    q1 = float(np.percentile(finite, 25))
+    q3 = float(np.percentile(finite, 75))
+    iqr = float(q3 - q1)
+    return {
+        "count": int(finite.size),
+        "q1": q1,
+        "q3": q3,
+        "iqr": iqr,
+        "min": float(finite.min()),
+        "max": float(finite.max()),
+        "lower_bound": float(q1 - multiplier * iqr),
+        "upper_bound": float(q3 + multiplier * iqr),
+    }
+
+
+def _camera_space_bound_metrics(prefix: str, clip_metrics: list[dict], multiplier: float) -> tuple[dict | None, dict]:
+    bounds = {}
+    distributions = {}
+    has_any = False
+    for axis in CAMERA_AXES:
+        min_key = f"min_camera_space_{prefix}_{axis}"
+        max_key = f"max_camera_space_{prefix}_{axis}"
+        min_summary = summarize_iqr_distribution([metrics[min_key] for metrics in clip_metrics], multiplier)
+        max_summary = summarize_iqr_distribution([metrics[max_key] for metrics in clip_metrics], multiplier)
+        if min_summary is None or max_summary is None:
+            continue
+        has_any = True
+        bounds[axis] = {
+            "lower": float(min_summary["lower_bound"]),
+            "upper": float(max_summary["upper_bound"]),
+        }
+        distributions[axis] = {
+            "lower_tail": min_summary,
+            "upper_tail": max_summary,
+        }
+    return (bounds if has_any else None), distributions
+
+
+def _camera_space_axis_abs_cap_bounds(cap: float | None) -> dict | None:
+    if cap is None:
+        return None
+    cap_value = float(cap)
+    return {
+        axis: {
+            "lower": -cap_value,
+            "upper": cap_value,
+        }
+        for axis in CAMERA_AXES
+    }
+
+
+def _merge_camera_space_bounds(primary: dict | None, secondary: dict | None) -> dict | None:
+    if primary is None:
+        return secondary
+    if secondary is None:
+        return primary
+    merged = {}
+    for axis in CAMERA_AXES:
+        primary_axis = primary.get(axis) if primary else None
+        secondary_axis = secondary.get(axis) if secondary else None
+        if primary_axis is None and secondary_axis is None:
+            continue
+        if primary_axis is None:
+            merged[axis] = dict(secondary_axis)
+            continue
+        if secondary_axis is None:
+            merged[axis] = dict(primary_axis)
+            continue
+        merged[axis] = {
+            "lower": max(float(primary_axis["lower"]), float(secondary_axis["lower"])),
+            "upper": min(float(primary_axis["upper"]), float(secondary_axis["upper"])),
+        }
+    return merged or None
+
+
 def resolve_auto_quality_thresholds(clip_metrics: list[dict], criteria: dict) -> dict:
     resolved = {
         "max_camera_space_wrist_abs": criteria["max_camera_space_wrist_abs"],
         "max_camera_space_hand_abs": criteria["max_camera_space_hand_abs"],
+        "camera_space_wrist_bounds": None,
+        "camera_space_hand_bounds": None,
     }
     summaries = {}
-    percentile = float(criteria["camera_space_abs_percentile"])
-    scale = float(criteria["camera_space_abs_scale"])
+    auto_method = str(criteria.get("camera_space_auto_method", "iqr_bounds"))
+    percentile = float(criteria.get("camera_space_abs_percentile", 99.0))
+    scale = float(criteria.get("camera_space_abs_scale", 2.5))
+    iqr_multiplier = float(criteria.get("camera_space_iqr_multiplier", 2.5))
+    axis_abs_cap = criteria.get("camera_space_axis_abs_cap", 1.5)
 
     candidate_metrics = [metrics for metrics in clip_metrics if metrics["frames_kept_candidate"] > 0]
-    wrist_values = [metrics["max_camera_space_wrist_abs"] for metrics in candidate_metrics]
-    hand_values = [metrics["max_camera_space_hand_abs"] for metrics in candidate_metrics]
-    wrist_summary = summarize_metric_distribution(wrist_values)
-    hand_summary = summarize_metric_distribution(hand_values)
-    if wrist_summary is not None:
-        summaries["max_camera_space_wrist_abs"] = wrist_summary
-    if hand_summary is not None:
-        summaries["max_camera_space_hand_abs"] = hand_summary
+    use_manual_abs = (
+        resolved["max_camera_space_wrist_abs"] is not None
+        or resolved["max_camera_space_hand_abs"] is not None
+    )
 
-    if resolved["max_camera_space_wrist_abs"] is None and wrist_summary is not None:
-        resolved["max_camera_space_wrist_abs"] = float(
-            np.percentile(np.asarray(wrist_values, dtype=np.float64), percentile) * scale
-        )
-    if resolved["max_camera_space_hand_abs"] is None and hand_summary is not None:
-        resolved["max_camera_space_hand_abs"] = float(
-            np.percentile(np.asarray(hand_values, dtype=np.float64), percentile) * scale
-        )
+    if not use_manual_abs and auto_method == "iqr_bounds":
+        wrist_bounds, wrist_distributions = _camera_space_bound_metrics("wrist", candidate_metrics, iqr_multiplier)
+        hand_bounds, hand_distributions = _camera_space_bound_metrics("hand", candidate_metrics, iqr_multiplier)
+        cap_bounds = _camera_space_axis_abs_cap_bounds(axis_abs_cap)
+        resolved["camera_space_wrist_bounds"] = _merge_camera_space_bounds(wrist_bounds, cap_bounds)
+        resolved["camera_space_hand_bounds"] = _merge_camera_space_bounds(hand_bounds, cap_bounds)
+        if wrist_distributions:
+            summaries["camera_space_wrist_bounds"] = wrist_distributions
+        if hand_distributions:
+            summaries["camera_space_hand_bounds"] = hand_distributions
+        if cap_bounds is not None:
+            summaries["camera_space_axis_abs_cap"] = {
+                "lower": -float(axis_abs_cap),
+                "upper": float(axis_abs_cap),
+            }
+    else:
+        wrist_values = [metrics["max_camera_space_wrist_abs"] for metrics in candidate_metrics]
+        hand_values = [metrics["max_camera_space_hand_abs"] for metrics in candidate_metrics]
+        wrist_summary = summarize_metric_distribution(wrist_values)
+        hand_summary = summarize_metric_distribution(hand_values)
+        if wrist_summary is not None:
+            summaries["max_camera_space_wrist_abs"] = wrist_summary
+        if hand_summary is not None:
+            summaries["max_camera_space_hand_abs"] = hand_summary
+
+        if resolved["max_camera_space_wrist_abs"] is None and wrist_summary is not None:
+            resolved["max_camera_space_wrist_abs"] = float(
+                np.percentile(np.asarray(wrist_values, dtype=np.float64), percentile) * scale
+            )
+        if resolved["max_camera_space_hand_abs"] is None and hand_summary is not None:
+            resolved["max_camera_space_hand_abs"] = float(
+                np.percentile(np.asarray(hand_values, dtype=np.float64), percentile) * scale
+            )
+
+    if use_manual_abs and axis_abs_cap is not None:
+        summaries["camera_space_axis_abs_cap"] = {
+            "lower": -float(axis_abs_cap),
+            "upper": float(axis_abs_cap),
+        }
 
     return {
         "resolved": resolved,
         "distribution": summaries,
         "auto_rule": {
+            "method": "manual_abs" if use_manual_abs else auto_method,
             "percentile": percentile,
             "scale": scale,
+            "iqr_multiplier": iqr_multiplier,
+            "axis_abs_cap": axis_abs_cap,
         },
     }
+
+
+def _camera_space_bounds_exceeded(metrics: dict, prefix: str, bounds: dict | None) -> bool:
+    if not bounds:
+        return False
+    for axis in CAMERA_AXES:
+        axis_bounds = bounds.get(axis)
+        if not axis_bounds:
+            continue
+        min_key = f"min_camera_space_{prefix}_{axis}"
+        max_key = f"max_camera_space_{prefix}_{axis}"
+        if metrics[min_key] < axis_bounds["lower"] or metrics[max_key] > axis_bounds["upper"]:
+            return True
+    return False
 
 
 def decide_clip_quality(
@@ -412,4 +609,21 @@ def decide_clip_quality(
         and metrics["max_camera_space_hand_abs"] > criteria["max_camera_space_hand_abs"]
     ):
         reasons.append("camera_space_hand_abs_exceeded")
+    if _camera_space_bounds_exceeded(metrics, "wrist", criteria.get("camera_space_wrist_bounds")):
+        reasons.append("camera_space_wrist_iqr_bounds_exceeded")
+    if _camera_space_bounds_exceeded(metrics, "hand", criteria.get("camera_space_hand_bounds")):
+        reasons.append("camera_space_hand_iqr_bounds_exceeded")
+    axis_abs_cap = criteria.get("camera_space_axis_abs_cap")
+    if axis_abs_cap is not None:
+        cap_bounds = _camera_space_axis_abs_cap_bounds(axis_abs_cap)
+        if (
+            criteria.get("camera_space_wrist_bounds") is None
+            and _camera_space_bounds_exceeded(metrics, "wrist", cap_bounds)
+        ):
+            reasons.append("camera_space_wrist_axis_abs_cap_exceeded")
+        if (
+            criteria.get("camera_space_hand_bounds") is None
+            and _camera_space_bounds_exceeded(metrics, "hand", cap_bounds)
+        ):
+            reasons.append("camera_space_hand_axis_abs_cap_exceeded")
     return not reasons, reasons

@@ -94,6 +94,25 @@ def build_parser():
         help="Optional max absolute camera-space coordinate allowed for stored hand keypoints in meters",
     )
     parser.add_argument(
+        "--camera_space_auto_method",
+        type=str,
+        default="iqr_bounds",
+        choices=("iqr_bounds", "percentile_abs"),
+        help="Automatic camera-space filter mode when manual abs thresholds are not provided",
+    )
+    parser.add_argument(
+        "--camera_space_iqr_multiplier",
+        type=float,
+        default=2.5,
+        help="IQR multiplier used for automatic camera-space lower/upper bounds",
+    )
+    parser.add_argument(
+        "--camera_space_axis_abs_cap",
+        type=float,
+        default=1.5,
+        help="Hard absolute cap applied to camera-space x/y/z coordinates for wrist and hand points",
+    )
+    parser.add_argument(
         "--camera_space_abs_percentile",
         type=float,
         default=99.0,
@@ -102,7 +121,7 @@ def build_parser():
     parser.add_argument(
         "--camera_space_abs_scale",
         type=float,
-        default=3.0,
+        default=2.5,
         help="Scale multiplier applied to the chosen percentile for automatic camera-space thresholds",
     )
     parser.add_argument("--annotation_root", default=None, help="Clip annotation sidecar directory")
@@ -288,8 +307,13 @@ def build_report(
         "max_hand_translation_step": criteria["max_hand_translation_step"],
         "max_camera_translation_step": criteria["max_camera_translation_step"],
         "max_camera_rotation_step": criteria["max_camera_rotation_step"],
+        "camera_space_auto_method": criteria["camera_space_auto_method"],
+        "camera_space_iqr_multiplier": criteria["camera_space_iqr_multiplier"],
         "max_camera_space_wrist_abs": threshold_info["resolved"]["max_camera_space_wrist_abs"],
         "max_camera_space_hand_abs": threshold_info["resolved"]["max_camera_space_hand_abs"],
+        "camera_space_wrist_bounds": threshold_info["resolved"]["camera_space_wrist_bounds"],
+        "camera_space_hand_bounds": threshold_info["resolved"]["camera_space_hand_bounds"],
+        "camera_space_axis_abs_cap": criteria["camera_space_axis_abs_cap"],
     }
     return {
         "input_manifest": str(input_manifest.resolve()),
@@ -353,6 +377,9 @@ def run_filter(args) -> dict:
         "max_camera_rotation_step": args.max_camera_rotation_step,
         "max_camera_space_wrist_abs": args.max_camera_space_wrist_abs,
         "max_camera_space_hand_abs": args.max_camera_space_hand_abs,
+        "camera_space_auto_method": args.camera_space_auto_method,
+        "camera_space_iqr_multiplier": args.camera_space_iqr_multiplier,
+        "camera_space_axis_abs_cap": args.camera_space_axis_abs_cap,
         "camera_space_abs_percentile": args.camera_space_abs_percentile,
         "camera_space_abs_scale": args.camera_space_abs_scale,
         "mano_dir": args.mano_dir,
