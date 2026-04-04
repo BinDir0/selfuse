@@ -26,41 +26,70 @@ def train_step_tb_dict(
     loss: float,
     bce: float,
     mano: float,
-    mano_param: float,
+    mano_param_raw: float,
+    mano_param_weighted: float,
     mano_joint: float,
+    mano_vert: float,
+    mano_hand_pca: float,
     lp_l: float,
     lp_r: float,
     jl_w: float,
     jr_w: float,
+    vl_w: float,
+    vr_w: float,
+    hpc_l: float,
+    hpc_r: float,
     optim_steps: int,
 ) -> dict[str, float]:
     return {
         "train/loss": loss,
         "train/bce": bce,
         "train/mano": mano,
-        "train/mano_param": mano_param,
+        "train/mano_param_raw": mano_param_raw,
+        "train/mano_param_weighted": mano_param_weighted,
         "train/mano_joint": mano_joint,
+        "train/mano_vert": mano_vert,
+        "train/mano_hand_pca": mano_hand_pca,
         "train/mano_param_left": lp_l,
         "train/mano_param_right": lp_r,
         "train/mano_joint_left": jl_w,
         "train/mano_joint_right": jr_w,
-        "train/mano_left": lp_l + jl_w,
-        "train/mano_right": lp_r + jr_w,
+        "train/mano_vert_left": vl_w,
+        "train/mano_vert_right": vr_w,
+        "train/mano_hand_pca_left": hpc_l,
+        "train/mano_hand_pca_right": hpc_r,
+        "train/mano_left": lp_l + jl_w + vl_w + hpc_l,
+        "train/mano_right": lp_r + jr_w + vr_w + hpc_r,
         "train/optim_step": float(optim_steps),
     }
 
 
 def val_avg_to_tb_dict(avg: Mapping[str, float]) -> dict[str, float]:
+    mp_l = float(avg["mano_param_left"])
+    mp_r = float(avg["mano_param_right"])
+    jl_w = float(avg["mano_joint_left"])
+    jr_w = float(avg["mano_joint_right"])
+    vl_w = float(avg.get("mano_vert_left", 0.0))
+    vr_w = float(avg.get("mano_vert_right", 0.0))
+    hpc_l = float(avg.get("mano_hand_pca_left", 0.0))
+    hpc_r = float(avg.get("mano_hand_pca_right", 0.0))
     return {
         "val/loss": float(avg["loss"]),
         "val/bce": float(avg["bce"]),
         "val/mano": float(avg["mano"]),
-        "val/mano_param": float(avg["mano_param"]),
+        "val/mano_param_raw": float(avg.get("mano_param_raw", avg["mano_param"])),
+        "val/mano_param_weighted": float(avg.get("mano_param_weighted", avg["mano_param"])),
         "val/mano_joint": float(avg["mano_joint"]),
-        "val/mano_param_left": float(avg["mano_param_left"]),
-        "val/mano_param_right": float(avg["mano_param_right"]),
-        "val/mano_joint_left": float(avg["mano_joint_left"]),
-        "val/mano_joint_right": float(avg["mano_joint_right"]),
-        "val/mano_left": float(avg["mano_param_left"] + avg["mano_joint_left"]),
-        "val/mano_right": float(avg["mano_param_right"] + avg["mano_joint_right"]),
+        "val/mano_vert": float(avg.get("mano_vert", 0.0)),
+        "val/mano_hand_pca": float(avg.get("mano_hand_pca", 0.0)),
+        "val/mano_param_left": mp_l,
+        "val/mano_param_right": mp_r,
+        "val/mano_joint_left": jl_w,
+        "val/mano_joint_right": jr_w,
+        "val/mano_vert_left": vl_w,
+        "val/mano_vert_right": vr_w,
+        "val/mano_hand_pca_left": hpc_l,
+        "val/mano_hand_pca_right": hpc_r,
+        "val/mano_left": mp_l + jl_w + vl_w + hpc_l,
+        "val/mano_right": mp_r + jr_w + vr_w + hpc_r,
     }

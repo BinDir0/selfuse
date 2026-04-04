@@ -55,7 +55,18 @@ from dataloader.mano_pca import get_cached_mano_pca_decode_layers
 from egotransformer.model import EgoHandSTConfig, EgoHandSTModel
 from training.checkpoint import module_state_dict
 from training.logging_utils import log_line
+from training.losses import MANO_PARAM_KEY_CHOICES
 from training.train_loop import eval_one_epoch, train_one_epoch
+
+
+def _parse_mano_param_keys(text: str) -> frozenset[str]:
+    parts = [p.strip().lower() for p in text.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("--mano-param-keys must list at least one of: trans, root_orient, hand_pose, betas")
+    bad = [p for p in parts if p not in MANO_PARAM_KEY_CHOICES]
+    if bad:
+        raise ValueError(f"unknown --mano-param-keys entries {bad}; allowed: {sorted(MANO_PARAM_KEY_CHOICES)}")
+    return frozenset(parts)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -101,15 +112,22 @@ def _parse_args() -> argparse.Namespace:
         "--mano-pose-weight",
         type=float,
         default=1.0,
-        help="weight for hand_pose term in mano loss; 0 disables",
+        help="relative weight for hand_pose inside param regression when hand_pose is in --mano-param-keys",
     )
     m.add_argument("--mano-no-left-root-fix", action="store_true")
+    m.add_argument(
+        "--mano-param-keys",
+        type=str,
+        default="trans,betas",
+        help="comma-separated subset of trans,root_orient,hand_pose,betas for vector regression "
+        "(default: trans,betas; no axis-angle hand_pose unless listed)",
+    )
     m.add_argument(
         "--mano-param-loss",
         type=str,
         default="l2",
         choices=("l1", "l2", "huber"),
-        help="vector loss for trans/root_orient/hand_pose/betas",
+        help="vector loss type for selected param keys",
     )
     m.add_argument(
         "--mano-huber-delta",
@@ -118,16 +136,34 @@ def _parse_args() -> argparse.Namespace:
         help="smooth_l1 beta when kind is huber",
     )
     m.add_argument(
+        "--mano-param-loss-weight",
+        type=float,
+        default=0.25,
+        help="scale for vector regression on selected --mano-param-keys",
+    )
+    m.add_argument(
         "--mano-joint-loss-weight",
         type=float,
-        default=1.0,
-        help="3D joint MSE (m^2) via ManoLayer; default 1.0 (on); 0 disables; needs hand PCA decode (no --no-decode-hand-pca)",
+        default=2.0,
+        help="scale for 3D joint MSE (m^2); 0 disables; needs PCA decode",
+    )
+    m.add_argument(
+        "--mano-vert-loss-weight",
+        type=float,
+        default=0.25,
+        help="scale for 3D vertex MSE (m^2); 0 disables; needs PCA decode",
+    )
+    m.add_argument(
+        "--mano-hand-pca-loss-weight",
+        type=float,
+        default=0.25,
+        help="scale for hand_pose PCA coefficient MSE (axis-angle -> layer PCA vs GT); default on; 0 disables",
     )
     m.add_argument(
         "--mano-joint-chunk",
         type=int,
         default=512,
-        help="sub-batch size for ManoLayer when computing joint loss",
+        help="sub-batch size for ManoLayer joint/vertex forward passes",
     )
 
     mo = p.add_argument_group("model")
@@ -261,6 +297,10 @@ def main() -> None:
 
     set_seed(args.seed)
 
+    try:
+        mano_param_keys = _parse_mano_param_keys(args.mano_param_keys)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
     mano_param_loss = cast(Literal["l1", "l2", "huber"], args.mano_param_loss)
 
     run_root = Path(args.run_dir.strip()).resolve() if args.run_dir.strip() else None
@@ -414,8 +454,12 @@ def main() -> None:
                 mano_pose_weight=args.mano_pose_weight,
                 mano_param_loss=mano_param_loss,
                 mano_huber_delta=args.mano_huber_delta,
+                mano_param_loss_weight=args.mano_param_loss_weight,
                 mano_joint_loss_weight=args.mano_joint_loss_weight,
+                mano_vert_loss_weight=args.mano_vert_loss_weight,
                 mano_joint_chunk=args.mano_joint_chunk,
+                mano_param_keys=mano_param_keys,
+                mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
                 mano_pca_layers=mano_pca_layers,
                 tb_writer=tb_writer,
                 epoch=1,
@@ -449,8 +493,12 @@ def main() -> None:
                 mano_pose_weight=args.mano_pose_weight,
                 mano_param_loss=mano_param_loss,
                 mano_huber_delta=args.mano_huber_delta,
+                mano_param_loss_weight=args.mano_param_loss_weight,
                 mano_joint_loss_weight=args.mano_joint_loss_weight,
+                mano_vert_loss_weight=args.mano_vert_loss_weight,
                 mano_joint_chunk=args.mano_joint_chunk,
+                mano_param_keys=mano_param_keys,
+                mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
                 mano_pca_layers=mano_pca_layers,
                 grad_clip=args.grad_clip,
                 tb_writer=tb_writer,
@@ -489,8 +537,12 @@ def main() -> None:
                     mano_pose_weight=args.mano_pose_weight,
                     mano_param_loss=mano_param_loss,
                     mano_huber_delta=args.mano_huber_delta,
+                    mano_param_loss_weight=args.mano_param_loss_weight,
                     mano_joint_loss_weight=args.mano_joint_loss_weight,
+                    mano_vert_loss_weight=args.mano_vert_loss_weight,
                     mano_joint_chunk=args.mano_joint_chunk,
+                    mano_param_keys=mano_param_keys,
+                    mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
                     mano_pca_layers=mano_pca_layers,
                     tb_writer=tb_writer,
                     epoch=ep,
