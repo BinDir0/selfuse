@@ -30,6 +30,7 @@ from lib.pipeline.exporters.webdataset_features import (
     _build_lowdim_features,
     _compute_joint_states,
     _compute_presence_per_frame,
+    InvalidCameraDataError,
     _load_episode_camera_features,
     _load_world_space_prediction,
     build_mano_models,
@@ -47,7 +48,7 @@ _worker_feature_cache_dir = None
 _worker_episode_cache = {}
 _worker_shard_fd_cache = {}
 _worker_shard_tar_cache = {}
-MANIFEST_FEATURE_CACHE_VERSION = 6
+MANIFEST_FEATURE_CACHE_VERSION = 7
 WRITE_PREFETCH_THREADS = 4
 WRITE_PREFETCH_DEPTH = 16
 LOWDIM_SIZE = 116
@@ -197,6 +198,8 @@ def _resample_axis_angle_batch(axis_angle, target_count: int, source_fps: float,
 
 def _resample_extrinsics_sequence(extrinsics, target_count: int, source_fps: float, target_fps: float) -> np.ndarray:
     mats = np.asarray(extrinsics, dtype=np.float32)
+    if not np.isfinite(mats).all():
+        raise InvalidCameraDataError("extrinsics contain non-finite values before resampling")
     source_count = int(mats.shape[0])
     if target_count == source_count:
         return mats.astype(np.float32, copy=False)
@@ -204,9 +207,14 @@ def _resample_extrinsics_sequence(extrinsics, target_count: int, source_fps: flo
         return np.repeat(mats[:1], target_count, axis=0).astype(np.float32, copy=False)
 
     source_times, target_times = _build_source_target_times(source_count, target_count, source_fps, target_fps)
-    rotations = Rotation.from_matrix(mats[:, :3, :3])
-    slerp = Slerp(source_times, rotations)
-    interp_rot = slerp(target_times).as_matrix().astype(np.float32)
+    if not np.isfinite(mats[:, :3, :3]).all():
+        raise InvalidCameraDataError("rotation blocks contain non-finite values before resampling")
+    try:
+        rotations = Rotation.from_matrix(mats[:, :3, :3])
+        slerp = Slerp(source_times, rotations)
+        interp_rot = slerp(target_times).as_matrix().astype(np.float32)
+    except Exception as error:
+        raise InvalidCameraDataError(f"failed to resample camera rotations: {error}") from error
     interp_trans = _resample_linear_sequence(mats[:, :3, 3], target_count, source_fps, target_fps)
 
     output = np.tile(np.eye(4, dtype=np.float32), (target_count, 1, 1))
@@ -363,21 +371,25 @@ def load_descriptor_episode_features(
         device,
     )
     camera_ep = {"crop_dir": seq_folder, "episode_id": ep["episode_id"]}
-    extrinsics, intrinsic = _load_episode_camera_features(camera_ep, source_frame_count)
-    presence_per_frame = _compute_presence_per_frame(pred_valid, source_frame_count)
-    wrist_state, hand_state, pred_rot, pred_hand_pose, pred_betas, extrinsics, presence_per_frame = _resample_episode_features(
-        wrist_state[:source_frame_count],
-        hand_state[:source_frame_count],
-        pred_rot[:, :source_frame_count],
-        pred_hand_pose[:, :source_frame_count],
-        pred_betas[:, :source_frame_count],
-        extrinsics[:source_frame_count],
-        presence_per_frame[:source_frame_count],
-        frame_count,
-        source_fps=source_fps,
-        target_fps=target_fps,
-        interpolate_labels=interpolate_labels,
-    )
+    try:
+        extrinsics, intrinsic = _load_episode_camera_features(camera_ep, source_frame_count)
+        presence_per_frame = _compute_presence_per_frame(pred_valid, source_frame_count)
+        wrist_state, hand_state, pred_rot, pred_hand_pose, pred_betas, extrinsics, presence_per_frame = _resample_episode_features(
+            wrist_state[:source_frame_count],
+            hand_state[:source_frame_count],
+            pred_rot[:, :source_frame_count],
+            pred_hand_pose[:, :source_frame_count],
+            pred_betas[:, :source_frame_count],
+            extrinsics[:source_frame_count],
+            presence_per_frame[:source_frame_count],
+            frame_count,
+            source_fps=source_fps,
+            target_fps=target_fps,
+            interpolate_labels=interpolate_labels,
+        )
+    except InvalidCameraDataError as error:
+        print(f"  Skip {ep['episode_id']}: invalid camera features: {error}")
+        return None
     lowdim_all = _build_lowdim_features(
         wrist_state,
         hand_state,

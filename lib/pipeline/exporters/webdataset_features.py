@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FINGERTIP_INDICES = [4, 8, 12, 16, 20]
 DEFAULT_INTRINSIC = np.array([500.0, 500.0, 320.0, 240.0], dtype=np.float32)
 LOWDIM_SIZE = 116
-EPISODE_FEATURE_CACHE_VERSION = 5
+EPISODE_FEATURE_CACHE_VERSION = 6
 _SLAM_WARNING_COUNTS = {}
 
 
@@ -29,6 +29,17 @@ def _log_slam_warning(kind: str, message: str):
     if count <= 10 or count in (20, 50, 100) or count % 500 == 0:
         suffix = "" if count == 1 else f" [count={count}]"
         print(f"  Warning: {message}{suffix}")
+
+
+class InvalidCameraDataError(ValueError):
+    """Raised when episode camera data is present but too dirty to trust."""
+
+
+def _ensure_finite_array(name: str, value):
+    array = np.asarray(value)
+    if not np.isfinite(array).all():
+        raise InvalidCameraDataError(f"{name} contains non-finite values")
+    return array
 
 
 def run_mano_forward(mano_model, trans, root_orient, hand_pose, betas, device):
@@ -203,10 +214,14 @@ def _load_episode_camera_features(ep, num_frames):
 
     try:
         slam_data = np.load(str(slam_files[0]), allow_pickle=True)
-        traj = np.asarray(slam_data["traj"], dtype=np.float32)
+        traj = _ensure_finite_array("traj", np.asarray(slam_data["traj"], dtype=np.float32))
         scale = float(slam_data["scale"])
         img_focal = float(slam_data["img_focal"])
-        img_center = np.asarray(slam_data["img_center"], dtype=np.float32)
+        img_center = _ensure_finite_array("img_center", np.asarray(slam_data["img_center"], dtype=np.float32))
+        if not np.isfinite(scale):
+            raise InvalidCameraDataError("scale is non-finite")
+        if not np.isfinite(img_focal):
+            raise InvalidCameraDataError("img_focal is non-finite")
 
         intrinsic = np.array(
             [
@@ -217,12 +232,15 @@ def _load_episode_camera_features(ep, num_frames):
             ],
             dtype=np.float32,
         )
+        _ensure_finite_array("intrinsic", intrinsic)
 
         c2w = np.stack([quat_to_4x4(traj_row, scale) for traj_row in traj], axis=0)
+        _ensure_finite_array("c2w", c2w)
         direct_extrinsics = np.linalg.inv(c2w).astype(np.float32)
+        _ensure_finite_array("direct_extrinsics", direct_extrinsics)
         direct_count = min(int(direct_extrinsics.shape[0]), int(num_frames))
         if direct_count <= 0:
-            raise ValueError("empty direct SLAM trajectory")
+            raise InvalidCameraDataError("empty direct SLAM trajectory")
         extrinsics[:direct_count] = direct_extrinsics[:direct_count]
         if direct_count < num_frames:
             extrinsics[direct_count:] = direct_extrinsics[direct_count - 1]
@@ -239,8 +257,10 @@ def _load_episode_camera_features(ep, num_frames):
                 f"traj={direct_extrinsics.shape[0]} num_frames={num_frames}; "
                 "used direct traj without interpolation and truncated the remainder.",
             )
+    except InvalidCameraDataError:
+        raise
     except Exception as error:
-        _log_slam_warning("slam_load_failed", f"SLAM load failed for {ep['episode_id']}: {error}")
+        raise InvalidCameraDataError(str(error)) from error
 
     return extrinsics, intrinsic
 
@@ -381,7 +401,11 @@ def load_episode_features(
         mano_left,
         device,
     )
-    extrinsics, intrinsic = _load_episode_camera_features(ep, num_frames)
+    try:
+        extrinsics, intrinsic = _load_episode_camera_features(ep, num_frames)
+    except InvalidCameraDataError as error:
+        _log_slam_warning("invalid_camera_episode", f"Skip {ep['episode_id']}: invalid camera features: {error}")
+        return None
     presence_per_frame = _compute_presence_per_frame(pred_valid, num_frames)
     lowdim_all = _build_lowdim_features(wrist_state, hand_state, extrinsics, intrinsic)
 
