@@ -338,7 +338,9 @@ class LegendVLA(nn.Module):
         )
         action_embeds = self.action_encoder(flow_inputs["noisy_actions"])
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
-        action_position_ids = self.build_action_position_ids(batch, action_embeds)
+        # actions_valid_mask is always single-chunk [B, H, D]; position ids are
+        # built per-chunk then repeated, matching the expanded action_embeds.
+        action_position_ids = self.build_action_position_ids(batch, batch["actions_valid_mask"])
         action_mask = action_mask.repeat(1, num_parallel_chunks)
         action_position_ids = action_position_ids.repeat(1, num_parallel_chunks)
         if action_embeds.shape[1] != action_mask.shape[1]:
