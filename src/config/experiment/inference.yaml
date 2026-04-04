@@ -1,10 +1,6 @@
 # @package _global_
 defaults:
-  - legendvla_qwen3_vl
   - _self_
-
-# Override workspace target (not used for serving, but keeps Hydra happy)
-_target_: src.workspace.train_legendvla_workspace.TrainLegendVLAWorkspace
 
 serving:
   host: "0.0.0.0"
@@ -14,11 +10,11 @@ serving:
   warmup_enabled: True
   warmup_iters: 3
   warmup_instruction: "pick up the object"
-  warmup_image_shape: [480, 640, 3]
-  warmup_depth_shape: [480, 640, 3]
+  warmup_image_shape: [384, 384, 3]
+  warmup_depth_shape: [384, 384, 3]
   warmup_intrinsic: [500.0, 500.0, 320.0, 240.0]
-  log_obs_details: False
-  record_enabled: False
+  log_obs_details: True
+  record_enabled: True
   record_root_dir: outputs/serving_records
   profile_enabled: False
   profile_dir: outputs/serving_profile
@@ -29,24 +25,25 @@ serving:
 # model_config_path: path to the training run's .hydra/config.yaml
 policy:
   _target_: src.policy.legendvla_inference_wrapper.LegendVLAInference
-  model_config_path: ???  # required: path to the training run's .hydra/config.yaml
-  checkpoint_path: ???    # required: path to trained model checkpoint
+  model_config_path: /home/descfly/checkpoints/real-world-only-0403/.hydra/config.yaml  # required: path to the training run's .hydra/config.yaml
+  checkpoint_path: /home/descfly/checkpoints/real-world-only-0403/update_step=85000    # required: path to trained model checkpoint
+  pretrained_vlm_path: /home/descfly/checkpoints/Qwen3VL-2B-Instruct  # override pretrained.model_name_or_path in model config (for backbone, action expert, tokenizer)
   mode: flow
   use_mixed_precision: True
   tokenizer_padding: max_length
   max_length: 768
   default_instruction: null
-  flow_sampling_steps: ${flow.num_inference_steps}
+  flow_sampling_steps: 10
   ar_max_new_tokens: null
   ar_temperature: 1.0
   ar_cfg: 1.0
-  normalizer_path: ${training.normalizer_path}
+  normalizer_path: /home/descfly/normalizer/2026.03.16-relative-mixed/normalizer.pkl
   use_relative_action: True
   compile:
-    enabled: False
+    enabled: True
     fullgraph: False       # allow graph breaks in backbone multimodal processing
     backend: inductor
-    mode: reduce-overhead  # CUDA graphs; requires fixed tensor shapes (batch_size=1 serving)
+    mode: default 
 
 env_wrapper:
   enabled: True

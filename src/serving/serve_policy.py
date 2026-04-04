@@ -18,16 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 def _load_config() -> OmegaConf:
-    from hydra import compose, initialize_config_dir
-    from hydra.core.global_hydra import GlobalHydra
-
-    config_dir = str(pathlib.Path(__file__).resolve().parents[1] / "config")
-    logger.info("Composing inference config from: %s", config_dir)
-    GlobalHydra.instance().clear()
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg = compose(config_name="inference_config")
+    config_path = pathlib.Path(__file__).resolve().parents[1] / "config" / "experiment" / "inference.yaml"
+    logger.info("Loading inference config from: %s", config_path)
+    cfg = OmegaConf.load(config_path)
     assert "serving" in cfg and "policy" in cfg and "env_wrapper" in cfg, (
-        "Missing policy/serving/env_wrapper config after Hydra compose"
+        "Missing policy/serving/env_wrapper config after config load"
     )
     return cfg
 
@@ -58,8 +53,8 @@ def _warmup_policy(policy: Any, serving_cfg: OmegaConf) -> None:
     if not serving_cfg.warmup_enabled:
         return
 
-    warmup_iters = int(serving_cfg.warmup_iters)
-    warmup_instruction = str(serving_cfg.warmup_instruction)
+    warmup_iters = serving_cfg.warmup_iters
+    warmup_instruction = serving_cfg.warmup_instruction
     logger.info("Starting policy warmup")
     policy.warmup(warmup_iters=warmup_iters, instruction=warmup_instruction)
 

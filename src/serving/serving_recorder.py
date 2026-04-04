@@ -112,23 +112,23 @@ class ConnectionRecorder:
 
     @staticmethod
     def _prepare_rgb_canvas(value: Any) -> np.ndarray:
-        # Expected image shape: [1, H, W, 3], with values in [0, 1] or [0, 255].
+        # Expected image shape: [T, H, W, 3], with values in [0, 1] or [0, 255].
         array = np.asarray(value, dtype=np.float32)
-        assert array.ndim == 4 and array.shape[0] == 1 and array.shape[-1] == 3, (
-            f"Expected image shape [1, H, W, 3], got {array.shape}"
+        assert array.ndim == 4 and array.shape[-1] == 3, (
+            f"Expected image shape [T, H, W, 3], got {array.shape}"
         )
-        image = array[0]
+        image = array[-1]
         image = ConnectionRecorder._normalize_rgb(image)
         return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
     @staticmethod
     def _prepare_depth_canvas(value: Any) -> np.ndarray:
-        # Expected depth_image shape: [1, H, W, 1]. Save it as a per-frame min/max normalized preview.
+        # Expected depth_image shape: [T, H, W, 1]. Save it as a per-frame min/max normalized preview.
         array = np.asarray(value, dtype=np.float32)
-        assert array.ndim == 4 and array.shape[0] == 1 and array.shape[-1] == 1, (
-            f"Expected depth_image shape [1, H, W, 1], got {array.shape}"
+        assert array.ndim == 4 and array.shape[-1] == 1, (
+            f"Expected depth_image shape [T, H, W, 1], got {array.shape}"
         )
-        depth = array[0, :, :, 0]
+        depth = array[-1, :, :, 0]
         depth_uint8 = ConnectionRecorder._normalize_grayscale(depth)
         return cv2.cvtColor(depth_uint8, cv2.COLOR_GRAY2BGR)
 

@@ -255,12 +255,16 @@ class LegendVLA(nn.Module):
         )
         return answer_start_idx.to(device=batch["input_ids"].device, dtype=torch.long)
 
-    def build_action_position_ids(self, batch: dict) -> torch.Tensor:
-        if "actions" not in batch:
-            raise ValueError("Action position ids require an `actions` tensor in the batch.")
-        batch_size = batch["actions"].shape[0]
-        action_len = batch["actions"].shape[1]
-        device = batch["actions"].device
+    def build_action_position_ids(self, batch: dict, action_ref: torch.Tensor) -> torch.Tensor:
+        """Build absolute position ids for action tokens.
+
+        Args:
+            batch: Collated batch (used by build_prefix_lengths for prefix info).
+            action_ref: Any tensor with shape [B, action_len, ...] to derive dimensions from
+                (e.g. action_embeds in flow stream, or raw actions in training).
+        """
+        action_len = action_ref.shape[1]
+        device = action_ref.device
         base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
         return base + torch.arange(action_len, device=device).unsqueeze(0)
 
@@ -333,7 +337,7 @@ class LegendVLA(nn.Module):
         )
         action_embeds = self.action_encoder(flow_inputs["noisy_actions"])
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
-        action_position_ids = self.build_action_position_ids(batch)
+        action_position_ids = self.build_action_position_ids(batch, action_embeds)
         action_mask = action_mask.repeat(1, num_parallel_chunks)
         action_position_ids = action_position_ids.repeat(1, num_parallel_chunks)
         if action_embeds.shape[1] != action_mask.shape[1]:

@@ -79,6 +79,9 @@ def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
     2. Accelerate FSDP2 sharded dir (contains pytorch_model_fsdp_0/).
        Uses torch.distributed.checkpoint with no_dist=True (PyTorch 2.3+).
     3. Accelerate safetensors dir — falls back to load_checkpoint_in_model.
+
+    All paths use strict loading: any missing or unexpected keys will raise
+    an error instead of silently producing a partially loaded model.
     """
     path = pathlib.Path(path)
     if not path.exists():
@@ -86,12 +89,12 @@ def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
 
     # Single-file checkpoint
     if path.is_file():
-        state_dict = torch.load(path, map_location="cpu")
+        state_dict = torch.load(path, map_location="cpu", weights_only=False)
         for key in ["model", "module", "model_state_dict"]:
             if key in state_dict:
                 state_dict = state_dict[key]
                 break
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=True)
         log.info("Loaded single-file checkpoint from %s", path)
         return
 
@@ -108,12 +111,21 @@ def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
             storage_reader=dcp.FileSystemReader(str(fsdp_dir)),
             no_dist=True,
         )
-        model.load_state_dict(state_dict["model"])
+        model.load_state_dict(state_dict["model"], strict=True)
         log.info("Loaded FSDP sharded checkpoint from %s", fsdp_dir)
         return
 
     # Safetensors / other Accelerate format
     # Source: accelerate.utils.load_checkpoint_in_model
-    from accelerate.utils import load_checkpoint_in_model
-    load_checkpoint_in_model(model, str(path))
-    log.info("Loaded checkpoint from %s", path)
+    # load_checkpoint_in_model does not support strict mode natively;
+    # load into a temporary state_dict and use strict load_state_dict instead.
+    from safetensors.torch import load_file
+
+    safetensor_files = sorted(path.glob("*.safetensors"))
+    if not safetensor_files:
+        raise FileNotFoundError(f"No safetensors files found in {path}")
+    state_dict = {}
+    for sf in safetensor_files:
+        state_dict.update(load_file(str(sf), device="cpu"))
+    model.load_state_dict(state_dict, strict=True)
+    log.info("Loaded safetensors checkpoint from %s (%d files)", path, len(safetensor_files))

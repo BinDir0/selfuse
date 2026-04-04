@@ -126,6 +126,7 @@ def build_wrapper_stub(
     wrapper.image_horizon = 1
     wrapper.image_stride = 1
     wrapper.video_base_fps = 30.0
+    wrapper.target_image_size = None
     wrapper.history_pad_mode = history_pad_mode
     wrapper.ar_max_new_tokens = wrapper.action_horizon
     wrapper.ar_temperature = 1.0
@@ -156,7 +157,6 @@ def make_expected_vla_sample(
     n_states: int,
     instruction: str = "pick the cup",
     action_horizon: int = 4,
-    action_dim: int = 2,
 ) -> dict[str, Any]:
     return {
         "images": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
@@ -165,10 +165,8 @@ def make_expected_vla_sample(
         "vision_type": "video",
         "video_fps": torch.tensor(30.0, dtype=torch.float32),
         "states": states,
-        "n_states": torch.tensor(n_states, dtype=torch.int32),
-        "actions": torch.zeros(action_horizon, action_dim, dtype=torch.float32),
-        "actions_valid_mask": torch.ones(action_horizon, action_dim, dtype=torch.bool),
-        "n_actions": torch.tensor(action_horizon, dtype=torch.int32),
+        "n_states": torch.tensor(n_states, dtype=torch.long),
+        "n_actions": torch.tensor(action_horizon, dtype=torch.long),
         "is_vla_data": torch.tensor(True, dtype=torch.bool),
     }
 

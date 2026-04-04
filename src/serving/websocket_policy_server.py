@@ -160,8 +160,7 @@ class RuntimeEngine:
 
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """The high-level entry point for inference."""
-        batch = self.policy.prepare_process(obs)
-        inputs = self.policy.build_model_inputs(batch)
+        inputs = self.policy.prepare_process(obs)
         inputs = self._move_to_device(inputs)
 
         with self._autocast_context(), torch.inference_mode():
@@ -211,30 +210,21 @@ class EnvWrapper:
         return self.policy.infer(mapped_obs)
 
 
-
 def _resolve_device(device: str | None) -> torch.device:
     if device in (None, "auto"):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
-
 def create_engine(policy_cfg: Any, serving_cfg: Any) -> Any:
-    policy = hydra.utils.instantiate(policy_cfg)
-    device = _resolve_device(serving_cfg.device)
-    use_autocast = bool(serving_cfg.autocast)
-    warmup_image_shape = tuple(int(x) for x in serving_cfg.warmup_image_shape)
-    warmup_depth_shape = tuple(int(x) for x in serving_cfg.warmup_depth_shape)
-    warmup_intrinsic = np.asarray(serving_cfg.warmup_intrinsic, dtype=np.float64)
     return RuntimeEngine(
-        policy,
-        device=device,
-        use_autocast=use_autocast,
-        warmup_image_shape=warmup_image_shape,
-        warmup_depth_shape=warmup_depth_shape,
-        warmup_intrinsic=warmup_intrinsic,
+        hydra.utils.instantiate(policy_cfg),
+        device=_resolve_device(serving_cfg.device),
+        use_autocast=serving_cfg.autocast,
+        warmup_image_shape=tuple(serving_cfg.warmup_image_shape),
+        warmup_depth_shape=tuple(serving_cfg.warmup_depth_shape),
+        warmup_intrinsic=np.asarray(serving_cfg.warmup_intrinsic, dtype=np.float64),
     )
-
 
 
 def create_env_wrapper(policy: Any, wrapper_cfg: Any) -> Any:
