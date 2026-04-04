@@ -60,9 +60,9 @@ def _parse_args() -> argparse.Namespace:
         help="只训单条 episode（调试）；与 --episodes-file 互斥",
     )
     d.add_argument("--val-episodes-file", type=str, default="", help="验证集列表；空=不跑 val")
-    d.add_argument("--seq-len", type=int, default=8, help="窗口长度 T")
+    d.add_argument("--seq-len", type=int, default=32, help="窗口长度 T")
     d.add_argument("--stride", type=int, default=1)
-    d.add_argument("--batch-size", type=int, default=2, help="每 GPU 的 batch；DDP 时总 batch 约乘 GPU 数")
+    d.add_argument("--batch-size", type=int, default=32, help="每 GPU 的 batch；DDP 时总 batch 约乘 GPU 数")
     d.add_argument("--workers", type=int, default=0)
 
     o = p.add_argument_group("optim")
