@@ -71,6 +71,11 @@ def get_parser():
         help="Comma-separated stage list. Preferred: prepare,annotate,infer,filter,build,validate",
     )
     parser.add_argument("--run_tag", type=str, default=None, help="Optional run tag override")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume compatible stages. Currently forwarded to the build stage to skip existing non-empty shards.",
+    )
     return parser
 
 
@@ -219,6 +224,7 @@ def main():
     run_summary = {
         "config": str(Path(args.config).resolve()),
         "run_dir": str(run_dir.resolve()),
+        "resume": bool(args.resume),
         "source_type": source_type,
         "source_id": source_id,
         "split": split,
@@ -407,6 +413,8 @@ def main():
             str(final_dataset_root),
             *cli_args_from_mapping(build_cfg),
         ]
+        if args.resume:
+            build_cmd.append("--resume")
         if annotation_root:
             build_cmd.extend(["--annotation_root", str(annotation_root)])
         run_logged("build", build_cmd)
