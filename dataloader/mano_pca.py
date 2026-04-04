@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Tuple
 
 import torch
+import torch.nn as nn
 
 __all__ = [
     "build_mano_pca_layer",
@@ -18,6 +19,7 @@ __all__ = [
     "mano_pca_to_axisang45",
     "mano_pose48_to_pca",
     "mano_pose48_to_pca_pose",
+    "mano_parameter_dict_to_joints_bt",
 ]
 
 
@@ -160,6 +162,46 @@ def mano_pca_to_axisang45(
     joint_axisang45 = hand_pca.mm(selected_comps) + hands_mean
 
     return joint_axisang45.squeeze(0) if squeeze else joint_axisang45
+
+
+def mano_parameter_dict_to_joints_bt(
+    trans_bt: torch.Tensor,
+    root_orient_bt: torch.Tensor,
+    hand_pose_aa_bt: torch.Tensor,
+    betas_bt: torch.Tensor,
+    mano_layer: nn.Module,
+    *,
+    chunk: int = 512,
+) -> torch.Tensor:
+    """Training-space MANO dict (camera trans, axis-angle root + 45 hand, betas) -> joints (B,T,J,3).
+
+    Positions are in **millimeters** (manopth convention after internal *1000). Differentiable w.r.t. inputs.
+    """
+    if trans_bt.ndim != 3 or root_orient_bt.shape[-1] != 3 or betas_bt.shape[-1] != 10:
+        raise ValueError(
+            f"expected trans (B,T,3), root (B,T,3), betas (B,T,10); got "
+            f"{tuple(trans_bt.shape)}, {tuple(root_orient_bt.shape)}, {tuple(betas_bt.shape)}"
+        )
+    b, t, _ = trans_bt.shape
+    n = b * t
+    trans = trans_bt.reshape(n, 3)
+    root = root_orient_bt.reshape(n, 3)
+    hand = hand_pose_aa_bt.reshape(n, 45)
+    betas = betas_bt.reshape(n, 10)
+    pca = mano_axisang45_to_pca(hand, mano_layer)
+    pose = torch.cat([root, pca], dim=-1)
+
+    parts: list[torch.Tensor] = []
+    for s in range(0, n, max(1, int(chunk))):
+        e = min(n, s + max(1, int(chunk)))
+        _, jtr = mano_layer(
+            pose[s:e],
+            th_betas=betas[s:e],
+            th_trans=trans[s:e],
+        )
+        parts.append(jtr)
+    j = torch.cat(parts, dim=0)
+    return j.view(b, t, j.shape[1], 3)
 
 
 def hand_pca_bt_to_axisang45(
