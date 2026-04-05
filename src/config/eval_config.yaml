@@ -1,0 +1,31 @@
+# Offline dataset evaluation for LegendVLA flow matching.
+#
+# Required overrides:
+#   checkpoint_path: path to trained model checkpoint
+#   train_config_path: path to the training run's .hydra/config.yaml
+
+# Model loading
+checkpoint_path: ???
+train_config_path: ???
+
+# Evaluation settings
+output_dir: outputs/eval_dataset
+num_shards: 10
+num_samples: 200
+batch_size: 16
+device: cuda
+seed: 42
+num_workers: 10               # keep <= num_shards; extra workers are idle with val-mode shard splitting
+flow_steps: null              # override flow inference steps (null = use training config value)
+inference_delay: 0            # RTC test: pin first N GT action steps as prefix (0 = disabled)
+
+# 2D visualization and HTML report settings
+vis_action_stride: 4          # draw every N-th action timestep in 2D overlay
+generate_html_report: true    # generate self-contained HTML report with metrics + vis
+
+# Datasets to evaluate (same schema as vla_wds_datasets entries)
+eval_datasets:
+  - name: taco_test_seen
+    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/taco_test_seen/shard-*.tar
+  - name: oakink2_test_seen
+    shard_urls: /share_data/guantianrui/datasets/Webdataset_val/oakink2_test_seen_presence_clean/shard-*.tar
