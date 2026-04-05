@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 import torch
@@ -11,6 +12,7 @@ from tqdm import tqdm
 from training.batch import wds_batch_to_training_batch
 from training.checkpoint import maybe_save_step_checkpoint
 from training.logging_utils import tb_add_scalars, train_step_tb_dict, val_avg_to_tb_dict
+from training.mano_train_render import maybe_save_train_mano_compare_png
 from training.losses import (
     bce_existence,
     mano_hand_pose_pca_mse,
@@ -50,6 +52,8 @@ def train_one_epoch(
     ckpt_dir: str | None,
     use_dist: bool,
     is_rank0: bool,
+    render_mano_every: int,
+    render_mano_dir: str | None,
 ) -> tuple[dict[str, float], int, int, bool]:
     model.train()
     tot = {"loss": 0.0, "bce": 0.0, "mano": 0.0}
@@ -177,6 +181,28 @@ def train_one_epoch(
 
         if save_every_steps > 0 and optim_steps % save_every_steps == 0:
             maybe_save_step_checkpoint(ckpt_dir, optim_steps, model, is_rank0=is_rank0)
+
+        if (
+            render_mano_every > 0
+            and render_mano_dir
+            and mano_pca_layers is not None
+            and is_rank0
+            and optim_steps % render_mano_every == 0
+        ):
+            _outp = os.path.join(render_mano_dir, f"e{epoch:04d}_step{optim_steps:08d}.png")
+            maybe_save_train_mano_compare_png(
+                out_path=_outp,
+                video_btchw=video,
+                batch=batch,
+                mano_l_gt=mano_l_tgt,
+                mano_r_gt=mano_r_tgt,
+                mano_l_pr=out["mano_left"],
+                mano_r_pr=out["mano_right"],
+                exist_bt2=exist_tgt,
+                mano_pca_layers=mano_pca_layers,
+                joint_chunk=mano_joint_chunk,
+                device=device,
+            )
 
         if max_steps > 0 and optim_steps >= max_steps:
             hit_max = True

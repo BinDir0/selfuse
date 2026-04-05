@@ -3,9 +3,9 @@
 Scan tar shards, collect normalized episode_name values, write train.txt / test.txt.
 
 Full split (train = all \\ random test holdout):
-python scripts/make_episode_split.py \\
-  --data-path /path/to/shards \\
-  --holdout 10 \\
+python scripts/make_episode_split.py \
+  --data-path /path/to/shards \
+  --holdout 10 \
   --out-dir splits/full
 
 Small train for overfit (first N episodes after sort; optional disjoint test from the rest):

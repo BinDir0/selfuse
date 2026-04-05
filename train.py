@@ -12,6 +12,7 @@ torchrun --standalone --nproc_per_node=8 train.py \
   --run-dir runs/my_exp1 \
   --tensorboard-dir runs/my_exp1/tb
 
+
 # eval_only:
 python train.py --eval-only \
   --resume runs/my_exp1/checkpoints/latest.pt \
@@ -156,8 +157,9 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-hand-pca-loss-weight",
         type=float,
-        default=0.25,
-        help="scale for hand_pose PCA coefficient MSE (axis-angle -> layer PCA vs GT); default on; 0 disables",
+        default=0.0,
+        help="scale for hand_pose PCA coefficient MSE (axis-angle -> layer PCA vs GT); default 0 (off); "
+        "set e.g. 0.25 to enable",
     )
     m.add_argument(
         "--mano-joint-chunk",
@@ -178,6 +180,20 @@ def _parse_args() -> argparse.Namespace:
     io.add_argument("--tensorboard-dir", type=str, default="")
     io.add_argument("--log-dir", type=str, default="")
     io.add_argument("--run-dir", type=str, default="", help="sets default checkpoints/ and logs/")
+    io.add_argument(
+        "--render-mano-every",
+        type=int,
+        default=10,
+        help="every N optimizer steps (rank0): save GT|Pred MANO skeleton PNG under <run-dir>/render_mano; "
+        "0=off. Default 10 when training; skipped without --run-dir/--render-mano-dir (see log). "
+        "Needs MANO decode layers unless --no-decode-hand-pca.",
+    )
+    io.add_argument(
+        "--render-mano-dir",
+        type=str,
+        default="",
+        help="output directory for --render-mano-every; default: <run-dir>/render_mano",
+    )
 
     r = p.add_argument_group("run")
     r.add_argument("--seed", type=int, default=42)
@@ -419,6 +435,29 @@ def main() -> None:
     if is_rank0 and ckpt_dir:
         os.makedirs(ckpt_dir, exist_ok=True)
 
+    render_mano_every = max(0, int(args.render_mano_every))
+    render_mano_dir: str | None = None
+    if not args.eval_only and render_mano_every > 0:
+        if mano_pca_layers is None:
+            if is_rank0:
+                log_line("--render-mano-every ignored (MANO decode off: use default decode or drop --no-decode-hand-pca)", log_path)
+            render_mano_every = 0
+        else:
+            rd = args.render_mano_dir.strip()
+            if rd:
+                render_mano_dir = os.path.abspath(rd)
+            elif run_root is not None:
+                render_mano_dir = str(run_root / "render_mano")
+            else:
+                if is_rank0:
+                    log_line(
+                        "--render-mano-every ignored (no --run-dir or --render-mano-dir); use 0 explicitly to silence",
+                        log_path,
+                    )
+                render_mano_every = 0
+            if render_mano_every > 0 and render_mano_dir is not None and is_rank0:
+                os.makedirs(render_mano_dir, exist_ok=True)
+
     show_progress = not args.no_progress
     max_steps = max(0, int(args.max_steps))
     save_every_steps = max(0, int(args.save_every_steps))
@@ -512,6 +551,8 @@ def main() -> None:
                 ckpt_dir=ckpt_dir_or_none,
                 use_dist=use_dist,
                 is_rank0=is_rank0,
+                render_mano_every=render_mano_every,
+                render_mano_dir=render_mano_dir,
             )
             if is_rank0:
                 summary = (
