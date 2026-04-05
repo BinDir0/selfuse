@@ -1,4 +1,4 @@
-"""EgoHandSTModel：DINOv3 、ST-Transformer、双手 cross-attn、存在性与 RoWaH 风格 MANO 头。"""
+"""EgoHandSTModel：DINOv3 、ST-Transformer、双手 cross-attn、存在性与  MANO 头。"""
 
 from __future__ import annotations
 

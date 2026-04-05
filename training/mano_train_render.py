@@ -1,4 +1,4 @@
-"""训练调试：将相机系 MANO 关节投影到当前帧，拼 GT | Pred 存图。"""
+"""Training debug: GT | Pred PNG via vis.mano_render.render_hand_on_frame (same pipeline as zarr viewer)."""
 
 from __future__ import annotations
 
@@ -14,23 +14,22 @@ try:
 except ImportError:
     cv2 = None  # type: ignore[misc, assignment]
 
-from dataloader.mano_pca import mano_parameter_dict_to_joints_bt
-
-# 与 vis/mano_render.py 中手指骨架一致（MANO 21 关节）
-_MANO_JOINT_TREE: list[list[tuple[int, int]]] = [
-    [(0, 1), (1, 2), (2, 3), (3, 4)],
-    [(0, 5), (5, 6), (6, 7), (7, 8)],
-    [(0, 9), (9, 10), (10, 11), (11, 12)],
-    [(0, 13), (13, 14), (14, 15), (15, 16)],
-    [(0, 17), (17, 18), (18, 19), (19, 20)],
-]
+from dataloader.mano_pca import mano_axisang45_to_pca
 
 
-def _project_points(pts_cam: np.ndarray, fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
-    zs = pts_cam[:, 2] + 1e-8
-    us = fx * (pts_cam[:, 0] / zs) + cx
-    vs = fy * (pts_cam[:, 1] / zs) + cy
-    return np.stack([us, vs], axis=1)
+def _mano_layer_device(layer: nn.Module) -> torch.device:
+    """ManoLayer has buffers only (no Parameters); use buffers() for device."""
+    for p in layer.parameters():
+        return p.device
+    for b in layer.buffers():
+        return b.device
+    return torch.device("cpu")
+
+
+def _as_numpy_intrinsic(x: Any) -> np.ndarray:
+    if torch.is_tensor(x):
+        x = x.detach().float().cpu().numpy()
+    return np.asarray(x, dtype=np.float32).reshape(-1)
 
 
 def _scale_intrinsics(
@@ -41,81 +40,78 @@ def _scale_intrinsics(
     return fx * sx, fy * sy, cx * sx, cy * sy
 
 
-def _as_numpy_intrinsic(x: Any) -> np.ndarray:
-    if torch.is_tensor(x):
-        x = x.detach().float().cpu().numpy()
-    return np.asarray(x, dtype=np.float32).reshape(-1)
+def _aa_to_rotmat_np(aa: np.ndarray) -> np.ndarray:
+    aa = np.asarray(aa, dtype=np.float64).reshape(3)
+    theta = float(np.linalg.norm(aa))
+    if theta < 1e-8:
+        return np.eye(3, dtype=np.float32)
+    k = aa / theta
+    x, y, z = float(k[0]), float(k[1]), float(k[2])
+    K = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
+    r = np.eye(3, dtype=np.float64) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+    return r.astype(np.float32)
 
 
-def _video_slice_to_bgr_uint8(video_btchw: torch.Tensor, bi: int, ti: int) -> np.ndarray:
-    """video: (B,T,3,H,W) float, 值域约 [0,1]。"""
-    fr = video_btchw[bi, ti].detach().float().cpu().clamp(0.0, 1.0).numpy()
-    fr = np.transpose(fr, (1, 2, 0))
-    fr_u8 = (fr * 255.0).round().clip(0, 255).astype(np.uint8)
-    return fr_u8[:, :, ::-1].copy()
+def _aa_to_rot6_np(aa: np.ndarray) -> np.ndarray:
+    """First two columns of R(aa); matches vis rot6_to_rotmat convention for wrist_params."""
+    r = _aa_to_rotmat_np(aa)
+    return np.concatenate([r[:, 0], r[:, 1]], axis=0).astype(np.float32)
 
 
-def _draw_hand_skeleton(
-    img_bgr: np.ndarray,
-    joints_cam_m: np.ndarray,
-    fx: float,
-    fy: float,
-    cx: float,
-    cy: float,
-    *,
-    line_bgr: tuple[int, int, int],
-    point_bgr: tuple[int, int, int],
-    line_thickness: int = 2,
-) -> None:
-    if cv2 is None:
-        return
-    h, w = img_bgr.shape[:2]
-    uv = _project_points(joints_cam_m, fx, fy, cx, cy).astype(np.int32)
-    z_ok = joints_cam_m[:, 2] > 1e-5
-    in_img = (
-        (uv[:, 0] >= 0)
-        & (uv[:, 0] < w)
-        & (uv[:, 1] >= 0)
-        & (uv[:, 1] < h)
-    )
-    mask = z_ok & in_img
-    for chain in _MANO_JOINT_TREE:
-        for j1, j2 in chain:
-            if mask[j1] and mask[j2]:
-                cv2.line(
-                    img_bgr,
-                    tuple(uv[j1]),
-                    tuple(uv[j2]),
-                    line_bgr,
-                    line_thickness,
-                    lineType=cv2.LINE_AA,
-                )
-    for i in range(uv.shape[0]):
-        if mask[i]:
-            cv2.circle(img_bgr, tuple(uv[i]), 3, point_bgr, -1, lineType=cv2.LINE_AA)
+def _presence_int(left_on: bool, right_on: bool) -> int:
+    if left_on and right_on:
+        return 3
+    if left_on:
+        return 1
+    if right_on:
+        return 2
+    return 0
 
 
-def _joints_cam_m_for_hand(
-    mano: Mapping[str, torch.Tensor],
-    mano_layer: nn.Module,
+def _pack_mano_render_args(
+    mano_l: Mapping[str, torch.Tensor],
+    mano_r: Mapping[str, torch.Tensor],
+    ml: nn.Module,
+    mr: nn.Module,
     bi: int,
     ti: int,
-    *,
-    joint_chunk: int,
     device: torch.device,
-) -> np.ndarray:
-    sl = slice(bi, bi + 1), slice(ti, ti + 1)
-    trans = mano["trans"][sl].to(device)
-    root = mano["root_orient"][sl].to(device)
-    hand = mano["hand_pose"][sl].to(device)
-    betas = mano["betas"][sl].to(device)
-    with torch.no_grad():
-        j = mano_parameter_dict_to_joints_bt(
-            trans, root, hand, betas, mano_layer, chunk=joint_chunk
+    *,
+    left_on: bool,
+    right_on: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], int]:
+    mano_params: dict[str, Any] = {}
+    wrist_params: dict[str, Any] = {}
+    shape_params: dict[str, Any] = {}
+    if left_on:
+        hp = mano_l["hand_pose"][bi : bi + 1, ti : ti + 1].to(device)
+        pca = mano_axisang45_to_pca(hp.squeeze(0).squeeze(0), ml)
+        mano_params["left"] = pca.detach().float().cpu().numpy().reshape(-1).astype(np.float32)
+        wrist_params["left_translation"] = (
+            mano_l["trans"][bi, ti].detach().float().cpu().numpy().astype(np.float32)
         )
-    # 与 loss 一致：manopth 关节单位为 mm，投影用米
-    jm = (j.squeeze(0).squeeze(0) * 0.001).float().cpu().numpy()
-    return jm
+        wrist_params["left_rotation"] = _aa_to_rot6_np(
+            mano_l["root_orient"][bi, ti].detach().float().cpu().numpy()
+        )
+        shape_params["left"] = mano_l["betas"][bi, ti].detach().float().cpu().numpy().astype(np.float32)
+    if right_on:
+        hp = mano_r["hand_pose"][bi : bi + 1, ti : ti + 1].to(device)
+        pca = mano_axisang45_to_pca(hp.squeeze(0).squeeze(0), mr)
+        mano_params["right"] = pca.detach().float().cpu().numpy().reshape(-1).astype(np.float32)
+        wrist_params["right_translation"] = (
+            mano_r["trans"][bi, ti].detach().float().cpu().numpy().astype(np.float32)
+        )
+        wrist_params["right_rotation"] = _aa_to_rot6_np(
+            mano_r["root_orient"][bi, ti].detach().float().cpu().numpy()
+        )
+        shape_params["right"] = mano_r["betas"][bi, ti].detach().float().cpu().numpy().astype(np.float32)
+    return mano_params, wrist_params, shape_params, _presence_int(left_on, right_on)
+
+
+def _frame_rgb_uint8(video_btchw: torch.Tensor, bi: int, ti: int) -> np.ndarray:
+    fr = video_btchw[bi, ti].detach().float().cpu().clamp(0.0, 1.0).numpy()
+    fr = np.transpose(fr, (1, 2, 0))
+    return (fr * 255.0).round().clip(0, 255).astype(np.uint8)
 
 
 def maybe_save_train_mano_compare_png(
@@ -134,13 +130,25 @@ def maybe_save_train_mano_compare_png(
     bi: int = 0,
     ti: int | None = None,
 ) -> bool:
-    """GT 在左、Pred 在右；仅当可导入 cv2 且 MANO 层可用时写盘。成功返回 True。"""
+    """GT left half, Pred right half; rendering is vis.render_hand_on_frame (MANO_ROOT / manopth as in vis)."""
+    del joint_chunk  # API compatibility with train_loop; render uses ManoLayer forward like vis.
     if cv2 is None:
         return False
+
+    from vis.mano_render import MANO_AVAILABLE, render_hand_on_frame
+
+    if not MANO_AVAILABLE:
+        return False
+
     b, t, _, h, w = video_btchw.shape
     if ti is None:
         ti = max(0, t // 2)
     if bi < 0 or bi >= b or ti < 0 or ti >= t:
+        return False
+
+    left_on = float(exist_bt2[bi, ti, 0].item()) > 0.5
+    right_on = float(exist_bt2[bi, ti, 1].item()) > 0.5
+    if not left_on and not right_on:
         return False
 
     vid_np = batch["video"]
@@ -154,34 +162,65 @@ def maybe_save_train_mano_compare_png(
         return False
     fx, fy, cx, cy = float(intr[0]), float(intr[1]), float(intr[2]), float(intr[3])
     fx, fy, cx, cy = _scale_intrinsics(fx, fy, cx, cy, w0, h0, w, h)
+    intrinsic_np = np.array([fx, fy, cx, cy], dtype=np.float32)
 
     ml, mr = mano_pca_layers
-    left_on = float(exist_bt2[bi, ti, 0].item()) > 0.5
-    right_on = float(exist_bt2[bi, ti, 1].item()) > 0.5
+    mano_layers_dict = {"left": ml, "right": mr}
 
-    img_gt = _video_slice_to_bgr_uint8(video_btchw, bi, ti)
-    img_pr = img_gt.copy()
+    # train.py moves ManoLayer to CUDA; vis generate_mano_mesh uses CPU torch.from_numpy inputs.
+    orig_dev = _mano_layer_device(ml)
+    need_restore_mano = orig_dev.type == "cuda"
+    if need_restore_mano:
+        ml.cpu()
+        mr.cpu()
 
-    c_l_line, c_l_pt = (255, 100, 0), (200, 50, 0)
-    c_r_line, c_r_pt = (0, 100, 255), (0, 50, 200)
-    if left_on:
-        jl_gt = _joints_cam_m_for_hand(mano_l_gt, ml, bi, ti, joint_chunk=joint_chunk, device=device)
-        jl_pr = _joints_cam_m_for_hand(mano_l_pr, ml, bi, ti, joint_chunk=joint_chunk, device=device)
-        _draw_hand_skeleton(img_gt, jl_gt, fx, fy, cx, cy, line_bgr=c_l_line, point_bgr=c_l_pt)
-        _draw_hand_skeleton(img_pr, jl_pr, fx, fy, cx, cy, line_bgr=c_l_line, point_bgr=c_l_pt)
-    if right_on:
-        jr_gt = _joints_cam_m_for_hand(mano_r_gt, mr, bi, ti, joint_chunk=joint_chunk, device=device)
-        jr_pr = _joints_cam_m_for_hand(mano_r_pr, mr, bi, ti, joint_chunk=joint_chunk, device=device)
-        _draw_hand_skeleton(img_gt, jr_gt, fx, fy, cx, cy, line_bgr=c_r_line, point_bgr=c_r_pt)
-        _draw_hand_skeleton(img_pr, jr_pr, fx, fy, cx, cy, line_bgr=c_r_line, point_bgr=c_r_pt)
+    frame_rgb = _frame_rgb_uint8(video_btchw, bi, ti)
 
-    _, w_img = img_gt.shape[:2]
-    combo = np.concatenate([img_gt, img_pr], axis=1)
+    mp_g, wp_g, sp_g, pr_g = _pack_mano_render_args(
+        mano_l_gt, mano_r_gt, ml, mr, bi, ti, device, left_on=left_on, right_on=right_on
+    )
+    mp_p, wp_p, sp_p, pr_p = _pack_mano_render_args(
+        mano_l_pr, mano_r_pr, ml, mr, bi, ti, device, left_on=left_on, right_on=right_on
+    )
 
+    try:
+        # Supervision is already in camera frame; vis uses world + extrinsic -> cam, so use identity.
+        img_gt = render_hand_on_frame(
+            frame_rgb.copy(),
+            mano_params=mp_g,
+            wrist_params=wp_g,
+            extrinsic=None,
+            intrinsic=intrinsic_np,
+            presence=pr_g,
+            shape_params=sp_g,
+            mano_layers=mano_layers_dict,
+            fingertips=None,
+            auto_reframe=False,
+        )
+        img_pr = render_hand_on_frame(
+            frame_rgb.copy(),
+            mano_params=mp_p,
+            wrist_params=wp_p,
+            extrinsic=None,
+            intrinsic=intrinsic_np,
+            presence=pr_p,
+            shape_params=sp_p,
+            mano_layers=mano_layers_dict,
+            fingertips=None,
+            auto_reframe=False,
+        )
+    finally:
+        if need_restore_mano:
+            ml.to(orig_dev)
+            mr.to(orig_dev)
+
+    combo_rgb = np.concatenate([img_gt, img_pr], axis=1)
+    combo_bgr = cv2.cvtColor(combo_rgb, cv2.COLOR_RGB2BGR)
+    w_img = img_gt.shape[1]
     font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(combo, "GT", (8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(combo, "Pred", (w_img + 8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combo_bgr, "GT", (8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combo_bgr, "Pred", (w_img + 8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    cv2.imwrite(out_path, combo)
+    cv2.imwrite(out_path, combo_bgr)
     return True

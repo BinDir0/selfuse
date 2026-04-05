@@ -38,6 +38,9 @@ def train_one_epoch(
     mano_huber_delta: float,
     mano_param_loss_weight: float,
     mano_joint_loss_weight: float,
+    mano_joint_weight_21: torch.Tensor | None,
+    mano_joint_smooth_max_weight: float,
+    mano_joint_smooth_max_tau: float,
     mano_vert_loss_weight: float,
     mano_bone_loss_weight: float,
     mano_bone_dir_loss_weight: float,
@@ -119,10 +122,24 @@ def train_one_epoch(
             ml, mr = mano_pca_layers
             if mano_joint_loss_weight > 0.0:
                 lj_l = mano_masked_joint_mse_m2(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
+                    out["mano_left"],
+                    mano_l_tgt,
+                    mask_l,
+                    ml,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
+                    smooth_max_weight=mano_joint_smooth_max_weight,
+                    smooth_max_tau=mano_joint_smooth_max_tau,
                 )
                 lj_r = mano_masked_joint_mse_m2(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
+                    out["mano_right"],
+                    mano_r_tgt,
+                    mask_r,
+                    mr,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
+                    smooth_max_weight=mano_joint_smooth_max_weight,
+                    smooth_max_tau=mano_joint_smooth_max_tau,
                 )
             if mano_vert_loss_weight > 0.0:
                 vv_l = mano_masked_vert_mse_m2(
@@ -282,6 +299,9 @@ def eval_one_epoch(
     mano_huber_delta: float,
     mano_param_loss_weight: float,
     mano_joint_loss_weight: float,
+    mano_joint_weight_21: torch.Tensor | None,
+    mano_joint_smooth_max_weight: float,
+    mano_joint_smooth_max_tau: float,
     mano_vert_loss_weight: float,
     mano_bone_loss_weight: float,
     mano_bone_dir_loss_weight: float,
@@ -373,10 +393,24 @@ def eval_one_epoch(
             ml, mr = mano_pca_layers
             if mano_joint_loss_weight > 0.0:
                 lj_l = mano_masked_joint_mse_m2(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
+                    out["mano_left"],
+                    mano_l_tgt,
+                    mask_l,
+                    ml,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
+                    smooth_max_weight=mano_joint_smooth_max_weight,
+                    smooth_max_tau=mano_joint_smooth_max_tau,
                 )
                 lj_r = mano_masked_joint_mse_m2(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
+                    out["mano_right"],
+                    mano_r_tgt,
+                    mask_r,
+                    mr,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
+                    smooth_max_weight=mano_joint_smooth_max_weight,
+                    smooth_max_tau=mano_joint_smooth_max_tau,
                 )
             if mano_vert_loss_weight > 0.0:
                 vv_l = mano_masked_vert_mse_m2(

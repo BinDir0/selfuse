@@ -13,9 +13,12 @@ from dataloader.mano_pca import (
 )
 
 MANO_PARAM_KEY_CHOICES = frozenset({"trans", "root_orient", "hand_pose", "betas"})
-DEFAULT_MANO_PARAM_KEYS = frozenset({"trans", "root_orient", "betas"})
+DEFAULT_MANO_PARAM_KEYS = frozenset({"trans", "root_orient"})
 
-# 21 joints in manopth order; wrist 0, four chains of 4 bones; edges (child, parent), same as vis skeleton.
+# 21 joints in manopth order; wrist 0, five chains ending at tips 4,8,12,16,20.
+MANO_FINGERTIP_JOINT_INDICES: tuple[int, ...] = (4, 8, 12, 16, 20)
+
+# Edges (child, parent), same as vis skeleton.
 _MANO_HAND_BONE_EDGES: tuple[tuple[int, int], ...] = (
     (1, 0),
     (2, 1),
@@ -117,6 +120,22 @@ def mano_hand_pose_pca_mse(
     return (per_bt * mask_bt).sum() / mask_bt.sum().clamp_min(1.0)
 
 
+def mano_joint_weight_vector_21(
+    preset: Literal["uniform", "fingertip"],
+    fingertip_scale: float,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Per-joint nonnegative weights for joint MSE; None means uniform mean (same as all-ones / 21)."""
+    if preset == "uniform":
+        return None
+    w = torch.ones(21, device=device, dtype=dtype)
+    for i in MANO_FINGERTIP_JOINT_INDICES:
+        w[i] = w[i] * fingertip_scale
+    return w
+
+
 def mano_masked_joint_mse_m2(
     pred: dict[str, torch.Tensor],
     tgt: dict[str, torch.Tensor],
@@ -124,6 +143,9 @@ def mano_masked_joint_mse_m2(
     mano_layer: nn.Module,
     *,
     chunk: int,
+    joint_weight_21: torch.Tensor | None = None,
+    smooth_max_weight: float = 0.0,
+    smooth_max_tau: float = 0.002,
 ) -> torch.Tensor:
     if mask_bt.sum() < 1e-6:
         return pred["trans"].new_tensor(0.0)
@@ -146,7 +168,19 @@ def mano_masked_joint_mse_m2(
         mano_layer,
         chunk=chunk,
     ) * mm_to_m
-    per_bt = (j_p - j_t).pow(2).sum(-1).mean(-1)
+    e = (j_p - j_t).pow(2).sum(-1)
+    if joint_weight_21 is None:
+        l_avg = e.mean(dim=-1)
+    else:
+        w = joint_weight_21.to(device=e.device, dtype=e.dtype).view(1, 1, -1)
+        l_avg = (e * w).sum(dim=-1) / w.sum().clamp_min(1e-8)
+    if smooth_max_weight > 0.0:
+        tau = max(float(smooth_max_tau), 1e-8)
+        t = e.new_tensor(tau)
+        l_smax = t * torch.logsumexp(e / t, dim=-1)
+        per_bt = l_avg + smooth_max_weight * l_smax
+    else:
+        per_bt = l_avg
     return (per_bt * mask_bt).sum() / mask_bt.sum().clamp_min(1.0)
 
 

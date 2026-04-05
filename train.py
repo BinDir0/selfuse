@@ -56,7 +56,7 @@ from dataloader.mano_pca import get_cached_mano_pca_decode_layers
 from egotransformer.model import EgoHandSTConfig, EgoHandSTModel
 from training.checkpoint import module_state_dict
 from training.logging_utils import log_line
-from training.losses import MANO_PARAM_KEY_CHOICES
+from training.losses import MANO_PARAM_KEY_CHOICES, mano_joint_weight_vector_21
 from training.train_loop import eval_one_epoch, train_one_epoch
 
 
@@ -112,7 +112,7 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-pose-weight",
         type=float,
-        default=1.0,
+        default=0.0,
         help="relative weight for hand_pose inside param regression when hand_pose is in --mano-param-keys",
     )
     m.add_argument(
@@ -126,9 +126,9 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-param-keys",
         type=str,
-        default="trans,root_orient,betas",
+        default="trans,root_orient",
         help="comma-separated subset of trans,root_orient,hand_pose,betas for vector regression "
-        "(default: trans,root_orient,betas)",
+        "(default: trans,root_orient; betas not in regression—supervise betas with e.g. --mano-param-keys ...,betas)",
     )
     m.add_argument(
         "--mano-param-loss",
@@ -153,26 +153,51 @@ def _parse_args() -> argparse.Namespace:
         "--mano-joint-loss-weight",
         type=float,
         default=2.0,
-        help="scale for 3D joint MSE (m^2); 0 disables; needs PCA decode",
+        help="scale for 3D joint MSE (m^2); main MANO geometric term by default; 0 disables; needs PCA decode",
+    )
+    m.add_argument(
+        "--mano-joint-weight-preset",
+        type=str,
+        default="fingertip",
+        choices=("uniform", "fingertip"),
+        help="default fingertip: upweight tips (MANO 4,8,12,16,20) by --mano-joint-fingertip-scale to stress finger pose; "
+        "uniform: unweighted mean over 21 joints",
+    )
+    m.add_argument(
+        "--mano-joint-fingertip-scale",
+        type=float,
+        default=2.0,
+        help="fingertip joint weight multiplier vs other joints (must be > 0); only used when preset is fingertip",
+    )
+    m.add_argument(
+        "--mano-joint-smooth-max-weight",
+        type=float,
+        default=0.0,
+        help="optional soft-max over per-joint errors (0=off, default); not used unless >0",
+    )
+    m.add_argument(
+        "--mano-joint-smooth-max-tau",
+        type=float,
+        default=0.002,
+        help="temperature (m^2) for --mano-joint-smooth-max-weight when enabled",
     )
     m.add_argument(
         "--mano-vert-loss-weight",
         type=float,
-        default=1.0,
-        help="scale for 3D vertex MSE (m^2); 0 disables; needs PCA decode",
+        default=0.0,
+        help="scale for 3D vertex MSE (m^2); default 0 (off); set >0 to enable; needs PCA decode",
     )
     m.add_argument(
         "--mano-bone-loss-weight",
         type=float,
-        default=1.0,
-        help="scale for bone-length MSE (m^2): 20 parent-child edges in 21-joint MANO order; "
-        "0 disables; needs PCA decode",
+        default=0.0,
+        help="scale for bone-length MSE (m^2), 20 edges; default 0 (off); needs PCA decode",
     )
     m.add_argument(
         "--mano-bone-dir-loss-weight",
         type=float,
-        default=1.0,
-        help="scale for bone unit-direction MSE (20 edges, dimensionless); 0 disables; needs PCA decode",
+        default=0.0,
+        help="scale for bone unit-direction MSE; default 0 (off); needs PCA decode",
     )
     m.add_argument(
         "--mano-hand-pca-loss-weight",
@@ -338,6 +363,15 @@ def main() -> None:
     except ValueError as e:
         raise SystemExit(str(e)) from e
     mano_param_loss = cast(Literal["l1", "l2", "huber"], args.mano_param_loss)
+    if args.mano_joint_fingertip_scale <= 0:
+        raise SystemExit("--mano-joint-fingertip-scale must be > 0")
+    mano_joint_preset = cast(Literal["uniform", "fingertip"], args.mano_joint_weight_preset)
+    mano_joint_w21 = mano_joint_weight_vector_21(
+        mano_joint_preset,
+        args.mano_joint_fingertip_scale,
+        device=device,
+        dtype=torch.float32,
+    )
 
     run_root = Path(args.run_dir.strip()).resolve() if args.run_dir.strip() else None
     if run_root is not None:
@@ -516,6 +550,9 @@ def main() -> None:
                 mano_huber_delta=args.mano_huber_delta,
                 mano_param_loss_weight=args.mano_param_loss_weight,
                 mano_joint_loss_weight=args.mano_joint_loss_weight,
+                mano_joint_weight_21=mano_joint_w21,
+                mano_joint_smooth_max_weight=args.mano_joint_smooth_max_weight,
+                mano_joint_smooth_max_tau=args.mano_joint_smooth_max_tau,
                 mano_vert_loss_weight=args.mano_vert_loss_weight,
                 mano_bone_loss_weight=args.mano_bone_loss_weight,
                 mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
@@ -558,6 +595,9 @@ def main() -> None:
                 mano_huber_delta=args.mano_huber_delta,
                 mano_param_loss_weight=args.mano_param_loss_weight,
                 mano_joint_loss_weight=args.mano_joint_loss_weight,
+                mano_joint_weight_21=mano_joint_w21,
+                mano_joint_smooth_max_weight=args.mano_joint_smooth_max_weight,
+                mano_joint_smooth_max_tau=args.mano_joint_smooth_max_tau,
                 mano_vert_loss_weight=args.mano_vert_loss_weight,
                 mano_bone_loss_weight=args.mano_bone_loss_weight,
                 mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
@@ -607,6 +647,9 @@ def main() -> None:
                     mano_huber_delta=args.mano_huber_delta,
                     mano_param_loss_weight=args.mano_param_loss_weight,
                     mano_joint_loss_weight=args.mano_joint_loss_weight,
+                    mano_joint_weight_21=mano_joint_w21,
+                    mano_joint_smooth_max_weight=args.mano_joint_smooth_max_weight,
+                    mano_joint_smooth_max_tau=args.mano_joint_smooth_max_tau,
                     mano_vert_loss_weight=args.mano_vert_loss_weight,
                     mano_bone_loss_weight=args.mano_bone_loss_weight,
                     mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
