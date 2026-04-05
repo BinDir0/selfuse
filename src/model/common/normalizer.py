@@ -567,33 +567,6 @@ def _normalize(x, params, forward=True):
     scale = params['scale']
     offset = params['offset']
 
-    # clip outliers using quantiles before forward normalization
-    if forward and 'input_stats' in params:
-        input_stats = params['input_stats']
-        if 'q01' in input_stats and 'q99' in input_stats:
-            q01 = input_stats['q01']
-            q99 = input_stats['q99']
-            ignored_dim_mask = params.get('ignored_dim_mask')
-            if ignored_dim_mask is not None:
-                ignored_dim_mask = ignored_dim_mask > 0.5
-                q01 = q01.clone()
-                q99 = q99.clone()
-                q01[ignored_dim_mask] = float('-inf')
-                q99[ignored_dim_mask] = float('inf')
-            if is_numpy:
-                q01 = q01.cpu().numpy()
-                q99 = q99.cpu().numpy()
-            else:
-                q01 = q01.to(x.device)
-                q99 = q99.to(x.device)
-            src_shape = x.shape
-            x = x.reshape(-1, q01.shape[0])
-            if is_numpy:
-                x = np.clip(x, q01, q99)
-            else:
-                x = torch.clamp(x, q01, q99)
-            x = x.reshape(src_shape)
-
     if is_numpy:
         scale = scale.cpu().numpy()
         offset = offset.cpu().numpy()
