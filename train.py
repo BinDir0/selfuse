@@ -115,13 +115,20 @@ def _parse_args() -> argparse.Namespace:
         default=1.0,
         help="relative weight for hand_pose inside param regression when hand_pose is in --mano-param-keys",
     )
+    m.add_argument(
+        "--mano-root-orient-weight",
+        type=float,
+        default=2.0,
+        help="relative weight for root_orient inside param regression when root_orient is in --mano-param-keys "
+        "(default 2.0 vs 1.0 for trans/betas)",
+    )
     m.add_argument("--mano-no-left-root-fix", action="store_true")
     m.add_argument(
         "--mano-param-keys",
         type=str,
-        default="trans,betas",
+        default="trans,root_orient,betas",
         help="comma-separated subset of trans,root_orient,hand_pose,betas for vector regression "
-        "(default: trans,betas; no axis-angle hand_pose unless listed)",
+        "(default: trans,root_orient,betas)",
     )
     m.add_argument(
         "--mano-param-loss",
@@ -139,8 +146,8 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-param-loss-weight",
         type=float,
-        default=0.25,
-        help="scale for vector regression on selected --mano-param-keys",
+        default=0.5,
+        help="scale for vector regression on --mano-param-keys; 0 disables",
     )
     m.add_argument(
         "--mano-joint-loss-weight",
@@ -151,8 +158,21 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-vert-loss-weight",
         type=float,
-        default=0.25,
+        default=1.0,
         help="scale for 3D vertex MSE (m^2); 0 disables; needs PCA decode",
+    )
+    m.add_argument(
+        "--mano-bone-loss-weight",
+        type=float,
+        default=1.0,
+        help="scale for bone-length MSE (m^2): 20 parent-child edges in 21-joint MANO order; "
+        "0 disables; needs PCA decode",
+    )
+    m.add_argument(
+        "--mano-bone-dir-loss-weight",
+        type=float,
+        default=1.0,
+        help="scale for bone unit-direction MSE (20 edges, dimensionless); 0 disables; needs PCA decode",
     )
     m.add_argument(
         "--mano-hand-pca-loss-weight",
@@ -491,11 +511,14 @@ def main() -> None:
                 image_size=cfg.image_size,
                 apply_left_root_fix=apply_left,
                 mano_pose_weight=args.mano_pose_weight,
+                mano_root_orient_weight=args.mano_root_orient_weight,
                 mano_param_loss=mano_param_loss,
                 mano_huber_delta=args.mano_huber_delta,
                 mano_param_loss_weight=args.mano_param_loss_weight,
                 mano_joint_loss_weight=args.mano_joint_loss_weight,
                 mano_vert_loss_weight=args.mano_vert_loss_weight,
+                mano_bone_loss_weight=args.mano_bone_loss_weight,
+                mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
                 mano_joint_chunk=args.mano_joint_chunk,
                 mano_param_keys=mano_param_keys,
                 mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
@@ -530,11 +553,14 @@ def main() -> None:
                 image_size=cfg.image_size,
                 apply_left_root_fix=apply_left,
                 mano_pose_weight=args.mano_pose_weight,
+                mano_root_orient_weight=args.mano_root_orient_weight,
                 mano_param_loss=mano_param_loss,
                 mano_huber_delta=args.mano_huber_delta,
                 mano_param_loss_weight=args.mano_param_loss_weight,
                 mano_joint_loss_weight=args.mano_joint_loss_weight,
                 mano_vert_loss_weight=args.mano_vert_loss_weight,
+                mano_bone_loss_weight=args.mano_bone_loss_weight,
+                mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
                 mano_joint_chunk=args.mano_joint_chunk,
                 mano_param_keys=mano_param_keys,
                 mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
@@ -576,11 +602,14 @@ def main() -> None:
                     image_size=cfg.image_size,
                     apply_left_root_fix=apply_left,
                     mano_pose_weight=args.mano_pose_weight,
+                    mano_root_orient_weight=args.mano_root_orient_weight,
                     mano_param_loss=mano_param_loss,
                     mano_huber_delta=args.mano_huber_delta,
                     mano_param_loss_weight=args.mano_param_loss_weight,
                     mano_joint_loss_weight=args.mano_joint_loss_weight,
                     mano_vert_loss_weight=args.mano_vert_loss_weight,
+                    mano_bone_loss_weight=args.mano_bone_loss_weight,
+                    mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
                     mano_joint_chunk=args.mano_joint_chunk,
                     mano_param_keys=mano_param_keys,
                     mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,

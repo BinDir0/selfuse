@@ -13,7 +13,31 @@ from dataloader.mano_pca import (
 )
 
 MANO_PARAM_KEY_CHOICES = frozenset({"trans", "root_orient", "hand_pose", "betas"})
-DEFAULT_MANO_PARAM_KEYS = frozenset({"trans", "betas"})
+DEFAULT_MANO_PARAM_KEYS = frozenset({"trans", "root_orient", "betas"})
+
+# 21 joints in manopth order; wrist 0, four chains of 4 bones; edges (child, parent), same as vis skeleton.
+_MANO_HAND_BONE_EDGES: tuple[tuple[int, int], ...] = (
+    (1, 0),
+    (2, 1),
+    (3, 2),
+    (4, 3),
+    (5, 0),
+    (6, 5),
+    (7, 6),
+    (8, 7),
+    (9, 0),
+    (10, 9),
+    (11, 10),
+    (12, 11),
+    (13, 0),
+    (14, 13),
+    (15, 14),
+    (16, 15),
+    (17, 0),
+    (18, 17),
+    (19, 18),
+    (20, 19),
+)
 
 
 def bce_existence(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -46,6 +70,7 @@ def mano_regression_loss(
     *,
     param_keys: frozenset[str],
     hand_pose_weight: float = 1.0,
+    root_orient_weight: float = 1.0,
     param_loss: Literal["l1", "l2", "huber"] = "l2",
     huber_delta: float = 1.0,
 ) -> torch.Tensor:
@@ -65,7 +90,7 @@ def mano_regression_loss(
         w_sum += weight
 
     add_param("trans", 1.0)
-    add_param("root_orient", 1.0)
+    add_param("root_orient", root_orient_weight)
     add_param("hand_pose", hand_pose_weight)
     add_param("betas", 1.0)
     if w_sum <= 0.0:
@@ -123,6 +148,93 @@ def mano_masked_joint_mse_m2(
     ) * mm_to_m
     per_bt = (j_p - j_t).pow(2).sum(-1).mean(-1)
     return (per_bt * mask_bt).sum() / mask_bt.sum().clamp_min(1.0)
+
+
+def mano_masked_bone_length_mse_m2(
+    pred: dict[str, torch.Tensor],
+    tgt: dict[str, torch.Tensor],
+    mask_bt: torch.Tensor,
+    mano_layer: nn.Module,
+    *,
+    chunk: int,
+) -> torch.Tensor:
+    """MSE of parent-child bone lengths (m) vs GT; mean over 20 edges, then mask-mean over B,T."""
+    if mask_bt.sum() < 1e-6:
+        return pred["trans"].new_tensor(0.0)
+    mm_to_m = 0.001
+    with torch.no_grad():
+        j_t = mano_parameter_dict_to_joints_bt(
+            tgt["trans"],
+            tgt["root_orient"],
+            tgt["hand_pose"],
+            tgt["betas"],
+            mano_layer,
+            chunk=chunk,
+        )
+        j_t = j_t * mm_to_m
+    j_p = (
+        mano_parameter_dict_to_joints_bt(
+            pred["trans"],
+            pred["root_orient"],
+            pred["hand_pose"],
+            pred["betas"],
+            mano_layer,
+            chunk=chunk,
+        )
+        * mm_to_m
+    )
+    errs: list[torch.Tensor] = []
+    for c, p in _MANO_HAND_BONE_EDGES:
+        len_p = (j_p[..., c, :] - j_p[..., p, :]).norm(dim=-1)
+        len_t = (j_t[..., c, :] - j_t[..., p, :]).norm(dim=-1)
+        errs.append((len_p - len_t).pow(2))
+    err_bt = torch.stack(errs, dim=-1).mean(dim=-1)
+    return (err_bt * mask_bt).sum() / mask_bt.sum().clamp_min(1.0)
+
+
+def mano_masked_bone_direction_mse(
+    pred: dict[str, torch.Tensor],
+    tgt: dict[str, torch.Tensor],
+    mask_bt: torch.Tensor,
+    mano_layer: nn.Module,
+    *,
+    chunk: int,
+) -> torch.Tensor:
+    """MSE of unit bone directions vs GT (dimensionless); 20 edges; same graph as bone-length loss."""
+    if mask_bt.sum() < 1e-6:
+        return pred["trans"].new_tensor(0.0)
+    mm_to_m = 0.001
+    with torch.no_grad():
+        j_t = mano_parameter_dict_to_joints_bt(
+            tgt["trans"],
+            tgt["root_orient"],
+            tgt["hand_pose"],
+            tgt["betas"],
+            mano_layer,
+            chunk=chunk,
+        )
+        j_t = j_t * mm_to_m
+    j_p = (
+        mano_parameter_dict_to_joints_bt(
+            pred["trans"],
+            pred["root_orient"],
+            pred["hand_pose"],
+            pred["betas"],
+            mano_layer,
+            chunk=chunk,
+        )
+        * mm_to_m
+    )
+    errs: list[torch.Tensor] = []
+    eps = 1e-6
+    for c, p in _MANO_HAND_BONE_EDGES:
+        d_p = j_p[..., c, :] - j_p[..., p, :]
+        d_t = j_t[..., c, :] - j_t[..., p, :]
+        u_p = d_p / d_p.norm(dim=-1, keepdim=True).clamp_min(eps)
+        u_t = d_t / d_t.norm(dim=-1, keepdim=True).clamp_min(eps)
+        errs.append((u_p - u_t).pow(2).sum(dim=-1))
+    err_bt = torch.stack(errs, dim=-1).mean(dim=-1)
+    return (err_bt * mask_bt).sum() / mask_bt.sum().clamp_min(1.0)
 
 
 def mano_masked_vert_mse_m2(
