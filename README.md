@@ -29,7 +29,7 @@ python scripts/make_episode_split.py --data-path /path/to/tar_root --out-dir spl
 单卡：
 
 ```bash
-python train.py --data-path /path/to/tar_root --episodes-file splits/my_split/train.txt --run-dir runs/exp --tensorboard-dir runs/exp/tb --mano-left-root-fix 
+python train.py --data-path /path/to/tar_root --episodes-file splits/my_split/train.txt --run-dir runs/exp --tensorboard-dir runs/exp/tb --mano-no-left-root-fix 
 ```
 
 多卡（例：8 卡）：
@@ -40,7 +40,7 @@ torchrun --standalone --nproc_per_node=8 train.py \
   --episodes-file splits/my_split/train.txt \
   --run-dir runs/exp \
   --tensorboard-dir runs/exp/tb
-  --mano-left-root-fix
+  --mano-no-left-root-fix
 ```
 
 验证集：`--val-episodes-file splits/my_split/val.txt`。仅验证：`--eval-only --resume .../latest.pt`。
