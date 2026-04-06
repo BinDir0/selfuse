@@ -76,6 +76,11 @@ PARTS = {
         "module": "src.tests.full_chain_verification.part8_accelerate_training",
         "needs_gpu": True,
     },
+    9: {
+        "name": "Part 9: Input Ablation Verification",
+        "module": "src.tests.full_chain_verification.part9_input_ablation",
+        "needs_gpu": True,
+    },
 }
 
 
@@ -109,6 +114,24 @@ def run_part(part_id: int, part_info: dict, args: argparse.Namespace) -> bool:
         else:
             print(f"  SKIP {part_info['name']} (requires --model-path)")
             return True
+    elif part_id == 9:
+        if args.config_path:
+            cmd.extend(["--config-path", args.config_path])
+        else:
+            print(f"  SKIP {part_info['name']} (requires --config-path)")
+            return True
+        if args.vla_shard:
+            cmd.extend(["--vla-shard", args.vla_shard])
+        else:
+            print(f"  SKIP {part_info['name']} (requires --vla-shard)")
+            return True
+        if args.normalizer_path:
+            cmd.extend(["--normalizer-path", args.normalizer_path])
+        else:
+            print(f"  SKIP {part_info['name']} (requires --normalizer-path)")
+            return True
+        if args.checkpoint_path:
+            cmd.extend(["--checkpoint-path", args.checkpoint_path])
     elif part_id in (3, 5, 6, 8):
         if args.config_path:
             cmd.extend(["--config-path", args.config_path])

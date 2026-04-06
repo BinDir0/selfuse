@@ -47,7 +47,8 @@
 | **Part 6** | Inference + Train-Infer Parity | Yes | No (mock) | 10 |
 | **Part 7** | E2E Training + Checkpoint | Yes | Yes (optional shard) | 14 |
 | **Part 8** | Accelerate Training Verification | Yes | No (config) | 13 |
-| | | | **Total** | **120 + Part 0** |
+| **Part 9** | Input Ablation (Real Data) | Yes | Yes (shard) | 17 |
+| | | | **Total** | **137 + Part 0** |
 
 ---
 
