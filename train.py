@@ -7,10 +7,11 @@ python train.py \
   --episodes-file splits/train.txt
 
 torchrun --standalone --nproc_per_node=8 train.py \
-  --data-path /share_data/zhangtingrui/datasets/taco_v2 \
-  --episodes-file splits/train.txt \
+  --data-path /share_data/zhangtingrui/datasets/oakink2_v4 \
+  --episodes-file splits/oakink_full/train.txt \
   --run-dir runs/my_exp1 \
-  --tensorboard-dir runs/my_exp1/tb
+  --tensorboard-dir runs/my_exp1/tb \
+  --save-every-steps 100
 
 
 # eval_only:
@@ -22,11 +23,11 @@ python train.py --eval-only \
   --tensorboard-dir runs/my_exp1/tb
 
 torchrun --standalone --nproc_per_node=8 train.py --eval-only \
-  --resume runs/my_exp1/checkpoints/latest.pt \
-  --data-path /share_data/zhangtingrui/datasets/taco_v2 \
-  --val-episodes-file splits/val.txt \
-  --run-dir runs/my_exp1 \
-  --tensorboard-dir runs/my_exp1/tb
+    --resume runs/my_exp2/checkpoints/latest.pt \
+    --data-path /share_data/zhangtingrui/datasets/oakink2_v4 \
+    --val-episodes-file splits/oakink_full/val.txt \
+    --run-dir runs/my_exp2 \
+    --tensorboard-dir runs/my_exp2/tb_val
 
 tensorboard --logdir runs/my_exp1/tb
 
@@ -51,7 +52,12 @@ import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
-from dataloader import EpisodeWindowDataLoader
+from dataloader import (
+    DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
+    DEFAULT_WINDOW_SHUFFLE_SEED,
+    DEFAULT_WINDOW_SHUFFLE_WINDOWS,
+    EpisodeWindowDataLoader,
+)
 from dataloader.mano_pca import get_cached_mano_pca_decode_layers
 from egotransformer.model import EgoHandSTConfig, EgoHandSTModel
 from training.checkpoint import module_state_dict
@@ -93,6 +99,23 @@ def _parse_args() -> argparse.Namespace:
     d.add_argument("--stride", type=int, default=1)
     d.add_argument("--batch-size", type=int, default=32, help="per-GPU batch (global ~ batch * num GPUs)")
     d.add_argument("--workers", type=int, default=0)
+    d.add_argument(
+        "--no-shuffle-windows",
+        action="store_true",
+        help="disable training window shuffle; by default shuffle is enabled",
+    )
+    d.add_argument(
+        "--shuffle-buffer-size",
+        type=int,
+        default=DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
+        help="training only: streaming window-shuffle buffer size when shuffle is enabled; 0/1 keeps sequential order",
+    )
+    d.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=-1,
+        help="training only: base seed for window shuffle; default uses --seed",
+    )
 
     o = p.add_argument_group("optim")
     o.add_argument("--epochs", type=int, default=5)
@@ -126,9 +149,9 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-param-keys",
         type=str,
-        default="trans,root_orient,betas",
+        default="trans,root_orient,hand_pose,betas",
         help="comma-separated subset of trans,root_orient,hand_pose,betas for vector regression "
-        "(default: trans,root_orient,betas)",
+        "(default: trans,root_orient,hand_pose,betas)",
     )
     m.add_argument(
         "--mano-param-loss",
@@ -280,6 +303,9 @@ def _build_loader(
     dist_rank: int = 0,
     dist_world_size: int = 1,
     ddp_read_all_shards: bool = False,
+    shuffle_windows: bool = DEFAULT_WINDOW_SHUFFLE_WINDOWS,
+    shuffle_buffer_size: int = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
+    shuffle_seed: int = DEFAULT_WINDOW_SHUFFLE_SEED,
 ) -> DataLoader:
     ef = episodes_file.strip()
     sf = (episode_filter or "").strip() or None
@@ -295,6 +321,9 @@ def _build_loader(
         dist_rank=dist_rank,
         dist_world_size=dist_world_size,
         ddp_read_all_shards=ddp_read_all_shards,
+        shuffle_windows=shuffle_windows,
+        shuffle_buffer_size=shuffle_buffer_size,
+        shuffle_seed=shuffle_seed,
         batch_size=batch_size,
         num_workers=workers,
         pin_memory=pin_memory,
@@ -338,6 +367,9 @@ def main() -> None:
     except ValueError as e:
         raise SystemExit(str(e)) from e
     mano_param_loss = cast(Literal["l1", "l2", "huber"], args.mano_param_loss)
+    shuffle_seed = args.seed if int(args.shuffle_seed) < 0 else int(args.shuffle_seed)
+    shuffle_buffer_size = max(0, int(args.shuffle_buffer_size))
+    train_shuffle_windows = (not args.no_shuffle_windows) and shuffle_buffer_size > 1
 
     run_root = Path(args.run_dir.strip()).resolve() if args.run_dir.strip() else None
     if run_root is not None:
@@ -411,6 +443,9 @@ def main() -> None:
                 dist_rank=rank,
                 dist_world_size=world_size,
                 ddp_read_all_shards=ddp_read_all,
+                shuffle_windows=train_shuffle_windows,
+                shuffle_buffer_size=shuffle_buffer_size,
+                shuffle_seed=shuffle_seed,
             )
         except ValueError as e:
             raise SystemExit(str(e)) from e
@@ -429,6 +464,9 @@ def main() -> None:
             episode_filter=None,
             dist_rank=0,
             dist_world_size=1,
+            shuffle_windows=False,
+            shuffle_buffer_size=0,
+            shuffle_seed=shuffle_seed,
         )
 
     apply_left = not args.mano_no_left_root_fix
@@ -496,7 +534,9 @@ def main() -> None:
                 f"start  dist={use_dist} rank={rank}/{world_size} device={device}  "
                 f"epochs={args.epochs}  local_batch={args.batch_size}  "
                 f"(global_batch≈{args.batch_size * world_size})  "
-                f"max_steps_per_rank={max_steps or 'inf'}  save_every_steps={save_every_steps or 'off'}",
+                f"max_steps_per_rank={max_steps or 'inf'}  save_every_steps={save_every_steps or 'off'}  "
+                f"shuffle_windows={train_shuffle_windows}  shuffle_buffer={shuffle_buffer_size}  "
+                f"shuffle_seed={shuffle_seed}",
                 log_path,
             )
 
@@ -545,6 +585,8 @@ def main() -> None:
         for ep in range(1, args.epochs + 1):
             if max_steps > 0 and optim_steps >= max_steps:
                 break
+            if loader is not None and hasattr(loader.dataset, "set_epoch"):
+                loader.dataset.set_epoch(ep)
             stats, global_step, optim_steps, hit_max = train_one_epoch(
                 loader,
                 optim,

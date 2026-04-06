@@ -163,6 +163,8 @@ def main() -> None:
         window_size=args.window_size,
         stride=args.stride,
         episode_filter=args.episode,
+        shuffle_windows=False,
+        shuffle_buffer_size=0,
         batch_size=args.batch_size,
         num_workers=args.workers,
     )
