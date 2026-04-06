@@ -128,6 +128,46 @@ def infer_flow_action(model, batch: dict, **kwargs):
     return result
 
 
+def _truncate_action_tokens_in_batch(
+    batch: dict[str, Any], action_token_id: int, keep_n: int,
+) -> None:
+    """Remove excess action tokens from sequence tensors in-place.
+
+    When AR inference uses max_new_tokens < total action tokens in the
+    sequence, the input_ids still contains the original full set of <action>
+    slots.  masked_scatter requires the embedding tensor to cover every True
+    position in the mask, so we must trim the sequence to match.
+
+    Modifies batch["input_ids"], batch["attention_mask"], batch["labels"],
+    and batch["mm_token_type_ids"] in-place by removing action token positions
+    beyond ``keep_n``.
+    """
+    input_ids = batch["input_ids"]  # [B, L]
+    action_mask = input_ids == action_token_id  # [B, L]
+
+    # Build a per-position cumulative count of action tokens
+    cum_action = action_mask.cumsum(dim=1)  # [B, L]
+    # Positions to remove: action tokens whose cumulative index > keep_n
+    remove_mask = action_mask & (cum_action > keep_n)  # [B, L]
+    keep_mask = ~remove_mask  # [B, L]
+
+    # Handle each sample independently (batch is typically 1 for inference).
+    seq_keys = ["input_ids", "attention_mask", "labels", "mm_token_type_ids"]
+    tensors_to_update = {}
+    for key in seq_keys:
+        if key in batch and torch.is_tensor(batch[key]) and batch[key].ndim == 2:
+            tensors_to_update[key] = []
+
+    B = input_ids.shape[0]
+    for b in range(B):
+        keep_indices = keep_mask[b].nonzero(as_tuple=True)[0]
+        for key in tensors_to_update:
+            tensors_to_update[key].append(batch[key][b, keep_indices])
+
+    for key in tensors_to_update:
+        batch[key] = torch.stack(tensors_to_update[key], dim=0)
+
+
 def infer_ar_action(
     model,
     batch: dict,
@@ -142,10 +182,19 @@ def infer_ar_action(
     action_valid_mask = _build_action_valid_mask(working_batch, model.action_horizon, model.action_dim)
     action_step_mask = action_valid_mask.any(dim=-1)
     batch_size, action_len, _ = action_valid_mask.shape
+    original_action_len = action_len
     if max_new_tokens is not None:
         action_len = min(action_len, int(max_new_tokens))
         action_valid_mask = action_valid_mask[:, :action_len]
         action_step_mask = action_step_mask[:, :action_len]
+
+    # When action_len is truncated, remove excess <action> tokens from the
+    # sequence tensors so that masked_scatter in replace_slot_embeddings sees
+    # the correct number of action slots.
+    if action_len < original_action_len:
+        _truncate_action_tokens_in_batch(
+            working_batch, model.backbone.action_token_id, action_len,
+        )
 
     device = working_batch["input_ids"].device
     action_dtype = working_batch.get("states", torch.empty((), device=device, dtype=torch.float32)).dtype

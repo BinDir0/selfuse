@@ -533,8 +533,8 @@ class DiffLoss(nn.Module):
         if num_steps is None:
             num_steps = self.num_inference_steps
         
-        # Initial noise
-        x = torch.randn(batch_size, self.in_channels, device=device) * temperature
+        # Initial noise (match z dtype to avoid float32 vs bfloat16 mismatch)
+        x = torch.randn(batch_size, self.in_channels, device=device, dtype=z.dtype) * temperature
         
         # CFG setup
         if cfg != 1.0:
@@ -547,7 +547,7 @@ class DiffLoss(nn.Module):
 
         # Euler integration loop (t from 0 to 1)
         dt = 1.0 / num_steps
-        t_curr = torch.zeros(x.shape[0], device=device)
+        t_curr = torch.zeros(x.shape[0], device=device, dtype=z.dtype)
         
         for step in range(num_steps):
             # Model predicts velocity
