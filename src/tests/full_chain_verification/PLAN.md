@@ -47,8 +47,8 @@
 | **Part 6** | Inference + Train-Infer Parity | Yes | No (mock) | 10 |
 | **Part 7** | E2E Training + Checkpoint | Yes | Yes (optional shard) | 14 |
 | **Part 8** | Accelerate Training Verification | Yes | No (config) | 13 |
-| **Part 9** | Input Ablation (Real Data) | Yes | Yes (shard) | 17 |
-| | | | **Total** | **137 + Part 0** |
+| **Part 9** | Input Ablation (Real Data) | Yes | Yes (shard) | 19 |
+| | | | **Total** | **139 + Part 0** |
 
 ---
 
@@ -241,3 +241,29 @@ Visualizations per dataset:
 - 7.4 Gradient health: per-component norms, no unused parameters
 - 7.5 Batch dtypes correctness
 - 7.6 Checkpoint: load without errors, inference produces reasonable values
+
+## Part 8: Accelerate Training Verification
+
+**File**: `part8_accelerate_training.py`  |  **Tests**: 16
+
+- 8.1 FSDP wrap targets importable and present in model
+- 8.2 Parameter groups: coverage, no duplicates, lr/wd/betas match config, decay/nodecay split
+- 8.3 Production LR schedule shape, VLM freeze scheduler
+- 8.4 preprocess_batch: required keys, dtypes
+- 8.5 Gradient clipping: per-component param lists, clip values, clip isolation
+- 8.6 NaN guard: scalar_metric_value + isfinite, skip logic
+- 8.7 Gradient accumulation: 2 micro-steps → finite gradients
+
+## Part 9: Input Ablation (Real Data)
+
+**File**: `part9_input_ablation.py`  |  **Tests**: 19
+
+- 9.1 Visual ablation: zeroing visual embeddings changes inference output / flow loss
+- 9.2 State ablation: zeroing states changes inference output / flow loss
+- 9.3 Per-field state ablation: wrist_state / hand_state individually affect output
+- 9.4 Instruction/text ablation: different instructions → different actions, zeroing text embeddings
+- 9.5 Component ablation (hooks): state_encoder / time_embedding / action_decoder
+- 9.6 DiffLoss condition isolation: zeroing latent_condition_projector changes diffusion_loss but NOT flow_loss
+- 9.7 Prefix cache ablation: zeroed prefix KV cache → very different actions
+- 9.8 Action leakage: zeroed backbone action input does NOT change flow_loss, ar_action_encoder not called during inference
+- 9.9 Attention weight distribution: temporarily switch to eager attention, measure prefix vs action attention share per layer, breakdown by visual/state/text tokens, per-head analysis, heatmap visualization
