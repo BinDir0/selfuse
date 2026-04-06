@@ -23,14 +23,30 @@ def wds_batch_to_training_batch(
     device: torch.device,
     image_size: int,
     image_scale: float = 1.0 / 255.0,
-    apply_left_root_fix: bool = True,
+    apply_left_root_fix: bool = False,
     mano_pca_layers: tuple[torch.nn.Module, torch.nn.Module] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    dict[str, torch.Tensor],
+    dict[str, torch.Tensor],
+    torch.Tensor,
+]:
     video = to_float_tensor(batch["video"], device)
     if video.dim() == 5 and video.max() > 1.5:
         video = video * image_scale
     b, t, c, h, w = video.shape
+    intr_bt = to_float_tensor(batch["intrinsic"], device)
+    if intr_bt.dim() != 3 or intr_bt.shape[-1] != 4:
+        raise ValueError(f"expected batch['intrinsic'] (B,T,4) fx,fy,cx,cy, got {tuple(intr_bt.shape)}")
     if (h, w) != (image_size, image_size):
+        sx = image_size / max(w, 1)
+        sy = image_size / max(h, 1)
+        intr_bt = intr_bt.clone()
+        intr_bt[..., 0] *= sx
+        intr_bt[..., 1] *= sy
+        intr_bt[..., 2] *= sx
+        intr_bt[..., 3] *= sy
         video = F.interpolate(
             video.flatten(0, 1),
             size=(image_size, image_size),
@@ -67,7 +83,7 @@ def wds_batch_to_training_batch(
         e4,
         to_float_tensor(batch["right_shape"], device),
         is_left=False,
-        apply_left_root_fix=True,
+        apply_left_root_fix=False,
         hand_pose_fill=hand_r_fill,
     )
-    return video, existence, mano_l, mano_r
+    return video, existence, mano_l, mano_r, intr_bt

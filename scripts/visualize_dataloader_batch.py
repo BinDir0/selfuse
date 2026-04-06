@@ -159,6 +159,7 @@ def main() -> None:
         episode_filter=args.episode,
         batch_size=args.batch_size,
         num_workers=args.workers,
+        shuffle=False,
     )
 
     try:
