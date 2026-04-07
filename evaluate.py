@@ -203,6 +203,7 @@ def main(eval_cfg):
     all_gt = []
     vis_data_list = []
 
+    collected = 0
     for batch in tqdm(dataloader, desc="Evaluating"):
         inputs = build_eval_inputs(batch, device, dtype)
 
@@ -227,6 +228,7 @@ def main(eval_cfg):
         gt_unnorm = normalizer[norm_key].unnormalize(batch["actions"].float())
         all_pred.append(pred_unnorm * valid_mask)
         all_gt.append(gt_unnorm * valid_mask)
+        collected += pred_unnorm.shape[0]
 
         # Collect visualization data for all samples
         if generate_report:
@@ -245,6 +247,9 @@ def main(eval_cfg):
                     global_index=len(vis_data_list),
                 )
                 vis_data_list.append(vis_sample)
+
+        if collected >= eval_cfg.num_samples:
+            break
 
     if not all_pred:
         print("ERROR: No samples were evaluated. Check dataset paths and shards.")

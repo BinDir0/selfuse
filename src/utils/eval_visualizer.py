@@ -26,7 +26,7 @@ CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 # Qwen3VL vision patchification parameters.
 # Source: https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_vl/configuration_qwen2_vl.py
 TEMPORAL_PATCH_SIZE = 2
-PATCH_SIZE = 14
+PATCH_SIZE = 16
 # Spatial merge size: the processor groups patches into merge_size x merge_size blocks
 # before flattening, which changes the spatial ordering of patches in pixel_values_videos.
 # Source: transformers/models/qwen3_vl/video_processing_qwen3_vl.py
