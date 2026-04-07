@@ -242,11 +242,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             timestamp_seed = int(objects[0])
             run_seed = base_seed + timestamp_seed
 
-        torch.manual_seed(run_seed)
+        # Per-rank offset for independent random augmentation across devices
+        per_device_seed = run_seed + accelerator.process_index
+        torch.manual_seed(per_device_seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(run_seed)
-        np.random.seed(run_seed % (2**32 - 1))
-        random.seed(run_seed)
+            torch.cuda.manual_seed_all(per_device_seed)
+        np.random.seed(per_device_seed % (2**32 - 1))
+        random.seed(per_device_seed)
         self.run_seed = run_seed
 
         accelerator.wait_for_everyone()
