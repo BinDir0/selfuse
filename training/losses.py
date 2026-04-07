@@ -38,6 +38,91 @@ def masked_param_tensor_loss(
     return (elem * mask_exp).sum() / denom
 
 
+def _skew_from_vec3(v: torch.Tensor) -> torch.Tensor:
+    """v (...,3) -> skew-symmetric matrix (...,3,3)."""
+    z = torch.zeros_like(v[..., 0])
+    vx, vy, vz = v[..., 0], v[..., 1], v[..., 2]
+    row0 = torch.stack([z, -vz, vy], dim=-1)
+    row1 = torch.stack([vz, z, -vx], dim=-1)
+    row2 = torch.stack([-vy, vx, z], dim=-1)
+    return torch.stack([row0, row1, row2], dim=-2)
+
+
+def _axis_angle_to_rotmat(axis_angle: torch.Tensor) -> torch.Tensor:
+    """axis-angle (...,3) -> rotation matrix (...,3,3)."""
+    eps = 1e-6
+    theta = torch.linalg.norm(axis_angle, dim=-1, keepdim=True).clamp_min(eps)
+    axis = axis_angle / theta
+    k = _skew_from_vec3(axis)
+    eye = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype)
+    eye = eye.view(*([1] * (axis_angle.ndim - 1)), 3, 3)
+    sin_t = torch.sin(theta)[..., None]
+    cos_t = torch.cos(theta)[..., None]
+    return eye + sin_t * k + (1.0 - cos_t) * (k @ k)
+
+
+def masked_root_orient_geodesic_loss(
+    pred_root: torch.Tensor,
+    tgt_root: torch.Tensor,
+    mask_bt: torch.Tensor,
+    *,
+    kind: Literal["l1", "l2", "huber"],
+    huber_delta: float,
+) -> torch.Tensor:
+    """Geodesic loss on SO(3) for root_orient (axis-angle inputs)."""
+    if mask_bt.sum() < 1e-6:
+        return pred_root.new_tensor(0.0)
+    rp = _axis_angle_to_rotmat(pred_root)
+    rt = _axis_angle_to_rotmat(tgt_root)
+    rel = rp.transpose(-1, -2) @ rt
+    tr = rel.diagonal(dim1=-1, dim2=-2).sum(-1)
+    cos = ((tr - 1.0) * 0.5).clamp(min=-1.0 + 1e-6, max=1.0 - 1e-6)
+    ang = torch.acos(cos)
+    if kind == "l1":
+        elem = ang.abs()
+    elif kind == "l2":
+        elem = ang * ang
+    else:
+        elem = F.smooth_l1_loss(ang, torch.zeros_like(ang), reduction="none", beta=huber_delta)
+    denom = mask_bt.sum().clamp_min(1.0)
+    return (elem * mask_bt).sum() / denom
+
+
+def masked_hand_pose_geodesic_loss(
+    pred_pose: torch.Tensor,
+    tgt_pose: torch.Tensor,
+    mask_bt: torch.Tensor,
+    *,
+    kind: Literal["l1", "l2", "huber"],
+    huber_delta: float,
+) -> torch.Tensor:
+    """Per-joint geodesic loss on SO(3) for hand_pose axis-angle (B,T,45)."""
+    if mask_bt.sum() < 1e-6:
+        return pred_pose.new_tensor(0.0)
+    if pred_pose.shape[-1] % 3 != 0 or tgt_pose.shape[-1] % 3 != 0:
+        raise ValueError(
+            f"hand_pose last dim must be multiple of 3, got {pred_pose.shape[-1]} and {tgt_pose.shape[-1]}"
+        )
+    j = pred_pose.shape[-1] // 3
+    pp = pred_pose.view(*pred_pose.shape[:-1], j, 3)
+    pt = tgt_pose.view(*tgt_pose.shape[:-1], j, 3)
+    rp = _axis_angle_to_rotmat(pp)
+    rt = _axis_angle_to_rotmat(pt)
+    rel = rp.transpose(-1, -2) @ rt
+    tr = rel.diagonal(dim1=-1, dim2=-2).sum(-1)
+    cos = ((tr - 1.0) * 0.5).clamp(min=-1.0 + 1e-6, max=1.0 - 1e-6)
+    ang = torch.acos(cos)  # (B,T,J)
+    if kind == "l1":
+        elem = ang.abs()
+    elif kind == "l2":
+        elem = ang * ang
+    else:
+        elem = F.smooth_l1_loss(ang, torch.zeros_like(ang), reduction="none", beta=huber_delta)
+    per_bt = elem.mean(dim=-1)
+    denom = mask_bt.sum().clamp_min(1.0)
+    return (per_bt * mask_bt).sum() / denom
+
+
 def mano_regression_loss(
     pred: dict[str, torch.Tensor],
     tgt: dict[str, torch.Tensor],
@@ -59,9 +144,27 @@ def mano_regression_loss(
         nonlocal acc, w_sum
         if weight <= 0.0 or key not in param_keys:
             return
-        acc = acc + weight * masked_param_tensor_loss(
-            pred[key], tgt[key], m, kind=param_loss, huber_delta=huber_delta
-        )
+        if key == "root_orient":
+            val = masked_root_orient_geodesic_loss(
+                pred["root_orient"],
+                tgt["root_orient"],
+                mask_bt,
+                kind=param_loss,
+                huber_delta=huber_delta,
+            )
+        elif key == "hand_pose":
+            val = masked_hand_pose_geodesic_loss(
+                pred["hand_pose"],
+                tgt["hand_pose"],
+                mask_bt,
+                kind=param_loss,
+                huber_delta=huber_delta,
+            )
+        else:
+            val = masked_param_tensor_loss(
+                pred[key], tgt[key], m, kind=param_loss, huber_delta=huber_delta
+            )
+        acc = acc + weight * val
         w_sum += weight
 
     add_param("trans", 1.0)
@@ -91,9 +194,26 @@ def mano_regression_per_key_raw(
     for key in ("trans", "root_orient", "hand_pose", "betas"):
         if key not in param_keys:
             continue
-        out[key] = masked_param_tensor_loss(
-            pred[key], tgt[key], m, kind=param_loss, huber_delta=huber_delta
-        )
+        if key == "root_orient":
+            out[key] = masked_root_orient_geodesic_loss(
+                pred["root_orient"],
+                tgt["root_orient"],
+                mask_bt,
+                kind=param_loss,
+                huber_delta=huber_delta,
+            )
+        elif key == "hand_pose":
+            out[key] = masked_hand_pose_geodesic_loss(
+                pred["hand_pose"],
+                tgt["hand_pose"],
+                mask_bt,
+                kind=param_loss,
+                huber_delta=huber_delta,
+            )
+        else:
+            out[key] = masked_param_tensor_loss(
+                pred[key], tgt[key], m, kind=param_loss, huber_delta=huber_delta
+            )
     return out
 
 

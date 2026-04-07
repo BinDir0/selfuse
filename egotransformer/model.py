@@ -23,7 +23,7 @@ class EgoHandSTConfig:
     pretrained_backbone: bool = True
     freeze_backbone: bool = True
     use_cls_token: bool = False
-    image_size: int = 224
+    image_size: int = 384
 
     st_depth: int = 4
     st_num_heads: int = 12

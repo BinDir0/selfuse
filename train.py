@@ -89,9 +89,9 @@ def _parse_args() -> argparse.Namespace:
         help="single episode (debug); mutually exclusive with --episodes-file",
     )
     d.add_argument("--val-episodes-file", type=str, default="", help="val episode list; empty = skip val")
-    d.add_argument("--seq-len", type=int, default=64, help="window length T")
+    d.add_argument("--seq-len", type=int, default=48, help="window length T")
     d.add_argument("--stride", type=int, default=16)
-    d.add_argument("--batch-size", type=int, default=16, help="per-GPU batch (global ~ batch * num GPUs)")
+    d.add_argument("--batch-size", type=int, default=8, help="per-GPU batch (global ~ batch * num GPUs)")
     d.add_argument("--workers", type=int, default=0)
     d.add_argument(
         "--no-shuffle-data",
@@ -437,7 +437,7 @@ def main() -> None:
     cfg = EgoHandSTConfig(
         pretrained_backbone=not args.no_pretrained,
         freeze_backbone=not args.unfreeze_backbone,
-        image_size=224,
+        image_size=384,
         use_mano_cross_decoder=not args.no_mano_cross_decoder,
         mano_decoder_depth=int(args.mano_decoder_depth),
         mano_decoder_heads=int(args.mano_decoder_heads),

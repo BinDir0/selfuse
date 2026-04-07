@@ -20,9 +20,9 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_DEFAULT_SEQ_LEN = 64
+_DEFAULT_SEQ_LEN = 48
 _DEFAULT_STRIDE = 16
-_DEFAULT_BATCH_SIZE = 16
+_DEFAULT_BATCH_SIZE = 8
 
 from dataloader import EpisodeWindowDataLoader
 from dataloader.utils import sanitize_key
@@ -91,7 +91,7 @@ def _config_from_args_json(path: str) -> EgoHandSTConfig:
     return EgoHandSTConfig(
         pretrained_backbone=not bool(d.get("no_pretrained", False)),
         freeze_backbone=not bool(d.get("unfreeze_backbone", False)),
-        image_size=224,
+        image_size=384,
         use_mano_cross_decoder=not bool(d.get("no_mano_cross_decoder", False)),
         mano_decoder_depth=int(d.get("mano_decoder_depth", 2)),
         mano_decoder_heads=int(d.get("mano_decoder_heads", 8)),
