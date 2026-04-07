@@ -62,6 +62,13 @@ class ARActionTrainConfig:
     )
 
 
+class InputMaskEmbeddings(nn.Module):
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.action = nn.Parameter(torch.randn(hidden_size) * 0.02)
+        self.state = nn.Parameter(torch.randn(hidden_size) * 0.02)
+
+
 class LegendVLA(nn.Module):
     def __init__(
         self,
@@ -143,9 +150,9 @@ class LegendVLA(nn.Module):
         self.reg_action_head = reg_action_head
         self.latent_condition_projector = latent_condition_projector
 
-        # Learnable mask embeddings for input-side masking (std=0.02 matches FourierActionEncoder init)
-        self.action_mask_embed = nn.Parameter(torch.randn(self.vlm_hidden_size) * 0.02)
-        self.state_mask_embed = nn.Parameter(torch.randn(self.vlm_hidden_size) * 0.02)
+        # Mask embeddings only needed when input_mask_enabled is True.
+        if self.ar_action_train_config.input_mask_enabled:
+            self.input_mask_embeddings = InputMaskEmbeddings(self.vlm_hidden_size)
 
     def compile_blocks(
         self,
@@ -250,10 +257,9 @@ class LegendVLA(nn.Module):
             modules.append(self.diffloss)
         if self.reg_action_head is not None:
             modules.append(self.reg_action_head)
-        params = [param for module in modules for param in module.parameters() if param.requires_grad]
-        params.append(self.action_mask_embed)
-        params.append(self.state_mask_embed)
-        return params
+        if hasattr(self, "input_mask_embeddings"):
+            modules.append(self.input_mask_embeddings)
+        return [param for module in modules for param in module.parameters() if param.requires_grad]
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
         answer_start_idx = batch.get("answer_start_idx")
@@ -295,7 +301,7 @@ class LegendVLA(nn.Module):
                 )
                 state_embeds = torch.where(
                     state_mask.unsqueeze(-1),
-                    self.state_mask_embed,
+                    self.input_mask_embeddings.state,
                     state_embeds,
                 )
             slot_embeds["state"] = state_embeds
@@ -312,7 +318,7 @@ class LegendVLA(nn.Module):
                 )
                 action_embeds = torch.where(
                     action_mask.unsqueeze(-1),
-                    self.action_mask_embed,
+                    self.input_mask_embeddings.action,
                     action_embeds,
                 )
             slot_embeds["action"] = action_embeds
