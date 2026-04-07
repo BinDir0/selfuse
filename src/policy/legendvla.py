@@ -11,6 +11,7 @@ from src.model.vlm.prefix_cache import (
     BackboneStreamOutput,
     slice_prefix_cache_from_full_kv,
 )
+from src.utils.sample_utils import generate_multi_span_mask
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,26 @@ class LossConfig:
 
 
 @dataclass(frozen=True)
+class SpanMaskConfig:
+    mask_ratio: float = 0.4
+    mean_span_len: float = 4.0
+    start_bias_alpha: float = 1.5
+    p_no_mask: float = 0.1
+    keep_last: bool = False
+    prefer_early: bool = True
+
+
+@dataclass(frozen=True)
 class ARActionTrainConfig:
     noise_std: float = 0.02
     chunk_size: int = 4
     diffloss_repeat: int = 1
+    input_mask_enabled: bool = True
+    action_mask: SpanMaskConfig = SpanMaskConfig()
+    state_mask: SpanMaskConfig = SpanMaskConfig(
+        mask_ratio=0.65, mean_span_len=5.0, start_bias_alpha=2.0,
+        p_no_mask=0.1, keep_last=True, prefer_early=False,
+    )
 
 
 class LegendVLA(nn.Module):
@@ -125,6 +142,10 @@ class LegendVLA(nn.Module):
         self.diffloss = diffloss
         self.reg_action_head = reg_action_head
         self.latent_condition_projector = latent_condition_projector
+
+        # Learnable mask embeddings for input-side masking (std=0.02 matches FourierActionEncoder init)
+        self.action_mask_embed = nn.Parameter(torch.randn(self.vlm_hidden_size) * 0.02)
+        self.state_mask_embed = nn.Parameter(torch.randn(self.vlm_hidden_size) * 0.02)
 
     def compile_blocks(
         self,
@@ -229,7 +250,10 @@ class LegendVLA(nn.Module):
             modules.append(self.diffloss)
         if self.reg_action_head is not None:
             modules.append(self.reg_action_head)
-        return [param for module in modules for param in module.parameters() if param.requires_grad]
+        params = [param for module in modules for param in module.parameters() if param.requires_grad]
+        params.append(self.action_mask_embed)
+        params.append(self.state_mask_embed)
+        return params
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
         answer_start_idx = batch.get("answer_start_idx")
@@ -254,19 +278,45 @@ class LegendVLA(nn.Module):
 
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
         slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None, "camera": None}
-        
+
         if self.camera_intrinsic_mode == "token" and self.camera_encoder is not None and "camera_intrinsic" in batch:
             camera_embeds = self.camera_encoder(batch["camera_intrinsic"])
             slot_embeds["camera"] = camera_embeds
+
+        mask_cfg = self.ar_action_train_config
+        do_mask = self.training and mask_cfg.input_mask_enabled
+
         if "states" in batch:
-            state_embeds = self.state_encoder(batch["states"])
+            state_embeds = self.state_encoder(batch["states"])  # [B, H_s, vlm_hidden_size]
+            if do_mask:
+                state_mask = generate_multi_span_mask(
+                    state_embeds.shape[0], self.num_state_tokens,
+                    mask_cfg.state_mask, device=state_embeds.device,
+                )
+                state_embeds = torch.where(
+                    state_mask.unsqueeze(-1),
+                    self.state_mask_embed,
+                    state_embeds,
+                )
             slot_embeds["state"] = state_embeds
+
         if "actions" in batch:
             action_input = batch["actions"]
             if add_action_noise:
-                action_input = action_input + torch.randn_like(batch["actions"]) * self.ar_action_train_config.noise_std
-            action_embeds = self.ar_action_encoder(action_input)
+                action_input = action_input + torch.randn_like(batch["actions"]) * mask_cfg.noise_std
+            action_embeds = self.ar_action_encoder(action_input)  # [B, H_a, vlm_hidden_size]
+            if do_mask:
+                action_mask = generate_multi_span_mask(
+                    action_embeds.shape[0], self.num_action_tokens,
+                    mask_cfg.action_mask, device=action_embeds.device,
+                )
+                action_embeds = torch.where(
+                    action_mask.unsqueeze(-1),
+                    self.action_mask_embed,
+                    action_embeds,
+                )
             slot_embeds["action"] = action_embeds
+
         return slot_embeds
 
     def forward_backbone_stream(

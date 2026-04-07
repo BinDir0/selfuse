@@ -190,3 +190,79 @@ def sample_rtc_delay(
 
     raise ValueError(f"Unsupported RTC delay strategy: {strategy}")
 
+
+# ---------------------------------------------------------------------------
+# Multi-span mask generation
+# ---------------------------------------------------------------------------
+
+def generate_multi_span_mask(
+    batch_size: int,
+    seq_len: int,
+    config,
+    *,
+    device: torch.device = torch.device("cpu"),
+) -> torch.BoolTensor:
+    """Generate multi-span boolean masks for input-side corruption.
+
+    Reads mask parameters directly from ``config`` attributes:
+    ``mask_ratio``, ``mean_span_len``, ``start_bias_alpha``,
+    ``p_no_mask``, ``keep_last``, ``prefer_early``.
+
+    Args:
+        batch_size: Number of samples in the batch.
+        seq_len: Total sequence length (H_action or H_state).
+        config: A SpanMaskConfig (or duck-typed equivalent).
+        device: Target device for the output tensor.
+
+    Returns:
+        [B, seq_len] BoolTensor where True = masked position.
+    """
+    mask_ratio = config.mask_ratio
+    mean_span_len = config.mean_span_len
+    start_bias_alpha = config.start_bias_alpha
+    p_no_mask = config.p_no_mask
+    keep_last = config.keep_last
+    prefer_early = config.prefer_early
+
+    effective_len = seq_len - 1 if keep_last else seq_len
+    if effective_len <= 0 or mask_ratio <= 0:
+        return torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+
+    expected_n_spans = max(1.0, mask_ratio * effective_len / mean_span_len)
+
+    # Per-element span count from Poisson, so n_spans varies across batch
+    n_spans_per_elem = torch.poisson(
+        torch.full((batch_size,), expected_n_spans, device=device)
+    ).long().clamp_(min=0, max=effective_len)
+    max_n_spans = max(1, int(n_spans_per_elem.max().item()))
+
+    # Biased start positions and geometric span lengths (padded to max_n_spans)
+    starts = sample_beta_positions(
+        batch_size, max_n_spans, effective_len, start_bias_alpha,
+        prefer_early=prefer_early, device=device,
+    )  # [B, max_n_spans]
+    span_lengths = sample_geometric(
+        (batch_size, max_n_spans), mean_span_len, device=device,
+    ).clamp_(min=1, max=effective_len)  # [B, max_n_spans]
+
+    # Mask out inactive span slots per element
+    active = torch.arange(max_n_spans, device=device).unsqueeze(0) < n_spans_per_elem.unsqueeze(1)
+
+    # Expand spans via 3D offset grid and scatter into output mask
+    max_span = min(int(span_lengths.max().item()), effective_len)
+    offsets = torch.arange(max_span, device=device).view(1, 1, -1)
+    abs_pos = starts.unsqueeze(-1) + offsets  # [B, max_n_spans, max_span]
+    valid = (abs_pos < effective_len) & (offsets < span_lengths.unsqueeze(-1)) & active.unsqueeze(-1)
+    abs_pos = abs_pos.clamp(0, effective_len - 1)
+
+    mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+    mask.scatter_(1, abs_pos.reshape(batch_size, -1), valid.reshape(batch_size, -1))
+
+    # Some samples get no masking at all
+    no_mask_selector = torch.rand(batch_size, device=device) < p_no_mask
+    mask[no_mask_selector] = False
+
+    if keep_last:
+        mask[:, -1] = False
+
+    return mask

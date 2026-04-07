@@ -179,6 +179,23 @@ policy:
     noise_std: 0.02
     chunk_size: 4
     diffloss_repeat: 16
+    input_mask_enabled: True
+    action_mask:
+      _target_: src.policy.legendvla.SpanMaskConfig
+      mask_ratio: 0.4
+      mean_span_len: 4.0
+      start_bias_alpha: 1.5
+      p_no_mask: 0.1
+      keep_last: False
+      prefer_early: True
+    state_mask:
+      _target_: src.policy.legendvla.SpanMaskConfig
+      mask_ratio: 0.65
+      mean_span_len: 5.0
+      start_bias_alpha: 2.0
+      p_no_mask: 0.1
+      keep_last: True
+      prefer_early: False
   loss_config:
     _target_: src.policy.legendvla.LossConfig
     ce_loss_weight: 0.1
