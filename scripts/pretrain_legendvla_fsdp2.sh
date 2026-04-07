@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
 # ---------------- CONFIGURATION ----------------
 NODES=(
     "172.18.0.101"
@@ -15,7 +18,6 @@ NODES=(
 )
 
 SSH_USER=""
-PROJECT_DIR="/home/zengfanlian/Projects/legendvla"
 GPUS_PER_NODE=8
 MASTER_PORT=18276
 
@@ -65,6 +67,7 @@ trap 'cleanup 130' INT TERM
 trap 'cleanup $?' EXIT
 
 echo "Launching training on $NNODES nodes from master..."
+echo "Project directory: $PROJECT_DIR"
 echo "Master Address: $MASTER_ADDR"
 echo "Master Port: $MASTER_PORT"
 echo "Total Processes: $TOTAL_PROCESSES"
