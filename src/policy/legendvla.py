@@ -98,11 +98,7 @@ class LegendVLA(nn.Module):
 
         if self.flow_config.num_parallel_t < 1:
             raise ValueError(f"num_parallel_t must be >= 1, got {self.flow_config.num_parallel_t}.")
-        if self.flow_config.sampling == "beta":
-            self.flow_beta_dist = torch.distributions.Beta(self.flow_config.alpha, self.flow_config.beta)
-        elif self.flow_config.sampling == "uniform":
-            self.flow_beta_dist = None
-        else:
+        if self.flow_config.sampling not in ("beta", "uniform"):
             raise ValueError(f"Unsupported flow sampling strategy: {self.flow_config.sampling}")
         # Mutable: overridden at inference time by legendvla_inference_wrapper.
         self.num_inference_steps = self.flow_config.num_inference_steps
@@ -129,21 +125,6 @@ class LegendVLA(nn.Module):
         self.diffloss = diffloss
         self.reg_action_head = reg_action_head
         self.latent_condition_projector = latent_condition_projector
-
-    def sample_flow_time(self, batch_size: int, num_samples: int = 1) -> torch.FloatTensor:
-        if self.flow_config.sampling == "uniform":
-            # Stratified sampling: batch elements are evenly spaced across [0, 1),
-            # each shifted by a shared random offset per sample.
-            eps = 1e-5
-            ranks = torch.arange(batch_size, dtype=torch.float32) / batch_size
-            offsets = torch.rand(num_samples, dtype=torch.float32)
-            t = (ranks.unsqueeze(1) + offsets.unsqueeze(0)) % (1 - eps)  # [B, T]
-            return t.squeeze(1) if num_samples == 1 else t
-        if self.flow_config.sampling == "beta":
-            z = self.flow_beta_dist.sample((batch_size, num_samples))
-            t = (1 - self.flow_config.sig_min) * (1 - z)
-            return t.squeeze(1) if num_samples == 1 else t
-        raise ValueError(f"Unsupported flow sampling: {self.flow_config.sampling}")
 
     def compile_blocks(
         self,

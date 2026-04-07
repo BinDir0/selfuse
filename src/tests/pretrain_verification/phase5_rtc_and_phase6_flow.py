@@ -31,10 +31,10 @@ import torch
 from src.policy.legendvla_loss import (
     build_rtc_flow_inputs,
     compute_packed_flow_loss,
-    sample_rtc_delay,
     build_flow_inputs,
     psi_t,
 )
+from src.utils.sample_utils import sample_rtc_delay
 from src.tests.pretrain_verification.utils import (
     CheckResult,
     PhaseReport,
@@ -214,11 +214,11 @@ def check_5_3_rtc_noisy_actions(report: PhaseReport) -> None:
 
     # Create a mock model with required attributes
     mock_model = SimpleNamespace(
-        flow_config=SimpleNamespace(sig_min=0.001, num_parallel_t=1),
-        rtc_config=SimpleNamespace(enabled=True, delay_strategy="uniform", max_delay=8),
-        sample_flow_time=lambda batch_size, num_samples=1: (
-            t[:batch_size].clone() if num_samples == 1 else t[:batch_size].unsqueeze(1).expand(-1, num_samples).clone()
+        flow_config=SimpleNamespace(
+            sig_min=0.001, num_parallel_t=1,
+            sampling="beta", alpha=1.5, beta=1.0,
         ),
+        rtc_config=SimpleNamespace(enabled=True, delay_strategy="uniform", max_delay=8),
     )
 
     # Run build_flow_inputs multiple times to find a case with nonzero delay.
@@ -231,7 +231,7 @@ def check_5_3_rtc_noisy_actions(report: PhaseReport) -> None:
             "actions_valid_mask": actions_valid_mask.clone(),
             "n_actions": n_actions.clone(),
         }
-        result = build_flow_inputs(mock_model, batch, num_parallel_t=1)
+        result = build_flow_inputs(mock_model, batch, num_parallel_t=1, sampled_t=t[:batch_size].clone())
         noisy_actions = result["noisy_actions"]
         time_for_model = result["time_for_model"]
 

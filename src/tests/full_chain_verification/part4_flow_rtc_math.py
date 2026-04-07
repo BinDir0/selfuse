@@ -26,8 +26,8 @@ from src.policy.legendvla_loss import (
     build_rtc_flow_inputs,
     compute_packed_flow_loss,
     psi_t,
-    sample_rtc_delay,
 )
+from src.utils.sample_utils import sample_rtc_delay
 from src.tests.full_chain_verification.utils import (
     CheckResult,
     PhaseReport,
@@ -240,12 +240,6 @@ class MockModelForFlow:
 
     flow_config = _FlowConfig()
     rtc_config = _RTCConfig()
-    flow_beta_dist = torch.distributions.Beta(1.5, 1.0)
-
-    def sample_flow_time(self, batch_size, num_samples=1):
-        z = self.flow_beta_dist.sample((batch_size, num_samples))
-        t = (1 - self.flow_config.sig_min) * (1 - z)
-        return t.squeeze(1) if num_samples == 1 else t
 
 
 def test_flow_inputs_shapes_T1(report: PhaseReport) -> None:

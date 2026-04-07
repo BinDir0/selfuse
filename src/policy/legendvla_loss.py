@@ -11,6 +11,8 @@ Contains:
 import torch
 from torch import nn
 
+from src.utils.sample_utils import sample_flow_time, sample_rtc_delay
+
 
 def compute_celoss(
     lm_head: nn.Module,
@@ -69,69 +71,6 @@ def psi_t(
 
     return (1 - (1 - flow_sig_min) * t) * x + t * x1
 
-def sample_rtc_delay(
-    valid_action_len: torch.LongTensor,
-    strategy: str = "uniform",
-    max_delay: int | None = None,
-    forced_delay: torch.LongTensor | None = None,
-) -> torch.LongTensor:
-    """
-    Sample one RTC prefix delay per batch element.
-
-    The sampled delay determines how many leading action tokens are treated as
-    known action-prefix conditions during RTC flow training.
-
-    Args:
-        valid_action_len:
-            [B] Number of valid action steps for each sample. Values are expected
-            to be in the range [0, horizon_steps].
-        strategy:
-            Delay sampling strategy. `uniform` samples all valid delays with
-            equal probability. `exp` matches the Kinetix RTC
-            implementation and biases toward smaller delays via
-            `exp(arange(upper)[::-1])`.
-        max_delay:
-            Optional upper bound for the sampled delay. When provided, the actual
-            sampling upper bound becomes min(valid_action_len, max_delay) for each
-            sample.
-        forced_delay:
-            Optional [B] tensor used to bypass random sampling. This is intended
-            for deterministic tests and debugging.
-
-    Returns:
-        torch.LongTensor:
-            [B] Sampled prefix delays. Each entry is in the range
-            [0, min(valid_action_len_i, max_delay)) when the upper bound is
-            positive, or 0 when the sample has no valid action tokens.
-    """
-    if forced_delay is not None:
-        return forced_delay.to(device=valid_action_len.device, dtype=torch.long)
-
-    delay_upper = valid_action_len.clamp(min=0)
-    if max_delay is not None:
-        delay_upper = torch.minimum(
-            delay_upper,
-            torch.full_like(delay_upper, max_delay),
-        )
-    delay_upper = delay_upper.clamp(min=0)
-    strategy = str(strategy).lower()
-
-    if strategy == "uniform":
-        random_delay = torch.rand(delay_upper.shape, device=valid_action_len.device, dtype=torch.float32)
-        return torch.floor(random_delay * delay_upper.to(torch.float32)).to(dtype=torch.long)
-
-    if strategy == "exp":
-        max_upper = delay_upper.max().item()
-        if max_upper <= 0:
-            return torch.zeros_like(delay_upper, device=valid_action_len.device, dtype=torch.long)
-        w = torch.exp(torch.arange(max_upper - 1, -1, -1, device=valid_action_len.device, dtype=torch.float32))
-        w = w / w.sum()
-        sampled = torch.multinomial(w.unsqueeze(0).expand(delay_upper.shape[0], -1), num_samples=1).squeeze(1)
-        sampled = sampled % delay_upper.clamp(min=1)
-        return sampled.to(dtype=torch.long)
-
-
-    raise ValueError(f"Unsupported RTC delay strategy: {strategy}")
 
 def build_rtc_flow_inputs(
     *,
@@ -354,7 +293,13 @@ def build_flow_inputs(
         raise ValueError(f"num_parallel_t must be >= 1, got {num_parallel_t}.")
 
     if sampled_t is None:
-        sampled_t = model.sample_flow_time(batch_size, num_parallel_t)
+        sampled_t = sample_flow_time(
+            batch_size, num_parallel_t,
+            sampling=model.flow_config.sampling,
+            alpha=model.flow_config.alpha,
+            beta=model.flow_config.beta,
+            sig_min=model.flow_config.sig_min,
+        )
     sampled_t = sampled_t.to(device=actions.device, dtype=actions.dtype)
     if sampled_t.ndim == 1:
         if num_parallel_t != 1 or sampled_t.shape[0] != batch_size:

@@ -5,6 +5,7 @@ import math
 
 from src.model.common import create_diffusion
 from src.model.common.modules import SinusoidalPosEmb, TimeEncoder
+from src.utils.sample_utils import sample_flow_time
 
 
 def modulate(x, shift, scale):
@@ -303,11 +304,10 @@ class DiffLoss(nn.Module):
         self.flow_sig_min = flow_sig_min
         self.cond_dropout_prob = cond_dropout_prob
         
-        # Flow matching time sampling
+        # Flow matching time sampling config (sampling delegated to sample_flow_time)
         self.flow_sampling = flow_sampling
-        if self.flow_sampling == "beta":
-            self.flow_t_max = 1.0 - flow_sig_min
-            self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
+        self.flow_alpha = flow_alpha
+        self.flow_beta = flow_beta
         
         # Choose network architecture based on configuration
         if self.use_flow_matching:
@@ -343,29 +343,6 @@ class DiffLoss(nn.Module):
             else:
                 timestep_respacing = num_sampling_steps
             self.gen_diffusion = create_diffusion(timestep_respacing=timestep_respacing, noise_schedule="cosine")
-
-    def sample_time(self, bsz: int, device: torch.device) -> torch.FloatTensor:
-        """
-        Sample time steps for flow matching training.
-        Uses configurable sampling strategy (uniform or beta distribution).
-        
-        Args:
-            bsz: Batch size
-            device: Target device
-            
-        Returns:
-            torch.FloatTensor: [bsz] Time steps in [0, 1]
-        """
-        if self.flow_sampling == "uniform":
-            eps = 1e-5
-            t = (torch.rand(1, device=device) + torch.arange(bsz, device=device) / bsz) % (1 - eps)
-        elif self.flow_sampling == "beta":
-            z = self.flow_beta_dist.sample((bsz,)).to(device)
-            t = self.flow_t_max * (1 - z)  # flip and shift
-        else:
-            # Fallback to uniform
-            t = torch.rand(bsz, device=device)
-        return t
 
     def set_dim_weights(self, dim_weights, chunk_size):
         """Register per-dimension loss weights, tiled for flattened action chunks.
@@ -447,7 +424,13 @@ class DiffLoss(nn.Module):
         # 1. Sample continuous time t ∈ [0, 1] (if not provided)
         if t is None:
             # Sample using configured strategy (beta or uniform)
-            t = self.sample_time(target.shape[0], target.device).to(dtype=target.dtype)
+            t = sample_flow_time(
+                target.shape[0],
+                sampling=self.flow_sampling,
+                alpha=self.flow_alpha,
+                beta=self.flow_beta,
+                sig_min=self.flow_sig_min,
+            ).to(device=target.device, dtype=target.dtype)
         
         # 2. Sample noise and construct interpolation
         x0 = torch.randn_like(target)  # Noise

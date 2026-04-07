@@ -175,16 +175,22 @@ def check_flow_loss(report: PhaseReport, output_dir: Path, skip_visual: bool) ->
     if not skip_visual:
         t_values = torch.linspace(0.01, 0.99, 20)
         flow_losses = []
+        import src.policy.legendvla_loss as _loss_mod
+        _orig_sample = _loss_mod.sample_flow_time
         for t_val in t_values:
+            t_scalar = t_val.item()
+            def _fixed_t(batch_size, num_samples=1, _t=t_scalar, **kw):
+                if num_samples == 1:
+                    return torch.full((batch_size,), _t)
+                return torch.full((batch_size, num_samples), _t)
             model_t = build_model(with_diffloss=False)
             batch_t = build_batch(batch_size=1)
             batch_t["is_vla_data"] = torch.tensor([True], dtype=torch.bool)
-            model_t.sample_flow_time = lambda batch_size, num_samples=1, t=t_val.item(): (
-                torch.full((batch_size,), t) if num_samples == 1 else torch.full((batch_size, num_samples), t)
-            )
+            _loss_mod.sample_flow_time = _fixed_t
             with torch.no_grad():
                 out_t = model_t("train_flow", batch_t)
             flow_losses.append(out_t["flow_loss"].item())
+        _loss_mod.sample_flow_time = _orig_sample
 
         plt = safe_import_plt()
         if plt is not None:
