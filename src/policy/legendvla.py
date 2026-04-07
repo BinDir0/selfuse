@@ -208,8 +208,6 @@ class LegendVLA(nn.Module):
     @property
     def action_expert_parameters(self):
         modules = [
-            self.state_encoder,
-            self.ar_action_encoder,
             self.action_encoder,
             self.time_embedding,
             self.flow_expert,
@@ -222,7 +220,11 @@ class LegendVLA(nn.Module):
 
     @property
     def diffloss_parameters(self):
-        modules = [self.latent_condition_projector]
+        modules = [
+            self.state_encoder,
+            self.ar_action_encoder,
+            self.latent_condition_projector,
+        ]
         if self.diffloss is not None:
             modules.append(self.diffloss)
         if self.reg_action_head is not None:
