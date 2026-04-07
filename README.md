@@ -46,3 +46,25 @@ torchrun --standalone --nproc_per_node=8 train.py \
 验证集：`--val-episodes-file splits/my_split/val.txt`。仅验证：`--eval-only --resume .../latest.pt`。
 
 TensorBoard：`tensorboard --logdir runs/exp/tb`
+
+### 3. 推理（`infer.py`）
+
+默认 `--seq-len` / `--stride` / `--batch-size` 与 `train.py` 一致；`--args-json` 指向该次训练的 `args.json` 以匹配模型结构。
+
+**视频**（长序列按窗滑动、`--stride 0` 表示窗无重叠即 `stride==seq-len`）：
+
+```bash
+python infer.py --checkpoint runs/exp/checkpoints/latest.pt \
+  --args-json runs/exp/args.json --video /path/to/clip.mp4 --out preds.npz
+```
+
+**WebDataset**（与训练相同的 tar / `--episodes-file` 等；重叠窗按帧融合，**每 episode 一个** `npz`，按 `frame_index` 一行）：
+
+```bash
+python infer.py --checkpoint runs/exp/checkpoints/latest.pt \
+  --args-json runs/exp/args.json --data-path /path/to/tar_root \
+  --episodes-file splits/my_split/val.txt --out infer_out/
+```
+
+输出目录会生成“每个 episode 一个文件”，文件名示例：`taco_v2__episode_000123.npz`。
+主要字段：`frame_index`、`per_frame_window_count`、`hand_existence_prob`、`mano_left_trans/root_orient/hand_pose/betas`、`mano_right_trans/root_orient/hand_pose/betas`。

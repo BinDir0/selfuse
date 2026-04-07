@@ -161,6 +161,7 @@ def main() -> None:
         shuffle_buffer_size=0,
         batch_size=args.batch_size,
         num_workers=args.workers,
+        shuffle=False,
     )
 
     try:

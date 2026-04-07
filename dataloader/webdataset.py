@@ -43,6 +43,8 @@ lowdim = concat([
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import random
 import tarfile
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -293,6 +295,9 @@ def emit_episode_windows(
     stride: int,
     episode_filter: Optional[str],
     episode_allowlist: Optional[frozenset[str]],
+    *,
+    shuffle_windows: bool = False,
+    rng_windows: Optional[random.Random] = None,
 ) -> Iterator[Dict]:
     if not episode_frames:
         return
@@ -303,7 +308,10 @@ def emit_episode_windows(
     if len(ordered_frames) < window_size:
         return
 
-    for start in range(0, len(ordered_frames) - window_size + 1, stride):
+    starts = list(range(0, len(ordered_frames) - window_size + 1, stride))
+    if shuffle_windows and rng_windows is not None:
+        rng_windows.shuffle(starts)
+    for start in starts:
         yield build_window_batch(episode_name, ordered_frames, start, window_size)
 
 
@@ -313,6 +321,9 @@ def iter_episode_windows(
     stride: int,
     episode_filter: Optional[str],
     episode_allowlist: Optional[frozenset[str]] = None,
+    *,
+    shuffle_windows: bool = False,
+    rng_windows: Optional[random.Random] = None,
 ) -> Iterator[Dict]:
     """
     Main logic for dataloading and episode windowing.
@@ -337,6 +348,8 @@ def iter_episode_windows(
                     stride,
                     episode_filter,
                     episode_allowlist,
+                    shuffle_windows=shuffle_windows,
+                    rng_windows=rng_windows,
                 )
                 current_episode_id = sample_episode_id # start tracking the new episode
                 current_frames = []
@@ -351,6 +364,8 @@ def iter_episode_windows(
             stride,
             episode_filter,
             episode_allowlist,
+            shuffle_windows=shuffle_windows,
+            rng_windows=rng_windows,
         )
 
 
@@ -367,9 +382,9 @@ class EpisodeWindowDataset(IterableDataset):
         dist_rank: int = 0,
         dist_world_size: int = 1,
         ddp_read_all_shards: bool = False,
-        shuffle_windows: bool = DEFAULT_WINDOW_SHUFFLE_WINDOWS,
-        shuffle_buffer_size: int = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
-        shuffle_seed: int = DEFAULT_WINDOW_SHUFFLE_SEED,
+        shuffle_shards: bool = True,
+        shuffle_windows: bool = True,
+        shuffle_seed: int = 0,
     ) -> None:
         super().__init__()
         if window_size < 1:
@@ -404,17 +419,45 @@ class EpisodeWindowDataset(IterableDataset):
         if ws > 1 and not ddp_read_all_shards:
             shards = shards[rk::ws]
         self.shards = shards
+        self.shuffle_shards = bool(shuffle_shards)
+        self.shuffle_windows = bool(shuffle_windows)
+        self.shuffle_seed = int(shuffle_seed)
+        # Shared across forked DataLoader workers (Linux) so set_epoch() affects all workers.
+        self._epoch_val = mp.Value("i", 0)
 
     def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
+        """Bumps RNG for shard / window shuffling each training epoch (1-based epoch index ok)."""
+        with self._epoch_val.get_lock():
+            self._epoch_val.value = int(epoch)
 
-    def _iter_rank_local_windows(self) -> Iterator[Dict]:
+    def __iter__(self) -> Iterator[Dict]:
+        wi = get_worker_info()
+        num_workers = wi.num_workers if wi is not None else 1
+        worker_id = wi.id if wi is not None else 0
+
+        with self._epoch_val.get_lock():
+            epoch_i = int(self._epoch_val.value)
+
+        shards = list(self.shards)
+        if self.shuffle_shards:
+            rng_s = random.Random(self.shuffle_seed + epoch_i * 1_000_003)
+            rng_s.shuffle(shards)
+        shards = shards[worker_id::num_workers]
+
+        rng_win: Optional[random.Random] = None
+        if self.shuffle_windows:
+            rng_win = random.Random(
+                self.shuffle_seed + epoch_i * 999_983 + worker_id * 50_051
+            )
+
         return iter_episode_windows(
-            shards=self.shards,
+            shards=shards,
             window_size=self.window_size,
             stride=self.stride,
             episode_filter=self.episode_filter,
             episode_allowlist=self._episode_allowlist,
+            shuffle_windows=self.shuffle_windows,
+            rng_windows=rng_win,
         )
 
     @staticmethod
@@ -481,34 +524,16 @@ class EpisodeWindowDataLoader(DataLoader):
         dist_rank: int = 0,
         dist_world_size: int = 1,
         ddp_read_all_shards: bool = False,
-        shuffle_windows: Optional[bool] = None,
-        shuffle_buffer_size: Optional[int] = None,
-        shuffle_seed: int = DEFAULT_WINDOW_SHUFFLE_SEED,
+        shuffle: bool = True,
+        shuffle_seed: int = 0,
         **kwargs,
     ) -> None:
-        dl_shuffle = kwargs.pop("shuffle", None)
-        if dl_shuffle is not None:
-            dl_shuffle = bool(dl_shuffle)
-
-        if shuffle_windows is None:
-            if dl_shuffle is None:
-                shuffle_windows = DEFAULT_WINDOW_SHUFFLE_WINDOWS
-            else:
-                shuffle_windows = dl_shuffle
-        else:
-            shuffle_windows = bool(shuffle_windows)
-            if dl_shuffle is not None and dl_shuffle != shuffle_windows:
-                raise ValueError(
-                    f"conflicting shuffle flags: shuffle={dl_shuffle} vs shuffle_windows={shuffle_windows}"
-                )
-
-        if shuffle_buffer_size is None:
-            shuffle_buffer_size = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE if shuffle_windows else 0
-        else:
-            shuffle_buffer_size = int(shuffle_buffer_size)
-
-        if shuffle_windows and shuffle_buffer_size <= 1:
-            shuffle_buffer_size = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE
+        _dup = kwargs.pop("shuffle", None)
+        if _dup is not None:
+            raise ValueError(
+                "Pass shuffle= to EpisodeWindowDataLoader(..., shuffle=...); "
+                "do not pass DataLoader(shuffle=)."
+            )
 
         dataset = EpisodeWindowDataset(
             dataset_path=dataset_path,
@@ -520,8 +545,8 @@ class EpisodeWindowDataLoader(DataLoader):
             dist_rank=dist_rank,
             dist_world_size=dist_world_size,
             ddp_read_all_shards=ddp_read_all_shards,
-            shuffle_windows=shuffle_windows,
-            shuffle_buffer_size=shuffle_buffer_size,
+            shuffle_shards=shuffle,
+            shuffle_windows=shuffle,
             shuffle_seed=shuffle_seed,
         )
         super().__init__(dataset, **kwargs)

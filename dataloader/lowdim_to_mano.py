@@ -75,10 +75,13 @@ def lowdim_wrist_to_mano_cam(
     betas: torch.Tensor,
     *,
     is_left: bool,
-    apply_left_root_fix: bool = True,
+    apply_left_root_fix: bool = False,
     hand_pose_fill: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Batch 维 (B,T,·)、外参 (B,T,4,4)；返回 trans、root_orient、hand_pose、betas。"""
+    """Batch 维 (B,T,·)、外参 (B,T,4,4)；返回 trans、root_orient、hand_pose、betas。
+
+    apply_left_root_fix：仅左手；默认 False（与常见 WebDataset wrist 一致）。旧数据需对齐 manopth 左手时再设 True。
+    """
     R_w2c = extrinsic_4x4[..., :3, :3]
     t_w2c = extrinsic_4x4[..., :3, 3]
     Rw2world = rot6d_to_rotmat(rot6)

@@ -7,11 +7,10 @@ python train.py \
   --episodes-file splits/train.txt
 
 torchrun --standalone --nproc_per_node=8 train.py \
-  --data-path /share_data/zhangtingrui/datasets/oakink2_v4 \
-  --episodes-file splits/oakink_full/train.txt \
-  --run-dir runs/my_exp1 \
-  --tensorboard-dir runs/my_exp1/tb \
-  --save-every-steps 100
+  --data-path /share_data/zhangtingrui/datasets/taco_v2 \
+  --episodes-file splits/taco_v2/train.txt \
+  --run-dir runs/my_exp12 \
+  --tensorboard-dir runs/my_exp12/tb
 
 
 # eval_only:
@@ -95,33 +94,21 @@ def _parse_args() -> argparse.Namespace:
         help="single episode (debug); mutually exclusive with --episodes-file",
     )
     d.add_argument("--val-episodes-file", type=str, default="", help="val episode list; empty = skip val")
-    d.add_argument("--seq-len", type=int, default=32, help="window length T")
-    d.add_argument("--stride", type=int, default=1)
-    d.add_argument("--batch-size", type=int, default=32, help="per-GPU batch (global ~ batch * num GPUs)")
+    d.add_argument("--seq-len", type=int, default=48, help="window length T")
+    d.add_argument("--stride", type=int, default=16)
+    d.add_argument("--batch-size", type=int, default=8, help="per-GPU batch (global ~ batch * num GPUs)")
     d.add_argument("--workers", type=int, default=0)
     d.add_argument(
-        "--no-shuffle-windows",
+        "--no-shuffle-data",
         action="store_true",
-        help="disable training window shuffle; by default shuffle is enabled",
-    )
-    d.add_argument(
-        "--shuffle-buffer-size",
-        type=int,
-        default=DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
-        help="training only: streaming window-shuffle buffer size when shuffle is enabled; 0/1 keeps sequential order",
-    )
-    d.add_argument(
-        "--shuffle-seed",
-        type=int,
-        default=-1,
-        help="training only: base seed for window shuffle; default uses --seed",
+        help="disable tar-shard order and within-episode window order shuffling",
     )
 
     o = p.add_argument_group("optim")
     o.add_argument("--epochs", type=int, default=5)
-    o.add_argument("--lr", type=float, default=3e-4)
+    o.add_argument("--lr", type=float, default=2e-4)
     o.add_argument("--weight-decay", type=float, default=0.01)
-    o.add_argument("--grad-clip", type=float, default=0.0)
+    o.add_argument("--grad-clip", type=float, default=1.0)
     o.add_argument(
         "--max-steps",
         type=int,
@@ -135,23 +122,27 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-pose-weight",
         type=float,
-        default=0.0,
+        default=0.5,
         help="relative weight for hand_pose inside param regression when hand_pose is in --mano-param-keys",
     )
     m.add_argument(
         "--mano-root-orient-weight",
         type=float,
-        default=2.0,
+        default=1.0,
         help="relative weight for root_orient inside param regression when root_orient is in --mano-param-keys "
-        "(default 2.0 vs 1.0 for trans/betas)",
+        "(default 1.0 vs 1.0 for trans/betas)",
     )
-    m.add_argument("--mano-no-left-root-fix", action="store_true")
+    m.add_argument(
+        "--mano-left-root-fix",
+        action="store_true",
+        help="",
+    )
     m.add_argument(
         "--mano-param-keys",
         type=str,
-        default="trans,root_orient",
+        default="trans,root_orient,hand_pose,betas",
         help="comma-separated subset of trans,root_orient,hand_pose,betas for vector regression "
-        "(default: trans,root_orient; betas not in regression—supervise betas with e.g. --mano-param-keys ...,betas)",
+        "(default: all four keys)",
     )
     m.add_argument(
         "--mano-param-loss",
@@ -169,28 +160,42 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-param-loss-weight",
         type=float,
-        default=0.5,
+        default=1.0,
         help="scale for vector regression on --mano-param-keys; 0 disables",
     )
     m.add_argument(
         "--mano-joint-loss-weight",
         type=float,
-        default=2.0,
-        help="scale for 3D joint MSE (m^2); main MANO geometric term by default; 0 disables; needs PCA decode",
+        default=1.0,
+        help="scale for J(pred MANO) vs J(GT MANO) MSE (m²); >0 needs MANO decode",
     )
     m.add_argument(
         "--mano-joint-weight-preset",
         type=str,
         default="fingertip",
         choices=("uniform", "fingertip"),
-        help="default fingertip: upweight tips (MANO 4,8,12,16,20) by --mano-joint-fingertip-scale to stress finger pose; "
-        "uniform: unweighted mean over 21 joints",
+        help="default fingertip: upweight tips by --mano-joint-fingertip-scale; wrist (index 0) by --mano-joint-wrist-scale; "
+        "all start from --mano-joint-chain-scale. uniform: only wrist scale applies unless it is 1.0 (then plain mean over 21)",
+    )
+    m.add_argument(
+        "--mano-joint-chain-scale",
+        type=float,
+        default=0.5,
+        help="base weight for non-wrist joints before tip/wrist multipliers (MANO indices 1–20 in fingertip preset); "
+        "wrist is chain_scale * wrist_scale; tips are chain_scale * fingertip_scale; must be > 0",
     )
     m.add_argument(
         "--mano-joint-fingertip-scale",
         type=float,
-        default=2.0,
+        default=1.0,
         help="fingertip joint weight multiplier vs other joints (must be > 0); only used when preset is fingertip",
+    )
+    m.add_argument(
+        "--mano-joint-wrist-scale",
+        type=float,
+        default=2.0,
+        help="multiply weight on wrist joint (MANO index 0) in 3D joint loss; 1.0 recovers no extra wrist emphasis "
+        "when preset is uniform",
     )
     m.add_argument(
         "--mano-joint-smooth-max-weight",
@@ -205,40 +210,52 @@ def _parse_args() -> argparse.Namespace:
         help="temperature (m^2) for --mano-joint-smooth-max-weight when enabled",
     )
     m.add_argument(
-        "--mano-vert-loss-weight",
-        type=float,
-        default=0.0,
-        help="scale for 3D vertex MSE (m^2); default 0 (off); set >0 to enable; needs PCA decode",
-    )
-    m.add_argument(
-        "--mano-bone-loss-weight",
-        type=float,
-        default=0.0,
-        help="scale for bone-length MSE (m^2), 20 edges; default 0 (off); needs PCA decode",
-    )
-    m.add_argument(
-        "--mano-bone-dir-loss-weight",
-        type=float,
-        default=0.0,
-        help="scale for bone unit-direction MSE; default 0 (off); needs PCA decode",
-    )
-    m.add_argument(
-        "--mano-hand-pca-loss-weight",
-        type=float,
-        default=0.0,
-        help="scale for hand_pose PCA coefficient MSE (axis-angle -> layer PCA vs GT); default 0 (off); "
-        "set e.g. 0.25 to enable",
-    )
-    m.add_argument(
         "--mano-joint-chunk",
         type=int,
         default=512,
-        help="sub-batch size for ManoLayer joint/vertex forward passes",
+        help="sub-batch size for ManoLayer joint forward passes",
+    )
+    m.add_argument(
+        "--mano-weakcam-loss-weight",
+        type=float,
+        default=2.0,
+        help="scale for weak-camera normalized-plane reprojection using pred_cam (s,tx,ty); 0 disables",
+    )
+    m.add_argument(
+        "--mano-weakcam-reg-weight",
+        type=float,
+        default=0.5,
+        help="regularize weak-camera params towards identity (s=1,tx=0,ty=0); 0 disables",
     )
 
     mo = p.add_argument_group("model")
     mo.add_argument("--no-pretrained", action="store_true")
     mo.add_argument("--unfreeze-backbone", action="store_true")
+    mo.add_argument(
+        "--no-mano-cross-decoder",
+        action="store_true",
+        help="disable TransformerDecoder from hand token to ST patches; use linear MANO heads on hand token only",
+    )
+    mo.add_argument("--mano-decoder-depth", type=int, default=2)
+    mo.add_argument("--mano-decoder-heads", type=int, default=8)
+    mo.add_argument(
+        "--no-mano-temporal-refine",
+        action="store_true",
+        help="disable temporal Transformer on 61-D MANO vector (no sequence refine after heads)",
+    )
+    mo.add_argument("--mano-refine-hdim", type=int, default=512)
+    mo.add_argument("--mano-refine-layers", type=int, default=2)
+    mo.add_argument("--mano-refine-heads", type=int, default=8)
+    mo.add_argument(
+        "--no-hand-side-embedding",
+        action="store_true",
+        help="disable learnable left/right slot embedding added to hand queries",
+    )
+    mo.add_argument(
+        "--no-hand-role-mem-bias",
+        action="store_true",
+        help="disable per-hand additive bias on ST tokens (single batched cross-attn)",
+    )
 
     io = p.add_argument_group("checkpoint & log")
     io.add_argument("--save", type=str, default="", help="extra final .pt path")
@@ -328,9 +345,8 @@ def _build_loader(
     dist_rank: int = 0,
     dist_world_size: int = 1,
     ddp_read_all_shards: bool = False,
-    shuffle_windows: bool = DEFAULT_WINDOW_SHUFFLE_WINDOWS,
-    shuffle_buffer_size: int = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
-    shuffle_seed: int = DEFAULT_WINDOW_SHUFFLE_SEED,
+    shuffle: bool = True,
+    shuffle_seed: int = 0,
 ) -> DataLoader:
     ef = episodes_file.strip()
     sf = (episode_filter or "").strip() or None
@@ -346,8 +362,7 @@ def _build_loader(
         dist_rank=dist_rank,
         dist_world_size=dist_world_size,
         ddp_read_all_shards=ddp_read_all_shards,
-        shuffle_windows=shuffle_windows,
-        shuffle_buffer_size=shuffle_buffer_size,
+        shuffle=shuffle,
         shuffle_seed=shuffle_seed,
         batch_size=batch_size,
         num_workers=workers,
@@ -394,10 +409,16 @@ def main() -> None:
     mano_param_loss = cast(Literal["l1", "l2", "huber"], args.mano_param_loss)
     if args.mano_joint_fingertip_scale <= 0:
         raise SystemExit("--mano-joint-fingertip-scale must be > 0")
+    if args.mano_joint_wrist_scale <= 0:
+        raise SystemExit("--mano-joint-wrist-scale must be > 0")
+    if args.mano_joint_chain_scale <= 0:
+        raise SystemExit("--mano-joint-chain-scale must be > 0")
     mano_joint_preset = cast(Literal["uniform", "fingertip"], args.mano_joint_weight_preset)
     mano_joint_w21 = mano_joint_weight_vector_21(
         mano_joint_preset,
         args.mano_joint_fingertip_scale,
+        args.mano_joint_wrist_scale,
+        args.mano_joint_chain_scale,
         device=device,
         dtype=torch.float32,
     )
@@ -430,7 +451,16 @@ def main() -> None:
     cfg = EgoHandSTConfig(
         pretrained_backbone=not args.no_pretrained,
         freeze_backbone=not args.unfreeze_backbone,
-        image_size=224,
+        image_size=384,
+        use_mano_cross_decoder=not args.no_mano_cross_decoder,
+        mano_decoder_depth=int(args.mano_decoder_depth),
+        mano_decoder_heads=int(args.mano_decoder_heads),
+        use_mano_temporal_refine=not args.no_mano_temporal_refine,
+        mano_refine_hdim=int(args.mano_refine_hdim),
+        mano_refine_layers=int(args.mano_refine_layers),
+        mano_refine_heads=int(args.mano_refine_heads),
+        use_hand_side_embedding=not args.no_hand_side_embedding,
+        use_hand_role_mem_bias=not args.no_hand_role_mem_bias,
     )
     model = EgoHandSTModel(cfg).to(device)
     resume_path = args.resume.strip()
@@ -477,9 +507,8 @@ def main() -> None:
                 dist_rank=rank,
                 dist_world_size=world_size,
                 ddp_read_all_shards=ddp_read_all,
-                shuffle_windows=train_shuffle_windows,
-                shuffle_buffer_size=shuffle_buffer_size,
-                shuffle_seed=shuffle_seed,
+                shuffle=not args.no_shuffle_data,
+                shuffle_seed=args.seed,
             )
         except ValueError as e:
             raise SystemExit(str(e)) from e
@@ -498,12 +527,11 @@ def main() -> None:
             episode_filter=None,
             dist_rank=0,
             dist_world_size=1,
-            shuffle_windows=False,
-            shuffle_buffer_size=0,
-            shuffle_seed=shuffle_seed,
+            shuffle=False,
+            shuffle_seed=args.seed,
         )
 
-    apply_left = not args.mano_no_left_root_fix
+    apply_left = bool(args.mano_left_root_fix)
     mano_pca_layers = None
     if not args.no_decode_hand_pca:
         try:
@@ -593,17 +621,15 @@ def main() -> None:
                 mano_joint_weight_21=mano_joint_w21,
                 mano_joint_smooth_max_weight=args.mano_joint_smooth_max_weight,
                 mano_joint_smooth_max_tau=args.mano_joint_smooth_max_tau,
-                mano_vert_loss_weight=args.mano_vert_loss_weight,
-                mano_bone_loss_weight=args.mano_bone_loss_weight,
-                mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
                 mano_joint_chunk=args.mano_joint_chunk,
                 mano_param_keys=mano_param_keys,
-                mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
                 mano_pca_layers=mano_pca_layers,
                 tb_writer=tb_writer,
                 epoch=1,
                 show_progress=show_progress,
                 is_rank0=is_rank0,
+                mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
+                mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
             )
             if is_rank0:
                 log_line(
@@ -640,12 +666,8 @@ def main() -> None:
                 mano_joint_weight_21=mano_joint_w21,
                 mano_joint_smooth_max_weight=args.mano_joint_smooth_max_weight,
                 mano_joint_smooth_max_tau=args.mano_joint_smooth_max_tau,
-                mano_vert_loss_weight=args.mano_vert_loss_weight,
-                mano_bone_loss_weight=args.mano_bone_loss_weight,
-                mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
                 mano_joint_chunk=args.mano_joint_chunk,
                 mano_param_keys=mano_param_keys,
-                mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
                 mano_pca_layers=mano_pca_layers,
                 grad_clip=args.grad_clip,
                 tb_writer=tb_writer,
@@ -661,6 +683,8 @@ def main() -> None:
                 is_rank0=is_rank0,
                 render_mano_every=render_mano_every,
                 render_mano_dir=render_mano_dir,
+                mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
+                mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
             )
             if is_rank0:
                 summary = (
@@ -692,17 +716,15 @@ def main() -> None:
                     mano_joint_weight_21=mano_joint_w21,
                     mano_joint_smooth_max_weight=args.mano_joint_smooth_max_weight,
                     mano_joint_smooth_max_tau=args.mano_joint_smooth_max_tau,
-                    mano_vert_loss_weight=args.mano_vert_loss_weight,
-                    mano_bone_loss_weight=args.mano_bone_loss_weight,
-                    mano_bone_dir_loss_weight=args.mano_bone_dir_loss_weight,
                     mano_joint_chunk=args.mano_joint_chunk,
                     mano_param_keys=mano_param_keys,
-                    mano_hand_pose_pca_loss_weight=args.mano_hand_pca_loss_weight,
                     mano_pca_layers=mano_pca_layers,
                     tb_writer=tb_writer,
                     epoch=ep,
                     show_progress=show_progress,
                     is_rank0=is_rank0,
+                    mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
+                    mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
                 )
                 if is_rank0:
                     log_line(

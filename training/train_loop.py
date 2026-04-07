@@ -15,12 +15,11 @@ from training.logging_utils import tb_add_scalars, train_step_tb_dict, val_avg_t
 from training.mano_train_render import maybe_save_train_mano_compare_png
 from training.losses import (
     bce_existence,
-    mano_hand_pose_pca_mse,
-    mano_masked_bone_direction_mse,
-    mano_masked_bone_length_mse_m2,
     mano_masked_joint_mse_m2,
-    mano_masked_vert_mse_m2,
+    mano_masked_weakcam_reproj_normalized_plane_m2,
     mano_regression_loss,
+    mano_regression_per_key_raw,
+    weakcam_reg_loss,
 )
 
 
@@ -41,12 +40,8 @@ def train_one_epoch(
     mano_joint_weight_21: torch.Tensor | None,
     mano_joint_smooth_max_weight: float,
     mano_joint_smooth_max_tau: float,
-    mano_vert_loss_weight: float,
-    mano_bone_loss_weight: float,
-    mano_bone_dir_loss_weight: float,
     mano_joint_chunk: int,
     mano_param_keys: frozenset[str],
-    mano_hand_pose_pca_loss_weight: float,
     mano_pca_layers: tuple[nn.Module, nn.Module] | None,
     grad_clip: float,
     tb_writer: Any | None,
@@ -62,8 +57,13 @@ def train_one_epoch(
     is_rank0: bool,
     render_mano_every: int,
     render_mano_dir: str | None,
+    mano_weakcam_loss_weight: float,
+    mano_weakcam_reg_weight: float,
 ) -> tuple[dict[str, float], int, int, bool]:
     model.train()
+    _ds = loader.dataset
+    if hasattr(_ds, "set_epoch"):
+        _ds.set_epoch(epoch)
     tot = {"loss": 0.0, "bce": 0.0, "mano": 0.0}
     n = 0
     hit_max = False
@@ -75,7 +75,7 @@ def train_one_epoch(
         disable=not (show_progress and is_rank0),
     )
     for batch in pbar:
-        video, exist_tgt, mano_l_tgt, mano_r_tgt = wds_batch_to_training_batch(
+        video, exist_tgt, mano_l_tgt, mano_r_tgt, intr_bt = wds_batch_to_training_batch(
             batch,
             device=device,
             image_size=image_size,
@@ -114,10 +114,8 @@ def train_one_epoch(
 
         zj = out["mano_left"]["trans"].new_tensor(0.0)
         lj_l, lj_r = zj, zj
-        vv_l, vv_r = zj, zj
-        bl_l, bl_r = zj, zj
-        bd_l, bd_r = zj, zj
-        hpc_l, hpc_r = zj, zj
+        wcl, wcr = zj, zj
+        wreg_l, wreg_r = zj, zj
         if mano_pca_layers is not None:
             ml, mr = mano_pca_layers
             if mano_joint_loss_weight > 0.0:
@@ -141,46 +139,36 @@ def train_one_epoch(
                     smooth_max_weight=mano_joint_smooth_max_weight,
                     smooth_max_tau=mano_joint_smooth_max_tau,
                 )
-            if mano_vert_loss_weight > 0.0:
-                vv_l = mano_masked_vert_mse_m2(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
+            if mano_weakcam_loss_weight > 0.0:
+                wcl = mano_masked_weakcam_reproj_normalized_plane_m2(
+                    out["mano_left"],
+                    mano_l_tgt,
+                    out["pred_cam"][:, :, 0, :],
+                    mask_l,
+                    ml,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
                 )
-                vv_r = mano_masked_vert_mse_m2(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
+                wcr = mano_masked_weakcam_reproj_normalized_plane_m2(
+                    out["mano_right"],
+                    mano_r_tgt,
+                    out["pred_cam"][:, :, 1, :],
+                    mask_r,
+                    mr,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
                 )
-            if mano_bone_loss_weight > 0.0:
-                bl_l = mano_masked_bone_length_mse_m2(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
-                )
-                bl_r = mano_masked_bone_length_mse_m2(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
-                )
-            if mano_bone_dir_loss_weight > 0.0:
-                bd_l = mano_masked_bone_direction_mse(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
-                )
-                bd_r = mano_masked_bone_direction_mse(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
-                )
-            if mano_hand_pose_pca_loss_weight > 0.0:
-                hpc_l = mano_hand_pose_pca_mse(out["mano_left"], mano_l_tgt, mask_l, ml)
-                hpc_r = mano_hand_pose_pca_mse(out["mano_right"], mano_r_tgt, mask_r, mr)
+            if mano_weakcam_reg_weight > 0.0:
+                wreg_l = weakcam_reg_loss(out["pred_cam"][:, :, 0, :], mask_l)
+                wreg_r = weakcam_reg_loss(out["pred_cam"][:, :, 1, :], mask_r)
+
         loss_joint = mano_joint_loss_weight * (lj_l + lj_r)
         jl_w = mano_joint_loss_weight * lj_l
         jr_w = mano_joint_loss_weight * lj_r
-        loss_vert = mano_vert_loss_weight * (vv_l + vv_r)
-        vl_w = mano_vert_loss_weight * vv_l
-        vr_w = mano_vert_loss_weight * vv_r
-        loss_bone = mano_bone_loss_weight * (bl_l + bl_r)
-        blw_l = mano_bone_loss_weight * bl_l
-        blw_r = mano_bone_loss_weight * bl_r
-        loss_bone_dir = mano_bone_dir_loss_weight * (bd_l + bd_r)
-        bddl_w = mano_bone_dir_loss_weight * bd_l
-        bddr_w = mano_bone_dir_loss_weight * bd_r
-        loss_hand_pca = mano_hand_pose_pca_loss_weight * (hpc_l + hpc_r)
-        hpcl_w = mano_hand_pose_pca_loss_weight * hpc_l
-        hpcr_w = mano_hand_pose_pca_loss_weight * hpc_r
-        loss_m = loss_param_w + loss_joint + loss_vert + loss_bone + loss_bone_dir + loss_hand_pca
+        loss_weakcam = mano_weakcam_loss_weight * (wcl + wcr)
+        loss_weakcam_reg = mano_weakcam_reg_weight * (wreg_l + wreg_r)
+
+        loss_m = loss_param_w + loss_joint + loss_weakcam + loss_weakcam_reg
 
         loss = loss_b + loss_m
         loss.backward()
@@ -200,6 +188,26 @@ def train_one_epoch(
             mano=f"{float(loss_m.detach()):.4f}",
         )
         if tb_writer is not None:
+            pk_l = mano_regression_per_key_raw(
+                out["mano_left"],
+                mano_l_tgt,
+                mask_l,
+                param_keys=mano_param_keys,
+                param_loss=mano_param_loss,
+                huber_delta=mano_huber_delta,
+            )
+            pk_r = mano_regression_per_key_raw(
+                out["mano_right"],
+                mano_r_tgt,
+                mask_r,
+                param_keys=mano_param_keys,
+                param_loss=mano_param_loss,
+                huber_delta=mano_huber_delta,
+            )
+            param_per_key = {
+                k: 0.5 * (float(pk_l[k].detach()) + float(pk_r[k].detach()))
+                for k in pk_l.keys()
+            }
             tb_add_scalars(
                 tb_writer,
                 global_step,
@@ -210,24 +218,21 @@ def train_one_epoch(
                     mano_param_raw=float(loss_param.detach()),
                     mano_param_weighted=float(loss_param_w.detach()),
                     mano_joint=float(loss_joint.detach()),
-                    mano_vert=float(loss_vert.detach()),
-                    mano_bone=float(loss_bone.detach()),
-                    mano_bone_dir=float(loss_bone_dir.detach()),
-                    mano_hand_pca=float(loss_hand_pca.detach()),
                     lp_l=float(lp_l.detach()),
                     lp_r=float(lp_r.detach()),
                     jl_w=float(jl_w.detach()),
                     jr_w=float(jr_w.detach()),
-                    vl_w=float(vl_w.detach()),
-                    vr_w=float(vr_w.detach()),
-                    bl_w=float(blw_l.detach()),
-                    br_w=float(blw_r.detach()),
-                    bdl_w=float(bddl_w.detach()),
-                    bdr_w=float(bddr_w.detach()),
-                    hpc_l=float(hpcl_w.detach()),
-                    hpc_r=float(hpcr_w.detach()),
                     optim_steps=optim_steps,
+                    mano_param_per_key=param_per_key,
                 ),
+            )
+            tb_add_scalars(
+                tb_writer,
+                global_step,
+                {
+                    "train/mano_weakcam_weighted": float(loss_weakcam.detach()),
+                    "train/mano_weakcam_reg_weighted": float(loss_weakcam_reg.detach()),
+                },
             )
             global_step += 1
 
@@ -302,20 +307,21 @@ def eval_one_epoch(
     mano_joint_weight_21: torch.Tensor | None,
     mano_joint_smooth_max_weight: float,
     mano_joint_smooth_max_tau: float,
-    mano_vert_loss_weight: float,
-    mano_bone_loss_weight: float,
-    mano_bone_dir_loss_weight: float,
     mano_joint_chunk: int,
     mano_param_keys: frozenset[str],
-    mano_hand_pose_pca_loss_weight: float,
     mano_pca_layers: tuple[nn.Module, nn.Module] | None,
     tb_writer: Any | None,
     epoch: int,
     show_progress: bool,
     is_rank0: bool,
+    mano_weakcam_loss_weight: float,
+    mano_weakcam_reg_weight: float,
 ) -> dict[str, float]:
     model.eval()
-    tot = {
+    _ds = loader.dataset
+    if hasattr(_ds, "set_epoch"):
+        _ds.set_epoch(epoch)
+    tot: dict[str, float] = {
         "loss": 0.0,
         "bce": 0.0,
         "mano": 0.0,
@@ -323,23 +329,15 @@ def eval_one_epoch(
         "mano_param_raw": 0.0,
         "mano_param_weighted": 0.0,
         "mano_joint": 0.0,
-        "mano_vert": 0.0,
-        "mano_bone": 0.0,
-        "mano_bone_dir": 0.0,
-        "mano_hand_pca": 0.0,
         "mano_param_left": 0.0,
         "mano_param_right": 0.0,
         "mano_joint_left": 0.0,
         "mano_joint_right": 0.0,
-        "mano_vert_left": 0.0,
-        "mano_vert_right": 0.0,
-        "mano_bone_left": 0.0,
-        "mano_bone_right": 0.0,
-        "mano_bone_dir_left": 0.0,
-        "mano_bone_dir_right": 0.0,
-        "mano_hand_pca_left": 0.0,
-        "mano_hand_pca_right": 0.0,
+        "mano_weakcam": 0.0,
+        "mano_weakcam_reg": 0.0,
     }
+    for k in sorted(mano_param_keys & frozenset({"trans", "root_orient", "hand_pose", "betas"})):
+        tot[f"mano_pk_{k}"] = 0.0
     n = 0
     pbar = tqdm(
         loader,
@@ -349,7 +347,7 @@ def eval_one_epoch(
         disable=not (show_progress and is_rank0),
     )
     for batch in pbar:
-        video, exist_tgt, mano_l_tgt, mano_r_tgt = wds_batch_to_training_batch(
+        video, exist_tgt, mano_l_tgt, mano_r_tgt, intr_bt = wds_batch_to_training_batch(
             batch,
             device=device,
             image_size=image_size,
@@ -385,10 +383,8 @@ def eval_one_epoch(
 
         zj = out["mano_left"]["trans"].new_tensor(0.0)
         lj_l, lj_r = zj, zj
-        vv_l, vv_r = zj, zj
-        bl_l, bl_r = zj, zj
-        bd_l, bd_r = zj, zj
-        hpc_l, hpc_r = zj, zj
+        wcl, wcr = zj, zj
+        wreg_l, wreg_r = zj, zj
         if mano_pca_layers is not None:
             ml, mr = mano_pca_layers
             if mano_joint_loss_weight > 0.0:
@@ -412,47 +408,57 @@ def eval_one_epoch(
                     smooth_max_weight=mano_joint_smooth_max_weight,
                     smooth_max_tau=mano_joint_smooth_max_tau,
                 )
-            if mano_vert_loss_weight > 0.0:
-                vv_l = mano_masked_vert_mse_m2(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
+            if mano_weakcam_loss_weight > 0.0:
+                wcl = mano_masked_weakcam_reproj_normalized_plane_m2(
+                    out["mano_left"],
+                    mano_l_tgt,
+                    out["pred_cam"][:, :, 0, :],
+                    mask_l,
+                    ml,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
                 )
-                vv_r = mano_masked_vert_mse_m2(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
+                wcr = mano_masked_weakcam_reproj_normalized_plane_m2(
+                    out["mano_right"],
+                    mano_r_tgt,
+                    out["pred_cam"][:, :, 1, :],
+                    mask_r,
+                    mr,
+                    chunk=mano_joint_chunk,
+                    joint_weight_21=mano_joint_weight_21,
                 )
-            if mano_bone_loss_weight > 0.0:
-                bl_l = mano_masked_bone_length_mse_m2(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
-                )
-                bl_r = mano_masked_bone_length_mse_m2(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
-                )
-            if mano_bone_dir_loss_weight > 0.0:
-                bd_l = mano_masked_bone_direction_mse(
-                    out["mano_left"], mano_l_tgt, mask_l, ml, chunk=mano_joint_chunk
-                )
-                bd_r = mano_masked_bone_direction_mse(
-                    out["mano_right"], mano_r_tgt, mask_r, mr, chunk=mano_joint_chunk
-                )
-            if mano_hand_pose_pca_loss_weight > 0.0:
-                hpc_l = mano_hand_pose_pca_mse(out["mano_left"], mano_l_tgt, mask_l, ml)
-                hpc_r = mano_hand_pose_pca_mse(out["mano_right"], mano_r_tgt, mask_r, mr)
+            if mano_weakcam_reg_weight > 0.0:
+                wreg_l = weakcam_reg_loss(out["pred_cam"][:, :, 0, :], mask_l)
+                wreg_r = weakcam_reg_loss(out["pred_cam"][:, :, 1, :], mask_r)
+
         loss_joint = mano_joint_loss_weight * (lj_l + lj_r)
         jl_w = mano_joint_loss_weight * lj_l
         jr_w = mano_joint_loss_weight * lj_r
-        loss_vert = mano_vert_loss_weight * (vv_l + vv_r)
-        vl_w = mano_vert_loss_weight * vv_l
-        vr_w = mano_vert_loss_weight * vv_r
-        loss_bone = mano_bone_loss_weight * (bl_l + bl_r)
-        blw_l = mano_bone_loss_weight * bl_l
-        blw_r = mano_bone_loss_weight * bl_r
-        loss_bone_dir = mano_bone_dir_loss_weight * (bd_l + bd_r)
-        bddl_w = mano_bone_dir_loss_weight * bd_l
-        bddr_w = mano_bone_dir_loss_weight * bd_r
-        loss_hand_pca = mano_hand_pose_pca_loss_weight * (hpc_l + hpc_r)
-        hpcl_w = mano_hand_pose_pca_loss_weight * hpc_l
-        hpcr_w = mano_hand_pose_pca_loss_weight * hpc_r
-        loss_m = loss_param_w + loss_joint + loss_vert + loss_bone + loss_bone_dir + loss_hand_pca
+        loss_weakcam = mano_weakcam_loss_weight * (wcl + wcr)
+        loss_weakcam_reg = mano_weakcam_reg_weight * (wreg_l + wreg_r)
+
+        loss_m = loss_param_w + loss_joint + loss_weakcam + loss_weakcam_reg
         loss = loss_b + loss_m
+
+        pk_l = mano_regression_per_key_raw(
+            out["mano_left"],
+            mano_l_tgt,
+            mask_l,
+            param_keys=mano_param_keys,
+            param_loss=mano_param_loss,
+            huber_delta=mano_huber_delta,
+        )
+        pk_r = mano_regression_per_key_raw(
+            out["mano_right"],
+            mano_r_tgt,
+            mask_r,
+            param_keys=mano_param_keys,
+            param_loss=mano_param_loss,
+            huber_delta=mano_huber_delta,
+        )
+        for k in pk_l.keys():
+            tot[f"mano_pk_{k}"] += 0.5 * (float(pk_l[k]) + float(pk_r[k]))
+
         tot["loss"] += float(loss)
         tot["bce"] += float(loss_b)
         tot["mano"] += float(loss_m)
@@ -460,22 +466,12 @@ def eval_one_epoch(
         tot["mano_param_raw"] += float(loss_param)
         tot["mano_param_weighted"] += float(loss_param_w)
         tot["mano_joint"] += float(loss_joint)
-        tot["mano_vert"] += float(loss_vert)
-        tot["mano_bone"] += float(loss_bone)
-        tot["mano_bone_dir"] += float(loss_bone_dir)
-        tot["mano_hand_pca"] += float(loss_hand_pca)
         tot["mano_param_left"] += float(lp_l)
         tot["mano_param_right"] += float(lp_r)
         tot["mano_joint_left"] += float(jl_w)
         tot["mano_joint_right"] += float(jr_w)
-        tot["mano_vert_left"] += float(vl_w)
-        tot["mano_vert_right"] += float(vr_w)
-        tot["mano_bone_left"] += float(blw_l)
-        tot["mano_bone_right"] += float(blw_r)
-        tot["mano_bone_dir_left"] += float(bddl_w)
-        tot["mano_bone_dir_right"] += float(bddr_w)
-        tot["mano_hand_pca_left"] += float(hpcl_w)
-        tot["mano_hand_pca_right"] += float(hpcr_w)
+        tot["mano_weakcam"] += float(loss_weakcam)
+        tot["mano_weakcam_reg"] += float(loss_weakcam_reg)
         n += 1
         pbar.set_postfix(
             loss=f"{float(loss):.4f}",
