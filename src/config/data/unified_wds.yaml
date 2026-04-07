@@ -13,8 +13,8 @@ data:
   video_base_fps: 30.0
   n_obs_image_steps: 6
   n_obs_image_stride: 30
-  n_obs_state_steps: 18
-  n_obs_state_stride: 10
+  n_obs_state_steps: 6
+  n_obs_state_stride: 30
   n_action_steps: 32
   n_action_stride: 1
   shape_meta:

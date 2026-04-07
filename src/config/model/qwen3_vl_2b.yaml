@@ -24,7 +24,7 @@ camera_intrinsic_mode: text
 runtime:
   use_lora: False
   use_quantization: False
-  knowledge_insulation: True  # True = full, False = off, int N = insulate first N layers
+  knowledge_insulation: False  # True = full, False = off, int N = insulate first N layers
 
 dims:
   vlm_hidden_size: 2048
@@ -115,7 +115,7 @@ policy:
     num_heads: 8
     attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
-    use_kv_projection: false
+    use_kv_projection: True
   action_decoder:
     _target_: src.model.action.action_head.MLPProjector
     input_dim: ${dims.action_hidden_size}
@@ -191,7 +191,7 @@ policy:
     state_mask:
       _target_: src.policy.legendvla.SpanMaskConfig
       mask_ratio: 0.65
-      mean_span_len: 5.0
+      mean_span_len: 3.0
       start_bias_alpha: 2.0
       p_no_mask: 0.1
       keep_last: True
