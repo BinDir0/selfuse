@@ -89,9 +89,9 @@ def _parse_args() -> argparse.Namespace:
         help="single episode (debug); mutually exclusive with --episodes-file",
     )
     d.add_argument("--val-episodes-file", type=str, default="", help="val episode list; empty = skip val")
-    d.add_argument("--seq-len", type=int, default=32, help="window length T")
-    d.add_argument("--stride", type=int, default=1)
-    d.add_argument("--batch-size", type=int, default=32, help="per-GPU batch (global ~ batch * num GPUs)")
+    d.add_argument("--seq-len", type=int, default=64, help="window length T")
+    d.add_argument("--stride", type=int, default=16)
+    d.add_argument("--batch-size", type=int, default=16, help="per-GPU batch (global ~ batch * num GPUs)")
     d.add_argument("--workers", type=int, default=0)
     d.add_argument(
         "--no-shuffle-data",
@@ -117,7 +117,7 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-pose-weight",
         type=float,
-        default=0.0,
+        default=0.5,
         help="relative weight for hand_pose inside param regression when hand_pose is in --mano-param-keys",
     )
     m.add_argument(
@@ -125,7 +125,7 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="relative weight for root_orient inside param regression when root_orient is in --mano-param-keys "
-        "(default 2.0 vs 1.0 for trans/betas)",
+        "(default 1.0 vs 1.0 for trans/betas)",
     )
     m.add_argument(
         "--mano-left-root-fix",
@@ -135,9 +135,9 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-param-keys",
         type=str,
-        default="trans,betas",
+        default="trans,root_orient,hand_pose,betas",
         help="comma-separated subset of trans,root_orient,hand_pose,betas for vector regression "
-        "(default: trans,betas only; add root_orient/hand_pose if needed)",
+        "(default: all four keys)",
     )
     m.add_argument(
         "--mano-param-loss",
