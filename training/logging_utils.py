@@ -77,12 +77,8 @@ def val_avg_to_tb_dict(avg: Mapping[str, float]) -> dict[str, float]:
     }
     if "mano_weakcam" in avg:
         out["val/mano_weakcam"] = float(avg["mano_weakcam"])
-    if "mano_weakcam_px" in avg:
-        out["val/mano_weakcam_px"] = float(avg["mano_weakcam_px"])
     if "mano_weakcam_reg" in avg:
         out["val/mano_weakcam_reg"] = float(avg["mano_weakcam_reg"])
-    if "mano_kp2d" in avg:
-        out["val/mano_kp2d"] = float(avg["mano_kp2d"])
     for key in ("trans", "root_orient", "hand_pose", "betas"):
         pk = f"mano_pk_{key}"
         if pk in avg:

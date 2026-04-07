@@ -349,6 +349,72 @@ def mano_masked_mano_reproj_normalized_plane_m2(
     return (per_bt * mask_bt * frame_ok.float()).sum() / mask_bt.sum().clamp_min(1.0)
 
 
+def mano_masked_mano_reproj_pixel_m2(
+    pred_mano: dict[str, torch.Tensor],
+    tgt_mano: dict[str, torch.Tensor],
+    mask_bt: torch.Tensor,
+    mano_layer: nn.Module,
+    intr_bt4: torch.Tensor,
+    *,
+    chunk: int,
+    joint_weight_21: torch.Tensor | None,
+    z_min: float = 0.05,
+) -> torch.Tensor:
+    """Pixel-plane reprojection: (u,v) from pred MANO vs GT MANO joints using intrinsics."""
+    if mask_bt.sum() < 1e-6:
+        return pred_mano["trans"].new_tensor(0.0)
+    if intr_bt4.shape[-1] != 4:
+        raise ValueError(f"expected intr_bt4 (...,4) fx,fy,cx,cy, got {tuple(intr_bt4.shape)}")
+    mm_to_m = 0.001
+    zm = max(float(z_min), 1e-6)
+    with torch.no_grad():
+        j_t = mano_parameter_dict_to_joints_bt(
+            tgt_mano["trans"],
+            tgt_mano["root_orient"],
+            tgt_mano["hand_pose"],
+            tgt_mano["betas"],
+            mano_layer,
+            chunk=chunk,
+        ) * mm_to_m
+    j_p = (
+        mano_parameter_dict_to_joints_bt(
+            pred_mano["trans"],
+            pred_mano["root_orient"],
+            pred_mano["hand_pose"],
+            pred_mano["betas"],
+            mano_layer,
+            chunk=chunk,
+        )
+        * mm_to_m
+    )
+    zp = j_p[..., 2].clamp_min(zm)
+    zt = j_t[..., 2].clamp_min(zm)
+    plane_p = torch.stack([j_p[..., 0] / zp, j_p[..., 1] / zp], dim=-1)
+    plane_t = torch.stack([j_t[..., 0] / zt, j_t[..., 1] / zt], dim=-1)
+
+    fx = intr_bt4[..., 0].unsqueeze(-1).unsqueeze(-1)
+    fy = intr_bt4[..., 1].unsqueeze(-1).unsqueeze(-1)
+    cx = intr_bt4[..., 2].unsqueeze(-1).unsqueeze(-1)
+    cy = intr_bt4[..., 3].unsqueeze(-1).unsqueeze(-1)
+    pix_p = torch.cat([fx * plane_p[..., 0:1] + cx, fy * plane_p[..., 1:2] + cy], dim=-1)
+    pix_t = torch.cat([fx * plane_t[..., 0:1] + cx, fy * plane_t[..., 1:2] + cy], dim=-1)
+
+    valid = (j_p[..., 2] > zm) & (j_t[..., 2] > zm)
+    valid = valid & torch.isfinite(pix_p).all(dim=-1) & torch.isfinite(pix_t).all(dim=-1)
+    e = (pix_p - pix_t).pow(2).sum(dim=-1)
+    m = valid & mask_bt.unsqueeze(-1).bool()
+    if joint_weight_21 is None:
+        w = e.new_ones(e.shape[-1])
+    else:
+        w = joint_weight_21.to(device=e.device, dtype=e.dtype).view(1, 1, -1).expand_as(e)
+    num = (e * w * m.float()).sum(dim=-1)
+    den = (w * m.float()).sum(dim=-1).clamp_min(1e-8)
+    l_avg = num / den
+    frame_ok = den > 1e-7
+    per_bt = torch.where(frame_ok, l_avg, l_avg.new_zeros(()))
+    return (per_bt * mask_bt * frame_ok.float()).sum() / mask_bt.sum().clamp_min(1.0)
+
+
 def weakcam_reg_loss(pred_cam_bt3: torch.Tensor, mask_bt: torch.Tensor) -> torch.Tensor:
     """Regularize weak camera to identity-ish: s->1, tx/ty->0."""
     if mask_bt.sum() < 1e-6:

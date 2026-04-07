@@ -16,9 +16,7 @@ from training.mano_train_render import maybe_save_train_mano_compare_png
 from training.losses import (
     bce_existence,
     mano_masked_joint_mse_m2,
-    mano_masked_mano_reproj_normalized_plane_m2,
     mano_masked_weakcam_reproj_normalized_plane_m2,
-    mano_masked_weakcam_reproj_pixel_m2,
     mano_regression_loss,
     mano_regression_per_key_raw,
     weakcam_reg_loss,
@@ -59,10 +57,8 @@ def train_one_epoch(
     is_rank0: bool,
     render_mano_every: int,
     render_mano_dir: str | None,
-    mano_kp2d_loss_weight: float,
     mano_weakcam_loss_weight: float,
     mano_weakcam_reg_weight: float,
-    mano_weakcam_pixel_loss_weight: float,
 ) -> tuple[dict[str, float], int, int, bool]:
     model.train()
     _ds = loader.dataset
@@ -118,9 +114,7 @@ def train_one_epoch(
 
         zj = out["mano_left"]["trans"].new_tensor(0.0)
         lj_l, lj_r = zj, zj
-        k2dl, k2dr = zj, zj
         wcl, wcr = zj, zj
-        wpx_l, wpx_r = zj, zj
         wreg_l, wreg_r = zj, zj
         if mano_pca_layers is not None:
             ml, mr = mano_pca_layers
@@ -145,25 +139,6 @@ def train_one_epoch(
                     smooth_max_weight=mano_joint_smooth_max_weight,
                     smooth_max_tau=mano_joint_smooth_max_tau,
                 )
-            if mano_kp2d_loss_weight > 0.0:
-                k2dl = mano_masked_mano_reproj_normalized_plane_m2(
-                    out["mano_left"],
-                    mano_l_tgt,
-                    mask_l,
-                    ml,
-                    intr_bt,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
-                k2dr = mano_masked_mano_reproj_normalized_plane_m2(
-                    out["mano_right"],
-                    mano_r_tgt,
-                    mask_r,
-                    mr,
-                    intr_bt,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
             if mano_weakcam_loss_weight > 0.0:
                 wcl = mano_masked_weakcam_reproj_normalized_plane_m2(
                     out["mano_left"],
@@ -183,27 +158,6 @@ def train_one_epoch(
                     chunk=mano_joint_chunk,
                     joint_weight_21=mano_joint_weight_21,
                 )
-            if mano_weakcam_pixel_loss_weight > 0.0:
-                wpx_l = mano_masked_weakcam_reproj_pixel_m2(
-                    out["mano_left"],
-                    mano_l_tgt,
-                    out["pred_cam"][:, :, 0, :],
-                    intr_bt,
-                    mask_l,
-                    ml,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
-                wpx_r = mano_masked_weakcam_reproj_pixel_m2(
-                    out["mano_right"],
-                    mano_r_tgt,
-                    out["pred_cam"][:, :, 1, :],
-                    intr_bt,
-                    mask_r,
-                    mr,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
             if mano_weakcam_reg_weight > 0.0:
                 wreg_l = weakcam_reg_loss(out["pred_cam"][:, :, 0, :], mask_l)
                 wreg_r = weakcam_reg_loss(out["pred_cam"][:, :, 1, :], mask_r)
@@ -211,12 +165,10 @@ def train_one_epoch(
         loss_joint = mano_joint_loss_weight * (lj_l + lj_r)
         jl_w = mano_joint_loss_weight * lj_l
         jr_w = mano_joint_loss_weight * lj_r
-        loss_kp2d = mano_kp2d_loss_weight * (k2dl + k2dr)
         loss_weakcam = mano_weakcam_loss_weight * (wcl + wcr)
-        loss_weakcam_px = mano_weakcam_pixel_loss_weight * (wpx_l + wpx_r)
         loss_weakcam_reg = mano_weakcam_reg_weight * (wreg_l + wreg_r)
 
-        loss_m = loss_param_w + loss_joint + loss_kp2d + loss_weakcam + loss_weakcam_px + loss_weakcam_reg
+        loss_m = loss_param_w + loss_joint + loss_weakcam + loss_weakcam_reg
 
         loss = loss_b + loss_m
         loss.backward()
@@ -278,9 +230,7 @@ def train_one_epoch(
                 tb_writer,
                 global_step,
                 {
-                    "train/mano_kp2d_weighted": float(loss_kp2d.detach()),
                     "train/mano_weakcam_weighted": float(loss_weakcam.detach()),
-                    "train/mano_weakcam_px_weighted": float(loss_weakcam_px.detach()),
                     "train/mano_weakcam_reg_weighted": float(loss_weakcam_reg.detach()),
                 },
             )
@@ -364,10 +314,8 @@ def eval_one_epoch(
     epoch: int,
     show_progress: bool,
     is_rank0: bool,
-    mano_kp2d_loss_weight: float,
     mano_weakcam_loss_weight: float,
     mano_weakcam_reg_weight: float,
-    mano_weakcam_pixel_loss_weight: float,
 ) -> dict[str, float]:
     model.eval()
     _ds = loader.dataset
@@ -380,13 +328,11 @@ def eval_one_epoch(
         "mano_param": 0.0,
         "mano_param_raw": 0.0,
         "mano_param_weighted": 0.0,
-        "mano_kp2d": 0.0,
         "mano_joint": 0.0,
         "mano_param_left": 0.0,
         "mano_param_right": 0.0,
         "mano_joint_left": 0.0,
         "mano_joint_right": 0.0,
-        "mano_weakcam_px": 0.0,
         "mano_weakcam": 0.0,
         "mano_weakcam_reg": 0.0,
     }
@@ -437,9 +383,7 @@ def eval_one_epoch(
 
         zj = out["mano_left"]["trans"].new_tensor(0.0)
         lj_l, lj_r = zj, zj
-        k2dl, k2dr = zj, zj
         wcl, wcr = zj, zj
-        wpx_l, wpx_r = zj, zj
         wreg_l, wreg_r = zj, zj
         if mano_pca_layers is not None:
             ml, mr = mano_pca_layers
@@ -464,25 +408,6 @@ def eval_one_epoch(
                     smooth_max_weight=mano_joint_smooth_max_weight,
                     smooth_max_tau=mano_joint_smooth_max_tau,
                 )
-            if mano_kp2d_loss_weight > 0.0:
-                k2dl = mano_masked_mano_reproj_normalized_plane_m2(
-                    out["mano_left"],
-                    mano_l_tgt,
-                    mask_l,
-                    ml,
-                    intr_bt,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
-                k2dr = mano_masked_mano_reproj_normalized_plane_m2(
-                    out["mano_right"],
-                    mano_r_tgt,
-                    mask_r,
-                    mr,
-                    intr_bt,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
             if mano_weakcam_loss_weight > 0.0:
                 wcl = mano_masked_weakcam_reproj_normalized_plane_m2(
                     out["mano_left"],
@@ -502,27 +427,6 @@ def eval_one_epoch(
                     chunk=mano_joint_chunk,
                     joint_weight_21=mano_joint_weight_21,
                 )
-            if mano_weakcam_pixel_loss_weight > 0.0:
-                wpx_l = mano_masked_weakcam_reproj_pixel_m2(
-                    out["mano_left"],
-                    mano_l_tgt,
-                    out["pred_cam"][:, :, 0, :],
-                    intr_bt,
-                    mask_l,
-                    ml,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
-                wpx_r = mano_masked_weakcam_reproj_pixel_m2(
-                    out["mano_right"],
-                    mano_r_tgt,
-                    out["pred_cam"][:, :, 1, :],
-                    intr_bt,
-                    mask_r,
-                    mr,
-                    chunk=mano_joint_chunk,
-                    joint_weight_21=mano_joint_weight_21,
-                )
             if mano_weakcam_reg_weight > 0.0:
                 wreg_l = weakcam_reg_loss(out["pred_cam"][:, :, 0, :], mask_l)
                 wreg_r = weakcam_reg_loss(out["pred_cam"][:, :, 1, :], mask_r)
@@ -530,12 +434,10 @@ def eval_one_epoch(
         loss_joint = mano_joint_loss_weight * (lj_l + lj_r)
         jl_w = mano_joint_loss_weight * lj_l
         jr_w = mano_joint_loss_weight * lj_r
-        loss_kp2d = mano_kp2d_loss_weight * (k2dl + k2dr)
         loss_weakcam = mano_weakcam_loss_weight * (wcl + wcr)
-        loss_weakcam_px = mano_weakcam_pixel_loss_weight * (wpx_l + wpx_r)
         loss_weakcam_reg = mano_weakcam_reg_weight * (wreg_l + wreg_r)
 
-        loss_m = loss_param_w + loss_joint + loss_kp2d + loss_weakcam + loss_weakcam_px + loss_weakcam_reg
+        loss_m = loss_param_w + loss_joint + loss_weakcam + loss_weakcam_reg
         loss = loss_b + loss_m
 
         pk_l = mano_regression_per_key_raw(
@@ -563,13 +465,11 @@ def eval_one_epoch(
         tot["mano_param"] += float(loss_param)
         tot["mano_param_raw"] += float(loss_param)
         tot["mano_param_weighted"] += float(loss_param_w)
-        tot["mano_kp2d"] += float(loss_kp2d)
         tot["mano_joint"] += float(loss_joint)
         tot["mano_param_left"] += float(lp_l)
         tot["mano_param_right"] += float(lp_r)
         tot["mano_joint_left"] += float(jl_w)
         tot["mano_joint_right"] += float(jr_w)
-        tot["mano_weakcam_px"] += float(loss_weakcam_px)
         tot["mano_weakcam"] += float(loss_weakcam)
         tot["mano_weakcam_reg"] += float(loss_weakcam_reg)
         n += 1
