@@ -28,7 +28,6 @@ def train_step_tb_dict(
     mano: float,
     mano_param_raw: float,
     mano_param_weighted: float,
-    mano_kp2d_weighted: float,
     mano_joint: float,
     lp_l: float,
     lp_r: float,
@@ -43,7 +42,6 @@ def train_step_tb_dict(
         "train/mano": mano,
         "train/mano_param_raw": mano_param_raw,
         "train/mano_param_weighted": mano_param_weighted,
-        "train/mano_kp2d_weighted": mano_kp2d_weighted,
         "train/mano_joint": mano_joint,
         "train/mano_param_left": lp_l,
         "train/mano_param_right": lp_r,
@@ -69,7 +67,6 @@ def val_avg_to_tb_dict(avg: Mapping[str, float]) -> dict[str, float]:
         "val/mano": float(avg["mano"]),
         "val/mano_param_raw": float(avg.get("mano_param_raw", avg["mano_param"])),
         "val/mano_param_weighted": float(avg.get("mano_param_weighted", avg["mano_param"])),
-        "val/mano_kp2d": float(avg.get("mano_kp2d", 0.0)),
         "val/mano_joint": float(avg["mano_joint"]),
         "val/mano_param_left": mp_l,
         "val/mano_param_right": mp_r,
@@ -78,6 +75,14 @@ def val_avg_to_tb_dict(avg: Mapping[str, float]) -> dict[str, float]:
         "val/mano_left": mp_l + jl_w,
         "val/mano_right": mp_r + jr_w,
     }
+    if "mano_weakcam" in avg:
+        out["val/mano_weakcam"] = float(avg["mano_weakcam"])
+    if "mano_weakcam_px" in avg:
+        out["val/mano_weakcam_px"] = float(avg["mano_weakcam_px"])
+    if "mano_weakcam_reg" in avg:
+        out["val/mano_weakcam_reg"] = float(avg["mano_weakcam_reg"])
+    if "mano_kp2d" in avg:
+        out["val/mano_kp2d"] = float(avg["mano_kp2d"])
     for key in ("trans", "root_orient", "hand_pose", "betas"):
         pk = f"mano_pk_{key}"
         if pk in avg:

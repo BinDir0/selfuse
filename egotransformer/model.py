@@ -47,6 +47,7 @@ class EgoHandSTConfig:
     mano_hand_pose_rot6d_dim: int = _MANO_NHANDJOINTS * 6
     mano_hand_pose_dim: int = _MANO_NHANDJOINTS * 3
     mano_betas_dim: int = 10
+    weak_cam_dim: int = 3
 
     # cross-attn decoder: refine hand token against per-frame ST patch tokens (HMR2-style)
     use_mano_cross_decoder: bool = True
@@ -263,6 +264,15 @@ class EgoHandSTModel(nn.Module):
             c.mano_hand_pose_rot6d_dim,
             c.mano_betas_dim,
         )
+        self.cam_head_left = nn.Linear(dim, c.weak_cam_dim)
+        self.cam_head_right = nn.Linear(dim, c.weak_cam_dim)
+        nn.init.zeros_(self.cam_head_left.weight)
+        nn.init.zeros_(self.cam_head_right.weight)
+        with torch.no_grad():
+            self.cam_head_left.bias.zero_()
+            self.cam_head_right.bias.zero_()
+            self.cam_head_left.bias[0] = 1.0
+            self.cam_head_right.bias[0] = 1.0
 
         self._mano_vec_dim = (
             c.mano_trans_dim
@@ -434,12 +444,16 @@ class EgoHandSTModel(nn.Module):
         mano_concat = torch.stack(
             [self._concat_mano(mano_left), self._concat_mano(mano_right)], dim=2
         )
+        cam_left = self.cam_head_left(hl)
+        cam_right = self.cam_head_right(hr)
+        pred_cam = torch.stack([cam_left, cam_right], dim=2)
 
         return {
             "hand_existence_logits": existence_logits,
             "mano_left": mano_left,
             "mano_right": mano_right,
             "mano_concat": mano_concat,
+            "pred_cam": pred_cam,
             "per_frame_tokens": st_out,
             "hand_features": torch.stack([hl, hr], dim=2),
         }

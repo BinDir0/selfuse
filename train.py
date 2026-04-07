@@ -213,8 +213,26 @@ def _parse_args() -> argparse.Namespace:
     m.add_argument(
         "--mano-kp2d-loss-weight",
         type=float,
-        default=2.0,
+        default=1.0,
         help="masked MSE of (X/Z,Y/Z) from pred MANO joints vs GT MANO joints; scale-free; z>5cm; 0 disables",
+    )
+    m.add_argument(
+        "--mano-weakcam-loss-weight",
+        type=float,
+        default=2.0,
+        help="scale for weak-camera normalized-plane reprojection using pred_cam (s,tx,ty); 0 disables",
+    )
+    m.add_argument(
+        "--mano-weakcam-pixel-loss-weight",
+        type=float,
+        default=0.5,
+        help="aux: pixel-space reprojection using intrinsics + pred_cam; keep small (e.g., 0.01–0.05); 0 disables",
+    )
+    m.add_argument(
+        "--mano-weakcam-reg-weight",
+        type=float,
+        default=0.5,
+        help="regularize weak-camera params towards identity (s=1,tx=0,ty=0); 0 disables",
     )
 
     mo = p.add_argument_group("model")
@@ -613,6 +631,9 @@ def main() -> None:
                 show_progress=show_progress,
                 is_rank0=is_rank0,
                 mano_kp2d_loss_weight=args.mano_kp2d_loss_weight,
+                mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
+                mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
+                mano_weakcam_pixel_loss_weight=args.mano_weakcam_pixel_loss_weight,
             )
             if is_rank0:
                 log_line(
@@ -665,6 +686,9 @@ def main() -> None:
                 render_mano_every=render_mano_every,
                 render_mano_dir=render_mano_dir,
                 mano_kp2d_loss_weight=args.mano_kp2d_loss_weight,
+                mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
+                mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
+                mano_weakcam_pixel_loss_weight=args.mano_weakcam_pixel_loss_weight,
             )
             if is_rank0:
                 summary = (
@@ -704,6 +728,9 @@ def main() -> None:
                     show_progress=show_progress,
                     is_rank0=is_rank0,
                     mano_kp2d_loss_weight=args.mano_kp2d_loss_weight,
+                    mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
+                    mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
+                    mano_weakcam_pixel_loss_weight=args.mano_weakcam_pixel_loss_weight,
                 )
                 if is_rank0:
                     log_line(
