@@ -204,14 +204,14 @@ policy:
     diffusion_loss_weight: 2.0
     flow_loss_weight: 1.0
     reg_loss_weight: 1.0
-    wm_loss_weight: ${oc.select:world_model.loss_weight,0.0}
+    wm_loss_weight: ${world_model.loss_weight}
   knowledge_insulation: ${runtime.knowledge_insulation}
   # World model (conditionally instantiated from world_model config group)
-  world_model_expert: ${oc.select:world_model.world_model_expert,null}
-  frozen_teacher: ${oc.select:world_model.frozen_teacher,null}
+  world_model_expert: ${world_model.world_model_expert}
+  frozen_teacher: ${world_model.frozen_teacher}
   world_model_config:
     _target_: src.policy.legendvla.WorldModelConfig
-    num_future_frames: ${oc.select:world_model.future_frame.horizon,0}
-    target_image_size: ${oc.select:world_model.teacher_image_size,null}
-    teacher_patch_size: ${oc.select:world_model.teacher_patch_size,16}
-    upsample_factor: ${oc.select:world_model.upsample_factor,2}
+    num_future_frames: ${world_model.future_frame.horizon}
+    target_image_size: ${world_model.teacher_image_size}
+    teacher_patch_size: ${world_model.teacher_patch_size}
+    upsample_factor: ${world_model.upsample_factor}
