@@ -15,13 +15,18 @@
 import argparse
 import sys
 from pathlib import Path
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:  # pragma: no cover - fallback for minimal environments
+    def tqdm(iterable, **_kwargs):
+        return iterable
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.pipeline.stage_api import STAGES, get_track_range, validate_stage_output_fast
+DEFAULT_STAGES = ["detect_track", "motion", "slam", "infiller"]
 
 
 def find_video_folders(root_dir: Path, max_depth: int = 5):
@@ -78,6 +83,8 @@ def create_done_markers(
         dry_run: 如果为True，只检查不创建文件
         verbose: 是否显示详细信息
     """
+    from lib.pipeline.stage_api import get_track_range, validate_stage_output_fast
+
     print(f"Scanning video folders in: {root_dir}")
     video_folders = find_video_folders(root_dir)
     print(f"Found {len(video_folders)} video folders\n")
@@ -185,8 +192,8 @@ Examples:
     parser.add_argument(
         '--stages',
         nargs='+',
-        choices=STAGES,
-        default=['detect_track', 'motion', 'slam', 'infiller'],
+        choices=DEFAULT_STAGES,
+        default=DEFAULT_STAGES,
         help='要检查的stage列表（默认：所有stage）'
     )
 
