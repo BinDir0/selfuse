@@ -261,17 +261,30 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         })
 
         # Future frames for world model supervision (raw uint8, no augmentation).
-        # Only valid frames are kept; no zero-padding. tps truncation happens
-        # downstream in BatchProcessor.process_future_frames().
+        # Zero-padded to K frames so all samples in a batch have uniform shape.
+        # Always emit future_frames when K > 0 (zero-fill if missing) so every
+        # sample in a batch has the key and torch.stack works in the collator.
         K = self.future_frame_horizon
-        if K > 0 and "future_frames" in sample:
-            ff = sample["future_frames"]
-            n_valid = min(int(sample.get("valid_future_frame_len", ff.shape[0])), K)
-            if n_valid > 0:
-                ff = ff[:n_valid]
-                if self.target_image_size is not None:
-                    ff = resize_frames(ff, self.target_image_size)
-                data["future_frames"] = ff
+        if K > 0:
+            tH, tW = self.target_image_size or (image.shape[1], image.shape[2])
+            if "future_frames" in sample:
+                ff = sample["future_frames"]
+                n_valid = min(int(sample.get("valid_future_frame_len", ff.shape[0])), K)
+                if n_valid > 0:
+                    ff = ff[:n_valid]
+                    if self.target_image_size is not None:
+                        ff = resize_frames(ff, self.target_image_size)
+                else:
+                    ff = np.zeros((0, tH, tW, 3), dtype=np.uint8)
+                    n_valid = 0
+            else:
+                ff = np.zeros((0, tH, tW, 3), dtype=np.uint8)
+                n_valid = 0
+            # Zero-pad to K frames
+            if ff.shape[0] < K:
+                pad = np.zeros((K - ff.shape[0], tH, tW, 3), dtype=np.uint8)
+                ff = np.concatenate([ff, pad], axis=0) if ff.shape[0] > 0 else pad
+            data["future_frames"] = ff
             data["n_future_frames"] = np.array(n_valid, dtype=np.int32)
         else:
             data["n_future_frames"] = np.array(0, dtype=np.int32)
