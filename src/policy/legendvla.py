@@ -37,7 +37,6 @@ class LossConfig:
     diffusion_loss_weight: float = 1.0
     flow_loss_weight: float = 1.0
     reg_loss_weight: float = 0.0
-    wm_loss_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -94,11 +93,6 @@ class LegendVLA(nn.Module):
         # Camera intrinsic as token embedding (optional)
         camera_intrinsic_mode: str = "text",
         camera_encoder: nn.Module | None = None,
-        # World model (all optional, gated behind wm_diffloss != None)
-        target_encoder: nn.Module | None = None,
-        wm_condition_projector: nn.Module | None = None,
-        wm_diffloss: nn.Module | None = None,
-        world_model_cfg: dict | None = None,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -160,40 +154,7 @@ class LegendVLA(nn.Module):
         if self.ar_action_train_config.input_mask_enabled:
             self.input_mask_embeddings = InputMaskEmbeddings(self.vlm_hidden_size)
 
-        # World model submodules
-        self.use_world_model = wm_diffloss is not None
-        if self.use_world_model:
-            cfg = world_model_cfg or {}
-            self._world_model_cfg = cfg
-            self.wm_condition_projector = wm_condition_projector
-            self.wm_diffloss = wm_diffloss
-            self.ff_noise_std = cfg.get("ff_noise_std", 0.02)
-
-            ff_token_id = getattr(self.backbone, "future_frame_token_id", None)
-            self.future_frame_token_index = int(ff_token_id) if ff_token_id is not None else None
-
-            # Target encoder as a normal submodule so .to(device) propagates.
-            # All params are requires_grad=False after init, so they stay
-            # out of optimizer groups and gradient sync.
-            self.target_encoder = target_encoder
-
-            # For self_vit: EMA encoder output (pooler_output) is already
-            # post-merger with dim = out_hidden_size = vlm_hidden_size.
-            # No additional projection is needed.
-            if target_encoder is not None:
-                source_visual = self.backbone.base_model.model.visual
-                if target_encoder.use_ema:
-                    target_encoder.init_ema(
-                        source_visual,
-                        momentum=cfg.get("ema_momentum", 0.996),
-                    )
-                else:
-                    target_encoder.init_frozen(source_visual)
-        else:
-            self.wm_condition_projector = None
-            self.wm_diffloss = None
-            self.future_frame_token_index = None
-            self.target_encoder = None
+        self.use_world_model = False
 
     def compile_blocks(
         self,
@@ -302,19 +263,6 @@ class LegendVLA(nn.Module):
             modules.append(self.input_mask_embeddings)
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
-    @property
-    def world_model_parameters(self):
-        if not self.use_world_model:
-            return []
-        modules = [m for m in [self.wm_condition_projector, self.wm_diffloss] if m is not None]
-        return [p for m in modules for p in m.parameters() if p.requires_grad]
-
-    def update_ema(self) -> None:
-        """Update EMA target encoder from backbone visual module. Call after optimizer.step()."""
-        target_encoder = self.target_encoder
-        if self.use_world_model and target_encoder is not None and target_encoder.use_ema:
-            target_encoder.update_ema(self.backbone.base_model.model.visual)
-
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
         answer_start_idx = batch.get("answer_start_idx")
         assert answer_start_idx is not None, (
@@ -338,7 +286,7 @@ class LegendVLA(nn.Module):
 
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
         slot_embeds: dict[str, torch.Tensor | None] = {
-            "state": None, "action": None, "camera": None, "future_frame": None,
+            "state": None, "action": None, "camera": None,
         }
 
         if self.camera_intrinsic_mode == "token" and self.camera_encoder is not None and "camera_intrinsic" in batch:
@@ -379,92 +327,7 @@ class LegendVLA(nn.Module):
                 )
             slot_embeds["action"] = action_embeds
 
-        if self.use_world_model and "ff_pixel_values" in batch:
-            target_features, ff_only_grid = self.encode_world_model_targets(batch)
-            batch["_wm_target_features"] = target_features
-            batch["_wm_ff_grid_thw"] = ff_only_grid
-
-            noisy_features = target_features + torch.randn_like(target_features) * self.ff_noise_std
-            slot_embeds["future_frame"] = noisy_features
-
         return slot_embeds
-
-    @torch.no_grad()
-    def encode_world_model_targets(
-        self, batch: dict,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run EMA target encoder on obs+future combined video.
-
-        Obs pixel_values are extracted from the main batch's
-        pixel_values_videos (already processed by HF processor on CPU).
-        Future pixel_values come from process_future_frames. Both are
-        concatenated per-sample on GPU before feeding to the EMA ViT, so
-        MEM temporal causal attention can attend from future to obs frames.
-
-        Returns:
-            target_features: (total_ff_merged_tokens, hidden) future-only.
-            ff_only_grid: (N_ff, 3) grid_thw for future tokens only.
-        """
-        ff_pv = batch["ff_pixel_values"]
-        ff_grid = batch["ff_grid_thw"]
-        ff_video_indices = batch["ff_video_indices"]
-        obs_pv = batch["pixel_values_videos"]
-        obs_grid = batch["video_grid_thw"]
-
-        # Per-entry patch counts and offsets in the flat tensors
-        obs_entry_len = obs_grid[:, 0] * obs_grid[:, 1] * obs_grid[:, 2]
-        obs_offsets = torch.zeros(len(obs_entry_len) + 1, dtype=torch.long, device=obs_pv.device)
-        obs_offsets[1:] = obs_entry_len.cumsum(0)
-
-        ff_entry_len = ff_grid[:, 0] * ff_grid[:, 1] * ff_grid[:, 2]
-        ff_offsets = torch.zeros(len(ff_entry_len) + 1, dtype=torch.long, device=ff_pv.device)
-        ff_offsets[1:] = ff_entry_len.cumsum(0)
-
-        # Per-sample concat: [obs_patches_i, ff_patches_i] for each ff sample
-        combined_parts: list[torch.Tensor] = []
-        combined_grid_list: list[list[int]] = []
-        n_obs_temporal_patches: list[int] = []
-        for i in range(len(ff_video_indices)):
-            vi = int(ff_video_indices[i].item())
-            o_s, o_e = int(obs_offsets[vi].item()), int(obs_offsets[vi + 1].item())
-            f_s, f_e = int(ff_offsets[i].item()), int(ff_offsets[i + 1].item())
-
-            combined_parts.append(obs_pv[o_s:o_e])
-            combined_parts.append(ff_pv[f_s:f_e])
-
-            T_obs = int(obs_grid[vi, 0].item())
-            T_ff = int(ff_grid[i, 0].item())
-            H = int(obs_grid[vi, 1].item())
-            W = int(obs_grid[vi, 2].item())
-            combined_grid_list.append([T_obs + T_ff, H, W])
-            n_obs_temporal_patches.append(T_obs)
-
-        combined_pv = torch.cat(combined_parts, dim=0)
-        combined_grid = torch.tensor(combined_grid_list, dtype=torch.long, device=ff_pv.device)
-
-        # EMA forward on combined obs+future sequence
-        all_features, _ = self.target_encoder(combined_pv, combined_grid)
-        all_features = all_features.detach()
-
-        # Split: discard obs merged tokens, keep future merged tokens
-        sms = self.backbone.base_model.model.visual.spatial_merge_size
-        ff_features_list: list[torch.Tensor] = []
-        ff_only_grid_list: list[list[int]] = []
-        offset = 0
-        for i in range(len(combined_grid_list)):
-            T_combined, H, W = combined_grid_list[i]
-            merged_spatial = (H * W) // (sms * sms)
-            total_tokens = T_combined * merged_spatial
-            obs_tokens = n_obs_temporal_patches[i] * merged_spatial
-
-            ff_features_list.append(all_features[offset + obs_tokens : offset + total_tokens])
-            T_ff = T_combined - n_obs_temporal_patches[i]
-            ff_only_grid_list.append([T_ff, H, W])
-            offset += total_tokens
-
-        target_features = torch.cat(ff_features_list, dim=0)
-        ff_only_grid = torch.tensor(ff_only_grid_list, dtype=torch.long, device=ff_pv.device)
-        return target_features, ff_only_grid
 
     def forward_backbone_stream(
         self, batch: dict, slot_embeds: dict, output_attentions: bool = False,
@@ -480,7 +343,6 @@ class LegendVLA(nn.Module):
             state_slot_embeds=slot_embeds.get("state"),
             action_slot_embeds=slot_embeds.get("action"),
             camera_slot_embeds=slot_embeds.get("camera"),
-            future_frame_slot_embeds=slot_embeds.get("future_frame"),
             output_attentions=output_attentions,
         )
         output.prefix_cache = slice_prefix_cache_from_full_kv(

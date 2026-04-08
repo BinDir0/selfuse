@@ -74,19 +74,12 @@ class Qwen3VLChatFormatter:
         action_token: str = "<action>",
         camera_token: str = "<camera>",
         camera_intrinsic_mode: str = "text",
-        future_frame_token: str = "<future_frame>",
         lowercase_vla_text: bool = True,
     ):
         self.state_token = state_token
         self.action_token = action_token
         self.camera_token = camera_token
         self.camera_intrinsic_mode = camera_intrinsic_mode
-        self.future_frame_token = future_frame_token
-        # Must be set by the collator from the real processor before
-        # build_messages is called on samples with future_frames.
-        self.patch_size: int | None = None
-        self.spatial_merge_size: int | None = None
-        self.temporal_patch_size: int | None = None
         self.lowercase_vla_text = lowercase_vla_text
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
@@ -135,37 +128,7 @@ class Qwen3VLChatFormatter:
                 n_states=sample["n_states"],
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
-            # Emit future_frame tokens for world model slot embeddings.
-            # Token count is computed from the actual frame shape and
-            # processor geometry (patch_size, spatial_merge_size, temporal_patch_size),
-            # all read from the real processor by the collator at init.
-            has_future_frames = False
-            if "future_frames" in sample:
-                if self.patch_size is None or self.spatial_merge_size is None or self.temporal_patch_size is None:
-                    raise RuntimeError(
-                        "patch_size, spatial_merge_size, temporal_patch_size must be set "
-                        "from the real processor before formatting samples with future_frames"
-                    )
-                ff = sample["future_frames"]
-                tps = self.temporal_patch_size
-                T_future = ff.shape[0] // tps
-                if T_future > 0:
-                    H, W = ff.shape[1], ff.shape[2]
-                    divisor = self.patch_size * self.spatial_merge_size
-                    assert H % divisor == 0 and W % divisor == 0, (
-                        f"future_frames H={H}, W={W} must be divisible by "
-                        f"patch_size({self.patch_size}) * spatial_merge_size({self.spatial_merge_size}) = {divisor}"
-                    )
-                    tokens_per_temporal_patch = (
-                        (H // self.patch_size // self.spatial_merge_size)
-                        * (W // self.patch_size // self.spatial_merge_size)
-                    )
-                    assistant_text += self.future_frame_token * (T_future * tokens_per_temporal_patch)
-                    has_future_frames = True
-            if has_future_frames:
-                user_text += " Predict the next action sequence and future visual observations."
-            else:
-                user_text += " Predict the next action sequence."
+            user_text += " Predict the next action sequence."
         else:
             user_text = str(sample["question"]).strip()
             assistant_text = str(sample["answer"]).strip()
@@ -206,7 +169,6 @@ class Qwen3VLBatchProcessor:
         padding_side: str = "right",
         state_token: str = "<state>",
         action_token: str = "<action>",
-        future_frame_token: str = "<future_frame>",
         processor: Any = None,
     ):
         self.model_name_or_path = model_name_or_path
@@ -216,12 +178,9 @@ class Qwen3VLBatchProcessor:
         self.padding_side = padding_side
         self.state_token = state_token
         self.action_token = action_token
-        self.future_frame_token = future_frame_token
         self.processor = processor if processor is not None else self.init_processor()
         self.tokenizer = self.processor.tokenizer
         special_tokens = [self.state_token, self.action_token]
-        if self.future_frame_token:
-            special_tokens.append(self.future_frame_token)
         self.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         self.action_token_id = int(self.tokenizer.convert_tokens_to_ids(self.action_token))
 
@@ -335,52 +294,3 @@ class Qwen3VLBatchProcessor:
         labels = labels.masked_fill(positions < answer_start_idx.unsqueeze(1), self.ignore_index)
         return labels
 
-    def process_future_frames(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
-        """Process future frames for the world model target encoder.
-
-        Contract:
-        - Only samples with a "future_frames" key are processed.
-        - Future frame count is truncated to the nearest multiple of
-          temporal_patch_size (tps) to satisfy Qwen3-VL's temporal patching.
-          tps truncation happens HERE, not in vla_dataset.
-        - Returns {ff_pixel_values, ff_grid_thw, ff_video_indices} or
-          empty dict if no valid frames.
-        - ff_video_indices maps each ff entry to its corresponding index
-          in the batch's video_grid_thw, so build_slot_embeddings can
-          extract obs pixel_values for GPU-side obs+future concat.
-        - Truncation formula: n_ff = (K // tps) * tps. Must match the
-          token count in Qwen3VLChatFormatter.build_messages().
-        """
-        video_proc = getattr(self.processor, "video_processor", None)
-        tps = getattr(video_proc, "temporal_patch_size", 2) if video_proc else 2
-
-        videos = []
-        ff_video_indices = []
-        video_idx = -1
-        for s in samples:
-            if s.get("vision_type") == "video":
-                video_idx += 1
-            if "future_frames" not in s:
-                continue
-            ff = s["future_frames"]
-            n_ff = (ff.shape[0] // tps) * tps
-            if n_ff == 0:
-                continue
-            videos.append(ff[:n_ff])
-            ff_video_indices.append(video_idx)
-
-        if not videos:
-            return {}
-
-        # Source: Qwen3-VL video_processor call convention
-        # videos: list of [T, H, W, C] uint8 tensors
-        processed = self.processor.video_processor(
-            videos=videos,
-            return_tensors="pt",
-            do_sample_frames=False,
-        )
-        return {
-            "ff_pixel_values": processed["pixel_values_videos"],
-            "ff_grid_thw": processed["video_grid_thw"],
-            "ff_video_indices": torch.tensor(ff_video_indices, dtype=torch.long),
-        }

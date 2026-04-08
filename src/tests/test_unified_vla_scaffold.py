@@ -18,7 +18,7 @@ class DummyBackbone(nn.Module):
         self.image_token_id = 100
         self.state_token_id = 101
         self.action_token_id = 102
-        self.future_frame_token_id = 103
+
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -49,7 +49,6 @@ class DummyBackbone(nn.Module):
         state_slot_embeds,
         action_slot_embeds,
         camera_slot_embeds=None,
-        future_frame_slot_embeds=None,
         output_attentions=False,
         state_token_id=None,
         action_token_id=None,
@@ -74,12 +73,6 @@ class DummyBackbone(nn.Module):
             gather_index = action_slot.clamp(min=0, max=action_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             action_values = torch.gather(action_slot_embeds, dim=1, index=gather_index)
             embeds = torch.where(action_mask.unsqueeze(-1), action_values, embeds)
-        # Future frame slot embeds are 2D (total_tokens, H) — variable per
-        # sample. Use masked_scatter to match real backbone behavior.
-        if future_frame_slot_embeds is not None:
-            ff_mask = (input_ids == self.future_frame_token_id).unsqueeze(-1).expand_as(embeds)
-            embeds = embeds.masked_scatter(ff_mask, future_frame_slot_embeds.to(embeds.dtype))
-
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
         position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)

@@ -47,15 +47,6 @@ class UnifiedVLACollator:
         if self.formatter.action_token != self.batch_processor.action_token:
             raise ValueError("Formatter and batch processor must share the same action token.")
 
-        # Sync vision geometry from the real processor so the formatter
-        # computes future-frame token counts that match the ViT exactly.
-        processor = getattr(self.batch_processor, "processor", None)
-        video_proc = getattr(processor, "video_processor", None) if processor is not None else None
-        if video_proc is not None:
-            self.formatter.patch_size = getattr(video_proc, "patch_size", 16)
-            self.formatter.spatial_merge_size = getattr(video_proc, "merge_size", 2)
-            self.formatter.temporal_patch_size = getattr(video_proc, "temporal_patch_size", 2)
-
     def collate_values(self, values: list[Any]) -> Any:
         if isinstance(values[0], torch.Tensor):
             return torch.stack(values)
@@ -140,7 +131,6 @@ class UnifiedVLACollator:
             "intrinsic",
             "vision_type",
             "video_fps",
-            # future_frames is only present in VLA samples; handled below.
             "future_frames",
         }
         common_keys = set(samples[0])
@@ -154,12 +144,6 @@ class UnifiedVLACollator:
         if self.formatter.camera_intrinsic_mode == "token":
             intrinsics = [s["intrinsic"] for s in samples]
             batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
-
-        # Future frame pixel processing is delegated to the BatchProcessor.
-        # tps truncation and video_processor call happen there.
-        if any("future_frames" in s for s in samples):
-            ff_result = self.batch_processor.process_future_frames(samples)
-            batch.update(ff_result)
 
         if self.debug_capture_texts:
             batch["debug_prompt_messages"] = prompt_messages

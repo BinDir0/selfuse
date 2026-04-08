@@ -19,7 +19,6 @@ from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.common.diffloss import DiffLoss
 from src.model.common.modules import TimeEmbedding
 from src.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
-from src.model.vision.future_frame_encoder import FutureFrameTargetEncoder
 from src.model.vlm.qwen3_vl_backbone import Qwen3VLBackboneWrapper
 from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
 from src.tests.dummy_flow_expert import DummyFlowExpert
@@ -115,16 +114,6 @@ def has_local_model_weights(model_name: str) -> bool:
     return False
 
 
-def resolve_world_model_name() -> str:
-    if has_local_model_weights(WM_MODEL_NAME):
-        return WM_MODEL_NAME
-    if has_local_model_weights(MODEL_NAME):
-        return MODEL_NAME
-    pytest.skip(
-        f"Neither {WM_MODEL_NAME!r} nor {MODEL_NAME!r} has complete local weights for offline real-model testing."
-    )
-
-
 def add_bytes_to_tar(tar_obj: tarfile.TarFile, name: str, payload: bytes) -> None:
     info = tarfile.TarInfo(name=name)
     info.size = len(payload)
@@ -208,10 +197,8 @@ def make_shape_meta(
     image_horizon: int = 1,
     state_horizon: int = 1,
     action_horizon: int = 1,
-    future_frame_horizon: int = 0,
-    future_frame_stride: int = 1,
 ) -> dict:
-    shape_meta = {
+    return {
         "obs": {
             "rgb": {"shape": [64, 64, 3], "type": "rgb", "horizon": image_horizon, "stride": 1},
             "depth": {"shape": [64, 64], "type": "depth", "horizon": 0, "stride": 1},
@@ -226,9 +213,6 @@ def make_shape_meta(
         },
         "action": {"shape": [48], "type": "fingertips", "horizon": action_horizon, "stride": 1},
     }
-    if future_frame_horizon > 0:
-        shape_meta["future_frame"] = {"horizon": future_frame_horizon, "stride": future_frame_stride}
-    return shape_meta
 
 
 def make_identity_normalizer() -> LinearNormalizer:
@@ -245,12 +229,7 @@ def build_real_model(
     *,
     model_name: str = MODEL_NAME,
     shape_meta: dict | None = None,
-    future_frame_token: str = "",
     loss_config: LossConfig | None = None,
-    target_encoder: FutureFrameTargetEncoder | None = None,
-    wm_condition_projector: MLPProjector | None = None,
-    wm_diffloss: DiffLoss | None = None,
-    world_model_cfg: dict | None = None,
 ) -> LegendVLA:
     text_attn_implementation, vision_attn_implementation = resolve_attention_backends()
     backbone = Qwen3VLBackboneWrapper(
@@ -260,7 +239,6 @@ def build_real_model(
         torch_dtype="bfloat16",
         state_token="<state>",
         action_token="<action>",
-        future_frame_token=future_frame_token,
         use_lora=True,
         lora={
             "r": 8,
@@ -358,10 +336,6 @@ def build_real_model(
         ar_action_train_config=ARActionTrainConfig(noise_std=0.0, chunk_size=1),
         rtc_config=RTCConfig(enabled=False),
         loss_config=loss_config or LossConfig(),
-        target_encoder=target_encoder,
-        wm_condition_projector=wm_condition_projector,
-        wm_diffloss=wm_diffloss,
-        world_model_cfg=world_model_cfg,
     )
 
     modules_to_move = [
@@ -374,8 +348,6 @@ def build_real_model(
         model.latent_condition_projector,
         model.diffloss,
     ]
-    if model.use_world_model:
-        modules_to_move.extend([model.wm_condition_projector, model.wm_diffloss])
     for module in modules_to_move:
         if module is not None:
             module.to(device=device, dtype=dtype)
@@ -404,15 +376,6 @@ def preprocess_batch(batch: dict[str, torch.Tensor], dtype: torch.dtype, device:
         "actions_valid_mask": batch["actions_valid_mask"].to(device=device),
         "labels": batch["labels"].to(device=device),
     }
-    optional_fields = {
-        "ff_pixel_values": lambda value: value.to(device=device, dtype=dtype),
-        "ff_grid_thw": lambda value: value.to(device=device),
-        "n_future_frames": lambda value: value.to(device=device),
-    }
-    for key, move_fn in optional_fields.items():
-        value = batch.get(key)
-        if value is not None:
-            inputs[key] = move_fn(value)
     return inputs
 
 
@@ -530,114 +493,3 @@ def test_real_qwen3vl_wds_forward_backward(tmp_path: Path):
         assert has_diffloss_grad, "No gradient reached diffloss parameters"
 
 
-@pytest.mark.cuda
-@pytest.mark.real_model
-def test_real_qwen3vl_world_model_forward_backward(tmp_path: Path):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for the real Qwen3-VL integration test.")
-
-    torch.manual_seed(0)
-    np.random.seed(0)
-    torch.cuda.empty_cache()
-
-    with patched_hf_cache_env():
-        world_model_name = resolve_world_model_name()
-        shape_meta = make_shape_meta(
-            image_horizon=2,
-            state_horizon=1,
-            action_horizon=1,
-            future_frame_horizon=2,
-            future_frame_stride=1,
-        )
-        backbone_hidden_size = resolve_model_hidden_size(world_model_name)
-        loader = build_real_dataloader(
-            tmp_path,
-            model_name=world_model_name,
-            shape_meta=shape_meta,
-            include_vlm=False,
-            batch_size=1,
-        )
-        batch = next(iter(loader))
-
-        assert batch["input_ids"].shape[0] == 1
-        assert bool(batch["is_vla_data"][0].item()) is True
-        assert batch["ff_pixel_values"] is not None
-        assert batch["ff_grid_thw"] is not None
-        assert int(batch["n_future_frames"][0].item()) == 2
-
-        device = torch.device("cuda")
-        dtype = torch.float32
-        wm_latent_dim = 128
-        model = build_real_model(
-            device=device,
-            dtype=dtype,
-            model_name=world_model_name,
-            shape_meta=shape_meta,
-            future_frame_token="<future_frame>",
-            loss_config=LossConfig(
-                ce_loss_weight=0.0,
-                diffusion_loss_weight=0.0,
-                flow_loss_weight=0.0,
-                reg_loss_weight=0.0,
-                wm_loss_weight=1.0,
-            ),
-            target_encoder=FutureFrameTargetEncoder(
-                encoder_type="self_vit",
-                feature_dim=backbone_hidden_size,
-                use_ema=True,
-            ),
-            wm_condition_projector=MLPProjector(
-                input_dim=backbone_hidden_size,
-                output_dim=wm_latent_dim,
-                width=256,
-                depth=2,
-                final_layer_norm=False,
-                use_mlp_layer_norm=False,
-            ),
-            wm_diffloss=DiffLoss(
-                target_channels=backbone_hidden_size,
-                z_channels=wm_latent_dim,
-                depth=2,
-                width=256,
-                num_sampling_steps="10",
-                grad_checkpointing=False,
-                use_ddim_sampling=True,
-                use_flow_matching=False,
-                flow_sig_min=0.001,
-                time_min_period=0.004,
-                time_max_period=4.0,
-                flow_sampling="uniform",
-                flow_alpha=1.5,
-                flow_beta=1.0,
-                num_inference_steps=2,
-            ),
-            world_model_cfg={"ff_noise_std": 0.0, "ema_momentum": 0.9},
-        )
-        model.train()
-
-        future_frame_token_count = int((batch["input_ids"] == model.future_frame_token_index).sum().item())
-        assert future_frame_token_count > 0
-
-        inputs = preprocess_batch(batch, dtype=dtype, device=device)
-        output = model("train", inputs)
-
-        assert output["total_loss"].requires_grad
-        assert torch.isfinite(output["total_loss"])
-        assert torch.isfinite(output["wm_loss"])
-        assert output["wm_loss"].item() > 0
-        torch.testing.assert_close(output["total_loss"], output["wm_loss"])
-
-        output["total_loss"].backward()
-
-        has_world_model_grad = any(
-            param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
-            for param in model.world_model_parameters
-        )
-        has_target_encoder_grad = any(
-            param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
-            for param in model.target_encoder.parameters()
-        )
-
-        assert model.target_encoder.ema is not None
-        assert has_world_model_grad, "No gradient reached world model parameters"
-        assert not has_target_encoder_grad, "Target encoder should stay frozen during training"

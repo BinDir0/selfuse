@@ -55,8 +55,6 @@ policy:
     use_quantization: ${runtime.use_quantization}
     text_attn_implementation: ${pretrained.text_attn_implementation}
     vision_attn_implementation: ${pretrained.vision_attn_implementation}
-    future_frame_token: ${world_model.ff_token}
-    mem_temporal_attention: ${world_model.mem_temporal_attention}
     quantization:
       load_in_4bit: True
       load_in_8bit: False
@@ -160,11 +158,6 @@ policy:
     # depth: 2
     # final_layer_norm: False
     # use_mlp_layer_norm: False
-  # World model (future frame prediction, wired from world_model config group)
-  target_encoder: ${world_model.target_encoder}
-  wm_condition_projector: ${world_model.wm_condition_projector}
-  wm_diffloss: ${world_model.wm_diffloss}
-  world_model_cfg: ${world_model}
   shape_meta: ${data.shape_meta}
   ignore_index: ${data.ignore_index}
   action_hidden_size: ${dims.action_hidden_size}
@@ -209,5 +202,4 @@ policy:
     diffusion_loss_weight: 2.0
     flow_loss_weight: 1.0
     reg_loss_weight: 1.0
-    wm_loss_weight: ${world_model.loss_weight}
   knowledge_insulation: ${runtime.knowledge_insulation}

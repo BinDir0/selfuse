@@ -397,16 +397,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         )
         all_trainable_parameters.extend(diffloss_trainable_paramters)
 
-        # World model optimizer group (gated by use_world_model)
-        if model.use_world_model:
-            wm_params = model.world_model_parameters
-            if wm_params:
-                wm_trainable_parameters = self.get_grouped_parameters(
-                    wm_params,
-                    cfg.optimizer.world_model,
-                )
-                all_trainable_parameters.extend(wm_trainable_parameters)
-
         all_trainable_params_list = []
         for params_dict in all_trainable_parameters:
             all_trainable_params_list.extend(params_dict['params'])
@@ -606,9 +596,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             }
                             if cfg.training.train_vlm and not vlm_freeze_active:
                                 part_params["vlm"] = self.model.trainable_vlm_parameters
-                            wm_clip_params = self.model.world_model_parameters
-                            if wm_clip_params:
-                                part_params["world_model"] = wm_clip_params
                             norms = {
                                 name: accelerator.clip_grad_norm_(params, max_norm)
                                 for name, params in part_params.items()
@@ -645,14 +632,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         continue
                     self.global_step += 1
                     if accelerator.sync_gradients:
-                        # Update EMA target encoder only on actual optimizer
-                        # steps; during gradient accumulation optimizer.step()
-                        # is a no-op so calling update_ema() would lower the
-                        # effective momentum (momentum^accum_steps).
-                        unwrapped = _unwrap_model(self)
-                        if unwrapped.use_world_model:
-                            unwrapped.update_ema()
-
                         self.update_step += 1
                         total_samples_processed += inputs["input_ids"].shape[0]
                         # initialize model averaging
@@ -711,8 +690,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             })
                             if "vlm" in part_grad_norms:
                                 step_log['grad_norm_vlm'] = part_grad_norms["vlm"]
-                            if "world_model" in part_grad_norms:
-                                step_log['grad_norm_world_model'] = part_grad_norms["world_model"]
                         with torch.no_grad():
                             if cfg.training.train_vlm:
                                 vlm_params = self.model.trainable_vlm_parameters
@@ -723,9 +700,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             step_log["weight_norm/diffloss"] = params_l2_norm(
                                 self.model.diffloss_parameters
                             )
-                            wm_log_params = self.model.world_model_parameters
-                            if wm_log_params:
-                                step_log["weight_norm/world_model"] = params_l2_norm(wm_log_params)
                         step_log.update(raw_loss_cpu)
 
                     # Evaluation
@@ -816,13 +790,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Camera intrinsic as token embedding.
         if "camera_intrinsic" in batch:
             inputs["camera_intrinsic"] = batch["camera_intrinsic"].to(self.dtype)
-        # World model: future-frame-only pixel values for target encoder.
-        # BatchProcessor.process_future_frames() already applied tps truncation.
-        if "ff_pixel_values" in batch:
-            inputs["ff_pixel_values"] = batch["ff_pixel_values"].to(self.dtype)
-            inputs["ff_grid_thw"] = batch["ff_grid_thw"]
-            inputs["ff_video_indices"] = batch["ff_video_indices"]
-            inputs["n_future_frames"] = batch["n_future_frames"]
         return inputs
 
     def get_grouped_parameters(self, param_list, cfg):
