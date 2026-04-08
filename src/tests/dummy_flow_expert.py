@@ -30,6 +30,7 @@ class DummyFlowExpert(nn.Module):
         time_cond: torch.Tensor,
         action_mask: torch.Tensor,
         num_parallel_chunks: int,
+        output_attentions: bool = False,
     ) -> torch.Tensor:
         if prefix_cache is None:
             raise ValueError("DummyFlowExpert requires a prefix cache.")

@@ -47,7 +47,9 @@ class DummyBackbone(nn.Module):
         mm_token_type_ids,
         state_slot_embeds,
         action_slot_embeds,
+        camera_slot_embeds=None,
         future_frame_slot_embeds=None,
+        output_attentions=False,
         state_token_id=None,
         action_token_id=None,
         use_cache=True,
@@ -55,6 +57,7 @@ class DummyBackbone(nn.Module):
         past_key_values=None,
     ):
         del pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw, mm_token_type_ids
+        del camera_slot_embeds, output_attentions
         del state_token_id, action_token_id, use_cache, output_hidden_states, past_key_values
 
         embeds = self.embed(input_ids)

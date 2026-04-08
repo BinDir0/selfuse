@@ -345,6 +345,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     break
             model.load_state_dict(state_dict)
             print("Successfully loaded finetuning weights.")
+        # Ensure non-backbone modules match the VLM dtype (bf16) for single-GPU
+        # training where accelerate autocast may not cover custom modules.
+        if cfg.training.use_bf16 and accelerator.distributed_type.value == "NO":
+            model.to(dtype=torch.bfloat16)
+
         runtime_cfg = getattr(cfg, "runtime", None)
         use_lora = bool(getattr(runtime_cfg, "use_lora", getattr(cfg, "lora", False)))
         if use_lora:
@@ -816,6 +821,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if "ff_pixel_values" in batch:
             inputs["ff_pixel_values"] = batch["ff_pixel_values"].to(self.dtype)
             inputs["ff_grid_thw"] = batch["ff_grid_thw"]
+            inputs["ff_video_indices"] = batch["ff_video_indices"]
             inputs["n_future_frames"] = batch["n_future_frames"]
         return inputs
 
