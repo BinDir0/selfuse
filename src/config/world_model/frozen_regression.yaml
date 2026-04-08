@@ -1,18 +1,22 @@
 # @package _global_
+# Override future_pad_mode to repeat for world model (episode boundaries get
+# the last available frame repeated rather than being truncated).
+dataset:
+  vla_dataset:
+    future_pad_mode: repeat
+
 world_model:
   enabled: true
   future_frame:
-    horizon: 3
-    stride: 1
+    horizon: 1
+    stride: 30    # predict frame ~1 second ahead (at 30fps base)
   loss_weight: 1.0
 
   frozen_teacher:
     _target_: src.model.world_model.frozen_teacher.FrozenVisualTeacher
-    # DINOv2-large: patch_size=14, hidden_size=1024, no register tokens.
-    # To switch to DINOv3-ViT-L/16 (patch_size=16, 4 register tokens):
-    #   model_name_or_path: facebook/dinov3-vitl16-pretrain-lvd1689m
-    #   And update teacher_patch_size/teacher_image_size below to 16/384.
-    model_name_or_path: ${oc.select:frozen_teacher_path,facebook/dinov2-large}
+    # DINOv3-ViT-L/16: patch_size=16, hidden_size=1024, 4 register tokens, RoPE.
+    # Native multi-resolution support, 384/16=24 → 576 spatial tokens.
+    model_name_or_path: ${oc.select:frozen_teacher_path,facebook/dinov3-vitl16-pretrain-lvd1689m}
     feature_dim: 1024
     torch_dtype: bfloat16
     target_size: ${world_model.teacher_image_size}
@@ -31,14 +35,9 @@ world_model:
     attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
 
-  # DINOv2-large: patch_size=14. Input images are 384x384 from data pipeline;
-  # FrozenVisualTeacher auto-resizes to nearest patch-aligned resolution (378x378).
-  # 378 / 14 = 27 → 27x27 = 729 spatial tokens.
-  # teacher_image_size controls grid computation for world model query tokens:
-  # grid = teacher_image_size / (patch_size * upsample_factor)
-  # 378 / (14 * 2) = 13.5 → NOT integer. Use 364: 364/14=26, 26/2=13.
-  #
-  # Instead, use teacher_image_size=392 (14*28): 392/14=28, 28/2=14 → 14x14=196 queries.
-  teacher_image_size: [392, 392]
-  teacher_patch_size: 14
+  # DINOv3-ViT-L/16: patch_size=16, 384/16=24 spatial grid (exact).
+  # grid = 384 / (16 * 2) = 12 → 12x12 = 144 query tokens per frame.
+  # Upsampled to 24x24 = 576 = DINOv3 spatial tokens at 384x384.
+  teacher_image_size: [384, 384]
+  teacher_patch_size: 16
   upsample_factor: 2
