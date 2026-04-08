@@ -498,22 +498,12 @@ def main():
     summaries = scan_sample_summaries(
         tar_paths,
         sample_limit=args.sample_limit,
+        episode_limit=args.episode_limit,
         filter_key=args.filter_key,
         filter_presence=args.filter_presence,
     )
     if not summaries:
         raise SystemExit("No samples matched the current filters.")
-
-    if args.episode_limit is not None:
-        limited = []
-        seen = set()
-        for summary in summaries:
-            if summary.episode_key not in seen:
-                if len(seen) >= args.episode_limit:
-                    break
-                seen.add(summary.episode_key)
-            limited.append(summary)
-        summaries = limited
 
     backend = EpisodeViewerBackend(
         summaries,

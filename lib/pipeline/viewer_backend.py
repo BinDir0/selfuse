@@ -98,11 +98,13 @@ def scan_sample_summaries(
     tar_paths: list[str],
     *,
     sample_limit: Optional[int],
+    episode_limit: Optional[int],
     filter_key: str,
     filter_presence: Optional[int],
 ) -> list[wv.SampleSummary]:
     entries: list[wv.SampleSummary] = []
     filter_key_lower = filter_key.lower()
+    seen_episodes: set[str] = set()
 
     print(f"Scanning {len(tar_paths)} tar shard(s) for sample metadata...", flush=True)
     for shard_idx, shard_path in enumerate(tar_paths, start=1):
@@ -125,15 +127,26 @@ def scan_sample_summaries(
             if filter_presence is not None and summary.presence != filter_presence:
                 continue
 
+            if episode_limit is not None and summary.episode_key not in seen_episodes and len(seen_episodes) >= episode_limit:
+                print(f"Reached episode limit {episode_limit}; stopping scan.", flush=True)
+                return entries
+
             entries.append(summary)
+            seen_episodes.add(summary.episode_key)
             matched_in_shard += 1
             if len(entries) <= 5 or len(entries) % 500 == 0:
-                print(f"  matched={len(entries)} current_shard={matched_in_shard}", flush=True)
+                print(
+                    f"  matched={len(entries)} episodes={len(seen_episodes)} current_shard={matched_in_shard}",
+                    flush=True,
+                )
             if sample_limit is not None and len(entries) >= sample_limit:
                 print(f"Reached sample limit {sample_limit}; stopping scan.", flush=True)
                 return entries
         print(
-            f"  done shard {shard_idx}/{len(tar_paths)} matched_in_shard={matched_in_shard} total={len(entries)}",
+            (
+                f"  done shard {shard_idx}/{len(tar_paths)} matched_in_shard={matched_in_shard} "
+                f"episodes={len(seen_episodes)} total={len(entries)}"
+            ),
             flush=True,
         )
 
