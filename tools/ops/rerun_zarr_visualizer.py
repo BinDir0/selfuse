@@ -145,6 +145,15 @@ def _episode_bounds(episode_ends: np.ndarray, episode_idx: int) -> tuple[int, in
     return start, end
 
 
+def _normalize_extrinsic(extrinsic) -> np.ndarray:
+    matrix = np.asarray(extrinsic, dtype=np.float32)
+    if matrix.shape == (4, 4):
+        return matrix
+    if matrix.size == 16:
+        return matrix.reshape(4, 4)
+    raise ValueError(f"Expected extrinsic shape (16,) or (4, 4), got {matrix.shape}")
+
+
 def _resolve_mano_runtime(mano_dir: Optional[str], mano_device: str):
     import torch
 
@@ -261,7 +270,7 @@ def _load_episode_frames(
 
     frames: list[ZarrEpisodeFrame] = []
     for local_idx, global_idx in enumerate(indices.tolist()):
-        c2w, _ = wv._resolve_camera_c2w(extrinsic[local_idx])
+        c2w, _ = wv._resolve_camera_c2w(_normalize_extrinsic(extrinsic[local_idx]))
         frames.append(
             ZarrEpisodeFrame(
                 frame_idx=int(global_idx - start),
