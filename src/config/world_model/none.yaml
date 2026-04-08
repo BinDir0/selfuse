@@ -10,4 +10,4 @@ world_model:
   target_encoder: null
   wm_condition_projector: null
   wm_diffloss: null
-  loss_weight: 1.0
+  loss_weight: 0.0
