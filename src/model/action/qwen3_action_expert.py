@@ -1,8 +1,10 @@
-"""Qwen3-based action expert with DiT-style AdaLN-Zero modulation.
+"""Qwen3-based expert with optional DiT-style AdaLN-Zero modulation.
 
 This module keeps the Qwen3 text attention / MLP / rotary embedding stack
-structurally aligned with the backbone LLM while replacing the two per-layer
-pre-norms with AdaLN-Zero conditioning.
+structurally aligned with the backbone LLM. When ``use_adaln=True`` (default),
+the two per-layer pre-norms are replaced with AdaLN-Zero conditioning (DiT mode
+for flow matching). When ``use_adaln=False``, standard RMSNorm pre-norms are
+used (for world model or other non-conditioned experts).
 """
 
 from __future__ import annotations
@@ -51,22 +53,35 @@ class StaticPrefixCache:
 
 
 class DiTQwen3DecoderLayer(nn.Module):
-    """Qwen3 decoder block with AdaLN-Zero in place of the two pre-norms."""
+    """Qwen3 decoder block with optional AdaLN-Zero conditioning.
+
+    When ``use_adaln=True`` (DiT mode), the two pre-norms are replaced with
+    AdaLN-Zero modulation conditioned on an external signal (e.g. flow time).
+    When ``use_adaln=False`` (standard mode), plain RMSNorm pre-norms are used
+    and no external conditioning is needed.
+    """
 
     def __init__(
         self,
         config: Any,
         layer_idx: int,
-        time_hidden_size: int,
         attention_cls: type[nn.Module],
         mlp_cls: type[nn.Module],
+        rms_norm_cls: type[nn.Module],
+        use_adaln: bool = True,
+        cond_hidden_size: int = 1024,
         use_kv_projection: bool = False,
     ):
         super().__init__()
+        self.use_adaln = use_adaln
         self.self_attn = attention_cls(config=config, layer_idx=layer_idx)
         self.mlp = mlp_cls(config)
-        self.attn_adaln = AdaLNZero(config.hidden_size, time_hidden_size, eps=config.rms_norm_eps)
-        self.mlp_adaln = AdaLNZero(config.hidden_size, time_hidden_size, eps=config.rms_norm_eps)
+        if use_adaln:
+            self.attn_adaln = AdaLNZero(config.hidden_size, cond_hidden_size, eps=config.rms_norm_eps)
+            self.mlp_adaln = AdaLNZero(config.hidden_size, cond_hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.input_layernorm = rms_norm_cls(config.hidden_size, eps=config.rms_norm_eps)
+            self.post_attention_layernorm = rms_norm_cls(config.hidden_size, eps=config.rms_norm_eps)
         head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         if use_kv_projection:
             self.prefix_key_proj = nn.Linear(head_dim, head_dim, bias=False)
@@ -84,7 +99,7 @@ class DiTQwen3DecoderLayer(nn.Module):
         attention_mask: torch.Tensor | Any,
         prefix_key: torch.Tensor,
         prefix_value: torch.Tensor,
-        time_cond: torch.Tensor,
+        cond: torch.Tensor | None = None,
         text_position_ids: torch.Tensor | None = None,
         output_attentions: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -92,12 +107,16 @@ class DiTQwen3DecoderLayer(nn.Module):
         prefix_value = self.prefix_value_proj(prefix_value)
         prefix_cache = StaticPrefixCache(prefix_key, prefix_value)
 
+        # Attention block
         residual = hidden_states
-        attn_inputs, attn_gate = self.attn_adaln(hidden_states, time_cond)
+        if self.use_adaln:
+            normed, gate = self.attn_adaln(hidden_states, cond)
+        else:
+            normed = self.input_layernorm(hidden_states)
+            gate = None
         # Second return is attn_weights (eager), LSE (flex), or None (sdpa).
-        # We only collect it when output_attentions=True + eager backend.
         attn_output, attn_weights = self.self_attn(
-            hidden_states=attn_inputs,
+            hidden_states=normed,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             position_ids=text_position_ids,
@@ -105,36 +124,60 @@ class DiTQwen3DecoderLayer(nn.Module):
             use_cache=False,
             is_causal=False,
         )
-        hidden_states = residual + attn_gate * attn_output
+        hidden_states = residual + (gate * attn_output if gate is not None else attn_output)
 
+        # MLP block
         residual = hidden_states
-        mlp_inputs, mlp_gate = self.mlp_adaln(hidden_states, time_cond)
-        mlp_output = self.mlp(mlp_inputs)
-        hidden_states = residual + mlp_gate * mlp_output
+        if self.use_adaln:
+            normed, gate = self.mlp_adaln(hidden_states, cond)
+        else:
+            normed = self.post_attention_layernorm(hidden_states)
+            gate = None
+        mlp_output = self.mlp(normed)
+        hidden_states = residual + (gate * mlp_output if gate is not None else mlp_output)
         return hidden_states, attn_weights
 
 
-class Qwen3ActionExpert(nn.Module):
-    """Action expert that reuses Qwen3 text primitives with DiT-style AdaLN-Zero.
+def compute_kv_layer_indices(num_expert_layers: int, num_backbone_layers: int) -> list[int]:
+    """Compute which backbone KV layers to use when expert has fewer layers.
 
-    The expert always inherits the backbone text layer count so that each action
-    expert layer consumes the prefix KV cache from the matching backbone layer.
-    ``hidden_size`` and ``intermediate_size`` may differ from the backbone,
-    while KV-critical dimensions remain aligned.
+    Uniformly samples ``num_expert_layers`` indices from [0, num_backbone_layers).
+    When counts match, returns identity mapping.
+    """
+    if num_expert_layers >= num_backbone_layers:
+        return list(range(num_backbone_layers))
+    step = num_backbone_layers / num_expert_layers
+    return [int(round(step * i + step - 1)) for i in range(num_expert_layers)]
+
+
+class Qwen3Expert(nn.Module):
+    """Qwen3-based expert reusing text attention / MLP / rotary primitives.
+
+    Supports two modes via ``use_adaln``:
+    - ``True`` (DiT mode): AdaLN-Zero conditioning for flow matching action expert.
+    - ``False`` (standard mode): RMSNorm pre-norms for world model or other experts.
+
+    When ``num_layers`` is smaller than the backbone layer count, backbone KV
+    layers are uniformly sampled so the expert sees a representative cross-section.
     """
 
     def __init__(
         self,
         model_name_or_path: str,
-        time_hidden_size: int,
+        use_adaln: bool = True,
+        cond_hidden_size: int | None = None,
         hidden_size: int | None = None,
         intermediate_size: int | None = None,
         num_heads: int | None = None,
+        num_layers: int | None = None,
+        detach_prefix_kv: bool = False,
         attn_implementation: str | None = None,
         trust_remote_code: bool = False,
         use_kv_projection: bool = False,
     ):
         super().__init__()
+        if use_adaln and cond_hidden_size is None:
+            raise ValueError("cond_hidden_size is required when use_adaln=True.")
         try:
             from transformers import Qwen3VLConfig, Qwen3VLTextConfig
             from transformers.models.qwen3_vl.modeling_qwen3_vl import (
@@ -145,7 +188,7 @@ class Qwen3ActionExpert(nn.Module):
             )
         except ImportError as exc:
             raise ImportError(
-                "Qwen3ActionExpert requires transformers with Qwen3-VL support."
+                "Qwen3Expert requires transformers with Qwen3-VL support."
             ) from exc
         base = Qwen3VLConfig.from_pretrained(
             model_name_or_path,
@@ -155,11 +198,12 @@ class Qwen3ActionExpert(nn.Module):
         hidden_size = hidden_size or base.hidden_size
         intermediate_size = intermediate_size or base.intermediate_size
         num_heads = num_heads or base.num_attention_heads
+        num_layers = num_layers or base.num_hidden_layers
 
         config = Qwen3VLTextConfig(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            num_hidden_layers=base.num_hidden_layers,
+            num_hidden_layers=num_layers,
             num_attention_heads=num_heads,
             num_key_value_heads=base.num_key_value_heads,
             head_dim=base.head_dim,
@@ -177,13 +221,17 @@ class Qwen3ActionExpert(nn.Module):
             config._attn_implementation = base._attn_implementation
         if getattr(config, "_attn_implementation", None) != "flex_attention":
             raise ValueError(
-                "Qwen3ActionExpert requires attn_implementation='flex_attention' "
-                "because action attention always uses a BlockMask."
+                "Qwen3Expert requires attn_implementation='flex_attention' "
+                "because expert attention always uses a BlockMask."
             )
 
         self.config = config
         self.hidden_size = hidden_size
-        self.num_layers = config.num_hidden_layers
+        self.use_adaln = use_adaln
+        self.detach_prefix_kv = detach_prefix_kv
+        self.num_layers = num_layers
+        self.backbone_num_layers = base.num_hidden_layers
+        self.kv_layer_indices = compute_kv_layer_indices(num_layers, base.num_hidden_layers)
         self.rotary_emb = Qwen3VLTextRotaryEmbedding(config)
         # All layers use layer_idx=0 because each layer gets its own
         # single-entry cache at runtime.  Using the same index everywhere
@@ -193,9 +241,11 @@ class Qwen3ActionExpert(nn.Module):
                 DiTQwen3DecoderLayer(
                     config=config,
                     layer_idx=0,
-                    time_hidden_size=time_hidden_size,
                     attention_cls=Qwen3VLTextAttention,
                     mlp_cls=Qwen3VLTextMLP,
+                    rms_norm_cls=Qwen3VLTextRMSNorm,
+                    use_adaln=use_adaln,
+                    cond_hidden_size=cond_hidden_size or 0,
                     use_kv_projection=use_kv_projection,
                 )
                 for _ in range(self.num_layers)
@@ -264,21 +314,33 @@ class Qwen3ActionExpert(nn.Module):
         action_embeds: torch.Tensor,
         prefix_cache: PrefixKVCache,
         action_position_ids: torch.Tensor,
-        time_cond: torch.Tensor,
-        action_mask: torch.Tensor,
-        num_parallel_chunks: int,
+        cond: torch.Tensor | None = None,
+        action_mask: torch.Tensor | None = None,
+        num_parallel_chunks: int = 1,
         output_attentions: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor | None]]:
         if prefix_cache is None:
-            raise ValueError("Action expert requires a prefix cache.")
-        if prefix_cache.num_layers < self.num_layers:
+            raise ValueError("Expert requires a prefix cache.")
+        if prefix_cache.num_layers < max(self.kv_layer_indices) + 1:
             raise ValueError(
                 f"Prefix cache has {prefix_cache.num_layers} layers, "
-                f"but expert expects {self.num_layers}."
+                f"but expert needs layer index up to {max(self.kv_layer_indices)}."
             )
         if num_parallel_chunks < 1:
             raise ValueError(f"num_parallel_chunks must be >= 1, got {num_parallel_chunks}.")
+
+        if self.detach_prefix_kv:
+            prefix_cache = prefix_cache.detach()
+
         hidden_states = action_embeds
+        seq_len = hidden_states.shape[1]
+
+        # Default action_mask: all tokens visible
+        if action_mask is None:
+            action_mask = torch.ones(
+                hidden_states.shape[0], seq_len,
+                device=hidden_states.device, dtype=torch.bool,
+            )
 
         # Build full attention mask: [prefix_mask | action_mask]
         full_attention_mask = torch.cat(
@@ -293,10 +355,10 @@ class Qwen3ActionExpert(nn.Module):
             action_position_ids = action_position_ids[0]
         if action_position_ids.ndim != 2:
             raise ValueError(f"Expected action_position_ids to be 2D after squeeze, got {action_position_ids.shape}.")
-        if action_position_ids.shape[1] != hidden_states.shape[1]:
+        if action_position_ids.shape[1] != seq_len:
             raise ValueError(
                 "Action position ids length "
-                f"{action_position_ids.shape[1]} does not match hidden sequence length {hidden_states.shape[1]}."
+                f"{action_position_ids.shape[1]} does not match hidden sequence length {seq_len}."
             )
         # Qwen3-VL position_ids: 4 dims = [text_pos, height, width, temporal]
         action_position_ids = action_position_ids.unsqueeze(0).expand(4, -1, -1)
@@ -305,7 +367,7 @@ class Qwen3ActionExpert(nn.Module):
         position_embeddings = self.rotary_emb(hidden_states, action_position_ids[1:])
 
         prefix_len = prefix_cache.kv_seq_len
-        action_len = action_embeds.shape[1]
+        action_len = seq_len
         if action_len % num_parallel_chunks != 0:
             raise ValueError(
                 f"Action length {action_len} must be divisible by num_parallel_chunks={num_parallel_chunks}."
@@ -313,7 +375,7 @@ class Qwen3ActionExpert(nn.Module):
 
         batch_size = hidden_states.shape[0]
         chunk_size = action_len // num_parallel_chunks
-        full_attention_mask_bool = full_attention_mask.to(device=action_embeds.device)
+        full_attention_mask_bool = full_attention_mask.to(device=hidden_states.device)
 
         use_flex = self.config._attn_implementation == "flex_attention"
         if use_flex:
@@ -334,7 +396,7 @@ class Qwen3ActionExpert(nn.Module):
                 H=None,
                 Q_LEN=action_len,
                 KV_LEN=prefix_len + action_len,
-                device=action_embeds.device,
+                device=hidden_states.device,
             )
         else:
             # Eager / sdpa: build a standard 4D additive attention mask
@@ -349,9 +411,10 @@ class Qwen3ActionExpert(nn.Module):
 
         all_attn_weights: list[torch.Tensor | None] = []
         for layer_idx, layer in enumerate(self.layers):
-            # Compile-friendly: pure tensor indexing on stacked cache
-            prefix_key = prefix_cache.keys[layer_idx]
-            prefix_value = prefix_cache.values[layer_idx]
+            # Map expert layer to backbone KV layer (identity when counts match)
+            backbone_layer = self.kv_layer_indices[layer_idx]
+            prefix_key = prefix_cache.keys[backbone_layer]
+            prefix_value = prefix_cache.values[backbone_layer]
 
             if (
                 self.gradient_checkpointing
@@ -365,7 +428,7 @@ class Qwen3ActionExpert(nn.Module):
                     attention_mask,
                     prefix_key,
                     prefix_value,
-                    time_cond,
+                    cond,
                     text_position_ids,
                     output_attentions,
                 )
@@ -376,7 +439,7 @@ class Qwen3ActionExpert(nn.Module):
                     attention_mask=attention_mask,
                     prefix_key=prefix_key,
                     prefix_value=prefix_value,
-                    time_cond=time_cond,
+                    cond=cond,
                     text_position_ids=text_position_ids,
                     output_attentions=output_attentions,
                 )
@@ -388,3 +451,7 @@ class Qwen3ActionExpert(nn.Module):
         if output_attentions:
             return result, all_attn_weights
         return result
+
+
+# Backward-compatible alias
+Qwen3ActionExpert = Qwen3Expert

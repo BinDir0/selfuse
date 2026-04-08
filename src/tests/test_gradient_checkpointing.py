@@ -31,7 +31,7 @@ def _make_expert(monkeypatch, num_layers=2, attn_implementation="flex_attention"
     )
     return Qwen3ActionExpert(
         model_name_or_path="dummy",
-        time_hidden_size=32,
+        cond_hidden_size=32,
         hidden_size=64,
         intermediate_size=128,
         num_heads=4,
@@ -76,14 +76,14 @@ def _make_expert_inputs(expert, batch_size=2, prefix_len=3, action_len=4):
         lengths=torch.full((batch_size,), prefix_len, dtype=torch.long),
     )
     action_embeds = torch.randn(batch_size, action_len, 64, requires_grad=True)
-    time_cond = torch.randn(batch_size, action_len, 32, requires_grad=True)
+    cond = torch.randn(batch_size, action_len, 32, requires_grad=True)
     action_mask = torch.ones(batch_size, action_len, dtype=torch.bool)
     action_position_ids = torch.arange(action_len).unsqueeze(0).expand(batch_size, -1)
     return dict(
         action_embeds=action_embeds,
         prefix_cache=prefix_cache,
         action_position_ids=action_position_ids,
-        time_cond=time_cond,
+        cond=cond,
         action_mask=action_mask,
         num_parallel_chunks=1,
     )
@@ -148,7 +148,7 @@ def test_action_expert_checkpoint_runs_only_in_train_mode(monkeypatch):
     out.sum().backward()
     assert len(train_calls) == expert.num_layers
     assert inputs["action_embeds"].grad is not None
-    assert inputs["time_cond"].grad is not None
+    assert inputs["cond"].grad is not None
 
     eval_calls = []
 
@@ -159,7 +159,7 @@ def test_action_expert_checkpoint_runs_only_in_train_mode(monkeypatch):
     expert._gradient_checkpointing_func = fake_gc_eval
     expert.eval()
     detached = {**inputs, "action_embeds": inputs["action_embeds"].detach(),
-                "time_cond": inputs["time_cond"].detach()}
+                "cond": inputs["cond"].detach()}
     expert(**detached)
     assert len(eval_calls) == 0
 
@@ -324,7 +324,7 @@ def test_parallel_chunk_forward_matches_separate_single_chunk(monkeypatch):
             action_embeds=inputs["action_embeds"][:, chunk_start:chunk_end],
             prefix_cache=inputs["prefix_cache"],
             action_position_ids=base_position_ids,
-            time_cond=inputs["time_cond"][:, chunk_start:chunk_end],
+            cond=inputs["cond"][:, chunk_start:chunk_end],
             action_mask=inputs["action_mask"][:, chunk_start:chunk_end],
             num_parallel_chunks=1,
         )
@@ -366,7 +366,7 @@ def test_parallel_chunk_forward_matches_separate_single_chunk_with_kv_projection
             action_embeds=inputs["action_embeds"][:, chunk_start:chunk_end],
             prefix_cache=inputs["prefix_cache"],
             action_position_ids=base_position_ids,
-            time_cond=inputs["time_cond"][:, chunk_start:chunk_end],
+            cond=inputs["cond"][:, chunk_start:chunk_end],
             action_mask=inputs["action_mask"][:, chunk_start:chunk_end],
             num_parallel_chunks=1,
         )

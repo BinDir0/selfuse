@@ -27,9 +27,9 @@ class DummyFlowExpert(nn.Module):
         action_embeds: torch.Tensor,
         prefix_cache: PrefixKVCache,
         action_position_ids: torch.Tensor,
-        time_cond: torch.Tensor,
-        action_mask: torch.Tensor,
-        num_parallel_chunks: int,
+        cond: torch.Tensor | None = None,
+        action_mask: torch.Tensor | None = None,
+        num_parallel_chunks: int = 1,
         output_attentions: bool = False,
     ) -> torch.Tensor:
         if prefix_cache is None:
@@ -42,6 +42,11 @@ class DummyFlowExpert(nn.Module):
         self.last_action_position_ids = action_position_ids.detach().clone()
         self.last_num_parallel_chunks = num_parallel_chunks
 
+        if action_mask is None:
+            action_mask = torch.ones(
+                action_embeds.shape[0], action_embeds.shape[1],
+                device=action_embeds.device, dtype=torch.bool,
+            )
         hidden_states = self.action_proj(action_embeds)
         # Aggregate prefix signal from stacked KV tensors
         # keys/values: [num_layers, B, num_kv_heads, prefix_len, head_dim]
@@ -50,7 +55,8 @@ class DummyFlowExpert(nn.Module):
             + prefix_cache.values.to(dtype=hidden_states.dtype).mean(dim=(0, 2, 3, 4))
         )
         hidden_states = hidden_states + prefix_signal.view(-1, 1, 1)
-        hidden_states = hidden_states + self.time_proj(time_cond)
+        if cond is not None:
+            hidden_states = hidden_states + self.time_proj(cond)
         hidden_states = hidden_states + action_position_ids.unsqueeze(-1).to(hidden_states.dtype) * 0.01
         for layer in self.layers:
             hidden_states = layer(hidden_states)
