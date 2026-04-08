@@ -107,12 +107,14 @@ policy:
     min_period: 0.004
     max_period: 4.0
   flow_expert:
-    _target_: src.model.action.qwen3_action_expert.Qwen3ActionExpert
+    _target_: src.model.action.qwen3_action_expert.Qwen3Expert
     model_name_or_path: ${pretrained.model_name_or_path}
-    time_hidden_size: ${dims.time_hidden_size}
+    use_adaln: True
+    cond_hidden_size: ${dims.time_hidden_size}
     hidden_size: ${dims.action_hidden_size}
     intermediate_size: 4096
     num_heads: 8
+    detach_prefix_kv: False
     attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
     use_kv_projection: True
@@ -202,4 +204,14 @@ policy:
     diffusion_loss_weight: 2.0
     flow_loss_weight: 1.0
     reg_loss_weight: 1.0
+    wm_loss_weight: ${oc.select:world_model.loss_weight,0.0}
   knowledge_insulation: ${runtime.knowledge_insulation}
+  # World model (conditionally instantiated from world_model config group)
+  world_model_expert: ${oc.select:world_model.world_model_expert,null}
+  frozen_teacher: ${oc.select:world_model.frozen_teacher,null}
+  world_model_config:
+    _target_: src.policy.legendvla.WorldModelConfig
+    num_future_frames: ${oc.select:world_model.future_frame.horizon,0}
+    target_image_size: ${oc.select:world_model.teacher_image_size,null}
+    teacher_patch_size: ${oc.select:world_model.teacher_patch_size,16}
+    upsample_factor: ${oc.select:world_model.upsample_factor,2}

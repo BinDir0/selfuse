@@ -37,6 +37,7 @@ class LossConfig:
     diffusion_loss_weight: float = 1.0
     flow_loss_weight: float = 1.0
     reg_loss_weight: float = 0.0
+    wm_loss_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,14 @@ class SpanMaskConfig:
     p_no_mask: float = 0.1
     keep_last: bool = False
     prefer_early: bool = True
+
+
+@dataclass(frozen=True)
+class WorldModelConfig:
+    num_future_frames: int = 0
+    target_image_size: tuple[int, int] | None = None
+    teacher_patch_size: int = 16
+    upsample_factor: int = 2
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,10 @@ class LegendVLA(nn.Module):
         # Camera intrinsic as token embedding (optional)
         camera_intrinsic_mode: str = "text",
         camera_encoder: nn.Module | None = None,
+        # World model (optional)
+        world_model_expert: nn.Module | None = None,
+        frozen_teacher: nn.Module | None = None,
+        world_model_config: WorldModelConfig = WorldModelConfig(),
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -154,7 +167,31 @@ class LegendVLA(nn.Module):
         if self.ar_action_train_config.input_mask_enabled:
             self.input_mask_embeddings = InputMaskEmbeddings(self.vlm_hidden_size)
 
-        self.use_world_model = False
+        # World model components
+        self.world_model_expert = world_model_expert
+        self.frozen_teacher = frozen_teacher
+        self.world_model_config = world_model_config
+        self.use_world_model = world_model_expert is not None and frozen_teacher is not None
+        if self.use_world_model:
+            self._init_world_model(world_model_expert, world_model_config)
+
+    def _init_world_model(self, expert: nn.Module, config: WorldModelConfig) -> None:
+        tH, tW = config.target_image_size
+        stride = config.teacher_patch_size * config.upsample_factor
+        assert tH % stride == 0 and tW % stride == 0, (
+            f"target ({tH},{tW}) must be divisible by patch*upsample={stride}"
+        )
+        self.wm_grid_h = tH // stride
+        self.wm_grid_w = tW // stride
+        self.wm_upsample_factor = config.upsample_factor
+        self.wm_num_future_frames = config.num_future_frames
+
+        D = expert.hidden_size
+        n_queries = config.num_future_frames * self.wm_grid_h * self.wm_grid_w
+        self.wm_query_embed = nn.Parameter(torch.randn(n_queries, D) * 0.02)
+        self.wm_output_proj = nn.Linear(D, D * config.upsample_factor ** 2)
+        nn.init.zeros_(self.wm_output_proj.weight)
+        nn.init.zeros_(self.wm_output_proj.bias)
 
     def compile_blocks(
         self,
@@ -263,6 +300,17 @@ class LegendVLA(nn.Module):
             modules.append(self.input_mask_embeddings)
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
+    @property
+    def world_model_parameters(self):
+        params = []
+        if self.world_model_expert is not None:
+            params.extend(p for p in self.world_model_expert.parameters() if p.requires_grad)
+        if hasattr(self, "wm_query_embed"):
+            params.append(self.wm_query_embed)
+        if hasattr(self, "wm_output_proj"):
+            params.extend(p for p in self.wm_output_proj.parameters() if p.requires_grad)
+        return params
+
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
         answer_start_idx = batch.get("answer_start_idx")
         assert answer_start_idx is not None, (
@@ -349,13 +397,8 @@ class LegendVLA(nn.Module):
             output.past_key_values_hf,
             self.build_prefix_lengths(batch),
         )
-        if output.prefix_cache is not None:
-            if self.knowledge_insulation is True:
-                output.prefix_cache = output.prefix_cache.detach()
-            elif isinstance(self.knowledge_insulation, int) and self.knowledge_insulation > 0:
-                output.prefix_cache = output.prefix_cache.partial_detach(
-                    self.knowledge_insulation
-                )
+        # KV cache is never detached at the backbone level.
+        # Each expert controls its own detach via detach_prefix_kv.
         output.past_key_values_hf = None
         return output
 
@@ -400,7 +443,7 @@ class LegendVLA(nn.Module):
             action_embeds=action_embeds,
             prefix_cache=prefix_cache,
             action_position_ids=action_position_ids,
-            time_cond=time_cond,
+            cond=time_cond,
             action_mask=action_mask,
             num_parallel_chunks=num_parallel_chunks,
             output_attentions=output_attentions,
@@ -416,6 +459,45 @@ class LegendVLA(nn.Module):
             "action_hidden_states": expert_hidden,
             "pred_v": pred_v,
             "expert_attention_weights": expert_attn_weights,
+        }
+
+    def forward_world_model_stream(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+    ) -> dict[str, torch.Tensor]:
+        """Run world model expert and frozen teacher on future frames.
+
+        Returns dict with ``pred`` and ``target`` feature maps, plus ``n_future_frames``.
+        """
+        B = backbone_output.last_hidden_states.shape[0]
+        queries = self.wm_query_embed.unsqueeze(0).expand(B, -1, -1)
+        prefix_lengths = self.build_prefix_lengths(batch)
+        base = prefix_lengths.unsqueeze(1).to(device=queries.device, dtype=torch.long)
+        query_position_ids = base + torch.arange(queries.shape[1], device=queries.device).unsqueeze(0)
+
+        wm_hidden = self.world_model_expert(
+            action_embeds=queries,
+            prefix_cache=backbone_output.prefix_cache,
+            action_position_ids=query_position_ids,
+        )
+
+        # Depth-to-space upsample (inverse of Qwen3-VL spatial merge).
+        # Source: transformers Qwen3VLVisionModel.fast_pos_embed_interpolate
+        K = self.wm_num_future_frames
+        gh, gw, uf = self.wm_grid_h, self.wm_grid_w, self.wm_upsample_factor
+        D = self.world_model_expert.hidden_size
+        x = self.wm_output_proj(wm_hidden)
+        x = x.reshape(B * K, gh, gw, uf, uf, D)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * K, gh * uf, gw * uf, D)
+        pred = x.flatten(1, 2).reshape(B, K, -1, D)
+
+        target = self.frozen_teacher(batch["future_frames"])
+
+        return {
+            "pred": pred,
+            "target": target,
+            "n_future_frames": batch["n_future_frames"],
         }
 
     def compute_loss(self, batch: dict, **kwargs) -> dict[str, torch.Tensor]:

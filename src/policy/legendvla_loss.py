@@ -407,6 +407,30 @@ def compute_flow_stream_loss(
     return flow_loss, flow_output
 
 
+def compute_wm_loss(
+    model,
+    batch: dict[str, torch.Tensor],
+    backbone_output,
+) -> torch.Tensor:
+    """Masked MSE between world model predictions and frozen teacher features."""
+    if not model.use_world_model or "future_frames" not in batch:
+        return zero_loss(backbone_output.last_hidden_states)
+
+    wm_output = model.forward_world_model_stream(batch, backbone_output)
+    pred = wm_output["pred"]
+    target = wm_output["target"].to(pred.dtype)
+    n_future = wm_output["n_future_frames"]
+    K = pred.shape[1]
+
+    positions = torch.arange(K, device=n_future.device).unsqueeze(0)
+    valid_mask = (positions < n_future.unsqueeze(1)).unsqueeze(-1).unsqueeze(-1)
+    mask_float = valid_mask.to(dtype=pred.dtype)
+
+    squared_error = (pred - target) ** 2
+    n_elements = pred.shape[-2] * pred.shape[-1]
+    return (squared_error * mask_float).sum() / mask_float.sum().clamp(min=1) / n_elements
+
+
 def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     slot_embeds = model.build_slot_embeddings(batch)
     backbone_output = model.forward_backbone_stream(batch, slot_embeds)
@@ -424,12 +448,14 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
     diff_loss = compute_diffloss_loss(model, hidden_states, dense_inputs)
     reg_loss = compute_reg_action_loss(model, hidden_states, dense_inputs)
     flow_loss, _ = compute_flow_stream_loss(model, batch, backbone_output)
+    wm_loss = compute_wm_loss(model, batch, backbone_output)
 
     total_loss = (
         model.loss_config.ce_loss_weight * ce_loss
         + model.loss_config.diffusion_loss_weight * diff_loss
         + model.loss_config.reg_loss_weight * reg_loss
         + model.loss_config.flow_loss_weight * flow_loss
+        + model.loss_config.wm_loss_weight * wm_loss
     )
     return {
         "total_loss": total_loss,
@@ -437,7 +463,7 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
         "diffusion_loss": diff_loss,
         "reg_loss": reg_loss,
         "flow_loss": flow_loss,
-        "wm_loss": zero_loss(hidden_states),
+        "wm_loss": wm_loss,
     }
 
 

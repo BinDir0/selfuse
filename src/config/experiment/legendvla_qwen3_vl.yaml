@@ -6,7 +6,7 @@ defaults:
   - /logging: default
   - /dataset_paths/vla_wds
   - /dataset_paths/vlm_wds
-  - /world_model: none
+  - /world_model: frozen_regression
   - _self_
 
 name: legendvla_qwen3_vl
