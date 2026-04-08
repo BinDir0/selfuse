@@ -1,10 +1,4 @@
 # @package _global_
-# Override future_pad_mode to repeat for world model (episode boundaries get
-# the last available frame repeated rather than being truncated).
-dataset:
-  vla_dataset:
-    future_pad_mode: repeat
-
 world_model:
   enabled: true
   future_frame:
