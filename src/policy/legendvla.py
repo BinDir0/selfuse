@@ -54,7 +54,7 @@ class ARActionTrainConfig:
     noise_std: float = 0.02
     chunk_size: int = 4
     diffloss_repeat: int = 1
-    input_mask_enabled: bool = True
+    input_mask_enabled: bool = False
     action_mask: SpanMaskConfig = SpanMaskConfig()
     state_mask: SpanMaskConfig = SpanMaskConfig(
         mask_ratio=0.65, mean_span_len=5.0, start_bias_alpha=2.0,
