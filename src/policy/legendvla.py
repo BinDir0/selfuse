@@ -57,7 +57,7 @@ class WorldModelHead(nn.Module):
         super().__init__()
         self.query_embed = nn.Parameter(torch.randn(n_queries, hidden_size) * 0.02)
         self.output_proj = nn.Linear(hidden_size, hidden_size * upsample_factor ** 2)
-        nn.init.zeros_(self.output_proj.weight)
+        nn.init.normal_(self.output_proj.weight, std=0.02)
         nn.init.zeros_(self.output_proj.bias)
 
 
@@ -311,9 +311,8 @@ class LegendVLA(nn.Module):
     @property
     def world_model_parameters(self):
         params = []
-        if self.world_model_expert is not None:
+        if self.use_world_model:
             params.extend(p for p in self.world_model_expert.parameters() if p.requires_grad)
-        if hasattr(self, "wm_head"):
             params.extend(p for p in self.wm_head.parameters() if p.requires_grad)
         return params
 
@@ -446,11 +445,11 @@ class LegendVLA(nn.Module):
             )
         prefix_cache = backbone_output.prefix_cache
         expert_output = self.flow_expert(
-            action_embeds=action_embeds,
+            suffix_embeds=action_embeds,
             prefix_cache=prefix_cache,
-            action_position_ids=action_position_ids,
+            suffix_position_ids=action_position_ids,
             cond=time_cond,
-            action_mask=action_mask,
+            suffix_mask=action_mask,
             num_parallel_chunks=num_parallel_chunks,
             output_attentions=output_attentions,
         )
@@ -482,10 +481,15 @@ class LegendVLA(nn.Module):
         base = prefix_lengths.unsqueeze(1).to(device=queries.device, dtype=torch.long)
         query_position_ids = base + torch.arange(queries.shape[1], device=queries.device).unsqueeze(0)
 
+        # TODO: condition world model on action by running flow expert with
+        # an extra t=1.0 parallel copy, then prepending the resulting action
+        # embeddings to the world model prefix cache.
+        wm_mask = torch.ones(B, queries.shape[1], device=queries.device, dtype=torch.bool)
         wm_hidden = self.world_model_expert(
-            action_embeds=queries,
+            suffix_embeds=queries,
             prefix_cache=backbone_output.prefix_cache,
-            action_position_ids=query_position_ids,
+            suffix_position_ids=query_position_ids,
+            suffix_mask=wm_mask,
         )
 
         # Depth-to-space upsample (inverse of Qwen3-VL spatial merge).

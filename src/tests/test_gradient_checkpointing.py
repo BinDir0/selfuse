@@ -6,7 +6,7 @@ import torch
 from transformers import Qwen3VLConfig, Qwen3VLTextConfig
 
 from src.model.common.diffloss import SimpleMLPAdaLN
-from src.model.action.qwen3_action_expert import Qwen3ActionExpert
+from src.model.vlm.qwen3_expert import Qwen3Expert
 from src.model.vlm.prefix_cache import PrefixKVCache
 
 
@@ -29,12 +29,14 @@ def _make_expert(monkeypatch, num_layers=2, attn_implementation="flex_attention"
         "from_pretrained",
         classmethod(lambda cls, *args, **kwargs: SimpleNamespace(text_config=base_text_config)),
     )
-    return Qwen3ActionExpert(
+    return Qwen3Expert(
         model_name_or_path="dummy",
-        cond_hidden_size=32,
         hidden_size=64,
         intermediate_size=128,
         num_heads=4,
+        num_layers=num_layers,
+        use_adaln=True,
+        cond_hidden_size=32,
         attn_implementation=attn_implementation,
         use_kv_projection=use_kv_projection,
     )
@@ -63,7 +65,7 @@ def _move_expert_inputs_to_cuda(expert, inputs):
 
 requires_cuda_action_expert = pytest.mark.skipif(
     not torch.cuda.is_available(),
-    reason="Qwen3ActionExpert BlockMask tests require CUDA flex_attention.",
+    reason="Qwen3Expert BlockMask tests require CUDA flex_attention.",
 )
 
 
@@ -75,16 +77,16 @@ def _make_expert_inputs(expert, batch_size=2, prefix_len=3, action_len=4):
         mask=torch.ones(batch_size, prefix_len, dtype=torch.bool),
         lengths=torch.full((batch_size,), prefix_len, dtype=torch.long),
     )
-    action_embeds = torch.randn(batch_size, action_len, 64, requires_grad=True)
+    suffix_embeds = torch.randn(batch_size, action_len, 64, requires_grad=True)
     cond = torch.randn(batch_size, action_len, 32, requires_grad=True)
-    action_mask = torch.ones(batch_size, action_len, dtype=torch.bool)
-    action_position_ids = torch.arange(action_len).unsqueeze(0).expand(batch_size, -1)
+    suffix_mask = torch.ones(batch_size, action_len, dtype=torch.bool)
+    suffix_position_ids = torch.arange(action_len).unsqueeze(0).expand(batch_size, -1)
     return dict(
-        action_embeds=action_embeds,
+        suffix_embeds=suffix_embeds,
         prefix_cache=prefix_cache,
-        action_position_ids=action_position_ids,
+        suffix_position_ids=suffix_position_ids,
         cond=cond,
-        action_mask=action_mask,
+        suffix_mask=suffix_mask,
         num_parallel_chunks=1,
     )
 
@@ -147,7 +149,7 @@ def test_action_expert_checkpoint_runs_only_in_train_mode(monkeypatch):
     out = expert(**inputs)
     out.sum().backward()
     assert len(train_calls) == expert.num_layers
-    assert inputs["action_embeds"].grad is not None
+    assert inputs["suffix_embeds"].grad is not None
     assert inputs["cond"].grad is not None
 
     eval_calls = []
@@ -158,7 +160,7 @@ def test_action_expert_checkpoint_runs_only_in_train_mode(monkeypatch):
 
     expert._gradient_checkpointing_func = fake_gc_eval
     expert.eval()
-    detached = {**inputs, "action_embeds": inputs["action_embeds"].detach(),
+    detached = {**inputs, "suffix_embeds": inputs["suffix_embeds"].detach(),
                 "cond": inputs["cond"].detach()}
     expert(**detached)
     assert len(eval_calls) == 0
@@ -274,22 +276,22 @@ def test_parallel_flow_block_mask_prevents_chunk_leakage(monkeypatch):
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=4)
     expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
-    base_action_embeds = inputs["action_embeds"].clone()
-    chunk0 = base_action_embeds[:, :2].clone()
-    chunk1_a = base_action_embeds[:, 2:].clone()
+    base_suffix_embeds = inputs["suffix_embeds"].clone()
+    chunk0 = base_suffix_embeds[:, :2].clone()
+    chunk1_a = base_suffix_embeds[:, 2:].clone()
     chunk1_b = chunk1_a + 10.0
 
     out_a = expert(
         **{
             **inputs,
-            "action_embeds": torch.cat([chunk0, chunk1_a], dim=1),
+            "suffix_embeds": torch.cat([chunk0, chunk1_a], dim=1),
             "num_parallel_chunks": 2,
         }
     )
     out_b = expert(
         **{
             **inputs,
-            "action_embeds": torch.cat([chunk0, chunk1_b], dim=1),
+            "suffix_embeds": torch.cat([chunk0, chunk1_b], dim=1),
             "num_parallel_chunks": 2,
         }
     )
@@ -306,13 +308,13 @@ def test_parallel_chunk_forward_matches_separate_single_chunk(monkeypatch):
     expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
     num_parallel_chunks = 3
-    chunk_size = inputs["action_embeds"].shape[1] // num_parallel_chunks
-    base_position_ids = torch.arange(chunk_size, device=inputs["action_embeds"].device).unsqueeze(0)
+    chunk_size = inputs["suffix_embeds"].shape[1] // num_parallel_chunks
+    base_position_ids = torch.arange(chunk_size, device=inputs["suffix_embeds"].device).unsqueeze(0)
     packed_position_ids = base_position_ids.repeat(1, num_parallel_chunks)
     packed_output = expert(
         **{
             **inputs,
-            "action_position_ids": packed_position_ids,
+            "suffix_position_ids": packed_position_ids,
             "num_parallel_chunks": num_parallel_chunks,
         }
     )
@@ -321,11 +323,11 @@ def test_parallel_chunk_forward_matches_separate_single_chunk(monkeypatch):
         chunk_start = chunk_idx * chunk_size
         chunk_end = chunk_start + chunk_size
         single_output = expert(
-            action_embeds=inputs["action_embeds"][:, chunk_start:chunk_end],
+            suffix_embeds=inputs["suffix_embeds"][:, chunk_start:chunk_end],
             prefix_cache=inputs["prefix_cache"],
-            action_position_ids=base_position_ids,
+            suffix_position_ids=base_position_ids,
             cond=inputs["cond"][:, chunk_start:chunk_end],
-            action_mask=inputs["action_mask"][:, chunk_start:chunk_end],
+            suffix_mask=inputs["suffix_mask"][:, chunk_start:chunk_end],
             num_parallel_chunks=1,
         )
         torch.testing.assert_close(
@@ -348,13 +350,13 @@ def test_parallel_chunk_forward_matches_separate_single_chunk_with_kv_projection
     expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
     num_parallel_chunks = 3
-    chunk_size = inputs["action_embeds"].shape[1] // num_parallel_chunks
-    base_position_ids = torch.arange(chunk_size, device=inputs["action_embeds"].device).unsqueeze(0)
+    chunk_size = inputs["suffix_embeds"].shape[1] // num_parallel_chunks
+    base_position_ids = torch.arange(chunk_size, device=inputs["suffix_embeds"].device).unsqueeze(0)
     packed_position_ids = base_position_ids.repeat(1, num_parallel_chunks)
     packed_output = expert(
         **{
             **inputs,
-            "action_position_ids": packed_position_ids,
+            "suffix_position_ids": packed_position_ids,
             "num_parallel_chunks": num_parallel_chunks,
         }
     )
@@ -363,11 +365,11 @@ def test_parallel_chunk_forward_matches_separate_single_chunk_with_kv_projection
         chunk_start = chunk_idx * chunk_size
         chunk_end = chunk_start + chunk_size
         single_output = expert(
-            action_embeds=inputs["action_embeds"][:, chunk_start:chunk_end],
+            suffix_embeds=inputs["suffix_embeds"][:, chunk_start:chunk_end],
             prefix_cache=inputs["prefix_cache"],
-            action_position_ids=base_position_ids,
+            suffix_position_ids=base_position_ids,
             cond=inputs["cond"][:, chunk_start:chunk_end],
-            action_mask=inputs["action_mask"][:, chunk_start:chunk_end],
+            suffix_mask=inputs["suffix_mask"][:, chunk_start:chunk_end],
             num_parallel_chunks=1,
         )
         torch.testing.assert_close(
@@ -383,8 +385,8 @@ def test_parallel_chunk_forward_matches_separate_single_chunk_with_kv_projection
 # ---------------------------------------------------------------------------
 
 def _replicate_mask_mod(full_attention_mask_bool, prefix_len, chunk_size):
-    """Replicate the exact mask_mod closure from Qwen3ActionExpert.forward."""
-    # Source: src/model/action/qwen3_action_expert.py L307-L312
+    """Replicate the exact mask_mod closure from Qwen3Expert.forward."""
+    # Source: src/model/vlm/qwen3_expert.py Qwen3Expert.forward mask_mod
     def mask_mod(b, h, q_idx, kv_idx):
         del h
         valid = full_attention_mask_bool[b, kv_idx]
@@ -574,12 +576,12 @@ def test_forward_same_chunk_influence(monkeypatch):
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=4)
     expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
-    base = inputs["action_embeds"].clone()
+    base = inputs["suffix_embeds"].clone()
     perturbed = base.clone()
     perturbed[:, 0] += 10.0
 
     out_base = expert(**{**inputs, "num_parallel_chunks": 2})
-    out_pert = expert(**{**inputs, "action_embeds": perturbed, "num_parallel_chunks": 2})
+    out_pert = expert(**{**inputs, "suffix_embeds": perturbed, "num_parallel_chunks": 2})
 
     assert not torch.allclose(out_base[:, :2], out_pert[:, :2]), (
         "Chunk 0 should change when a chunk-0 position is perturbed"
@@ -592,18 +594,18 @@ def test_forward_padding_queries_produce_finite_output(monkeypatch):
     """Queries at padded action positions produce finite output (no NaN).
 
     Padded Q positions still attend to the prefix, so softmax never gets an
-    all-masked row. The final action_mask multiply zeros them out, but the
+    all-masked row. The final suffix_mask multiply zeros them out, but the
     intermediate hidden states must remain finite.
     """
     expert = _make_expert(monkeypatch, attn_implementation="flex_attention")
     expert.eval()
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=4)
     expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
-    inputs["action_mask"][:, 3] = False
+    inputs["suffix_mask"][:, 3] = False
 
     out = expert(**{**inputs, "num_parallel_chunks": 2})
     assert torch.isfinite(out).all(), "Output contains NaN or Inf with padded query"
-    # Padded position zeroed by final action_mask multiply
+    # Padded position zeroed by final suffix_mask multiply
     torch.testing.assert_close(
         out[:, 3], torch.zeros_like(out[:, 3]),
         atol=0.0, rtol=0.0,
@@ -618,12 +620,12 @@ def test_forward_three_chunk_isolation(monkeypatch):
     inputs = _make_expert_inputs(expert, batch_size=1, prefix_len=3, action_len=6)
     expert, inputs = _move_expert_inputs_to_cuda(expert, inputs)
 
-    base = inputs["action_embeds"].clone()
+    base = inputs["suffix_embeds"].clone()
     perturbed = base.clone()
     perturbed[:, 2:4] += 10.0  # chunk 1
 
     out_base = expert(**{**inputs, "num_parallel_chunks": 3})
-    out_pert = expert(**{**inputs, "action_embeds": perturbed, "num_parallel_chunks": 3})
+    out_pert = expert(**{**inputs, "suffix_embeds": perturbed, "num_parallel_chunks": 3})
 
     torch.testing.assert_close(out_base[:, :2], out_pert[:, :2], atol=1e-5, rtol=1e-5)
     assert not torch.allclose(out_base[:, 2:4], out_pert[:, 2:4])
