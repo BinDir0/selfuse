@@ -551,6 +551,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         with profile_context as prof:
             if accelerator.is_main_process:
                 print(f"Training with {steps_per_epoch} steps per epoch (WebDataset streaming)")
+                print(f"[WM] use_world_model={self.model.use_world_model}")
+                if hasattr(self.model, "wm_num_future_frames"):
+                    print(f"[WM] frames={self.model.wm_num_future_frames} grid=({self.model.wm_grid_h},{self.model.wm_grid_w})")
+                vla_ds = getattr(dataset, "vla_dataset", None)
+                if vla_ds:
+                    print(f"[WM] ff_horizon={vla_ds.future_frame_horizon} ff_stride={vla_ds.future_frame_stride}")
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
                 if accelerator.is_main_process:
@@ -601,6 +607,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 "action_expert": self.model.action_expert_parameters,
                                 "diffloss": self.model.diffloss_parameters,
                             }
+                            if self.model.use_world_model:
+                                part_params["world_model"] = self.model.world_model_parameters
                             if cfg.training.train_vlm and not vlm_freeze_active:
                                 part_params["vlm"] = self.model.trainable_vlm_parameters
                             norms = {
@@ -708,6 +716,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 self.model.diffloss_parameters
                             )
                         step_log.update(raw_loss_cpu)
+                        if accelerator.is_main_process:
+                            loss_str = " ".join(f"{k}={v:.4f}" for k, v in raw_loss_cpu.items())
+                            print(f"[step {self.update_step}] {loss_str}")
 
                     # Evaluation
                     if should_eval:
@@ -797,6 +808,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Camera intrinsic as token embedding.
         if "camera_intrinsic" in batch:
             inputs["camera_intrinsic"] = batch["camera_intrinsic"].to(self.dtype)
+        # World model future frames (uint8, no dtype cast).
+        if "future_frames" in batch:
+            inputs["future_frames"] = batch["future_frames"]
+            inputs["n_future_frames"] = batch["n_future_frames"]
         return inputs
 
     def get_grouped_parameters(self, param_list, cfg):
