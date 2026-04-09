@@ -279,6 +279,19 @@ class LegendVLA(nn.Module):
         return [param for param in self.backbone.parameters() if param.requires_grad]
 
     @property
+    def trainable_vision_parameters(self):
+        visual = getattr(self.backbone.base_model.model, "visual", None)
+        if visual is None:
+            return []
+        return [param for param in visual.parameters() if param.requires_grad]
+
+    @property
+    def trainable_text_parameters(self):
+        # Language model + lm_head + embedding; exclude vision tower
+        vision_ids = {id(p) for p in (getattr(self.backbone.base_model.model, "visual", None) or nn.Module()).parameters()}
+        return [param for param in self.backbone.parameters() if param.requires_grad and id(param) not in vision_ids]
+
+    @property
     def lora_trainable_vlm_parameters(self):
         return self.trainable_vlm_parameters
 

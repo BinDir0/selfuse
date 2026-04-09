@@ -112,7 +112,7 @@ policy:
     use_adaln: True
     cond_hidden_size: ${dims.time_hidden_size}
     hidden_size: ${dims.action_hidden_size}
-    intermediate_size: 4096
+    intermediate_size: 2816
     num_heads: 8
     num_layers: 14
     detach_prefix_kv: False

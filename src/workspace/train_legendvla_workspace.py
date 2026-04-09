@@ -551,12 +551,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         with profile_context as prof:
             if accelerator.is_main_process:
                 print(f"Training with {steps_per_epoch} steps per epoch (WebDataset streaming)")
-                print(f"[WM] use_world_model={self.model.use_world_model}")
-                if hasattr(self.model, "wm_num_future_frames"):
-                    print(f"[WM] frames={self.model.wm_num_future_frames} grid=({self.model.wm_grid_h},{self.model.wm_grid_w})")
-                vla_ds = getattr(dataset, "vla_dataset", None)
-                if vla_ds:
-                    print(f"[WM] ff_horizon={vla_ds.future_frame_horizon} ff_stride={vla_ds.future_frame_stride}")
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
                 if accelerator.is_main_process:
@@ -610,7 +604,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             if self.model.use_world_model:
                                 part_params["world_model"] = self.model.world_model_parameters
                             if cfg.training.train_vlm and not vlm_freeze_active:
-                                part_params["vlm"] = self.model.trainable_vlm_parameters
+                                part_params["vision"] = self.model.trainable_vision_parameters
+                                part_params["text"] = self.model.trainable_text_parameters
                             norms = {
                                 name: accelerator.clip_grad_norm_(params, max_norm)
                                 for name, params in part_params.items()
@@ -703,14 +698,20 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                                 'grad_norm_action_expert': part_grad_norms["action_expert"],
                                 'grad_norm_diffloss': part_grad_norms["diffloss"],
                             })
-                            if "vlm" in part_grad_norms:
-                                step_log['grad_norm_vlm'] = part_grad_norms["vlm"]
+                            if "vision" in part_grad_norms:
+                                step_log['grad_norm_vision'] = part_grad_norms["vision"]
+                            if "text" in part_grad_norms:
+                                step_log['grad_norm_text'] = part_grad_norms["text"]
                             if "world_model" in part_grad_norms:
                                 step_log['grad_norm_world_model'] = part_grad_norms["world_model"]
                         with torch.no_grad():
                             if cfg.training.train_vlm:
-                                vlm_params = self.model.trainable_vlm_parameters
-                                step_log["weight_norm/vlm"] = params_l2_norm(vlm_params)
+                                step_log["weight_norm/vision"] = params_l2_norm(
+                                    self.model.trainable_vision_parameters
+                                )
+                                step_log["weight_norm/text"] = params_l2_norm(
+                                    self.model.trainable_text_parameters
+                                )
                             step_log["weight_norm/action"] = params_l2_norm(
                                 self.model.action_expert_parameters
                             )
