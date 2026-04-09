@@ -50,6 +50,17 @@ class SpanMaskConfig:
     prefer_early: bool = True
 
 
+class WorldModelHead(nn.Module):
+    """Query tokens + output projection for world model prediction."""
+
+    def __init__(self, n_queries: int, hidden_size: int, upsample_factor: int):
+        super().__init__()
+        self.query_embed = nn.Parameter(torch.randn(n_queries, hidden_size) * 0.02)
+        self.output_proj = nn.Linear(hidden_size, hidden_size * upsample_factor ** 2)
+        nn.init.zeros_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+
+
 @dataclass(frozen=True)
 class WorldModelConfig:
     num_future_frames: int = 0
@@ -188,10 +199,7 @@ class LegendVLA(nn.Module):
 
         D = expert.hidden_size
         n_queries = config.num_future_frames * self.wm_grid_h * self.wm_grid_w
-        self.wm_query_embed = nn.Parameter(torch.randn(n_queries, D) * 0.02)
-        self.wm_output_proj = nn.Linear(D, D * config.upsample_factor ** 2)
-        nn.init.zeros_(self.wm_output_proj.weight)
-        nn.init.zeros_(self.wm_output_proj.bias)
+        self.wm_head = WorldModelHead(n_queries, D, config.upsample_factor)
 
     def compile_blocks(
         self,
@@ -305,10 +313,8 @@ class LegendVLA(nn.Module):
         params = []
         if self.world_model_expert is not None:
             params.extend(p for p in self.world_model_expert.parameters() if p.requires_grad)
-        if hasattr(self, "wm_query_embed"):
-            params.append(self.wm_query_embed)
-        if hasattr(self, "wm_output_proj"):
-            params.extend(p for p in self.wm_output_proj.parameters() if p.requires_grad)
+        if hasattr(self, "wm_head"):
+            params.extend(p for p in self.wm_head.parameters() if p.requires_grad)
         return params
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
@@ -471,7 +477,7 @@ class LegendVLA(nn.Module):
         Returns dict with ``pred`` and ``target`` feature maps, plus ``n_future_frames``.
         """
         B = backbone_output.last_hidden_states.shape[0]
-        queries = self.wm_query_embed.unsqueeze(0).expand(B, -1, -1)
+        queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
         prefix_lengths = self.build_prefix_lengths(batch)
         base = prefix_lengths.unsqueeze(1).to(device=queries.device, dtype=torch.long)
         query_position_ids = base + torch.arange(queries.shape[1], device=queries.device).unsqueeze(0)
@@ -487,7 +493,7 @@ class LegendVLA(nn.Module):
         K = self.wm_num_future_frames
         gh, gw, uf = self.wm_grid_h, self.wm_grid_w, self.wm_upsample_factor
         D = self.world_model_expert.hidden_size
-        x = self.wm_output_proj(wm_hidden)
+        x = self.wm_head.output_proj(wm_hidden)
         x = x.reshape(B * K, gh, gw, uf, uf, D)
         x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * K, gh * uf, gw * uf, D)
         pred = x.flatten(1, 2).reshape(B, K, -1, D)
