@@ -25,6 +25,8 @@ JPEG_QUALITY = 90
 @dataclass
 class ReviewedFrame:
     frame_idx: int
+    left_accepted: bool
+    right_accepted: bool
     left_box: list[float] | None
     right_box: list[float] | None
 
@@ -126,6 +128,55 @@ def _build_reviewed_tracks(
     return model_boxes, tracks
 
 
+def _clone_frame_boxes(frame_boxes: dict[str, list[np.ndarray | None]]) -> dict[str, list[np.ndarray | None]]:
+    return {
+        side: [None if box is None else np.asarray(box, dtype=np.float32).copy() for box in boxes]
+        for side, boxes in frame_boxes.items()
+    }
+
+
+def _interpolate_box(box_a: np.ndarray, box_b: np.ndarray, alpha: float) -> np.ndarray:
+    box_a = np.asarray(box_a, dtype=np.float32)
+    box_b = np.asarray(box_b, dtype=np.float32)
+    return ((1.0 - alpha) * box_a + alpha * box_b).astype(np.float32)
+
+
+def _build_sparse_manual_boxes(
+    original_frame_boxes: dict[str, list[np.ndarray | None]],
+    current_frame_boxes: dict[str, list[np.ndarray | None]],
+    *,
+    review_indices: list[int],
+    accepted_frames_by_side: dict[str, set[int]],
+) -> dict[str, list[np.ndarray | None]]:
+    result = _clone_frame_boxes(original_frame_boxes)
+    if not review_indices:
+        return result
+
+    interval_start = int(review_indices[0])
+    interval_end = int(review_indices[-1])
+
+    for side in ("left", "right"):
+        accepted = sorted(int(frame_idx) for frame_idx in accepted_frames_by_side[side] if frame_idx in review_indices)
+        for frame_idx in range(interval_start, interval_end + 1):
+            result[side][frame_idx] = None
+        for frame_idx in accepted:
+            box = current_frame_boxes[side][frame_idx]
+            result[side][frame_idx] = None if box is None else np.asarray(box, dtype=np.float32).copy()
+        for start_frame, end_frame in zip(accepted[:-1], accepted[1:]):
+            start_box = current_frame_boxes[side][start_frame]
+            end_box = current_frame_boxes[side][end_frame]
+            if start_box is None or end_box is None:
+                continue
+            gap = end_frame - start_frame
+            if gap <= 1:
+                continue
+            for frame_idx in range(start_frame + 1, end_frame):
+                alpha = float(frame_idx - start_frame) / float(gap)
+                result[side][frame_idx] = _interpolate_box(start_box, end_box, alpha)
+
+    return result
+
+
 def _write_review_outputs(
     output_dir: Path,
     *,
@@ -180,13 +231,19 @@ class ReviewSession:
         self.frame_source = build_frame_source(args.video_path)
         self.num_frames = len(self.frame_source)
         self.tracks = _load_existing_tracks(self.tracks_path)
-        self.frame_boxes = _frame_boxes_from_tracks(self.tracks, num_frames=self.num_frames)
+        self.original_frame_boxes = _frame_boxes_from_tracks(self.tracks, num_frames=self.num_frames)
+        self.frame_boxes = _clone_frame_boxes(self.original_frame_boxes)
 
         review_start = max(0, int(args.start_frame))
         review_end = self.num_frames if args.end_frame is None else min(self.num_frames, int(args.end_frame))
         self.review_indices = list(range(review_start, review_end, max(1, int(args.frame_step))))
         if not self.review_indices:
             raise SystemExit("No frames selected for review")
+        self.review_index_set = set(int(frame_idx) for frame_idx in self.review_indices)
+        self.accepted_frames_by_side = {
+            "left": set(),
+            "right": set(),
+        }
 
         sample_frame = self.frame_source.get_frame(0, rgb=False)
         self.image_height = int(sample_frame.shape[0])
@@ -212,6 +269,10 @@ class ReviewSession:
             "image_height": self.image_height,
             "left_box": _box_to_json(self.frame_boxes["left"][frame_idx]),
             "right_box": _box_to_json(self.frame_boxes["right"][frame_idx]),
+            "left_accepted": frame_idx in self.accepted_frames_by_side["left"],
+            "right_accepted": frame_idx in self.accepted_frames_by_side["right"],
+            "accepted_left_total": len(self.accepted_frames_by_side["left"]),
+            "accepted_right_total": len(self.accepted_frames_by_side["right"]),
             "frame_url": f"/api/frame/{frame_idx}.jpg",
         }
 
@@ -221,6 +282,20 @@ class ReviewSession:
 
     def step(self, delta: int):
         return self.set_position(self.position + int(delta))
+
+    def accept_frame(self, frame_idx: int):
+        if frame_idx not in self.review_index_set:
+            raise ValueError(f"frame {frame_idx} is not in the review set")
+        self.accepted_frames_by_side["left"].add(int(frame_idx))
+        self.accepted_frames_by_side["right"].add(int(frame_idx))
+
+    def accept_side(self, frame_idx: int, side: str):
+        side = side.lower()
+        if side not in {"left", "right"}:
+            raise ValueError(f"Unsupported side: {side}")
+        if frame_idx not in self.review_index_set:
+            raise ValueError(f"frame {frame_idx} is not in the review set")
+        self.accepted_frames_by_side[side].add(int(frame_idx))
 
     def set_box(self, frame_idx: int, side: str, box_payload: dict):
         side = side.lower()
@@ -238,16 +313,24 @@ class ReviewSession:
         x2 = min(max(0.0, x2), float(self.image_width))
         y2 = min(max(0.0, y2), float(self.image_height))
         self.frame_boxes[side][frame_idx] = np.array([x1, y1, x2, y2, conf], dtype=np.float32)
+        self.accept_side(frame_idx, side)
 
     def clear_box(self, frame_idx: int, side: str):
         side = side.lower()
         if side not in {"left", "right"}:
             raise ValueError(f"Unsupported side: {side}")
         self.frame_boxes[side][frame_idx] = None
+        self.accept_side(frame_idx, side)
 
     def save(self):
-        model_boxes, reviewed_tracks = _build_reviewed_tracks(
+        final_frame_boxes = _build_sparse_manual_boxes(
+            self.original_frame_boxes,
             self.frame_boxes,
+            review_indices=self.review_indices,
+            accepted_frames_by_side=self.accepted_frames_by_side,
+        )
+        model_boxes, reviewed_tracks = _build_reviewed_tracks(
+            final_frame_boxes,
             image_width=self.image_width,
             image_height=self.image_height,
             edge_margin_ratio=float(self.args.edge_margin_ratio),
@@ -255,6 +338,8 @@ class ReviewSession:
         reviewed_frames = [
             ReviewedFrame(
                 frame_idx=int(frame_idx),
+                left_accepted=int(frame_idx) in self.accepted_frames_by_side["left"],
+                right_accepted=int(frame_idx) in self.accepted_frames_by_side["right"],
                 left_box=None if self.frame_boxes["left"][frame_idx] is None else self.frame_boxes["left"][frame_idx].astype(np.float32).tolist(),
                 right_box=None if self.frame_boxes["right"][frame_idx] is None else self.frame_boxes["right"][frame_idx].astype(np.float32).tolist(),
             )
@@ -282,6 +367,8 @@ class ReviewSession:
         return {
             "output_dir": str(output_dir),
             "backup_dir": str(backup_dir) if self.args.apply_in_place else None,
+            "accepted_left_total": len(self.accepted_frames_by_side["left"]),
+            "accepted_right_total": len(self.accepted_frames_by_side["right"]),
         }
 
 
@@ -364,6 +451,9 @@ def build_html():
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
+    .buttons.triple {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
     button {
       appearance: none;
       border: 1px solid var(--line);
@@ -434,9 +524,16 @@ def build_html():
     <aside class="sidebar">
       <h1>Detect Track Review</h1>
       <div class="meta" id="meta"></div>
+      <h2>Mode</h2>
+      <div class="meta">
+        <div class="meta-row"><span>Inside review interval</span><span>only accepted anchors + interpolation</span></div>
+        <div class="meta-row"><span>Unaccepted sampled frames</span><span>ignored on save</span></div>
+        <div class="meta-row"><span>Outside review interval</span><span>keep original detect</span></div>
+      </div>
       <h2>Navigation</h2>
-      <div class="buttons">
+      <div class="buttons triple">
         <button id="prevBtn">Prev</button>
+        <button id="skipBtn">Next</button>
         <button id="nextBtn" class="primary">Accept / Next</button>
       </div>
       <h2>Editing</h2>
@@ -456,6 +553,7 @@ def build_html():
       <h2>Shortcuts</h2>
       <div class="meta">
         <div class="meta-row"><span class="kbd">A / Space / Enter</span><span>Accept and next</span></div>
+        <div class="meta-row"><span class="kbd">N / Right</span><span>Next without accepting</span></div>
         <div class="meta-row"><span class="kbd">P</span><span>Previous</span></div>
         <div class="meta-row"><span class="kbd">L / R</span><span>Draw left / right</span></div>
         <div class="meta-row"><span class="kbd">X / Y</span><span>Clear left / right</span></div>
@@ -505,10 +603,12 @@ def build_html():
         <div class="meta-row"><span>Frame</span><span>${f.frame_idx}</span></div>
         <div class="meta-row"><span>Review Index</span><span>${f.position + 1} / ${f.total}</span></div>
         <div class="meta-row"><span>Image Size</span><span>${f.image_width} x ${f.image_height}</span></div>
+        <div class="meta-row"><span>Accepted Left Anchors</span><span>${f.accepted_left_total}</span></div>
+        <div class="meta-row"><span>Accepted Right Anchors</span><span>${f.accepted_right_total}</span></div>
       `;
       boxGridEl.innerHTML = `
-        <div class="box-row"><span>Left</span><span>${boxToText(f.left_box)}</span></div>
-        <div class="box-row"><span>Right</span><span>${boxToText(f.right_box)}</span></div>
+        <div class="box-row"><span>Left${f.left_accepted ? " [accepted]" : ""}</span><span>${boxToText(f.left_box)}</span></div>
+        <div class="box-row"><span>Right${f.right_accepted ? " [accepted]" : ""}</span><span>${boxToText(f.right_box)}</span></div>
       `;
     }
 
@@ -599,10 +699,15 @@ def build_html():
       await loadFrame(payload);
     }
 
+    async function acceptAndStep(delta = 1) {
+      const payload = await api("/api/accept", { method: "POST", body: JSON.stringify({ delta }) });
+      await loadFrame(payload);
+    }
+
     async function save() {
       setStatus("Saving...");
       const data = await api("/api/save", { method: "POST", body: JSON.stringify({}) });
-      setStatus(`Saved to ${data.output_dir}${data.backup_dir ? `  backup=${data.backup_dir}` : ""}`);
+      setStatus(`Saved to ${data.output_dir}${data.backup_dir ? `  backup=${data.backup_dir}` : ""}  left=${data.accepted_left_total} right=${data.accepted_right_total}`);
     }
 
     async function clearSide(side) {
@@ -679,7 +784,8 @@ def build_html():
     });
 
     document.getElementById("prevBtn").addEventListener("click", () => step(-1));
-    document.getElementById("nextBtn").addEventListener("click", () => step(1));
+    document.getElementById("skipBtn").addEventListener("click", () => step(1));
+    document.getElementById("nextBtn").addEventListener("click", () => acceptAndStep(1));
     document.getElementById("drawLeftBtn").addEventListener("click", () => { state.drawMode = "left"; setStatus("Draw left box"); });
     document.getElementById("drawRightBtn").addEventListener("click", () => { state.drawMode = "right"; setStatus("Draw right box"); });
     document.getElementById("clearLeftBtn").addEventListener("click", () => clearSide("left"));
@@ -691,6 +797,10 @@ def build_html():
       if (!state.frame) return;
       if (event.key === " " || event.key === "Enter" || event.key.toLowerCase() === "a") {
         event.preventDefault();
+        await acceptAndStep(1);
+        return;
+      }
+      if (event.key.toLowerCase() === "n" || event.key === "ArrowRight") {
         await step(1);
         return;
       }
@@ -754,6 +864,13 @@ def create_app(args):
         delta = int(payload.get("delta", 0))
         return jsonify(session.step(delta))
 
+    @app.post("/api/accept")
+    def api_accept():
+        payload = request.get_json(force=True, silent=False) or {}
+        delta = int(payload.get("delta", 1))
+        session.accept_frame(session.current_frame_idx())
+        return jsonify(session.step(delta))
+
     @app.post("/api/set_box")
     def api_set_box():
         payload = request.get_json(force=True, silent=False) or {}
@@ -788,6 +905,8 @@ def create_app(args):
                 "review_frames": len(session.review_indices),
                 "current_position": session.position,
                 "current_frame_idx": session.current_frame_idx(),
+                "accepted_left_total": len(session.accepted_frames_by_side["left"]),
+                "accepted_right_total": len(session.accepted_frames_by_side["right"]),
             }
         )
 
