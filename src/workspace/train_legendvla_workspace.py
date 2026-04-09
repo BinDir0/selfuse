@@ -705,6 +705,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             })
                             if "vlm" in part_grad_norms:
                                 step_log['grad_norm_vlm'] = part_grad_norms["vlm"]
+                            if "world_model" in part_grad_norms:
+                                step_log['grad_norm_world_model'] = part_grad_norms["world_model"]
                         with torch.no_grad():
                             if cfg.training.train_vlm:
                                 vlm_params = self.model.trainable_vlm_parameters
@@ -715,10 +717,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             step_log["weight_norm/diffloss"] = params_l2_norm(
                                 self.model.diffloss_parameters
                             )
+                            if self.model.use_world_model:
+                                step_log["weight_norm/world_model"] = params_l2_norm(
+                                    self.model.world_model_parameters
+                                )
                         step_log.update(raw_loss_cpu)
                         if accelerator.is_main_process:
                             loss_str = " ".join(f"{k}={v:.4f}" for k, v in raw_loss_cpu.items())
-                            print(f"[step {self.update_step}] {loss_str}")
+                            extra = ""
+                            if part_grad_norms is not None and "world_model" in part_grad_norms:
+                                extra += f" gn_wm={scalar_metric_value(part_grad_norms['world_model']):.4f}"
+                            if "weight_norm/world_model" in step_log:
+                                extra += f" wn_wm={scalar_metric_value(step_log['weight_norm/world_model']):.4f}"
+                            print(f"[step {self.update_step}] {loss_str}{extra}")
 
                     # Evaluation
                     if should_eval:
