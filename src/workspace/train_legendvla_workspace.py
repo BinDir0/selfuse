@@ -397,6 +397,13 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         )
         all_trainable_parameters.extend(diffloss_trainable_paramters)
 
+        if model.use_world_model:
+            wm_trainable_parameters = self.get_grouped_parameters(
+                model.world_model_parameters,
+                cfg.optimizer.world_model,
+            )
+            all_trainable_parameters.extend(wm_trainable_parameters)
+
         all_trainable_params_list = []
         for params_dict in all_trainable_parameters:
             all_trainable_params_list.extend(params_dict['params'])

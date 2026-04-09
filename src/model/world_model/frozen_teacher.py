@@ -73,15 +73,10 @@ class FrozenVisualTeacher(nn.Module):
                 f"target_size ({tH}, {tW}) must be divisible by patch_size={self.patch_size}"
             )
 
-        # ImageNet normalization buffers (auto-move with model device/dtype)
-        self.register_buffer(
-            "pixel_mean",
-            torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1),
-        )
-        self.register_buffer(
-            "pixel_std",
-            torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1),
-        )
+        # ImageNet normalization constants (not registered as buffers to avoid
+        # DTensor conversion issues with FSDP2; created on-the-fly in preprocess).
+        self._pixel_mean = (0.485, 0.456, 0.406)
+        self._pixel_std = (0.229, 0.224, 0.225)
 
     def train(self, mode: bool = True) -> "FrozenVisualTeacher":
         # Always keep in eval mode
@@ -98,8 +93,10 @@ class FrozenVisualTeacher(nn.Module):
         # Resize to target_size if specified
         if self.target_size is not None and (x.shape[2], x.shape[3]) != self.target_size:
             x = F.interpolate(x, size=self.target_size, mode="bicubic", align_corners=False)
-        # ImageNet normalize
-        x = (x - self.pixel_mean) / self.pixel_std
+        # ImageNet normalize (constants created on device to avoid DTensor issues)
+        mean = torch.tensor(self._pixel_mean, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        std = torch.tensor(self._pixel_std, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        x = (x - mean) / std
         return x
 
     @torch.no_grad()

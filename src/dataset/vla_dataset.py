@@ -532,6 +532,11 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         if "intrinsic" not in vlm_sample:
             vlm_sample["intrinsic"] = torch.zeros(4, dtype=torch.float32)
         vlm_sample["n_future_frames"] = torch.tensor(0, dtype=torch.int32)
+        ff_horizon = self.vla_dataset.future_frame_horizon
+        if ff_horizon > 0:
+            tgt = self.vla_dataset.target_image_size
+            tH, tW = tgt if tgt else (384, 384)
+            vlm_sample["future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
         if getattr(self.vla_dataset, "debug_capture_raw_sample", False):
             vlm_sample["debug_raw_sample"] = None
         if getattr(self.vla_dataset, "debug_capture_processed_sample", False):
