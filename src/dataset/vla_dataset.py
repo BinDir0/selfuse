@@ -95,7 +95,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
 
         ff_cfg = shape_meta.get("future_frame", {})
         self.future_frame_horizon = int(ff_cfg.get("horizon", 0))
-        self.future_frame_stride = int(ff_cfg.get("stride", 1))
+        self.future_frame_stride = int(ff_cfg.get("stride", 30))
 
         self.window_config = WindowConfig(
             action_horizon=shape_meta["action"]["horizon"],
@@ -266,10 +266,15 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # sample in a batch has the key and torch.stack works in the collator.
         K = self.future_frame_horizon
         if K > 0:
-            tH, tW = self.target_image_size or (image.shape[1], image.shape[2])
+            if self.target_image_size is None:
+                raise ValueError(
+                    "target_image_size must be set when future_frame_horizon > 0. "
+                    "Set data.target_image_size in the config."
+                )
+            tH, tW = self.target_image_size
             if "future_frames" in sample:
                 ff = sample["future_frames"]
-                n_valid = min(int(sample.get("valid_future_frame_len", ff.shape[0])), K)
+                n_valid = min(sample.get("valid_future_frame_len", ff.shape[0]), K)
                 if n_valid > 0:
                     ff = ff[:n_valid]
                     if self.target_image_size is not None:
@@ -535,7 +540,12 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         ff_horizon = self.vla_dataset.future_frame_horizon
         if ff_horizon > 0:
             tgt = self.vla_dataset.target_image_size
-            tH, tW = tgt if tgt else (384, 384)
+            if tgt is None:
+                raise ValueError(
+                    "target_image_size must be set when future_frame_horizon > 0. "
+                    "Set data.target_image_size in the config."
+                )
+            tH, tW = tgt
             vlm_sample["future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
         if getattr(self.vla_dataset, "debug_capture_raw_sample", False):
             vlm_sample["debug_raw_sample"] = None

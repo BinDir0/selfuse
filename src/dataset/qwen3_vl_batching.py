@@ -75,12 +75,14 @@ class Qwen3VLChatFormatter:
         camera_token: str = "<camera>",
         camera_intrinsic_mode: str = "text",
         lowercase_vla_text: bool = True,
+        predict_future_frames: bool = False,
     ):
         self.state_token = state_token
         self.action_token = action_token
         self.camera_token = camera_token
         self.camera_intrinsic_mode = camera_intrinsic_mode
         self.lowercase_vla_text = lowercase_vla_text
+        self.predict_future_frames = predict_future_frames
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
         vision_type = sample["vision_type"]
@@ -128,7 +130,10 @@ class Qwen3VLChatFormatter:
                 n_states=sample["n_states"],
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
-            user_text += " Predict the next action sequence."
+            if self.predict_future_frames:
+                user_text += " Predict the next action sequence and future frames."
+            else:
+                user_text += " Predict the next action sequence."
         else:
             user_text = str(sample["question"]).strip()
             assistant_text = str(sample["answer"]).strip()

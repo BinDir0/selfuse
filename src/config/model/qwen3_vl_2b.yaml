@@ -107,13 +107,14 @@ policy:
     min_period: 0.004
     max_period: 4.0
   flow_expert:
-    _target_: src.model.action.qwen3_action_expert.Qwen3Expert
+    _target_: src.model.vlm.qwen3_expert.Qwen3Expert
     model_name_or_path: ${pretrained.model_name_or_path}
     use_adaln: True
     cond_hidden_size: ${dims.time_hidden_size}
     hidden_size: ${dims.action_hidden_size}
     intermediate_size: 4096
     num_heads: 8
+    num_layers: 4
     detach_prefix_kv: False
     attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
@@ -179,7 +180,7 @@ policy:
   ar_action_train_config:
     _target_: src.policy.legendvla.ARActionTrainConfig
     noise_std: 0.02
-    chunk_size: 8
+    chunk_size: 4
     diffloss_repeat: 16
     input_mask_enabled: True
     action_mask:
@@ -204,7 +205,7 @@ policy:
     diffusion_loss_weight: 2.0
     flow_loss_weight: 1.0
     reg_loss_weight: 1.0
-    wm_loss_weight: ${world_model.loss_weight}
+    wm_loss_weight: 1.0
   knowledge_insulation: ${runtime.knowledge_insulation}
   # World model (conditionally instantiated from world_model config group)
   world_model_expert: ${world_model.world_model_expert}

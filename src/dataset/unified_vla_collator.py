@@ -123,27 +123,14 @@ class UnifiedVLACollator:
             "answer_start_idx": answer_start_idx,
         }
 
-        reserved_keys = {
-            "images",
-            "instruction",
-            "question",
-            "answer",
-            "intrinsic",
-            "vision_type",
-            "video_fps",
-            "future_frames",
-        }
-        common_keys = set(samples[0])
-        for sample in samples[1:]:
-            common_keys &= set(sample)
-
-        for key in sorted(common_keys - reserved_keys):
-            batch[key] = self.collate_values([sample[key] for sample in samples])
-
-        # Future frames: stack when all samples have them (K > 0 guarantees
-        # every VLA sample emits zero-padded future_frames).
-        if all("future_frames" in s for s in samples):
-            batch["future_frames"] = torch.stack([s["future_frames"] for s in samples])
+        collatable_keys = [
+            "is_vla_data", "states", "actions", "actions_valid_mask",
+            "n_states", "n_actions", "n_future_frames",
+            "depth_values", "has_depth_values", "future_frames",
+        ]
+        for key in collatable_keys:
+            if all(key in s for s in samples):
+                batch[key] = self.collate_values([s[key] for s in samples])
 
         # When camera_intrinsic_mode=token, pass intrinsic tensor for camera_encoder.
         if self.formatter.camera_intrinsic_mode == "token":

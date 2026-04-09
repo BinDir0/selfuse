@@ -4,7 +4,6 @@ world_model:
   future_frame:
     horizon: 0
     stride: 1
-  loss_weight: 0.0
   frozen_teacher: null
   world_model_expert: null
   teacher_image_size: null

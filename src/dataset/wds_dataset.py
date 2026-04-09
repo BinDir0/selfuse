@@ -88,7 +88,7 @@ class WindowConfig:
     history_pad_mode: str = "repeat"
     future_pad_mode: str = "repeat"
     future_frame_horizon: int = 0
-    future_frame_stride: int = 1
+    future_frame_stride: int = 30
 
     def __post_init__(self):
         valid_modes = {"repeat", "truncate"}
@@ -220,7 +220,7 @@ def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
             refs.append(buf[offset])
             valid_count += 1
         elif pad_mode == "repeat":
-            refs.append(buf[len(buf) - 1])
+            refs.append(buf[-1])
     return refs, valid_count
 
 

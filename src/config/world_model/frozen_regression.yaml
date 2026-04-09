@@ -4,8 +4,6 @@ world_model:
   future_frame:
     horizon: 1
     stride: 30    # predict frame ~1 second ahead (at 30fps base)
-  loss_weight: 1.0
-
   frozen_teacher:
     _target_: src.model.world_model.frozen_teacher.FrozenVisualTeacher
     # DINOv3-ViT-L/16: patch_size=16, hidden_size=1024, 4 register tokens, RoPE.
@@ -16,7 +14,7 @@ world_model:
     target_size: ${world_model.teacher_image_size}
 
   world_model_expert:
-    _target_: src.model.action.qwen3_action_expert.Qwen3Expert
+    _target_: src.model.vlm.qwen3_expert.Qwen3Expert
     model_name_or_path: ${pretrained.model_name_or_path}
     use_adaln: false
     cond_hidden_size: null
