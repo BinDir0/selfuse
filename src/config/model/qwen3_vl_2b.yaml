@@ -114,7 +114,7 @@ policy:
     hidden_size: ${dims.action_hidden_size}
     intermediate_size: 4096
     num_heads: 8
-    num_layers: 4
+    num_layers: 14
     detach_prefix_kv: False
     attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
@@ -216,3 +216,5 @@ policy:
     target_image_size: ${world_model.teacher_image_size}
     teacher_patch_size: ${world_model.teacher_patch_size}
     upsample_factor: ${world_model.upsample_factor}
+    action_conditioning: ${world_model.action_conditioning}
+    detach_action_cond: ${world_model.detach_action_cond}

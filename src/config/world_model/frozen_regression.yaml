@@ -33,3 +33,5 @@ world_model:
   teacher_image_size: [384, 384]
   teacher_patch_size: 16
   upsample_factor: 2
+  action_conditioning: true
+  detach_action_cond: false

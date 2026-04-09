@@ -411,12 +411,13 @@ def compute_wm_loss(
     model,
     batch: dict[str, torch.Tensor],
     backbone_output,
+    action_cond_embeds: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Masked MSE between world model predictions and frozen teacher features."""
     if not model.use_world_model or "future_frames" not in batch:
         return zero_loss(backbone_output.last_hidden_states)
 
-    wm_output = model.forward_world_model_stream(batch, backbone_output)
+    wm_output = model.forward_world_model_stream(batch, backbone_output, action_cond_embeds)
     pred = wm_output["pred"]
     target = wm_output["target"].to(pred.dtype)
     n_future = wm_output["n_future_frames"]
@@ -448,7 +449,13 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
     diff_loss = compute_diffloss_loss(model, hidden_states, dense_inputs)
     reg_loss = compute_reg_action_loss(model, hidden_states, dense_inputs)
     flow_loss, _ = compute_flow_stream_loss(model, batch, backbone_output)
-    wm_loss = compute_wm_loss(model, batch, backbone_output)
+
+    # Action conditioning for world model: encode clean actions
+    action_cond_embeds = None
+    if model.use_world_model and model.world_model_config.action_conditioning and "actions" in batch:
+        action_cond_embeds = model.action_encoder(batch["actions"])
+
+    wm_loss = compute_wm_loss(model, batch, backbone_output, action_cond_embeds)
 
     total_loss = (
         model.loss_config.ce_loss_weight * ce_loss

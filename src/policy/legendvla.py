@@ -67,6 +67,8 @@ class WorldModelConfig:
     target_image_size: tuple[int, int] | None = None
     teacher_patch_size: int = 16
     upsample_factor: int = 2
+    action_conditioning: bool = False
+    detach_action_cond: bool = False
 
 
 @dataclass(frozen=True)
@@ -470,27 +472,63 @@ class LegendVLA(nn.Module):
         self,
         batch: dict,
         backbone_output: BackboneStreamOutput,
+        action_cond_embeds: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Run world model expert and frozen teacher on future frames.
+
+        Args:
+            action_cond_embeds: Optional [B, H, D] action embeddings from
+                action_encoder(clean_actions). Prepended to WM queries so the
+                expert can attend to action tokens when predicting future frames.
 
         Returns dict with ``pred`` and ``target`` feature maps, plus ``n_future_frames``.
         """
         B = backbone_output.last_hidden_states.shape[0]
         queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
-        prefix_lengths = self.build_prefix_lengths(batch)
-        base = prefix_lengths.unsqueeze(1).to(device=queries.device, dtype=torch.long)
-        query_position_ids = base + torch.arange(queries.shape[1], device=queries.device).unsqueeze(0)
 
-        # TODO: condition world model on action by running flow expert with
-        # an extra t=1.0 parallel copy, then prepending the resulting action
-        # embeddings to the world model prefix cache.
-        wm_mask = torch.ones(B, queries.shape[1], device=queries.device, dtype=torch.bool)
+        # Action conditioning: prepend encoded clean actions before WM queries
+        if action_cond_embeds is not None:
+            if self.world_model_config.detach_action_cond:
+                action_cond_embeds = action_cond_embeds.detach()
+            suffix = torch.cat([action_cond_embeds, queries], dim=1)
+            action_len = action_cond_embeds.shape[1]
+        else:
+            suffix = queries
+            action_len = 0
+
+        # Position IDs: sequential from prefix_len, action tokens then queries
+        prefix_lengths = self.build_prefix_lengths(batch)
+        base = prefix_lengths.unsqueeze(1).to(device=suffix.device, dtype=torch.long)
+        position_ids = base + torch.arange(suffix.shape[1], device=suffix.device).unsqueeze(0)
+
+        # Build suffix_mask from real validity
+        # Action portion: [B, H] — valid where any action dim is non-zero
+        if action_cond_embeds is not None:
+            action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
+        else:
+            action_mask = None
+
+        # Query portion: [B, K*gh*gw] — valid for frames k < n_future_frames[b]
+        K = self.wm_num_future_frames
+        queries_per_frame = self.wm_grid_h * self.wm_grid_w
+        n_future = batch["n_future_frames"].to(device=suffix.device)
+        frame_valid = torch.arange(K, device=suffix.device).unsqueeze(0) < n_future.unsqueeze(1)
+        query_mask = frame_valid.unsqueeze(-1).expand(-1, -1, queries_per_frame).reshape(B, -1)
+
+        if action_mask is not None:
+            suffix_mask = torch.cat([action_mask, query_mask], dim=1)
+        else:
+            suffix_mask = query_mask
+
         wm_hidden = self.world_model_expert(
-            suffix_embeds=queries,
+            suffix_embeds=suffix,
             prefix_cache=backbone_output.prefix_cache,
-            suffix_position_ids=query_position_ids,
-            suffix_mask=wm_mask,
+            suffix_position_ids=position_ids,
+            suffix_mask=suffix_mask,
         )
+
+        # Extract only query portion (discard action token outputs)
+        wm_hidden = wm_hidden[:, action_len:, :]
 
         # Depth-to-space upsample (inverse of Qwen3-VL spatial merge).
         # Source: transformers Qwen3VLVisionModel.fast_pos_embed_interpolate
