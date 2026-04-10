@@ -5,6 +5,21 @@ import numpy as np
 import sys
 import os
 
+
+def get_mano_cfg(is_right=True):
+    """Compatibility helper for code paths that construct MANO directly."""
+    mano_cfg = {
+        'DATA_DIR': '_DATA/data/' if is_right else '_DATA/data_left/',
+        'MODEL_PATH': '_DATA/data/mano' if is_right else '_DATA/data_left/mano_left',
+        'GENDER': 'neutral',
+        'NUM_HAND_JOINTS': 15,
+        'CREATE_BODY_POSE': False,
+    }
+    if not is_right:
+        mano_cfg['is_rhand'] = False
+    return {k.lower(): v for k, v in mano_cfg.items()}
+
+
 def block_print():
     sys.stdout = open(os.devnull, 'w')
 
