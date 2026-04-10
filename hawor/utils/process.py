@@ -4,13 +4,28 @@ from hawor.utils.geometry import aa_to_rotmat
 import numpy as np
 import sys
 import os
+from pathlib import Path
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def resolve_mano_data_dir(is_right=True) -> Path:
+    subdir = ("_DATA/data" if is_right else "_DATA/data_left")
+    return (_project_root() / subdir).resolve()
+
+
+def resolve_mano_model_dir(is_right=True) -> Path:
+    subdir = ("mano" if is_right else "mano_left")
+    return (resolve_mano_data_dir(is_right=is_right) / subdir).resolve()
 
 
 def get_mano_cfg(is_right=True):
     """Compatibility helper for code paths that construct MANO directly."""
     mano_cfg = {
-        'DATA_DIR': '_DATA/data/' if is_right else '_DATA/data_left/',
-        'MODEL_PATH': '_DATA/data/mano' if is_right else '_DATA/data_left/mano_left',
+        'DATA_DIR': str(resolve_mano_data_dir(is_right=is_right)),
+        'MODEL_PATH': str(resolve_mano_model_dir(is_right=is_right)),
         'GENDER': 'neutral',
         'NUM_HAND_JOINTS': 15,
         'CREATE_BODY_POSE': False,
