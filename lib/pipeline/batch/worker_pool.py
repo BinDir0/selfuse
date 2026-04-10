@@ -2,6 +2,7 @@ import multiprocessing as mp
 import os
 import time
 import traceback
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty
 from typing import Dict, List, Optional
@@ -185,7 +186,36 @@ class StageWorkerPool:
         except OSError:
             return 0
 
+    def _prioritize_detect_track_videos(self, video_paths: List[str]) -> List[str]:
+        shard_groups = defaultdict(list)
+        shard_work = {}
+
+        for video_path in video_paths:
+            descriptor = self.descriptor_map.get(video_path)
+            shard_key = descriptor.shard_path if descriptor is not None and descriptor.shard_path else video_path
+            estimated_work = self._estimate_video_work(video_path, "detect_track")
+            shard_groups[shard_key].append((video_path, estimated_work))
+            shard_work[shard_key] = shard_work.get(shard_key, 0) + estimated_work
+
+        prioritized = []
+        ordered_shards = sorted(
+            shard_groups,
+            key=lambda shard_key: (
+                -shard_work[shard_key],
+                shard_key,
+            ),
+        )
+        for shard_key in ordered_shards:
+            shard_videos = sorted(
+                shard_groups[shard_key],
+                key=lambda item: (-item[1], item[0]),
+            )
+            prioritized.extend(video_path for video_path, _ in shard_videos)
+        return prioritized
+
     def _prioritize_videos(self, video_paths: List[str], stage: str) -> List[str]:
+        if stage == "detect_track" and self.descriptor_map:
+            return self._prioritize_detect_track_videos(video_paths)
         return sorted(video_paths, key=lambda video_path: self._estimate_video_work(video_path, stage), reverse=True)
 
     @staticmethod

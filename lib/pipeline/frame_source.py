@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import os
 import threading
+from collections import OrderedDict
 
 import torch
 import torch.utils.data
@@ -15,6 +16,31 @@ except ImportError:
 
 # Check if we should suppress verbose output
 QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
+SHARD_MEMBER_INDEX_CACHE_SIZE = max(1, int(os.environ.get("HAWOR_SHARD_MEMBER_INDEX_CACHE_SIZE", "8")))
+_SHARD_MEMBER_INDEX_LOCK = threading.Lock()
+_SHARD_MEMBER_INDEX_CACHE = OrderedDict()
+
+
+def _load_shard_member_index(tar_path: str):
+    with _SHARD_MEMBER_INDEX_LOCK:
+        cached = _SHARD_MEMBER_INDEX_CACHE.get(tar_path)
+        if cached is not None:
+            _SHARD_MEMBER_INDEX_CACHE.move_to_end(tar_path)
+            return cached
+
+    member_index = {}
+    with __import__("tarfile").open(tar_path, "r") as tar_reader:
+        for member in tar_reader:
+            if not member.isfile():
+                continue
+            member_index[member.name] = (int(member.offset_data), int(member.size))
+
+    with _SHARD_MEMBER_INDEX_LOCK:
+        _SHARD_MEMBER_INDEX_CACHE[tar_path] = member_index
+        _SHARD_MEMBER_INDEX_CACHE.move_to_end(tar_path)
+        while len(_SHARD_MEMBER_INDEX_CACHE) > SHARD_MEMBER_INDEX_CACHE_SIZE:
+            _SHARD_MEMBER_INDEX_CACHE.popitem(last=False)
+    return member_index
 
 
 class BaseFrameSource:
@@ -168,10 +194,24 @@ class ShardVideoFrameSource(BaseFrameSource):
                     f"(expected {size} bytes, got {len(jpeg_data)})"
                 )
         else:
-            # Legacy fallback: tarfile handle is thread-local because TarFile is not thread-safe.
-            tar = self._get_tar()
-            member = tar.getmember(member_name)
-            jpeg_data = tar.extractfile(member).read()
+            member_index = _load_shard_member_index(self.tar_path)
+            offset_size = member_index.get(member_name)
+            if offset_size is not None:
+                offset, size = offset_size
+                jpeg_data = os.pread(self._get_fd(), size, offset)
+                if len(jpeg_data) != size:
+                    raise RuntimeError(
+                        f"Short read from tar: {self.tar_path}/{member_name} "
+                        f"(expected {size} bytes, got {len(jpeg_data)})"
+                    )
+            else:
+                # Fallback for unexpected tar metadata drift.
+                tar = self._get_tar()
+                member = tar.getmember(member_name)
+                extracted = tar.extractfile(member)
+                if extracted is None:
+                    raise RuntimeError(f"Failed to extract image from tar: {self.tar_path}/{member_name}")
+                jpeg_data = extracted.read()
 
         if self.use_turbojpeg and member_name.lower().endswith(('.jpg', '.jpeg')):
             try:

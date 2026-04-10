@@ -194,6 +194,7 @@ def build_video_index(factory_dir: str) -> dict:
         raise FileNotFoundError(f"No tar shards found in {factory_dir}")
 
     clips: Dict[str, dict] = {}
+    skipped_cross_shard_clips: set[str] = set()
     n_frames_total = 0
     pbar = tqdm(shard_files, desc="Scanning shards", unit="shard")
     for shard_file in pbar:
@@ -211,6 +212,9 @@ def build_video_index(factory_dir: str) -> dict:
                         continue
                     clip_id, frame_sort, ext = parsed
 
+                    if clip_id in skipped_cross_shard_clips:
+                        continue
+
                     if clip_id not in clips:
                         clips[clip_id] = _new_clip_summary(
                             shard_file,
@@ -221,10 +225,9 @@ def build_video_index(factory_dir: str) -> dict:
                         )
                     clip_summary = clips[clip_id]
                     if clip_summary["shard"] != shard_file:
-                        raise RuntimeError(
-                            f"Clip {clip_id} spans multiple shards: "
-                            f"{clip_summary['shard']} and {shard_file}"
-                        )
+                        skipped_cross_shard_clips.add(clip_id)
+                        clips.pop(clip_id, None)
+                        continue
 
                     frame_idx = int(frame_sort[1:])
                     if clip_summary["frame_ext"] != f".{ext.lower()}":
@@ -268,6 +271,17 @@ def build_video_index(factory_dir: str) -> dict:
     pbar.set_postfix(clips=len(clips), frames=n_frames_total)
     pbar.close()
 
+    if skipped_cross_shard_clips:
+        skipped_preview = ", ".join(sorted(skipped_cross_shard_clips)[:8])
+        print(
+            (
+                f"Warning: skipped {len(skipped_cross_shard_clips)} clip(s) in {factory_dir} "
+                f"because they span multiple shards. "
+                f"Examples: {skipped_preview}"
+            ),
+            flush=True,
+        )
+
     for clip_id, clip_summary in clips.items():
         min_frame_idx = int(clip_summary.pop("_min_frame_idx"))
         max_frame_idx = int(clip_summary.pop("_max_frame_idx"))
@@ -285,6 +299,7 @@ def build_video_index(factory_dir: str) -> dict:
         "shards": shard_files,
         "num_videos": len(clips),
         "num_shards": len(shard_files),
+        "skipped_cross_shard_clips": sorted(skipped_cross_shard_clips),
     }
 
 
