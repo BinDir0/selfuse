@@ -141,7 +141,7 @@ class ShardVideoFrameSource(BaseFrameSource):
             raise RuntimeError(f"ShardVideoFrameSource requires non-empty frame_names for {tar_path}")
 
         if not QUIET_MODE:
-            mode = "direct-seek" if frame_offsets else "tarfile"
+            mode = "direct-seek" if frame_offsets else "indexed-pread"
             print(f"ShardVideoFrameSource: {len(self.frame_names)} frames from {os.path.basename(tar_path)} ({mode})")
 
         self.use_turbojpeg = use_turbojpeg and TURBOJPEG_AVAILABLE

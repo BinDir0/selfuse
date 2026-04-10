@@ -11,6 +11,47 @@ import supervision as sv
 QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
 
 
+def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: int):
+    from lib.pipeline.frame_source import FrameDataset, _numpy_collate, _frame_dataset_worker_init
+
+    num_frames = len(frame_source)
+    if num_frames <= 0:
+        return
+
+    # Short clips pay more for spawning loader workers than they gain back.
+    if num_io_workers <= 0 or num_frames <= max(detect_batch_size * 2, 256):
+        for start_idx in tqdm(
+            range(0, num_frames, detect_batch_size),
+            disable=QUIET_MODE,
+            desc="Detect (batched)",
+        ):
+            end_idx = min(start_idx + detect_batch_size, num_frames)
+            batch_indices = list(range(start_idx, end_idx))
+            batch_frames = [frame_source.get_frame(frame_idx, rgb=False) for frame_idx in batch_indices]
+            yield batch_indices, batch_frames
+        return
+
+    effective_io_workers = min(
+        num_io_workers,
+        max(1, min(num_frames // max(1, detect_batch_size), os.cpu_count() or 1)),
+    )
+
+    dataset = FrameDataset(frame_source)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=detect_batch_size,
+        shuffle=False,
+        num_workers=effective_io_workers,
+        collate_fn=_numpy_collate,
+        worker_init_fn=_frame_dataset_worker_init,
+        pin_memory=False,
+        prefetch_factor=2,
+        persistent_workers=True,
+    )
+
+    yield from tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)")
+
+
 def detect_track(
     frame_source,
     thresh=0.35,
@@ -39,8 +80,6 @@ def detect_track(
         device: Device for YOLO detector (e.g., 'cuda:0')
         half_precision: Use FP16 for YOLO inference
     """
-    from lib.pipeline.frame_source import FrameDataset, _numpy_collate, _frame_dataset_worker_init
-
     hand_det_model = hand_det_model or YOLO('./weights/external/detector.pt')
 
     if device:
@@ -54,21 +93,12 @@ def detect_track(
     all_detections = [None] * num_frames  # (xyxy, confs, class_ids) per frame
     all_boxes_raw = [np.array([]).reshape(0, 5)] * num_frames  # boxes with conf for output
 
-    dataset = FrameDataset(frame_source)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=detect_batch_size,
-        shuffle=False,
-        num_workers=num_io_workers,
-        collate_fn=_numpy_collate,
-        worker_init_fn=_frame_dataset_worker_init,
-        pin_memory=False,
-        prefetch_factor=2 if num_io_workers > 0 else None,
-        persistent_workers=num_io_workers > 0,
-    )
-
-    for batch_indices, batch_frames in tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)"):
-        with torch.no_grad():
+    for batch_indices, batch_frames in _iter_detect_batches(
+        frame_source,
+        detect_batch_size=detect_batch_size,
+        num_io_workers=num_io_workers,
+    ):
+        with torch.inference_mode():
             results_list = hand_det_model.predict(
                 batch_frames, conf=thresh, verbose=False, half=use_half,
             )
