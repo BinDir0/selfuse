@@ -190,10 +190,12 @@ def prepare_vis_sample(
     )
 
     # Camera intrinsic: [fx, fy, cx, cy]
-    if "camera_intrinsic" in batch:
+    if "intrinsic" in batch:
+        intrinsic = batch["intrinsic"][sample_idx].float().cpu().numpy()
+    elif "camera_intrinsic" in batch:
         intrinsic = batch["camera_intrinsic"][sample_idx, 0, :].float().cpu().numpy()
     else:
-        intrinsic = np.array([384.0, 384.0, 192.0, 192.0], dtype=np.float32)
+        raise ValueError("No camera intrinsic found in batch. Ensure 'intrinsic' is in collatable_keys.")
 
     # Per-step valid mask: True for non-padded timesteps.
     # actions_valid_mask shape: [H_action, 48] — check first dim of any column.
@@ -275,18 +277,18 @@ def render_overlay_image(vis_sample, action_stride=4):
     if not valid_steps:
         return _append_colorbar(
             canvas, total_steps,
-            (180, 255, 180), (0, 128, 0), (200, 210, 255), (0, 100, 255),
+            (100, 230, 100), (0, 80, 0), (120, 160, 255), (0, 40, 200),
         )
     timesteps = valid_steps[::action_stride]
     if valid_steps[-1] not in timesteps:
         timesteps.append(valid_steps[-1])
     num_valid = len(valid_steps)
 
-    # Color gradients (BGR)
-    GT_COLOR_START = (180, 255, 180)    # light green
-    GT_COLOR_END = (0, 128, 0)          # dark green
-    PRED_COLOR_START = (200, 210, 255)  # light orange
-    PRED_COLOR_END = (0, 100, 255)      # dark orange
+    # Color gradients (BGR): t=0 bright, t=H dark
+    GT_COLOR_START = (100, 230, 100)    # bright green
+    GT_COLOR_END = (0, 80, 0)           # deep green
+    PRED_COLOR_START = (120, 160, 255)  # bright orange
+    PRED_COLOR_END = (0, 40, 200)       # deep red-orange
 
     # Draw trajectory lines first (thinner, behind points)
     max_valid_t = valid_steps[-1]

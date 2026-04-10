@@ -127,6 +127,7 @@ class UnifiedVLACollator:
             "is_vla_data", "states", "actions", "actions_valid_mask",
             "n_states", "n_actions", "n_future_frames",
             "depth_values", "has_depth_values", "future_frames",
+            "intrinsic",
         ]
         for key in collatable_keys:
             if all(key in s for s in samples):
