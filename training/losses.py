@@ -27,6 +27,11 @@ def masked_param_tensor_loss(
     kind: Literal["l1", "l2", "huber"],
     huber_delta: float,
 ) -> torch.Tensor:
+    """Masked element-wise mean over all valid entries.
+
+    ``mask_exp`` is broadcastable to ``pred_v``; denominator counts valid elements
+    after broadcasting so loss scale does not depend on parameter dimensionality.
+    """
     if kind == "l1":
         elem = (pred_v - tgt_v).abs()
     elif kind == "l2":
@@ -34,8 +39,9 @@ def masked_param_tensor_loss(
         elem = d * d
     else:
         elem = F.smooth_l1_loss(pred_v, tgt_v, reduction="none", beta=huber_delta)
-    denom = mask_exp.sum().clamp_min(1.0)
-    return (elem * mask_exp).sum() / denom
+    w = mask_exp.expand_as(elem)
+    denom = w.sum().clamp_min(1.0)
+    return (elem * w).sum() / denom
 
 
 def _skew_from_vec3(v: torch.Tensor) -> torch.Tensor:
@@ -134,6 +140,10 @@ def mano_regression_loss(
     param_loss: Literal["l1", "l2", "huber"] = "l2",
     huber_delta: float = 1.0,
 ) -> torch.Tensor:
+    """MANO parameter regression loss.
+
+    ``trans`` uses the same native unit as model outputs/targets (millimeters).
+    """
     if mask_bt.sum() < 1e-6:
         return pred["trans"].new_tensor(0.0)
     m = mask_bt.unsqueeze(-1)
@@ -160,6 +170,14 @@ def mano_regression_loss(
                 kind=param_loss,
                 huber_delta=huber_delta,
             )
+        elif key == "trans":
+            val = masked_param_tensor_loss(
+                pred["trans"],
+                tgt["trans"],
+                m,
+                kind=param_loss,
+                huber_delta=huber_delta,
+            )
         else:
             val = masked_param_tensor_loss(
                 pred[key], tgt[key], m, kind=param_loss, huber_delta=huber_delta
@@ -167,7 +185,7 @@ def mano_regression_loss(
         acc = acc + weight * val
         w_sum += weight
 
-    add_param("trans", 1.0)
+    add_param("trans", 2.0)
     add_param("root_orient", root_orient_weight)
     add_param("hand_pose", hand_pose_weight)
     add_param("betas", 1.0)
@@ -185,7 +203,10 @@ def mano_regression_per_key_raw(
     param_loss: Literal["l1", "l2", "huber"] = "l2",
     huber_delta: float = 1.0,
 ) -> dict[str, torch.Tensor]:
-    """Per-parameter masked mean (same as ``masked_param_tensor_loss``), for TensorBoard per-key curves."""
+    """Per-parameter masked mean for TensorBoard per-key curves.
+
+    ``trans`` is reported in the native millimeter-space loss.
+    """
     if mask_bt.sum() < 1e-6:
         z = pred["trans"].new_tensor(0.0)
         return {k: z for k in sorted(param_keys & MANO_PARAM_KEY_CHOICES)}
@@ -207,6 +228,14 @@ def mano_regression_per_key_raw(
                 pred["hand_pose"],
                 tgt["hand_pose"],
                 mask_bt,
+                kind=param_loss,
+                huber_delta=huber_delta,
+            )
+        elif key == "trans":
+            out[key] = masked_param_tensor_loss(
+                pred["trans"],
+                tgt["trans"],
+                m,
                 kind=param_loss,
                 huber_delta=huber_delta,
             )
@@ -360,7 +389,12 @@ def mano_masked_mano_reproj_pixel_m2(
     joint_weight_21: torch.Tensor | None,
     z_min: float = 0.05,
 ) -> torch.Tensor:
-    """Pixel-plane reprojection: (u,v) from pred MANO vs GT MANO joints using intrinsics."""
+    """Pixel-plane reprojection using focal-normalized residuals.
+
+    Residuals are divided by per-frame mean focal length so this term is
+    approximately resolution/intrinsics invariant and does not dominate other
+    losses by raw pixel^2 scale.
+    """
     if mask_bt.sum() < 1e-6:
         return pred_mano["trans"].new_tensor(0.0)
     if intr_bt4.shape[-1] != 4:
@@ -398,10 +432,123 @@ def mano_masked_mano_reproj_pixel_m2(
     cy = intr_bt4[..., 3].unsqueeze(-1).unsqueeze(-1)
     pix_p = torch.cat([fx * plane_p[..., 0:1] + cx, fy * plane_p[..., 1:2] + cy], dim=-1)
     pix_t = torch.cat([fx * plane_t[..., 0:1] + cx, fy * plane_t[..., 1:2] + cy], dim=-1)
+    f_mean = (0.5 * (fx + fy)).clamp_min(1.0)
 
     valid = (j_p[..., 2] > zm) & (j_t[..., 2] > zm)
     valid = valid & torch.isfinite(pix_p).all(dim=-1) & torch.isfinite(pix_t).all(dim=-1)
-    e = (pix_p - pix_t).pow(2).sum(dim=-1)
+    e = ((pix_p - pix_t) / f_mean).pow(2).sum(dim=-1)
+    m = valid & mask_bt.unsqueeze(-1).bool()
+    if joint_weight_21 is None:
+        w = e.new_ones(e.shape[-1])
+    else:
+        w = joint_weight_21.to(device=e.device, dtype=e.dtype).view(1, 1, -1).expand_as(e)
+    num = (e * w * m.float()).sum(dim=-1)
+    den = (w * m.float()).sum(dim=-1).clamp_min(1e-8)
+    l_avg = num / den
+    frame_ok = den > 1e-7
+    per_bt = torch.where(frame_ok, l_avg, l_avg.new_zeros(()))
+    return (per_bt * mask_bt * frame_ok.float()).sum() / mask_bt.sum().clamp_min(1.0)
+
+
+def intrinsic_reg_loss(
+    pred_intr_bt4: torch.Tensor,
+    mask_bt: torch.Tensor,
+    *,
+    ref_fx: float,
+    ref_fy: float,
+    ref_cx: float,
+    ref_cy: float,
+) -> torch.Tensor:
+    """Regularize predicted intrinsics around a sensible prior using relative errors."""
+    if mask_bt.sum() < 1e-6:
+        return pred_intr_bt4.new_tensor(0.0)
+    if pred_intr_bt4.shape[-1] != 4:
+        raise ValueError(f"expected pred_intr_bt4 (...,4) fx,fy,cx,cy, got {tuple(pred_intr_bt4.shape)}")
+
+    ref = pred_intr_bt4.new_tensor([
+        max(float(ref_fx), 1e-6),
+        max(float(ref_fy), 1e-6),
+        float(ref_cx),
+        float(ref_cy),
+    ]).view(1, 1, 4)
+    scale = pred_intr_bt4.new_tensor([
+        max(float(ref_fx), 1.0),
+        max(float(ref_fy), 1.0),
+        max(abs(float(ref_cx)), 1.0),
+        max(abs(float(ref_cy)), 1.0),
+    ]).view(1, 1, 4)
+    rel = (pred_intr_bt4 - ref) / scale
+    reg = rel.pow(2).sum(dim=-1)
+    return (reg * mask_bt).sum() / mask_bt.sum().clamp_min(1.0)
+
+
+def mano_masked_fullperspective_reproj_pixel_m2(
+    pred_mano: dict[str, torch.Tensor],
+    tgt_mano: dict[str, torch.Tensor],
+    pred_intr_bt4: torch.Tensor,
+    gt_intr_bt4: torch.Tensor,
+    mask_bt: torch.Tensor,
+    mano_layer: nn.Module,
+    *,
+    chunk: int,
+    joint_weight_21: torch.Tensor | None,
+    z_min: float = 0.05,
+) -> torch.Tensor:
+    """Pixel reprojection using pred-depth+pred-intr vs gt-depth+gt-intr.
+
+    Residuals are normalized by GT focal scale to avoid raw pixel^2 blow-up in
+    early training.
+    """
+    if mask_bt.sum() < 1e-6:
+        return pred_mano["trans"].new_tensor(0.0)
+    if pred_intr_bt4.shape[-1] != 4:
+        raise ValueError(f"expected pred_intr_bt4 (...,4) fx,fy,cx,cy, got {tuple(pred_intr_bt4.shape)}")
+    if gt_intr_bt4.shape[-1] != 4:
+        raise ValueError(f"expected gt_intr_bt4 (...,4) fx,fy,cx,cy, got {tuple(gt_intr_bt4.shape)}")
+
+    mm_to_m = 0.001
+    zm = max(float(z_min), 1e-6)
+
+    with torch.no_grad():
+        j_t = mano_parameter_dict_to_joints_bt(
+            tgt_mano["trans"],
+            tgt_mano["root_orient"],
+            tgt_mano["hand_pose"],
+            tgt_mano["betas"],
+            mano_layer,
+            chunk=chunk,
+        ) * mm_to_m
+
+    j_p = mano_parameter_dict_to_joints_bt(
+        pred_mano["trans"],
+        pred_mano["root_orient"],
+        pred_mano["hand_pose"],
+        pred_mano["betas"],
+        mano_layer,
+        chunk=chunk,
+    ) * mm_to_m
+
+    zp = j_p[..., 2].clamp_min(zm)
+    zt = j_t[..., 2].clamp_min(zm)
+    plane_p = torch.stack([j_p[..., 0] / zp, j_p[..., 1] / zp], dim=-1)
+    plane_t = torch.stack([j_t[..., 0] / zt, j_t[..., 1] / zt], dim=-1)
+
+    fx_p = pred_intr_bt4[..., 0].unsqueeze(-1).unsqueeze(-1)
+    fy_p = pred_intr_bt4[..., 1].unsqueeze(-1).unsqueeze(-1)
+    cx_p = pred_intr_bt4[..., 2].unsqueeze(-1).unsqueeze(-1)
+    cy_p = pred_intr_bt4[..., 3].unsqueeze(-1).unsqueeze(-1)
+    pix_p = torch.cat([fx_p * plane_p[..., 0:1] + cx_p, fy_p * plane_p[..., 1:2] + cy_p], dim=-1)
+
+    fx_t = gt_intr_bt4[..., 0].unsqueeze(-1).unsqueeze(-1)
+    fy_t = gt_intr_bt4[..., 1].unsqueeze(-1).unsqueeze(-1)
+    cx_t = gt_intr_bt4[..., 2].unsqueeze(-1).unsqueeze(-1)
+    cy_t = gt_intr_bt4[..., 3].unsqueeze(-1).unsqueeze(-1)
+    pix_t = torch.cat([fx_t * plane_t[..., 0:1] + cx_t, fy_t * plane_t[..., 1:2] + cy_t], dim=-1)
+    f_mean = (0.5 * (fx_t + fy_t)).clamp_min(1.0)
+
+    valid = (j_p[..., 2] > zm) & (j_t[..., 2] > zm)
+    valid = valid & torch.isfinite(pix_p).all(dim=-1) & torch.isfinite(pix_t).all(dim=-1)
+    e = ((pix_p - pix_t) / f_mean).pow(2).sum(dim=-1)
     m = valid & mask_bt.unsqueeze(-1).bool()
     if joint_weight_21 is None:
         w = e.new_ones(e.shape[-1])
@@ -546,10 +693,11 @@ def mano_masked_weakcam_reproj_pixel_m2(
     cy = intr_bt4[..., 3].unsqueeze(-1).unsqueeze(-1)
     pix_p = torch.cat([fx * plane_pw[..., 0:1] + cx, fy * plane_pw[..., 1:2] + cy], dim=-1)
     pix_t = torch.cat([fx * plane_t[..., 0:1] + cx, fy * plane_t[..., 1:2] + cy], dim=-1)
+    f_mean = (0.5 * (fx + fy)).clamp_min(1.0)
 
     valid = (j_p[..., 2] > zm) & (j_t[..., 2] > zm)
     valid = valid & torch.isfinite(pix_p).all(dim=-1) & torch.isfinite(pix_t).all(dim=-1)
-    e = (pix_p - pix_t).pow(2).sum(dim=-1)
+    e = ((pix_p - pix_t) / f_mean).pow(2).sum(dim=-1)
     m = valid & mask_bt.unsqueeze(-1).bool()
     if joint_weight_21 is None:
         w = e.new_ones(e.shape[-1])

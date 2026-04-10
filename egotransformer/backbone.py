@@ -46,6 +46,13 @@ class DinoVisionBackbone(nn.Module):
         reg = int(getattr(self.vit, "num_register_tokens", 0))
         return 1 + reg
 
+    def _prefix_len_with_patches(self) -> int:
+        n_prefix = getattr(self.vit, "num_prefix_tokens", None)
+        if n_prefix is not None:
+            return int(n_prefix)
+        reg = int(getattr(self.vit, "num_register_tokens", 0))
+        return 1 + reg
+
     @property
     def num_patches(self) -> int:
         return int(self.vit.patch_embed.num_patches)
@@ -70,3 +77,23 @@ class DinoVisionBackbone(nn.Module):
                 )
             feat = feat[:, start:, :]
         return feat
+
+    def forward_patches_and_cls(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """x: (B,3,H,W) -> patches (B,N,C) and cls-like global token (B,C)."""
+        feat = self.vit.forward_features(x)
+        if feat.dim() != 3:
+            raise RuntimeError(f"Expected (B, L, C), got shape {tuple(feat.shape)}")
+
+        prefix = self._prefix_len_with_patches()
+        if prefix > 0:
+            cls = feat[:, 0, :]
+            if feat.shape[1] <= prefix:
+                raise RuntimeError(
+                    "No patch tokens left after dropping prefix; "
+                    f"L={feat.shape[1]}, prefix={prefix}"
+                )
+            patches = feat[:, prefix:, :]
+        else:
+            patches = feat
+            cls = feat.mean(dim=1)
+        return patches, cls

@@ -9,6 +9,7 @@ webdataset
 decord
 tqdm
 chumpy
+kornia>=0.7.3
 # TensorBoard
 grpcio
 protobuf

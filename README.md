@@ -26,6 +26,32 @@ python scripts/make_episode_split.py --data-path /path/to/tar_root --out-dir spl
 
 ### 2. 训练
 
+推荐改为“配置文件驱动”调参：
+
+1) 复制并修改 `configs/train_default.json`（按 data / augment / optim / mano / model / io / run 分组）。
+
+2) 直接用配置启动：
+
+```bash
+python train.py --config configs/train_default.json
+```
+
+3) 需要临时覆盖时，命令行参数优先级更高：
+
+```bash
+python train.py --config configs/train_default.json --batch-size 16 --lr 1e-4
+```
+
+多卡同理：
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py --config configs/train_default.json
+```
+
+说明：
+- `--config` 默认就是 `configs/train_default.json`，所以不传也会读取它。
+- 若你想完全走纯 CLI（不读配置文件），可传 `--config ""`。
+
 单卡：
 
 ```bash
@@ -34,14 +60,60 @@ python train.py --data-path /path/to/tar_root --episodes-file splits/my_split/tr
 
 多卡（例：8 卡）：
 
+
+单数据集：
 ```bash
 torchrun --standalone --nproc_per_node=8 train.py \
   --data-path /path/to/tar_root \
   --episodes-file splits/my_split/train.txt \
   --run-dir runs/exp \
-  --tensorboard-dir runs/exp/tb
+  --tensorboard-dir runs/exp/tb \
   --mano-no-left-root-fix
 ```
+
+多数据集混合：
+```bash
+torchrun --standalone --nproc_per_node=8 train.py \
+  --datasets-config configs/multi_datasets.json \
+  --run-dir runs/mix_exp \
+  --tensorboard-dir runs/mix_exp/tb
+```
+
+多数据集混合训练（同一 batch 可自然混合不同数据集样本）：
+
+先准备 JSON（示例 `configs/multi_datasets.json`）：
+
+```json
+{
+  "datasets": [
+    {
+      "name": "taco_sp",
+      "data_path": "/path/to/taco_sp",
+      "episodes_file": "splits/taco_sp/train.txt"
+    },
+    {
+      "name": "oakink2_v5",
+      "data_path": "/path/to/oakink2_v5",
+      "episodes_file": "splits/oakink2_v5/train.txt",
+      "shard_glob": "*.tar"
+    }
+  ]
+}
+```
+
+训练命令：
+
+```bash
+python train.py \
+  --datasets-config configs/multi_datasets.json \
+  --run-dir runs/mix_exp2 \
+  --tensorboard-dir runs/mix_exp2/tb \
+  --batch-size 2
+```
+
+说明：
+- 多数据集模式下，`--episodes-file` / `--episode-filter` 需要写在 JSON 的每个 dataset 项里。
+- `--data-path` 在多数据集模式下可不传；若需要单独验证集，可额外传 `--data-path` + `--val-episodes-file`。
 
 验证集：`--val-episodes-file splits/my_split/val.txt`。仅验证：`--eval-only --resume .../latest.pt`。
 

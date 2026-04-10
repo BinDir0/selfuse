@@ -75,10 +75,14 @@ def val_avg_to_tb_dict(avg: Mapping[str, float]) -> dict[str, float]:
         "val/mano_left": mp_l + jl_w,
         "val/mano_right": mp_r + jr_w,
     }
-    if "mano_weakcam" in avg:
-        out["val/mano_weakcam"] = float(avg["mano_weakcam"])
-    if "mano_weakcam_reg" in avg:
-        out["val/mano_weakcam_reg"] = float(avg["mano_weakcam_reg"])
+    if "mano_persp" in avg:
+        out["val/mano_persp"] = float(avg["mano_persp"])
+    elif "mano_weakcam" in avg:
+        out["val/mano_persp"] = float(avg["mano_weakcam"])
+    if "mano_persp_reg" in avg:
+        out["val/mano_persp_reg"] = float(avg["mano_persp_reg"])
+    elif "mano_weakcam_reg" in avg:
+        out["val/mano_persp_reg"] = float(avg["mano_weakcam_reg"])
     for key in ("trans", "root_orient", "hand_pose", "betas"):
         pk = f"mano_pk_{key}"
         if pk in avg:

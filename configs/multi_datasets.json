@@ -1,0 +1,10 @@
+{
+  "datasets": [
+    {
+      "name": "oakink2_v5",
+      "data_path": "/share_data/zhangtingrui/datasets/oakink2_v5",
+      "episodes_file": "splits/oakink2_v5/train.txt",
+      "shard_glob": "*.tar"
+    }
+  ]
+}

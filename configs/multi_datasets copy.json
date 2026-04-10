@@ -1,0 +1,21 @@
+{
+  "datasets": [
+    {
+      "name": "taco_v3_aligned",
+      "data_path": "/share_data/zhangtingrui/datasets/taco_v3_aligned",
+      "episodes_file": "splits/taco_v3_aligned/train.txt"
+    },
+    {
+      "name": "oakink2_v5",
+      "data_path": "/share_data/zhangtingrui/datasets/oakink2_v5",
+      "episodes_file": "splits/oakink2_v5/train.txt",
+      "shard_glob": "*.tar"
+    },
+    {
+      "name": "hoi4d_v3_filtered",
+      "data_path": "/share_data/zhangtingrui/datasets/hoi4d_v3_filtered",
+      "episodes_file": "splits/hoi4d_v3_filtered/train.txt",
+      "shard_glob": "*.tar"
+    }
+  ]
+}

@@ -163,6 +163,17 @@ def build_window_batch(episode_name: str, episode_frames: List[Dict], start: int
         video_thwc = np.stack([decode_image_jpg(frame["image.jpg"]) for frame in frames], axis=0)
         return np.transpose(video_thwc, (0, 3, 1, 2)).copy()
 
+    # Keep only fixed meta keys so default_collate can batch mixed datasets safely.
+    def compact_meta(frame: Dict) -> Dict[str, object]:
+        meta = frame["meta"]
+        return {
+            "dataset_name": str(meta["dataset_name"]),
+            "episode_name": str(meta["episode_name"]),
+            "episode_idx": int(meta["episode_idx"]),
+            "frame_idx": int(meta["frame_idx"]),
+            "presence": int(meta["presence"]),
+        }
+
     video = concat_imgs(window_frames)
     existence = np.asarray([convert_presence(frame["presence"]) for frame in window_frames], dtype=np.int8)
 
@@ -173,7 +184,7 @@ def build_window_batch(episode_name: str, episode_frames: List[Dict], start: int
         "episode_idx": int(window_frames[0]["episode_idx"]),
         "sample_keys": [frame["sample_key"] for frame in window_frames],
         "frame_indices": frame_indices,
-        "meta": [frame["meta"] for frame in window_frames],
+        "meta": [compact_meta(frame) for frame in window_frames],
         "window_start": int(frame_indices[0]),
         "window_end": int(frame_indices[-1]),
         "window_size": window_size,
@@ -374,6 +385,7 @@ class EpisodeWindowDataset(IterableDataset):
         self,
         dataset_path: str | Path,
         *,
+        dataset_sources: Optional[List[Dict[str, str]]] = None,
         window_size: int,
         stride: int = 1,
         shard_glob: str = "*.tar",
@@ -383,8 +395,9 @@ class EpisodeWindowDataset(IterableDataset):
         dist_world_size: int = 1,
         ddp_read_all_shards: bool = False,
         shuffle_shards: bool = True,
-        shuffle_windows: bool = True,
-        shuffle_seed: int = 0,
+        shuffle_windows: bool = DEFAULT_WINDOW_SHUFFLE_WINDOWS,
+        shuffle_buffer_size: int = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
+        shuffle_seed: int = DEFAULT_WINDOW_SHUFFLE_SEED,
     ) -> None:
         super().__init__()
         if window_size < 1:
@@ -393,6 +406,8 @@ class EpisodeWindowDataset(IterableDataset):
             raise ValueError(f"stride must be >= 1, got {stride}")
         if episode_list_file and episode_filter is not None:
             raise ValueError("use either episode_list_file or episode_filter, not both")
+        if dataset_sources is not None and (episode_list_file or episode_filter):
+            raise ValueError("do not pass episode_list_file/episode_filter when dataset_sources is provided")
         if shuffle_buffer_size < 0:
             raise ValueError(f"shuffle_buffer_size must be >= 0, got {shuffle_buffer_size}")
         ws = int(dist_world_size)
@@ -400,28 +415,59 @@ class EpisodeWindowDataset(IterableDataset):
         if ws < 1 or rk < 0 or rk >= ws:
             raise ValueError(f"invalid dist rank/world_size: rank={rk}, world_size={ws}")
 
-        self.dataset_path = str(dataset_path)
         self.window_size = int(window_size)
         self.stride = int(stride)
-        self.shard_glob = shard_glob
-        self.episode_filter = episode_filter
         self.dist_rank = rk
+        self.shuffle_shards = bool(shuffle_shards)
         self.shuffle_windows = bool(shuffle_windows)
         self.shuffle_buffer_size = int(shuffle_buffer_size)
         self.shuffle_seed = int(shuffle_seed)
-        self.epoch = 0
-        self._episode_allowlist: Optional[frozenset[str]]
-        if episode_list_file:
-            self._episode_allowlist = load_episode_name_set(episode_list_file)
+
+        sources: List[Dict[str, object]] = []
+        if dataset_sources is not None:
+            for idx, src in enumerate(dataset_sources):
+                data_path = str(src.get("data_path", "")).strip()
+                if not data_path:
+                    raise ValueError(f"dataset_sources[{idx}].data_path is required")
+                src_glob = str(src.get("shard_glob", "")).strip() or shard_glob
+                src_episodes_file = str(src.get("episodes_file", "")).strip()
+                src_episode_filter = str(src.get("episode_filter", "")).strip()
+                if src_episodes_file and src_episode_filter:
+                    raise ValueError(f"dataset_sources[{idx}]: use either episodes_file or episode_filter, not both")
+
+                src_allowlist: Optional[frozenset[str]] = None
+                if src_episodes_file:
+                    src_allowlist = load_episode_name_set(src_episodes_file)
+
+                shards = discover_shards(data_path, src_glob)
+                if ws > 1 and not ddp_read_all_shards:
+                    shards = shards[rk::ws]
+
+                sources.append(
+                    {
+                        "name": str(src.get("name", f"dataset_{idx}")),
+                        "episode_filter": src_episode_filter or None,
+                        "episode_allowlist": src_allowlist,
+                        "shards": shards,
+                    }
+                )
         else:
-            self._episode_allowlist = None
-        shards = discover_shards(self.dataset_path, self.shard_glob)
-        if ws > 1 and not ddp_read_all_shards:
-            shards = shards[rk::ws]
-        self.shards = shards
-        self.shuffle_shards = bool(shuffle_shards)
-        self.shuffle_windows = bool(shuffle_windows)
-        self.shuffle_seed = int(shuffle_seed)
+            allowlist: Optional[frozenset[str]] = None
+            if episode_list_file:
+                allowlist = load_episode_name_set(episode_list_file)
+            shards = discover_shards(str(dataset_path), shard_glob)
+            if ws > 1 and not ddp_read_all_shards:
+                shards = shards[rk::ws]
+            sources.append(
+                {
+                    "name": "dataset_0",
+                    "episode_filter": episode_filter,
+                    "episode_allowlist": allowlist,
+                    "shards": shards,
+                }
+            )
+
+        self.sources = sources
         # Shared across forked DataLoader workers (Linux) so set_epoch() affects all workers.
         self._epoch_val = mp.Value("i", 0)
 
@@ -430,35 +476,85 @@ class EpisodeWindowDataset(IterableDataset):
         with self._epoch_val.get_lock():
             self._epoch_val.value = int(epoch)
 
-    def __iter__(self) -> Iterator[Dict]:
-        wi = get_worker_info()
-        num_workers = wi.num_workers if wi is not None else 1
-        worker_id = wi.id if wi is not None else 0
+    def _iter_source_windows(
+        self,
+        source: Dict[str, object],
+        source_shards: List[Path],
+        rng_windows: Optional[random.Random],
+    ) -> Iterator[Dict]:
+        current_episode_id: Optional[Tuple[str, int, str]] = None
+        current_frames: List[Dict] = []
+        source_episode_filter = source["episode_filter"]
+        source_episode_allowlist = source["episode_allowlist"]
 
-        with self._epoch_val.get_lock():
-            epoch_i = int(self._epoch_val.value)
+        for shard_path in source_shards:
+            for sample_key, fields in iter_lowdim_samples_in_shard(shard_path):
+                sample = decode_lowdim_sample(sample_key, fields)
+                sample_episode_id = episode_identity(sample)
 
-        shards = list(self.shards)
-        if self.shuffle_shards:
-            rng_s = random.Random(self.shuffle_seed + epoch_i * 1_000_003)
-            rng_s.shuffle(shards)
-        shards = shards[worker_id::num_workers]
+                if current_episode_id is None:
+                    current_episode_id = sample_episode_id
 
-        rng_win: Optional[random.Random] = None
-        if self.shuffle_windows:
-            rng_win = random.Random(
-                self.shuffle_seed + epoch_i * 999_983 + worker_id * 50_051
+                if sample_episode_id != current_episode_id:
+                    yield from emit_episode_windows(
+                        current_episode_id[2],
+                        current_frames,
+                        self.window_size,
+                        self.stride,
+                        source_episode_filter,
+                        source_episode_allowlist,
+                        shuffle_windows=self.shuffle_windows,
+                        rng_windows=rng_windows,
+                    )
+                    current_episode_id = sample_episode_id
+                    current_frames = []
+
+                current_frames.append(sample)
+
+        if current_episode_id is not None:
+            yield from emit_episode_windows(
+                current_episode_id[2],
+                current_frames,
+                self.window_size,
+                self.stride,
+                source_episode_filter,
+                source_episode_allowlist,
+                shuffle_windows=self.shuffle_windows,
+                rng_windows=rng_windows,
             )
 
-        return iter_episode_windows(
-            shards=shards,
-            window_size=self.window_size,
-            stride=self.stride,
-            episode_filter=self.episode_filter,
-            episode_allowlist=self._episode_allowlist,
-            shuffle_windows=self.shuffle_windows,
-            rng_windows=rng_win,
-        )
+    @staticmethod
+    def _iter_round_robin_sources(source_iters: List[Iterator[Dict]]) -> Iterator[Dict]:
+        if not source_iters:
+            return
+
+        exhausted = [False] * len(source_iters)
+        num_exhausted = 0
+        source_idx = 0
+
+        while num_exhausted < len(source_iters):
+            if exhausted[source_idx]:
+                source_idx = (source_idx + 1) % len(source_iters)
+                continue
+
+            try:
+                yield next(source_iters[source_idx])
+            except StopIteration:
+                exhausted[source_idx] = True
+                num_exhausted += 1
+
+            source_idx = (source_idx + 1) % len(source_iters)
+
+    def _iter_rank_local_windows(self, epoch_i: int, rng_windows: Optional[random.Random]) -> Iterator[Dict]:
+        source_iters: List[Iterator[Dict]] = []
+        for source_idx, source in enumerate(self.sources):
+            source_shards = list(source["shards"])
+            if self.shuffle_shards:
+                src_rng = random.Random(self.shuffle_seed + epoch_i * 1_000_003 + source_idx * 9_176)
+                src_rng.shuffle(source_shards)
+            source_iters.append(self._iter_source_windows(source, source_shards, rng_windows))
+
+        yield from self._iter_round_robin_sources(source_iters)
 
     @staticmethod
     def _iter_worker_partition(
@@ -494,14 +590,23 @@ class EpisodeWindowDataset(IterableDataset):
         worker_id = worker.id if worker is not None else 0
         num_workers = worker.num_workers if worker is not None else 1
 
-        windows = self._iter_rank_local_windows()
+        with self._epoch_val.get_lock():
+            epoch_i = int(self._epoch_val.value)
+
+        rng_win: Optional[random.Random] = None
+        if self.shuffle_windows:
+            rng_win = random.Random(
+                self.shuffle_seed + epoch_i * 999_983 + self.dist_rank * 9_176 + worker_id * 50_051
+            )
+
+        windows = self._iter_rank_local_windows(epoch_i=epoch_i, rng_windows=rng_win)
         if num_workers > 1:
             windows = self._iter_worker_partition(windows, worker_id, num_workers)
 
         if self.shuffle_windows and self.shuffle_buffer_size > 1:
             effective_seed = (
                 self.shuffle_seed
-                + self.epoch * 1_000_003
+                + epoch_i * 1_000_003
                 + self.dist_rank * 9_176
                 + worker_id
             )
@@ -516,6 +621,7 @@ class EpisodeWindowDataLoader(DataLoader):
         self,
         dataset_path: str | Path,
         *,
+        dataset_sources: Optional[List[Dict[str, str]]] = None,
         window_size: int,
         stride: int = 1,
         shard_glob: str = "*.tar",
@@ -525,7 +631,9 @@ class EpisodeWindowDataLoader(DataLoader):
         dist_world_size: int = 1,
         ddp_read_all_shards: bool = False,
         shuffle: bool = True,
-        shuffle_seed: int = 0,
+        shuffle_windows: bool = DEFAULT_WINDOW_SHUFFLE_WINDOWS,
+        shuffle_buffer_size: int = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
+        shuffle_seed: int = DEFAULT_WINDOW_SHUFFLE_SEED,
         **kwargs,
     ) -> None:
         _dup = kwargs.pop("shuffle", None)
@@ -537,6 +645,7 @@ class EpisodeWindowDataLoader(DataLoader):
 
         dataset = EpisodeWindowDataset(
             dataset_path=dataset_path,
+            dataset_sources=dataset_sources,
             window_size=window_size,
             stride=stride,
             shard_glob=shard_glob,
@@ -546,7 +655,8 @@ class EpisodeWindowDataLoader(DataLoader):
             dist_world_size=dist_world_size,
             ddp_read_all_shards=ddp_read_all_shards,
             shuffle_shards=shuffle,
-            shuffle_windows=shuffle,
+            shuffle_windows=shuffle_windows,
+            shuffle_buffer_size=shuffle_buffer_size,
             shuffle_seed=shuffle_seed,
         )
         super().__init__(dataset, **kwargs)

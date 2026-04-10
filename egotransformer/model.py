@@ -47,7 +47,11 @@ class EgoHandSTConfig:
     mano_hand_pose_rot6d_dim: int = _MANO_NHANDJOINTS * 6
     mano_hand_pose_dim: int = _MANO_NHANDJOINTS * 3
     mano_betas_dim: int = 10
-    weak_cam_dim: int = 3
+    camera_intrinsics_dim: int = 4
+    camera_init_fx: float = 384.0
+    camera_init_fy: float = 384.0
+    camera_init_cx: float = 192.0
+    camera_init_cy: float = 192.0
 
     # cross-attn decoder: refine hand token against per-frame ST patch tokens (HMR2-style)
     use_mano_cross_decoder: bool = True
@@ -264,15 +268,21 @@ class EgoHandSTModel(nn.Module):
             c.mano_hand_pose_rot6d_dim,
             c.mano_betas_dim,
         )
-        self.cam_head_left = nn.Linear(dim, c.weak_cam_dim)
-        self.cam_head_right = nn.Linear(dim, c.weak_cam_dim)
+        self.cam_head_left = nn.Linear(dim * 2, c.camera_intrinsics_dim)
+        self.cam_head_right = nn.Linear(dim * 2, c.camera_intrinsics_dim)
         nn.init.zeros_(self.cam_head_left.weight)
         nn.init.zeros_(self.cam_head_right.weight)
         with torch.no_grad():
             self.cam_head_left.bias.zero_()
             self.cam_head_right.bias.zero_()
-            self.cam_head_left.bias[0] = 1.0
-            self.cam_head_right.bias[0] = 1.0
+            self.cam_head_left.bias[0] = c.camera_init_fx
+            self.cam_head_left.bias[1] = c.camera_init_fy
+            self.cam_head_left.bias[2] = c.camera_init_cx
+            self.cam_head_left.bias[3] = c.camera_init_cy
+            self.cam_head_right.bias[0] = c.camera_init_fx
+            self.cam_head_right.bias[1] = c.camera_init_fy
+            self.cam_head_right.bias[2] = c.camera_init_cx
+            self.cam_head_right.bias[3] = c.camera_init_cy
 
         self._mano_vec_dim = (
             c.mano_trans_dim
@@ -407,6 +417,17 @@ class EgoHandSTModel(nn.Module):
             "betas": betas,
         }
 
+    @staticmethod
+    def _sanitize_intrinsics(pred_cam: torch.Tensor) -> torch.Tensor:
+        """Force positive focal lengths while keeping principal point unconstrained."""
+        if pred_cam.shape[-1] != 4:
+            raise ValueError(f"expected pred_cam (...,4) for fx,fy,cx,cy, got {tuple(pred_cam.shape)}")
+        fx = torch.clamp_min(pred_cam[..., 0:1], 1e-3)
+        fy = torch.clamp_min(pred_cam[..., 1:2], 1e-3)
+        cx = pred_cam[..., 2:3]
+        cy = pred_cam[..., 3:4]
+        return torch.cat([fx, fy, cx, cy], dim=-1)
+
     def forward(self, video: torch.Tensor) -> dict[str, torch.Tensor]:
         if video.dim() != 5:
             raise ValueError(f"Expected video (B,T,3,H,W), got {tuple(video.shape)}")
@@ -415,9 +436,10 @@ class EgoHandSTModel(nn.Module):
             raise ValueError(f"Expected 3 input channels, got {c}")
 
         x = video.reshape(b * t, c, h, w)
-        tokens = self.backbone(x)
-        _, s, d = tokens.shape
-        feats = tokens.reshape(b, t, s, d)
+        patches, cls_bt = self.backbone.forward_patches_and_cls(x)
+        _, s, d = patches.shape
+        feats = patches.reshape(b, t, s, d)
+        cls_btd = cls_bt.reshape(b, t, d)
 
         st_out = self.st(feats)
         h_left, h_right = self._hand_tokens_from_st(st_out, batch=b, time_len=t)
@@ -444,8 +466,10 @@ class EgoHandSTModel(nn.Module):
         mano_concat = torch.stack(
             [self._concat_mano(mano_left), self._concat_mano(mano_right)], dim=2
         )
-        cam_left = self.cam_head_left(hl)
-        cam_right = self.cam_head_right(hr)
+        cam_in_left = torch.cat([hl, cls_btd], dim=-1)
+        cam_in_right = torch.cat([hr, cls_btd], dim=-1)
+        cam_left = self._sanitize_intrinsics(self.cam_head_left(cam_in_left))
+        cam_right = self._sanitize_intrinsics(self.cam_head_right(cam_in_right))
         pred_cam = torch.stack([cam_left, cam_right], dim=2)
 
         return {

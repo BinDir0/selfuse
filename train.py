@@ -39,7 +39,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -65,6 +65,42 @@ from training.losses import MANO_PARAM_KEY_CHOICES, mano_joint_weight_vector_21
 from training.train_loop import eval_one_epoch, train_one_epoch
 
 
+def _load_train_config_defaults(path: str, valid_dests: set[str]) -> dict[str, Any]:
+    p = Path(path)
+    if not p.is_file():
+        raise ValueError(f"--config not found: {path}")
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid JSON in --config: {e}") from e
+
+    if not isinstance(payload, dict):
+        raise ValueError("--config must be a JSON object")
+
+    flat: dict[str, Any] = {}
+    bad_keys: list[str] = []
+    for key, value in payload.items():
+        if key in valid_dests and not isinstance(value, dict):
+            flat[key] = value
+            continue
+
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if sub_key in valid_dests:
+                    flat[sub_key] = sub_value
+                else:
+                    bad_keys.append(f"{key}.{sub_key}")
+            continue
+
+        bad_keys.append(key)
+
+    if bad_keys:
+        sample = ", ".join(sorted(bad_keys)[:20])
+        raise ValueError(f"unknown keys in --config: {sample}")
+
+    return flat
+
+
 def _parse_mano_param_keys(text: str) -> frozenset[str]:
     parts = [p.strip().lower() for p in text.split(",") if p.strip()]
     if not parts:
@@ -75,11 +111,81 @@ def _parse_mano_param_keys(text: str) -> frozenset[str]:
     return frozenset(parts)
 
 
-def _parse_args() -> argparse.Namespace:
+def _load_datasets_config(path: str) -> list[dict[str, str]]:
+    p = Path(path)
+    if not p.is_file():
+        raise ValueError(f"--datasets-config not found: {path}")
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid JSON in --datasets-config: {e}") from e
+
+    items: Any
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("datasets"), list):
+        items = payload["datasets"]
+    else:
+        raise ValueError("--datasets-config must be a JSON list or an object with key 'datasets'")
+
+    normalized: list[dict[str, str]] = []
+    for i, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            raise ValueError(f"datasets[{i}] must be a JSON object")
+        if raw.get("enabled", True) is False:
+            continue
+
+        data_path = str(raw.get("data_path", "")).strip()
+        if not data_path:
+            raise ValueError(f"datasets[{i}].data_path is required")
+
+        episodes_file = str(raw.get("episodes_file", "")).strip()
+        episode_filter = str(raw.get("episode_filter", "")).strip()
+        if episodes_file and episode_filter:
+            raise ValueError(f"datasets[{i}]: use either episodes_file or episode_filter, not both")
+
+        src: dict[str, str] = {
+            "name": str(raw.get("name", f"dataset_{i}")),
+            "data_path": data_path,
+        }
+        shard_glob = str(raw.get("shard_glob", "")).strip()
+        if shard_glob:
+            src["shard_glob"] = shard_glob
+        if episodes_file:
+            src["episodes_file"] = episodes_file
+        if episode_filter:
+            src["episode_filter"] = episode_filter
+        normalized.append(src)
+
+    if not normalized:
+        raise ValueError("--datasets-config has no enabled datasets")
+    return normalized
+
+
+def _dataset_sources_has_episode_restriction(dataset_sources: list[dict[str, str]]) -> bool:
+    for src in dataset_sources:
+        if src.get("episodes_file", "").strip() or src.get("episode_filter", "").strip():
+            return True
+    return False
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Train EgoHandSTModel")
+    p.add_argument(
+        "--config",
+        type=str,
+        default="configs/train_default.json",
+        help="training config JSON (grouped sections); CLI args override config values",
+    )
 
     d = p.add_argument_group("data")
-    d.add_argument("--data-path", type=str, required=True, help="tar dir, file, or glob")
+    d.add_argument("--data-path", type=str, default="", help="tar dir, file, or glob (legacy single-dataset mode)")
+    d.add_argument(
+        "--datasets-config",
+        type=str,
+        default="configs/multi_datasets.json",
+        help="JSON file for multi-dataset train input; list entries require data_path and optional episodes_file/episode_filter",
+    )
     d.add_argument("--shard-glob", type=str, default="*.tar")
     d.add_argument(
         "--episodes-file",
@@ -103,12 +209,73 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="disable tar-shard order and within-episode window order shuffling",
     )
+    d.add_argument(
+        "--no-shuffle-windows",
+        action="store_true",
+        help="disable window-level shuffle within each epoch (keeps shard shuffle unless --no-shuffle-data)",
+    )
+    d.add_argument(
+        "--shuffle-buffer-size",
+        type=int,
+        default=DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
+        help="window shuffle buffer size; <=1 disables window-buffer mixing",
+    )
+    d.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=DEFAULT_WINDOW_SHUFFLE_SEED,
+        help="seed for shard/window shuffling; negative means reuse --seed",
+    )
+
+    a = p.add_argument_group("augment")
+    a.add_argument("--aug-enable", action="store_true", help="enable training-time GPU augmentations")
+    a.add_argument("--aug-color-temp-prob", type=float, default=0.0)
+    a.add_argument(
+        "--aug-color-temp-strength",
+        type=float,
+        default=0.08,
+        help="channel gain strength for color temperature shift (R up / B down)",
+    )
+    a.add_argument("--aug-contrast-prob", type=float, default=0.0)
+    a.add_argument("--aug-contrast-min", type=float, default=0.9)
+    a.add_argument("--aug-contrast-max", type=float, default=1.1)
+    a.add_argument("--aug-saturation-prob", type=float, default=0.0)
+    a.add_argument("--aug-saturation-min", type=float, default=0.9)
+    a.add_argument("--aug-saturation-max", type=float, default=1.1)
+    a.add_argument("--aug-grayscale-prob", type=float, default=0.0)
+    a.add_argument("--aug-scale-prob", type=float, default=0.0)
+    a.add_argument("--aug-scale-min", type=float, default=0.9)
+    a.add_argument("--aug-scale-max", type=float, default=1.1)
+    a.add_argument(
+        "--aug-scale-pad-mode",
+        type=str,
+        default="constant_mean",
+        choices=("constant_mean", "constant_zero", "reflect"),
+    )
+    a.add_argument(
+        "--aug-invisible-joint-threshold",
+        type=int,
+        default=20,
+        help="set existence to 0 when invisible MANO joints >= threshold",
+    )
+    a.add_argument(
+        "--aug-no-update-existence",
+        action="store_true",
+        help="disable visibility-based existence relabel after scaling augment",
+    )
 
     o = p.add_argument_group("optim")
     o.add_argument("--epochs", type=int, default=5)
     o.add_argument("--lr", type=float, default=2e-4)
     o.add_argument("--weight-decay", type=float, default=0.01)
     o.add_argument("--grad-clip", type=float, default=1.0)
+    o.add_argument("--grad-accum-steps", type=int, default=4, help="optimizer step every N micro-batches")
+    o.add_argument(
+        "--warmup-global-steps",
+        type=int,
+        default=10,
+        help="linear LR warmup optimizer steps; during warmup, perspective loss is forced to 0",
+    )
     o.add_argument(
         "--max-steps",
         type=int,
@@ -216,16 +383,28 @@ def _parse_args() -> argparse.Namespace:
         help="sub-batch size for ManoLayer joint forward passes",
     )
     m.add_argument(
+        "--mano-persp-loss-weight",
+        type=float,
+        default=2.5,
+        help="scale for full-perspective pixel reprojection using pred_intr(fx,fy,cx,cy); 0 disables",
+    )
+    m.add_argument(
+        "--mano-persp-reg-weight",
+        type=float,
+        default=0.05,
+        help="regularize predicted intrinsics around init priors (low default); 0 disables",
+    )
+    m.add_argument(
         "--mano-weakcam-loss-weight",
         type=float,
-        default=2.0,
-        help="scale for weak-camera normalized-plane reprojection using pred_cam (s,tx,ty); 0 disables",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     m.add_argument(
         "--mano-weakcam-reg-weight",
         type=float,
-        default=0.5,
-        help="regularize weak-camera params towards identity (s=1,tx=0,ty=0); 0 disables",
+        default=None,
+        help=argparse.SUPPRESS,
     )
 
     mo = p.add_argument_group("model")
@@ -256,6 +435,10 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="disable per-hand additive bias on ST tokens (single batched cross-attn)",
     )
+    mo.add_argument("--camera-init-fx", type=float, default=384.0)
+    mo.add_argument("--camera-init-fy", type=float, default=384.0)
+    mo.add_argument("--camera-init-cx", type=float, default=192.0)
+    mo.add_argument("--camera-init-cy", type=float, default=192.0)
 
     io = p.add_argument_group("checkpoint & log")
     io.add_argument("--save", type=str, default="", help="extra final .pt path")
@@ -269,7 +452,7 @@ def _parse_args() -> argparse.Namespace:
         "--render-mano-every",
         type=int,
         default=10,
-        help="every N optimizer steps (rank0): save GT|Pred MANO skeleton PNG under <run-dir>/render_mano; "
+        help="every N optimizer steps (rank0): save 3-panel MANO PNG (GT | GT intr + Pred | Pred intr + Pred) under <run-dir>/render_mano; "
         "0=off. Default 10 when training; skipped without --run-dir/--render-mano-dir (see log). "
         "Needs MANO decode layers unless --no-decode-hand-pca.",
     )
@@ -305,6 +488,26 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="validation only; needs --resume and --val-episodes-file",
     )
+    return p
+
+
+def _parse_args() -> argparse.Namespace:
+    p = _build_arg_parser()
+    pre_args, _ = p.parse_known_args()
+
+    config_path = str(getattr(pre_args, "config", "")).strip()
+    if config_path:
+        valid_dests = {
+            a.dest
+            for a in p._actions
+            if a.dest not in ("help", argparse.SUPPRESS) and isinstance(a.dest, str)
+        }
+        try:
+            config_defaults = _load_train_config_defaults(config_path, valid_dests)
+        except ValueError as e:
+            raise SystemExit(str(e)) from e
+        p.set_defaults(**config_defaults)
+
     return p.parse_args()
 
 
@@ -334,6 +537,7 @@ def _ddp_read_all_shards_effective(args: argparse.Namespace, use_dist: bool, wor
 def _build_loader(
     data_path: str,
     *,
+    dataset_sources: list[dict[str, str]] | None = None,
     window_size: int,
     stride: int,
     shard_glob: str,
@@ -346,14 +550,17 @@ def _build_loader(
     dist_world_size: int = 1,
     ddp_read_all_shards: bool = False,
     shuffle: bool = True,
+    shuffle_windows: bool = DEFAULT_WINDOW_SHUFFLE_WINDOWS,
+    shuffle_buffer_size: int = DEFAULT_WINDOW_SHUFFLE_BUFFER_SIZE,
     shuffle_seed: int = 0,
 ) -> DataLoader:
     ef = episodes_file.strip()
     sf = (episode_filter or "").strip() or None
-    if ef and sf:
+    if dataset_sources is None and ef and sf:
         raise ValueError("use either --episodes-file or --episode-filter, not both")
     return EpisodeWindowDataLoader(
         data_path,
+        dataset_sources=dataset_sources,
         window_size=window_size,
         stride=stride,
         shard_glob=shard_glob,
@@ -363,6 +570,8 @@ def _build_loader(
         dist_world_size=dist_world_size,
         ddp_read_all_shards=ddp_read_all_shards,
         shuffle=shuffle,
+        shuffle_windows=shuffle_windows,
+        shuffle_buffer_size=shuffle_buffer_size,
         shuffle_seed=shuffle_seed,
         batch_size=batch_size,
         num_workers=workers,
@@ -382,8 +591,73 @@ def _save_args_json(path: Path, args: argparse.Namespace) -> None:
         json.dump(vars(args), f, indent=2, default=str, sort_keys=True)
 
 
+def _migrate_legacy_cam_head_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    init_fx: float,
+    init_fy: float,
+    init_cx: float,
+    init_cy: float,
+    target_in_dim: int,
+) -> dict[str, torch.Tensor]:
+    """Migrate legacy camera heads to current intrinsics head shape (4, target_in_dim)."""
+
+    def _migrate_head(prefix: str) -> None:
+        w_key = f"{prefix}.weight"
+        b_key = f"{prefix}.bias"
+        if w_key not in state_dict or b_key not in state_dict:
+            return
+        w = state_dict[w_key]
+        b = state_dict[b_key]
+        if w.ndim != 2 or b.ndim != 1:
+            return
+        out_old, in_old = int(w.shape[0]), int(w.shape[1])
+        out_new, in_new = 4, int(target_in_dim)
+        if out_old == out_new and in_old == in_new and int(b.shape[0]) == out_new:
+            return
+
+        new_w = w.new_zeros((out_new, in_new))
+        copy_out = min(out_old, out_new)
+        copy_in = min(in_old, in_new)
+        new_w[:copy_out, :copy_in] = w[:copy_out, :copy_in]
+
+        if int(b.shape[0]) >= out_new:
+            new_b = b[:out_new].clone()
+        else:
+            new_b = b.new_tensor([float(init_fx), float(init_fy), float(init_cx), float(init_cy)])
+
+        if int(b.shape[0]) == 3:
+            # Weak-cam legacy bias has incompatible semantics, reset to intrinsics prior.
+            new_b = b.new_tensor([float(init_fx), float(init_fy), float(init_cx), float(init_cy)])
+
+        state_dict[w_key] = new_w
+        state_dict[b_key] = new_b
+
+    _migrate_head("cam_head_left")
+    _migrate_head("cam_head_right")
+    return state_dict
+
+
 def main() -> None:
     args = _parse_args()
+    if args.mano_weakcam_loss_weight is not None:
+        args.mano_persp_loss_weight = float(args.mano_weakcam_loss_weight)
+    if args.mano_weakcam_reg_weight is not None:
+        args.mano_persp_reg_weight = float(args.mano_weakcam_reg_weight)
+
+    dataset_sources: list[dict[str, str]] | None = None
+    if args.datasets_config.strip():
+        try:
+            dataset_sources = _load_datasets_config(args.datasets_config.strip())
+        except ValueError as e:
+            raise SystemExit(str(e)) from e
+
+    if dataset_sources is None and not args.data_path.strip():
+        raise SystemExit("--data-path is required unless --datasets-config is provided")
+
+    if dataset_sources is not None and (args.episodes_file.strip() or args.episode_filter.strip()):
+        raise SystemExit("When using --datasets-config, do not pass --episodes-file/--episode-filter (set per dataset in JSON)")
+
     if args.eval_only:
         if not args.resume.strip():
             raise SystemExit("--eval-only requires --resume")
@@ -425,6 +699,26 @@ def main() -> None:
     shuffle_seed = args.seed if int(args.shuffle_seed) < 0 else int(args.shuffle_seed)
     shuffle_buffer_size = max(0, int(args.shuffle_buffer_size))
     train_shuffle_windows = (not args.no_shuffle_windows) and shuffle_buffer_size > 1
+    train_aug_config: dict[str, object] = {
+        "enable": bool(args.aug_enable),
+        "color_temp_prob": float(args.aug_color_temp_prob),
+        "color_temp_strength": float(args.aug_color_temp_strength),
+        "contrast_prob": float(args.aug_contrast_prob),
+        "contrast_min": float(args.aug_contrast_min),
+        "contrast_max": float(args.aug_contrast_max),
+        "saturation_prob": float(args.aug_saturation_prob),
+        "saturation_min": float(args.aug_saturation_min),
+        "saturation_max": float(args.aug_saturation_max),
+        "grayscale_prob": float(args.aug_grayscale_prob),
+        "scale_prob": float(args.aug_scale_prob),
+        "scale_min": float(args.aug_scale_min),
+        "scale_max": float(args.aug_scale_max),
+        "scale_pad_mode": str(args.aug_scale_pad_mode),
+        "update_existence_from_visibility": not bool(args.aug_no_update_existence),
+        "invisible_joint_threshold": int(args.aug_invisible_joint_threshold),
+        "visibility_joint_chunk": int(args.mano_joint_chunk),
+    }
+    eval_aug_config: dict[str, object] = {"enable": False}
 
     run_root = Path(args.run_dir.strip()).resolve() if args.run_dir.strip() else None
     if run_root is not None:
@@ -461,11 +755,23 @@ def main() -> None:
         mano_refine_heads=int(args.mano_refine_heads),
         use_hand_side_embedding=not args.no_hand_side_embedding,
         use_hand_role_mem_bias=not args.no_hand_role_mem_bias,
+        camera_init_fx=float(args.camera_init_fx),
+        camera_init_fy=float(args.camera_init_fy),
+        camera_init_cx=float(args.camera_init_cx),
+        camera_init_cy=float(args.camera_init_cy),
     )
     model = EgoHandSTModel(cfg).to(device)
     resume_path = args.resume.strip()
     if resume_path:
         sd = torch.load(resume_path, map_location=device)
+        sd = _migrate_legacy_cam_head_state_dict(
+            sd,
+            init_fx=cfg.camera_init_fx,
+            init_fy=cfg.camera_init_fy,
+            init_cx=cfg.camera_init_cx,
+            init_cy=cfg.camera_init_cy,
+            target_in_dim=int(model.cam_head_left.in_features),
+        )
         model.load_state_dict(sd, strict=True)
 
     if use_dist:
@@ -486,8 +792,17 @@ def main() -> None:
 
     loader = None
     if not args.eval_only:
-        ddp_read_all = _ddp_read_all_shards_effective(args, use_dist, world_size)
-        if is_rank0 and use_dist and world_size > 1 and args.episodes_file.strip() and ddp_read_all:
+        has_episode_restriction = (
+            _dataset_sources_has_episode_restriction(dataset_sources)
+            if dataset_sources is not None
+            else bool(args.episodes_file.strip())
+        )
+        ddp_read_all = bool(use_dist and world_size > 1 and has_episode_restriction)
+        if args.ddp_shard_striping:
+            ddp_read_all = False
+        if args.ddp_read_all_shards:
+            ddp_read_all = True
+        if is_rank0 and use_dist and world_size > 1 and has_episode_restriction and ddp_read_all:
             log_line(
                 "DDP: each rank reads all tar shards (non-empty --episodes-file). "
                 "Pass --ddp-shard-striping to use per-rank shards only.",
@@ -496,6 +811,7 @@ def main() -> None:
         try:
             loader = _build_loader(
                 args.data_path,
+                dataset_sources=dataset_sources,
                 window_size=args.seq_len,
                 stride=args.stride,
                 shard_glob=args.shard_glob,
@@ -508,13 +824,17 @@ def main() -> None:
                 dist_world_size=world_size,
                 ddp_read_all_shards=ddp_read_all,
                 shuffle=not args.no_shuffle_data,
-                shuffle_seed=args.seed,
+                shuffle_windows=(not args.no_shuffle_windows) and (not args.no_shuffle_data),
+                shuffle_buffer_size=max(0, int(args.shuffle_buffer_size)),
+                shuffle_seed=args.seed if int(args.shuffle_seed) < 0 else int(args.shuffle_seed),
             )
         except ValueError as e:
             raise SystemExit(str(e)) from e
 
     val_loader: DataLoader | None = None
     if is_rank0 and args.val_episodes_file.strip():
+        if not args.data_path.strip():
+            raise SystemExit("--val-episodes-file currently requires --data-path")
         val_loader = _build_loader(
             args.data_path,
             window_size=args.seq_len,
@@ -528,7 +848,9 @@ def main() -> None:
             dist_rank=0,
             dist_world_size=1,
             shuffle=False,
-            shuffle_seed=args.seed,
+            shuffle_windows=False,
+            shuffle_buffer_size=0,
+            shuffle_seed=args.seed if int(args.shuffle_seed) < 0 else int(args.shuffle_seed),
         )
 
     apply_left = bool(args.mano_left_root_fix)
@@ -581,6 +903,8 @@ def main() -> None:
     show_progress = not args.no_progress
     max_steps = max(0, int(args.max_steps))
     save_every_steps = max(0, int(args.save_every_steps))
+    grad_accum_steps = max(1, int(args.grad_accum_steps))
+    warmup_global_steps = max(0, int(args.warmup_global_steps))
     if is_rank0:
         if args.eval_only:
             log_line(
@@ -595,12 +919,22 @@ def main() -> None:
             log_line(
                 f"start  dist={use_dist} rank={rank}/{world_size} device={device}  "
                 f"epochs={args.epochs}  local_batch={args.batch_size}  "
-                f"(global_batch≈{args.batch_size * world_size})  "
+                f"(global_batch≈{args.batch_size * world_size * grad_accum_steps}; accum={grad_accum_steps})  "
+                f"warmup_global_steps={warmup_global_steps} (~{warmup_global_steps * grad_accum_steps} ministeps/rank)  "
                 f"max_steps_per_rank={max_steps or 'inf'}  save_every_steps={save_every_steps or 'off'}  "
                 f"shuffle_windows={train_shuffle_windows}  shuffle_buffer={shuffle_buffer_size}  "
                 f"shuffle_seed={shuffle_seed}",
                 log_path,
             )
+            if dataset_sources is not None:
+                log_line(f"datasets-config={args.datasets_config.strip()!r} count={len(dataset_sources)}", log_path)
+                for i, src in enumerate(dataset_sources):
+                    log_line(
+                        f"dataset[{i}] name={src.get('name', '')!r} data_path={src.get('data_path', '')!r} "
+                        f"shard_glob={src.get('shard_glob', args.shard_glob)!r} "
+                        f"episodes_file={src.get('episodes_file', '')!r} episode_filter={src.get('episode_filter', '')!r}",
+                        log_path,
+                    )
 
     if args.eval_only:
         if is_rank0 and val_loader is None:
@@ -628,8 +962,13 @@ def main() -> None:
                 epoch=1,
                 show_progress=show_progress,
                 is_rank0=is_rank0,
-                mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
-                mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
+                mano_persp_loss_weight=args.mano_persp_loss_weight,
+                mano_persp_reg_weight=args.mano_persp_reg_weight,
+                camera_init_fx=cfg.camera_init_fx,
+                camera_init_fy=cfg.camera_init_fy,
+                camera_init_cx=cfg.camera_init_cx,
+                camera_init_cy=cfg.camera_init_cy,
+                augment_config=eval_aug_config,
             )
             if is_rank0:
                 log_line(
@@ -670,6 +1009,9 @@ def main() -> None:
                 mano_param_keys=mano_param_keys,
                 mano_pca_layers=mano_pca_layers,
                 grad_clip=args.grad_clip,
+                grad_accum_steps=grad_accum_steps,
+                base_lr=float(args.lr),
+                warmup_global_steps=warmup_global_steps,
                 tb_writer=tb_writer,
                 global_step=global_step,
                 optim_steps=optim_steps,
@@ -683,8 +1025,13 @@ def main() -> None:
                 is_rank0=is_rank0,
                 render_mano_every=render_mano_every,
                 render_mano_dir=render_mano_dir,
-                mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
-                mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
+                mano_persp_loss_weight=args.mano_persp_loss_weight,
+                mano_persp_reg_weight=args.mano_persp_reg_weight,
+                camera_init_fx=cfg.camera_init_fx,
+                camera_init_fy=cfg.camera_init_fy,
+                camera_init_cx=cfg.camera_init_cx,
+                camera_init_cy=cfg.camera_init_cy,
+                augment_config=train_aug_config,
             )
             if is_rank0:
                 summary = (
@@ -723,8 +1070,13 @@ def main() -> None:
                     epoch=ep,
                     show_progress=show_progress,
                     is_rank0=is_rank0,
-                    mano_weakcam_loss_weight=args.mano_weakcam_loss_weight,
-                    mano_weakcam_reg_weight=args.mano_weakcam_reg_weight,
+                    mano_persp_loss_weight=args.mano_persp_loss_weight,
+                    mano_persp_reg_weight=args.mano_persp_reg_weight,
+                    camera_init_fx=cfg.camera_init_fx,
+                    camera_init_fy=cfg.camera_init_fy,
+                    camera_init_cx=cfg.camera_init_cx,
+                    camera_init_cy=cfg.camera_init_cy,
+                    augment_config=eval_aug_config,
                 )
                 if is_rank0:
                     log_line(

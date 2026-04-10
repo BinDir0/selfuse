@@ -118,11 +118,12 @@ def maybe_save_train_mano_compare_png(
     *,
     out_path: str,
     video_btchw: torch.Tensor,
-    batch: dict[str, Any],
+    intr_bt: torch.Tensor,
     mano_l_gt: Mapping[str, torch.Tensor],
     mano_r_gt: Mapping[str, torch.Tensor],
     mano_l_pr: Mapping[str, torch.Tensor],
     mano_r_pr: Mapping[str, torch.Tensor],
+    pred_intr_bt: torch.Tensor,
     exist_bt2: torch.Tensor,
     mano_pca_layers: tuple[nn.Module, nn.Module],
     joint_chunk: int,
@@ -130,7 +131,7 @@ def maybe_save_train_mano_compare_png(
     bi: int = 0,
     ti: int | None = None,
 ) -> bool:
-    """GT left half, Pred right half; rendering is vis.render_hand_on_frame (MANO_ROOT / manopth as in vis)."""
+    """3 panels: GT | GT intr + Pred MANO | Pred intr + Pred MANO."""
     del joint_chunk  # API compatibility with train_loop; render uses ManoLayer forward like vis.
     if cv2 is None:
         return False
@@ -151,18 +152,20 @@ def maybe_save_train_mano_compare_png(
     if not left_on and not right_on:
         return False
 
-    vid_np = batch["video"]
-    if torch.is_tensor(vid_np):
-        h0, w0 = int(vid_np.shape[-2]), int(vid_np.shape[-1])
-    else:
-        h0, w0 = int(np.asarray(vid_np).shape[-2]), int(np.asarray(vid_np).shape[-1])
-
-    intr = _as_numpy_intrinsic(batch["intrinsic"][bi, ti])
+    intr = _as_numpy_intrinsic(intr_bt[bi, ti])
     if intr.size < 4:
         return False
     fx, fy, cx, cy = float(intr[0]), float(intr[1]), float(intr[2]), float(intr[3])
-    fx, fy, cx, cy = _scale_intrinsics(fx, fy, cx, cy, w0, h0, w, h)
-    intrinsic_np = np.array([fx, fy, cx, cy], dtype=np.float32)
+    intrinsic_gt_np = np.array([fx, fy, cx, cy], dtype=np.float32)
+
+    pred_intr = _as_numpy_intrinsic(pred_intr_bt[bi, ti])
+    if pred_intr.size < 4:
+        return False
+    pfx = max(float(pred_intr[0]), 1e-3)
+    pfy = max(float(pred_intr[1]), 1e-3)
+    pcx = float(pred_intr[2])
+    pcy = float(pred_intr[3])
+    intrinsic_pred_np = np.array([pfx, pfy, pcx, pcy], dtype=np.float32)
 
     ml, mr = mano_pca_layers
     mano_layers_dict = {"left": ml, "right": mr}
@@ -190,19 +193,31 @@ def maybe_save_train_mano_compare_png(
             mano_params=mp_g,
             wrist_params=wp_g,
             extrinsic=None,
-            intrinsic=intrinsic_np,
+            intrinsic=intrinsic_gt_np,
             presence=pr_g,
             shape_params=sp_g,
             mano_layers=mano_layers_dict,
             fingertips=None,
             auto_reframe=False,
         )
-        img_pr = render_hand_on_frame(
+        img_pr_gt_intr = render_hand_on_frame(
             frame_rgb.copy(),
             mano_params=mp_p,
             wrist_params=wp_p,
             extrinsic=None,
-            intrinsic=intrinsic_np,
+            intrinsic=intrinsic_gt_np,
+            presence=pr_p,
+            shape_params=sp_p,
+            mano_layers=mano_layers_dict,
+            fingertips=None,
+            auto_reframe=False,
+        )
+        img_pr_pred_intr = render_hand_on_frame(
+            frame_rgb.copy(),
+            mano_params=mp_p,
+            wrist_params=wp_p,
+            extrinsic=None,
+            intrinsic=intrinsic_pred_np,
             presence=pr_p,
             shape_params=sp_p,
             mano_layers=mano_layers_dict,
@@ -214,12 +229,13 @@ def maybe_save_train_mano_compare_png(
             ml.to(orig_dev)
             mr.to(orig_dev)
 
-    combo_rgb = np.concatenate([img_gt, img_pr], axis=1)
+    combo_rgb = np.concatenate([img_gt, img_pr_gt_intr, img_pr_pred_intr], axis=1)
     combo_bgr = cv2.cvtColor(combo_rgb, cv2.COLOR_RGB2BGR)
     w_img = img_gt.shape[1]
     font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.putText(combo_bgr, "GT", (8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(combo_bgr, "Pred", (w_img + 8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combo_bgr, "GT intr + Pred", (w_img + 8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(combo_bgr, "Pred intr + Pred", (2 * w_img + 8, 24), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     cv2.imwrite(out_path, combo_bgr)

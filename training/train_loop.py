@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import os
 from typing import Any, Literal
 
@@ -15,12 +16,49 @@ from training.logging_utils import tb_add_scalars, train_step_tb_dict, val_avg_t
 from training.mano_train_render import maybe_save_train_mano_compare_png
 from training.losses import (
     bce_existence,
+    intrinsic_reg_loss,
+    mano_masked_fullperspective_reproj_pixel_m2,
     mano_masked_joint_mse_m2,
-    mano_masked_weakcam_reproj_normalized_plane_m2,
     mano_regression_loss,
     mano_regression_per_key_raw,
-    weakcam_reg_loss,
 )
+
+
+def _batch_dataset_counter(batch: dict[str, Any]) -> Counter[str]:
+    names: list[str] = []
+
+    # Preferred: window-level dataset names (length B after default_collate).
+    ds = batch.get("dataset_name", None)
+    if isinstance(ds, (list, tuple)):
+        names.extend(str(x) for x in ds)
+    elif isinstance(ds, str):
+        names.append(ds)
+
+    # Fallback: frame-level meta shapes from different collate forms.
+    if not names:
+        meta = batch.get("meta", None)
+        if isinstance(meta, dict):
+            meta_ds = meta.get("dataset_name", None)
+            if isinstance(meta_ds, (list, tuple)):
+                # Could be (B,T) nested lists or flat list.
+                for item in meta_ds:
+                    if isinstance(item, (list, tuple)):
+                        names.extend(str(x) for x in item)
+                    else:
+                        names.append(str(item))
+        elif isinstance(meta, (list, tuple)):
+            for seq in meta:
+                if isinstance(seq, dict):
+                    dn = seq.get("dataset_name", None)
+                    if dn is not None:
+                        names.append(str(dn))
+                    continue
+                if isinstance(seq, (list, tuple)):
+                    for frame in seq:
+                        if isinstance(frame, dict) and "dataset_name" in frame:
+                            names.append(str(frame["dataset_name"]))
+
+    return Counter(names)
 
 
 def train_one_epoch(
@@ -44,6 +82,9 @@ def train_one_epoch(
     mano_param_keys: frozenset[str],
     mano_pca_layers: tuple[nn.Module, nn.Module] | None,
     grad_clip: float,
+    grad_accum_steps: int,
+    base_lr: float,
+    warmup_global_steps: int,
     tb_writer: Any | None,
     global_step: int,
     optim_steps: int,
@@ -57,8 +98,13 @@ def train_one_epoch(
     is_rank0: bool,
     render_mano_every: int,
     render_mano_dir: str | None,
-    mano_weakcam_loss_weight: float,
-    mano_weakcam_reg_weight: float,
+    mano_persp_loss_weight: float,
+    mano_persp_reg_weight: float,
+    camera_init_fx: float,
+    camera_init_fy: float,
+    camera_init_cx: float,
+    camera_init_cy: float,
+    augment_config: dict[str, Any] | None,
 ) -> tuple[dict[str, float], int, int, bool]:
     model.train()
     _ds = loader.dataset
@@ -74,16 +120,45 @@ def train_one_epoch(
         dynamic_ncols=True,
         disable=not (show_progress and is_rank0),
     )
+
+    DEBUG_DATASET_DIST_EVERY = 100  # 每N步打印一次
+    step_in_epoch = 0
+    accum_steps = max(1, int(grad_accum_steps))
+    warm_steps = max(0, int(warmup_global_steps))
+    accum_counter = 0
+    global_step = int(optim_steps)
+
+    def _set_lr_for_step(step: int) -> float:
+        if warm_steps <= 0:
+            lr_now = float(base_lr)
+        else:
+            s = max(0, int(step))
+            if s >= warm_steps:
+                lr_now = float(base_lr)
+            else:
+                lr_now = float(base_lr) * (float(s) / float(warm_steps))
+        for pg in optim.param_groups:
+            pg["lr"] = lr_now
+        return lr_now
+
+    _set_lr_for_step(global_step)
+    optim.zero_grad(set_to_none=True)
     for batch in pbar:
+        # Debug: 打印当前batch的dataset_name分布
+        if step_in_epoch % DEBUG_DATASET_DIST_EVERY == 0 and is_rank0:
+            dist = _batch_dataset_counter(batch)
+            print(f"[DEBUG] Step {step_in_epoch}: batch dataset_name distribution: {dict(dist)}")
+
         video, exist_tgt, mano_l_tgt, mano_r_tgt, intr_bt = wds_batch_to_training_batch(
             batch,
             device=device,
             image_size=image_size,
             apply_left_root_fix=apply_left_root_fix,
             mano_pca_layers=mano_pca_layers,
+            augment_config=augment_config,
         )
+        step_in_epoch += 1
 
-        optim.zero_grad(set_to_none=True)
         out = model(video)
         loss_b = bce_existence(out["hand_existence_logits"], exist_tgt)
 
@@ -114,8 +189,8 @@ def train_one_epoch(
 
         zj = out["mano_left"]["trans"].new_tensor(0.0)
         lj_l, lj_r = zj, zj
-        wcl, wcr = zj, zj
-        wreg_l, wreg_r = zj, zj
+        ppl, ppr = zj, zj
+        preg_l, preg_r = zj, zj
         if mano_pca_layers is not None:
             ml, mr = mano_pca_layers
             if mano_joint_loss_weight > 0.0:
@@ -139,43 +214,70 @@ def train_one_epoch(
                     smooth_max_weight=mano_joint_smooth_max_weight,
                     smooth_max_tau=mano_joint_smooth_max_tau,
                 )
-            if mano_weakcam_loss_weight > 0.0:
-                wcl = mano_masked_weakcam_reproj_normalized_plane_m2(
+            if mano_persp_loss_weight > 0.0:
+                ppl = mano_masked_fullperspective_reproj_pixel_m2(
                     out["mano_left"],
                     mano_l_tgt,
                     out["pred_cam"][:, :, 0, :],
+                    intr_bt,
                     mask_l,
                     ml,
                     chunk=mano_joint_chunk,
                     joint_weight_21=mano_joint_weight_21,
                 )
-                wcr = mano_masked_weakcam_reproj_normalized_plane_m2(
+                ppr = mano_masked_fullperspective_reproj_pixel_m2(
                     out["mano_right"],
                     mano_r_tgt,
                     out["pred_cam"][:, :, 1, :],
+                    intr_bt,
                     mask_r,
                     mr,
                     chunk=mano_joint_chunk,
                     joint_weight_21=mano_joint_weight_21,
                 )
-            if mano_weakcam_reg_weight > 0.0:
-                wreg_l = weakcam_reg_loss(out["pred_cam"][:, :, 0, :], mask_l)
-                wreg_r = weakcam_reg_loss(out["pred_cam"][:, :, 1, :], mask_r)
+            if mano_persp_reg_weight > 0.0:
+                preg_l = intrinsic_reg_loss(
+                    out["pred_cam"][:, :, 0, :],
+                    mask_l,
+                    ref_fx=camera_init_fx,
+                    ref_fy=camera_init_fy,
+                    ref_cx=camera_init_cx,
+                    ref_cy=camera_init_cy,
+                )
+                preg_r = intrinsic_reg_loss(
+                    out["pred_cam"][:, :, 1, :],
+                    mask_r,
+                    ref_fx=camera_init_fx,
+                    ref_fy=camera_init_fy,
+                    ref_cx=camera_init_cx,
+                    ref_cy=camera_init_cy,
+                )
+
+        in_warmup = global_step < warm_steps
+        persp_weight_eff = 0.0 if in_warmup else float(mano_persp_loss_weight)
 
         loss_joint = mano_joint_loss_weight * (lj_l + lj_r)
         jl_w = mano_joint_loss_weight * lj_l
         jr_w = mano_joint_loss_weight * lj_r
-        loss_weakcam = mano_weakcam_loss_weight * (wcl + wcr)
-        loss_weakcam_reg = mano_weakcam_reg_weight * (wreg_l + wreg_r)
+        loss_persp = persp_weight_eff * (ppl + ppr)
+        loss_persp_reg = mano_persp_reg_weight * (preg_l + preg_r)
 
-        loss_m = loss_param_w + loss_joint + loss_weakcam + loss_weakcam_reg
+        loss_m = loss_param_w + loss_joint + loss_persp + loss_persp_reg
 
         loss = loss_b + loss_m
-        loss.backward()
-        if grad_clip > 0.0:
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optim.step()
-        optim_steps += 1
+        (loss / float(accum_steps)).backward()
+        accum_counter += 1
+
+        did_step = accum_counter >= accum_steps
+        if did_step:
+            _set_lr_for_step(global_step)
+            if grad_clip > 0.0:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optim.step()
+            optim.zero_grad(set_to_none=True)
+            accum_counter = 0
+            optim_steps += 1
+            global_step += 1
 
         tot["loss"] += float(loss.detach())
         tot["bce"] += float(loss_b.detach())
@@ -186,6 +288,14 @@ def train_one_epoch(
             loss=f"{float(loss.detach()):.4f}",
             bce=f"{float(loss_b.detach()):.4f}",
             mano=f"{float(loss_m.detach()):.4f}",
+            param=f"{float(loss_param_w.detach()):.4f}",
+            joint=f"{float(loss_joint.detach()):.4f}",
+            persp=f"{float(loss_persp.detach()):.4f}",
+            preg=f"{float(loss_persp_reg.detach()):.4f}",
+            persp_raw=f"{float((ppl + ppr).detach()):.4f}",
+            preg_raw=f"{float((preg_l + preg_r).detach()):.4f}",
+            warmup=int(in_warmup),
+            lr=f"{float(optim.param_groups[0]['lr']):.2e}",
         )
         if tb_writer is not None:
             pk_l = mano_regression_per_key_raw(
@@ -230,17 +340,24 @@ def train_one_epoch(
                 tb_writer,
                 global_step,
                 {
-                    "train/mano_weakcam_weighted": float(loss_weakcam.detach()),
-                    "train/mano_weakcam_reg_weighted": float(loss_weakcam_reg.detach()),
+                    "train/mano_persp_weighted": float(loss_persp.detach()),
+                    "train/mano_persp_reg_weighted": float(loss_persp_reg.detach()),
+                    "train/pred_cam_left_fx": float(out["pred_cam"][:, :, 0, 0].detach().mean()),
+                    "train/pred_cam_left_fy": float(out["pred_cam"][:, :, 0, 1].detach().mean()),
+                    "train/pred_cam_left_cx": float(out["pred_cam"][:, :, 0, 2].detach().mean()),
+                    "train/pred_cam_left_cy": float(out["pred_cam"][:, :, 0, 3].detach().mean()),
+                    "train/pred_cam_right_fx": float(out["pred_cam"][:, :, 1, 0].detach().mean()),
+                    "train/pred_cam_right_fy": float(out["pred_cam"][:, :, 1, 1].detach().mean()),
+                    "train/pred_cam_right_cx": float(out["pred_cam"][:, :, 1, 2].detach().mean()),
+                    "train/pred_cam_right_cy": float(out["pred_cam"][:, :, 1, 3].detach().mean()),
                 },
             )
-            global_step += 1
-
-        if save_every_steps > 0 and optim_steps % save_every_steps == 0:
+        if did_step and save_every_steps > 0 and optim_steps % save_every_steps == 0:
             maybe_save_step_checkpoint(ckpt_dir, optim_steps, model, is_rank0=is_rank0)
 
         if (
-            render_mano_every > 0
+            did_step
+            and render_mano_every > 0
             and render_mano_dir
             and mano_pca_layers is not None
             and is_rank0
@@ -250,20 +367,34 @@ def train_one_epoch(
             maybe_save_train_mano_compare_png(
                 out_path=_outp,
                 video_btchw=video,
-                batch=batch,
+                intr_bt=intr_bt,
                 mano_l_gt=mano_l_tgt,
                 mano_r_gt=mano_r_tgt,
                 mano_l_pr=out["mano_left"],
                 mano_r_pr=out["mano_right"],
+                pred_intr_bt=out["pred_cam"],
                 exist_bt2=exist_tgt,
                 mano_pca_layers=mano_pca_layers,
                 joint_chunk=mano_joint_chunk,
                 device=device,
             )
 
-        if max_steps > 0 and optim_steps >= max_steps:
+        if did_step and max_steps > 0 and optim_steps >= max_steps:
             hit_max = True
             break
+
+    if not hit_max and accum_counter > 0:
+        _set_lr_for_step(global_step)
+        if grad_clip > 0.0:
+            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optim.step()
+        optim.zero_grad(set_to_none=True)
+        optim_steps += 1
+        global_step += 1
+        if save_every_steps > 0 and optim_steps % save_every_steps == 0:
+            maybe_save_step_checkpoint(ckpt_dir, optim_steps, model, is_rank0=is_rank0)
+        if max_steps > 0 and optim_steps >= max_steps:
+            hit_max = True
 
     t = torch.tensor(
         [tot["loss"], tot["bce"], tot["mano"], float(n)],
@@ -314,8 +445,13 @@ def eval_one_epoch(
     epoch: int,
     show_progress: bool,
     is_rank0: bool,
-    mano_weakcam_loss_weight: float,
-    mano_weakcam_reg_weight: float,
+    mano_persp_loss_weight: float,
+    mano_persp_reg_weight: float,
+    camera_init_fx: float,
+    camera_init_fy: float,
+    camera_init_cx: float,
+    camera_init_cy: float,
+    augment_config: dict[str, Any] | None,
 ) -> dict[str, float]:
     model.eval()
     _ds = loader.dataset
@@ -333,8 +469,8 @@ def eval_one_epoch(
         "mano_param_right": 0.0,
         "mano_joint_left": 0.0,
         "mano_joint_right": 0.0,
-        "mano_weakcam": 0.0,
-        "mano_weakcam_reg": 0.0,
+        "mano_persp": 0.0,
+        "mano_persp_reg": 0.0,
     }
     for k in sorted(mano_param_keys & frozenset({"trans", "root_orient", "hand_pose", "betas"})):
         tot[f"mano_pk_{k}"] = 0.0
@@ -353,6 +489,7 @@ def eval_one_epoch(
             image_size=image_size,
             apply_left_root_fix=apply_left_root_fix,
             mano_pca_layers=mano_pca_layers,
+            augment_config=augment_config,
         )
         out = model(video)
         loss_b = bce_existence(out["hand_existence_logits"], exist_tgt)
@@ -383,8 +520,8 @@ def eval_one_epoch(
 
         zj = out["mano_left"]["trans"].new_tensor(0.0)
         lj_l, lj_r = zj, zj
-        wcl, wcr = zj, zj
-        wreg_l, wreg_r = zj, zj
+        ppl, ppr = zj, zj
+        preg_l, preg_r = zj, zj
         if mano_pca_layers is not None:
             ml, mr = mano_pca_layers
             if mano_joint_loss_weight > 0.0:
@@ -408,36 +545,52 @@ def eval_one_epoch(
                     smooth_max_weight=mano_joint_smooth_max_weight,
                     smooth_max_tau=mano_joint_smooth_max_tau,
                 )
-            if mano_weakcam_loss_weight > 0.0:
-                wcl = mano_masked_weakcam_reproj_normalized_plane_m2(
+            if mano_persp_loss_weight > 0.0:
+                ppl = mano_masked_fullperspective_reproj_pixel_m2(
                     out["mano_left"],
                     mano_l_tgt,
                     out["pred_cam"][:, :, 0, :],
+                    intr_bt,
                     mask_l,
                     ml,
                     chunk=mano_joint_chunk,
                     joint_weight_21=mano_joint_weight_21,
                 )
-                wcr = mano_masked_weakcam_reproj_normalized_plane_m2(
+                ppr = mano_masked_fullperspective_reproj_pixel_m2(
                     out["mano_right"],
                     mano_r_tgt,
                     out["pred_cam"][:, :, 1, :],
+                    intr_bt,
                     mask_r,
                     mr,
                     chunk=mano_joint_chunk,
                     joint_weight_21=mano_joint_weight_21,
                 )
-            if mano_weakcam_reg_weight > 0.0:
-                wreg_l = weakcam_reg_loss(out["pred_cam"][:, :, 0, :], mask_l)
-                wreg_r = weakcam_reg_loss(out["pred_cam"][:, :, 1, :], mask_r)
+            if mano_persp_reg_weight > 0.0:
+                preg_l = intrinsic_reg_loss(
+                    out["pred_cam"][:, :, 0, :],
+                    mask_l,
+                    ref_fx=camera_init_fx,
+                    ref_fy=camera_init_fy,
+                    ref_cx=camera_init_cx,
+                    ref_cy=camera_init_cy,
+                )
+                preg_r = intrinsic_reg_loss(
+                    out["pred_cam"][:, :, 1, :],
+                    mask_r,
+                    ref_fx=camera_init_fx,
+                    ref_fy=camera_init_fy,
+                    ref_cx=camera_init_cx,
+                    ref_cy=camera_init_cy,
+                )
 
         loss_joint = mano_joint_loss_weight * (lj_l + lj_r)
         jl_w = mano_joint_loss_weight * lj_l
         jr_w = mano_joint_loss_weight * lj_r
-        loss_weakcam = mano_weakcam_loss_weight * (wcl + wcr)
-        loss_weakcam_reg = mano_weakcam_reg_weight * (wreg_l + wreg_r)
+        loss_persp = mano_persp_loss_weight * (ppl + ppr)
+        loss_persp_reg = mano_persp_reg_weight * (preg_l + preg_r)
 
-        loss_m = loss_param_w + loss_joint + loss_weakcam + loss_weakcam_reg
+        loss_m = loss_param_w + loss_joint + loss_persp + loss_persp_reg
         loss = loss_b + loss_m
 
         pk_l = mano_regression_per_key_raw(
@@ -470,13 +623,19 @@ def eval_one_epoch(
         tot["mano_param_right"] += float(lp_r)
         tot["mano_joint_left"] += float(jl_w)
         tot["mano_joint_right"] += float(jr_w)
-        tot["mano_weakcam"] += float(loss_weakcam)
-        tot["mano_weakcam_reg"] += float(loss_weakcam_reg)
+        tot["mano_persp"] += float(loss_persp)
+        tot["mano_persp_reg"] += float(loss_persp_reg)
         n += 1
         pbar.set_postfix(
             loss=f"{float(loss):.4f}",
             bce=f"{float(loss_b):.4f}",
             mano=f"{float(loss_m):.4f}",
+            param=f"{float(loss_param_w):.4f}",
+            joint=f"{float(loss_joint):.4f}",
+            persp=f"{float(loss_persp):.4f}",
+            preg=f"{float(loss_persp_reg):.4f}",
+            persp_raw=f"{float(ppl + ppr):.4f}",
+            preg_raw=f"{float(preg_l + preg_r):.4f}",
         )
     nn_ = max(n, 1)
     avg = {k: tot[k] / nn_ for k in tot}
