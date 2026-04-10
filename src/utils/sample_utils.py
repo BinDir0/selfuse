@@ -179,15 +179,26 @@ def sample_rtc_delay(
         return torch.floor(random_delay * delay_upper.to(torch.float32)).to(dtype=torch.long)
 
     if strategy == "exp":
-        max_upper = delay_upper.max().item()
-        if max_upper <= 0:
-            return torch.zeros_like(delay_upper, device=valid_action_len.device, dtype=torch.long)
-        w = torch.exp(torch.arange(max_upper - 1, -1, -1, device=valid_action_len.device, dtype=torch.float32))
-        w = w.unsqueeze(0).expand(delay_upper.shape[0], -1).clone()
-        idx = torch.arange(max_upper, device=valid_action_len.device).unsqueeze(0)
-        w[idx >= delay_upper.unsqueeze(1)] = 0.0
+        device = valid_action_len.device
+        out = torch.zeros_like(delay_upper, device=device, dtype=torch.long)
+        # Only VLA samples (delay_upper > 0) participate in multinomial sampling.
+        # VLM padding samples have delay_upper == 0 and keep the default 0, both
+        # avoiding the all-zero-row CUDA assert in torch.multinomial and skipping
+        # useless work for samples whose flow loss is masked out anyway.
+        active = delay_upper > 0
+        if not active.any():
+            return out
+        active_upper = delay_upper[active]
+        max_upper = int(active_upper.max().item())
+        w = torch.exp(
+            torch.arange(max_upper - 1, -1, -1, device=device, dtype=torch.float32)
+        )
+        w = w.unsqueeze(0).expand(active_upper.shape[0], -1).clone()
+        idx = torch.arange(max_upper, device=device).unsqueeze(0)
+        w[idx >= active_upper.unsqueeze(1)] = 0.0
         sampled = torch.multinomial(w, num_samples=1).squeeze(1)
-        return sampled.to(dtype=torch.long)
+        out[active] = sampled.to(dtype=torch.long)
+        return out
 
     raise ValueError(f"Unsupported RTC delay strategy: {strategy}")
 
