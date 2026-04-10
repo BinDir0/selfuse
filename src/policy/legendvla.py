@@ -211,7 +211,7 @@ class LegendVLA(nn.Module):
         block_compile_kwargs = {
             key: value
             for key, value in compile_kwargs.items()
-            if key not in {"vision", "text", "flow", "diffloss"}
+            if key not in {"vision", "text", "flow", "diffloss", "world_model"}
         }
 
         if compile_flags["vision"]:
@@ -222,6 +222,8 @@ class LegendVLA(nn.Module):
             compile_module_list(self.flow_expert.layers, block_compile_kwargs)
         if compile_flags["diffloss"] and self.diffloss is not None:
             self.diffloss.net = torch.compile(self.diffloss.net, **block_compile_kwargs)
+        if compile_flags["world_model"] and self.use_world_model:
+            compile_module_list(self.world_model_expert.layers, block_compile_kwargs)
 
     def resolve_compile_block_flags(
         self,
@@ -232,6 +234,7 @@ class LegendVLA(nn.Module):
             "text": bool(compile_kwargs.get("text", True)),
             "flow": bool(compile_kwargs.get("flow", True)),
             "diffloss": bool(compile_kwargs.get("diffloss", True)),
+            "world_model": bool(compile_kwargs.get("world_model", True)),
         }
 
     def enable_gradient_checkpointing(self, config: dict | None = None) -> None:
