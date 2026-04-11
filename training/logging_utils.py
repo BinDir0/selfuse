@@ -21,6 +21,13 @@ def tb_add_scalars(writer: Any | None, step: int, scalars: Mapping[str, float]) 
         writer.add_scalar(tag, val, step)
 
 
+def wandb_add_scalars(run: Any | None, step: int, scalars: Mapping[str, float]) -> None:
+    if run is None:
+        return
+    payload = {tag: float(val) for tag, val in scalars.items()}
+    run.log(payload, step=int(step))
+
+
 def train_step_tb_dict(
     *,
     loss: float,

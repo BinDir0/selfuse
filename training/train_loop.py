@@ -12,7 +12,12 @@ from tqdm import tqdm
 
 from training.batch import wds_batch_to_training_batch
 from training.checkpoint import maybe_save_step_checkpoint
-from training.logging_utils import tb_add_scalars, train_step_tb_dict, val_avg_to_tb_dict
+from training.logging_utils import (
+    tb_add_scalars,
+    train_step_tb_dict,
+    val_avg_to_tb_dict,
+    wandb_add_scalars,
+)
 from training.mano_train_render import maybe_save_train_mano_compare_png
 from training.losses import (
     bce_existence,
@@ -86,6 +91,7 @@ def train_one_epoch(
     base_lr: float,
     warmup_global_steps: int,
     tb_writer: Any | None,
+    wandb_run: Any | None,
     global_step: int,
     optim_steps: int,
     epoch: int,
@@ -297,7 +303,9 @@ def train_one_epoch(
             warmup=int(in_warmup),
             lr=f"{float(optim.param_groups[0]['lr']):.2e}",
         )
-        if tb_writer is not None:
+        train_scalars: dict[str, float] | None = None
+        cam_scalars: dict[str, float] | None = None
+        if tb_writer is not None or wandb_run is not None:
             pk_l = mano_regression_per_key_raw(
                 out["mano_left"],
                 mano_l_tgt,
@@ -318,40 +326,40 @@ def train_one_epoch(
                 k: 0.5 * (float(pk_l[k].detach()) + float(pk_r[k].detach()))
                 for k in pk_l.keys()
             }
-            tb_add_scalars(
-                tb_writer,
-                global_step,
-                train_step_tb_dict(
-                    loss=float(loss.detach()),
-                    bce=float(loss_b.detach()),
-                    mano=float(loss_m.detach()),
-                    mano_param_raw=float(loss_param.detach()),
-                    mano_param_weighted=float(loss_param_w.detach()),
-                    mano_joint=float(loss_joint.detach()),
-                    lp_l=float(lp_l.detach()),
-                    lp_r=float(lp_r.detach()),
-                    jl_w=float(jl_w.detach()),
-                    jr_w=float(jr_w.detach()),
-                    optim_steps=optim_steps,
-                    mano_param_per_key=param_per_key,
-                ),
+            train_scalars = train_step_tb_dict(
+                loss=float(loss.detach()),
+                bce=float(loss_b.detach()),
+                mano=float(loss_m.detach()),
+                mano_param_raw=float(loss_param.detach()),
+                mano_param_weighted=float(loss_param_w.detach()),
+                mano_joint=float(loss_joint.detach()),
+                lp_l=float(lp_l.detach()),
+                lp_r=float(lp_r.detach()),
+                jl_w=float(jl_w.detach()),
+                jr_w=float(jr_w.detach()),
+                optim_steps=optim_steps,
+                mano_param_per_key=param_per_key,
             )
-            tb_add_scalars(
-                tb_writer,
-                global_step,
-                {
-                    "train/mano_persp_weighted": float(loss_persp.detach()),
-                    "train/mano_persp_reg_weighted": float(loss_persp_reg.detach()),
-                    "train/pred_cam_left_fx": float(out["pred_cam"][:, :, 0, 0].detach().mean()),
-                    "train/pred_cam_left_fy": float(out["pred_cam"][:, :, 0, 1].detach().mean()),
-                    "train/pred_cam_left_cx": float(out["pred_cam"][:, :, 0, 2].detach().mean()),
-                    "train/pred_cam_left_cy": float(out["pred_cam"][:, :, 0, 3].detach().mean()),
-                    "train/pred_cam_right_fx": float(out["pred_cam"][:, :, 1, 0].detach().mean()),
-                    "train/pred_cam_right_fy": float(out["pred_cam"][:, :, 1, 1].detach().mean()),
-                    "train/pred_cam_right_cx": float(out["pred_cam"][:, :, 1, 2].detach().mean()),
-                    "train/pred_cam_right_cy": float(out["pred_cam"][:, :, 1, 3].detach().mean()),
-                },
-            )
+            cam_scalars = {
+                "train/mano_persp_weighted": float(loss_persp.detach()),
+                "train/mano_persp_reg_weighted": float(loss_persp_reg.detach()),
+                "train/pred_cam_left_fx": float(out["pred_cam"][:, :, 0, 0].detach().mean()),
+                "train/pred_cam_left_fy": float(out["pred_cam"][:, :, 0, 1].detach().mean()),
+                "train/pred_cam_left_cx": float(out["pred_cam"][:, :, 0, 2].detach().mean()),
+                "train/pred_cam_left_cy": float(out["pred_cam"][:, :, 0, 3].detach().mean()),
+                "train/pred_cam_right_fx": float(out["pred_cam"][:, :, 1, 0].detach().mean()),
+                "train/pred_cam_right_fy": float(out["pred_cam"][:, :, 1, 1].detach().mean()),
+                "train/pred_cam_right_cx": float(out["pred_cam"][:, :, 1, 2].detach().mean()),
+                "train/pred_cam_right_cy": float(out["pred_cam"][:, :, 1, 3].detach().mean()),
+            }
+        if train_scalars is not None:
+            tb_add_scalars(tb_writer, global_step, train_scalars)
+        if cam_scalars is not None:
+            tb_add_scalars(tb_writer, global_step, cam_scalars)
+        if did_step and train_scalars is not None:
+            wandb_add_scalars(wandb_run, global_step, train_scalars)
+        if did_step and cam_scalars is not None:
+            wandb_add_scalars(wandb_run, global_step, cam_scalars)
         if did_step and save_every_steps > 0 and optim_steps % save_every_steps == 0:
             maybe_save_step_checkpoint(ckpt_dir, optim_steps, model, is_rank0=is_rank0)
 
@@ -415,6 +423,16 @@ def train_one_epoch(
                 "epoch/mano": avg["mano"],
             },
         )
+    wandb_add_scalars(
+        wandb_run,
+        global_step,
+        {
+            "epoch/loss": avg["loss"],
+            "epoch/bce": avg["bce"],
+            "epoch/mano": avg["mano"],
+            "epoch/index": float(epoch),
+        },
+    )
     hm = torch.tensor([int(hit_max)], device=device, dtype=torch.int32)
     if use_dist:
         dist.all_reduce(hm, op=dist.ReduceOp.MAX)
@@ -442,7 +460,9 @@ def eval_one_epoch(
     mano_param_keys: frozenset[str],
     mano_pca_layers: tuple[nn.Module, nn.Module] | None,
     tb_writer: Any | None,
+    wandb_run: Any | None,
     epoch: int,
+    log_step: int,
     show_progress: bool,
     is_rank0: bool,
     mano_persp_loss_weight: float,
@@ -639,6 +659,15 @@ def eval_one_epoch(
         )
     nn_ = max(n, 1)
     avg = {k: tot[k] / nn_ for k in tot}
+    val_scalars = val_avg_to_tb_dict(avg)
     if tb_writer is not None:
-        tb_add_scalars(tb_writer, epoch, val_avg_to_tb_dict(avg))
+        tb_add_scalars(tb_writer, epoch, val_scalars)
+    wandb_add_scalars(
+        wandb_run,
+        log_step,
+        {
+            **val_scalars,
+            "val/epoch": float(epoch),
+        },
+    )
     return avg

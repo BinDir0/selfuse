@@ -119,6 +119,12 @@ python train.py \
 
 TensorBoard：`tensorboard --logdir runs/exp/tb`
 
+可选：启用 W&B（仅 rank0 记录）：
+
+```bash
+python train.py --config configs/train_default.json --wandb --wandb-project egotransformer
+```
+
 ### 3. 推理（`infer.py`）
 
 默认 `--seq-len` / `--stride` / `--batch-size` 与 `train.py` 一致；`--args-json` 指向该次训练的 `args.json` 以匹配模型结构。

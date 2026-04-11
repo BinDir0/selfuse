@@ -446,6 +446,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     io.add_argument("--save-every-steps", type=int, default=0)
     io.add_argument("--resume", type=str, default="")
     io.add_argument("--tensorboard-dir", type=str, default="")
+    io.add_argument("--wandb", action="store_true", help="enable Weights & Biases logging on rank0")
+    io.add_argument("--wandb-project", type=str, default="", help="W&B project name; default: egotransformer")
+    io.add_argument("--wandb-entity", type=str, default="", help="optional W&B entity/team")
+    io.add_argument("--wandb-name", type=str, default="", help="optional W&B run name; default: run-dir basename")
+    io.add_argument(
+        "--wandb-mode",
+        type=str,
+        default="online",
+        choices=("online", "offline", "disabled"),
+        help="W&B mode; disabled behaves like --wandb off",
+    )
+    io.add_argument(
+        "--wandb-dir",
+        type=str,
+        default="",
+        help="directory for W&B metadata/cache; default: run-dir or current working directory",
+    )
     io.add_argument("--log-dir", type=str, default="")
     io.add_argument("--run-dir", type=str, default="", help="sets default checkpoints/ and logs/")
     io.add_argument(
@@ -874,6 +891,38 @@ def main() -> None:
         tb_writer = SummaryWriter(os.path.abspath(tb_dir))
         log_line(f"TensorBoard: tensorboard --logdir {os.path.abspath(tb_dir)}", log_path)
 
+    wandb_run = None
+    wandb_enabled = bool(args.wandb) and str(args.wandb_mode).strip().lower() != "disabled"
+    if is_rank0 and wandb_enabled:
+        try:
+            import wandb
+        except ImportError as e:
+            raise SystemExit("Missing wandb. Install it with `pip install wandb`.") from e
+        wandb_dir = args.wandb_dir.strip()
+        if not wandb_dir:
+            wandb_dir = str(run_root) if run_root is not None else os.getcwd()
+        os.makedirs(wandb_dir, exist_ok=True)
+        wandb_project = args.wandb_project.strip() or "egotransformer"
+        wandb_name = args.wandb_name.strip()
+        if not wandb_name and run_root is not None:
+            wandb_name = run_root.name
+        init_kwargs: dict[str, Any] = {
+            "project": wandb_project,
+            "config": dict(vars(args)),
+            "dir": os.path.abspath(wandb_dir),
+            "mode": str(args.wandb_mode).strip().lower(),
+        }
+        if args.wandb_entity.strip():
+            init_kwargs["entity"] = args.wandb_entity.strip()
+        if wandb_name:
+            init_kwargs["name"] = wandb_name
+        wandb_run = wandb.init(**init_kwargs)
+        log_line(
+            f"W&B: project={wandb_project!r} name={wandb_name or '<auto>'!r} "
+            f"mode={init_kwargs['mode']!r} dir={os.path.abspath(wandb_dir)}",
+            log_path,
+        )
+
     if is_rank0 and ckpt_dir:
         os.makedirs(ckpt_dir, exist_ok=True)
 
@@ -1013,6 +1062,7 @@ def main() -> None:
                 base_lr=float(args.lr),
                 warmup_global_steps=warmup_global_steps,
                 tb_writer=tb_writer,
+                wandb_run=wandb_run,
                 global_step=global_step,
                 optim_steps=optim_steps,
                 epoch=ep,
@@ -1067,7 +1117,9 @@ def main() -> None:
                     mano_param_keys=mano_param_keys,
                     mano_pca_layers=mano_pca_layers,
                     tb_writer=tb_writer,
+                    wandb_run=wandb_run,
                     epoch=ep,
+                    log_step=global_step,
                     show_progress=show_progress,
                     is_rank0=is_rank0,
                     mano_persp_loss_weight=args.mano_persp_loss_weight,
@@ -1094,6 +1146,8 @@ def main() -> None:
 
     if tb_writer is not None:
         tb_writer.close()
+    if wandb_run is not None:
+        wandb_run.finish()
 
     if is_rank0 and args.save:
         save_path = os.path.abspath(args.save)
