@@ -100,13 +100,16 @@ class ConnectionRecorder:
 
     def _save_observation_image(self, obs: dict[str, Any], output_path: pathlib.Path) -> bool:
         image = obs.get(self._image_key)
-        depth = obs.get(self._depth_key)
-        if image is None or depth is None:
+        if image is None:
             return False
 
         image_canvas = self._prepare_rgb_canvas(image)
-        depth_canvas = self._prepare_depth_canvas(depth)
-        canvas = np.concatenate([image_canvas, depth_canvas], axis=1)
+        depth = obs.get(self._depth_key)
+        if depth is not None:
+            depth_canvas = self._prepare_depth_canvas(depth)
+            canvas = np.concatenate([image_canvas, depth_canvas], axis=1)
+        else:
+            canvas = image_canvas
 
         return bool(cv2.imwrite(str(output_path), canvas))
 

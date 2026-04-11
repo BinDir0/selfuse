@@ -28,6 +28,7 @@ policy:
   model_config_path: /home/descfly/checkpoints/real-world-only-0403/.hydra/config.yaml  # required: path to the training run's .hydra/config.yaml
   checkpoint_path: /home/descfly/checkpoints/real-world-only-0403/update_step=85000    # required: path to trained model checkpoint
   pretrained_vlm_path: /home/descfly/checkpoints/Qwen3-VL-2B-Instruct  # override pretrained.model_name_or_path in model config (for backbone, action expert, tokenizer)
+  teacher_path: /home/descfly/checkpoints/dinov3-vitl16-pretrain-lvd1689m  # override frozen_teacher.model_name_or_path (null = keep training config value)
   mode: flow
   use_mixed_precision: True
   tokenizer_padding: max_length

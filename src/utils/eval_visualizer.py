@@ -277,18 +277,18 @@ def render_overlay_image(vis_sample, action_stride=4):
     if not valid_steps:
         return _append_colorbar(
             canvas, total_steps,
-            (100, 230, 100), (0, 80, 0), (120, 160, 255), (0, 40, 200),
+            GT_COLOR_START, GT_COLOR_END, PRED_COLOR_START, PRED_COLOR_END,
         )
     timesteps = valid_steps[::action_stride]
     if valid_steps[-1] not in timesteps:
         timesteps.append(valid_steps[-1])
     num_valid = len(valid_steps)
 
-    # Color gradients (BGR): t=0 bright, t=H dark
-    GT_COLOR_START = (100, 230, 100)    # bright green
-    GT_COLOR_END = (0, 80, 0)           # deep green
-    PRED_COLOR_START = (120, 160, 255)  # bright orange
-    PRED_COLOR_END = (0, 40, 200)       # deep red-orange
+    # Color gradients (BGR): cross-hue for maximum contrast between t=0 and t=T
+    GT_COLOR_START = (255, 100, 0)      # bright blue
+    GT_COLOR_END = (200, 255, 0)        # cyan
+    PRED_COLOR_START = (50, 50, 255)    # bright red
+    PRED_COLOR_END = (0, 220, 255)      # yellow
 
     # Draw trajectory lines first (thinner, behind points)
     max_valid_t = valid_steps[-1]
@@ -305,7 +305,7 @@ def render_overlay_image(vis_sample, action_stride=4):
             gt_2d_0 = project_3d_to_2d(gt_pos0, fx, fy, cx, cy)[0]
             gt_2d_1 = project_3d_to_2d(gt_pos1, fx, fy, cx, cy)[0]
             gt_color = lerp_color(GT_COLOR_START, GT_COLOR_END, (ratio0 + ratio1) / 2)
-            cv2.line(canvas, _pt(gt_2d_0), _pt(gt_2d_1), gt_color, 1, cv2.LINE_AA)
+            cv2.line(canvas, _pt(gt_2d_0), _pt(gt_2d_1), gt_color, 2, cv2.LINE_AA)
 
             # Pred wrist trajectory
             pred_pos0 = pred_wrist[t0, hand_idx * 3: hand_idx * 3 + 3].reshape(1, 3)
@@ -313,7 +313,7 @@ def render_overlay_image(vis_sample, action_stride=4):
             pred_2d_0 = project_3d_to_2d(pred_pos0, fx, fy, cx, cy)[0]
             pred_2d_1 = project_3d_to_2d(pred_pos1, fx, fy, cx, cy)[0]
             pred_color = lerp_color(PRED_COLOR_START, PRED_COLOR_END, (ratio0 + ratio1) / 2)
-            cv2.line(canvas, _pt(pred_2d_0), _pt(pred_2d_1), pred_color, 1, cv2.LINE_AA)
+            cv2.line(canvas, _pt(pred_2d_0), _pt(pred_2d_1), pred_color, 2, cv2.LINE_AA)
 
     # Draw keypoints at each selected timestep
     for t in timesteps:
@@ -371,12 +371,15 @@ def _draw_hand(canvas, wrist_2d, fingers_2d, color, radius=3):
         return
 
     wp = _pt(wrist_2d)
+    # Black outline then filled color for visibility when overlapping
+    cv2.circle(canvas, wp, radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
     cv2.circle(canvas, wp, radius + 1, color, -1, cv2.LINE_AA)
 
     for i in range(fingers_2d.shape[0]):
         fp = _pt(fingers_2d[i])
         if -margin <= fp[0] <= W + margin and -margin <= fp[1] <= H + margin:
             cv2.line(canvas, wp, fp, color, 1, cv2.LINE_AA)
+            cv2.circle(canvas, fp, radius + 1, (0, 0, 0), -1, cv2.LINE_AA)
             cv2.circle(canvas, fp, radius, color, -1, cv2.LINE_AA)
 
 

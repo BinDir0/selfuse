@@ -33,6 +33,7 @@ class LegendVLAInference(nn.Module):
         model_config_path: str,
         checkpoint_path: str = None,
         pretrained_vlm_path: str = None,
+        teacher_path: str | None = None,
         mode: str = "flow",
         use_mixed_precision: bool = True,
         tokenizer_padding: str = "longest",
@@ -53,6 +54,9 @@ class LegendVLAInference(nn.Module):
         if pretrained_vlm_path:
             OmegaConf.update(model_cfg, "pretrained.model_name_or_path", pretrained_vlm_path)
             log.info("Overriding pretrained VLM path to %s", pretrained_vlm_path)
+        if teacher_path:
+            OmegaConf.update(model_cfg, "policy.frozen_teacher.model_name_or_path", teacher_path)
+            log.info("Overriding frozen_teacher path to %s", teacher_path)
 
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
