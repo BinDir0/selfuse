@@ -174,9 +174,12 @@ def mano_parameter_dict_to_joints_bt(
     *,
     chunk: int = 512,
 ) -> torch.Tensor:
-    """Training-space MANO dict (camera trans, axis-angle root + 45 hand, betas) -> joints (B,T,J,3).
+    """Training-space MANO dict -> joints ``(B,T,J,3)`` in millimeters.
 
-    Positions are in **millimeters** (manopth convention after internal *1000). Differentiable w.r.t. inputs.
+    Important: in this codebase ``trans_bt`` is treated as an external wrist/camera-space
+    translation in meters. To make ``center_idx=0`` effective, we decode MANO without
+    ``th_trans`` so manopth returns wrist-centered outputs, then add ``trans_bt`` after
+    converting it to millimeters.
     """
     if trans_bt.ndim != 3 or root_orient_bt.shape[-1] != 3 or betas_bt.shape[-1] != 10:
         raise ValueError(
@@ -198,9 +201,8 @@ def mano_parameter_dict_to_joints_bt(
         _, jtr = mano_layer(
             pose[s:e],
             th_betas=betas[s:e],
-            th_trans=trans[s:e],
         )
-        parts.append(jtr)
+        parts.append(jtr + trans[s:e].unsqueeze(1) * 1000.0)
     j = torch.cat(parts, dim=0)
     return j.view(b, t, j.shape[1], 3)
 
@@ -214,7 +216,11 @@ def mano_parameter_dict_to_verts_bt(
     *,
     chunk: int = 512,
 ) -> torch.Tensor:
-    """MANO dict -> mesh vertices (B,T,V,3). Positions in millimeters (manopth). Differentiable."""
+    """MANO dict -> mesh vertices ``(B,T,V,3)`` in millimeters.
+
+    Mirrors ``mano_parameter_dict_to_joints_bt``: decode with centered MANO outputs and
+    apply the external translation after converting meters -> millimeters.
+    """
     if trans_bt.ndim != 3 or root_orient_bt.shape[-1] != 3 or betas_bt.shape[-1] != 10:
         raise ValueError(
             f"expected trans (B,T,3), root (B,T,3), betas (B,T,10); got "
@@ -235,9 +241,8 @@ def mano_parameter_dict_to_verts_bt(
         v, _ = mano_layer(
             pose[s:e],
             th_betas=betas[s:e],
-            th_trans=trans[s:e],
         )
-        parts.append(v)
+        parts.append(v + trans[s:e].unsqueeze(1) * 1000.0)
     v_all = torch.cat(parts, dim=0)
     return v_all.view(b, t, v_all.shape[1], 3)
 
