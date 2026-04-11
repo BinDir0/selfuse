@@ -163,3 +163,46 @@ def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
         state_dict.update(load_file(str(sf), device="cpu"))
     model.load_state_dict(state_dict, strict=True)
     log.info("Loaded safetensors checkpoint from %s (%d files)", path, len(safetensor_files))
+
+
+def load_model_and_collator_from_saved_config(
+    train_config_path: str | pathlib.Path,
+    device: str,
+    collator_mode: str = "train",
+    dtype: torch.dtype = torch.bfloat16,
+):
+    """Instantiate model + collator from a training run's saved .hydra/config.yaml.
+
+    Mirrors the loading path in ``evaluate.py::main`` (lines 119-143): load
+    the training config, instantiate ``cfg.policy``, move to device in the
+    target dtype, and instantiate the collator. Use this when the checkpoint
+    was trained with options (use_kv_projection, world_model,
+    intermediate_size, ...) that differ from the current code's default
+    experiment config.
+
+    Note: this function does NOT register OmegaConf resolvers. Callers that
+    need ``${eval:...}`` interpolations in saved configs must register the
+    resolver at module import time via::
+
+        OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+    Args:
+        train_config_path: Path to the run's saved ``.hydra/config.yaml``.
+        device: Target device string (e.g. ``"cuda"``).
+        collator_mode: Mode passed to the collator constructor (default
+            ``"train"`` to match the most common analysis use case).
+        dtype: Tensor dtype for ``model.to(...)`` (default bfloat16).
+
+    Returns:
+        ``(model, collator, train_cfg)``.
+    """
+    import hydra  # lazy import: only this helper needs hydra
+    from omegaconf import OmegaConf
+
+    train_cfg = OmegaConf.load(str(train_config_path))
+    log.info("Loaded saved training config from %s", train_config_path)
+    model = hydra.utils.instantiate(train_cfg.policy)
+    model = model.to(device=device, dtype=dtype)
+    model.eval()
+    collator = hydra.utils.instantiate(train_cfg.data_collator, mode=collator_mode)
+    return model, collator, train_cfg

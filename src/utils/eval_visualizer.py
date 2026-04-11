@@ -132,6 +132,79 @@ def recover_frames_from_pixel_values_videos(
     return frames
 
 
+def recover_all_frames(
+    pixel_values_videos,
+    video_grid_thw,
+    sample_idx: int,
+    target_size=(384, 384),
+):
+    """Recover ALL frames (not just the last) for one sample's video.
+
+    Mirrors :func:`recover_frames_from_pixel_values_videos` but iterates over
+    every ``(temporal_group, frame_in_group)`` pair instead of extracting only
+    the most-recent frame. Useful for attention-visualization workflows that
+    need every frame in the observation history, not just the last one.
+
+    See also :func:`recover_frames_from_pixel_values_videos`, which returns
+    only the last frame per sample (more efficient when that is all you need).
+
+    Args:
+        pixel_values_videos: Tensor [total_patches, channel_dim].
+        video_grid_thw: Tensor [num_videos, 3] with (T_grid, H_grid, W_grid).
+        sample_idx: Which sample in the batch to recover.
+        target_size: (H, W) output size.
+
+    Returns:
+        (frames, grid) where `frames` is a list of uint8 RGB arrays of length
+        ``T_g * TEMPORAL_PATCH_SIZE``, and `grid` is ``(T_g, H_g, W_g)``.
+    """
+    pvv = pixel_values_videos.float().cpu()
+    grid = video_grid_thw.long().cpu()
+    channel_dim = pvv.shape[1]
+
+    expected_channel_dim = TEMPORAL_PATCH_SIZE * 3 * PATCH_SIZE * PATCH_SIZE
+    assert channel_dim == expected_channel_dim, (
+        f"Unexpected channel_dim {channel_dim}, expected {expected_channel_dim}"
+    )
+
+    # Per-sample offsets into the packed patch sequence.
+    patch_counts = (grid[:, 0] * grid[:, 1] * grid[:, 2]).tolist()
+    offsets = [0]
+    for cnt in patch_counts:
+        offsets.append(offsets[-1] + cnt)
+
+    T_g, H_g, W_g = grid[sample_idx].tolist()
+    start, end = offsets[sample_idx], offsets[sample_idx + 1]
+    video_patches = pvv[start:end]  # [T_g * H_g * W_g, channel_dim]
+
+    m = MERGE_SIZE if (H_g % MERGE_SIZE == 0 and W_g % MERGE_SIZE == 0) else 1
+    video_patches = video_patches.reshape(
+        T_g, H_g // m, W_g // m, m, m, 3, TEMPORAL_PATCH_SIZE, PATCH_SIZE, PATCH_SIZE,
+    )
+    video_patches = video_patches.permute(0, 1, 3, 2, 4, 5, 6, 7, 8).reshape(
+        T_g, H_g, W_g, 3, TEMPORAL_PATCH_SIZE, PATCH_SIZE, PATCH_SIZE,
+    )
+    # video_patches: [T_g, H_g, W_g, 3, tp, ph, pw]
+
+    H_target, W_target = target_size
+    frames = []
+    for t_idx in range(T_g):
+        for tp_idx in range(TEMPORAL_PATCH_SIZE):
+            fp = video_patches[t_idx, :, :, :, tp_idx, :, :]  # [H_g, W_g, 3, ph, pw]
+            frame = fp.permute(2, 0, 3, 1, 4).reshape(
+                3, H_g * PATCH_SIZE, W_g * PATCH_SIZE,
+            )
+            frame = frame.permute(1, 2, 0).numpy()
+            frame = frame * CLIP_STD + CLIP_MEAN
+            frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+            h, w = frame.shape[:2]
+            if (h, w) != (H_target, W_target):
+                frame = cv2.resize(frame, (W_target, H_target), interpolation=cv2.INTER_LINEAR)
+            frames.append(frame)
+
+    return frames, (T_g, H_g, W_g)
+
+
 # ---------------------------------------------------------------------------
 # Function B: Prepare visualization sample
 # ---------------------------------------------------------------------------
