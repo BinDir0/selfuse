@@ -50,6 +50,18 @@ def build_parser():
     parser.add_argument("--report_out", default=None, help="Optional JSON report path")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
     parser.add_argument(
+        "--start_shard",
+        type=int,
+        default=0,
+        help="Start shard index in sorted shard order (inclusive)",
+    )
+    parser.add_argument(
+        "--end_shard",
+        type=int,
+        default=None,
+        help="End shard index in sorted shard order (exclusive)",
+    )
+    parser.add_argument(
         "--drop_nonfinite_lowdim",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -465,6 +477,12 @@ def build_report(
     report = {
         "source_shard_dir": str(source_shard_dir.resolve()),
         "output_dir": str(output_dir.resolve()) if output_dir else None,
+        "shard_selection": {
+            "start_shard": int(args_dict["start_shard"]),
+            "end_shard": int(args_dict["end_shard"]),
+            "selected_shards": len(analysis_results),
+            "total_shards_available": int(args_dict["total_shards_available"]),
+        },
         "mode": (
             f"two_pass_auto_{threshold_info['auto_rule']['method']}"
             if args_dict["use_auto_camera_space_thresholds"]
@@ -543,6 +561,16 @@ def main():
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
+    total_shards = len(shard_paths)
+    start_shard = int(args.start_shard)
+    end_shard = total_shards if args.end_shard is None else int(args.end_shard)
+    if start_shard < 0 or start_shard >= total_shards:
+        raise ValueError(f"--start_shard {start_shard} is out of range [0, {total_shards})")
+    if end_shard < start_shard or end_shard > total_shards:
+        raise ValueError(f"--end_shard {end_shard} is out of range [{start_shard}, {total_shards}]")
+    shard_paths = shard_paths[start_shard:end_shard]
+    if not shard_paths:
+        raise RuntimeError(f"No shards selected in range [{start_shard}, {end_shard}) from {source_dir}")
 
     args_dict = {
         "drop_nonfinite_lowdim": bool(args.drop_nonfinite_lowdim),
@@ -561,6 +589,9 @@ def main():
         "use_auto_camera_space_thresholds": (
             args.max_camera_space_wrist_abs is None or args.max_camera_space_hand_abs is None
         ),
+        "start_shard": start_shard,
+        "end_shard": end_shard,
+        "total_shards_available": total_shards,
         "output_dir": str(output_dir) if output_dir else None,
     }
 
