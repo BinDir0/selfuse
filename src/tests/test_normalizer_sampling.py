@@ -11,7 +11,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from src.dataset.collator import ConcatDataCollator
+from src.dataset.unified_vla_collator import ConcatDataCollator
 from src.dataset.normalizer_utils import get_normalizer
 from src.dataset.vla_dataset import VLALowLevelWdsDataset
 

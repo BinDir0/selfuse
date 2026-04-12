@@ -18,7 +18,7 @@ from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.utils.pytorch_util import dict_apply
 from .data_transforms import process_state_action, process_image, resize_frames
 from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
-from .collator import ConcatDataCollator
+from .unified_vla_collator import ConcatDataCollator
 from .wds_dataset import (
     build_blended_dataset, build_wds_pipeline, WindowConfig, LOWDIM_SLICES,
     expand_shard_patterns,

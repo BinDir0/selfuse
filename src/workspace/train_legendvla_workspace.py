@@ -28,7 +28,7 @@ from accelerate.utils import ProfileKwargs, InitProcessGroupKwargs
 from src.workspace.eval_utils import _unwrap_model
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
-from src.utils.checkpoint_util import TopKCheckpointManager
+from src.utils.checkpoint_util import TopKCheckpointManager, load_checkpoint
 from src.model.common.model_average import ModelAveraging
 from src.utils.training_utils import (
     TrainingState,
@@ -337,13 +337,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # Load pretrained weights before optimizer setup
         if cfg.training.finetune_checkpoint_path:
-            state_dict = torch.load(cfg.training.finetune_checkpoint_path, map_location='cpu')
-            # handle wrapping
-            for key in ['module', 'model', 'model_state_dict']:
-                if key in state_dict:
-                    state_dict = state_dict[key]
-                    break
-            model.load_state_dict(state_dict)
+            load_checkpoint(model, cfg.training.finetune_checkpoint_path)
             print("Successfully loaded finetuning weights.")
         # Ensure non-backbone modules match the VLM dtype (bf16) for single-GPU
         # training where accelerate autocast may not cover custom modules.

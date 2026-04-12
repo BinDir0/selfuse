@@ -560,7 +560,7 @@ class TestStreamingVsBatchFit:
 # Module 4: ConcatDataCollator
 # ======================================================================
 
-from src.dataset.collator import ConcatDataCollator
+from src.dataset.unified_vla_collator import ConcatDataCollator
 
 
 class TestConcatDataCollator:

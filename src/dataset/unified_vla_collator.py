@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import numpy as np
 import torch
 
 from src.dataset.qwen3_vl_batching import Qwen3VLBatchProcessor, Qwen3VLChatFormatter
@@ -170,3 +171,23 @@ class UnifiedVLACollator:
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         return self.collate_raw(samples)
+
+
+class ConcatDataCollator:
+    """Collator that concatenates samples along the first dimension.
+
+    Used for normalizer fitting where streaming statistics are accumulated
+    from variable-length batches.
+    """
+
+    def __call__(self, data_list):
+        batch = {}
+        for key in data_list[0].keys():
+            if isinstance(data_list[0][key], torch.Tensor):
+                batch[key] = torch.cat([item[key] for item in data_list], dim=0)
+            elif isinstance(data_list[0][key], np.ndarray):
+                batch[key] = np.concatenate([item[key] for item in data_list], axis=0)
+            else:
+                batch[key] = [item[key] for item in data_list]
+        batch["_batch_num_samples"] = len(data_list)
+        return batch
