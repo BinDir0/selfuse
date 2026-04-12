@@ -10,6 +10,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from src.utils.visual_attention import overlay_attention
+
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +65,12 @@ class ConnectionRecorder:
         self._depth_key = depth_key
         self._request_index = 0
 
-    def record(self, obs: dict[str, Any], response: dict[str, Any]) -> pathlib.Path:
+    def record(
+        self,
+        obs: dict[str, Any],
+        response: dict[str, Any],
+        attention_grid: np.ndarray | None = None,
+    ) -> pathlib.Path:
         self._request_index += 1
         request_dir = self._connection_dir / f"req_{self._request_index:06d}"
         request_dir.mkdir(parents=True, exist_ok=True)
@@ -86,9 +93,27 @@ class ConnectionRecorder:
         }
         response_payload.update(self._to_jsonable(response))
 
+        if attention_grid is not None:
+            frame = self._last_frame_rgb(obs)
+            if frame is not None:
+                overlay = overlay_attention(frame, attention_grid[-1])
+                cv2.imwrite(
+                    str(request_dir / "attention_overlay.jpg"),
+                    cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
+                )
+                response_payload["attention_overlay"] = "attention_overlay.jpg"
+
         self._write_json(request_dir / "request.json", request_payload)
         self._write_json(request_dir / "response.json", response_payload)
         return request_dir
+
+    def _last_frame_rgb(self, obs: dict[str, Any]) -> np.ndarray | None:
+        """Extract the last RGB frame from obs as uint8 [H, W, 3]."""
+        image = obs.get(self._image_key)
+        if image is None:
+            return None
+        frame = np.asarray(image, dtype=np.float32)[-1]
+        return self._normalize_rgb(frame)
 
     def _build_request_fields(self, obs: dict[str, Any]) -> dict[str, Any]:
         payload: dict[str, Any] = {}

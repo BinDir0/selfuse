@@ -40,6 +40,7 @@ policy:
   ar_cfg: 1.0
   normalizer_path: /home/descfly/normalizer/2026.03.16-relative-mixed/normalizer.pkl
   use_relative_action: True
+  attention_recording: False
   compile:
     enabled: True
     fullgraph: False       # allow graph breaks in backbone multimodal processing

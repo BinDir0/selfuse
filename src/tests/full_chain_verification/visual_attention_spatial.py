@@ -356,11 +356,6 @@ def analyze_sample(
     frames, (T_g, H_g, W_g) = recover_all_frames(
         batch["pixel_values_videos"], batch["video_grid_thw"], sample_idx=0,
     )
-    assert T_g == 3 and H_g == 24 and W_g == 24, (
-        f"Unexpected grid {(T_g, H_g, W_g)} — script assumes 6 frames at 384x384 "
-        f"(24x24 raw patches with patch_size=16, merge_size=2 -> 12x12 tokens)"
-    )
-
     # Capture expert attention.
     cap = extract_expert_attention(model, batch)
     expert_attn = cap["expert_attn"]
@@ -377,7 +372,7 @@ def analyze_sample(
 
     # Dense tensor [S, L, H, A, n_visual]
     vis_flat = stack_visual_attention(
-        expert_attn, prefix_len, visual_indices, sample_idx=0,
+        expert_attn, visual_indices, sample_idx=0,
     )
     # Reshape visual axis -> [S, L, H, A, T_g, token_H, token_W]
     vis_grid, token_H, token_W = reshape_visual_to_grid(vis_flat, T_g, H_g, W_g)

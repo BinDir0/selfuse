@@ -72,7 +72,6 @@ def compute_middle_layer_range(
 
 def stack_visual_attention(
     expert_attn: list[list[Any]],
-    prefix_len: int,
     visual_indices: Any,
     sample_idx: int = 0,
 ) -> torch.Tensor:
@@ -82,10 +81,7 @@ def stack_visual_attention(
         expert_attn: nested list `[n_steps][n_layers]` of Tensor `[B, H, A, kv]`
             or None. None entries represent layers for which `torch.compile`
             skipped attention capture.
-        prefix_len: number of prefix tokens (kv positions before the action
-            positions). Unused here but kept as an explicit anchor for the
-            caller to confirm the sparse slice.
-        visual_indices: positions of visual tokens inside the prefix. Accepted
+        visual_indices: positions of visual tokens in the KV sequence. Accepted
             as torch.Tensor, np.ndarray, or list[int].
         sample_idx: which sample in the batch to extract.
 
@@ -97,7 +93,6 @@ def stack_visual_attention(
     Raises:
         RuntimeError: if every layer at every step is None (nothing to stack).
     """
-    del prefix_len  # caller-facing sanity anchor only; we use visual_indices
     if not expert_attn or not expert_attn[0]:
         raise RuntimeError("expert_attn is empty")
     n_steps = len(expert_attn)

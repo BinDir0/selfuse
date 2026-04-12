@@ -13,6 +13,13 @@ from torch import nn
 
 from src.dataset.data_transforms import process_image
 from src.utils.checkpoint_util import load_checkpoint
+from src.utils.visual_attention import (
+    aggregate_visual_attention,
+    compute_middle_layer_range,
+    renormalize_visual_subset,
+    reshape_visual_to_grid,
+    stack_visual_attention,
+)
 
 
 log = logging.getLogger(__name__)
@@ -45,6 +52,7 @@ class LegendVLAInference(nn.Module):
         ar_cfg: float = 1.0,
         normalizer_path: str = None,
         use_relative_action: bool = False,
+        attention_recording: bool = False,
         compile: Any = None,
     ) -> None:
         super().__init__()
@@ -57,6 +65,9 @@ class LegendVLAInference(nn.Module):
         if teacher_path:
             OmegaConf.update(model_cfg, "policy.frozen_teacher.model_name_or_path", teacher_path)
             log.info("Overriding frozen_teacher path to %s", teacher_path)
+        if attention_recording:
+            OmegaConf.update(model_cfg, "policy.flow_expert.attn_implementation", "eager")
+            log.info("Attention recording: set flow_expert attn_implementation to eager")
 
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
@@ -104,6 +115,12 @@ class LegendVLAInference(nn.Module):
             "action_dim": self.action_dim,
         }
         self._model_compiled = False
+        self._attention_recording = attention_recording
+        self._middle_layer_range = (
+            compute_middle_layer_range(self.model.flow_expert.num_layers)
+            if attention_recording else None
+        )
+        self._last_attention_grid = None
         self.compile_cfg = None
         if compile is not None:
             self.compile_cfg = (
@@ -111,6 +128,7 @@ class LegendVLAInference(nn.Module):
                 if OmegaConf.is_config(compile)
                 else compile
             )
+        self.maybe_compile_model()
 
     @property
     def shape_meta(self) -> dict:
@@ -271,6 +289,28 @@ class LegendVLAInference(nn.Module):
 
         return batch
 
+    def extract_attention_grid(
+        self, batch: Dict[str, torch.Tensor], expert_attn: list,
+    ) -> np.ndarray:
+        """Aggregate expert attention into a spatial grid [T_g, tH, tW].
+
+        Uses the stack -> reshape -> aggregate -> renormalize pipeline from
+        src.utils.visual_attention. Returns a numpy float32 array.
+        """
+        input_ids = batch["input_ids"][0]
+        visual_indices = (input_ids == self.model.backbone.video_token_id).nonzero(as_tuple=True)[0].cpu()
+        T_g, H_g, W_g = (int(v) for v in batch["video_grid_thw"][0])
+
+        vis_flat = stack_visual_attention(expert_attn, visual_indices)
+        vis_grid, _, _ = reshape_visual_to_grid(vis_flat, T_g, H_g, W_g)
+        agg = aggregate_visual_attention(
+            vis_grid,
+            strategy="middle_layers_mean_heads",
+            ode_step=0,
+            layer_range=self._middle_layer_range,
+        )
+        return renormalize_visual_subset(agg).numpy()
+
     def post_process(self, actions: torch.Tensor) -> torch.Tensor:
         """Unnormalize predicted actions back to physical space."""
         if self.normalizer is None:
@@ -281,8 +321,17 @@ class LegendVLAInference(nn.Module):
     def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Run model inference. RTC fields (prev_action_chunk, inference_delay)
         are carried inside ``inputs`` when present."""
-        self.maybe_compile_model()
         if self.mode == "flow":
+            if self._attention_recording:
+                result = self.model("infer_action", inputs, output_attentions=True)
+                # Detach and move to CPU immediately to free GPU memory
+                # and prevent compile graph extension.
+                expert_attn = [
+                    [w.detach().cpu() if w is not None else None for w in step]
+                    for step in result["expert_attention_weights"]
+                ]
+                self._last_attention_grid = self.extract_attention_grid(inputs, expert_attn)
+                return result["generated_actions"]
             return self.model("infer_action", inputs)
         return self.model(
             "infer_vla", inputs,

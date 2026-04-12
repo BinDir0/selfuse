@@ -216,11 +216,6 @@ class Qwen3Expert(nn.Module):
             config._attn_implementation = attn_implementation
         elif hasattr(base, "_attn_implementation"):
             config._attn_implementation = base._attn_implementation
-        if getattr(config, "_attn_implementation", None) != "flex_attention":
-            raise ValueError(
-                "Qwen3Expert requires attn_implementation='flex_attention' "
-                "because expert attention always uses a BlockMask."
-            )
 
         self.config = config
         self.hidden_size = hidden_size

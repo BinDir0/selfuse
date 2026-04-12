@@ -42,7 +42,6 @@ class RuntimeEngine:
         self.policy = policy
         self.device = device
         self.use_autocast = use_autocast
-        self.metadata = policy.metadata
         self.warmup_image_shape = tuple(int(x) for x in warmup_image_shape)
         self.warmup_depth_shape = tuple(int(x) for x in warmup_depth_shape)
         self.warmup_intrinsic = np.asarray(warmup_intrinsic, dtype=np.float64)
@@ -52,8 +51,6 @@ class RuntimeEngine:
         self._profile_output_dir: pathlib.Path | None = None
 
         self.policy.to(device)
-        if hasattr(self.policy, "maybe_compile_model"):
-            self.policy.maybe_compile_model()
 
     def _move_to_device(self, data: Any) -> Any:
         if isinstance(data, dict):
@@ -63,7 +60,7 @@ class RuntimeEngine:
     def _autocast_context(self):
         if not self.use_autocast:
             return nullcontext()
-        return torch.autocast(device_type=self.device.type, dtype=self.policy.dtype)
+        return torch.autocast(device_type=self.device.type, dtype=self.dtype)
 
     def enable_profiling(self, output_dir: str | pathlib.Path, steps: int, skip_first: int) -> None:
         if steps <= 0:
@@ -116,15 +113,11 @@ class RuntimeEngine:
         self._profiler = None
         self._profile_output_dir = None
 
-    def _get_shape_meta(self) -> Dict[str, Any]:
-        if hasattr(self.policy, "shape_meta"):
-            return self.policy.shape_meta
-        if hasattr(self.policy, "model") and hasattr(self.policy.model, "shape_meta"):
-            return self.policy.model.shape_meta
-        raise AttributeError("Policy does not expose model.shape_meta for warmup")
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.policy, name)
 
     def _build_dummy_obs(self, instruction: str) -> Dict[str, Any]:
-        shape_meta = self._get_shape_meta()
+        shape_meta = self.shape_meta
         rgb_meta = shape_meta["obs"]["rgb"]
         state_meta = shape_meta["obs"]["state"]
 
@@ -160,13 +153,16 @@ class RuntimeEngine:
 
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """The high-level entry point for inference."""
-        inputs = self.policy.prepare_process(obs)
+        inputs = self.prepare_process(obs)
         inputs = self._move_to_device(inputs)
 
         with self._autocast_context(), torch.inference_mode():
             pred_actions = self.policy(inputs)
-        pred_actions = self.policy.post_process(pred_actions.cpu())
+        pred_actions = self.post_process(pred_actions.cpu())
         output = {"pred_actions": pred_actions.cpu().float().numpy()[0]}
+        attn_grid = self._last_attention_grid
+        if attn_grid is not None:
+            output["attention_grid"] = attn_grid
         self._step_profiler()
         return output
 
@@ -189,7 +185,6 @@ class EnvWrapper:
         self.instruction_key = instruction_key
         self.states_key = states_key
         self.prev_action_chunk_key = prev_action_chunk_key
-        self.metadata = getattr(policy, "metadata", {})
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.policy, name)
@@ -382,6 +377,10 @@ class WebsocketPolicyServer:
                 if prev_total_time is not None:
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
+                # Remove attention grid before packing (not serializable via
+                # msgpack and only used for local recording).
+                attention_grid = action.pop("attention_grid", None)
+
                 pack_start = time.monotonic()
                 packed_action = packer.pack(action)
                 pack_time = time.monotonic() - pack_start
@@ -392,7 +391,7 @@ class WebsocketPolicyServer:
                 if connection_recorder is not None:
                     try:
                         record_start = time.monotonic()
-                        connection_recorder.record(obs, action)
+                        connection_recorder.record(obs, action, attention_grid=attention_grid)
                         record_time = time.monotonic() - record_start
                     except Exception:
                         logger.exception("Failed to record request for %s", websocket.remote_address)

@@ -57,7 +57,7 @@ def test_stack_visual_attention_nan_fill():
     ]
 
     out = stack_visual_attention(
-        expert_attn, prefix_len=kv_len - action_len, visual_indices=visual_indices,
+        expert_attn, visual_indices=visual_indices,
     )
     # Shape: [S=2, L=3, H=4, A=8, n_visual=4]
     assert out.shape == (2, 3, n_heads, action_len, len(visual_indices))
@@ -77,7 +77,7 @@ def test_stack_visual_attention_all_none_raises():
     expert_attn = [[None, None]]
     with pytest.raises(RuntimeError, match="No expert attention"):
         stack_visual_attention(
-            expert_attn, prefix_len=10, visual_indices=np.array([0, 1]),
+            expert_attn, visual_indices=np.array([0, 1]),
         )
 
 

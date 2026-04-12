@@ -27,7 +27,6 @@ def _load_config() -> OmegaConf:
     return cfg
 
 
-
 def _create_recorder(serving_cfg: OmegaConf, wrapper_cfg: OmegaConf | None = None) -> ServingRecorder | None:
     if not bool(serving_cfg.record_enabled):
         logger.info("Serving recorder is disabled")
@@ -46,7 +45,6 @@ def _create_recorder(serving_cfg: OmegaConf, wrapper_cfg: OmegaConf | None = Non
     image_key = getattr(wrapper_cfg, "image_key", "image")
     depth_key = getattr(wrapper_cfg, "depth_key", "depth_image")
     return ServingRecorder(root_dir, image_key=image_key, depth_key=depth_key)
-
 
 
 def _warmup_policy(policy: Any, serving_cfg: OmegaConf) -> None:
@@ -68,7 +66,6 @@ def _enable_profiler(policy: Any, serving_cfg: OmegaConf) -> None:
         project_root = pathlib.Path(__file__).resolve().parents[2]
         profile_dir = project_root / profile_dir
     policy.enable_profiling(profile_dir, int(serving_cfg.profile_steps), int(serving_cfg.profile_skip_first))
-
 
 
 def main() -> None:
