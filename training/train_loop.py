@@ -152,8 +152,8 @@ def train_one_epoch(
     for batch in pbar:
         # Debug: 打印当前batch的dataset_name分布
         if step_in_epoch % DEBUG_DATASET_DIST_EVERY == 0 and is_rank0:
-            dist = _batch_dataset_counter(batch)
-            print(f"[DEBUG] Step {step_in_epoch}: batch dataset_name distribution: {dict(dist)}")
+            dataset_dist = _batch_dataset_counter(batch)
+            print(f"[DEBUG] Step {step_in_epoch}: batch dataset_name distribution: {dict(dataset_dist)}")
 
         video, exist_tgt, mano_l_tgt, mano_r_tgt, intr_bt = wds_batch_to_training_batch(
             batch,
