@@ -34,6 +34,7 @@ sudo apt install mpg123
 5. **安装依赖**：在container中执行：
 ```bash
 pip install -r requirements.txt
+sudo apt update
 sudo apt install vim
 sudo apt install tree
 sudo apt-get update && sudo apt-get install ros-$ROS_DISTRO-rmw-cyclonedds-cpp -y
