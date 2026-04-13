@@ -21,7 +21,6 @@ SSH_USER=""
 GPUS_PER_NODE=8
 MASTER_PORT=18276
 
-ACC_CONFIG="src/config/acc_config.yaml"
 SCRIPT="train.py"
 ARGS="experiment=legendvla_qwen3_vl"
 # -----------------------------------------------
@@ -50,7 +49,7 @@ ssh_target_prefix() {
 remote_cleanup() {
     pdsh -S -R exec -w "$HOSTLIST" \
         ssh -o BatchMode=yes "$(ssh_target_prefix)%h" \
-        "pkill -f 'accelerate launch' || true; pkill -f 'train.py' || true" || true
+        "pkill -f 'torchrun' || true; pkill -f 'train.py' || true" || true
 }
 
 cleanup() {
@@ -108,13 +107,12 @@ export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 export TORCH_LOGS="recompiles"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
-exec accelerate launch \\
-    --config_file "$ACC_CONFIG" \\
-    --num_machines "$NNODES" \\
-    --machine_rank __NODE_RANK__ \\
-    --main_process_ip "$MASTER_ADDR" \\
-    --main_process_port "$MASTER_PORT" \\
-    --num_processes "$TOTAL_PROCESSES" \\
+exec torchrun \\
+    --nnodes="$NNODES" \\
+    --node_rank=__NODE_RANK__ \\
+    --master_addr="$MASTER_ADDR" \\
+    --master_port="$MASTER_PORT" \\
+    --nproc_per_node="$GPUS_PER_NODE" \\
     "$SCRIPT" \\
     $ARGS
 EOF

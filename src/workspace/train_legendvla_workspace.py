@@ -21,14 +21,16 @@ import pickle
 import time
 import math
 from datetime import timedelta
-from transformers import get_scheduler
-import accelerate
-from accelerate import Accelerator
-from accelerate.utils import ProfileKwargs, InitProcessGroupKwargs
+import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.profiler import profile as torch_profile, ProfilerActivity, schedule as profiler_schedule
+import wandb
 from src.workspace.eval_utils import _unwrap_model
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager, load_checkpoint
+from src.utils.fsdp_app_state import APP_STATE_KEY, FSDPWorkspaceAppState
 from src.model.common.model_average import ModelAveraging
 from src.utils.training_utils import (
     TrainingState,
@@ -89,7 +91,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.compile_cfg = cfg.training.get("compile", {})
         print(f"Training with objective function: {self.objective_func}")
 
-    def maybe_compile_model(self, accelerator):
+    def maybe_compile_model(self, rank):
         if not self.compile_cfg.get("enabled", False):
             return
 
@@ -105,7 +107,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             if key != "enabled" and value is not None
         }
 
-        if accelerator.is_main_process:
+        if rank == 0:
             print(f"Compiling blocks with kwargs: {compile_kwargs}")
 
         self.model.compile_blocks(compile_kwargs)
@@ -194,7 +196,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def _is_vlm_freeze_active(self) -> bool:
         return bool(self._vlm_group_indices) and self.update_step < self._vlm_freeze_updates
 
-    def _maybe_reset_vlm_optimizer_state(self, accelerator) -> None:
+    def _maybe_reset_vlm_optimizer_state(self, rank) -> None:
         if (
             self._vlm_optimizer_state_reset_done
             or not self._vlm_group_indices
@@ -211,7 +213,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     num_cleared += 1
 
         self._vlm_optimizer_state_reset_done = True
-        if accelerator.is_main_process:
+        if rank == 0:
             print(
                 f"Reset optimizer state for {num_cleared} VLM parameters "
                 f"at update_step={self.update_step} before VLM re-warmup."
@@ -225,7 +227,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         ]
         return current_lrs, non_vlm_group_indices
         
-    def reset_run_seed(self, accelerator):
+    def reset_run_seed(self, rank):
         """Reset runtime seed before building dataset/dataloader."""
         base_seed = int(self.cfg.training.seed)
         dynamic_data_seed = bool(self.cfg.training.get("dynamic_data_seed", False))
@@ -233,17 +235,17 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         timestamp_seed = None
         run_seed = base_seed
         if dynamic_data_seed:
-            if accelerator.is_main_process:
+            if rank == 0:
                 timestamp_seed = int(time.time())
                 objects = [timestamp_seed]
             else:
                 objects = [None]
-            objects = accelerate.utils.broadcast_object_list(objects, from_process=0)
+            dist.broadcast_object_list(objects, src=0)
             timestamp_seed = int(objects[0])
             run_seed = base_seed + timestamp_seed
 
         # Per-rank offset for independent random augmentation across devices
-        per_device_seed = run_seed + accelerator.process_index
+        per_device_seed = run_seed + rank
         torch.manual_seed(per_device_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(per_device_seed)
@@ -251,8 +253,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         random.seed(per_device_seed)
         self.run_seed = run_seed
 
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
+        dist.barrier()
+        if rank == 0:
             if dynamic_data_seed:
                 print(
                     f"Using runtime seed: {run_seed} "
@@ -278,146 +280,103 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
             p.export_chrome_trace(f"{self.output_dir}/trace/trace_step_{p.step_num}.json")
 
+        # Initialize distributed process group
+        dist.init_process_group(backend="nccl", timeout=timedelta(seconds=3600))
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+
+        if rank == 0:
+            print("=" * 80)
+            print("Distributed Training Info:")
+            print(f"  backend: nccl")
+            print(f"  dtype: {'bf16' if cfg.training.use_bf16 else 'fp32'}")
+            print(f"  world_size: {world_size}")
+            print(f"  rank: {rank}")
+            print(f"  device: {device}")
+            print("=" * 80)
+
+        # Profiling setup
+        profiler = None
         if cfg.training.profile:
-            profile_kwargs = ProfileKwargs(
-                activities=['cpu', 'cuda'],
-                schedule_option={"wait": 1, "warmup": 2, "active": 10, "repeat": 3, "skip_first": 50},
+            os.makedirs(f"{self.output_dir}/trace", exist_ok=True)
+            profiler = torch_profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=profiler_schedule(
+                    wait=1, warmup=2, active=10, repeat=3, skip_first=50
+                ),
                 on_trace_ready=trace_handler,
             )
-            os.makedirs(f"{self.output_dir}/trace", exist_ok=True)
 
-        init_process_group_kwargs = InitProcessGroupKwargs(
-            timeout=timedelta(seconds=3600)
-        )
-        kwargs_handlers = [init_process_group_kwargs]
-        if cfg.training.profile:
-            kwargs_handlers.append(profile_kwargs)
-
-        accelerator = Accelerator(
-            log_with='wandb',
-            kwargs_handlers=kwargs_handlers
-        )
-
-        # Print accelerator initialization info
-        if accelerator.is_main_process:
-            print("=" * 80)
-            print("Accelerator Initialization Info:")
-            print(f"  distributed_type: {accelerator.distributed_type}")
-            print(f"  mixed_precision: {accelerator.mixed_precision}")
-            print(f"  num_processes: {accelerator.num_processes}")
-            print(f"  process_index: {accelerator.process_index}")
-            print(f"  device: {accelerator.device}")
-            print("=" * 80)
-
-        # Initialize wandb tracking
-        wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
-        project_name = wandb_cfg.pop('project')
-        accelerator.init_trackers(
-            project_name=project_name,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            init_kwargs={"wandb": wandb_cfg}
-        )
+        # Initialize wandb tracking (rank 0 only)
+        if rank == 0:
+            wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
+            project_name = wandb_cfg.pop('project')
+            wandb.init(
+                project=project_name,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                **wandb_cfg,
+            )
 
         # Broadcast output directory to all processes
-        if accelerator.is_main_process:
-            output_dir = self.output_dir
-            objects_to_broadcast = [output_dir]
+        if rank == 0:
+            objects_to_broadcast = [self.output_dir]
         else:
             objects_to_broadcast = [None]
 
-        objects_to_broadcast = accelerate.utils.broadcast_object_list(objects_to_broadcast, from_process=0)
+        dist.broadcast_object_list(objects_to_broadcast, src=0)
         output_dir = objects_to_broadcast[0]
         self._output_dir = output_dir
-        accelerator.wait_for_everyone()
+        dist.barrier()
 
-        self.reset_run_seed(accelerator)
+        self.reset_run_seed(rank)
+
+        # Gradient accumulation config
+        grad_accum_steps = int(cfg.training.get("gradient_accumulation_steps", 1))
 
         # Configure optimizers
         model = self.model
 
         # Load pretrained weights before optimizer setup
         if cfg.training.finetune_checkpoint_path:
+            if rank == 0:
+                print(f"[ckpt] finetune: loading model weights from {cfg.training.finetune_checkpoint_path}")
             load_checkpoint(model, cfg.training.finetune_checkpoint_path)
-            print("Successfully loaded finetuning weights.")
-        # Ensure non-backbone modules match the VLM dtype (bf16) for single-GPU
-        # training where accelerate autocast may not cover custom modules.
-        if cfg.training.use_bf16 and accelerator.distributed_type.value == "NO":
-            model.to(dtype=torch.bfloat16)
+            if rank == 0:
+                print(f"[ckpt] finetune: loaded (model weights only; optimizer + scheduler start fresh)")
+        # Dtype handling for FSDP2: master params must be uniform dtype
+        # before fully_shard(). Mixed precision is configured via
+        # MixedPrecisionPolicy at the FSDP layer below, which casts to
+        # bf16 only for compute. See the FSDP2 wrapping block for details.
 
         runtime_cfg = getattr(cfg, "runtime", None)
         use_lora = bool(getattr(runtime_cfg, "use_lora", getattr(cfg, "lora", False)))
         if use_lora:
             model.freeze_non_lora_weights_in_vlm()
 
-        # Compile after accelerator.prepare() to avoid _orig_mod issues with FSDP2.
-        # Moved from here; see post-prepare block below.
+        # Compile after FSDP2 wrapping to avoid _orig_mod issues.
+        # Moved from here; see post-wrapping block below.
 
-        self.model_averaging = ModelAveraging(self.model, cfg.training.average, accelerator.device)
-        for key in self.include_keys:
-            accelerator.register_for_checkpointing(self.__dict__[key])
+        self.model_averaging = ModelAveraging(self.model, cfg.training.average, device)
 
-        # Action optimizer
-        all_trainable_parameters = []
-        if self.objective_func != "train_ar":
-            all_trainable_parameters = self.get_grouped_parameters(
-                model.action_expert_parameters,
-                cfg.optimizer.action,
-            )
-        else:
+        # Freeze modules that should not be trained. Actual optimizer param
+        # groups are collected AFTER fully_shard() below — FSDP2 replaces
+        # module._parameters[name] with new Parameter objects that wrap
+        # DTensors, so any list of Parameter refs captured before sharding
+        # becomes orphaned (backward populates grads on the new DTensors,
+        # optimizer.step() runs on the stale pre-shard tensors, loss stays
+        # flat). lingbot-vla handles this the same way — its build_optimizer
+        # iterates ``model.named_parameters()`` after parallelize_model.
+        if self.objective_func == "train_ar":
             model.freeze_non_lora_weights_in_ae()
-
-        # VLM optimizer (if training VLM)
-        self._vlm_group_indices = set()
-        if cfg.training.train_vlm:
-            vlm_trained_parameters = model.trainable_vlm_parameters
-            vlm_trainable_parameters = self.get_grouped_parameters(
-                vlm_trained_parameters,
-                cfg.optimizer.vlm,
-            )
-            start_idx = len(all_trainable_parameters)
-            all_trainable_parameters.extend(vlm_trainable_parameters)
-            self._vlm_group_indices = set(
-                range(start_idx, start_idx + len(vlm_trainable_parameters))
-            )
-        else:
+        if not cfg.training.train_vlm:
             model.freeze_non_lora_weights_in_vlm()
-
         if cfg.training.train_depth is False:
             model.freeze_weights_in_depth()
 
-        diffloss_trainable_paramters = self.get_grouped_parameters(
-            model.diffloss_parameters,
-            cfg.optimizer.diffloss,
-        )
-        all_trainable_parameters.extend(diffloss_trainable_paramters)
-
-        if model.use_world_model:
-            wm_trainable_parameters = self.get_grouped_parameters(
-                model.world_model_parameters,
-                cfg.optimizer.world_model,
-            )
-            all_trainable_parameters.extend(wm_trainable_parameters)
-
-        all_trainable_params_list = []
-        for params_dict in all_trainable_parameters:
-            all_trainable_params_list.extend(params_dict['params'])
-
-        trainable_param_ids = {id(p) for p in all_trainable_params_list}
-
-        for i, param in enumerate(all_trainable_params_list):
-            assert param.requires_grad, \
-                f"Parameter at index {i} is in optimizer groups but requires_grad is False"
-
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                assert id(param) in trainable_param_ids, \
-                    f"Parameter '{name}' requires grad but is NOT in the optimizer parameters list"
-
-        self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
         self._vlm_freeze_updates, self._vlm_rewarmup_updates = self._get_vlm_stage_steps(cfg.training)
-        self._vlm_optimizer_state_reset_done = (
-            self._vlm_freeze_updates <= 0 or not self._vlm_group_indices
-        )
         # ============================================================
         # WebDataset: dataset and dataloader creation
         # ============================================================
@@ -425,7 +384,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         dataset = hydra.utils.instantiate(cfg.dataset)
         self.use_relative_action = dataset.vla_dataset.use_relative_action
         print("--> dataset instantiated")
-        accelerator.wait_for_everyone()
+        dist.barrier()
 
         data_collator = hydra.utils.instantiate(cfg.data_collator)
         dataset.vla_dataset.set_collator(data_collator)
@@ -441,11 +400,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         dataset.vla_dataset.set_normalizer(normalizer)
         self.normalizer = normalizer
 
-        # Distributed shard splitting: handled at dataset level, not by accelerate
-        dataset.distribute(
-            rank=accelerator.process_index,
-            world_size=accelerator.num_processes,
-        )
+        # Distributed shard splitting
+        dataset.distribute(rank=rank, world_size=world_size)
 
         # DataLoader for IterableDataset: use batch_size, no batch_sampler
         train_dataloader = DataLoader(
@@ -453,7 +409,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             collate_fn=dataset.get_collator(),
             **cfg.dataloader.loader,
         )
-        # Validation dataloader — NOT managed by accelerate.
+        # Validation dataloader.
         # Each rank reads its own shards via wds.split_by_node.
         # Unequal batch counts across ranks are safe because
         # eval_with_averaged_model pre-unshards all FSDP params,
@@ -468,36 +424,36 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Steps per epoch: configured value (streaming has no fixed length)
         steps_per_epoch = cfg.training.get("steps_per_epoch", 100000)
 
-        # Wrap dataloaders with DeviceTransferWrapper (not managed by accelerate)
-        train_dataloader = DeviceTransferWrapper(train_dataloader, accelerator.device)
-        val_dataloader = DeviceTransferWrapper(val_dataloader, accelerator.device)
+        # Wrap dataloaders with DeviceTransferWrapper
+        train_dataloader = DeviceTransferWrapper(train_dataloader, device)
+        val_dataloader = DeviceTransferWrapper(val_dataloader, device)
         # ============================================================
 
         # Configure learning rate schedulers
-        num_update_steps_per_epoch = math.ceil(steps_per_epoch / accelerator.gradient_accumulation_steps)
+        # Without accelerate wrapping, scheduler steps directly correspond to
+        # update steps — no num_processes scaling needed.
+        num_update_steps_per_epoch = math.ceil(steps_per_epoch / grad_accum_steps)
         max_train_steps = num_update_steps_per_epoch * cfg.training.num_epochs
         if cfg.training.max_train_steps is not None:
             max_train_steps = cfg.training.max_train_steps
-        # Accelerate's prepared scheduler only steps once every num_processes
-        # optimizer steps, so multiply total and warmup steps by num_processes
-        # to keep the effective schedule correct.
-        max_train_steps = max_train_steps * accelerator.num_processes
-        num_warmup_steps = cfg.training.lr_warmup_steps * accelerator.num_processes
-        vlm_freeze_steps = self._vlm_freeze_updates * accelerator.num_processes
-        vlm_rewarmup_steps = self._vlm_rewarmup_updates * accelerator.num_processes
-        if accelerator.is_main_process:
+        num_warmup_steps = cfg.training.lr_warmup_steps
+        vlm_freeze_steps = self._vlm_freeze_updates
+        vlm_rewarmup_steps = self._vlm_rewarmup_updates
+        if rank == 0:
             print(f"num_warmup_steps: {num_warmup_steps}, max_train_steps: {max_train_steps}")
             if self._vlm_freeze_updates > 0:
                 print(
                     f"VLM staged training: freeze for {self._vlm_freeze_updates} update steps, "
                     f"then re-warmup for {self._vlm_rewarmup_updates} steps"
                 )
-        self.lr_scheduler = self._build_lr_scheduler(
-            optimizer=self.optimizer,
+        # NOTE: lr_scheduler is constructed AFTER optimizer, which is after
+        # fully_shard() below. Capture the schedule knobs here and pass them
+        # through to the post-wrap block. ``vlm_group_indices`` is filled in
+        # there, once the post-shard param groups are known.
+        self._lr_schedule_kwargs = dict(
             schedule_name=cfg.training.lr_scheduler,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=max_train_steps,
-            vlm_group_indices=self._vlm_group_indices,
             vlm_freeze_steps=vlm_freeze_steps,
             vlm_rewarmup_steps=vlm_rewarmup_steps,
         )
@@ -508,23 +464,141 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             **cfg.checkpoint.topk
         )
 
-        # Prepare with Accelerate (DataLoader excluded — sharding handled manually)
-        self.model, self.optimizer, self.lr_scheduler = accelerator.prepare(
-            self.model, self.optimizer, self.lr_scheduler
+        # FSDP2 wrapping: shard sub-modules first, then root
+        from src.model.vlm.qwen3_vl_backbone import Qwen3VLTextDecoderLayerWithKV
+        from src.model.vlm.qwen3_expert import DiTQwen3DecoderLayer
+        from src.model.common.diffloss import DiffLoss
+        try:
+            from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionBlock
+            fsdp_wrap_classes = (Qwen3VLTextDecoderLayerWithKV, Qwen3VLVisionBlock, DiTQwen3DecoderLayer, DiffLoss)
+        except ImportError:
+            fsdp_wrap_classes = (Qwen3VLTextDecoderLayerWithKV, DiTQwen3DecoderLayer, DiffLoss)
+
+        # Upcast master params to fp32 before FSDP2 wrap, matching lingbot-vla's
+        # standard mixed-precision recipe: optimizer state (AdamW momentum /
+        # variance) lives in fp32 for numerical stability, while forward /
+        # backward run in bf16 via MixedPrecisionPolicy(param_dtype=bf16).
+        # reduce_dtype=fp32 keeps gradient all-reduce safe, and output_dtype=bf16
+        # avoids fp32↔bf16 re-casts at FSDP unit boundaries.
+        self.model.to(dtype=torch.float32)
+        self.model.to(device)
+
+        mp_policy = None
+        if cfg.training.use_bf16:
+            # MixedPrecisionPolicy setup.
+            mp_policy = MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+                output_dtype=torch.bfloat16,
+            )
+
+        fsdp_kwargs = {"reshard_after_forward": False}
+        if mp_policy is not None:
+            fsdp_kwargs["mp_policy"] = mp_policy
+
+        for module in self.model.modules():
+            if isinstance(module, fsdp_wrap_classes):
+                fully_shard(module, **fsdp_kwargs)
+        fully_shard(self.model, **fsdp_kwargs)
+
+        # ----------------------------------------------------------------
+        # Collect trainable parameter groups AFTER fully_shard(). FSDP2
+        # replaces each module._parameters[name] with a new nn.Parameter
+        # that wraps a sharded DTensor, so parameter lists captured before
+        # sharding become orphaned (backward pass populates grads on the
+        # new DTensors, but the optimizer would be looking at the old
+        # full-tensor refs). Re-read the model here so we get the post-
+        # shard Parameter objects. lingbot-vla's build_optimizer does the
+        # same — it iterates model.named_parameters() after the FSDP wrap.
+        # ----------------------------------------------------------------
+        all_trainable_parameters = []
+        if self.objective_func != "train_ar":
+            all_trainable_parameters = self.get_grouped_parameters(
+                model.action_expert_parameters,
+                cfg.optimizer.action,
+            )
+
+        self._vlm_group_indices = set()
+        if cfg.training.train_vlm:
+            vlm_trainable_parameters = self.get_grouped_parameters(
+                model.trainable_vlm_parameters,
+                cfg.optimizer.vlm,
+            )
+            start_idx = len(all_trainable_parameters)
+            all_trainable_parameters.extend(vlm_trainable_parameters)
+            self._vlm_group_indices = set(
+                range(start_idx, start_idx + len(vlm_trainable_parameters))
+            )
+
+        all_trainable_parameters.extend(
+            self.get_grouped_parameters(
+                model.diffloss_parameters,
+                cfg.optimizer.diffloss,
+            )
         )
-        
-        # Resume training from checkpoint after accelerator prepare but BEFORE
+
+        if model.use_world_model:
+            all_trainable_parameters.extend(
+                self.get_grouped_parameters(
+                    model.world_model_parameters,
+                    cfg.optimizer.world_model,
+                )
+            )
+
+        all_trainable_params_list = []
+        for params_dict in all_trainable_parameters:
+            all_trainable_params_list.extend(params_dict['params'])
+        trainable_param_ids = {id(p) for p in all_trainable_params_list}
+        for i, param in enumerate(all_trainable_params_list):
+            assert param.requires_grad, (
+                f"Parameter at index {i} is in optimizer groups but requires_grad is False"
+            )
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert id(param) in trainable_param_ids, (
+                    f"Parameter '{name}' requires grad but is NOT in the optimizer parameters list"
+                )
+
+        self._vlm_optimizer_state_reset_done = (
+            self._vlm_freeze_updates <= 0 or not self._vlm_group_indices
+        )
+
+        # Use fused=False for FSDP2/DTensor compatibility. lingbot-vla
+        # likewise defaults to fused=False — the fused AdamW kernel has
+        # had known DTensor correctness issues across PyTorch versions.
+        self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
+        self.lr_scheduler = self._build_lr_scheduler(
+            optimizer=self.optimizer,
+            vlm_group_indices=self._vlm_group_indices,
+            **self._lr_schedule_kwargs,
+        )
+
+        # Resume training from checkpoint after FSDP2 wrapping but BEFORE
         # compile, so that the state_dict keys don't have the _orig_mod prefix
         # that torch.compile introduces.
         if cfg.training.resume_checkpoint_path:
-            accelerator.load_state(cfg.training.resume_checkpoint_path)
+            if rank == 0:
+                print(f"[ckpt] resume: loading full workspace state from {cfg.training.resume_checkpoint_path}")
+            app_state = FSDPWorkspaceAppState(
+                model=self.model,
+                optimizer=self.optimizer,
+                lr_scheduler=self.lr_scheduler,
+                training_state=self.training_state,
+                model_averaging=self.model_averaging,
+            )
+            dcp.load({APP_STATE_KEY: app_state}, checkpoint_id=cfg.training.resume_checkpoint_path)
             self.update_step = self.training_state.update_step
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
             if self._vlm_group_indices and self._vlm_freeze_updates > 0:
                 self._vlm_optimizer_state_reset_done = self.update_step > self._vlm_freeze_updates
+            if rank == 0:
+                print(
+                    f"[ckpt] resume: restored update_step={self.update_step} "
+                    f"global_step={self.global_step} epoch={self.epoch}"
+                )
         # Compile after FSDP2 wrapping and checkpoint loading.
-        self.maybe_compile_model(accelerator)
+        self.maybe_compile_model(rank)
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2
@@ -534,8 +608,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             cfg.training.eval_every = 1
 
         profile_context = nullcontext()
-        if cfg.training.profile and accelerator.is_main_process:
-            profile_context = accelerator.profile()
+        if cfg.training.profile and rank == 0:
+            profile_context = profiler
 
         # Training loop
         gc_handler = GarbageCollection(gc_freq=1000)
@@ -543,11 +617,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         total_samples_processed = 0
         log_interval = int(getattr(cfg.training, "log_interval", 50))
         with profile_context as prof:
-            if accelerator.is_main_process:
+            if rank == 0:
                 print(f"Training with {steps_per_epoch} steps per epoch (WebDataset streaming)")
             for epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
-                if accelerator.is_main_process:
+                if rank == 0:
                     print(f"Training epoch {self.epoch} started")
                 dataloader = train_dataloader
                 step_perf_end = time.perf_counter()
@@ -566,95 +640,107 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     # Preprocess batch
                     inputs = self.preprocess_batch(batch)
 
-                    if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
+                    if batch_idx == 10 and rank == 0 and cfg.training.profile:
                         self.tracker.track()
                     step_skipped = False
-                    with accelerator.accumulate(self.model):
-                        # Forward pass
-                        with accelerator.autocast():
-                            raw_loss = self.model(self.objective_func, inputs)
 
-                        accelerator.backward(raw_loss["total_loss"])
-                        if batch_idx == 10 and accelerator.is_main_process and cfg.training.profile:
-                            torch.cuda.empty_cache()
-                            print(torch.cuda.memory_summary())
-                            self.tracker.report()
-                            self.tracker.stop()
+                    # Gradient accumulation: skip gradient sync on accumulation steps
+                    is_accumulating = (batch_idx + 1) % grad_accum_steps != 0
+                    sync_gradients = not is_accumulating
+                    # Only toggle when grad accumulation is actually in use;
+                    # otherwise this walks the whole FSDP module tree every
+                    # step for no benefit.
+                    if grad_accum_steps > 1:
+                        self.model.set_requires_gradient_sync(sync_gradients)
 
-                        should_record = (
-                            accelerator.sync_gradients
-                            and (self.update_step % log_interval == 0)
-                        )
-                        vlm_freeze_active = self._is_vlm_freeze_active()
-                        # Per-component gradient clipping to prevent cross-component interference.
-                        # clip_grad_norm_ returns the total norm before clipping.
-                        part_grad_norms = None
-                        if accelerator.sync_gradients and cfg.training.clipping.enabled:
-                            max_norm = cfg.training.clipping.max_grad_norm
-                            part_params = {
-                                "action_expert": self.model.action_expert_parameters,
-                                "diffloss": self.model.diffloss_parameters,
-                            }
-                            if self.model.use_world_model:
-                                part_params["world_model"] = self.model.world_model_parameters
-                            if cfg.training.train_vlm and not vlm_freeze_active:
-                                part_params["vision"] = self.model.trainable_vision_parameters
-                                part_params["text"] = self.model.trainable_text_parameters
-                            norms = {
-                                name: accelerator.clip_grad_norm_(params, max_norm)
-                                for name, params in part_params.items()
-                            }
-                            if should_record:
-                                part_grad_norms = norms
+                    # Forward pass. Compute dtype is managed by
+                    # MixedPrecisionPolicy at the FSDP layer — no autocast needed.
+                    raw_loss = self.model(self.objective_func, inputs)
 
-                            # NaN/Inf guard: clip_grad_norm_ returns a scalar
-                            # norm that DTensor dispatch already reduces across
-                            # all FSDP2 shards, so every rank sees the same
-                            # value. No extra all_reduce needed — all ranks
-                            # will make the same skip/no-skip decision.
-                            if any(
-                                not math.isfinite(scalar_metric_value(n))
-                                for n in norms.values()
-                            ):
-                                step_skipped = True
-                                if accelerator.is_main_process:
-                                    print(
-                                        f"[WARN] Non-finite grad norm at "
-                                        f"update_step={self.update_step} "
-                                        f"global_step={self.global_step}: "
-                                        f"{({k: scalar_metric_value(v) for k, v in norms.items()})}. "
-                                        f"Skipping step."
-                                    )
+                    loss = raw_loss["total_loss"]
+                    if grad_accum_steps > 1:
+                        loss = loss / grad_accum_steps
+                    loss.backward()
 
-                        if not step_skipped:
-                            self._maybe_reset_vlm_optimizer_state(accelerator)
-                            self.optimizer.step()
-                            self.lr_scheduler.step()
+                    if batch_idx == 10 and rank == 0 and cfg.training.profile:
+                        torch.cuda.empty_cache()
+                        print(torch.cuda.memory_summary())
+                        self.tracker.report()
+                        self.tracker.stop()
+
+                    should_record = (
+                        sync_gradients
+                        and (self.update_step % log_interval == 0)
+                    )
+                    vlm_freeze_active = self._is_vlm_freeze_active()
+                    # Per-component gradient clipping to prevent cross-component interference.
+                    # clip_grad_norm_ returns the total norm before clipping.
+                    part_grad_norms = None
+                    if sync_gradients and cfg.training.clipping.enabled:
+                        max_norm = cfg.training.clipping.max_grad_norm
+                        part_params = {
+                            "action_expert": self.model.action_expert_parameters,
+                            "diffloss": self.model.diffloss_parameters,
+                        }
+                        if self.model.use_world_model:
+                            part_params["world_model"] = self.model.world_model_parameters
+                        if cfg.training.train_vlm and not vlm_freeze_active:
+                            part_params["vision"] = self.model.trainable_vision_parameters
+                            part_params["text"] = self.model.trainable_text_parameters
+                        norms = {
+                            name: torch.nn.utils.clip_grad_norm_(params, max_norm)
+                            for name, params in part_params.items()
+                        }
+                        if should_record:
+                            part_grad_norms = norms
+
+                        # NaN/Inf guard: clip_grad_norm_ returns a scalar
+                        # norm that DTensor dispatch already reduces across
+                        # all FSDP2 shards, so every rank sees the same
+                        # value. No extra all_reduce needed — all ranks
+                        # will make the same skip/no-skip decision.
+                        if any(
+                            not math.isfinite(scalar_metric_value(n))
+                            for n in norms.values()
+                        ):
+                            step_skipped = True
+                            if rank == 0:
+                                print(
+                                    f"[WARN] Non-finite grad norm at "
+                                    f"update_step={self.update_step} "
+                                    f"global_step={self.global_step}: "
+                                    f"{({k: scalar_metric_value(v) for k, v in norms.items()})}. "
+                                    f"Skipping step."
+                                )
+
+                    if not step_skipped and sync_gradients:
+                        self._maybe_reset_vlm_optimizer_state(rank)
+                        self.optimizer.step()
+                        self.lr_scheduler.step()
+                    if sync_gradients:
                         self.optimizer.zero_grad(set_to_none=True)
 
                     if step_skipped:
                         continue
+                    if not sync_gradients:
+                        continue
                     self.global_step += 1
-                    if accelerator.sync_gradients:
-                        self.update_step += 1
-                        total_samples_processed += inputs["input_ids"].shape[0]
-                        # initialize model averaging
-                        self.model_averaging.maybe_initialize(self.update_step)
-                        # update model averaging
-                        self.model_averaging.maybe_update(self.update_step)
+                    self.update_step += 1
+                    total_samples_processed += inputs["input_ids"].shape[0]
+                    # initialize model averaging
+                    self.model_averaging.maybe_initialize(self.update_step)
+                    # update model averaging
+                    self.model_averaging.maybe_update(self.update_step)
 
                     should_eval = (
-                        accelerator.sync_gradients
-                        and val_dataloader is not None
+                        val_dataloader is not None
                         and (self.update_step % cfg.training.eval_every == 0)
                     )
                     should_ckpt = (
-                        accelerator.sync_gradients
-                        and (self.update_step % cfg.training.checkpoint_every == 0)
+                        self.update_step % cfg.training.checkpoint_every == 0
                     )
                     should_interval_ckpt = (
-                        accelerator.sync_gradients
-                        and (self.update_step % cfg.training.ckpt_save_interval == 0)
+                        self.update_step % cfg.training.ckpt_save_interval == 0
                     )
 
                     step_log = None
@@ -670,7 +756,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             'vlm_freeze_active': float(self._is_vlm_freeze_active()),
                         }
                         if self._vlm_group_indices:
-                            step_log['lr_vlm'] = current_group_lrs[min(self._vlm_group_indices)]       
+                            step_log['lr_vlm'] = current_group_lrs[min(self._vlm_group_indices)]
                     if should_record:
                         # Logging
                         raw_loss_cpu = {}
@@ -720,27 +806,27 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                     # Evaluation
                     if should_eval:
-                        self.evaluation(accelerator, val_dataloader, step_log)
+                        self.evaluation(rank, device, val_dataloader, step_log)
 
                     # Checkpoint saving
                     if should_ckpt:
-                        self.save_topk_ckpt(accelerator, topk_manager, step_log)
+                        self.save_topk_ckpt(rank, topk_manager, step_log)
 
                     if should_interval_ckpt:
-                        self.save_interval_ckpt(accelerator)
+                        self.save_interval_ckpt(rank)
 
-                    if step_log is not None:
-                        accelerator.log(step_log, step=self.update_step)
+                    if step_log is not None and rank == 0:
+                        wandb.log(step_log, step=self.update_step)
 
                     if cfg.training.max_train_steps and self.update_step >= cfg.training.max_train_steps:
-                        if accelerator.is_main_process:
+                        if rank == 0:
                             print(f"Max train steps {cfg.training.max_train_steps} reached, stopping training.")
                         break
 
-                    if self.global_step % 100 == 0 and accelerator.is_main_process:
+                    if self.global_step % 100 == 0 and rank == 0:
                         print(f"Global step {self.global_step} completed")
 
-                    if self.global_step % 500 == 0 and accelerator.is_main_process:
+                    if self.global_step % 500 == 0 and rank == 0:
                         import psutil
                         proc = psutil.Process()
                         children = proc.children(recursive=True)
@@ -750,7 +836,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         for pid, rss in worker_rss[:6]:
                             print(f"  Worker PID {pid}: {rss:.2f}GB")
 
-                    if cfg.training.profile and accelerator.is_main_process:
+                    if cfg.training.profile and rank == 0:
                         prof.step()
 
                     gc_handler.run(self.global_step)
@@ -761,24 +847,26 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 self.epoch += 1
 
         gc_handler.finalize()
-        accelerator.end_training()
+        if rank == 0:
+            wandb.finish()
+        dist.destroy_process_group()
 
     # Combine validation and sampling, so we can process data only once.
-    def evaluation(self, accelerator, dataloader, step_log):
+    def evaluation(self, rank, device, dataloader, step_log):
         from src.workspace.eval_utils import evaluation
-        evaluation(self, accelerator, dataloader, step_log)
+        evaluation(self, rank, device, dataloader, step_log)
 
-    def save_checkpoint_accelerator(self, accelerator, path=None, tag='latest'):
-        from src.workspace.eval_utils import save_checkpoint_accelerator
-        save_checkpoint_accelerator(self, accelerator, path, tag)
+    def save_checkpoint_native(self, rank, path=None, tag='latest'):
+        from src.workspace.eval_utils import save_checkpoint_native
+        save_checkpoint_native(self, rank, path, tag)
 
-    def save_topk_ckpt(self, accelerator, topk_manager, step_log):
+    def save_topk_ckpt(self, rank, topk_manager, step_log):
         from src.workspace.eval_utils import save_topk_ckpt
-        save_topk_ckpt(self, accelerator, topk_manager, step_log)
+        save_topk_ckpt(self, rank, topk_manager, step_log)
 
-    def save_interval_ckpt(self, accelerator):
+    def save_interval_ckpt(self, rank):
         from src.workspace.eval_utils import save_interval_ckpt
-        save_interval_ckpt(self, accelerator)
+        save_interval_ckpt(self, rank)
 
     def preprocess_batch(self, batch):
         input_ids = batch["input_ids"]

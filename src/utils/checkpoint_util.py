@@ -8,6 +8,8 @@ import types
 
 import torch
 
+from src.utils.fsdp_app_state import APP_STATE_KEY, FSDPModelOnlyAppState
+
 log = logging.getLogger(__name__)
 
 
@@ -59,7 +61,7 @@ class TopKCheckpointManager:
         self.format_str = format_str
         self.path_value_map = dict()
     
-    def get_ckpt_path(self, accelerator, data: Dict[str, float]) -> Optional[str]:
+    def get_ckpt_path(self, rank: int, data: Dict[str, float]) -> Optional[str]:
         if self.k == 0:
             return None
 
@@ -92,7 +94,7 @@ class TopKCheckpointManager:
             self.path_value_map[ckpt_path] = value
 
             # only main process mkdir and delete the checkpoint
-            if accelerator.is_main_process:
+            if rank == 0:
                 if not os.path.exists(self.save_dir):
                     os.mkdir(self.save_dir)
 
@@ -109,9 +111,11 @@ def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
 
     Supports three formats:
     1. Single file (.pt / .ckpt) — torch.load with key probing.
-    2. Accelerate FSDP2 sharded dir (contains pytorch_model_fsdp_0/).
+    2. Native DCP training checkpoint dir (contains .metadata).
+       Uses a model-only AppState over torch.distributed.checkpoint.
+    3. Accelerate FSDP2 sharded dir (contains pytorch_model_fsdp_0/).
        Uses torch.distributed.checkpoint with no_dist=True (PyTorch 2.3+).
-    3. Accelerate safetensors dir — falls back to load_checkpoint_in_model.
+    4. Accelerate safetensors dir — falls back to load_checkpoint_in_model.
 
     All paths use strict loading: any missing or unexpected keys will raise
     an error instead of silently producing a partially loaded model.
@@ -129,6 +133,20 @@ def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
                 break
         model.load_state_dict(state_dict, strict=True)
         log.info("Loaded single-file checkpoint from %s", path)
+        return
+
+    # Native DCP workspace checkpoint
+    if (path / ".metadata").exists():
+        import torch.distributed.checkpoint as dcp
+
+        enable_pathlib_local_pickle_compat()
+        app_state = FSDPModelOnlyAppState(model=model)
+        dcp.load(
+            state_dict={APP_STATE_KEY: app_state},
+            storage_reader=dcp.FileSystemReader(str(path)),
+            no_dist=True,
+        )
+        log.info("Loaded native DCP checkpoint from %s", path)
         return
 
     # Accelerate FSDP2 sharded checkpoint
