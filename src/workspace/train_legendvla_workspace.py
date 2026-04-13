@@ -20,16 +20,19 @@ import numpy as np
 import pickle
 import time
 import math
-from datetime import timedelta
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.profiler import profile as torch_profile, ProfilerActivity, schedule as profiler_schedule
 import wandb
 from src.workspace.eval_utils import _unwrap_model
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager, load_checkpoint
+from src.utils.distributed_utils import (
+    init_distributed,
+    apply_fsdp2,
+    build_mixed_precision_policy,
+)
 from src.utils.fsdp_app_state import APP_STATE_KEY, FSDPWorkspaceAppState
 from src.model.common.model_average import ModelAveraging
 from src.utils.training_utils import (
@@ -280,13 +283,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
             p.export_chrome_trace(f"{self.output_dir}/trace/trace_step_{p.step_num}.json")
 
-        # Initialize distributed process group
-        dist.init_process_group(backend="nccl", timeout=timedelta(seconds=3600))
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
+        # Initialize distributed process group and HSDP mesh
+        ctx = init_distributed(backend="nccl", timeout_sec=3600)
+        rank = ctx.rank
+        world_size = ctx.world_size
+        device = ctx.device
 
         if rank == 0:
             print("=" * 80)
@@ -296,6 +297,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             print(f"  world_size: {world_size}")
             print(f"  rank: {rank}")
             print(f"  device: {device}")
+            if ctx.mesh is not None:
+                print(f"  mesh: HSDP ({ctx.mesh.mesh.shape[0]} nodes x {ctx.mesh.mesh.shape[1]} GPUs/node)")
+            else:
+                print(f"  mesh: plain FSDP ({world_size} GPUs)")
             print("=" * 80)
 
         # Profiling setup
@@ -474,32 +479,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         except ImportError:
             fsdp_wrap_classes = (Qwen3VLTextDecoderLayerWithKV, DiTQwen3DecoderLayer, DiffLoss)
 
-        # Upcast master params to fp32 before FSDP2 wrap, matching lingbot-vla's
-        # standard mixed-precision recipe: optimizer state (AdamW momentum /
-        # variance) lives in fp32 for numerical stability, while forward /
-        # backward run in bf16 via MixedPrecisionPolicy(param_dtype=bf16).
-        # reduce_dtype=fp32 keeps gradient all-reduce safe, and output_dtype=bf16
-        # avoids fp32↔bf16 re-casts at FSDP unit boundaries.
-        self.model.to(dtype=torch.float32)
-        self.model.to(device)
+        # Upcast master params to fp32 before FSDP2 wrap: optimizer state
+        # (AdamW momentum / variance) lives in fp32 for numerical stability,
+        # while forward / backward run in bf16 via MixedPrecisionPolicy.
+        self.model.to(device=device, dtype=torch.float32)
 
-        mp_policy = None
-        if cfg.training.use_bf16:
-            # MixedPrecisionPolicy setup.
-            mp_policy = MixedPrecisionPolicy(
-                param_dtype=torch.bfloat16,
-                reduce_dtype=torch.float32,
-                output_dtype=torch.bfloat16,
-            )
-
-        fsdp_kwargs = {"reshard_after_forward": False}
-        if mp_policy is not None:
-            fsdp_kwargs["mp_policy"] = mp_policy
-
-        for module in self.model.modules():
-            if isinstance(module, fsdp_wrap_classes):
-                fully_shard(module, **fsdp_kwargs)
-        fully_shard(self.model, **fsdp_kwargs)
+        mp_policy = build_mixed_precision_policy(cfg.training.use_bf16)
+        apply_fsdp2(
+            model=self.model,
+            wrap_classes=fsdp_wrap_classes,
+            mesh=ctx.mesh,
+            reshard_after_forward=False,
+            mp_policy=mp_policy,
+        )
 
         # ----------------------------------------------------------------
         # Collect trainable parameter groups AFTER fully_shard(). FSDP2
@@ -566,7 +558,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Use fused=False for FSDP2/DTensor compatibility. lingbot-vla
         # likewise defaults to fused=False — the fused AdamW kernel has
         # had known DTensor correctness issues across PyTorch versions.
-        self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
+        self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=False)
         self.lr_scheduler = self._build_lr_scheduler(
             optimizer=self.optimizer,
             vlm_group_indices=self._vlm_group_indices,
@@ -612,7 +604,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             profile_context = profiler
 
         # Training loop
-        gc_handler = GarbageCollection(gc_freq=1000)
+        gc_handler = GarbageCollection(gc_freq=100, full_gc_freq=2000)
         training_start_time = None
         total_samples_processed = 0
         log_interval = int(getattr(cfg.training, "log_interval", 50))
@@ -688,7 +680,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                             part_params["vision"] = self.model.trainable_vision_parameters
                             part_params["text"] = self.model.trainable_text_parameters
                         norms = {
-                            name: torch.nn.utils.clip_grad_norm_(params, max_norm)
+                            name: torch.nn.utils.clip_grad_norm_(params, max_norm, foreach=True)
                             for name, params in part_params.items()
                         }
                         if should_record:

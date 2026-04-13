@@ -40,7 +40,7 @@ class DeviceTransferWrapper:
     def __iter__(self):
         for batch in self.dataloader:
             yield {
-                k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
 

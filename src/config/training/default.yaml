@@ -30,7 +30,7 @@ training:
   num_epochs: 2
   gradient_accumulation_steps: 1   # number of micro-batches to accumulate before each optimizer step (1 = disabled)
   use_bf16: True
-  log_interval: 1
+  log_interval: 20
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5]
   save_eval_attn_weights: False
   eval_every: 5000
