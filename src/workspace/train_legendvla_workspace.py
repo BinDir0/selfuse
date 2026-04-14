@@ -24,7 +24,6 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.profiler import profile as torch_profile, ProfilerActivity, schedule as profiler_schedule
 import wandb
-from src.workspace.eval_utils import _unwrap_model
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager, load_checkpoint
@@ -281,6 +280,29 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             print("\n--- CPU Bottlenecks ---")
             print(output_cpu)
 
+            # FLOPS summary: total measured FLOPS across all CUDA kernels.
+            # FunctionEventAvg uses device_time_total / self_device_time_total
+            # (not cuda_time_total which only exists on FunctionEvent).
+            # Reference: pytorch/torch/autograd/profiler_util.py FunctionEventAvg
+            try:
+                events = p.key_averages()
+                total_flops = sum(e.flops for e in events if e.flops > 0)
+                total_device_us = sum(e.self_device_time_total for e in events)
+                total_device_time_s = total_device_us / 1e6
+                if total_flops > 0 and total_device_time_s > 0:
+                    tflops_per_sec = total_flops / total_device_time_s / 1e12
+                    print(f"\n--- FLOPS Summary ---")
+                    print(f"  Total FLOPS: {total_flops / 1e12:.2f} TFLOPS")
+                    print(f"  Device time: {total_device_time_s:.3f}s")
+                    print(f"  Throughput:  {tflops_per_sec:.1f} TFLOPS/s")
+                    # A800 bf16 peak: 312 TFLOPS
+                    print(f"  MFU (vs 312 TFLOPS A800 bf16): {tflops_per_sec / 312 * 100:.1f}%")
+                else:
+                    print("\n--- FLOPS Summary ---")
+                    print("  No FLOPS data (with_flops only covers matmul/conv2d, compiled kernels may not report)")
+            except Exception as flops_err:
+                print(f"\n[WARN] FLOPS summary failed: {flops_err}")
+
             p.export_chrome_trace(f"{self.output_dir}/trace/trace_step_{p.step_num}.json")
 
         # Initialize distributed process group and HSDP mesh
@@ -313,6 +335,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     wait=1, warmup=2, active=10, repeat=3, skip_first=50
                 ),
                 on_trace_ready=trace_handler,
+                with_flops=True,
             )
 
         # Initialize wandb tracking (rank 0 only)
@@ -475,9 +498,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         from src.model.common.diffloss import DiffLoss
         try:
             from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionBlock
-            fsdp_wrap_classes = (Qwen3VLTextDecoderLayerWithKV, Qwen3VLVisionBlock, DiTQwen3DecoderLayer, DiffLoss)
-        except ImportError:
-            fsdp_wrap_classes = (Qwen3VLTextDecoderLayerWithKV, DiTQwen3DecoderLayer, DiffLoss)
+            from transformers.models.dinov3_vit.modeling_dinov3_vit import DINOv3ViTLayer
+        except ImportError as e:
+            raise ImportError(
+                "FSDP wrap requires transformers shipping both Qwen3VLVisionBlock "
+                "and DINOv3ViTLayer; please upgrade transformers."
+            ) from e
+        fsdp_wrap_classes: tuple[type, ...] = (
+            Qwen3VLTextDecoderLayerWithKV,
+            DiTQwen3DecoderLayer,
+            DiffLoss,
+            Qwen3VLVisionBlock,
+            DINOv3ViTLayer,
+        )
 
         # Upcast master params to fp32 before FSDP2 wrap: optimizer state
         # (AdamW momentum / variance) lives in fp32 for numerical stability,
