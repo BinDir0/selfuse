@@ -3,8 +3,8 @@
 # WebDataset shard paths for VLA training.
 #
 
-wds_base_dir: /share_data/guantianrui/datasets/Webdataset
-val_wds_base_dir: /share_data/guantianrui/datasets/Webdataset_val
+wds_base_dir: /efs-exp/guantianrui/datasets/Webdataset
+val_wds_base_dir: /efs-exp/guantianrui/datasets/Webdataset_val
 
 # Shuffle buffer is shared after RandomMix, so subset count does not affect memory.
 vla_wds_datasets:
@@ -24,10 +24,10 @@ vla_wds_datasets:
       - ${wds_base_dir}/ego4d_other_train_rechunked/shard-*.tar
     weight: 15
   - name: buildai
-    shard_urls: /share_data/guantianrui/datasets/BuildAI-10K-0328-filtered-v2/shard-*.tar
+    shard_urls: /efs-exp/guantianrui/datasets/BuildAI-10K-0328-filtered-v2/shard-*.tar
     weight: 25
   - name: teleop_xiaozi
-    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-*.tar
+    shard_urls: /efs-exp/zengfanlian/datasets/Webdataset/real_world/shard-*.tar
     weight: 10
 
 val_vla_wds_datasets:

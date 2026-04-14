@@ -489,8 +489,9 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             model=self.model,
             wrap_classes=fsdp_wrap_classes,
             mesh=ctx.mesh,
-            reshard_after_forward=False,
+            reshard_after_forward=cfg.training.fsdp.reshard_after_forward,
             mp_policy=mp_policy,
+            enable_prefetch=cfg.training.fsdp.enable_prefetch,
         )
 
         # ----------------------------------------------------------------
@@ -558,7 +559,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # Use fused=False for FSDP2/DTensor compatibility. lingbot-vla
         # likewise defaults to fused=False — the fused AdamW kernel has
         # had known DTensor correctness issues across PyTorch versions.
-        self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=False)
+        self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
         self.lr_scheduler = self._build_lr_scheduler(
             optimizer=self.optimizer,
             vlm_group_indices=self._vlm_group_indices,

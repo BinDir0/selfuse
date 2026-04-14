@@ -24,11 +24,14 @@ training:
   train_depth: False
   resume_checkpoint_path: 
   finetune_checkpoint_path:
-  normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.03.31-relative-mixed/normalizer.pkl
+  normalizer_path: /efs-exp/zengfanlian/Projects/EgoVLA/outputs/normalizer/2026.04.04-relative-mixed-all/normalizer.pkl
   max_train_steps: null
   max_eval_steps: null
   num_epochs: 2
   gradient_accumulation_steps: 1   # number of micro-batches to accumulate before each optimizer step (1 = disabled)
+  fsdp:
+    enable_prefetch: True
+    reshard_after_forward: False
   use_bf16: True
   log_interval: 20
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5]
@@ -61,6 +64,7 @@ training:
     text: True  # Keep text decoder blocks on by default.
     flow: True  # Keep action-expert blocks on by default.
     diffloss: True  # Keep diffloss blocks on by default.
+    world_model: True  # Compile world model expert + frozen DINOv3 teacher (no_grad) when use_world_model.
   # Per-component gradient checkpointing. Set to plain `False` to disable all,
   # or `True` to enable all with every_n=1 (backward compatible).
   gradient_checkpointing:

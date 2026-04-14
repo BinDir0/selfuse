@@ -115,6 +115,7 @@ def apply_fsdp2(
     mesh: DeviceMesh | None = None,
     reshard_after_forward: bool = False,
     mp_policy: MixedPrecisionPolicy | None = None,
+    enable_prefetch: bool = True,
 ) -> None:
     """Apply FSDP2 sharding to a model by wrapping matching sub-modules, then root.
 
@@ -136,6 +137,14 @@ def apply_fsdp2(
             backward, trading memory for speed.
         mp_policy: Mixed precision policy. When None, all computation
             stays in the model's current dtype.
+        enable_prefetch: If True, build explicit forward/backward prefetch
+            chains between consecutive sharded modules of the same class.
+            This lets FSDP overlap all-gather / reduce-scatter / (HSDP)
+            all-reduce with the compute of the previous block, instead of
+            leaving the collectives exposed at the end of each block.
+            Chains are scoped per parent ModuleList so we never prefetch
+            across expert boundaries (e.g. vision -> text) where forward
+            execution order is not guaranteed to match module iteration.
     """
     fsdp_kwargs: dict = {"reshard_after_forward": reshard_after_forward}
     if mesh is not None:
@@ -143,7 +152,38 @@ def apply_fsdp2(
     if mp_policy is not None:
         fsdp_kwargs["mp_policy"] = mp_policy
 
-    for module in model.modules():
-        if isinstance(module, wrap_classes):
-            fully_shard(module, **fsdp_kwargs)
+    # (parent_id, class) -> list of sharded child modules in registration order.
+    # Siblings under the same ModuleList / Sequential execute in index order,
+    # so they are safe to chain for prefetch. Modules under different parents
+    # or of different classes stay in separate chains.
+    prefetch_groups: dict[tuple[int, type], list[torch.nn.Module]] = {}
+
+    for parent in model.modules():
+        for child in parent.children():
+            if not isinstance(child, wrap_classes):
+                continue
+            fully_shard(child, **fsdp_kwargs)
+            if enable_prefetch:
+                key = (id(parent), type(child))
+                prefetch_groups.setdefault(key, []).append(child)
+
     fully_shard(model, **fsdp_kwargs)
+
+    if not enable_prefetch:
+        return
+
+    # Build bidirectional prefetch chain within each group.
+    # For a sequence [m0, m1, m2, ...]:
+    #   - m_{i}.set_modules_to_forward_prefetch([m_{i+1}])
+    #     overlaps m_{i+1}'s all-gather with m_i's forward compute.
+    #   - m_{i+1}.set_modules_to_backward_prefetch([m_i])
+    #     overlaps m_i's reduce-scatter / HSDP all-reduce with m_{i+1}'s
+    #     backward compute, which is the main win under HSDP.
+    # Reference: lingbot-vla/lingbotvla/distributed/vescale_parallelize.py:104-108
+    for chain in prefetch_groups.values():
+        for i in range(len(chain) - 1):
+            cur, nxt = chain[i], chain[i + 1]
+            if hasattr(cur, "set_modules_to_forward_prefetch"):
+                cur.set_modules_to_forward_prefetch([nxt])
+            if hasattr(nxt, "set_modules_to_backward_prefetch"):
+                nxt.set_modules_to_backward_prefetch([cur])

@@ -224,6 +224,8 @@ class LegendVLA(nn.Module):
             self.diffloss.net = torch.compile(self.diffloss.net, **block_compile_kwargs)
         if compile_flags["world_model"] and self.use_world_model:
             compile_module_list(self.world_model_expert.layers, block_compile_kwargs)
+            # DINOv3 ViT layer list lives at `model.model.layer`.
+            compile_module_list(self.frozen_teacher.model.model.layer, block_compile_kwargs)
 
     def resolve_compile_block_flags(
         self,

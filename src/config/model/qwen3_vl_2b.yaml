@@ -1,7 +1,7 @@
 # @package _global_
 
 pretrained:
-  model_name_or_path: /share_data/chenzhang/checkpoints/Qwen3-VL-2B-Instruct
+  model_name_or_path: /efs-exp/chenzhang/checkpoints/Qwen3-VL-2B-Instruct
   trust_remote_code: False
   torch_dtype: bfloat16
   # Attention backend used by the Qwen3-VL text tower and the Qwen3 action expert.
