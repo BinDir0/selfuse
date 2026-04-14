@@ -297,6 +297,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         low_cpu_mem_usage: bool = True,
         text_attn_implementation: str = "sdpa",
         vision_attn_implementation: str = "flash_attention_2",
+        mem_temporal_attention: dict[str, Any] | None = None,
     ):
         super().__init__()
         try:
@@ -382,6 +383,9 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if freeze_backbone:
             self.freeze_non_lora_parameters()
 
+        self.has_mem_blocks = False
+        if mem_temporal_attention and mem_temporal_attention.get("enabled", False):
+            self.inject_mem_temporal_attention(mem_temporal_attention)
 
     def _apply_lora(self, lora_cfg: dict, use_quantization: bool) -> None:
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -470,6 +474,82 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if callable(disable_method):
             disable_method()
 
+    def inject_mem_temporal_attention(self, mem_cfg: dict[str, Any]) -> None:
+        """Replace selected ViT blocks with MEMVisionBlock wrappers for temporal attention.
+
+        Reference: MEM (Torne et al., 2025), arxiv 2603.03596
+        Wraps every N-th block with factorized temporal-then-spatial attention.
+        Temporal attention shares the spatial block's norm1, QKV, and output
+        projection — zero new learnable parameters.
+        """
+        from src.model.vision.temporal_attention import MEMVisionBlock, TemporalCausalAttentionPass
+
+        visual = self.base_model.model.visual
+        every_n = mem_cfg["every_n_layers"]
+        max_temporal_len = mem_cfg.get("max_temporal_len", 32)
+        base = mem_cfg.get("sinusoidal_pe_base", 10000.0)
+        hidden_size = visual.config.hidden_size
+
+        for i in range(len(visual.blocks)):
+            if (i + 1) % every_n == 0:
+                spatial_block = visual.blocks[i]
+                ta = TemporalCausalAttentionPass(
+                    num_heads=spatial_block.attn.num_heads,
+                    hidden_size=hidden_size,
+                    max_temporal_len=max_temporal_len,
+                    base=base,
+                )
+                visual.blocks[i] = MEMVisionBlock(spatial_block, ta)
+        self.has_mem_blocks = True
+
+    def set_mem_grid_thw(self, grid_thw: torch.Tensor | None) -> None:
+        """Set transient grid_thw on all MEMVisionBlock temporal attention modules."""
+        if not self.has_mem_blocks:
+            return
+        from src.model.vision.temporal_attention import MEMVisionBlock
+
+        for block in self.base_model.model.visual.blocks:
+            if isinstance(block, MEMVisionBlock):
+                block.temporal_attn.current_grid_thw = grid_thw
+
+    def _slice_video_features_to_last_frame(
+        self,
+        video_outputs: Any,
+        video_grid_thw: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Keep only the last temporal group's tokens per multi-frame video entry.
+
+        MEM runs temporal causal attention over all T_post_tps groups in the ViT, so the last
+        group already integrates full temporal context. Dropping earlier groups matches the
+        collator's single-frame `<video>` placeholder layout and saves LM tokens.
+        """
+        pooler_output = video_outputs.pooler_output
+        deepstack_features = video_outputs.deepstack_features
+
+        per_entry_sliced: list[torch.Tensor] = []
+        entry_token_counts: list[tuple[int, int]] = []
+        for i, entry_feat in enumerate(pooler_output):
+            t_groups = int(video_grid_thw[i, 0].item())
+            total = int(entry_feat.shape[0])
+            if t_groups > 1:
+                n_per_frame = total // t_groups
+                per_entry_sliced.append(entry_feat[-n_per_frame:])
+                entry_token_counts.append((total, n_per_frame))
+            else:
+                per_entry_sliced.append(entry_feat)
+                entry_token_counts.append((total, total))
+        video_embeds = torch.cat(per_entry_sliced, dim=0)
+
+        deepstack_sliced: list[torch.Tensor] = []
+        for layer_feat in deepstack_features:
+            chunks: list[torch.Tensor] = []
+            offset = 0
+            for total, kept in entry_token_counts:
+                chunks.append(layer_feat[offset + total - kept : offset + total])
+                offset += total
+            deepstack_sliced.append(torch.cat(chunks, dim=0))
+        return video_embeds, deepstack_sliced
+
     def encode_visual_features(
         self,
         input_ids: torch.LongTensor,
@@ -492,7 +572,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             combined_pv = torch.cat([pixel_values, pixel_values_videos], dim=0)
             combined_grid = torch.cat([image_grid_thw, video_grid_thw], dim=0)
 
-
+            self.set_mem_grid_thw(combined_grid)
             combined_out = base_model.get_image_features(
                 pixel_values=combined_pv,
                 image_grid_thw=combined_grid,
@@ -501,15 +581,23 @@ class Qwen3VLBackboneWrapper(nn.Module):
 
             # pooler_output is a per-entry tuple (already split by get_image_features).
             image_embeds = torch.cat(combined_out.pooler_output[:n_image_entries], dim=0)
-            video_embeds = torch.cat(combined_out.pooler_output[n_image_entries:], dim=0)
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
             # deepstack_features are flat (total_tokens, hidden) per layer; split by token count.
             sms = base_model.model.visual.spatial_merge_size
             img_tokens = (image_grid_thw.prod(dim=-1) // (sms * sms)).sum().item()
             deepstack_image = [f[:img_tokens] for f in combined_out.deepstack_features]
-            deepstack_video = [f[img_tokens:] for f in combined_out.deepstack_features]
+            deepstack_video_flat = [f[img_tokens:] for f in combined_out.deepstack_features]
+
+            # Slice video branch to last frame for multi-frame entries.
+            video_outputs_like = type("VideoOutputs", (), {})()
+            video_outputs_like.pooler_output = combined_out.pooler_output[n_image_entries:]
+            video_outputs_like.deepstack_features = deepstack_video_flat
+            video_embeds, deepstack_video = self._slice_video_features_to_last_frame(
+                video_outputs=video_outputs_like,
+                video_grid_thw=video_grid_thw,
+            )
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
             image_mask, _ = base_model.model.get_placeholder_mask(
                 input_ids=input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds,
@@ -538,7 +626,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
 
         # Single-modality paths: only one ViT call needed.
         if has_images:
-
+            self.set_mem_grid_thw(image_grid_thw)
             image_outputs = base_model.get_image_features(
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
@@ -552,18 +640,22 @@ class Qwen3VLBackboneWrapper(nn.Module):
             return inputs_embeds, image_mask[..., 0], image_outputs.deepstack_features
 
         if has_videos:
-
+            self.set_mem_grid_thw(video_grid_thw)
             video_outputs = base_model.get_video_features(
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
                 return_dict=True,
             )
-            video_embeds = torch.cat(video_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            video_embeds, deepstack_features = self._slice_video_features_to_last_frame(
+                video_outputs=video_outputs,
+                video_grid_thw=video_grid_thw,
+            )
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             _, video_mask = base_model.model.get_placeholder_mask(
                 input_ids=input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds,
             )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-            return inputs_embeds, video_mask[..., 0], video_outputs.deepstack_features
+            return inputs_embeds, video_mask[..., 0], deepstack_features
 
         return inputs_embeds, None, None
 

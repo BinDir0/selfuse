@@ -216,18 +216,24 @@ class Qwen3VLBatchProcessor:
             return [rendered]
         return list(rendered)
 
-    def build_vision_inputs(self, batch_samples: list[dict[str, Any]]) -> dict[str, Any]:
+    def build_vision_inputs(
+        self, batch_samples: list[dict[str, Any]]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Build modality inputs using only real image/video samples.
 
         Contract:
         - `images` contains only image samples, ordered by their image placeholder appearance in the
           rendered batch texts.
         - `videos` contains only video samples, ordered by their video placeholder appearance.
-        - No batch-sized empty placeholder lists are inserted for missing modalities.
+        - For VLA multi-frame video samples, a 2-frame dummy (first frame duplicated) is sent to
+          the processor so the chat template expands `<video>` to exactly one frame's worth of
+          placeholders. The real T-frame video is tracked in `vla_entries` for post-processor swap.
+        - Returns `(processor_inputs, vla_entries)`.
         """
         images: list[Any] = []
         videos: list[Any] = []
         video_metadata: list[dict[str, Any]] = []
+        vla_entries: list[dict[str, Any]] = []
 
         for sample in batch_samples:
             vision_type = sample["vision_type"]
@@ -236,8 +242,22 @@ class Qwen3VLBatchProcessor:
             elif vision_type == "video":
                 video = build_sample_video(sample["images"])
                 video_fps = float(sample["video_fps"].item())
-                videos.append(video)
-                video_metadata.append(build_video_metadata(video, video_fps))
+                is_vla = bool(sample["is_vla_data"].item())
+                if is_vla and int(video.shape[0]) > 1:
+                    # Send 1-frame dummy so chat template expands <video> to one frame of
+                    # placeholders. video_processor auto-pads odd T to tps=2 via last-frame
+                    # repeat, so T=1 → T_post_tps=1 → N = h*w/sms^2 placeholders.
+                    # The real T frames are processed post-hoc and swapped in.
+                    dummy = video[:1].contiguous()
+                    entry_idx = len(videos)
+                    videos.append(dummy)
+                    video_metadata.append(build_video_metadata(dummy, video_fps))
+                    vla_entries.append(
+                        {"entry_idx": entry_idx, "real_video": video, "fps": video_fps}
+                    )
+                else:
+                    videos.append(video)
+                    video_metadata.append(build_video_metadata(video, video_fps))
             else:
                 raise ValueError(f"Unsupported vision_type: {vision_type}")
 
@@ -248,7 +268,64 @@ class Qwen3VLBatchProcessor:
             processor_inputs["videos"] = videos
             processor_inputs["video_metadata"] = video_metadata
             processor_inputs["do_sample_frames"] = False
-        return processor_inputs
+        return processor_inputs, vla_entries
+
+    def _swap_vla_video_entries(
+        self,
+        batch: dict[str, Any],
+        vla_entries: list[dict[str, Any]],
+    ) -> None:
+        """Replace dummy 2-frame blocks in `pixel_values_videos` with the real T-frame content.
+
+        Chat-template expansion already committed `<video>` to N placeholder tokens based on the
+        dummy 2-frame grid. After this swap, `video_grid_thw[entry, 0]` becomes the real
+        `T_post_tps`, so the ViT consumes all T frames. The LM still sees only N placeholders, and
+        the backbone slices the ViT output to the last frame before `masked_scatter`.
+        """
+        if not vla_entries:
+            return
+
+        pixel_values_videos = batch["pixel_values_videos"]
+        video_grid_thw = batch["video_grid_thw"]
+
+        # Per-entry patch counts in the original (dummy) pixel_values_videos.
+        entry_sizes_old = video_grid_thw.prod(dim=-1).tolist()
+        offsets_old = [0]
+        for size in entry_sizes_old:
+            offsets_old.append(offsets_old[-1] + size)
+
+        # Process each real video to get its own pixel_values_videos block + grid row.
+        new_entries: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        for entry in vla_entries:
+            idx = int(entry["entry_idx"])
+            real_video = entry["real_video"]
+            fps = float(entry["fps"])
+            real_outputs = self.processor.video_processor(
+                videos=[real_video],
+                video_metadata=[build_video_metadata(real_video, fps)],
+                do_sample_frames=False,
+                return_tensors="pt",
+            )
+            new_entries[idx] = (
+                real_outputs["pixel_values_videos"],
+                real_outputs["video_grid_thw"][0],
+            )
+
+        # Walk entries in order, swapping in real blocks where tracked.
+        new_pv_chunks: list[torch.Tensor] = []
+        new_grid_rows: list[torch.Tensor] = []
+        for i in range(video_grid_thw.shape[0]):
+            if i in new_entries:
+                chunk, row = new_entries[i]
+                new_pv_chunks.append(chunk.to(pixel_values_videos.device, pixel_values_videos.dtype))
+                new_grid_rows.append(row.to(video_grid_thw.device, video_grid_thw.dtype).unsqueeze(0))
+            else:
+                start, end = offsets_old[i], offsets_old[i + 1]
+                new_pv_chunks.append(pixel_values_videos[start:end])
+                new_grid_rows.append(video_grid_thw[i : i + 1])
+
+        batch["pixel_values_videos"] = torch.cat(new_pv_chunks, dim=0)
+        batch["video_grid_thw"] = torch.cat(new_grid_rows, dim=0)
 
     def encode_messages(
         self,
@@ -271,16 +348,19 @@ class Qwen3VLBatchProcessor:
             messages_batch=messages_batch,
             add_generation_prompt=add_generation_prompt,
         )
+        vision_inputs, vla_entries = self.build_vision_inputs(batch_samples)
         encoded = self.processor(
             text=rendered_texts,
             **self.processor_call_kwargs,
-            **self.build_vision_inputs(batch_samples),
+            **vision_inputs,
         )
         batch = dict(encoded)
         batch.setdefault("pixel_values", None)
         batch.setdefault("image_grid_thw", None)
         batch.setdefault("pixel_values_videos", None)
         batch.setdefault("video_grid_thw", None)
+        if vla_entries:
+            self._swap_vla_video_entries(batch, vla_entries)
         if "mm_token_type_ids" not in batch:
             batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
         if return_rendered_texts:
