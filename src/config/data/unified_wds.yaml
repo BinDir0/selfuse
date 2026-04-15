@@ -70,6 +70,11 @@ dataset:
     shuffle_buffer: 16384
     weights: [0.5, 0.5, 0.5]
     val_wds_datasets: ${val_vlm_wds_datasets}
+    # When MEM is on, repeat VLM image to T frames at the dataset layer so
+    # collator + backbone see uniform (T, N) entries everywhere.
+    mem_enabled: ${policy.backbone.mem_temporal_attention.enabled}
+    n_obs_image_steps: ${data.n_obs_image_steps}
+    target_image_size: ${data.target_image_size}
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
 
@@ -100,6 +105,9 @@ data_collator:
     padding_side: right
     state_token: ${added_slot_tokens.state}
     action_token: ${added_slot_tokens.action}
+    # Skip VLA dummy-swap when MEM is off so chat template expands T frames
+    # of placeholders and the LM sees the full temporal sequence.
+    mem_enabled: ${policy.backbone.mem_temporal_attention.enabled}
 
 dataloader:
   loader:

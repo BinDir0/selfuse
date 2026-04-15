@@ -175,6 +175,7 @@ class Qwen3VLBatchProcessor:
         state_token: str = "<state>",
         action_token: str = "<action>",
         processor: Any = None,
+        mem_enabled: bool = True,
     ):
         self.model_name_or_path = model_name_or_path
         self.processor_init_kwargs = dict(processor_init_kwargs or {})
@@ -183,6 +184,12 @@ class Qwen3VLBatchProcessor:
         self.padding_side = padding_side
         self.state_token = state_token
         self.action_token = action_token
+        # mem_enabled toggles the VLA dummy-swap path:
+        # - True  (MEM on): send 1-frame dummy so chat template only allocates
+        #         N placeholders; backbone slices ViT output to last frame.
+        # - False (MEM off): send the real T frames so chat template expands
+        #         T*N placeholders and backbone keeps all T frames.
+        self.mem_enabled = bool(mem_enabled)
         self.processor = processor if processor is not None else self.init_processor()
         self.tokenizer = self.processor.tokenizer
         special_tokens = [self.state_token, self.action_token]
@@ -243,11 +250,12 @@ class Qwen3VLBatchProcessor:
                 video = build_sample_video(sample["images"])
                 video_fps = float(sample["video_fps"].item())
                 is_vla = bool(sample["is_vla_data"].item())
-                if is_vla and int(video.shape[0]) > 1:
-                    # Send 1-frame dummy so chat template expands <video> to one frame of
-                    # placeholders. video_processor auto-pads odd T to tps=2 via last-frame
-                    # repeat, so T=1 → T_post_tps=1 → N = h*w/sms^2 placeholders.
-                    # The real T frames are processed post-hoc and swapped in.
+                if self.mem_enabled and is_vla and int(video.shape[0]) > 1:
+                    # MEM-on path: send 1-frame dummy so chat template expands
+                    # <video> to one frame of placeholders. video_processor
+                    # auto-pads odd T to tps=2 via last-frame repeat, so T=1
+                    # → T_post_tps=1 → N = h*w/sms^2 placeholders. The real T
+                    # frames are processed post-hoc and swapped into pixel_values_videos.
                     dummy = video[:1].contiguous()
                     entry_idx = len(videos)
                     videos.append(dummy)
@@ -256,6 +264,9 @@ class Qwen3VLBatchProcessor:
                         {"entry_idx": entry_idx, "real_video": video, "fps": video_fps}
                     )
                 else:
+                    # MEM-off (or single-frame video): send all frames to the
+                    # processor so chat template expands T*N placeholders and
+                    # the LM sees the full temporal sequence.
                     videos.append(video)
                     video_metadata.append(build_video_metadata(video, video_fps))
             else:
@@ -363,6 +374,20 @@ class Qwen3VLBatchProcessor:
             self._swap_vla_video_entries(batch, vla_entries)
         if "mm_token_type_ids" not in batch:
             batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
+        # MEM expects all samples to be on the video path with uniform (T, H, W),
+        # so the downstream view + SDPA stays sync-free. CPU-side check here.
+        if self.mem_enabled:
+            assert batch.get("image_grid_thw") is None, (
+                "mem_enabled requires VLM samples to be padded to videos at the "
+                "dataset layer; got image_grid_thw in batch"
+            )
+            video_grid_thw = batch.get("video_grid_thw")
+            if video_grid_thw is not None and video_grid_thw.shape[0] > 1:
+                first = video_grid_thw[0]
+                assert torch.equal(video_grid_thw, first.unsqueeze(0).expand_as(video_grid_thw)), (
+                    f"mem_enabled requires uniform video_grid_thw across entries, "
+                    f"got rows={video_grid_thw.tolist()}"
+                )
         if return_rendered_texts:
             batch["rendered_texts"] = rendered_texts
         return batch

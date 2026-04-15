@@ -3,11 +3,12 @@ WebDataset-based VLM dataset for LegendVLA training.
 '''
 
 import warnings
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import torch
 import numpy as np
 from torchvision import transforms
 from src.utils.pytorch_util import dict_apply
+from src.dataset.data_transforms import process_image
 from src.dataset.sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from src.dataset.wds_dataset import build_blended_dataset
 
@@ -15,6 +16,18 @@ from src.dataset.wds_dataset import build_blended_dataset
 class VLMWdsDataset(torch.utils.data.IterableDataset):
     """
     WebDataset VLM dataset.
+
+    When `mem_enabled` is True, VLM samples are resized to `target_image_size`
+    and padded to `n_obs_image_steps` repeated frames so they share the same
+    (T, N) shape as VLA video samples. This lets MEM temporal attention run
+    pure view + SDPA without per-sample mask gymnastics. The padding is
+    semantically a no-op (all T frames are identical copies of the original
+    image), so the LM still receives the same single-image content after the
+    backbone slices to the last frame.
+
+    When `mem_enabled` is False, VLM samples keep the original image path
+    (vision_type='image', no resize, no padding) and the collator/backbone
+    treat them as standard single-image inputs.
     """
     def __init__(
         self,
@@ -25,6 +38,9 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         shuffle_buffer: int = 16384,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
+        mem_enabled: bool = False,
+        n_obs_image_steps: int = 1,
+        target_image_size: Optional[Tuple[int, int]] = None,
     ):
         super().__init__()
         self.wds_datasets = wds_datasets
@@ -35,6 +51,14 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         self.return_dataset_info = return_dataset_info
         self.val_wds_datasets = val_wds_datasets
         self.collator = None
+        self.mem_enabled = mem_enabled
+        self.n_obs_image_steps = n_obs_image_steps
+        self.target_image_size = (
+            tuple(target_image_size) if target_image_size is not None else None
+        )
+        if self.mem_enabled:
+            assert self.n_obs_image_steps >= 1, "n_obs_image_steps must be >= 1 when mem_enabled"
+            assert self.target_image_size is not None, "target_image_size required when mem_enabled"
 
         if self.mode == 'train':
             self.aug_transform = transforms.Compose([
@@ -76,6 +100,9 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             shuffle_buffer=0,
             return_dataset_info=self.return_dataset_info,
             val_wds_datasets=self.val_wds_datasets,
+            mem_enabled=self.mem_enabled,
+            n_obs_image_steps=self.n_obs_image_steps,
+            target_image_size=self.target_image_size,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -136,13 +163,40 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             context=sample_context,
         )
 
-        data = {
-            'images': images_to_process,
-            'question': question,
-            'answer': answer,
-            'vision_type': 'image',
-            'is_vla_data': np.array(False, dtype=bool),
-        }
+        if self.mem_enabled:
+            # Resize to VLA target so all entries share N (= H*W / patch / merge),
+            # then repeat along the temporal axis to match VLA T frames.
+            # Repetition is semantically a no-op: backbone slices to the last
+            # frame, which is identical to the original single image.
+            images_resized, _, _ = process_image(
+                images_to_process,
+                target_size=self.target_image_size,
+            )
+            T = self.n_obs_image_steps
+            K = images_resized.shape[0]
+            if K < T:
+                pad = np.repeat(images_resized[-1:], T - K, axis=0)
+                images_padded = np.concatenate([images_resized, pad], axis=0)
+            elif K > T:
+                images_padded = images_resized[-T:]
+            else:
+                images_padded = images_resized
+            data = {
+                'images': images_padded,                    # (T, tH, tW, C)
+                'question': question,
+                'answer': answer,
+                'vision_type': 'video',
+                'video_fps': np.float32(1.0),
+                'is_vla_data': np.array(False, dtype=bool),
+            }
+        else:
+            data = {
+                'images': images_to_process,
+                'question': question,
+                'answer': answer,
+                'vision_type': 'image',
+                'is_vla_data': np.array(False, dtype=bool),
+            }
 
         if self.return_dataset_info:
             data['dataset_name'] = meta.get('source', meta.get('dataset_name', 'unknown'))

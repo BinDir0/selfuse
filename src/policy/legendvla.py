@@ -405,6 +405,10 @@ class LegendVLA(nn.Module):
     def forward_backbone_stream(
         self, batch: dict, slot_embeds: dict, output_attentions: bool = False,
     ) -> BackboneStreamOutput:
+        # is_vla_mask is consumed by the MEM temporal attention path when
+        # mask_non_vla=True; backbone ignores it otherwise.
+        is_vla_data = batch.get("is_vla_data")
+        is_vla_mask = is_vla_data.to(dtype=torch.bool) if is_vla_data is not None else None
         output = self.backbone(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
@@ -417,6 +421,7 @@ class LegendVLA(nn.Module):
             action_slot_embeds=slot_embeds.get("action"),
             camera_slot_embeds=slot_embeds.get("camera"),
             output_attentions=output_attentions,
+            is_vla_mask=is_vla_mask,
         )
         output.prefix_cache = slice_prefix_cache_from_full_kv(
             output.past_key_values_hf,
