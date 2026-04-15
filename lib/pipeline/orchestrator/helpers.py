@@ -72,7 +72,8 @@ def stream_command(
     *,
     cwd: str | Path | None = None,
     env: dict | None = None,
-) -> None:
+    raise_on_error: bool = True,
+) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_handle:
         log_handle.write("$ " + shlex.join(cmd) + "\n\n")
@@ -94,5 +95,6 @@ def stream_command(
             print(line, end="")
             log_handle.write(line)
         return_code = process.wait()
-        if return_code != 0:
+        if return_code != 0 and raise_on_error:
             raise RuntimeError(f"{name} failed with exit code {return_code}")
+        return return_code

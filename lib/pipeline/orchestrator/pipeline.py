@@ -12,7 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.pipeline.clip_manifest import build_manifest_records_from_descriptors, write_clip_manifest, write_shard_dir_list
+from lib.pipeline.clip_manifest import (
+    build_manifest_records_from_descriptors,
+    load_clip_manifest,
+    write_clip_manifest,
+    write_shard_dir_list,
+)
 from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
 from lib.pipeline.frame_sources import classify_descriptor_storage
 from lib.pipeline.multihost import (
@@ -22,6 +27,7 @@ from lib.pipeline.multihost import (
     sanitize_infer_args_for_multihost,
 )
 from lib.pipeline.pipeline_config import normalize_pipeline_config
+from lib.pipeline.stage_api import get_stage_done_marker
 
 from .cli import get_parser
 from .constants import BATCH_INFER_NEGATIVE_BOOL_FLAGS, MULTIHOST_DISALLOWED_INFER_KEYS, OFFICIAL_STAGE_ORDER
@@ -126,9 +132,79 @@ def run_pipeline(args) -> None:
             f"Received legacy names: {sorted(set(deprecated_stages))}"
         )
 
-    def run_logged(name: str, cmd: list[str], *, cwd: str | Path | None = None) -> None:
+    def run_logged(
+        name: str,
+        cmd: list[str],
+        *,
+        cwd: str | Path | None = None,
+        raise_on_error: bool = True,
+    ) -> int:
         print(f"\n[{name}] {shlex.join(cmd)}\n")
-        stream_command(name, cmd, run_dir / f"{name}.log", cwd=cwd)
+        return stream_command(name, cmd, run_dir / f"{name}.log", cwd=cwd, raise_on_error=raise_on_error)
+
+    def build_completed_stage_manifest(stage_name: str, source_manifest: Path) -> tuple[Path, dict]:
+        status_path = run_dir / "status.json"
+        if not status_path.exists():
+            raise RuntimeError(f"Missing status.json after {stage_name}: {status_path}")
+
+        status_payload = json.loads(status_path.read_text(encoding="utf-8"))
+        tasks = status_payload.get("tasks", {})
+        source_records = load_clip_manifest(source_manifest)
+        completed_records = []
+        failed_clip_ids = []
+        incomplete_clip_ids = []
+
+        for record in source_records:
+            task = tasks.get(record.descriptor.video_key) or tasks.get(record.clip_id) or {}
+            stage_status = (task.get("stage_status") or {}).get(stage_name)
+            if stage_status != "completed" and get_stage_done_marker(Path(record.descriptor.seq_folder), stage_name).exists():
+                stage_status = "completed"
+
+            if stage_status == "completed":
+                completed_records.append(record)
+            elif stage_status == "failed":
+                failed_clip_ids.append(record.clip_id)
+            else:
+                incomplete_clip_ids.append(record.clip_id)
+
+        subset_path = run_dir / f"{source_manifest.stem}.{stage_name}.completed.jsonl"
+        write_clip_manifest(completed_records, subset_path)
+        summary = {
+            "source_manifest": str(source_manifest.resolve()),
+            "completed_manifest": str(subset_path.resolve()),
+            "total": len(source_records),
+            "completed": len(completed_records),
+            "failed": len(failed_clip_ids),
+            "incomplete": len(incomplete_clip_ids),
+            "failed_clip_ids_preview": failed_clip_ids[:16],
+            "incomplete_clip_ids_preview": incomplete_clip_ids[:16],
+        }
+        return subset_path, summary
+
+    def handle_partial_infer_stage(
+        *,
+        stage_label: str,
+        completed_stage_name: str,
+        source_manifest: Path,
+        return_code: int,
+    ) -> Path:
+        subset_manifest, subset_summary = build_completed_stage_manifest(completed_stage_name, source_manifest)
+        run_summary.setdefault("infer_stage_manifests", {})[stage_label] = subset_summary
+        run_summary["active_manifest_path"] = str(subset_manifest.resolve())
+        summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if subset_summary["completed"] <= 0:
+            raise RuntimeError(
+                f"{stage_label} failed with exit code {return_code} and produced no successful clips. "
+                f"Summary: {json.dumps(subset_summary, ensure_ascii=False)}"
+            )
+        if return_code != 0:
+            print(
+                f"[{stage_label}] partial failure tolerated: exit_code={return_code}, "
+                f"continuing with completed subset {subset_summary['completed']}/{subset_summary['total']}",
+                flush=True,
+            )
+        return subset_manifest
 
     if "preprocess" in stages:
         prepared = adapter.prepare(
@@ -272,7 +348,7 @@ def run_pipeline(args) -> None:
                     + json.dumps(result["failed_shards"], ensure_ascii=False)
                 )
         else:
-            run_logged(
+            detect_motion_return_code = run_logged(
                 "detect_motion",
                 [
                     hawor_python,
@@ -286,6 +362,13 @@ def run_pipeline(args) -> None:
                     *common_batch_args,
                     *detect_motion_args,
                 ],
+                raise_on_error=False,
+            )
+            active_manifest_path = handle_partial_infer_stage(
+                stage_label="detect_motion",
+                completed_stage_name="motion",
+                source_manifest=active_manifest_path,
+                return_code=detect_motion_return_code,
             )
 
     if "slam" in stages:
@@ -325,7 +408,7 @@ def run_pipeline(args) -> None:
                     + json.dumps(result["failed_shards"], ensure_ascii=False)
                 )
         else:
-            run_logged(
+            slam_return_code = run_logged(
                 "slam",
                 [
                     slam_python,
@@ -339,6 +422,13 @@ def run_pipeline(args) -> None:
                     *common_batch_args,
                     *slam_args,
                 ],
+                raise_on_error=False,
+            )
+            active_manifest_path = handle_partial_infer_stage(
+                stage_label="slam",
+                completed_stage_name="slam",
+                source_manifest=active_manifest_path,
+                return_code=slam_return_code,
             )
 
     if "infiller" in stages:
@@ -378,7 +468,7 @@ def run_pipeline(args) -> None:
                     + json.dumps(result["failed_shards"], ensure_ascii=False)
                 )
         else:
-            run_logged(
+            infiller_return_code = run_logged(
                 "infiller",
                 [
                     hawor_python,
@@ -392,6 +482,13 @@ def run_pipeline(args) -> None:
                     *common_batch_args,
                     *infiller_args,
                 ],
+                raise_on_error=False,
+            )
+            active_manifest_path = handle_partial_infer_stage(
+                stage_label="infiller",
+                completed_stage_name="infiller",
+                source_manifest=active_manifest_path,
+                return_code=infiller_return_code,
             )
 
     if "filter" in stages:
