@@ -163,6 +163,7 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
     }
 
     return {
+        "run_tag": raw.get("run_tag"),
         "dataset": dataset_cfg,
         "paths": paths_cfg,
         "runtimes": runtimes_cfg,

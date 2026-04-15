@@ -68,7 +68,7 @@ def run_pipeline(args) -> None:
     )
 
     run_root = Path(paths_cfg.get("log_root", PROJECT_ROOT / "pipeline_runs"))
-    run_tag = args.run_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_tag = args.run_tag or config.get("run_tag") or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = run_root / run_tag
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -142,6 +142,14 @@ def run_pipeline(args) -> None:
         print(f"\n[{name}] {shlex.join(cmd)}\n")
         return stream_command(name, cmd, run_dir / f"{name}.log", cwd=cwd, raise_on_error=raise_on_error)
 
+    def ensure_manifest_exists(stage_label: str, manifest_to_check: Path) -> None:
+        if manifest_to_check.exists():
+            return
+        raise RuntimeError(
+            f"{stage_label} requires descriptor manifest: {manifest_to_check}\n"
+            "Run the manifest stage first, or reuse the previous run directory via --run_tag."
+        )
+
     def build_completed_stage_manifest(stage_name: str, source_manifest: Path) -> tuple[Path, dict]:
         status_path = run_dir / "status.json"
         if not status_path.exists():
@@ -188,6 +196,12 @@ def run_pipeline(args) -> None:
         source_manifest: Path,
         return_code: int,
     ) -> Path:
+        status_path = run_dir / "status.json"
+        if not status_path.exists():
+            raise RuntimeError(
+                f"{stage_label} failed with exit code {return_code} before status.json was created. "
+                f"Check {run_dir / f'{stage_label}.log'}."
+            )
         subset_manifest, subset_summary = build_completed_stage_manifest(completed_stage_name, source_manifest)
         run_summary.setdefault("infer_stage_manifests", {})[stage_label] = subset_summary
         run_summary["active_manifest_path"] = str(subset_manifest.resolve())
@@ -265,6 +279,7 @@ def run_pipeline(args) -> None:
         )
 
     if "annotate" in stages:
+        ensure_manifest_exists("annotate", annotation_manifest_path)
         annotation_command = annotation_cfg.get("command")
         if not annotation_command:
             raise RuntimeError("annotate stage selected but annotation.command is missing in config")
@@ -312,6 +327,7 @@ def run_pipeline(args) -> None:
         )
 
     if "detect_motion" in stages:
+        ensure_manifest_exists("detect_motion", active_manifest_path)
         detect_motion_args = tuple(
             cli_args_from_mapping(
                 infer_cfg.get("detect_motion"),
@@ -372,6 +388,7 @@ def run_pipeline(args) -> None:
             )
 
     if "slam" in stages:
+        ensure_manifest_exists("slam", active_manifest_path)
         slam_args = tuple(
             cli_args_from_mapping(
                 infer_cfg.get("slam"),
@@ -432,6 +449,7 @@ def run_pipeline(args) -> None:
             )
 
     if "infiller" in stages:
+        ensure_manifest_exists("infiller", active_manifest_path)
         infiller_args = tuple(
             cli_args_from_mapping(
                 infer_cfg.get("infiller"),
@@ -492,6 +510,7 @@ def run_pipeline(args) -> None:
             )
 
     if "filter" in stages:
+        ensure_manifest_exists("filter", active_manifest_path)
         filter_runtime_cfg = dict(filter_cfg)
         filter_runtime_cfg.setdefault("annotation_root", annotation_root)
         filter_runtime_cfg.setdefault("annotation_suffix", build_cfg.get("annotation_suffix"))
@@ -525,6 +544,7 @@ def run_pipeline(args) -> None:
         summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if "build" in stages:
+        ensure_manifest_exists("build", active_manifest_path)
         build_runtime_cfg = dict(build_cfg)
         build_runtime_cfg.setdefault("feature_cache_dir", str(shared_feature_cache_dir))
         build_cmd = [
@@ -543,6 +563,7 @@ def run_pipeline(args) -> None:
         run_logged("build", build_cmd)
 
     if "validate" in stages:
+        ensure_manifest_exists("validate", active_manifest_path)
         source_validation = adapter.validate_source(
             dataset_cfg=dataset_cfg,
             adapter_cfg=adapter_cfg,

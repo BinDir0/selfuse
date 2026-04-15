@@ -17,6 +17,96 @@ from lib.pipeline.orchestrator import pipeline as pipeline_module
 
 
 class OrchestratorPartialInferTests(unittest.TestCase):
+    def test_pipeline_uses_config_run_tag_when_cli_run_tag_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            log_root = tmp / "logs"
+            config_run_tag = "config-run-tag"
+            config_path = tmp / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "run_tag": config_run_tag,
+                        "dataset": {"adapter": "buildai"},
+                        "paths": {
+                            "log_root": str(log_root),
+                            "final_dataset_root": str(tmp / "final_dataset"),
+                        },
+                        "runtimes": {
+                            "hawor_python": "/usr/bin/python3",
+                            "slam_python": "/usr/bin/python3",
+                        },
+                        "infer": {
+                            "common": {"resume": True},
+                        },
+                        "build": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            descriptor = ClipDescriptor.from_image_sequence(
+                clip_id="clip_a",
+                clip_name="clip_a",
+                root_dir=str(tmp / "seqs"),
+                seq_folder=str(tmp / "seqs" / "clip_a"),
+                frame_dir=str(tmp / "seqs" / "clip_a" / "frames"),
+                frame_names=["000000.jpg", "000001.jpg"],
+            )
+            adapter = mock.Mock()
+            adapter.prepare.return_value = None
+            adapter.build_descriptors.return_value = [descriptor]
+
+            args = argparse.Namespace(
+                config=str(config_path),
+                stages="prepare",
+                run_tag=None,
+                resume=False,
+            )
+
+            with mock.patch.object(pipeline_module, "get_dataset_adapter", return_value=adapter):
+                pipeline_module.run_pipeline(args)
+
+            expected_manifest = log_root / config_run_tag / "clip_manifest.jsonl"
+            self.assertTrue(expected_manifest.exists())
+
+    def test_infer_requires_existing_manifest_for_infer_only_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            log_root = tmp / "logs"
+            config_path = tmp / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "dataset": {"adapter": "buildai"},
+                        "paths": {
+                            "log_root": str(log_root),
+                            "final_dataset_root": str(tmp / "final_dataset"),
+                        },
+                        "runtimes": {
+                            "hawor_python": "/usr/bin/python3",
+                            "slam_python": "/usr/bin/python3",
+                        },
+                        "infer": {
+                            "common": {"resume": True},
+                        },
+                        "build": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = argparse.Namespace(
+                config=str(config_path),
+                stages="infer",
+                run_tag="missing-manifest",
+                resume=False,
+            )
+
+            with mock.patch.object(pipeline_module, "get_dataset_adapter", return_value=object()):
+                with self.assertRaisesRegex(RuntimeError, "requires descriptor manifest"):
+                    pipeline_module.run_pipeline(args)
+
     def test_partial_infer_failure_narrows_manifest_for_downstream_stages(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
