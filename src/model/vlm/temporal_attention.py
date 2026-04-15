@@ -116,9 +116,15 @@ class TemporalCausalAttention(nn.Module):
 
 
 class MEMVisionBlock(nn.Module):
-    """Wraps a Qwen3VLVisionBlock with temporal-then-spatial attention.
+    """Wraps a Qwen3VLVisionBlock with optional temporal-then-spatial attention.
 
     Reference: MEM (Torne et al., 2025).
+
+    Every visual block is wrapped uniformly so apply_fsdp2 has a single wrap
+    target (MEMVisionBlock) and the inner spatial_block is always unsharded
+    as part of the outer MEM unit. Positions selected by every_n_layers get
+    a real `temporal_attn`; the rest carry `temporal_attn=None` and the
+    forward degrades to plain spatial.
 
     Temporal runs first so the shared norm1/QKV/proj see the same input
     distribution as in pretraining. `mem_grid_thw` and `is_vla_mask` are
@@ -126,15 +132,12 @@ class MEMVisionBlock(nn.Module):
     visual.forward → block); spatial Qwen3VLVisionBlock ignores them.
     `mem_grid_thw` (not `grid_thw`) is used as the kwarg name to avoid
     colliding with visual.forward's positional `grid_thw`.
-
-    Per-layer checkpointing toggles must unwrap to `spatial_block`; HF's
-    apply()-based enable already finds it via the module tree.
     """
 
     def __init__(
         self,
         spatial_block: nn.Module,
-        temporal_attn: TemporalCausalAttention,
+        temporal_attn: TemporalCausalAttention | None,
     ):
         super().__init__()
         self.spatial_block = spatial_block
@@ -148,13 +151,13 @@ class MEMVisionBlock(nn.Module):
         is_vla_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        hidden_states = hidden_states + self.temporal_attn(
-            hidden_states,
-            grid_thw=mem_grid_thw,
-            norm=self.spatial_block.norm1,
-            qkv_proj=self.spatial_block.attn.qkv,
-            out_proj=self.spatial_block.attn.proj,
-            is_vla_mask=is_vla_mask,
-        )
-        hidden_states = self.spatial_block(hidden_states, cu_seqlens, **kwargs)
-        return hidden_states
+        if self.temporal_attn is not None:
+            hidden_states = hidden_states + self.temporal_attn(
+                hidden_states,
+                grid_thw=mem_grid_thw,
+                norm=self.spatial_block.norm1,
+                qkv_proj=self.spatial_block.attn.qkv,
+                out_proj=self.spatial_block.attn.proj,
+                is_vla_mask=is_vla_mask,
+            )
+        return self.spatial_block(hidden_states, cu_seqlens, **kwargs)

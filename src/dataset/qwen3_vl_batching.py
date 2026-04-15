@@ -249,13 +249,14 @@ class Qwen3VLBatchProcessor:
             elif vision_type == "video":
                 video = build_sample_video(sample["images"])
                 video_fps = float(sample["video_fps"].item())
-                is_vla = bool(sample["is_vla_data"].item())
-                if self.mem_enabled and is_vla and int(video.shape[0]) > 1:
-                    # MEM-on path: send 1-frame dummy so chat template expands
-                    # <video> to one frame of placeholders. video_processor
-                    # auto-pads odd T to tps=2 via last-frame repeat, so T=1
-                    # → T_post_tps=1 → N = h*w/sms^2 placeholders. The real T
-                    # frames are processed post-hoc and swapped into pixel_values_videos.
+                if self.mem_enabled and int(video.shape[0]) > 1:
+                    # MEM-on path: every multi-frame video (VLA or padded VLM)
+                    # sends a 1-frame dummy so chat template expands <video> to
+                    # one frame of placeholders. video_processor auto-pads odd
+                    # T to tps=2 via last-frame repeat, so T=1 → T_post_tps=1
+                    # → N = h*w/sms^2 placeholders. The real T frames are
+                    # processed post-hoc and swapped into pixel_values_videos;
+                    # backbone slices ViT output to the last frame to match.
                     dummy = video[:1].contiguous()
                     entry_idx = len(videos)
                     videos.append(dummy)

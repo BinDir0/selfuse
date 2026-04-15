@@ -158,11 +158,22 @@ def apply_fsdp2(
     # or of different classes stay in separate chains.
     prefetch_groups: dict[tuple[int, type], list[torch.nn.Module]] = {}
 
+    # Once a module is wrapped as one FSDP unit, do NOT recurse into its
+    # children to wrap them again — that would split the params back out
+    # into a nested unit. This matters for wrappers like MEMVisionBlock that
+    # access inner spatial_block weights (norm1/qkv/proj) BEFORE calling
+    # spatial_block.forward; the outer wrap is what unshards those weights
+    # at MEM forward entry.
+    wrapped_ids: set[int] = set()
+
     for parent in model.modules():
+        if id(parent) in wrapped_ids:
+            continue
         for child in parent.children():
             if not isinstance(child, wrap_classes):
                 continue
             fully_shard(child, **fsdp_kwargs)
+            wrapped_ids.add(id(child))
             if enable_prefetch:
                 key = (id(parent), type(child))
                 prefetch_groups.setdefault(key, []).append(child)

@@ -497,9 +497,15 @@ class Qwen3VLBackboneWrapper(nn.Module):
         T = n_raw_frames // tps
         mask_non_vla = bool(mem_cfg.get("mask_non_vla", False))
 
+        # Wrap EVERY block in MEMVisionBlock so the FSDP wrap unit is uniform
+        # across visual.blocks. Only every_n positions get a real temporal_attn;
+        # the rest pass through. Uniform wrapping lets apply_fsdp2 use only
+        # MEMVisionBlock as the wrap target — the inner spatial_block is then
+        # always unsharded as part of the outer MEM unit, so MEM forward can
+        # read spatial_block.norm1 / .attn.qkv / .attn.proj as full tensors.
         for i in range(len(visual.blocks)):
+            spatial_block = visual.blocks[i]
             if (i + 1) % every_n == 0:
-                spatial_block = visual.blocks[i]
                 ta = TemporalCausalAttention(
                     num_heads=spatial_block.attn.num_heads,
                     hidden_size=visual.config.hidden_size,
@@ -508,7 +514,9 @@ class Qwen3VLBackboneWrapper(nn.Module):
                     max_temporal_len=mem_cfg.get("max_temporal_len", 32),
                     base=mem_cfg.get("sinusoidal_pe_base", 10000.0),
                 )
-                visual.blocks[i] = MEMVisionBlock(spatial_block, ta)
+            else:
+                ta = None
+            visual.blocks[i] = MEMVisionBlock(spatial_block, ta)
         self.has_mem_blocks = True
         self.mem_mask_non_vla = mask_non_vla
         self.mem_num_frames = T

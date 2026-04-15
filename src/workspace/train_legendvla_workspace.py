@@ -496,6 +496,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         from src.model.vlm.qwen3_vl_backbone import Qwen3VLTextDecoderLayerWithKV
         from src.model.vlm.qwen3_expert import DiTQwen3DecoderLayer
         from src.model.common.diffloss import DiffLoss
+        from src.model.vlm.temporal_attention import MEMVisionBlock
         try:
             from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionBlock
             from transformers.models.dinov3_vit.modeling_dinov3_vit import DINOv3ViTLayer
@@ -504,10 +505,16 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 "FSDP wrap requires transformers shipping both Qwen3VLVisionBlock "
                 "and DINOv3ViTLayer; please upgrade transformers."
             ) from e
+        # MEMVisionBlock wraps every visual block uniformly (real temporal_attn
+        # at every_n positions, None elsewhere) so it's the FSDP wrap target.
+        # Qwen3VLVisionBlock stays as a fallback for the no-MEM path; apply_fsdp2's
+        # wrapped_ids guard prevents double-wrapping the inner spatial_block when
+        # MEM is on.
         fsdp_wrap_classes: tuple[type, ...] = (
             Qwen3VLTextDecoderLayerWithKV,
             DiTQwen3DecoderLayer,
             DiffLoss,
+            MEMVisionBlock,
             Qwen3VLVisionBlock,
             DINOv3ViTLayer,
         )
