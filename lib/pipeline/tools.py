@@ -12,7 +12,9 @@ QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
 
 
 def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: int):
-    from lib.pipeline.frame_source import FrameDataset, _numpy_collate, _frame_dataset_worker_init
+    from concurrent.futures import ThreadPoolExecutor
+    import queue
+    import threading
 
     num_frames = len(frame_source)
     if num_frames <= 0:
@@ -31,25 +33,54 @@ def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: i
             yield batch_indices, batch_frames
         return
 
-    effective_io_workers = min(
-        num_io_workers,
-        max(1, min(num_frames // max(1, detect_batch_size), os.cpu_count() or 1)),
-    )
+    effective_io_workers = min(num_io_workers, max(1, os.cpu_count() or 1))
+    batch_ranges = [
+        (start_idx, min(start_idx + detect_batch_size, num_frames))
+        for start_idx in range(0, num_frames, detect_batch_size)
+    ]
+    get_frame = frame_source.get_frame
 
-    dataset = FrameDataset(frame_source)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=detect_batch_size,
-        shuffle=False,
-        num_workers=effective_io_workers,
-        collate_fn=_numpy_collate,
-        worker_init_fn=_frame_dataset_worker_init,
-        pin_memory=False,
-        prefetch_factor=2,
-        persistent_workers=True,
-    )
+    # Threaded loading avoids per-video DataLoader process startup and IPC overhead.
+    # JPEG decode / cv2.imdecode / os.pread all release the GIL in the hot path,
+    # so threads still parallelize frame IO well here. A dedicated prefetch thread
+    # overlaps loading batch N+1 while YOLO runs on batch N.
+    prefetch_q = queue.Queue(maxsize=2)
+    prefetch_error = []
 
-    yield from tqdm(loader, disable=QUIET_MODE, desc="Detect (batched)")
+    def _load_batches():
+        with ThreadPoolExecutor(max_workers=effective_io_workers) as pool:
+            try:
+                for start_idx, end_idx in batch_ranges:
+                    batch_indices = list(range(start_idx, end_idx))
+                    batch_frames = list(
+                        pool.map(
+                            lambda frame_idx: get_frame(frame_idx, rgb=False),
+                            batch_indices,
+                            chunksize=4,
+                        )
+                    )
+                    prefetch_q.put((batch_indices, batch_frames))
+            except Exception as error:
+                prefetch_error.append(error)
+            finally:
+                prefetch_q.put(None)
+
+    loader_thread = threading.Thread(target=_load_batches, daemon=True)
+    loader_thread.start()
+
+    progress = tqdm(total=len(batch_ranges), disable=QUIET_MODE, desc="Detect (batched)")
+    try:
+        while True:
+            item = prefetch_q.get()
+            if item is None:
+                if prefetch_error:
+                    raise prefetch_error[0]
+                break
+            progress.update(1)
+            yield item
+    finally:
+        progress.close()
+        loader_thread.join()
 
 
 def detect_track(

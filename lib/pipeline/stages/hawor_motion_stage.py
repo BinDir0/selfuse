@@ -399,9 +399,11 @@ def _process_hand_track(args, idx, track, context, profiler=None):
         all_boxes,
         img_focal=context.img_focal,
         img_center=context.img_center,
+        device=context.device,
         do_flip=do_flip,
         chunk_batch_size=getattr(args, "chunk_batch_size", 4),
         num_workers=getattr(args, "num_workers", 16),
+        output_device=context.device,
     )
     if profiler:
         print(f"[PROFILER] Step after inference (track {idx})")

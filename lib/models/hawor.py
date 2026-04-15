@@ -371,7 +371,19 @@ class HAWOR(pl.LightningModule):
 
         return output
 
-    def inference(self, frame_source, frame_indices, boxes, img_focal, img_center, device='cuda', do_flip=False, chunk_batch_size=32, num_workers=16):
+    def inference(
+        self,
+        frame_source,
+        frame_indices,
+        boxes,
+        img_focal,
+        img_center,
+        device='cuda',
+        do_flip=False,
+        chunk_batch_size=32,
+        num_workers=16,
+        output_device='cpu',
+    ):
         import queue
         import threading
         from concurrent.futures import ThreadPoolExecutor
@@ -472,11 +484,20 @@ class HAWOR(pl.LightningModule):
             pred_trans.append(out['trans_full'])
 
         # Concatenate on GPU, then transfer to CPU once
-        pred_cam = torch.cat(pred_cam, dim=0)[:total_frames].cpu()
-        pred_pose = torch.cat(pred_pose, dim=0)[:total_frames].cpu()
-        pred_shape = torch.cat(pred_shape, dim=0)[:total_frames].cpu()
-        pred_rotmat = torch.cat(pred_rotmat, dim=0)[:total_frames].cpu()
-        pred_trans = torch.cat(pred_trans, dim=0)[:total_frames].cpu()
+        pred_cam = torch.cat(pred_cam, dim=0)[:total_frames]
+        pred_pose = torch.cat(pred_pose, dim=0)[:total_frames]
+        pred_shape = torch.cat(pred_shape, dim=0)[:total_frames]
+        pred_rotmat = torch.cat(pred_rotmat, dim=0)[:total_frames]
+        pred_trans = torch.cat(pred_trans, dim=0)[:total_frames]
+
+        if output_device is not None:
+            target_device = torch.device(output_device)
+            if pred_cam.device != target_device:
+                pred_cam = pred_cam.to(target_device)
+                pred_pose = pred_pose.to(target_device)
+                pred_shape = pred_shape.to(target_device)
+                pred_rotmat = pred_rotmat.to(target_device)
+                pred_trans = pred_trans.to(target_device)
 
         return {
             'pred_cam': pred_cam,
