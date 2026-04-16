@@ -80,11 +80,13 @@ def validate_sample_record(sample):
         raise ValueError(f"Incomplete sample {sample['key']}: missing {', '.join(missing)}")
 
 
-def build_updated_meta(meta_bytes, instruction):
+def build_updated_meta(meta_bytes, instruction, language=None):
     """Update a sample meta payload with normalized instruction fields."""
     meta = json.loads(meta_bytes.decode("utf-8"))
     meta["instruction"] = list(instruction)
     meta["instruction_num"] = len(instruction)
+    if language is not None:
+        meta["language"] = language
     return json.dumps(meta, ensure_ascii=False).encode("utf-8")
 
 

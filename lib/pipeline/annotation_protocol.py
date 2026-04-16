@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -10,6 +11,7 @@ from typing import Optional
 
 ANNOTATION_SUFFIX = ".annotation.json"
 HIERARCHY_KEYS = ("level1", "level2", "level3", "level4", "level5")
+_FACTORY_CLIP_ID_PATTERN = re.compile(r"^f(\d{3})_")
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,42 @@ class ClipAnnotation:
 
 def annotation_path(annotation_root: str | Path, clip_id: str, *, annotation_suffix: str = ANNOTATION_SUFFIX) -> Path:
     return Path(annotation_root) / f"{clip_id}{annotation_suffix}"
+
+
+def annotation_path_candidates(
+    annotation_root: str | Path,
+    clip_id: str,
+    *,
+    annotation_suffix: str = ANNOTATION_SUFFIX,
+) -> list[Path]:
+    root = Path(annotation_root)
+    candidates = [annotation_path(root, clip_id, annotation_suffix=annotation_suffix)]
+
+    match = _FACTORY_CLIP_ID_PATTERN.match(str(clip_id))
+    if match:
+        factory_dir = root / f"factory{int(match.group(1)):03d}"
+        nested = factory_dir / f"{clip_id}{annotation_suffix}"
+        if nested not in candidates:
+            candidates.append(nested)
+
+    return candidates
+
+
+def resolve_annotation_path(
+    annotation_root: str | Path,
+    clip_id: str,
+    *,
+    annotation_suffix: str = ANNOTATION_SUFFIX,
+) -> tuple[Optional[Path], str]:
+    candidates = annotation_path_candidates(
+        annotation_root,
+        clip_id,
+        annotation_suffix=annotation_suffix,
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate, str(candidate)
+    return None, str(candidates[-1])
 
 
 def _normalize_string_list(values) -> list[str]:
@@ -76,9 +114,13 @@ def load_clip_annotation(
     annotation_suffix: str = ANNOTATION_SUFFIX,
 ) -> tuple[Optional[ClipAnnotation], Optional[str], str]:
     """Load one clip-level annotation sidecar."""
-    path = annotation_path(annotation_root, clip_id, annotation_suffix=annotation_suffix)
-    if not path.exists():
-        return None, "missing_annotation", str(path)
+    path, resolved_path = resolve_annotation_path(
+        annotation_root,
+        clip_id,
+        annotation_suffix=annotation_suffix,
+    )
+    if path is None:
+        return None, "missing_annotation", resolved_path
 
     try:
         with path.open("r", encoding="utf-8") as handle:
