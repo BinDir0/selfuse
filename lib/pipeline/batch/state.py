@@ -1,9 +1,10 @@
+import os
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from lib.pipeline.batch.config import BatchRunConfig
 from lib.pipeline.stage_api import (
@@ -49,6 +50,153 @@ class VideoTaskState:
         }
 
 
+def status_backup_path(status_path: Path) -> Path:
+    return status_path.with_name(f"{status_path.name}.bak")
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    backup_path = status_backup_path(path)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            try:
+                os.replace(path, backup_path)
+            except OSError:
+                pass
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _load_json_file(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _init_recovered_task(video_path: str, stages: Iterable[str] | None) -> dict[str, Any]:
+    stage_list = list(stages or [])
+    return {
+        "video_path": video_path,
+        "video_name": Path(video_path).stem,
+        "stage_status": {stage: "pending" for stage in stage_list},
+        "retry_count": {stage: 0 for stage in stage_list},
+        "start_time": None,
+        "end_time": None,
+    }
+
+
+def build_status_payload_from_events(
+    events_path: Path,
+    *,
+    video_paths: Iterable[str] | None = None,
+    stages: Iterable[str] | None = None,
+    run_dir: str | None = None,
+) -> tuple[dict, dict]:
+    tasks: dict[str, dict] = {}
+    stage_order = list(stages or [])
+    stage_seen = set(stage_order)
+    malformed_lines = 0
+    parsed_lines = 0
+    recovered_results = 0
+    last_error = None
+
+    for video_path in video_paths or []:
+        tasks[video_path] = _init_recovered_task(video_path, stage_order)
+
+    with events_path.open("r", encoding="utf-8") as handle:
+        for line_no, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as error:
+                malformed_lines += 1
+                last_error = f"line {line_no}: {error}"
+                continue
+            parsed_lines += 1
+            event = payload.get("event")
+            if event not in {"stage_success", "stage_failure"}:
+                continue
+            video_path = payload.get("video")
+            stage = payload.get("stage")
+            if not video_path or not stage:
+                continue
+            if stage not in stage_seen:
+                stage_order.append(stage)
+                stage_seen.add(stage)
+                for task in tasks.values():
+                    task["stage_status"].setdefault(stage, "pending")
+                    task["retry_count"].setdefault(stage, 0)
+            task = tasks.setdefault(video_path, _init_recovered_task(video_path, stage_order))
+            task["stage_status"][stage] = "completed" if event == "stage_success" else "failed"
+            task["retry_count"].setdefault(stage, 0)
+            recovered_results += 1
+
+    recovered = {
+        "run_dir": str(run_dir or events_path.parent),
+        "gpus": [],
+        "stages": stage_order,
+        "tasks": tasks,
+    }
+    meta = {
+        "source": "events",
+        "events_path": str(events_path),
+        "parsed_lines": parsed_lines,
+        "malformed_lines": malformed_lines,
+        "recovered_results": recovered_results,
+        "last_malformed_error": last_error,
+    }
+    return recovered, meta
+
+
+def load_status_payload_with_fallback(
+    status_path: Path,
+    *,
+    events_path: Path | None = None,
+    video_paths: Iterable[str] | None = None,
+    stages: Iterable[str] | None = None,
+) -> tuple[dict | None, dict]:
+    backup_path = status_backup_path(status_path)
+    load_errors = []
+
+    for candidate, source in ((status_path, "status"), (backup_path, "backup")):
+        if not candidate.exists():
+            continue
+        try:
+            return _load_json_file(candidate), {"source": source, "path": str(candidate), "load_errors": load_errors}
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            load_errors.append(f"{source}:{candidate}: {error}")
+
+    if events_path is not None and events_path.exists():
+        payload, meta = build_status_payload_from_events(
+            events_path,
+            video_paths=video_paths,
+            stages=stages,
+            run_dir=str(status_path.parent),
+        )
+        meta["load_errors"] = load_errors
+        return payload, meta
+
+    if not status_path.exists() and not backup_path.exists():
+        return None, {"source": "missing", "path": str(status_path), "load_errors": load_errors}
+
+    raise RuntimeError(
+        f"Failed to load batch status from {status_path}"
+        + (f" (backup: {backup_path})" if backup_path != status_path else "")
+        + (f". Errors: {' | '.join(load_errors)}" if load_errors else "")
+    )
+
+
 class BatchRunState:
     def __init__(self, config: BatchRunConfig):
         self.config = config
@@ -56,6 +204,7 @@ class BatchRunState:
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         self.status_file = config.run_dir / "status.json"
+        self.events_file = config.run_dir / "events.jsonl"
         descriptor_map = config.descriptor_map
         self.tasks = {
             video_path: VideoTaskState.create(
@@ -94,15 +243,33 @@ class BatchRunState:
             "stages": self.config.stages,
             "tasks": {video_path: task.to_dict() for video_path, task in self.tasks.items()},
         }
-        with open(self.status_file, "w") as handle:
-            json.dump(status_data, handle, indent=2, ensure_ascii=False)
+        _atomic_write_json(self.status_file, status_data)
 
     def load(self):
-        if not self.status_file.exists():
+        payload, meta = load_status_payload_with_fallback(
+            self.status_file,
+            events_path=self.events_file,
+            video_paths=self.config.video_paths,
+            stages=self.config.stages,
+        )
+        if payload is None:
             return
-        with open(self.status_file) as handle:
-            data = json.load(handle)
-        for video_path, task_data in data.get("tasks", {}).items():
+        if meta.get("source") != "status":
+            extra = ""
+            if meta.get("source") == "events":
+                extra = (
+                    f" parsed_lines={meta.get('parsed_lines', 0)}"
+                    f" malformed_lines={meta.get('malformed_lines', 0)}"
+                    f" recovered_results={meta.get('recovered_results', 0)}"
+                )
+            print(
+                f"[Resume] Recovered batch status from {meta.get('source')} "
+                f"for run_dir={self.config.run_dir}.{extra}",
+                flush=True,
+            )
+            for error in meta.get("load_errors", []):
+                print(f"[Resume] Status load warning: {error}", flush=True)
+        for video_path, task_data in payload.get("tasks", {}).items():
             if video_path not in self.tasks:
                 continue
             task = self.tasks[video_path]

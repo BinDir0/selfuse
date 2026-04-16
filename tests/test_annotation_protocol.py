@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lib.pipeline.annotation_protocol import load_clip_annotation, summarize_annotation_issues, write_annotation_issue_report
+from lib.pipeline.annotation_protocol import (
+    build_annotation_issue_from_candidates,
+    load_clip_annotation,
+    summarize_annotation_issues,
+    write_annotation_issue_report,
+)
 
 
 class AnnotationProtocolTests(unittest.TestCase):
@@ -56,6 +61,22 @@ class AnnotationProtocolTests(unittest.TestCase):
             self.assertEqual(payload["annotation_suffix"], "_qwen-annotation.json")
             self.assertEqual(payload["context"]["mode"], "test")
             self.assertEqual(len(payload["issues"]), 2)
+
+    def test_build_annotation_issue_from_candidates_includes_nested_paths(self):
+        issue = build_annotation_issue_from_candidates(
+            "/tmp/annotations",
+            "f011_w016_v00162_i001",
+            "missing_annotation",
+            annotation_suffix="_qwen-annotation.json",
+        )
+        self.assertEqual(issue["error_code"], "missing_annotation")
+        self.assertEqual(
+            issue["candidate_paths"],
+            [
+                "/tmp/annotations/f011_w016_v00162_i001_qwen-annotation.json",
+                "/tmp/annotations/factory011/f011_w016_v00162_i001_qwen-annotation.json",
+            ],
+        )
 
 
 if __name__ == "__main__":

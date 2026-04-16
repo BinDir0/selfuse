@@ -18,6 +18,7 @@ from lib.pipeline.clip_manifest import (
     write_clip_manifest,
     write_shard_dir_list,
 )
+from lib.pipeline.batch.state import load_status_payload_with_fallback
 from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
 from lib.pipeline.frame_sources import classify_descriptor_storage
 from lib.pipeline.multihost import (
@@ -152,12 +153,24 @@ def run_pipeline(args) -> None:
 
     def build_completed_stage_manifest(stage_name: str, source_manifest: Path) -> tuple[Path, dict]:
         status_path = run_dir / "status.json"
-        if not status_path.exists():
+        events_path = run_dir / "events.jsonl"
+        if not status_path.exists() and not events_path.exists():
             raise RuntimeError(f"Missing status.json after {stage_name}: {status_path}")
-
-        status_payload = json.loads(status_path.read_text(encoding="utf-8"))
-        tasks = status_payload.get("tasks", {})
         source_records = load_clip_manifest(source_manifest)
+        status_payload, status_meta = load_status_payload_with_fallback(
+            status_path,
+            events_path=events_path,
+            video_paths=[record.descriptor.video_key for record in source_records],
+            stages=[stage_name],
+        )
+        if status_payload is None:
+            raise RuntimeError(f"Missing recoverable batch status after {stage_name}: {status_path}")
+        if status_meta.get("source") != "status":
+            print(
+                f"[{stage_name}] recovered completed-stage manifest state from {status_meta.get('source')}",
+                flush=True,
+            )
+        tasks = status_payload.get("tasks", {})
         completed_records = []
         failed_clip_ids = []
         incomplete_clip_ids = []

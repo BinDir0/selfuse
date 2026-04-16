@@ -9,7 +9,7 @@ import joblib
 import numpy as np
 from tqdm import tqdm
 
-from lib.pipeline.annotation_protocol import build_annotation_issue, load_clip_annotation
+from lib.pipeline.annotation_protocol import build_annotation_issue_from_candidates, load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
 from lib.pipeline.frame_sources import classify_descriptor_storage, validate_descriptor_for_frame_reads
 from lib.pipeline.exporters.mano_codec import build_mano_pca_frame_features
@@ -254,7 +254,13 @@ def _prepare_manifest_episode(
             annotation_suffix=annotation_suffix,
         )
         if annotation is None:
-            annotation_issue = build_annotation_issue(record.clip_id, error_code, resolved_path)
+            annotation_issue = build_annotation_issue_from_candidates(
+                annotation_root,
+                record.clip_id,
+                error_code,
+                annotation_suffix=annotation_suffix,
+                resolved_path=resolved_path,
+            )
             if require_annotation:
                 return None, error_code, annotation_issue
         else:
@@ -440,6 +446,13 @@ def prepare_manifest_episodes(
             if annotation_issue is not None:
                 annotation_issues.append(annotation_issue)
                 code = str(annotation_issue.get("error_code") or "")
+                if code == "missing_annotation":
+                    candidates = annotation_issue.get("candidate_paths") or [annotation_issue.get("resolved_path")]
+                    print(
+                        "Warning: missing annotation for "
+                        f"{annotation_issue.get('clip_id')}; tried: {', '.join(str(path) for path in candidates)}",
+                        flush=True,
+                    )
                 if code in stats["annotation_issue_summary"]:
                     stats["annotation_issue_summary"][code] += 1
                 else:

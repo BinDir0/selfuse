@@ -73,6 +73,28 @@ def build_annotation_issue(clip_id: str, error_code: str, resolved_path: str) ->
     }
 
 
+def build_annotation_issue_from_candidates(
+    annotation_root: str | Path,
+    clip_id: str,
+    error_code: str,
+    *,
+    annotation_suffix: str = ANNOTATION_SUFFIX,
+    resolved_path: str | None = None,
+) -> dict:
+    candidates = annotation_path_candidates(
+        annotation_root,
+        clip_id,
+        annotation_suffix=annotation_suffix,
+    )
+    issue = build_annotation_issue(
+        clip_id,
+        error_code,
+        resolved_path or str(candidates[-1] if candidates else ""),
+    )
+    issue["candidate_paths"] = [str(path) for path in candidates]
+    return issue
+
+
 def summarize_annotation_issues(issues: list[dict]) -> dict:
     summary = {
         "total": len(issues),

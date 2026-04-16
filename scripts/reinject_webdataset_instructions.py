@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.annotation_protocol import (  # noqa: E402
-    build_annotation_issue,
+    build_annotation_issue_from_candidates,
     load_clip_annotation,
     write_annotation_issue_report,
 )
@@ -31,6 +31,11 @@ from lib.pipeline.exporters.webdataset_rewriter import (  # noqa: E402
 )
 
 _WORKER_ARGS = None
+
+
+def _default_annotation_issue_report_path(output_dir: str | Path, shard_start: int, shard_end: int | None) -> Path:
+    end_label = "all" if shard_end is None else f"{int(shard_end):06d}"
+    return Path(output_dir) / f"_annotation_issues.shards_{int(shard_start):06d}_{end_label}.json"
 
 
 def build_parser():
@@ -64,7 +69,7 @@ def build_parser():
     parser.add_argument(
         "--annotation_issue_report_out",
         default=None,
-        help="Optional JSON path for missing/invalid annotation report; defaults to <output_dir>/_annotation_issues.json when issues exist",
+        help="Optional JSON path for missing/invalid annotation report; defaults to a shard-range-specific file in output_dir when issues exist",
     )
     return parser
 
@@ -116,7 +121,22 @@ def rewrite_shard(
             )
             if annotation is None:
                 clip_stats.setdefault(clip_id, error_code or "unknown")
-                clip_issue_details.setdefault(clip_id, build_annotation_issue(clip_id, error_code or "unknown", annotation_path))
+                if clip_id not in clip_issue_details:
+                    issue = build_annotation_issue_from_candidates(
+                        annotation_root,
+                        clip_id,
+                        error_code or "unknown",
+                        annotation_suffix=annotation_suffix,
+                        resolved_path=annotation_path,
+                    )
+                    clip_issue_details[clip_id] = issue
+                    if (error_code or "unknown") == "missing_annotation":
+                        candidate_paths = issue.get("candidate_paths") or [annotation_path]
+                        print(
+                            "Warning: missing annotation for "
+                            f"{clip_id}; tried: {', '.join(str(path) for path in candidate_paths)}",
+                            flush=True,
+                        )
                 if strict:
                     raise RuntimeError(
                         f"Failed to load annotation for clip_id={clip_id}: {error_code} ({annotation_path})"
@@ -254,7 +274,8 @@ def main():
     annotation_issues = list(annotation_issue_map.values())
     if annotation_issues or args.annotation_issue_report_out:
         report_path = write_annotation_issue_report(
-            args.annotation_issue_report_out or (Path(args.output_dir) / "_annotation_issues.json"),
+            args.annotation_issue_report_out
+            or _default_annotation_issue_report_path(args.output_dir, args.shard_start, args.shard_end),
             annotation_root=args.annotation_root,
             annotation_suffix=args.annotation_suffix,
             issues=annotation_issues,
