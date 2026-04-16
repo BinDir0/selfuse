@@ -27,7 +27,6 @@ import wandb
 from .base_workspace import BaseWorkspace
 from src.policy.legendvla import LegendVLA
 from src.utils.checkpoint_util import TopKCheckpointManager, load_checkpoint
-from src.utils.cpu_affinity import dataloader_worker_init_fn
 from src.utils.distributed_utils import (
     init_distributed,
     apply_fsdp2,
@@ -436,7 +435,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         train_dataloader = DataLoader(
             dataset=dataset,
             collate_fn=dataset.get_collator(),
-            worker_init_fn=dataloader_worker_init_fn,
             **cfg.dataloader.loader,
         )
         # Validation dataloader.
@@ -448,7 +446,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         val_dataloader = DataLoader(
             dataset=val_dataset,
             collate_fn=val_dataset.get_collator(),
-            worker_init_fn=dataloader_worker_init_fn,
             **cfg.val_dataloader.loader,
         )
 
