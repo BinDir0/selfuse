@@ -24,6 +24,7 @@ from lib.pipeline.annotation_protocol import (  # noqa: E402
 )
 from lib.pipeline.exporters.webdataset_rewriter import (  # noqa: E402
     build_updated_meta,
+    build_updated_meta_from_meta,
     iter_shard_paths,
     iter_shard_samples,
     validate_sample_record,
@@ -104,6 +105,7 @@ def rewrite_shard(
     empty_frames = 0
     clip_stats: dict[str, str] = {}
     clip_issue_details: dict[str, dict] = {}
+    annotation_cache: dict[str, tuple[object, str | None, str]] = {}
 
     tar_writer = None
     try:
@@ -114,11 +116,15 @@ def rewrite_shard(
             if not clip_id:
                 raise RuntimeError(f"Sample {sample['key']} missing clip_id in meta")
 
-            annotation, error_code, annotation_path = load_clip_annotation(
-                annotation_root,
-                clip_id,
-                annotation_suffix=annotation_suffix,
-            )
+            cached = annotation_cache.get(clip_id)
+            if cached is None:
+                cached = load_clip_annotation(
+                    annotation_root,
+                    clip_id,
+                    annotation_suffix=annotation_suffix,
+                )
+                annotation_cache[clip_id] = cached
+            annotation, error_code, annotation_path = cached
             if annotation is None:
                 clip_stats.setdefault(clip_id, error_code or "unknown")
                 if clip_id not in clip_issue_details:
@@ -141,12 +147,12 @@ def rewrite_shard(
                     raise RuntimeError(
                         f"Failed to load annotation for clip_id={clip_id}: {error_code} ({annotation_path})"
                     )
-                updated_meta = build_updated_meta(sample["meta_bytes"], [], language=meta.get("language"))
+                updated_meta = build_updated_meta_from_meta(meta, [], language=meta.get("language"))
                 empty_frames += 1
             else:
                 clip_stats.setdefault(clip_id, "updated")
-                updated_meta = build_updated_meta(
-                    sample["meta_bytes"],
+                updated_meta = build_updated_meta_from_meta(
+                    meta,
                     annotation.instruction,
                     language=annotation.language,
                 )

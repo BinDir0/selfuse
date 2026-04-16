@@ -83,6 +83,12 @@ def validate_sample_record(sample):
 def build_updated_meta(meta_bytes, instruction, language=None):
     """Update a sample meta payload with normalized instruction fields."""
     meta = json.loads(meta_bytes.decode("utf-8"))
+    return build_updated_meta_from_meta(meta, instruction, language=language)
+
+
+def build_updated_meta_from_meta(meta: dict, instruction, language=None):
+    """Update an already-decoded sample meta payload with normalized instruction fields."""
+    meta = dict(meta)
     meta["instruction"] = list(instruction)
     meta["instruction_num"] = len(instruction)
     if language is not None:
