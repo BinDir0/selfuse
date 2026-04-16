@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lib.pipeline.annotation_protocol import load_clip_annotation
+from lib.pipeline.annotation_protocol import load_clip_annotation, summarize_annotation_issues, write_annotation_issue_report
 
 
 class AnnotationProtocolTests(unittest.TestCase):
@@ -33,6 +33,29 @@ class AnnotationProtocolTests(unittest.TestCase):
             self.assertIsNotNone(annotation)
             self.assertEqual(annotation.instruction, ["pick up object", "move object"])
             self.assertEqual(source_path, str(ann_path))
+
+    def test_write_annotation_issue_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report_path = root / "annotation_issues.json"
+            issues = [
+                {"clip_id": "clip_a", "error_code": "missing_annotation", "resolved_path": "/tmp/a.json"},
+                {"clip_id": "clip_b", "error_code": "empty_instruction", "resolved_path": "/tmp/b.json"},
+            ]
+
+            written_path = write_annotation_issue_report(
+                report_path,
+                annotation_root=root / "ann",
+                annotation_suffix="_qwen-annotation.json",
+                issues=issues,
+                context={"mode": "test"},
+            )
+
+            payload = json.loads(Path(written_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["summary"], summarize_annotation_issues(issues))
+            self.assertEqual(payload["annotation_suffix"], "_qwen-annotation.json")
+            self.assertEqual(payload["context"]["mode"], "test")
+            self.assertEqual(len(payload["issues"]), 2)
 
 
 if __name__ == "__main__":

@@ -65,6 +65,53 @@ def resolve_annotation_path(
     return None, str(candidates[-1])
 
 
+def build_annotation_issue(clip_id: str, error_code: str, resolved_path: str) -> dict:
+    return {
+        "clip_id": str(clip_id),
+        "error_code": str(error_code),
+        "resolved_path": str(resolved_path),
+    }
+
+
+def summarize_annotation_issues(issues: list[dict]) -> dict:
+    summary = {
+        "total": len(issues),
+        "missing_annotation": 0,
+        "invalid_json": 0,
+        "invalid_status": 0,
+        "empty_instruction": 0,
+        "other": 0,
+    }
+    for item in issues:
+        code = str(item.get("error_code") or "")
+        if code in summary:
+            summary[code] += 1
+        else:
+            summary["other"] += 1
+    return summary
+
+
+def write_annotation_issue_report(
+    report_path: str | Path,
+    *,
+    annotation_root: str | Path | None,
+    annotation_suffix: str,
+    issues: list[dict],
+    context: Optional[dict] = None,
+) -> str:
+    path = Path(report_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "annotation_root": None if annotation_root is None else str(Path(annotation_root).resolve()),
+        "annotation_suffix": str(annotation_suffix),
+        "summary": summarize_annotation_issues(issues),
+        "issues": list(issues),
+        "context": dict(context or {}),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path.resolve())
+
+
 def _normalize_string_list(values) -> list[str]:
     normalized = []
     if not isinstance(values, list):

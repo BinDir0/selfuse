@@ -17,7 +17,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.pipeline.annotation_protocol import load_clip_annotation  # noqa: E402
+from lib.pipeline.annotation_protocol import (  # noqa: E402
+    build_annotation_issue,
+    load_clip_annotation,
+    write_annotation_issue_report,
+)
 from lib.pipeline.exporters.webdataset_rewriter import (  # noqa: E402
     build_updated_meta,
     iter_shard_paths,
@@ -57,6 +61,11 @@ def build_parser():
         action="store_true",
         help="Fail a shard on missing/invalid/empty annotations instead of keeping empty instructions",
     )
+    parser.add_argument(
+        "--annotation_issue_report_out",
+        default=None,
+        help="Optional JSON path for missing/invalid annotation report; defaults to <output_dir>/_annotation_issues.json when issues exist",
+    )
     return parser
 
 
@@ -89,6 +98,7 @@ def rewrite_shard(
     rewritten_frames = 0
     empty_frames = 0
     clip_stats: dict[str, str] = {}
+    clip_issue_details: dict[str, dict] = {}
 
     tar_writer = None
     try:
@@ -106,6 +116,7 @@ def rewrite_shard(
             )
             if annotation is None:
                 clip_stats.setdefault(clip_id, error_code or "unknown")
+                clip_issue_details.setdefault(clip_id, build_annotation_issue(clip_id, error_code or "unknown", annotation_path))
                 if strict:
                     raise RuntimeError(
                         f"Failed to load annotation for clip_id={clip_id}: {error_code} ({annotation_path})"
@@ -159,6 +170,7 @@ def rewrite_shard(
         "rewritten_frames": rewritten_frames,
         "empty_frames": empty_frames,
         "clip_counts": counts,
+        "annotation_issues": list(clip_issue_details.values()),
     }
 
 
@@ -201,6 +213,7 @@ def main():
         "invalid_status": 0,
         "empty_instruction": 0,
     }
+    annotation_issue_map = {}
 
     if args.workers <= 1:
         result_iter = (
@@ -224,6 +237,9 @@ def main():
             totals["frames_written"] += result["frames_written"]
             totals["rewritten_frames"] += result["rewritten_frames"]
             totals["empty_frames"] += result["empty_frames"]
+            for issue in result.get("annotation_issues", []):
+                key = (issue.get("clip_id"), issue.get("error_code"), issue.get("resolved_path"))
+                annotation_issue_map.setdefault(key, issue)
             for key, value in result["clip_counts"].items():
                 if key == "updated":
                     totals["updated_clips"] += value
@@ -233,6 +249,30 @@ def main():
         if args.workers > 1:
             pool.close()
             pool.join()
+
+    report_path = None
+    annotation_issues = list(annotation_issue_map.values())
+    if annotation_issues or args.annotation_issue_report_out:
+        report_path = write_annotation_issue_report(
+            args.annotation_issue_report_out or (Path(args.output_dir) / "_annotation_issues.json"),
+            annotation_root=args.annotation_root,
+            annotation_suffix=args.annotation_suffix,
+            issues=annotation_issues,
+            context={
+                "source_shard_dir": str(Path(args.source_shard_dir).resolve()),
+                "output_dir": str(Path(args.output_dir).resolve()),
+                "strict": bool(args.strict),
+            },
+        )
+        if annotation_issues:
+            print(
+                "Warning: "
+                f"{len(annotation_issues)} clip(s) have missing/invalid/empty annotations; "
+                f"report written to {report_path}"
+            )
+    if report_path is not None:
+        totals["annotation_issue_report_path"] = report_path
+        totals["annotation_issue_count"] = len(annotation_issues)
 
     print(json.dumps(totals, ensure_ascii=False, indent=2))
 

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from multiprocessing import get_context
 
 import torch
 from tqdm import tqdm
+
+from lib.pipeline.annotation_protocol import write_annotation_issue_report
 
 from .episodes import prepare_manifest_episodes
 from .writer import (
@@ -37,9 +40,10 @@ def run_manifest_build(
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
+    annotation_issue_report_out: str | None = None,
     resume: bool = False,
 ):
-    episodes, prepare_stats = prepare_manifest_episodes(
+    episodes, prepare_stats, annotation_issues = prepare_manifest_episodes(
         manifest_path,
         annotation_root=annotation_root,
         annotation_suffix=annotation_suffix,
@@ -50,6 +54,27 @@ def run_manifest_build(
         target_fps=target_fps,
         interpolate_labels=interpolate_labels,
     )
+    annotation_issue_report_path = None
+    if annotation_root and (annotation_issues or annotation_issue_report_out):
+        report_path = annotation_issue_report_out or os.path.join(output_dir, "_annotation_issues.json")
+        annotation_issue_report_path = write_annotation_issue_report(
+            report_path,
+            annotation_root=annotation_root,
+            annotation_suffix=annotation_suffix,
+            issues=annotation_issues,
+            context={
+                "manifest_path": str(Path(manifest_path).resolve()),
+                "output_dir": str(Path(output_dir).resolve()),
+                "require_annotation": bool(require_annotation),
+            },
+        )
+        if annotation_issues:
+            print(
+                "Warning: "
+                f"{len(annotation_issues)} clip(s) have missing/invalid/empty annotations; "
+                f"report written to {annotation_issue_report_path}"
+            )
+
     if not episodes:
         raise RuntimeError(f"No valid manifest episodes found: {prepare_stats}")
 
@@ -122,6 +147,8 @@ def run_manifest_build(
         "prepare_stats": prepare_stats,
         "totals": totals,
         "skipped_clip_details": skipped_clip_details,
+        "annotation_issue_report_path": annotation_issue_report_path,
+        "annotation_issue_count": len(annotation_issues),
         "planned_shards": len(shard_tasks),
         "pending_shards": len(pending_shard_tasks),
         "planned_frames": sum(ep["num_valid_frames"] for ep in repeated),

@@ -25,6 +25,12 @@ def get_parser():
         help="Annotation sidecar suffix, e.g. .annotation.json or _qwen-annotation.json",
     )
     parser.add_argument("--require_annotation", action="store_true", help="Drop clips with missing or invalid annotations")
+    parser.add_argument(
+        "--annotation_issue_report_out",
+        type=str,
+        default=None,
+        help="Optional JSON path for missing/invalid annotation report; defaults to <output_dir>/_annotation_issues.json when issues exist",
+    )
     parser.add_argument("--max_episodes", type=int, default=None, help="Limit episodes for testing")
     parser.add_argument("--repeat_episodes", type=int, default=1, help="Repeat the manifest entries this many times")
     parser.add_argument("--preprocess_workers", type=int, default=8, help="Workers for manifest preparation")
@@ -77,6 +83,7 @@ def main():
         source_fps=args.source_fps,
         target_fps=args.target_fps,
         interpolate_labels=args.interpolate_labels,
+        annotation_issue_report_out=args.annotation_issue_report_out,
         resume=args.resume,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

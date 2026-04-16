@@ -9,7 +9,7 @@ import joblib
 import numpy as np
 from tqdm import tqdm
 
-from lib.pipeline.annotation_protocol import load_clip_annotation
+from lib.pipeline.annotation_protocol import build_annotation_issue, load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
 from lib.pipeline.frame_sources import classify_descriptor_storage, validate_descriptor_for_frame_reads
 from lib.pipeline.exporters.mano_codec import build_mano_pca_frame_features
@@ -246,15 +246,17 @@ def _prepare_manifest_episode(
 
     language = None
     instruction = []
+    annotation_issue = None
     if annotation_root:
-        annotation, error_code, _ = load_clip_annotation(
+        annotation, error_code, resolved_path = load_clip_annotation(
             annotation_root,
             record.clip_id,
             annotation_suffix=annotation_suffix,
         )
         if annotation is None:
+            annotation_issue = build_annotation_issue(record.clip_id, error_code, resolved_path)
             if require_annotation:
-                return None, error_code
+                return None, error_code, annotation_issue
         else:
             instruction = annotation.instruction
             language = annotation.language
@@ -274,7 +276,7 @@ def _prepare_manifest_episode(
         "instruction": instruction,
         "instruction_num": len(instruction),
         "language": language,
-    }, None
+    }, None, annotation_issue
 
 
 def prepare_manifest_record_for_build(
@@ -384,6 +386,14 @@ def prepare_manifest_episodes(
             "heavy_tar": 0,
             "image_sequence": 0,
         },
+        "annotation_issue_count": 0,
+        "annotation_issue_summary": {
+            "missing_annotation": 0,
+            "invalid_json": 0,
+            "invalid_status": 0,
+            "empty_instruction": 0,
+            "other": 0,
+        },
     }
 
     for record in records:
@@ -424,8 +434,16 @@ def prepare_manifest_episodes(
         )
 
     episodes = []
+    annotation_issues = []
     try:
-        for episode, error_code in tqdm(iterator, total=len(records), desc="Manifest episodes"):
+        for episode, error_code, annotation_issue in tqdm(iterator, total=len(records), desc="Manifest episodes"):
+            if annotation_issue is not None:
+                annotation_issues.append(annotation_issue)
+                code = str(annotation_issue.get("error_code") or "")
+                if code in stats["annotation_issue_summary"]:
+                    stats["annotation_issue_summary"][code] += 1
+                else:
+                    stats["annotation_issue_summary"]["other"] += 1
             if episode is None:
                 stats[error_code] = stats.get(error_code, 0) + 1
                 continue
@@ -437,7 +455,8 @@ def prepare_manifest_episodes(
             pool.close()
             pool.join()
 
-    return episodes, stats
+    stats["annotation_issue_count"] = len(annotation_issues)
+    return episodes, stats, annotation_issues
 
 
 def _prepare_manifest_episode_star(args):
