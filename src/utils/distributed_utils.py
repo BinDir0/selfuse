@@ -81,6 +81,16 @@ def init_distributed(
                 backend, world_size,
             )
 
+        # Report CPU affinity so we can tell whether scripts/numa_bind_wrapper.sh
+        # took effect. Expected on a 2-socket box with wrapper: ~half of total
+        # cores. Full core count means wrapper was bypassed.
+        import psutil
+        affinity = sorted(psutil.Process().cpu_affinity())
+        log.info(
+            "CPU affinity on rank 0: %d cores, range [%d-%d]",
+            len(affinity), affinity[0], affinity[-1],
+        )
+
     return DistributedContext(
         rank=rank,
         world_size=world_size,

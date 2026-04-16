@@ -21,8 +21,9 @@ sudo apt-get update
 sudo apt-get install -y libnccl2 libnccl-dev
 rm -f cuda-keyring_1.0-1_all.deb
 
-# Install pdsh for the multi-node launcher
-sudo apt-get install -y pdsh
+# Install pdsh for the multi-node launcher; numactl for per-rank NUMA binding
+# (see scripts/numa_bind_wrapper.sh).
+sudo apt-get install -y pdsh numactl
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda create -y -n legendvla python=3.10

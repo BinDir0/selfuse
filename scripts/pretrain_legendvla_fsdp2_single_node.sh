@@ -51,5 +51,7 @@ exec torchrun \
     --master_addr="$MASTER_ADDR" \
     --master_port="$MASTER_PORT" \
     --nproc_per_node="$GPU_COUNT" \
+    --no-python \
+    bash "$SCRIPT_DIR/numa_bind_wrapper.sh" \
     "$SCRIPT" \
     $ARGS
