@@ -6,12 +6,14 @@ pipeline builders for single/blended WebDataset sources.
 """
 
 import collections
+import functools
 import glob
 import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 import webdataset as wds
 
@@ -329,13 +331,15 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
 
 
 def decode_image_bytes(raw):
-    """Decode a single image from raw bytes or PIL Image to numpy array."""
+    """Decode a single image from raw JPEG bytes (cv2.imdecode, ~2x faster
+    than PIL) or pass through an already-decoded array."""
     if isinstance(raw, bytes):
-        from PIL import Image
-        import io
-        image = np.array(Image.open(io.BytesIO(raw)).convert("RGB"), copy=False)
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("cv2.imdecode failed on image bytes")
+        cv2.cvtColor(image, cv2.COLOR_BGR2RGB, dst=image)
     else:
-        # Already decoded (PIL Image or numpy array)
         image = np.array(raw, copy=True)
     if image.ndim == 2:
         image = np.stack([image] * 3, axis=-1)
@@ -350,19 +354,19 @@ def decode_depth_bytes(raw):
     return np.array(raw, copy=True)
 
 
-def materialize_sample_media(sample):
+def materialize_sample_media(sample, load_depth=True):
     """Materialize RGB/depth arrays from frame refs and drop the refs.
 
-    Supports both deferred-decode mode (raw bytes) and legacy mode
-    (already-decoded PIL Images / numpy arrays).  This runs after
-    shuffle so buffered samples share underlying frame objects.
+    Skips depth decoding entirely when load_depth=False; the heavy
+    augment_depth work downstream is also skipped because process_image
+    receives None for depth.
     """
     image_frame_refs = sample.pop("image_frame_refs", None)
     if image_frame_refs is not None:
         images = [decode_image_bytes(frame["image.jpg"]) for frame in image_frame_refs]
         sample["image"] = np.stack(images, axis=0)
 
-    if image_frame_refs and image_frame_refs[-1].get("depth.npy") is not None:
+    if load_depth and image_frame_refs and image_frame_refs[-1].get("depth.npy") is not None:
         depth_list = [
             decode_depth_bytes(frame["depth.npy"])
             for frame in image_frame_refs
@@ -435,7 +439,7 @@ def select_lowdim_files(fname):
 def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
                        preprocess_fn=None, shuffle_buffer=16384, mode='train',
                        use_sliding_window=True, lowdim_only=False,
-                       include_post_stages=True):
+                       include_post_stages=True, load_depth=True):
     """Build a WebDataset pipeline for a single dataset.
 
     Training: resampled infinite stream with shard-level shuffle.
@@ -506,7 +510,9 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     # non-sliding-window path (VLM) decodes raw bytes in-place.
     if not lowdim_only:
         if use_sliding_window:
-            pipeline = pipeline.map(materialize_sample_media)
+            pipeline = pipeline.map(
+                functools.partial(materialize_sample_media, load_depth=load_depth)
+            )
         else:
             pipeline = pipeline.map(decode_media_fields)
 
@@ -518,7 +524,8 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
 
 def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
                           preprocess_fn=None, shuffle_buffer=16384, mode='train',
-                          use_sliding_window=True, lowdim_only=False):
+                          use_sliding_window=True, lowdim_only=False,
+                          load_depth=True):
     """Build a blended dataset from multiple WebDataset sources.
 
     Training: per-subset pipelines (no per-subset shuffle) mixed via
@@ -559,6 +566,7 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
             use_sliding_window=use_sliding_window,
             lowdim_only=lowdim_only,
             include_post_stages=not is_train,
+            load_depth=load_depth,
         )
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))
@@ -582,7 +590,9 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
 
     if not lowdim_only:
         if use_sliding_window:
-            stages.append(wds.map(materialize_sample_media))
+            stages.append(wds.map(
+                functools.partial(materialize_sample_media, load_depth=load_depth)
+            ))
         else:
             stages.append(wds.map(decode_media_fields))
 

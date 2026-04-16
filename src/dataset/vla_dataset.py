@@ -61,6 +61,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         debug_capture_raw_sample: bool = False,
         debug_capture_processed_sample: bool = False,
         debug_profile_timing: bool = False,
+        load_depth: bool = True,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -77,6 +78,9 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.val_wds_datasets = val_wds_datasets
         self.return_dataset_info = return_dataset_info
         self.video_base_fps = float(video_base_fps)
+        # Skip depth decoding + augment_depth when training does not need depth.
+        # Saves ~25 ms/sample (depth augmentation is the single biggest CPU cost).
+        self.load_depth = bool(load_depth)
         # (H, W) tuple or None. Resize all RGB frames to this resolution
         # before HF processor. Required when world model is enabled so that
         # temporal attention patches share identical spatial semantics.
@@ -363,6 +367,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             preprocess_fn=preprocess_fn,
             shuffle_buffer=self.shuffle_buffer,
             mode=self.mode,
+            load_depth=self.load_depth,
         )
         return filter_none(pipeline)
 
@@ -390,6 +395,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             debug_capture_raw_sample=self.debug_capture_raw_sample,
             debug_capture_processed_sample=self.debug_capture_processed_sample,
             debug_profile_timing=self.debug_profile_timing,
+            load_depth=self.load_depth,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
