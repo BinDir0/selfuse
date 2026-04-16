@@ -319,7 +319,18 @@ HTML_PAGE = """<!doctype html>
     async function refresh() {
       const params = updateUrl();
       const response = await fetch(`/api/runs?${params.toString()}`, { cache: "no-store" });
-      const payload = await response.json();
+      let payload = await response.json();
+      if (Array.isArray(payload)) {
+        payload = {
+          log_root: "(legacy api)",
+          updated_at: new Date().toLocaleString(),
+          refresh_seconds: Number(document.getElementById("refresh_seconds").value || 5),
+          runs: payload,
+        };
+      }
+      if (payload && payload.error) {
+        throw new Error(payload.error);
+      }
       metaEl.textContent = `root=${payload.log_root} | updated=${payload.updated_at} | refresh=${payload.refresh_seconds}s`;
       renderSummary(payload);
       renderRows(payload);
@@ -337,7 +348,9 @@ HTML_PAGE = """<!doctype html>
 
     restoreFromUrl();
     refresh().catch((error) => {
-      metaEl.textContent = `load failed: ${error}`;
+      summaryEl.innerHTML = "";
+      rowsEl.innerHTML = `<tr><td colspan="8" class="small warnings">load failed: ${esc(error && error.message ? error.message : error)}</td></tr>`;
+      metaEl.textContent = `load failed: ${error && error.message ? error.message : error}`;
     });
   </script>
 </body>
