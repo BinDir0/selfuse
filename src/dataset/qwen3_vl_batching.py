@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
+
+log = logging.getLogger(__name__)
 
 
 def ensure_uint8_vision_tensor(images: torch.Tensor, field_name: str) -> None:
@@ -196,6 +199,17 @@ class Qwen3VLBatchProcessor:
         self.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         self.action_token_id = int(self.tokenizer.convert_tokens_to_ids(self.action_token))
 
+        # Assistant header tokens, used by find_answer_start_idx to locate
+        # the prompt/answer boundary. Qwen3-VL tokenizes this to exactly 3
+        # tokens; anything else means tokenizer drift, fail loudly.
+        self.assistant_header_ids = self.tokenizer.encode(
+            "<|im_start|>assistant\n", add_special_tokens=False
+        )
+        assert len(self.assistant_header_ids) == 3, (
+            f"Assistant header must tokenize to 3 tokens, got "
+            f"{len(self.assistant_header_ids)}: {self.assistant_header_ids}"
+        )
+
     def init_processor(self):
         try:
             from transformers import AutoProcessor
@@ -234,13 +248,13 @@ class Qwen3VLBatchProcessor:
         - `videos` contains only video samples, ordered by their video placeholder appearance.
         - For VLA multi-frame video samples, a 2-frame dummy (first frame duplicated) is sent to
           the processor so the chat template expands `<video>` to exactly one frame's worth of
-          placeholders. The real T-frame video is tracked in `vla_entries` for post-processor swap.
-        - Returns `(processor_inputs, vla_entries)`.
+          placeholders. The real T-frame video is tracked in `video_entries` for post-processor swap.
+        - Returns `(processor_inputs, video_entries)`.
         """
         images: list[Any] = []
         videos: list[Any] = []
         video_metadata: list[dict[str, Any]] = []
-        vla_entries: list[dict[str, Any]] = []
+        video_entries: list[dict[str, Any]] = []
 
         for sample in batch_samples:
             vision_type = sample["vision_type"]
@@ -261,7 +275,7 @@ class Qwen3VLBatchProcessor:
                     entry_idx = len(videos)
                     videos.append(dummy)
                     video_metadata.append(build_video_metadata(dummy, video_fps))
-                    vla_entries.append(
+                    video_entries.append(
                         {"entry_idx": entry_idx, "real_video": video, "fps": video_fps}
                     )
                 else:
@@ -280,64 +294,42 @@ class Qwen3VLBatchProcessor:
             processor_inputs["videos"] = videos
             processor_inputs["video_metadata"] = video_metadata
             processor_inputs["do_sample_frames"] = False
-        return processor_inputs, vla_entries
+        return processor_inputs, video_entries
 
-    def _swap_vla_video_entries(
+    def swap_video_entries(
         self,
         batch: dict[str, Any],
-        vla_entries: list[dict[str, Any]],
+        video_entries: list[dict[str, Any]],
     ) -> None:
-        """Replace dummy 2-frame blocks in `pixel_values_videos` with the real T-frame content.
+        """Replace dummy 1-frame entries with real T-frame content.
 
-        Chat-template expansion already committed `<video>` to N placeholder tokens based on the
-        dummy 2-frame grid. After this swap, `video_grid_thw[entry, 0]` becomes the real
-        `T_post_tps`, so the ViT consumes all T frames. The LM still sees only N placeholders, and
-        the backbone slices the ViT output to the last frame before `masked_scatter`.
+        Chat template already committed N placeholder tokens based on the dummy
+        1-frame grid; after the swap, `video_grid_thw[entry, 0]` becomes the
+        real `T_post_tps` so the ViT processes all T frames while the LM still
+        sees only N placeholders (backbone slices to last frame).
+
+        Under MEM-on with dataset-side padding to T frames, every video entry
+        is a dummy, so we replace `pixel_values_videos` and `video_grid_thw`
+        wholesale. Single-frame videos would break this and are forbidden by
+        the dataset contract.
         """
-        if not vla_entries:
+        if not video_entries:
             return
 
-        pixel_values_videos = batch["pixel_values_videos"]
-        video_grid_thw = batch["video_grid_thw"]
+        assert len(video_entries) == batch["video_grid_thw"].shape[0], (
+            f"video_entries ({len(video_entries)}) must cover all video entries "
+            f"({batch['video_grid_thw'].shape[0]}); single-frame video in "
+            "MEM-on mode is not supported."
+        )
 
-        # Per-entry patch counts in the original (dummy) pixel_values_videos.
-        entry_sizes_old = video_grid_thw.prod(dim=-1).tolist()
-        offsets_old = [0]
-        for size in entry_sizes_old:
-            offsets_old.append(offsets_old[-1] + size)
-
-        # Process each real video to get its own pixel_values_videos block + grid row.
-        new_entries: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-        for entry in vla_entries:
-            idx = int(entry["entry_idx"])
-            real_video = entry["real_video"]
-            fps = float(entry["fps"])
-            real_outputs = self.processor.video_processor(
-                videos=[real_video],
-                video_metadata=[build_video_metadata(real_video, fps)],
-                do_sample_frames=False,
-                return_tensors="pt",
-            )
-            new_entries[idx] = (
-                real_outputs["pixel_values_videos"],
-                real_outputs["video_grid_thw"][0],
-            )
-
-        # Walk entries in order, swapping in real blocks where tracked.
-        new_pv_chunks: list[torch.Tensor] = []
-        new_grid_rows: list[torch.Tensor] = []
-        for i in range(video_grid_thw.shape[0]):
-            if i in new_entries:
-                chunk, row = new_entries[i]
-                new_pv_chunks.append(chunk.to(pixel_values_videos.device, pixel_values_videos.dtype))
-                new_grid_rows.append(row.to(video_grid_thw.device, video_grid_thw.dtype).unsqueeze(0))
-            else:
-                start, end = offsets_old[i], offsets_old[i + 1]
-                new_pv_chunks.append(pixel_values_videos[start:end])
-                new_grid_rows.append(video_grid_thw[i : i + 1])
-
-        batch["pixel_values_videos"] = torch.cat(new_pv_chunks, dim=0)
-        batch["video_grid_thw"] = torch.cat(new_grid_rows, dim=0)
+        real_outputs = self.processor.video_processor(
+            videos=[e["real_video"] for e in video_entries],
+            video_metadata=[build_video_metadata(e["real_video"], float(e["fps"])) for e in video_entries],
+            do_sample_frames=False,
+            return_tensors="pt",
+        )
+        batch["pixel_values_videos"] = real_outputs["pixel_values_videos"]
+        batch["video_grid_thw"] = real_outputs["video_grid_thw"]
 
     def encode_messages(
         self,
@@ -360,7 +352,7 @@ class Qwen3VLBatchProcessor:
             messages_batch=messages_batch,
             add_generation_prompt=add_generation_prompt,
         )
-        vision_inputs, vla_entries = self.build_vision_inputs(batch_samples)
+        vision_inputs, video_entries = self.build_vision_inputs(batch_samples)
         encoded = self.processor(
             text=rendered_texts,
             **self.processor_call_kwargs,
@@ -371,8 +363,8 @@ class Qwen3VLBatchProcessor:
         batch.setdefault("image_grid_thw", None)
         batch.setdefault("pixel_values_videos", None)
         batch.setdefault("video_grid_thw", None)
-        if vla_entries:
-            self._swap_vla_video_entries(batch, vla_entries)
+        if video_entries:
+            self.swap_video_entries(batch, video_entries)
         if "mm_token_type_ids" not in batch:
             batch["mm_token_type_ids"] = torch.zeros_like(batch["input_ids"])
         # MEM expects all samples to be on the video path with uniform (T, H, W),
@@ -404,4 +396,40 @@ class Qwen3VLBatchProcessor:
         positions = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
         labels = labels.masked_fill(positions < answer_start_idx.unsqueeze(1), self.ignore_index)
         return labels
+
+    def find_answer_start_idx(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Position right after `<|im_start|>assistant\\n` for each sample.
+
+        Truncated training samples may not contain the header; for those we
+        return the sequence length so downstream label masking treats the
+        whole sequence as prompt (no supervised tokens).
+        """
+        _, L = input_ids.shape
+        header = torch.tensor(self.assistant_header_ids, device=input_ids.device)
+        H = header.numel()
+        assert L >= H, f"Sequence too short ({L}) for assistant header ({H})"
+
+        windows = input_ids.unfold(dimension=1, size=H, step=1)
+        matches = (windows == header).all(dim=-1)
+
+        # At most one header per sample. 0 = truncated (warned below);
+        # >1 = multi-turn or corrupted data, which would silently mask wrong
+        # tokens, so fail loudly.
+        match_counts = matches.sum(dim=1)
+        assert (match_counts <= 1).all(), (
+            f"Each sample has at most 1 assistant header, got counts "
+            f"{match_counts.tolist()}"
+        )
+
+        truncated = (match_counts == 0).nonzero(as_tuple=True)[0]
+        if truncated.numel() > 0:
+            log.warning(
+                "Assistant header missing in %d/%d samples (likely truncated); "
+                "their loss will be masked out.",
+                truncated.numel(), input_ids.shape[0],
+            )
+
+        # argmax on all-False rows returns 0; remap those to L.
+        pos = matches.long().argmax(dim=1) + H
+        return torch.where(match_counts == 1, pos, torch.full_like(pos, L))
 

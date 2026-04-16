@@ -56,38 +56,19 @@ class UnifiedVLACollator:
     def collate_raw(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         """Build one batch from raw dataset samples.
 
-        Two encoding strategies depending on ``prompt_only_input``:
-
-        - **Training** (``prompt_only_input=False``):
-          Full-conversation encode (with assistant content) for model inputs,
-          plus a prompt-only encode to locate ``answer_start_idx``.
-        - **Inference** (``prompt_only_input=True``):
-          Prompt-only encode with ``add_generation_prompt=True`` only.
-          No assistant content in ``input_ids``; downstream modules use
-          ``answer_start_idx`` to locate the generation boundary.
+        Single processor pass: full conversation in training, prompt-only +
+        add_generation_prompt in inference. Answer boundary recovered from
+        input_ids via find_answer_start_idx.
         """
         collate_start = time.perf_counter()
 
-        # Prompt-only encode: always needed for answer_start_idx.
-        prompt_messages = [self.formatter.build_messages(sample, prompt_only=True) for sample in samples]
-        prompt_batch = self.batch_processor.encode_messages(
-            messages_batch=prompt_messages,
+        messages = [self.formatter.build_messages(sample, prompt_only=self.prompt_only_input) for sample in samples]
+        main_batch = self.batch_processor.encode_messages(
+            messages_batch=messages,
             batch_samples=samples,
-            add_generation_prompt=True,
+            add_generation_prompt=self.prompt_only_input,
             return_rendered_texts=self.debug_capture_texts,
         )
-
-        if self.prompt_only_input:
-            main_batch = prompt_batch
-            full_messages = None
-        else:
-            full_messages = [self.formatter.build_messages(sample, prompt_only=False) for sample in samples]
-            main_batch = self.batch_processor.encode_messages(
-                messages_batch=full_messages,
-                batch_samples=samples,
-                add_generation_prompt=False,
-                return_rendered_texts=self.debug_capture_texts,
-            )
 
         input_ids = main_batch["input_ids"].to(dtype=torch.long)
         attention_mask = main_batch["attention_mask"].to(dtype=torch.long)
@@ -99,7 +80,9 @@ class UnifiedVLACollator:
             device=input_ids.device,
             dtype=torch.bool,
         )
-        answer_start_idx = prompt_batch["attention_mask"].sum(dim=1).to(device=input_ids.device, dtype=torch.long)
+        answer_start_idx = self.batch_processor.find_answer_start_idx(input_ids).to(
+            device=input_ids.device, dtype=torch.long,
+        )
         labels = torch.full_like(input_ids, self.ignore_index)
 
         if not self.prompt_only_input:
@@ -140,11 +123,8 @@ class UnifiedVLACollator:
             batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
 
         if self.debug_capture_texts:
-            batch["debug_prompt_messages"] = prompt_messages
-            batch["debug_prompt_texts"] = prompt_batch["rendered_texts"]
-            if full_messages is not None:
-                batch["debug_full_messages"] = full_messages
-                batch["debug_full_texts"] = main_batch["rendered_texts"]
+            batch["debug_messages"] = messages
+            batch["debug_texts"] = main_batch["rendered_texts"]
 
         if self.debug_profile_timing:
             sample_profiles = [
