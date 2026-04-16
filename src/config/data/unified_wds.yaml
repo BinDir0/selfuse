@@ -96,6 +96,11 @@ data_collator:
     processor_call_kwargs:
       min_pixels: 147456
       max_pixels: 147456
+      # Dataset already resizes every frame to data.target_image_size; setting
+      # do_resize=False skips the processor's redundant numpy<->PIL roundtrip
+      # (1-3ms/frame even when input matches target). rescale + normalize +
+      # patch reshape still run unconditionally.
+      do_resize: False
       text_kwargs:
         padding: ${data.tokenizer_padding}
         max_length: ${data.max_vlm_tokens}

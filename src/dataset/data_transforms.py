@@ -5,11 +5,15 @@ Data transformation functions for LegendVLA datasets.
 import random
 from typing import Optional
 
+import cv2
 import numpy as np
 import torch
-from PIL import Image
-from torchvision.transforms import ColorJitter
-from torchvision.transforms import functional as TF
+from torchvision.transforms import v2 as T
+
+# cv2 defaults to using all cores for its internal thread pool. With multiple
+# dataloader workers each spawning that pool, they would trample each other.
+# Force single-threaded so each worker only uses its assigned affinity cores.
+cv2.setNumThreads(0)
 
 from src.utils.geometry import (
     transform_wrist_to_target_frame,
@@ -20,6 +24,19 @@ from src.utils.geometry import (
     transform_hand_points_from_wrist_to_camera_frame,
 )
 from src.model.common.normalizer import LinearNormalizer
+
+# Module-level color augmentation pipeline. v2 transforms are stateless and
+# sample new params per __call__, so reusing across workers is safe and
+# avoids per-sample Compose construction overhead.
+COLOR_AUG = T.Compose([
+    T.ColorJitter(
+        brightness=(0.7, 1.3),
+        contrast=(0.7, 1.3),
+        saturation=(0.7, 1.3),
+        hue=(-0.1, 0.1),
+    ),
+    T.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
+])
 
 
 def get_relative_action(state, action):
@@ -207,17 +224,14 @@ def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0))
     x0 = random.randint(0, W - crop_w)
     sx, sy = W / crop_w, H / crop_h
 
-    # Crop + resize RGB (bilinear)
-    images = np.stack([
-        np.array(Image.fromarray(f).crop((x0, y0, x0 + crop_w, y0 + crop_h)).resize((W, H), Image.BILINEAR), dtype=np.uint8)
-        for f in images
-    ])
+    # Crop = numpy slicing; resize = cv2 (SIMD-optimized, ~10x faster than PIL).
+    cropped = images[:, y0:y0 + crop_h, x0:x0 + crop_w]
+    images = np.stack([cv2.resize(f, (W, H), interpolation=cv2.INTER_LINEAR) for f in cropped])
 
-    # Crop + resize depth (nearest to avoid interpolation artifacts at edges)
     if depth_images is not None:
+        cropped_depth = depth_images[:, y0:y0 + crop_h, x0:x0 + crop_w]
         depth_images = np.stack([
-            np.array(Image.fromarray(f, mode='F').crop((x0, y0, x0 + crop_w, y0 + crop_h)).resize((W, H), Image.NEAREST), dtype=np.float32)
-            for f in depth_images
+            cv2.resize(f, (W, H), interpolation=cv2.INTER_NEAREST) for f in cropped_depth
         ])
 
     # Update intrinsic [fx, fy, cx, cy] for the crop-then-resize transform
@@ -232,29 +246,14 @@ def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0))
 
 
 def augment_color(images):
-    '''Color jitter + Gaussian blur. Params sampled once for temporal consistency.'''
-    fn_idx, brightness, contrast, saturation, hue = ColorJitter.get_params(
-        brightness=(0.7, 1.3), contrast=(0.7, 1.3),
-        saturation=(0.7, 1.3), hue=(-0.1, 0.1),
-    )
-    sigma = random.uniform(0.1, 2.0)
+    '''Color jitter + Gaussian blur via vectorized torchvision.v2 on uint8 tensor.
 
-    jitter = [
-        lambda img: TF.adjust_brightness(img, brightness),
-        lambda img: TF.adjust_contrast(img, contrast),
-        lambda img: TF.adjust_saturation(img, saturation),
-        lambda img: TF.adjust_hue(img, hue),
-    ]
-    ops = [jitter[i] for i in fn_idx]
-    ops.append(lambda img: TF.gaussian_blur(img, kernel_size=[5, 5], sigma=sigma))
-
-    def apply(frame):
-        pil = Image.fromarray(frame)
-        for op in ops:
-            pil = op(pil)
-        return np.array(pil, dtype=np.uint8)
-
-    return np.stack([apply(f) for f in images])
+    v2 ColorJitter / GaussianBlur sample params once per call and apply to
+    the whole (N, C, H, W) tensor uniformly, preserving temporal consistency.
+    '''
+    t = torch.from_numpy(images).permute(0, 3, 1, 2)  # (N, 3, H, W) uint8
+    t = COLOR_AUG(t)
+    return t.permute(0, 2, 3, 1).contiguous().numpy()
 
 
 def augment_depth(depth_images, noise_scale=0.005, dropout_prob=0.5):
@@ -280,30 +279,22 @@ def augment_depth(depth_images, noise_scale=0.005, dropout_prob=0.5):
     return depth_images
 
 
-def resize_frames(frames, target_hw, interpolation=Image.BILINEAR):
-    '''Resize a batch of frames to target (H, W).
+def resize_frames(frames, target_hw, interpolation=cv2.INTER_LINEAR):
+    '''Resize a batch of frames to target (H, W) via cv2.resize.
 
     Args:
         frames: np.ndarray, shape [N, H, W, C] (uint8 RGB) or [N, H, W] (depth float32).
         target_hw: (target_H, target_W).
-        interpolation: PIL resampling filter. Use NEAREST for depth to avoid
-            interpolation artifacts at depth discontinuities.
+        interpolation: cv2 interpolation flag. Use cv2.INTER_NEAREST for depth
+            to avoid interpolation artifacts at depth discontinuities.
     Returns:
         np.ndarray with the same dtype, resized to target spatial dimensions.
     '''
     tH, tW = target_hw
     if frames.shape[1] == tH and frames.shape[2] == tW:
         return frames
-    is_depth = frames.ndim == 3
-    mode = 'F' if is_depth else None
-    resized = np.stack([
-        np.array(
-            Image.fromarray(f, mode=mode).resize((tW, tH), interpolation),
-            dtype=frames.dtype,
-        )
-        for f in frames
-    ])
-    return resized
+    # cv2.resize takes (W, H), not (H, W).
+    return np.stack([cv2.resize(f, (tW, tH), interpolation=interpolation) for f in frames])
 
 
 def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
@@ -330,9 +321,9 @@ def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
         _, H, W, _ = image.shape
         if H != tH or W != tW:
             sx, sy = tW / W, tH / H
-            image = resize_frames(image, target_size, interpolation=Image.BILINEAR)
+            image = resize_frames(image, target_size, interpolation=cv2.INTER_LINEAR)
             if depth_image is not None:
-                depth_image = resize_frames(depth_image, target_size, interpolation=Image.NEAREST)
+                depth_image = resize_frames(depth_image, target_size, interpolation=cv2.INTER_NEAREST)
             if intrinsic is not None:
                 intrinsic = intrinsic.copy()
                 intrinsic[0] *= sx  # fx
