@@ -68,6 +68,11 @@ def build_parser():
         help="Fail a shard on missing/invalid/empty annotations instead of keeping empty instructions",
     )
     parser.add_argument(
+        "--drop_missing_annotation",
+        action="store_true",
+        help="Drop frames/clips with missing/invalid/empty annotations instead of writing them with empty instructions",
+    )
+    parser.add_argument(
         "--annotation_issue_report_out",
         default=None,
         help="Optional JSON path for missing/invalid annotation report; defaults to a shard-range-specific file in output_dir when issues exist",
@@ -97,15 +102,18 @@ def rewrite_shard(
     annotation_root: str,
     annotation_suffix: str,
     strict: bool,
+    drop_missing_annotation: bool,
 ) -> dict:
     output_path = os.path.join(output_dir, os.path.basename(shard_path))
     tmp_path = output_path + ".tmp"
     frames_written = 0
     rewritten_frames = 0
     empty_frames = 0
+    dropped_frames = 0
     clip_stats: dict[str, str] = {}
     clip_issue_details: dict[str, dict] = {}
     annotation_cache: dict[str, tuple[object, str | None, str]] = {}
+    dropped_clip_ids: set[str] = set()
 
     tar_writer = None
     try:
@@ -147,6 +155,10 @@ def rewrite_shard(
                     raise RuntimeError(
                         f"Failed to load annotation for clip_id={clip_id}: {error_code} ({annotation_path})"
                     )
+                if drop_missing_annotation:
+                    dropped_frames += 1
+                    dropped_clip_ids.add(str(clip_id))
+                    continue
                 updated_meta = build_updated_meta_from_meta(meta, [], language=meta.get("language"))
                 empty_frames += 1
             else:
@@ -195,6 +207,8 @@ def rewrite_shard(
         "frames_written": frames_written,
         "rewritten_frames": rewritten_frames,
         "empty_frames": empty_frames,
+        "dropped_frames": dropped_frames,
+        "dropped_clips": len(dropped_clip_ids),
         "clip_counts": counts,
         "annotation_issues": list(clip_issue_details.values()),
     }
@@ -227,12 +241,15 @@ def main():
         "annotation_root": args.annotation_root,
         "annotation_suffix": args.annotation_suffix,
         "strict": args.strict,
+        "drop_missing_annotation": args.drop_missing_annotation,
     }
     totals = {
         "shards": 0,
         "frames_written": 0,
         "rewritten_frames": 0,
         "empty_frames": 0,
+        "dropped_frames": 0,
+        "dropped_clips": 0,
         "updated_clips": 0,
         "missing_annotation": 0,
         "invalid_json": 0,
@@ -249,6 +266,7 @@ def main():
                 annotation_root=args.annotation_root,
                 annotation_suffix=args.annotation_suffix,
                 strict=args.strict,
+                drop_missing_annotation=args.drop_missing_annotation,
             )
             for shard_path in shard_paths
         )
@@ -263,6 +281,8 @@ def main():
             totals["frames_written"] += result["frames_written"]
             totals["rewritten_frames"] += result["rewritten_frames"]
             totals["empty_frames"] += result["empty_frames"]
+            totals["dropped_frames"] += result.get("dropped_frames", 0)
+            totals["dropped_clips"] += result.get("dropped_clips", 0)
             for issue in result.get("annotation_issues", []):
                 key = (issue.get("clip_id"), issue.get("error_code"), issue.get("resolved_path"))
                 annotation_issue_map.setdefault(key, issue)
@@ -289,6 +309,7 @@ def main():
                 "source_shard_dir": str(Path(args.source_shard_dir).resolve()),
                 "output_dir": str(Path(args.output_dir).resolve()),
                 "strict": bool(args.strict),
+                "drop_missing_annotation": bool(args.drop_missing_annotation),
             },
         )
         if annotation_issues:
