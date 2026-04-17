@@ -32,24 +32,53 @@ def _env_flag_on(name: str, *, default_on: bool = True) -> bool:
     return True
 
 
+def _existing_path_or_none(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    return path if path.exists() else None
+
+
+def _fallback_any4d_repo_root(project_root: Path) -> Path | None:
+    candidates: list[Path] = []
+    user_name = os.environ.get("USER", "").strip()
+    if user_name:
+        candidates.append(Path(f"/share_data/{user_name}/Any4D"))
+    candidates.append(project_root / "thirdparty" / "Any4D")
+    for candidate in candidates:
+        existing = _existing_path_or_none(candidate)
+        if existing is not None:
+            return existing
+    return None
+
+
+def _fallback_any4d_checkpoint(repo_root: Path | None) -> Path | None:
+    if repo_root is None:
+        return None
+    return _existing_path_or_none(repo_root / "checkpoints" / "any4d_4v_combined.pth")
+
+
 def resolve_any4d_paths(project_root=None, any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None):
     project_root = Path(project_root or PROJECT_ROOT).resolve()
 
-    repo_root = any4d_repo_root or os.environ.get(
-        "HAWOR_ANY4D_REPO_ROOT",
-        str(project_root / "thirdparty" / "Any4D"),
-    )
-    repo_root = Path(repo_root).expanduser()
-    if not repo_root.is_absolute():
-        repo_root = (project_root / repo_root).resolve()
+    raw_repo_root = any4d_repo_root or os.environ.get("HAWOR_ANY4D_REPO_ROOT")
+    if raw_repo_root:
+        repo_root = Path(raw_repo_root).expanduser()
+        if not repo_root.is_absolute():
+            repo_root = (project_root / repo_root).resolve()
+    else:
+        repo_root = _fallback_any4d_repo_root(project_root)
+        if repo_root is None:
+            repo_root = (project_root / "thirdparty" / "Any4D").resolve()
 
-    checkpoint = checkpoint_path or os.environ.get(
-        "HAWOR_ANY4D_CHECKPOINT_PATH",
-        str(repo_root / "checkpoints" / "any4d_4v_combined.pth"),
-    )
-    checkpoint = Path(checkpoint).expanduser()
-    if not checkpoint.is_absolute():
-        checkpoint = (project_root / checkpoint).resolve()
+    raw_checkpoint = checkpoint_path or os.environ.get("HAWOR_ANY4D_CHECKPOINT_PATH")
+    if raw_checkpoint:
+        checkpoint = Path(raw_checkpoint).expanduser()
+        if not checkpoint.is_absolute():
+            checkpoint = (project_root / checkpoint).resolve()
+    else:
+        checkpoint = _fallback_any4d_checkpoint(repo_root)
+        if checkpoint is None:
+            checkpoint = (repo_root / "checkpoints" / "any4d_4v_combined.pth").resolve()
 
     if resolution_set is None:
         resolution_set = int(os.environ.get("HAWOR_ANY4D_RESOLUTION", "518"))

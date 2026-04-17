@@ -11,7 +11,7 @@ final_dataset_root: /share_data/guantianrui/datasets/Egocentric-100K/vla_0324
 log_root: /share_data/guantianrui/dataset_pipeline_logs
 
 hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
-slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4/bin/python3.10
+slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4d/bin/python3.10
 
 infer:
   common:

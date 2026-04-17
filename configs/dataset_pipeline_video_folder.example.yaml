@@ -16,7 +16,7 @@ paths:
 
 runtimes:
   hawor_python: /path/to/hawor/bin/python
-  slam_python: /path/to/any4/bin/python
+  slam_python: /path/to/any4d/bin/python
 
 infer:
   common:

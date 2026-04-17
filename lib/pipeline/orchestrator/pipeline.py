@@ -41,6 +41,28 @@ from .validation import (
 )
 
 
+def _resolve_runtime_python_path(raw_path: str | None, *, runtime_name: str) -> str | None:
+    if raw_path is None:
+        return None
+    path_text = str(raw_path)
+    candidate = Path(path_text)
+    if candidate.exists():
+        return path_text
+
+    # Backward-compatibility shim for the old Any4D env typo: `any4` -> `any4d`.
+    fixed_text = path_text.replace("/envs/any4/", "/envs/any4d/")
+    if fixed_text != path_text:
+        fixed_candidate = Path(fixed_text)
+        if fixed_candidate.exists():
+            print(
+                f"[runtime] {runtime_name} python not found at {path_text}; "
+                f"using compatible fallback {fixed_text}",
+                flush=True,
+            )
+            return fixed_text
+    return path_text
+
+
 def run_pipeline(args) -> None:
     config_path = Path(args.config).resolve()
     config = normalize_pipeline_config(load_yaml(config_path))
@@ -86,8 +108,8 @@ def run_pipeline(args) -> None:
     split = dataset_cfg.get("split", "train")
     annotation_root = paths_cfg.get("annotation_root")
     final_dataset_root = Path(paths_cfg["final_dataset_root"])
-    hawor_python = runtimes_cfg["hawor_python"]
-    slam_python = runtimes_cfg.get("slam_python", hawor_python)
+    hawor_python = _resolve_runtime_python_path(runtimes_cfg["hawor_python"], runtime_name="hawor")
+    slam_python = _resolve_runtime_python_path(runtimes_cfg.get("slam_python", hawor_python), runtime_name="slam")
     infer_multihost_cfg = parse_multihost_config(
         infer_cfg.get("multihost"),
         default_project_root=PROJECT_ROOT,

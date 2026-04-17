@@ -16,7 +16,7 @@ paths:
 runtimes:
   buildai_shell: /bin/bash
   hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
-  slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4/bin/python3.10
+  slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4d/bin/python3.10
 
 adapter_config:
   stages: 1,2,3
