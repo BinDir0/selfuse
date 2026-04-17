@@ -90,25 +90,39 @@ class Qwen3VLChatFormatter:
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
         vision_type = sample["vision_type"]
         if vision_type == "video":
-            return [{"type": "video"}]
+            blocks = [{"type": "video"}]
+            if sample.get("breast_images") is not None:
+                blocks.append({"type": "video"})
+            return blocks
         if vision_type == "image":
             return [{"type": "image"} for _ in range(count_images(sample["images"]))]
         raise ValueError(f"Unsupported vision_type: {vision_type}")
 
-    def build_vla_user_text(self, instruction: str, intrinsic: torch.Tensor, n_states: torch.Tensor) -> str:
+    def format_intrinsic_part(self, label: str, intrinsic: torch.Tensor) -> str:
+        if self.camera_intrinsic_mode == "token":
+            return f"{label} camera intrinsic: {self.camera_token}."
+        values = intrinsic.tolist()
+        return (
+            f"{label} camera intrinsic: fx:{values[0]:.2f} fy:{values[1]:.2f} "
+            f"cx:{values[2]:.2f} cy:{values[3]:.2f}."
+        )
+
+    def build_vla_user_text(
+        self,
+        instruction: str,
+        head_intrinsic: torch.Tensor,
+        n_states: torch.Tensor,
+        breast_intrinsic: torch.Tensor | None = None,
+    ) -> str:
         clean_text = str(instruction).replace(".", "").strip()
         if self.lowercase_vla_text:
             clean_text = clean_text.lower()
         state_slots = self.state_token * int(n_states.item())
-        if self.camera_intrinsic_mode == "token":
-            camera_part = f"Camera intrinsic: {self.camera_token}."
-        else:
-            intrinsic_values = intrinsic.tolist()
-            intrinsic_str = (
-                f"fx:{intrinsic_values[0]:.2f} fy:{intrinsic_values[1]:.2f} "
-                f"cx:{intrinsic_values[2]:.2f} cy:{intrinsic_values[3]:.2f}"
-            )
-            camera_part = f"Camera intrinsic: {intrinsic_str}."
+        camera_part = self.format_intrinsic_part("Head", head_intrinsic)
+        # Token mode wires a single <camera> slot to camera_encoder output and
+        # cannot currently accept a second view; skip breast text in that mode.
+        if breast_intrinsic is not None and self.camera_intrinsic_mode != "token":
+            camera_part += " " + self.format_intrinsic_part("Breast", breast_intrinsic)
         return (
             f"Task: {clean_text}. {camera_part} "
             f"States: {state_slots}."
@@ -129,8 +143,9 @@ class Qwen3VLChatFormatter:
         if is_vla:
             user_text = self.build_vla_user_text(
                 instruction=sample["instruction"],
-                intrinsic=sample["intrinsic"],
+                head_intrinsic=sample["intrinsic"],
                 n_states=sample["n_states"],
+                breast_intrinsic=sample.get("breast_intrinsic"),
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
             if self.predict_future_frames:
@@ -237,20 +252,32 @@ class Qwen3VLBatchProcessor:
             return [rendered]
         return list(rendered)
 
+    def append_video_entry(
+        self,
+        videos: list[Any],
+        video_metadata: list[dict[str, Any]],
+        video_entries: list[dict[str, Any]],
+        video: torch.Tensor,
+        video_fps: float,
+    ) -> None:
+        """MEM-on sends a 1-frame dummy and tracks real T frames for post-swap;
+        MEM-off / single-frame sends the full video directly."""
+        if self.mem_enabled and int(video.shape[0]) > 1:
+            dummy = video[:1].contiguous()
+            video_entries.append(
+                {"entry_idx": len(videos), "real_video": video, "fps": video_fps}
+            )
+            videos.append(dummy)
+            video_metadata.append(build_video_metadata(dummy, video_fps))
+        else:
+            videos.append(video)
+            video_metadata.append(build_video_metadata(video, video_fps))
+
     def build_vision_inputs(
         self, batch_samples: list[dict[str, Any]]
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Build modality inputs using only real image/video samples.
-
-        Contract:
-        - `images` contains only image samples, ordered by their image placeholder appearance in the
-          rendered batch texts.
-        - `videos` contains only video samples, ordered by their video placeholder appearance.
-        - For VLA multi-frame video samples, a 2-frame dummy (first frame duplicated) is sent to
-          the processor so the chat template expands `<video>` to exactly one frame's worth of
-          placeholders. The real T-frame video is tracked in `video_entries` for post-processor swap.
-        - Returns `(processor_inputs, video_entries)`.
-        """
+        """Build modality inputs. `videos` is flat in placeholder order;
+        per sample head video first, then breast (when present)."""
         images: list[Any] = []
         videos: list[Any] = []
         video_metadata: list[dict[str, Any]] = []
@@ -261,29 +288,16 @@ class Qwen3VLBatchProcessor:
             if vision_type == "image":
                 images.append(build_sample_images(sample["images"]))
             elif vision_type == "video":
-                video = build_sample_video(sample["images"])
-                video_fps = float(sample["video_fps"].item())
-                if self.mem_enabled and int(video.shape[0]) > 1:
-                    # MEM-on path: every multi-frame video (VLA or padded VLM)
-                    # sends a 1-frame dummy so chat template expands <video> to
-                    # one frame of placeholders. video_processor auto-pads odd
-                    # T to tps=2 via last-frame repeat, so T=1 → T_post_tps=1
-                    # → N = h*w/sms^2 placeholders. The real T frames are
-                    # processed post-hoc and swapped into pixel_values_videos;
-                    # backbone slices ViT output to the last frame to match.
-                    dummy = video[:1].contiguous()
-                    entry_idx = len(videos)
-                    videos.append(dummy)
-                    video_metadata.append(build_video_metadata(dummy, video_fps))
-                    video_entries.append(
-                        {"entry_idx": entry_idx, "real_video": video, "fps": video_fps}
+                fps = float(sample["video_fps"].item())
+                self.append_video_entry(
+                    videos, video_metadata, video_entries,
+                    build_sample_video(sample["images"]), fps,
+                )
+                if sample.get("breast_images") is not None:
+                    self.append_video_entry(
+                        videos, video_metadata, video_entries,
+                        build_sample_video(sample["breast_images"]), fps,
                     )
-                else:
-                    # MEM-off (or single-frame video): send all frames to the
-                    # processor so chat template expands T*N placeholders and
-                    # the LM sees the full temporal sequence.
-                    videos.append(video)
-                    video_metadata.append(build_video_metadata(video, video_fps))
             else:
                 raise ValueError(f"Unsupported vision_type: {vision_type}")
 

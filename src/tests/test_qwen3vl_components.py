@@ -96,6 +96,10 @@ class DummyTokenizerForBatchProcessor:
             return 102
         return 0
 
+    def encode(self, _text, add_special_tokens=False):
+        # Qwen3VLBatchProcessor.__init__ asserts 3 tokens for assistant header.
+        return [0, 0, 0]
+
 
 class DummyProcessorForBatchProcessor:
     def __init__(self):
@@ -104,10 +108,13 @@ class DummyProcessorForBatchProcessor:
 
 class TestQwen3VLBatchProcessor:
     def test_build_vision_inputs_mixes_image_and_video(self):
+        # mem_enabled=False so videos are sent whole (asserted below); MEM-on
+        # would rewrite each video to a 1-frame dummy and swap post hoc.
         batch_processor = Qwen3VLBatchProcessor(
             model_name_or_path="demo",
             processor_call_kwargs={"padding": "longest", "max_length": 32},
             processor=DummyProcessorForBatchProcessor(),
+            mem_enabled=False,
         )
         batch_inputs = batch_processor.build_vision_inputs([
             {
@@ -134,6 +141,7 @@ class TestQwen3VLBatchProcessor:
             model_name_or_path="demo",
             processor_call_kwargs={"padding": "longest", "max_length": 32},
             processor=DummyProcessorForBatchProcessor(),
+            mem_enabled=False,
         )
         batch_inputs = batch_processor.build_vision_inputs([
             {
@@ -158,11 +166,34 @@ class TestQwen3VLBatchProcessor:
         assert len(batch_inputs["videos"]) == 1
         assert len(batch_inputs["video_metadata"]) == 1
 
+    def test_build_vision_inputs_mem_on_sends_one_frame_dummy_and_tracks_real_video(self):
+        """MEM-on rewrites each multi-frame video to a 1-frame dummy; the real
+        T frames are preserved in video_entries for post-processor swap."""
+        batch_processor = Qwen3VLBatchProcessor(
+            model_name_or_path="demo",
+            processor_call_kwargs={"padding": "longest", "max_length": 32},
+            processor=DummyProcessorForBatchProcessor(),
+            mem_enabled=True,
+        )
+        batch_inputs, video_entries = batch_processor.build_vision_inputs([
+            {
+                "vision_type": "video",
+                "images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
+                "video_fps": torch.tensor(15.0),
+            },
+        ])
+
+        assert batch_inputs["videos"][0].shape == (1, 8, 8, 3)
+        assert len(video_entries) == 1
+        assert video_entries[0]["entry_idx"] == 0
+        assert video_entries[0]["real_video"].shape == (3, 8, 8, 3)
+
     def test_build_vision_inputs_rejects_non_uint8_images(self):
         batch_processor = Qwen3VLBatchProcessor(
             model_name_or_path="demo",
             processor_call_kwargs={"padding": "longest", "max_length": 32},
             processor=DummyProcessorForBatchProcessor(),
+            mem_enabled=False,
         )
 
         with pytest.raises(ValueError, match=r"images must use dtype torch\.uint8"):
@@ -178,6 +209,7 @@ class TestQwen3VLBatchProcessor:
             model_name_or_path="demo",
             processor_call_kwargs={"padding": "longest", "max_length": 32},
             processor=DummyProcessorForBatchProcessor(),
+            mem_enabled=False,
         )
 
         with pytest.raises(ValueError, match=r"video must use dtype torch\.uint8"):
@@ -480,6 +512,117 @@ class TestProcessorPromptBuilding:
         assistant_text = messages[1]["content"][0]["text"]
 
         assert assistant_text.count("<future_frame>") == 4
+
+
+# ======================================================================
+# Module 4b: Breast-camera (dual-view) formatting & batching
+# ======================================================================
+
+
+class TestBreastCameraFormatting:
+    """Dual-view (head + breast) formatter / batcher paths."""
+
+    @staticmethod
+    def breast_sample():
+        return {
+            "is_vla_data": torch.tensor(True),
+            "instruction": "Pick up the cup",
+            "intrinsic": torch.tensor([500.0, 500.0, 320.0, 240.0]),
+            "breast_intrinsic": torch.tensor([600.0, 600.0, 320.0, 240.0]),
+            "n_states": torch.tensor(2, dtype=torch.int32),
+            "n_actions": torch.tensor(2, dtype=torch.int32),
+            "vision_type": "video",
+            "images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
+            "breast_images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
+            "video_fps": torch.tensor(15.0),
+        }
+
+    def test_build_visual_content_returns_two_video_blocks_when_breast_present(self):
+        formatter = Qwen3VLChatFormatter()
+        content = formatter.build_visual_content(self.breast_sample())
+        assert content == [{"type": "video"}, {"type": "video"}]
+
+    def test_build_visual_content_head_only_sample_still_one_block(self):
+        formatter = Qwen3VLChatFormatter()
+        sample = self.breast_sample()
+        sample.pop("breast_images")
+        content = formatter.build_visual_content(sample)
+        assert content == [{"type": "video"}]
+
+    def test_build_vla_user_text_text_mode_appends_breast_intrinsic(self):
+        formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="text")
+        text = formatter.build_vla_user_text(
+            instruction="Pick up the cup",
+            head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
+            n_states=torch.tensor(2, dtype=torch.int32),
+            breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
+        )
+        assert "Head camera intrinsic: fx:500.00" in text
+        assert "Breast camera intrinsic: fx:600.00" in text
+
+    def test_build_vla_user_text_head_only_omits_breast_segment(self):
+        formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="text")
+        text = formatter.build_vla_user_text(
+            instruction="Pick up the cup",
+            head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
+            n_states=torch.tensor(2, dtype=torch.int32),
+            breast_intrinsic=None,
+        )
+        assert "Head camera intrinsic" in text
+        assert "Breast" not in text
+
+    def test_build_vla_user_text_token_mode_skips_breast_segment(self):
+        """Token mode wires a single <camera> slot; breast intrinsic falls off
+        the text so camera_encoder's single-view output keeps matching."""
+        formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="token", camera_token="<cam>")
+        text = formatter.build_vla_user_text(
+            instruction="Pick up the cup",
+            head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
+            n_states=torch.tensor(2, dtype=torch.int32),
+            breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
+        )
+        assert text.count("<cam>") == 1
+        assert "Head camera intrinsic: <cam>" in text
+        assert "Breast" not in text
+
+    def test_build_vision_inputs_flattens_head_then_breast_per_sample(self):
+        batch_processor = Qwen3VLBatchProcessor(
+            model_name_or_path="demo",
+            processor_call_kwargs={"padding": "longest", "max_length": 32},
+            processor=DummyProcessorForBatchProcessor(),
+            mem_enabled=False,
+        )
+        samples = [self.breast_sample(), self.breast_sample()]
+        # Mark head vs breast distinctively so we can assert ordering.
+        samples[0]["images"] = torch.full((3, 8, 8, 3), 1, dtype=torch.uint8)
+        samples[0]["breast_images"] = torch.full((3, 8, 8, 3), 2, dtype=torch.uint8)
+        samples[1]["images"] = torch.full((3, 8, 8, 3), 3, dtype=torch.uint8)
+        samples[1]["breast_images"] = torch.full((3, 8, 8, 3), 4, dtype=torch.uint8)
+
+        batch_inputs, _ = batch_processor.build_vision_inputs(samples)
+
+        assert len(batch_inputs["videos"]) == 4
+        assert int(batch_inputs["videos"][0][0, 0, 0, 0]) == 1  # sample0 head
+        assert int(batch_inputs["videos"][1][0, 0, 0, 0]) == 2  # sample0 breast
+        assert int(batch_inputs["videos"][2][0, 0, 0, 0]) == 3  # sample1 head
+        assert int(batch_inputs["videos"][3][0, 0, 0, 0]) == 4  # sample1 breast
+        assert len(batch_inputs["video_metadata"]) == 4
+
+    def test_build_vision_inputs_mixed_head_only_and_dual_view(self):
+        """HF processor semantics: flat list of all placeholders in batch order."""
+        batch_processor = Qwen3VLBatchProcessor(
+            model_name_or_path="demo",
+            processor_call_kwargs={"padding": "longest", "max_length": 32},
+            processor=DummyProcessorForBatchProcessor(),
+            mem_enabled=False,
+        )
+        head_only = self.breast_sample()
+        head_only.pop("breast_images")
+        head_only.pop("breast_intrinsic")
+
+        batch_inputs, _ = batch_processor.build_vision_inputs([head_only, self.breast_sample()])
+        # 1 (head-only) + 2 (dual) = 3 entries
+        assert len(batch_inputs["videos"]) == 3
 
 
 # ======================================================================

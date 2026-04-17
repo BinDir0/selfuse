@@ -126,8 +126,9 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         """Set the normalizer for state/action."""
         self.normalizer = normalizer
 
-    def build_raw_model_inputs(self, instruction, image, intrinsic):
-        return {
+    def build_raw_model_inputs(self, instruction, image, intrinsic,
+                               breast_image=None, breast_intrinsic=None):
+        data = {
             "images": image,
             "instruction": instruction,
             "intrinsic": intrinsic,
@@ -138,6 +139,10 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             ),
             "has_depth_values": np.array(False, dtype=bool),
         }
+        if breast_image is not None:
+            data["breast_images"] = breast_image
+            data["breast_intrinsic"] = breast_intrinsic
+        return data
 
     def copy_debug_value(self, value):
         """Create a detached debug copy of one sample field."""
@@ -208,8 +213,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         )
 
         intrinsic = sample["intrinsic"].astype(np.float32)
-        # TODO: when Qwen3-VL consumes breast view, run process_image on
-        # sample["breast_image"] / sample["breast_intrinsic"] here too.
         image, depth_images, intrinsic = process_image(
             sample["image"],
             sample.get("depth", None),
@@ -223,6 +226,24 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             stage="vla_after_image_process",
             context=sample_context,
         )
+
+        breast_image = None
+        breast_intrinsic = None
+        if sample.get("breast_image") is not None:
+            breast_intrinsic = sample["breast_intrinsic"].astype(np.float32)
+            breast_image, _, breast_intrinsic = process_image(
+                sample["breast_image"],
+                sample.get("breast_depth", None),
+                breast_intrinsic,
+                self.aug_transform,
+                self.depth_clip_range,
+                target_size=self.target_image_size,
+            )
+            ensure_mapping_finite(
+                {"breast_image": breast_image},
+                stage="vla_after_breast_image_process",
+                context=sample_context,
+            )
         instruction = sample["instruction"]
         instruction_num = sample["instruction_num"]
 
@@ -249,6 +270,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             instruction=instruction,
             image=image,
             intrinsic=intrinsic,
+            breast_image=breast_image,
+            breast_intrinsic=breast_intrinsic,
         )
 
         data.update({
@@ -261,9 +284,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         })
 
         # Future frames for world model supervision (raw uint8, no augmentation).
-        # Zero-padded to K frames so all samples in a batch have uniform shape.
-        # Always emit future_frames when K > 0 (zero-fill if missing) so every
-        # sample in a batch has the key and torch.stack works in the collator.
+        # Always emit future_frames when K > 0 so collator can stack; breast
+        # shares head's valid length (same frame_refs window).
         K = self.future_frame_horizon
         if K > 0:
             if self.target_image_size is None:
@@ -272,25 +294,25 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
                     "Set data.target_image_size in the config."
                 )
             tH, tW = self.target_image_size
-            if "future_frames" in sample:
-                ff = sample["future_frames"]
-                n_valid = min(sample.get("valid_future_frame_len", ff.shape[0]), K)
-                if n_valid > 0:
-                    ff = ff[:n_valid]
-                    if self.target_image_size is not None:
-                        ff = resize_frames(ff, self.target_image_size)
-                else:
-                    ff = np.zeros((0, tH, tW, 3), dtype=np.uint8)
-                    n_valid = 0
-            else:
-                ff = np.zeros((0, tH, tW, 3), dtype=np.uint8)
-                n_valid = 0
-            # Zero-pad to K frames
-            if ff.shape[0] < K:
-                pad = np.zeros((K - ff.shape[0], tH, tW, 3), dtype=np.uint8)
-                ff = np.concatenate([ff, pad], axis=0) if ff.shape[0] > 0 else pad
+            shared_valid_len = sample.get("valid_future_frame_len")
+
+            def pad_future(source):
+                frames = np.zeros((K, tH, tW, 3), dtype=np.uint8)
+                if source is None:
+                    return frames, 0
+                raw = shared_valid_len if shared_valid_len is not None else source.shape[0]
+                n = min(raw, K)
+                if n > 0:
+                    frames[:n] = resize_frames(source[:n], self.target_image_size)
+                return frames, n
+
+            ff, n_valid = pad_future(sample.get("future_frames"))
             data["future_frames"] = ff
             data["n_future_frames"] = np.array(n_valid, dtype=np.int32)
+
+            if sample.get("breast_future_frames") is not None:
+                breast_ff, _ = pad_future(sample["breast_future_frames"])
+                data["breast_future_frames"] = breast_ff
         else:
             data["n_future_frames"] = np.array(0, dtype=np.int32)
         if self.return_dataset_info:
@@ -549,6 +571,13 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
                 )
             tH, tW = tgt
             vlm_sample["future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
+        # Dummies so breast keys survive collate_raw's "all samples carry key"
+        # filter when VLA side runs with breast enabled.
+        if self.vla_dataset.load_breast_camera:
+            vlm_sample["breast_intrinsic"] = torch.zeros(4, dtype=torch.float32)
+            if ff_horizon > 0:
+                tH, tW = self.vla_dataset.target_image_size
+                vlm_sample["breast_future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
         if getattr(self.vla_dataset, "debug_capture_raw_sample", False):
             vlm_sample["debug_raw_sample"] = None
         if getattr(self.vla_dataset, "debug_capture_processed_sample", False):

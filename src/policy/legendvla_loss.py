@@ -413,7 +413,11 @@ def compute_wm_loss(
     backbone_output,
     action_cond_embeds: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Masked MSE between world model predictions and frozen teacher features."""
+    """Masked MSE between world model predictions and frozen teacher features.
+
+    Both pred and target are ``[B, V, K, spatial, D]`` (V=1 head-only, V=2
+    head+breast). Views are averaged with equal weight.
+    """
     if not model.use_world_model or "future_frames" not in batch:
         return zero_loss(backbone_output.last_hidden_states)
 
@@ -421,15 +425,17 @@ def compute_wm_loss(
     pred = wm_output["pred"]
     target = wm_output["target"].to(pred.dtype)
     n_future = wm_output["n_future_frames"]
-    K = pred.shape[1]
+    V, K = pred.shape[1], pred.shape[2]
 
     positions = torch.arange(K, device=n_future.device).unsqueeze(0)
-    valid_mask = (positions < n_future.unsqueeze(1)).unsqueeze(-1).unsqueeze(-1)
+    valid_mask = (positions < n_future.unsqueeze(1)).unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
     mask_float = valid_mask.to(dtype=pred.dtype)
 
     squared_error = (pred - target) ** 2
     n_elements = pred.shape[-2] * pred.shape[-1]
-    return (squared_error * mask_float).sum() / mask_float.sum().clamp(min=1) / n_elements
+    # × V in the denominator keeps the loss scale view-count-invariant.
+    denom = (mask_float.sum() * V).clamp(min=1)
+    return (squared_error * mask_float).sum() / denom / n_elements
 
 
 def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

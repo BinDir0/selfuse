@@ -51,11 +51,15 @@ class SpanMaskConfig:
 
 
 class WorldModelHead(nn.Module):
-    """Query tokens + output projection for world model prediction."""
+    """Query tokens + output projection. view_embed is added per view
+    (head/breast); zero-init keeps single-view output bit-identical.
+    """
 
-    def __init__(self, n_queries: int, hidden_size: int, upsample_factor: int):
+    def __init__(self, n_queries: int, hidden_size: int, upsample_factor: int,
+                 num_views: int = 2):
         super().__init__()
         self.query_embed = nn.Parameter(torch.randn(n_queries, hidden_size) * 0.02)
+        self.view_embed = nn.Parameter(torch.zeros(num_views, hidden_size))
         self.output_proj = nn.Linear(hidden_size, hidden_size * upsample_factor ** 2)
         nn.init.normal_(self.output_proj.weight, std=0.02)
         nn.init.zeros_(self.output_proj.bias)
@@ -515,75 +519,57 @@ class LegendVLA(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Run world model expert and frozen teacher on future frames.
 
-        Args:
-            action_cond_embeds: Optional [B, H, D] action embeddings from
-                action_encoder(clean_actions). Prepended to WM queries so the
-                expert can attend to action tokens when predicting future frames.
-
-        Returns dict with ``pred`` and ``target`` feature maps, plus ``n_future_frames``.
+        Per-view forwards are independent: queries are offset by a learned
+        ``view_embed[v]`` so the expert produces view-specific predictions.
+        Returns ``pred`` / ``target`` with a leading view dim (V=1 for
+        head-only, V=2 when breast_future_frames is present).
         """
         B = backbone_output.last_hidden_states.shape[0]
-        queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
+        device = backbone_output.last_hidden_states.device
+        K = self.wm_num_future_frames
+        gh, gw, uf = self.wm_grid_h, self.wm_grid_w, self.wm_upsample_factor
+        D = self.world_model_expert.hidden_size
 
-        # Action conditioning: prepend encoded clean actions before WM queries
-        if action_cond_embeds is not None:
-            if self.world_model_config.detach_action_cond:
-                action_cond_embeds = action_cond_embeds.detach()
-            suffix = torch.cat([action_cond_embeds, queries], dim=1)
-            action_len = action_cond_embeds.shape[1]
-        else:
-            suffix = queries
-            action_len = 0
+        if action_cond_embeds is not None and self.world_model_config.detach_action_cond:
+            action_cond_embeds = action_cond_embeds.detach()
+        action_len = action_cond_embeds.shape[1] if action_cond_embeds is not None else 0
 
-        # Position IDs: sequential from prefix_len, action tokens then queries
-        prefix_lengths = self.build_prefix_lengths(batch)
-        base = prefix_lengths.unsqueeze(1).to(device=suffix.device, dtype=torch.long)
-        position_ids = base + torch.arange(suffix.shape[1], device=suffix.device).unsqueeze(0)
-
-        # Build suffix_mask from real validity
-        # Action portion: [B, H] — valid where any action dim is non-zero
+        # Suffix mask: action tokens by actions_valid_mask; query tokens by n_future.
+        n_future = batch["n_future_frames"].to(device=device)
+        frame_valid = torch.arange(K, device=device).unsqueeze(0) < n_future.unsqueeze(1)
+        query_mask = frame_valid.unsqueeze(-1).expand(-1, -1, gh * gw).reshape(B, -1)
         if action_cond_embeds is not None:
             action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
-        else:
-            action_mask = None
-
-        # Query portion: [B, K*gh*gw] — valid for frames k < n_future_frames[b]
-        K = self.wm_num_future_frames
-        queries_per_frame = self.wm_grid_h * self.wm_grid_w
-        n_future = batch["n_future_frames"].to(device=suffix.device)
-        frame_valid = torch.arange(K, device=suffix.device).unsqueeze(0) < n_future.unsqueeze(1)
-        query_mask = frame_valid.unsqueeze(-1).expand(-1, -1, queries_per_frame).reshape(B, -1)
-
-        if action_mask is not None:
             suffix_mask = torch.cat([action_mask, query_mask], dim=1)
         else:
             suffix_mask = query_mask
 
-        wm_hidden = self.world_model_expert(
-            suffix_embeds=suffix,
-            prefix_cache=backbone_output.prefix_cache,
-            suffix_position_ids=position_ids,
-            suffix_mask=suffix_mask,
-        )
+        base_queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
+        suffix_len = action_len + base_queries.shape[1]
+        base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
+        position_ids = base + torch.arange(suffix_len, device=device).unsqueeze(0)
 
-        # Extract only query portion (discard action token outputs)
-        wm_hidden = wm_hidden[:, action_len:, :]
+        def run_view(view_idx: int, target_key: str) -> tuple[torch.Tensor, torch.Tensor]:
+            queries = base_queries + self.wm_head.view_embed[view_idx]
+            suffix = torch.cat([action_cond_embeds, queries], dim=1) if action_len else queries
+            wm_hidden = self.world_model_expert(
+                suffix_embeds=suffix,
+                prefix_cache=backbone_output.prefix_cache,
+                suffix_position_ids=position_ids,
+                suffix_mask=suffix_mask,
+            )[:, action_len:, :]
+            x = self.wm_head.output_proj(wm_hidden).reshape(B * K, gh, gw, uf, uf, D)
+            x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * K, gh * uf, gw * uf, D)
+            return x.flatten(1, 2).reshape(B, K, -1, D), self.frozen_teacher(batch[target_key])
 
-        # Depth-to-space upsample (inverse of Qwen3-VL spatial merge).
-        # Source: transformers Qwen3VLVisionModel.fast_pos_embed_interpolate
-        K = self.wm_num_future_frames
-        gh, gw, uf = self.wm_grid_h, self.wm_grid_w, self.wm_upsample_factor
-        D = self.world_model_expert.hidden_size
-        x = self.wm_head.output_proj(wm_hidden)
-        x = x.reshape(B * K, gh, gw, uf, uf, D)
-        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * K, gh * uf, gw * uf, D)
-        pred = x.flatten(1, 2).reshape(B, K, -1, D)
-
-        target = self.frozen_teacher(batch["future_frames"])
+        views = [(0, "future_frames")]
+        if "breast_future_frames" in batch:
+            views.append((1, "breast_future_frames"))
+        preds, targets = zip(*(run_view(v, k) for v, k in views))
 
         return {
-            "pred": pred,
-            "target": target,
+            "pred": torch.stack(preds, dim=1),        # [B, V, K, spatial, D]
+            "target": torch.stack(targets, dim=1),
             "n_future_frames": batch["n_future_frames"],
         }
 
