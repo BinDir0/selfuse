@@ -326,7 +326,6 @@ class Qwen3VLBatchProcessor:
             videos=[e["real_video"] for e in video_entries],
             video_metadata=[build_video_metadata(e["real_video"], float(e["fps"])) for e in video_entries],
             do_sample_frames=False,
-            do_resize=False,
             return_tensors="pt",
         )
         batch["pixel_values_videos"] = real_outputs["pixel_values_videos"]

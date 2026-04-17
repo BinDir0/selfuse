@@ -59,6 +59,12 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
     config_name="train_config"
 )
 def main(cfg: OmegaConf):
+    # Allow raising torch.compile recompile limits via env (no native env
+    # support in torch._dynamo.config). Must run before any torch.compile call.
+    import torch._dynamo.config as _dynamo_cfg
+    _dynamo_cfg.recompile_limit = int(32)
+    _dynamo_cfg.accumulated_recompile_limit = int(1024)
+
     # resolve immediately so all the ${now:} resolvers
     # will use the same time.
     OmegaConf.resolve(cfg)
