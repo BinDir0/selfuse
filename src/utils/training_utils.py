@@ -1,5 +1,7 @@
 import gc
+import math
 import os
+import random
 import sys
 import threading
 import pty
@@ -7,7 +9,10 @@ import re
 import time
 from contextlib import contextmanager
 from functools import wraps
+
+import numpy as np
 import torch
+import torch.distributed as dist
 
 
 class TrainingState:
@@ -265,3 +270,244 @@ class FullMemoryTracker:
     def stop(self):
         for h in self.hooks:
             h.remove()
+
+
+def reset_run_seed(base_seed: int, dynamic_data_seed: bool, rank: int) -> int:
+    """Reset torch/numpy/random seeds for the current rank.
+
+    When ``dynamic_data_seed`` is True, rank 0 samples an epoch-level seed
+    from wall-clock time and broadcasts it so all ranks agree. The final
+    per-rank seed is ``base_seed (+ timestamp) + rank`` to decorrelate any
+    per-rank augmentation without losing reproducibility of the global
+    schedule.
+    """
+    timestamp_seed = None
+    run_seed = base_seed
+    if dynamic_data_seed:
+        objects = [int(time.time())] if rank == 0 else [None]
+        dist.broadcast_object_list(objects, src=0)
+        timestamp_seed = int(objects[0])
+        run_seed = base_seed + timestamp_seed
+
+    per_device_seed = run_seed + rank
+    torch.manual_seed(per_device_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(per_device_seed)
+    np.random.seed(per_device_seed % (2**32 - 1))
+    random.seed(per_device_seed)
+
+    dist.barrier()
+    if rank == 0:
+        if dynamic_data_seed:
+            print(f"Using runtime seed: {run_seed} (base={base_seed}, timestamp={timestamp_seed})")
+        else:
+            print(f"Using fixed seed: {run_seed}")
+    return run_seed
+
+
+def build_param_groups(
+    model,
+    optimizer_cfg,
+    *,
+    objective_func: str,
+    train_vlm: bool,
+) -> tuple[list[dict], set[int], list[torch.nn.Parameter]]:
+    """Collect AdamW parameter groups for LegendVLA's components.
+
+    Components produce two param groups each (decay / no-decay by tensor
+    rank). Returns:
+        groups:             list of dicts suitable for ``torch.optim.AdamW``.
+        vlm_group_indices:  indices of VLM groups inside ``groups`` — used
+                            by the lr scheduler to apply a separate
+                            freeze/rewarmup curve.
+        vlm_param_refs:     flat list of VLM Parameter objects, captured
+                            while requires_grad is still True, so the
+                            caller can flip them for staged freeze.
+
+    Must be called AFTER ``fully_shard()`` so that the references point at
+    the post-shard DTensor-wrapped Parameters (pre-shard refs get orphaned
+    because FSDP2 replaces ``module._parameters[name]``).
+    """
+    groups: list[dict] = []
+
+    if objective_func != "train_ar":
+        groups.extend(grouped_parameters(model.action_expert_parameters, optimizer_cfg.action))
+
+    vlm_group_indices: set[int] = set()
+    vlm_param_refs: list[torch.nn.Parameter] = []
+    if train_vlm:
+        vlm_groups = grouped_parameters(model.trainable_vlm_parameters, optimizer_cfg.vlm)
+        start = len(groups)
+        groups.extend(vlm_groups)
+        vlm_group_indices = set(range(start, start + len(vlm_groups)))
+        for group in vlm_groups:
+            vlm_param_refs.extend(group["params"])
+
+    groups.extend(grouped_parameters(model.diffloss_parameters, optimizer_cfg.diffloss))
+
+    if getattr(model, "use_world_model", False):
+        groups.extend(grouped_parameters(model.world_model_parameters, optimizer_cfg.world_model))
+
+    all_params = [p for group in groups for p in group["params"]]
+    trainable_ids = {id(p) for p in all_params}
+    for idx, param in enumerate(all_params):
+        assert param.requires_grad, (
+            f"Parameter at index {idx} is in optimizer groups but requires_grad is False"
+        )
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            assert id(param) in trainable_ids, (
+                f"Parameter '{name}' requires grad but is NOT in the optimizer parameters list"
+            )
+
+    return groups, vlm_group_indices, vlm_param_refs
+
+
+def grouped_parameters(param_list, component_cfg) -> list[dict]:
+    """Split ``param_list`` into AdamW decay / no-decay groups.
+
+    Convention: tensors with ``ndim >= 2`` decay; biases and norm params
+    (ndim < 2) use weight_decay=0.
+    """
+    params = [p for p in param_list if p.requires_grad]
+    decay_params = [p for p in params if p.dim() >= 2]
+    nodecay_params = [p for p in params if p.dim() < 2]
+    # Plain list so FSDP2 checkpoint serialization (torch._iterate_state_dict)
+    # accepts it.
+    betas = list(component_cfg.betas)
+    return [
+        {"params": decay_params, "weight_decay": component_cfg.weight_decay, "lr": component_cfg.lr, "betas": betas},
+        {"params": nodecay_params, "weight_decay": 0.0, "lr": component_cfg.lr, "betas": betas},
+    ]
+
+
+def clip_and_check_grads(
+    model,
+    cfg_clipping,
+    *,
+    train_vlm: bool,
+    vlm_freeze_active: bool,
+    rank: int,
+    update_step: int,
+    global_step: int,
+) -> tuple[dict[str, torch.Tensor] | None, bool]:
+    """Clip per-component grads and detect non-finite norms.
+
+    Returns ``(norms, step_skipped)``:
+        norms:        {component_name: pre-clip L2 norm} or None when
+                      clipping is disabled.
+        step_skipped: True when any component's norm is NaN/Inf — the
+                      caller should skip optimizer.step() for this micro-batch.
+
+    clip_grad_norm_ returns a DTensor-reduced scalar under FSDP2, so every
+    rank sees the same value and decides identically without extra
+    collectives.
+    """
+    if not cfg_clipping.enabled:
+        return None, False
+
+    max_norm = cfg_clipping.max_grad_norm
+    part_params = {
+        "action_expert": model.action_expert_parameters,
+        "diffloss": model.diffloss_parameters,
+    }
+    if getattr(model, "use_world_model", False):
+        part_params["world_model"] = model.world_model_parameters
+    if train_vlm and not vlm_freeze_active:
+        part_params["vision"] = model.trainable_vision_parameters
+        part_params["text"] = model.trainable_text_parameters
+
+    norms = {
+        name: torch.nn.utils.clip_grad_norm_(params, max_norm, foreach=True)
+        for name, params in part_params.items()
+    }
+
+    if any(not math.isfinite(scalar_metric_value(n)) for n in norms.values()):
+        if rank == 0:
+            readable = {k: scalar_metric_value(v) for k, v in norms.items()}
+            print(
+                f"[WARN] Non-finite grad norm at update_step={update_step} "
+                f"global_step={global_step}: {readable}. Skipping step."
+            )
+        return norms, True
+
+    return norms, False
+
+
+def build_training_step_log(
+    workspace,
+    *,
+    include_full_metrics: bool,
+    raw_loss: dict[str, torch.Tensor] | None = None,
+    part_grad_norms: dict[str, torch.Tensor] | None = None,
+    batch: dict | None = None,
+    step_perf_start: float | None = None,
+    data_wait_sec: float | None = None,
+    training_start_time: float | None = None,
+    total_samples_processed: int = 0,
+    train_vlm: bool = False,
+) -> dict:
+    """Build the per-step wandb log dict.
+
+    The base fields (ids, lr, vlm state) are always included. Full metrics
+    (timings, grad norms, weight norms, raw loss components) are added
+    only when ``include_full_metrics=True`` — typically on logging steps.
+    """
+    current_group_lrs, non_vlm_group_indices = workspace.get_param_group_lrs()
+    current_lr = (
+        current_group_lrs[non_vlm_group_indices[0]]
+        if non_vlm_group_indices else current_group_lrs[0]
+    )
+
+    step_log: dict = {
+        "global_step": workspace.global_step,
+        "update_step": workspace.update_step,
+        "epoch": workspace.epoch,
+        "lr": current_lr,
+        "lr_non_vlm": current_lr,
+        "vlm_freeze_active": float(workspace.is_vlm_freeze_active()),
+    }
+    if workspace.vlm_group_indices:
+        step_log["lr_vlm"] = current_group_lrs[min(workspace.vlm_group_indices)]
+
+    if not include_full_metrics:
+        return step_log
+
+    step_wall_time = time.time()
+    step_time_sec = time.perf_counter() - step_perf_start
+    batch_size_local = batch["input_ids"].shape[0]
+    elapsed_time_sec = step_wall_time - training_start_time
+    step_log.update({
+        "elapsed_time_sec": elapsed_time_sec,
+        "step_time_sec": step_time_sec,
+        "data_wait_sec": data_wait_sec,
+        "avg_samples_per_sec": total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
+        "samples_per_sec": batch_size_local / step_time_sec if step_time_sec > 0 else 0,
+    })
+
+    if part_grad_norms is not None:
+        for component, name in (
+            ("action_expert", "grad_norm_action_expert"),
+            ("diffloss", "grad_norm_diffloss"),
+            ("vision", "grad_norm_vision"),
+            ("text", "grad_norm_text"),
+            ("world_model", "grad_norm_world_model"),
+        ):
+            if component in part_grad_norms:
+                step_log[name] = part_grad_norms[component]
+
+    model = workspace.model
+    with torch.no_grad():
+        if train_vlm:
+            step_log["weight_norm/vision"] = params_l2_norm(model.trainable_vision_parameters)
+            step_log["weight_norm/text"] = params_l2_norm(model.trainable_text_parameters)
+        step_log["weight_norm/action"] = params_l2_norm(model.action_expert_parameters)
+        step_log["weight_norm/diffloss"] = params_l2_norm(model.diffloss_parameters)
+        if getattr(model, "use_world_model", False):
+            step_log["weight_norm/world_model"] = params_l2_norm(model.world_model_parameters)
+
+    if raw_loss is not None:
+        for key, value in raw_loss.items():
+            step_log[key] = value.item()
+
+    return step_log

@@ -105,10 +105,15 @@ def build_mixed_precision_policy(use_bf16: bool) -> MixedPrecisionPolicy | None:
 
     The recipe: fp32 master params with bf16 compute + bf16 output.
     reduce_dtype stays fp32 for numerically safe gradient all-reduce.
+    cast_forward_inputs=True lets FSDP recursively cast floating-point
+    forward inputs to param_dtype; non-floating tensors (int/bool/uint8)
+    pass through untouched, so caller-side dtype casting is unnecessary.
 
     Returns None when use_bf16 is False (full fp32 training).
 
     Reference: torch/distributed/fsdp/_fully_shard/_fsdp_api.py:14-53
+    Reference: torch/distributed/fsdp/_fully_shard/_fsdp_common.py:171-178
+        (_cast_fp_tensor: skips non-floating tensors)
     """
     if not use_bf16:
         return None
@@ -116,6 +121,7 @@ def build_mixed_precision_policy(use_bf16: bool) -> MixedPrecisionPolicy | None:
         param_dtype=torch.bfloat16,
         reduce_dtype=torch.float32,
         output_dtype=torch.bfloat16,
+        cast_forward_inputs=True,
     )
 
 

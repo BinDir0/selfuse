@@ -363,7 +363,10 @@ def evaluation(workspace, rank, device, dataloader, step_log):
         save_eval_attn_weights = bool(workspace.cfg.training.save_eval_attn_weights)
 
         for batch_idx, batch in enumerate(dataloader):
-            inputs = workspace.preprocess_batch(batch)
+            # cast_forward_inputs=True on the FSDP MixedPrecisionPolicy casts
+            # floating-point batch tensors at model.forward entry, so no
+            # manual preprocess is needed here.
+            inputs = batch
 
             # Compute validation loss
             with torch.amp.autocast("cuda", dtype=workspace.dtype), torch.inference_mode():

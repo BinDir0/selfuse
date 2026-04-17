@@ -239,19 +239,22 @@ class LegendVLA(nn.Module):
             "world_model": bool(compile_kwargs.get("world_model", True)),
         }
 
-    def enable_gradient_checkpointing(self, config: dict | None = None) -> None:
+    def enable_gradient_checkpointing(self, config: bool | dict | None = None) -> None:
         """Enable checkpointing on modules that support it.
 
         Args:
-            config: per-component checkpointing config. Keys:
-                text:           {enabled: bool, every_n: int}
-                vision:         {enabled: bool, every_n: int}
-                action_expert:  {enabled: bool, every_n: int}
-                When *config* is None every component is fully checkpointed
-                (backward compatible with the old parameterless call).
+            config: per-component checkpointing config. Accepted forms:
+                - True / None: fully checkpoint every component (every_n=1).
+                - False: no-op.
+                - dict with optional keys ``text``, ``vision``, ``action_expert``;
+                  each value is ``{enabled: bool, every_n: int}``. A dict
+                  whose components are all disabled / missing is a no-op.
         """
-        if config is None:
+        if config is False:
+            return
+        if config is None or config is True:
             config = {}
+
         text_cfg = config.get("text", {})
         vision_cfg = config.get("vision", {})
         expert_cfg = config.get("action_expert", {})
@@ -264,6 +267,9 @@ class LegendVLA(nn.Module):
         vision_every_n = vision_cfg.get("every_n", 1) if vision_enabled else 0
         expert_enabled = expert_cfg.get("enabled", True)
         expert_every_n = expert_cfg.get("every_n", 1) if expert_enabled else 0
+
+        if text_every_n == 0 and vision_every_n == 0 and expert_every_n == 0:
+            return
 
         self.backbone.enable_gradient_checkpointing(
             text_every_n=text_every_n,
