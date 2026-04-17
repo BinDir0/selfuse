@@ -2,11 +2,11 @@
 WebDataset-based VLM dataset for LegendVLA training.
 '''
 
+import time
 import warnings
 from typing import Dict, List, Optional, Tuple
 import torch
 import numpy as np
-from torchvision import transforms
 from src.utils.pytorch_util import dict_apply
 from src.dataset.data_transforms import process_image
 from src.dataset.sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
@@ -60,13 +60,8 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             assert self.n_obs_image_steps >= 1, "n_obs_image_steps must be >= 1 when mem_enabled"
             assert self.target_image_size is not None, "target_image_size required when mem_enabled"
 
-        if self.mode == 'train':
-            self.aug_transform = transforms.Compose([
-                transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-                transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))
-            ])
-        else:
-            self.aug_transform = None
+        # Image augmentation is handled by data_transforms.process_image
+        # (shared with VLA). No separate transform object is needed here.
 
     def distribute(self, rank: int, world_size: int):
         """WebDataset splitting is handled in build_wds_pipeline."""
@@ -146,41 +141,41 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         question = str(text['user'])
         answer = str(text['assistant'])
 
-        augmented_images = []
+        raw_images = []
         for img_pil in images:
             if img_pil.mode != 'RGB':
                 img_pil = img_pil.convert('RGB')
-            if self.mode == 'train' and self.aug_transform is not None:
-                augmented_pil = self.aug_transform(img_pil)
-            else:
-                augmented_pil = img_pil
-            augmented_np = np.array(augmented_pil, dtype=np.uint8)
-            augmented_images.append(augmented_np)
-        images_to_process = np.stack(augmented_images, dtype=np.uint8)
+            raw_images.append(np.array(img_pil, dtype=np.uint8))
+        images_arr = np.stack(raw_images, dtype=np.uint8)
+
+        # Unified with VLA: process_image handles resize (when target_size is
+        # set) and, in train mode, random_resized_crop + augment_color.
+        # target_size is only applied when mem_enabled so VLM shares the
+        # VLA spatial grid; otherwise images keep their native size.
+        images_processed, _, _ = process_image(
+            images_arr,
+            aug_transform=(self.mode == 'train'),
+            target_size=self.target_image_size if self.mem_enabled else None,
+        )
         ensure_mapping_finite(
-            {'images_to_process': images_to_process},
-            stage='vlm_after_image_augmentation',
+            {'images_processed': images_processed},
+            stage='vlm_after_image_process',
             context=sample_context,
         )
 
         if self.mem_enabled:
-            # Resize to VLA target so all entries share N (= H*W / patch / merge),
-            # then repeat along the temporal axis to match VLA T frames.
+            # Repeat along the temporal axis to match VLA T frames.
             # Repetition is semantically a no-op: backbone slices to the last
             # frame, which is identical to the original single image.
-            images_resized, _, _ = process_image(
-                images_to_process,
-                target_size=self.target_image_size,
-            )
             T = self.n_obs_image_steps
-            K = images_resized.shape[0]
+            K = images_processed.shape[0]
             if K < T:
-                pad = np.repeat(images_resized[-1:], T - K, axis=0)
-                images_padded = np.concatenate([images_resized, pad], axis=0)
+                pad = np.repeat(images_processed[-1:], T - K, axis=0)
+                images_padded = np.concatenate([images_processed, pad], axis=0)
             elif K > T:
-                images_padded = images_resized[-T:]
+                images_padded = images_processed[-T:]
             else:
-                images_padded = images_resized
+                images_padded = images_processed
             data = {
                 'images': images_padded,                    # (T, tH, tW, C)
                 'question': question,
@@ -191,7 +186,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             }
         else:
             data = {
-                'images': images_to_process,
+                'images': images_processed,
                 'question': question,
                 'answer': answer,
                 'vision_type': 'image',

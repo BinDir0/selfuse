@@ -11,7 +11,6 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-from torchvision import transforms
 
 from src.model.common.normalizer import LinearNormalizer
 from src.dataset.unified_vla_collator import UnifiedVLACollator
@@ -115,14 +114,9 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         )
         self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
 
-        self.aug_transform = None
-        if self.mode == "train":
-            self.aug_transform = transforms.Compose([
-                transforms.ColorJitter(
-                    brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-                transforms.GaussianBlur(
-                    kernel_size=(5, 5), sigma=(0.1, 2.0)),
-            ])
+        # process_image only checks truthiness; actual color aug lives in
+        # data_transforms.COLOR_AUG (albumentations-based).
+        self.aug_transform = (self.mode == "train")
 
     def set_collator(self, collator):
         """Set the batch collator used to build model inputs."""

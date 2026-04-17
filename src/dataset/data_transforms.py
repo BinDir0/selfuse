@@ -5,10 +5,12 @@ Data transformation functions for LegendVLA datasets.
 import random
 from typing import Optional
 
+# Source: https://albumentations.ai/docs/benchmarks/image-benchmarks/
+# ColorJitter on CPU: ~11-13x faster than torchvision (1199 vs 88 img/s).
+import albumentations as A
 import cv2
 import numpy as np
 import torch
-from torchvision.transforms import v2 as T
 
 # cv2 defaults to using all cores for its internal thread pool. With multiple
 # dataloader workers each spawning that pool, they would trample each other.
@@ -25,18 +27,16 @@ from src.utils.geometry import (
 )
 from src.model.common.normalizer import LinearNormalizer
 
-# Module-level color augmentation pipeline. v2 transforms are stateless and
-# sample new params per __call__, so reusing across workers is safe and
-# avoids per-sample Compose construction overhead.
-COLOR_AUG = T.Compose([
-    T.ColorJitter(
-        brightness=(0.7, 1.3),
-        contrast=(0.7, 1.3),
-        saturation=(0.7, 1.3),
-        hue=(-0.1, 0.1),
-    ),
-    T.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
-])
+# Module-level color augmentation. Stateless: samples new params per __call__.
+# Hue intentionally dropped: it harmed color-sensitive VLA/VLM tasks.
+# Using albumentations for ~11x CPU speedup vs torchvision on ColorJitter.
+COLOR_AUG = A.ColorJitter(
+    brightness=(0.7, 1.3),
+    contrast=(0.7, 1.3),
+    saturation=(0.7, 1.3),
+    hue=0,
+    p=1.0,
+)
 
 
 def get_relative_action(state, action):
@@ -246,14 +246,18 @@ def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0))
 
 
 def augment_color(images):
-    '''Color jitter + Gaussian blur via vectorized torchvision.v2 on uint8 tensor.
+    '''Color jitter via albumentations on uint8 numpy array.
 
-    v2 ColorJitter / GaussianBlur sample params once per call and apply to
-    the whole (N, C, H, W) tensor uniformly, preserving temporal consistency.
+    Stack N frames vertically into a single [N*H, W, 3] image so one call to
+    A.ColorJitter samples params once and applies them to all frames,
+    preserving temporal consistency. ColorJitter is pixel-wise so this is
+    strictly equivalent to per-frame apply with shared params, but avoids
+    N times the Python dispatch overhead.
     '''
-    t = torch.from_numpy(images).permute(0, 3, 1, 2)  # (N, 3, H, W) uint8
-    t = COLOR_AUG(t)
-    return t.permute(0, 2, 3, 1).contiguous().numpy()
+    N, H, W, C = images.shape
+    stacked = np.ascontiguousarray(images.reshape(N * H, W, C))
+    jittered = COLOR_AUG(image=stacked)["image"]
+    return jittered.reshape(N, H, W, C)
 
 
 def augment_depth(depth_images, noise_scale=0.005, dropout_prob=0.5):
