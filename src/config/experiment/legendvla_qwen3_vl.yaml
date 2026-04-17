@@ -7,6 +7,7 @@ defaults:
   - /dataset_paths/vla_wds
   - /dataset_paths/vlm_wds
   - /world_model: frozen_regression
+  - /diffloss: flow
   - _self_
 
 name: legendvla_qwen3_vl

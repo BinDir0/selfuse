@@ -440,8 +440,11 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
 
     ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
 
+    # dense_inputs is shared by diffloss and reg_action_head. Skip the gather
+    # work entirely when neither head is active.
+    needs_dense = model.use_diffloss or model.reg_action_head is not None
     dense_inputs = None
-    if torch.any(is_vla_data):
+    if needs_dense and torch.any(is_vla_data):
         dense_inputs = build_dense_diffloss_inputs(
             model, hidden_states, batch["actions"],
             batch["answer_start_idx"], batch["n_actions"], is_vla_data,
@@ -481,8 +484,9 @@ def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, tor
     is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
     ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
 
+    needs_dense = model.use_diffloss or model.reg_action_head is not None
     dense_inputs = None
-    if torch.any(is_vla_data):
+    if needs_dense and torch.any(is_vla_data):
         dense_inputs = build_dense_diffloss_inputs(
             model, hidden_states, batch["actions"],
             batch["answer_start_idx"], batch["n_actions"], is_vla_data,

@@ -239,7 +239,7 @@ class TestEndToEndForwardBackward:
         has_expert_grad = any(p.grad is not None and p.grad.abs().sum() > 0
                               for p in model.action_expert_parameters)
         has_diffloss_grad = any(p.grad is not None and p.grad.abs().sum() > 0
-                                for p in model.diffloss_parameters)
+                                for p in model.ar_action_heads_parameters)
         assert has_backbone_grad, "No gradient reached backbone parameters"
         assert has_expert_grad, "No gradient reached action expert parameters"
         assert has_diffloss_grad, "No gradient reached diffloss parameters"
@@ -255,7 +255,7 @@ class TestEndToEndForwardBackward:
         output["total_loss"].backward()
 
         projector_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
-                                 for p in model.diffloss_parameters)
+                                 for p in model.ar_action_heads_parameters)
         assert not projector_has_grad, "Diffusion branch should be inactive when diffloss is disabled"
 
     def test_train_ar_mode(self):
@@ -559,7 +559,7 @@ class TestParameterGroups:
         model = build_model(with_diffloss=True)
         vlm_ids = {id(p) for p in model.trainable_vlm_parameters}
         expert_ids = {id(p) for p in model.action_expert_parameters}
-        diffloss_ids = {id(p) for p in model.diffloss_parameters}
+        diffloss_ids = {id(p) for p in model.ar_action_heads_parameters}
 
         assert vlm_ids.isdisjoint(expert_ids), "VLM and expert params overlap"
         assert vlm_ids.isdisjoint(diffloss_ids), "VLM and diffloss params overlap"
@@ -572,7 +572,7 @@ class TestParameterGroups:
         grouped = set()
         grouped.update(id(p) for p in model.trainable_vlm_parameters)
         grouped.update(id(p) for p in model.action_expert_parameters)
-        grouped.update(id(p) for p in model.diffloss_parameters)
+        grouped.update(id(p) for p in model.ar_action_heads_parameters)
 
         uncovered = all_trainable - grouped
         assert len(uncovered) == 0, (

@@ -96,13 +96,13 @@ class LegendVLA(nn.Module):
         self,
         backbone: nn.Module,
         state_encoder: nn.Module,
-        ar_action_encoder: nn.Module,
         action_encoder: nn.Module,
         time_embedding: nn.Module,
         flow_expert: nn.Module,
         action_decoder: nn.Module,
-        latent_condition_projector: nn.Module,
         shape_meta: dict,
+        ar_action_encoder: nn.Module | None = None,
+        latent_condition_projector: nn.Module | None = None,
         diffloss: nn.Module | None = None,
         reg_action_head: nn.Module | None = None,
         ignore_index: int = -100,
@@ -175,6 +175,15 @@ class LegendVLA(nn.Module):
         self.diffloss = diffloss
         self.reg_action_head = reg_action_head
         self.latent_condition_projector = latent_condition_projector
+
+        # Unified DiffLoss switch: all three must be present together. Any
+        # missing piece disables the whole AR-action-via-diffloss path,
+        # including the action branch in build_slot_embeddings.
+        self.use_diffloss = (
+            self.diffloss is not None
+            and self.latent_condition_projector is not None
+            and self.ar_action_encoder is not None
+        )
 
         # Mask embeddings only needed when input_mask_enabled is True.
         if self.ar_action_train_config.input_mask_enabled:
@@ -320,13 +329,14 @@ class LegendVLA(nn.Module):
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
     @property
-    def diffloss_parameters(self):
-        modules = [
-            self.state_encoder,
-            self.ar_action_encoder,
-            self.latent_condition_projector,
-        ]
-        if self.diffloss is not None:
+    def ar_action_heads_parameters(self):
+        # Heads attached to the VLM backbone. state_encoder is always here
+        # (backbone always consumes state). The ar_action/latent/diffloss
+        # trio enters and leaves together, driven by use_diffloss.
+        modules = [self.state_encoder]
+        if self.use_diffloss:
+            modules.append(self.ar_action_encoder)
+            modules.append(self.latent_condition_projector)
             modules.append(self.diffloss)
         if self.reg_action_head is not None:
             modules.append(self.reg_action_head)
@@ -389,7 +399,7 @@ class LegendVLA(nn.Module):
                 )
             slot_embeds["state"] = state_embeds
 
-        if "actions" in batch:
+        if self.use_diffloss and "actions" in batch:
             action_input = batch["actions"]
             if add_action_noise:
                 action_input = action_input + torch.randn_like(batch["actions"]) * mask_cfg.noise_std
@@ -606,7 +616,6 @@ class LegendVLA(nn.Module):
     def freeze_non_lora_weights_in_ae(self):
         modules = [
             self.state_encoder,
-            self.ar_action_encoder,
             self.action_encoder,
             self.time_embedding,
             self.flow_expert,

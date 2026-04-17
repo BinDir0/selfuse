@@ -100,7 +100,7 @@ def test_param_groups_cover_all_trainable(report: PhaseReport, model, cfg) -> No
         )
     all_groups.extend(
         TrainLegendVLAWorkspace.get_grouped_parameters(
-            None, model.diffloss_parameters, cfg.optimizer.diffloss
+            None, model.ar_action_heads_parameters, cfg.optimizer.ar_action_heads
         )
     )
 
@@ -143,7 +143,7 @@ def test_param_groups_lr_and_wd(report: PhaseReport, model, cfg) -> None:
     checks = []
     for group_name, params_fn, opt_cfg_key in [
         ("action", model.action_expert_parameters, "action"),
-        ("diffloss", model.diffloss_parameters, "diffloss"),
+        ("ar_action_heads", model.ar_action_heads_parameters, "ar_action_heads"),
     ]:
         opt_cfg = getattr(cfg.optimizer, opt_cfg_key)
         groups = TrainLegendVLAWorkspace.get_grouped_parameters(None, params_fn, opt_cfg)
@@ -324,7 +324,7 @@ def test_gradient_clipping_components(report: PhaseReport, model) -> None:
     """The three gradient clipping groups (action_expert, diffloss, vlm)
     should have non-overlapping parameters and cover expected modules."""
     action_ids = {id(p) for p in model.action_expert_parameters}
-    diffloss_ids = {id(p) for p in model.diffloss_parameters}
+    diffloss_ids = {id(p) for p in model.ar_action_heads_parameters}
 
     overlap = action_ids & diffloss_ids
     report.add(assert_check(
@@ -348,14 +348,14 @@ def test_gradient_clipping_components(report: PhaseReport, model) -> None:
         f"found={found_prefixes}, expected={expected_prefixes}",
     ))
 
-    # diffloss_parameters should include latent_condition_projector + diffloss
+    # ar_action_heads_parameters should include latent_condition_projector + diffloss
     dl_names = {n for n, p in model.named_parameters() if id(p) in diffloss_ids}
     expected_dl = ["latent_condition_projector", "diffloss"]
     found_dl = [p for p in expected_dl if any(n.startswith(p) for n in dl_names)]
 
     report.add(assert_check(
         len(found_dl) == len(expected_dl),
-        "8.5c diffloss_parameters covers expected modules",
+        "8.5c ar_action_heads_parameters covers expected modules",
         f"found={found_dl}, expected={expected_dl}",
     ))
 
@@ -367,7 +367,7 @@ def test_nan_guard_skips_step(report: PhaseReport) -> None:
     from src.utils.training_utils import scalar_metric_value
 
     # Simulate what the training loop does
-    norms = {"action_expert": torch.tensor(float("nan")), "diffloss": torch.tensor(1.5)}
+    norms = {"action_expert": torch.tensor(float("nan")), "ar_action_heads": torch.tensor(1.5)}
     should_skip = any(
         not math.isfinite(scalar_metric_value(n))
         for n in norms.values()
@@ -380,7 +380,7 @@ def test_nan_guard_skips_step(report: PhaseReport) -> None:
     ))
 
     # Normal case: no skip
-    norms_ok = {"action_expert": torch.tensor(2.0), "diffloss": torch.tensor(1.5)}
+    norms_ok = {"action_expert": torch.tensor(2.0), "ar_action_heads": torch.tensor(1.5)}
     should_not_skip = any(
         not math.isfinite(scalar_metric_value(n))
         for n in norms_ok.values()

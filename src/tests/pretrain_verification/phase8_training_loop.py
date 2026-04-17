@@ -55,7 +55,7 @@ def check_8_1_optimizer_groups() -> CheckResult:
     # Collect parameter groups as the training workspace does
     vlm_params = list(model.trainable_vlm_parameters)
     action_params = list(model.action_expert_parameters)
-    diff_params = list(model.diffloss_parameters)
+    diff_params = list(model.ar_action_heads_parameters)
 
     vlm_ids = {id(p) for p in vlm_params}
     action_ids = {id(p) for p in action_params}

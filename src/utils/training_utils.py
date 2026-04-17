@@ -343,7 +343,7 @@ def build_param_groups(
         for group in vlm_groups:
             vlm_param_refs.extend(group["params"])
 
-    groups.extend(grouped_parameters(model.diffloss_parameters, optimizer_cfg.diffloss))
+    groups.extend(grouped_parameters(model.ar_action_heads_parameters, optimizer_cfg.ar_action_heads))
 
     if getattr(model, "use_world_model", False):
         groups.extend(grouped_parameters(model.world_model_parameters, optimizer_cfg.world_model))
@@ -409,7 +409,7 @@ def clip_and_check_grads(
     max_norm = cfg_clipping.max_grad_norm
     part_params = {
         "action_expert": model.action_expert_parameters,
-        "diffloss": model.diffloss_parameters,
+        "ar_action_heads": model.ar_action_heads_parameters,
     }
     if getattr(model, "use_world_model", False):
         part_params["world_model"] = model.world_model_parameters
@@ -488,7 +488,7 @@ def build_training_step_log(
     if part_grad_norms is not None:
         for component, name in (
             ("action_expert", "grad_norm_action_expert"),
-            ("diffloss", "grad_norm_diffloss"),
+            ("ar_action_heads", "grad_norm_ar_action_heads"),
             ("vision", "grad_norm_vision"),
             ("text", "grad_norm_text"),
             ("world_model", "grad_norm_world_model"),
@@ -502,7 +502,7 @@ def build_training_step_log(
             step_log["weight_norm/vision"] = params_l2_norm(model.trainable_vision_parameters)
             step_log["weight_norm/text"] = params_l2_norm(model.trainable_text_parameters)
         step_log["weight_norm/action"] = params_l2_norm(model.action_expert_parameters)
-        step_log["weight_norm/diffloss"] = params_l2_norm(model.diffloss_parameters)
+        step_log["weight_norm/ar_action_heads"] = params_l2_norm(model.ar_action_heads_parameters)
         if getattr(model, "use_world_model", False):
             step_log["weight_norm/world_model"] = params_l2_norm(model.world_model_parameters)
 

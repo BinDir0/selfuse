@@ -485,7 +485,7 @@ def test_real_qwen3vl_wds_forward_backward(tmp_path: Path):
         )
         has_diffloss_grad = any(
             param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
-            for param in model.diffloss_parameters
+            for param in model.ar_action_heads_parameters
         )
 
         assert has_backbone_grad, "No gradient reached trainable real-backbone parameters"
