@@ -252,7 +252,7 @@ def aggregate_val_losses(val_losses, device, step_log):
 
         # Average only over non-zero samples
         val_losses[key] = (local_loss_sum / num_nonzero_samples.clamp(min=1)).item()
-        step_log[f'val_{key}'] = val_losses[key]
+        step_log[f'val_loss/{key}'] = val_losses[key]
 
 
 def aggregate_action_metrics(
@@ -283,11 +283,11 @@ def aggregate_action_metrics(
         dist.all_reduce(v, op=dist.ReduceOp.SUM)
         avg_l1_parts[k] = v / count.clamp(min=1)
 
-    step_log['eval_l1_loss'] = avg_l1.item()
+    step_log['eval/l1_loss'] = avg_l1.item()
     for part_name, part_loss in avg_l1_parts.items():
-        step_log[f'eval_l1_{part_name}'] = part_loss.item()
+        step_log[f'eval/l1_{part_name}'] = part_loss.item()
     for i, threshold in enumerate(eval_thresholds):
-        step_log[f'eval_acc_{threshold}'] = avg_accuracy[i].item()
+        step_log[f'eval/acc_{threshold}'] = avg_accuracy[i].item()
 
     return avg_l1, avg_l1_parts, avg_accuracy
 

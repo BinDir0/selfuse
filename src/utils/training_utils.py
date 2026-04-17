@@ -463,12 +463,11 @@ def build_training_step_log(
         "global_step": workspace.global_step,
         "update_step": workspace.update_step,
         "epoch": workspace.epoch,
-        "lr": current_lr,
-        "lr_non_vlm": current_lr,
+        "lr/non_vlm": current_lr,
         "vlm_freeze_active": float(workspace.is_vlm_freeze_active()),
     }
     if workspace.vlm_group_indices:
-        step_log["lr_vlm"] = current_group_lrs[min(workspace.vlm_group_indices)]
+        step_log["lr/vlm"] = current_group_lrs[min(workspace.vlm_group_indices)]
 
     if not include_full_metrics:
         return step_log
@@ -478,23 +477,17 @@ def build_training_step_log(
     batch_size_local = batch["input_ids"].shape[0]
     elapsed_time_sec = step_wall_time - training_start_time
     step_log.update({
-        "elapsed_time_sec": elapsed_time_sec,
-        "step_time_sec": step_time_sec,
-        "data_wait_sec": data_wait_sec,
-        "avg_samples_per_sec": total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
-        "samples_per_sec": batch_size_local / step_time_sec if step_time_sec > 0 else 0,
+        "time/elapsed_sec": elapsed_time_sec,
+        "time/step_sec": step_time_sec,
+        "time/data_wait_sec": data_wait_sec,
+        "time/avg_samples_per_sec": total_samples_processed / elapsed_time_sec if elapsed_time_sec > 0 else 0,
+        "time/samples_per_sec": batch_size_local / step_time_sec if step_time_sec > 0 else 0,
     })
 
     if part_grad_norms is not None:
-        for component, name in (
-            ("action_expert", "grad_norm_action_expert"),
-            ("ar_action_heads", "grad_norm_ar_action_heads"),
-            ("vision", "grad_norm_vision"),
-            ("text", "grad_norm_text"),
-            ("world_model", "grad_norm_world_model"),
-        ):
+        for component in ("action_expert", "ar_action_heads", "vision", "text", "world_model"):
             if component in part_grad_norms:
-                step_log[name] = part_grad_norms[component]
+                step_log[f"grad_norm/{component}"] = part_grad_norms[component]
 
     model = workspace.model
     with torch.no_grad():
@@ -508,6 +501,6 @@ def build_training_step_log(
 
     if raw_loss is not None:
         for key, value in raw_loss.items():
-            step_log[key] = value.item()
+            step_log[f"train_loss/{key}"] = value.item()
 
     return step_log
