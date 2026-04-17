@@ -19,7 +19,7 @@ from .data_transforms import process_state_action, process_image, resize_frames
 from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from .unified_vla_collator import ConcatDataCollator
 from .wds_dataset import (
-    build_blended_dataset, build_wds_pipeline, WindowConfig, LOWDIM_SLICES,
+    build_blended_dataset, build_wds_pipeline, WindowConfig,
     expand_shard_patterns,
 )
 
@@ -52,7 +52,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         shuffle_buffer: int = 16384,
         history_pad_mode: str = "repeat",
         future_pad_mode: str = "repeat",
-        lowdim_slices: Optional[Dict] = None,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
         video_base_fps: float = 30.0,
@@ -61,6 +60,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         debug_capture_processed_sample: bool = False,
         debug_profile_timing: bool = False,
         load_depth: bool = True,
+        load_breast_camera: bool = False,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -80,6 +80,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # Skip depth decoding + augment_depth when training does not need depth.
         # Saves ~25 ms/sample (depth augmentation is the single biggest CPU cost).
         self.load_depth = bool(load_depth)
+        self.load_breast_camera = bool(load_breast_camera)
         # (H, W) tuple or None. Resize all RGB frames to this resolution
         # before HF processor. Required when world model is enabled so that
         # temporal attention patches share identical spatial semantics.
@@ -112,7 +113,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             future_frame_horizon=self.future_frame_horizon,
             future_frame_stride=self.future_frame_stride,
         )
-        self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
 
         # process_image only checks truthiness; actual color aug lives in
         # data_transforms.COLOR_AUG (albumentations-based).
@@ -208,6 +208,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         )
 
         intrinsic = sample["intrinsic"].astype(np.float32)
+        # TODO: when Qwen3-VL consumes breast view, run process_image on
+        # sample["breast_image"] / sample["breast_intrinsic"] here too.
         image, depth_images, intrinsic = process_image(
             sample["image"],
             sample.get("depth", None),
@@ -357,7 +359,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         pipeline = build_blended_dataset(
             datasets_config=datasets_config,
             config=self.window_config,
-            lowdim_slices=self.lowdim_slices,
+            load_breast_camera=self.load_breast_camera,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=self.shuffle_buffer,
             mode=self.mode,
@@ -383,13 +385,13 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             shuffle_buffer=0,
             history_pad_mode=self.window_config.history_pad_mode,
             future_pad_mode=self.window_config.future_pad_mode,
-            lowdim_slices=self.lowdim_slices,
             return_dataset_info=self.return_dataset_info,
             target_image_size=list(self.target_image_size) if self.target_image_size else None,
             debug_capture_raw_sample=self.debug_capture_raw_sample,
             debug_capture_processed_sample=self.debug_capture_processed_sample,
             debug_profile_timing=self.debug_profile_timing,
             load_depth=self.load_depth,
+            load_breast_camera=self.load_breast_camera,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -591,7 +593,6 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         seed: int = 0,
         history_pad_mode: str = "repeat",
         future_pad_mode: str = "repeat",
-        lowdim_slices: Optional[Dict] = None,
     ):
         super().__init__()
         self.wds_datasets = wds_datasets
@@ -603,7 +604,6 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         self.max_total_shards = max_total_shards
         self.min_shards_per_dataset = min_shards_per_dataset
         self.seed = seed
-        self.lowdim_slices = lowdim_slices or LOWDIM_SLICES
 
         if self.mode != "val":
             warnings.warn(
@@ -779,7 +779,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         pipeline = build_wds_pipeline(
             shard_urls=shard_urls,
             config=self.window_config,
-            lowdim_slices=self.lowdim_slices,
+            load_breast_camera=False,  # Normalizer fitting only touches base lowdim [0:96]
             preprocess_fn=preprocess_fn,
             shuffle_buffer=0,
             mode=self.mode,

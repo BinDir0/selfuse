@@ -65,6 +65,9 @@ dataset:
     target_image_size: ${data.target_image_size}
     # When training does not need depth, skip depth decoding + augment_depth
     load_depth: ${training.train_depth}
+    # Decode breast (chest) camera when real-robot shards declare it.
+    # Model side still ignores these keys; set true only once downstream is ready.
+    load_breast_camera: false
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
     wds_datasets: ${vlm_wds_datasets}

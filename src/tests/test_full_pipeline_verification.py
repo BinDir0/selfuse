@@ -755,7 +755,7 @@ class TestSlidingWindowCompose:
             image_horizon=1, image_stride=1,
         )
         frames = [_make_frame("d", 0, i, rng) for i in range(5)]
-        samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES, lowdim_only=True))
+        samples = list(sliding_window_compose(iter(frames), config, lowdim_only=True))
         assert len(samples) == 5
 
     def test_two_episodes_produce_correct_count(self):
@@ -770,7 +770,7 @@ class TestSlidingWindowCompose:
             [_make_frame("d", 0, i, rng) for i in range(3)] +
             [_make_frame("d", 1, i, rng) for i in range(3)]
         )
-        samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES, lowdim_only=True))
+        samples = list(sliding_window_compose(iter(frames), config, lowdim_only=True))
         assert len(samples) == 6
 
     def test_repeat_padding_action_length(self):
@@ -783,7 +783,7 @@ class TestSlidingWindowCompose:
             future_pad_mode="repeat",
         )
         frames = [_make_frame("d", 0, i, rng) for i in range(3)]
-        samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES, lowdim_only=True))
+        samples = list(sliding_window_compose(iter(frames), config, lowdim_only=True))
         for s in samples:
             assert s["wrist_action"].shape[0] == 4
 
@@ -797,7 +797,7 @@ class TestSlidingWindowCompose:
             future_pad_mode="truncate",
         )
         frames = [_make_frame("d", 0, i, rng) for i in range(3)]
-        samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES, lowdim_only=True))
+        samples = list(sliding_window_compose(iter(frames), config, lowdim_only=True))
         # Last frame has only 1 available future frame → action len = 1
         assert samples[-1]["wrist_action"].shape[0] == 1
         assert samples[-1]["valid_action_len"] == 1
@@ -812,7 +812,7 @@ class TestSlidingWindowCompose:
             future_pad_mode="repeat",
         )
         frames = [_make_frame("d", 0, i, rng) for i in range(5)]
-        samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES, lowdim_only=True))
+        samples = list(sliding_window_compose(iter(frames), config, lowdim_only=True))
         # Frame 0: 5 avail, frame 1: 4 avail, ..., frame 4: 1 avail
         expected_lens = [5, 4, 3, 2, 1]
         actual_lens = [s["valid_action_len"] for s in samples]

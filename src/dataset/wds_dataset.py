@@ -18,21 +18,44 @@ import numpy as np
 import webdataset as wds
 
 
-# lowdim.npy layout (116,) float32:
-#   [0:18]    state/wrist
-#   [18:48]   state/hand
-#   [48:66]   action/wrist
-#   [66:96]   action/hand
-#   [96:112]  extrinsic
-#   [112:116] intrinsic
-LOWDIM_SLICES = {
+# lowdim.npy layout: base 96D (wrist/hand state+action) + 20D per camera
+# (extrinsic 16 + intrinsic 4) appended in meta["cameras"] order.
+# cameras[0] is always "head"; legacy shards with no cameras field are head-only.
+BASE_LOWDIM_SLICES = {
     'wrist_state':  (0, 18),
     'hand_state':   (18, 48),
     'wrist_action': (48, 66),
     'hand_action':  (66, 96),
-    'extrinsic':    (96, 112),
-    'intrinsic':    (112, 116),
 }
+BASE_LOWDIM_LEN = 96
+CAMERA_BLOCK_SIZE = 20
+
+
+def build_lowdim_slices(cameras):
+    """Return {field: (start, end)} for the given camera declaration.
+    cameras[0] must be 'head'.
+    """
+    if not cameras or cameras[0] != "head":
+        raise ValueError(f"cameras[0] must be 'head', got {cameras!r}")
+    slices = dict(BASE_LOWDIM_SLICES)
+    offset = BASE_LOWDIM_LEN
+    for cam in cameras:
+        slices[f'{cam}_extrinsic'] = (offset, offset + 16)
+        slices[f'{cam}_intrinsic'] = (offset + 16, offset + 20)
+        offset += CAMERA_BLOCK_SIZE
+    return slices
+
+
+# Head-only default with unprefixed "extrinsic"/"intrinsic" aliases so
+# pre-multi-camera audit scripts keep working.
+def build_legacy_lowdim_slices():
+    slices = build_lowdim_slices(["head"])
+    slices["extrinsic"] = slices["head_extrinsic"]
+    slices["intrinsic"] = slices["head_intrinsic"]
+    return slices
+
+
+LOWDIM_SLICES = build_legacy_lowdim_slices()
 
 
 def _is_shard_sequence(shard_patterns):
@@ -159,9 +182,10 @@ def decode_media_fields(sample):
     return sample
 
 
-def unpack_lowdim(lowdim):
-    """Unpack a (116,) float32 lowdim vector into named fields."""
-    return {k: lowdim[s:e] for k, (s, e) in LOWDIM_SLICES.items()}
+def unpack_lowdim(lowdim, cameras=None):
+    """Unpack a lowdim vector into named fields. cameras=None → head-only."""
+    slices = LOWDIM_SLICES if cameras is None else build_lowdim_slices(cameras)
+    return {k: lowdim[s:e] for k, (s, e) in slices.items()}
 
 
 def gather_history_frames(past, buf, horizon, stride, pad_mode):
@@ -226,23 +250,17 @@ def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
     return refs, valid_count
 
 
-def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False):
+def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim_only=False):
     """Build a training sample from the sliding window buffer.
 
-    Lowdim fields are materialized eagerly because they are small. RGB/depth
-    media stay as frame references so WebDataset shuffle buffers only retain
-    lightweight window descriptors; media arrays are copied later, after
-    shuffling, by ``materialize_sample_media``.
-
-    Args:
-        buf: deque of decoded samples, buf[0] is the current frame
-        past: deque of past frames (already yielded), past[-1] is most recent
-        config: WindowConfig with sampling parameters
-        lowdim_slices: dict mapping field names to (start, end) index pairs
-        lowdim_only: if True, only extract lowdim fields (skip image/depth)
+    RGB/depth stay as frame refs so the shuffle buffer retains only
+    lightweight window descriptors until ``materialize_sample_media`` runs
+    post-shuffle. Slice table is built per-sample from ``meta["cameras"]``.
     """
     current = buf[0]
     meta = current["meta.json"]
+    cameras = meta.get("cameras", ["head"])
+    lowdim_slices = build_lowdim_slices(cameras)
 
     # --- Action chunk: gather only action-horizon lowdim targets ---
     action_refs, valid_action_len = gather_future_refs(
@@ -262,20 +280,10 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
     else:
         raise ValueError(f"Invalid future pad mode: {config.future_pad_mode}")
 
-    ws, we = lowdim_slices['wrist_action']
-    hs, he = lowdim_slices['hand_action']
-    wrist_action = lowdims_full[:, ws:we]  # (H, 18)
-    hand_action = lowdims_full[:, hs:he]   # (H, 30)
-
-    # --- State: gather history frames and extract state slices ---
+    # --- State: gather history frames ---
     state_frames = gather_history_frames(
         past, buf, config.state_horizon, config.state_stride, config.history_pad_mode)
     state_lds = np.stack([f["lowdim.npy"] for f in state_frames], axis=0)
-
-    wss, wse = lowdim_slices['wrist_state']
-    hss, hse = lowdim_slices['hand_state']
-    wrist_state = state_lds[:, wss:wse]  # (state_horizon, 18)
-    hand_state = state_lds[:, hss:hse]   # (state_horizon, 30)
 
     # --- Image/depth: keep frame references for post-shuffle materialization ---
     image_frame_refs = None
@@ -294,34 +302,31 @@ def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False
         if ff_refs:
             future_frame_refs = tuple(ff_refs)
 
-    # --- Extrinsic / Intrinsic: from current frame ---
+    # head_* slices map to the unprefixed canonical keys; breast_* surface
+    # only when load_breast_camera is set.
     ld = current["lowdim.npy"]
-    es, ee = lowdim_slices['extrinsic']
-    ins, ine = lowdim_slices['intrinsic']
-    extrinsic = ld[es:ee]
-    intrinsic = ld[ins:ine]
+    result = {"valid_action_len": valid_action_len}
+    for field, (s, e) in lowdim_slices.items():
+        if field.endswith("_state"):
+            result[field] = state_lds[:, s:e].astype(np.float32)
+        elif field.endswith("_action"):
+            result[field] = lowdims_full[:, s:e].astype(np.float32)
+        elif field == "head_extrinsic":
+            result["extrinsic"] = ld[s:e].astype(np.float32)
+        elif field == "head_intrinsic":
+            result["intrinsic"] = ld[s:e].astype(np.float32)
+        elif load_breast_camera and field in ("breast_extrinsic", "breast_intrinsic"):
+            result[field] = ld[s:e].astype(np.float32)
 
-    # --- Instruction ---
-    instruction = meta["instruction"]
-    instruction_num = meta["instruction_num"]
-
-    # --- Presence: hand visibility flag (1=left, 2=right, 3=both) ---
-    presence = meta.get("presence", 3)
-
-    result = {
-        "valid_action_len": valid_action_len,
-        "wrist_state": wrist_state.astype(np.float32),
-        "hand_state": hand_state.astype(np.float32),
-        "wrist_action": wrist_action.astype(np.float32),
-        "hand_action": hand_action.astype(np.float32),
-        "extrinsic": extrinsic.astype(np.float32),
-        "intrinsic": intrinsic.astype(np.float32),
-        "instruction": instruction,
-        "instruction_num": instruction_num,
-        "presence": int(presence),
+    result.update({
+        "instruction": meta["instruction"],
+        "instruction_num": meta["instruction_num"],
+        # 1=left, 2=right, 3=both; human datasets only.
+        "presence": int(meta.get("presence", 3)),
         "dataset_name": meta.get("dataset_name", ""),
         "episode_index": meta.get("episode_index", 0),
-    }
+    })
+
     if image_frame_refs is not None:
         result["image_frame_refs"] = image_frame_refs
     if future_frame_refs is not None:
@@ -354,38 +359,48 @@ def decode_depth_bytes(raw):
     return np.array(raw, copy=True)
 
 
-def materialize_sample_media(sample, load_depth=True):
+def stack_optional(sample, out_key, refs, src_key, decoder):
+    """Decode+stack `src_key` over `refs` into `sample[out_key]` if the
+    current frame carries it. All refs must carry it; otherwise raise.
+    """
+    if refs[-1].get(src_key) is None:
+        return
+    arr = np.stack([decoder(f[src_key]) for f in refs], axis=0)
+    if arr.shape[0] != len(refs):
+        raise ValueError(f"{src_key}: got {arr.shape[0]} frames, expected {len(refs)}")
+    sample[out_key] = arr
+
+
+def materialize_sample_media(sample, load_depth=True, load_breast_camera=False):
     """Materialize RGB/depth arrays from frame refs and drop the refs.
 
-    Skips depth decoding entirely when load_depth=False; the heavy
-    augment_depth work downstream is also skipped because process_image
-    receives None for depth.
+    Skipping depth decode here also skips the heavy augment_depth downstream
+    (process_image receives None).
     """
-    image_frame_refs = sample.pop("image_frame_refs", None)
-    if image_frame_refs is not None:
-        images = [decode_image_bytes(frame["image.jpg"]) for frame in image_frame_refs]
-        sample["image"] = np.stack(images, axis=0)
+    image_refs = sample.pop("image_frame_refs", None)
+    if image_refs is not None:
+        sample["image"] = np.stack(
+            [decode_image_bytes(f["image.jpg"]) for f in image_refs], axis=0
+        )
+        if load_depth:
+            stack_optional(sample, "depth", image_refs, "depth.npy", decode_depth_bytes)
+        if load_breast_camera:
+            stack_optional(sample, "breast_image", image_refs, "breast_image.jpg", decode_image_bytes)
+            if load_depth:
+                stack_optional(sample, "breast_depth", image_refs, "breast_depth.npy", decode_depth_bytes)
 
-    if load_depth and image_frame_refs and image_frame_refs[-1].get("depth.npy") is not None:
-        depth_list = [
-            decode_depth_bytes(frame["depth.npy"])
-            for frame in image_frame_refs
-            if frame.get("depth.npy") is not None
-        ]
-        if len(depth_list) != len(images):
-            raise ValueError(f"Depth list length {len(depth_list)} does not match image list length {len(images)}")
-        if depth_list:
-            sample["depth"] = np.stack(depth_list, axis=0)
-
-    future_frame_refs = sample.pop("future_frame_refs", None)
-    if future_frame_refs is not None:
-        ff_images = [decode_image_bytes(frame["image.jpg"]) for frame in future_frame_refs]
-        sample["future_frames"] = np.stack(ff_images, axis=0)
+    future_refs = sample.pop("future_frame_refs", None)
+    if future_refs is not None:
+        sample["future_frames"] = np.stack(
+            [decode_image_bytes(f["image.jpg"]) for f in future_refs], axis=0
+        )
+        if load_breast_camera:
+            stack_optional(sample, "breast_future_frames", future_refs, "breast_image.jpg", decode_image_bytes)
 
     return sample
 
 
-def sliding_window_compose(src, config, lowdim_slices, lowdim_only=False):
+def sliding_window_compose(src, config, load_breast_camera=False, lowdim_only=False):
     """Compose filter: sliding window over episode frames.
 
     Guarantees:
@@ -408,7 +423,7 @@ def sliding_window_compose(src, config, lowdim_slices, lowdim_only=False):
         if ep_key != cur_ep:
             # Episode boundary: flush remaining frames with clamped actions
             while buf:
-                yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
+                yield build_sample_from_window(buf, past, config, load_breast_camera, lowdim_only)
                 past.append(buf.popleft())
             past.clear()
             cur_ep = ep_key
@@ -417,12 +432,12 @@ def sliding_window_compose(src, config, lowdim_slices, lowdim_only=False):
 
         # Yield as soon as we have enough future context
         if len(buf) > config.future_size:
-            yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
+            yield build_sample_from_window(buf, past, config, load_breast_camera, lowdim_only)
             past.append(buf.popleft())
 
     # Final flush
     while buf:
-        yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
+        yield build_sample_from_window(buf, past, config, load_breast_camera, lowdim_only)
         past.append(buf.popleft())
 
 
@@ -436,7 +451,7 @@ def select_lowdim_files(fname):
     return fname.endswith("meta.json") or fname.endswith("lowdim.npy")
 
 
-def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
+def build_wds_pipeline(shard_urls, config=None, load_breast_camera=False,
                        preprocess_fn=None, shuffle_buffer=16384, mode='train',
                        use_sliding_window=True, lowdim_only=False,
                        include_post_stages=True, load_depth=True):
@@ -454,7 +469,8 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
         shard_urls: list of shard tar paths, a braceexpand pattern string,
                     or a list of glob pattern strings (each expanded separately)
         config: WindowConfig with sampling parameters (uses defaults if None)
-        lowdim_slices: dict mapping field names to (start, end) pairs
+        load_breast_camera: when True, also decode breast_* media/calibration
+            for samples whose meta["cameras"] declares "breast".
         preprocess_fn: optional callable(sample_dict) -> sample_dict
         shuffle_buffer: sample-level shuffle buffer size (train only)
         mode: 'train' or 'val'
@@ -464,8 +480,6 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     """
     if config is None:
         config = WindowConfig()
-    if lowdim_slices is None:
-        lowdim_slices = LOWDIM_SLICES
 
     shard_urls, shard_patterns_metadata = expand_shard_patterns(shard_urls)
     assert shard_urls, f"No shards found: {shard_patterns_metadata}"
@@ -495,7 +509,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
 
     if use_sliding_window:
         pipeline = pipeline.compose(
-            lambda src: sliding_window_compose(src, config, lowdim_slices, lowdim_only)
+            lambda src: sliding_window_compose(src, config, load_breast_camera, lowdim_only)
         )
 
     if not include_post_stages:
@@ -511,7 +525,11 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     if not lowdim_only:
         if use_sliding_window:
             pipeline = pipeline.map(
-                functools.partial(materialize_sample_media, load_depth=load_depth)
+                functools.partial(
+                    materialize_sample_media,
+                    load_depth=load_depth,
+                    load_breast_camera=load_breast_camera,
+                )
             )
         else:
             pipeline = pipeline.map(decode_media_fields)
@@ -522,7 +540,7 @@ def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
     return pipeline
 
 
-def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
+def build_blended_dataset(datasets_config, config=None, load_breast_camera=False,
                           preprocess_fn=None, shuffle_buffer=16384, mode='train',
                           use_sliding_window=True, lowdim_only=False,
                           load_depth=True):
@@ -538,7 +556,7 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
             - shard_urls: list of shard tar paths or glob pattern
             - weight: sampling weight (train only)
         config: WindowConfig with sampling parameters (uses defaults if None)
-        lowdim_slices: dict mapping field names to (start, end) pairs
+        load_breast_camera: forwarded to per-subset pipelines.
         preprocess_fn: optional preprocess function
         shuffle_buffer: sample-level shuffle buffer size (train only)
         mode: 'train' or 'val'
@@ -547,8 +565,6 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
     """
     if config is None:
         config = WindowConfig()
-    if lowdim_slices is None:
-        lowdim_slices = LOWDIM_SLICES
 
     is_train = (mode == 'train')
 
@@ -559,7 +575,7 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
         # Train: each subset produces raw samples (no shuffle / materialize /
         # preprocess); these stages are applied once after RandomMix.
         pipe = build_wds_pipeline(
-            urls, config, lowdim_slices,
+            urls, config, load_breast_camera,
             preprocess_fn=preprocess_fn if not is_train else None,
             shuffle_buffer=shuffle_buffer,
             mode=mode,
@@ -591,7 +607,11 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
     if not lowdim_only:
         if use_sliding_window:
             stages.append(wds.map(
-                functools.partial(materialize_sample_media, load_depth=load_depth)
+                functools.partial(
+                    materialize_sample_media,
+                    load_depth=load_depth,
+                    load_breast_camera=load_breast_camera,
+                )
             ))
         else:
             stages.append(wds.map(decode_media_fields))

@@ -9,6 +9,7 @@ import numpy as np
 from src.dataset.wds_dataset import (
     WindowConfig,
     LOWDIM_SLICES,
+    build_lowdim_slices,
     build_sample_from_window,
     gather_future_refs,
     materialize_sample_media,
@@ -50,7 +51,7 @@ def test_state_includes_current_frame():
     past = collections.deque(make_episode(10), maxlen=config.past_size)
     buf = collections.deque([make_frame(10), make_frame(11), make_frame(12)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     ws = sample["wrist_state"]
 
     assert ws.shape[0] == config.state_horizon
@@ -67,7 +68,7 @@ def test_state_causal_order():
         [make_frame(i) for i in range(20)], maxlen=config.past_size)
     buf = collections.deque([make_frame(20), make_frame(21)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     ws = sample["wrist_state"]
 
     # state_horizon=4, stride=2 => offsets -6, -4, -2, 0 relative to current
@@ -87,7 +88,7 @@ def test_state_causal_order_stride1():
         [make_frame(i) for i in range(5)], maxlen=config.past_size)
     buf = collections.deque([make_frame(5), make_frame(6)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     ws = sample["wrist_state"]
 
     expected = [3.0, 4.0, 5.0]
@@ -104,7 +105,7 @@ def test_state_repeat_no_past():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque(make_episode(4))
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     ws = sample["wrist_state"]
 
     assert ws.shape[0] == config.state_horizon
@@ -128,7 +129,7 @@ def test_state_repeat_partial_past():
         [make_frame(i) for i in range(3)], maxlen=config.past_size)
     buf = collections.deque([make_frame(3), make_frame(4)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     ws = sample["wrist_state"]
 
     expected = [0.0, 0.0, 1.0, 3.0]
@@ -146,7 +147,7 @@ def test_action_repeat_padding():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(10), make_frame(11), make_frame(12)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     wa = sample["wrist_action"]
 
     assert wa.shape[0] == 6
@@ -164,7 +165,7 @@ def test_state_truncate_no_past():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(5), make_frame(6)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     ws = sample["wrist_state"]
 
     assert ws.shape[0] == 1
@@ -181,7 +182,7 @@ def test_action_truncate():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(10), make_frame(11)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     wa = sample["wrist_action"]
     assert wa.shape[0] == 2
 
@@ -202,7 +203,7 @@ def test_action_sampling_uses_own_horizon_when_future_frames_need_longer_buffer(
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(i) for i in range(66)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
 
     assert config.future_size == 65
     assert sample["valid_action_len"] == 4
@@ -227,7 +228,7 @@ def test_history_and_future_pad_modes_are_independent():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(5), make_frame(6)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
 
     assert sample["wrist_state"].shape[0] == 3
     assert sample["wrist_action"].shape[0] == 2
@@ -241,7 +242,7 @@ def test_single_episode_state_progression():
         image_horizon=1, image_stride=1, history_pad_mode="repeat",
     )
     frames = make_episode(10)
-    samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES))
+    samples = list(sliding_window_compose(iter(frames), config))
 
     assert len(samples) == 10
 
@@ -265,7 +266,7 @@ def test_episode_boundary_resets_past():
     ep2 = make_episode(5, episode_index=1)
     frames = ep1 + ep2
 
-    samples = list(sliding_window_compose(iter(frames), config, LOWDIM_SLICES))
+    samples = list(sliding_window_compose(iter(frames), config))
 
     ep2_first = samples[5]
     ws = ep2_first["wrist_state"]
@@ -282,7 +283,7 @@ def test_window_media_stays_lazy_until_materialized():
     past = collections.deque([make_frame(4, with_depth=True)], maxlen=config.past_size)
     buf = collections.deque([make_frame(5, with_depth=True), make_frame(6, with_depth=True)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
 
     assert "image" not in sample
     assert "depth" not in sample
@@ -300,7 +301,7 @@ def test_materialize_sample_media_copies_and_drops_refs():
     future = make_frame(6, with_depth=True)
     buf = collections.deque([current, future])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     materialize_sample_media(sample)
 
     assert "image_frame_refs" not in sample
@@ -314,31 +315,20 @@ def test_materialize_sample_media_copies_and_drops_refs():
     assert current["depth.npy"][0, 0] == 5
 
 
-def test_lowdim_slices_no_magic_numbers():
-    """Verify output uses lowdim_slices, not hardcoded indices."""
-    custom_slices = {
-        'wrist_state':  (0, 10),
-        'hand_state':   (10, 30),
-        'wrist_action': (30, 48),
-        'hand_action':  (48, 78),
-        'extrinsic':    (78, 94),
-        'intrinsic':    (94, 98),
-    }
-    config = WindowConfig(
-        action_horizon=2, state_horizon=1, state_stride=1,
-        image_horizon=1, image_stride=1,
-    )
-    past = collections.deque(maxlen=config.past_size)
-    buf = collections.deque([make_frame(7), make_frame(8)])
+def test_build_lowdim_slices_head_only_matches_legacy_constant():
+    """Head-only slices cover the same fields as the legacy constant."""
+    slices = build_lowdim_slices(["head"])
 
-    sample = build_sample_from_window(buf, past, config, custom_slices)
+    assert slices["wrist_state"] == (0, 18)
+    assert slices["hand_state"] == (18, 48)
+    assert slices["wrist_action"] == (48, 66)
+    assert slices["hand_action"] == (66, 96)
+    assert slices["head_extrinsic"] == (96, 112)
+    assert slices["head_intrinsic"] == (112, 116)
 
-    assert sample["wrist_state"].shape[-1] == 10
-    assert sample["hand_state"].shape[-1] == 20
-    assert sample["wrist_action"].shape[-1] == 18
-    assert sample["hand_action"].shape[-1] == 30
-    assert sample["extrinsic"].shape[-1] == 16
-    assert sample["intrinsic"].shape[-1] == 4
+    # Legacy aliases still resolve to head for backward compatibility.
+    assert LOWDIM_SLICES["extrinsic"] == slices["head_extrinsic"]
+    assert LOWDIM_SLICES["intrinsic"] == slices["head_intrinsic"]
 
 
 def test_depth_uses_history_pad_mode_with_image_history():
@@ -355,7 +345,7 @@ def test_depth_uses_history_pad_mode_with_image_history():
         make_frame(10, with_depth=True),
         make_frame(11, with_depth=True)])
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     materialize_sample_media(sample)
 
     # image_horizon=3, stride=2 => offsets -4, -2, 0 => frames 6, 8, 10
@@ -378,7 +368,7 @@ def test_depth_none_when_missing():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(5), make_frame(6)])  # no depth
 
-    sample = build_sample_from_window(buf, past, config, LOWDIM_SLICES)
+    sample = build_sample_from_window(buf, past, config)
     materialize_sample_media(sample)
     assert "depth" not in sample or sample["depth"] is None
 
@@ -411,6 +401,195 @@ def test_gather_future_refs_repeat_padding():
     assert valid_count == 3
     assert len(refs) == 4
     assert refs[3]["lowdim.npy"][0] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-camera (breast) support
+# ---------------------------------------------------------------------------
+
+def encode_jpeg(array):
+    import cv2
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(array, cv2.COLOR_RGB2BGR))
+    assert ok, "cv2.imencode failed"
+    return buf.tobytes()
+
+
+def encode_npy(array):
+    import io
+    buf = io.BytesIO()
+    np.save(buf, array)
+    return buf.getvalue()
+
+
+def make_dual_camera_frame(frame_idx, episode_index=0, dataset_name="test_real",
+                           with_depth=True, with_media_bytes=False):
+    """Frame with head + breast cameras declared via meta.cameras."""
+    lowdim = np.full(136, float(frame_idx), dtype=np.float32)
+    lowdim[96:112] = np.arange(16, dtype=np.float32) + frame_idx
+    lowdim[112:116] = np.array([500, 500, 320, 240], dtype=np.float32)
+    lowdim[116:132] = np.arange(16, dtype=np.float32) * 2 + frame_idx
+    lowdim[132:136] = np.array([600, 600, 320, 240], dtype=np.float32)
+    meta = {
+        "dataset_name": dataset_name,
+        "episode_index": episode_index,
+        "instruction": "pick up",
+        "instruction_num": 1,
+        "presence": 3,
+        "cameras": ["head", "breast"],
+    }
+    head_img = np.full((4, 4, 3), frame_idx, dtype=np.uint8)
+    breast_img = np.full((4, 4, 3), frame_idx + 100, dtype=np.uint8)
+    frame = {"lowdim.npy": lowdim, "meta.json": meta}
+    if with_media_bytes:
+        frame["image.jpg"] = encode_jpeg(head_img)
+        frame["breast_image.jpg"] = encode_jpeg(breast_img)
+    else:
+        frame["image.jpg"] = head_img
+        frame["breast_image.jpg"] = breast_img
+    if with_depth:
+        head_depth = np.full((4, 4), frame_idx, dtype=np.uint16)
+        breast_depth = np.full((4, 4), frame_idx + 100, dtype=np.uint16)
+        if with_media_bytes:
+            frame["depth.npy"] = encode_npy(head_depth)
+            frame["breast_depth.npy"] = encode_npy(breast_depth)
+        else:
+            frame["depth.npy"] = head_depth
+            frame["breast_depth.npy"] = breast_depth
+    return frame
+
+
+def test_build_lowdim_slices_head_breast_layout():
+    """Two-camera slice table should pack head then breast in 20D chunks."""
+    slices = build_lowdim_slices(["head", "breast"])
+    assert slices["head_extrinsic"] == (96, 112)
+    assert slices["head_intrinsic"] == (112, 116)
+    assert slices["breast_extrinsic"] == (116, 132)
+    assert slices["breast_intrinsic"] == (132, 136)
+
+
+def test_build_lowdim_slices_rejects_non_head_first():
+    """cameras[0] must always be 'head'."""
+    for bad_cameras in (["breast", "head"], []):
+        try:
+            build_lowdim_slices(bad_cameras)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad_cameras!r}")
+
+
+def test_build_sample_from_window_legacy_meta_is_head_only():
+    """Samples whose meta lacks 'cameras' fall back to head-only layout."""
+    config = WindowConfig(
+        action_horizon=2, state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque([make_frame(1), make_frame(2)])
+
+    sample = build_sample_from_window(buf, past, config, load_breast_camera=True)
+
+    assert sample["extrinsic"].shape == (16,)
+    assert sample["intrinsic"].shape == (4,)
+    assert "breast_extrinsic" not in sample
+    assert "breast_intrinsic" not in sample
+
+
+def test_build_sample_from_window_breast_disabled_drops_breast_calibration():
+    """Even if meta declares 'breast', load_breast_camera=False hides it."""
+    config = WindowConfig(
+        action_horizon=2, state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque([make_dual_camera_frame(1), make_dual_camera_frame(2)])
+
+    sample = build_sample_from_window(buf, past, config, load_breast_camera=False)
+
+    # Head canonical keys: always filled from lowdim[96:116].
+    np.testing.assert_allclose(sample["intrinsic"], [500, 500, 320, 240])
+    assert "breast_extrinsic" not in sample
+    assert "breast_intrinsic" not in sample
+
+
+def test_build_sample_from_window_breast_enabled_surfaces_breast_calibration():
+    """With load_breast_camera=True, breast ext/intr appear as optional keys."""
+    config = WindowConfig(
+        action_horizon=2, state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque([make_dual_camera_frame(1), make_dual_camera_frame(2)])
+
+    sample = build_sample_from_window(buf, past, config, load_breast_camera=True)
+
+    assert sample["breast_extrinsic"].shape == (16,)
+    assert sample["breast_intrinsic"].shape == (4,)
+    np.testing.assert_allclose(sample["breast_intrinsic"], [600, 600, 320, 240])
+
+
+def test_materialize_sample_media_breast_disabled_skips_breast_media():
+    """load_breast_camera=False should not decode breast media even if present."""
+    config = WindowConfig(
+        action_horizon=2, state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque([
+        make_dual_camera_frame(1, with_media_bytes=True),
+        make_dual_camera_frame(2, with_media_bytes=True),
+    ])
+
+    sample = build_sample_from_window(buf, past, config, load_breast_camera=False)
+    materialize_sample_media(sample, load_breast_camera=False)
+
+    assert "image" in sample
+    assert "breast_image" not in sample
+    assert "breast_depth" not in sample
+
+
+def test_materialize_sample_media_breast_enabled_decodes_both_views():
+    """load_breast_camera=True should decode both head and breast streams."""
+    config = WindowConfig(
+        action_horizon=2, state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque([
+        make_dual_camera_frame(1, with_media_bytes=True),
+        make_dual_camera_frame(2, with_media_bytes=True),
+    ])
+
+    sample = build_sample_from_window(buf, past, config, load_breast_camera=True)
+    materialize_sample_media(sample, load_breast_camera=True)
+
+    assert sample["image"].shape == (1, 4, 4, 3)
+    assert sample["breast_image"].shape == (1, 4, 4, 3)
+    assert sample["depth"].shape == (1, 4, 4)
+    assert sample["breast_depth"].shape == (1, 4, 4)
+
+
+def test_sliding_window_compose_handles_mixed_cameras():
+    """Single pipeline can stream human (head-only) and real (head+breast) samples."""
+    config = WindowConfig(
+        action_horizon=2, state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        future_pad_mode="truncate",
+    )
+    # Episode 0: head-only (legacy human data); Episode 1: head+breast (real robot).
+    human_frames = [make_frame(i, episode_index=0, dataset_name="human") for i in range(3)]
+    real_frames = [
+        make_dual_camera_frame(i, episode_index=1, dataset_name="real_robot")
+        for i in range(3)
+    ]
+    frames = human_frames + real_frames
+
+    samples = list(sliding_window_compose(iter(frames), config, load_breast_camera=True))
+    assert len(samples) == 6
+
+    head_only_samples = samples[:3]
+    dual_samples = samples[3:]
+    assert all("breast_extrinsic" not in s for s in head_only_samples)
+    assert all("breast_extrinsic" in s for s in dual_samples)
 
 
 # ---------------------------------------------------------------------------
