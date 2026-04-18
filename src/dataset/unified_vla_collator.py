@@ -118,10 +118,20 @@ class UnifiedVLACollator:
             if all(key in s for s in samples):
                 batch[key] = self.collate_values([s[key] for s in samples])
 
-        # When camera_intrinsic_mode=token, pass intrinsic tensor for camera_encoder.
+        # Token mode: emit one intrinsic per <camera> slot actually rendered in
+        # text (VLM samples have none; VLA samples have head, plus breast when
+        # breast_images is present). Flat [total_slots, 4] aligns with the
+        # batch-major order of <camera> tokens for backbone masked_scatter.
         if self.formatter.camera_intrinsic_mode == "token":
-            intrinsics = [s["intrinsic"] for s in samples]
-            batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
+            cam_list = []
+            for s in samples:
+                if not bool(s["is_vla_data"].item()):
+                    continue
+                cam_list.append(s["intrinsic"])
+                if s.get("breast_images") is not None:
+                    cam_list.append(s["breast_intrinsic"])
+            if cam_list:
+                batch["camera_intrinsic"] = torch.stack(cam_list)
 
         if self.debug_capture_texts:
             batch["debug_messages"] = messages

@@ -116,9 +116,7 @@ class Qwen3VLChatFormatter:
     ) -> str:
         state_slots = self.state_token * int(n_states.item())
         camera_part = self.format_intrinsic_part("Head", head_intrinsic)
-        # Token mode wires a single <camera> slot to camera_encoder output and
-        # cannot currently accept a second view; skip breast text in that mode.
-        if breast_intrinsic is not None and self.camera_intrinsic_mode != "token":
+        if breast_intrinsic is not None:
             camera_part += " " + self.format_intrinsic_part("Breast", breast_intrinsic)
         return (
             f"Task: {instruction}. {camera_part} "

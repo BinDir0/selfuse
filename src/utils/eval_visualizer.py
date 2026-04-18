@@ -262,13 +262,12 @@ def prepare_vis_sample(
         gt_wrist.numpy().astype(np.float32),
     )
 
-    # Camera intrinsic: [fx, fy, cx, cy]
-    if "intrinsic" in batch:
-        intrinsic = batch["intrinsic"][sample_idx].float().cpu().numpy()
-    elif "camera_intrinsic" in batch:
-        intrinsic = batch["camera_intrinsic"][sample_idx, 0, :].float().cpu().numpy()
-    else:
-        raise ValueError("No camera intrinsic found in batch. Ensure 'intrinsic' is in collatable_keys.")
+    # Head intrinsic [fx, fy, cx, cy]. camera_intrinsic is flat [total_slots, 4]
+    # keyed to rendered <camera> tokens in token mode, so it no longer admits
+    # a per-sample index; use the raw per-sample intrinsic here.
+    if "intrinsic" not in batch:
+        raise ValueError("'intrinsic' missing from batch; ensure it is in collatable_keys.")
+    intrinsic = batch["intrinsic"][sample_idx].float().cpu().numpy()
 
     # Per-step valid mask: True for non-padded timesteps.
     # actions_valid_mask shape: [H_action, 48] — check first dim of any column.
