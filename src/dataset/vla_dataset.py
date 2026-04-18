@@ -310,8 +310,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             data["future_frames"] = ff
             data["n_future_frames"] = np.array(n_valid, dtype=np.int32)
 
-            if sample.get("breast_future_frames") is not None:
-                breast_ff, _ = pad_future(sample["breast_future_frames"])
+            if self.load_breast_camera:
+                breast_ff, _ = pad_future(sample.get("breast_future_frames"))
                 data["breast_future_frames"] = breast_ff
         else:
             data["n_future_frames"] = np.array(0, dtype=np.int32)
