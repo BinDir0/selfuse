@@ -114,9 +114,6 @@ class Qwen3VLChatFormatter:
         n_states: torch.Tensor,
         breast_intrinsic: torch.Tensor | None = None,
     ) -> str:
-        clean_text = str(instruction).replace(".", "").strip()
-        if self.lowercase_vla_text:
-            clean_text = clean_text.lower()
         state_slots = self.state_token * int(n_states.item())
         camera_part = self.format_intrinsic_part("Head", head_intrinsic)
         # Token mode wires a single <camera> slot to camera_encoder output and
@@ -124,7 +121,7 @@ class Qwen3VLChatFormatter:
         if breast_intrinsic is not None and self.camera_intrinsic_mode != "token":
             camera_part += " " + self.format_intrinsic_part("Breast", breast_intrinsic)
         return (
-            f"Task: {clean_text}. {camera_part} "
+            f"Task: {instruction}. {camera_part} "
             f"States: {state_slots}."
         )
 

@@ -59,7 +59,7 @@ dataset:
     depth_clip_range: ${data.depth_clip_range}
     val_wds_datasets: ${val_vla_wds_datasets}
     history_pad_mode: repeat
-    future_pad_mode: truncate
+    future_pad_mode: repeat
     shuffle_buffer: 16384
     video_base_fps: ${data.video_base_fps}
     target_image_size: ${data.target_image_size}
