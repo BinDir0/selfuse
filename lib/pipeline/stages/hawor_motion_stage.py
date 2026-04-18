@@ -294,6 +294,8 @@ def _prepare_track_inference_inputs(track):
 
     boxes = np.concatenate([item["det_box"] for item in track])
     non_zero_indices = np.where(np.any(boxes != 0, axis=1))[0]
+    if len(non_zero_indices) == 0:
+        return None
     first_non_zero = non_zero_indices[0]
     last_non_zero = non_zero_indices[-1]
 
@@ -301,9 +303,21 @@ def _prepare_track_inference_inputs(track):
     velocity_valid = validate_motion_velocity(boxes[first_non_zero:last_non_zero + 1])
     valid[first_non_zero:last_non_zero + 1] = velocity_valid
 
+    slice_valid = valid[first_non_zero:last_non_zero + 1]
     boxes = boxes[first_non_zero:last_non_zero + 1]
-    is_right = np.concatenate([item["det_handedness"] for item in track])[valid]
-    frame = np.array([item["frame"] for item in track])[valid]
+    frames = np.array([item["frame"] for item in track])[first_non_zero:last_non_zero + 1]
+    handedness = np.concatenate([item["det_handedness"] for item in track])[first_non_zero:last_non_zero + 1]
+
+    geom_valid = np.isfinite(boxes[:, :4]).all(axis=1)
+    geom_valid &= boxes[:, 2] > boxes[:, 0]
+    geom_valid &= boxes[:, 3] > boxes[:, 1]
+    valid_mask = slice_valid & geom_valid
+    if valid_mask.sum() == 0:
+        return None
+
+    boxes = boxes[valid_mask]
+    frame = frames[valid_mask]
+    is_right = handedness[valid_mask]
 
     if is_right.sum() / len(is_right) < 0.5:
         is_right = np.zeros((len(boxes), 1))

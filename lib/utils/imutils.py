@@ -71,6 +71,12 @@ def transform_pts(pts, center, scale, res, invert=0, rot=0, asint=True):
 
 def crop(img, center, scale, res, rot=0):
     """Crop image according to the supplied bounding box."""
+    def _blank_crop():
+        shape = (int(res[0]), int(res[1]))
+        if len(img.shape) > 2:
+            shape += (img.shape[2],)
+        return np.zeros(shape, dtype=img.dtype)
+
     # Upper left point
     ul = np.array(transform([1, 1], center, scale, res, invert=1))-1
     # Bottom right point
@@ -86,6 +92,8 @@ def crop(img, center, scale, res, rot=0):
     new_shape = [br[1] - ul[1], br[0] - ul[0]]
     if len(img.shape) > 2:
         new_shape += [img.shape[2]]
+    if new_shape[0] <= 0 or new_shape[1] <= 0:
+        return _blank_crop()
     new_img = np.zeros(new_shape)
     
 
@@ -283,4 +291,3 @@ def est_intrinsics(img_shape):
     img_center = torch.tensor([w/2., h/2.]).float()
     img_focal = torch.tensor(np.sqrt(h**2 + w**2)).float()
     return img_center, img_focal
-

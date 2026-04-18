@@ -379,6 +379,8 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
             continue
         boxes = np.concatenate([t['det_box'] for t in trk])
         non_zero_indices = np.where(np.any(boxes != 0, axis=1))[0]
+        if len(non_zero_indices) == 0:
+            continue
         first_non_zero = non_zero_indices[0]
         last_non_zero = non_zero_indices[-1]
 
@@ -391,10 +393,21 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
         # Update valid mask: only frames that pass both interpolation and velocity check
         valid[first_non_zero:last_non_zero+1] = velocity_valid
 
-
+        slice_valid = valid[first_non_zero:last_non_zero+1]
         boxes = boxes[first_non_zero:last_non_zero+1]
-        is_right = np.concatenate([t['det_handedness'] for t in trk])[valid]
-        frame = np.array([t['frame'] for t in trk])[valid]
+        frames = np.array([t['frame'] for t in trk])[first_non_zero:last_non_zero+1]
+        handedness = np.concatenate([t['det_handedness'] for t in trk])[first_non_zero:last_non_zero+1]
+
+        geom_valid = np.isfinite(boxes[:, :4]).all(axis=1)
+        geom_valid &= boxes[:, 2] > boxes[:, 0]
+        geom_valid &= boxes[:, 3] > boxes[:, 1]
+        valid_mask = slice_valid & geom_valid
+        if valid_mask.sum() == 0:
+            continue
+
+        boxes = boxes[valid_mask]
+        frame = frames[valid_mask]
+        is_right = handedness[valid_mask]
         
         if is_right.sum() / len(is_right) < 0.5:
             is_right = np.zeros((len(boxes), 1))
