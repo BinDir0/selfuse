@@ -9,7 +9,10 @@ Does NOT require downloading the real Qwen3-VL model.
 import torch
 from torch import nn
 
-from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
+from src.policy.legendvla import (
+    LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig,
+    WorldModelConfig,
+)
 from src.policy.legendvla_loss import build_flow_inputs
 from src.model.action.action_head import FourierActionEncoder, MLPProjector
 from src.model.common.modules import TimeEmbedding
@@ -65,10 +68,12 @@ class DummyBackbone(nn.Module):
         use_cache=True,
         output_hidden_states=True,
         past_key_values=None,
+        is_vla_mask=None,
     ):
         del pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw, mm_token_type_ids
         del camera_slot_embeds, output_attentions
         del state_token_id, action_token_id, use_cache, output_hidden_states, past_key_values
+        del is_vla_mask
 
         embeds = self.embed(input_ids)
         if state_slot_embeds is not None:
@@ -636,3 +641,126 @@ class TestLossValues:
         assert output["flow_loss"].item() == 0.0
         assert output["diffusion_loss"].item() == 0.0
         assert output["wm_loss"].item() == 0.0
+
+
+# ======================================================================
+# World model: dedicated encoders + motion conditioning
+# ======================================================================
+
+
+def build_wm_enabled_model(action_conditioning=False, motion_conditioning=False):
+    """Minimal LegendVLA with world model + optional conditioning for config-wiring tests."""
+    from src.model.action.action_head import ActionEncoder, MLPProjector
+
+    backbone = DummyBackbone(hidden_size=H, num_layers=LAYERS,
+                             num_heads=NH, num_kv_heads=NKV, head_dim=HD)
+    wm_expert = DummyFlowExpert(hidden_size=AH, time_hidden_size=TH)
+    teacher = nn.Linear(AD, 32)  # stand-in; not invoked in these tests
+    wm_action_encoder = (
+        ActionEncoder(action_dim=AD, width=AH, time_cond=False)
+        if action_conditioning else None
+    )
+    wm_motion_encoder = (
+        MLPProjector(input_dim=16, output_dim=AH, width=AH, depth=2,
+                     final_layer_norm=False, use_mlp_layer_norm=False)
+        if motion_conditioning else None
+    )
+    return LegendVLA(
+        backbone=backbone,
+        state_encoder=FourierActionEncoder(action_dim=SD, width=H, time_cond=False,
+                                           enable_fourier_embed=False, mlp_depth=2,
+                                           final_layer_norm=False, use_mlp_layer_norm=False),
+        action_encoder=FourierActionEncoder(action_dim=AD, width=AH, time_cond=False,
+                                            enable_fourier_embed=False, mlp_depth=2,
+                                            final_layer_norm=False, use_mlp_layer_norm=False),
+        time_embedding=TimeEmbedding(TH),
+        flow_expert=DummyFlowExpert(hidden_size=AH, time_hidden_size=TH),
+        action_decoder=MLPProjector(input_dim=AH, output_dim=AD, width=AH, depth=2,
+                                    final_layer_norm=False, use_mlp_layer_norm=False),
+        shape_meta={"obs": {"state": {"shape": [SD], "horizon": 2}}, "action": {"shape": [AD], "horizon": 4}},
+        action_hidden_size=AH,
+        flow_config=FlowConfig(num_parallel_t=1, num_inference_steps=3),
+        ar_action_train_config=ARActionTrainConfig(chunk_size=2),
+        rtc_config=RTCConfig(),
+        loss_config=LossConfig(),
+        knowledge_insulation=True,
+        world_model_expert=wm_expert,
+        frozen_teacher=teacher,
+        wm_action_encoder=wm_action_encoder,
+        wm_motion_encoder=wm_motion_encoder,
+        world_model_config=WorldModelConfig(
+            num_future_frames=2, target_image_size=(32, 32),
+            teacher_patch_size=16, upsample_factor=1,
+            action_conditioning=action_conditioning,
+            motion_conditioning=motion_conditioning,
+        ),
+    )
+
+
+class TestWorldModelDedicatedEncoders:
+    def test_wm_action_encoder_is_separate_module_from_flow_action_encoder(self):
+        model = build_wm_enabled_model(action_conditioning=True)
+        assert model.wm_action_encoder is not None
+        assert model.wm_action_encoder is not model.action_encoder
+
+    def test_action_conditioning_without_encoder_raises(self):
+        from src.model.action.action_head import ActionEncoder
+        import pytest
+        with pytest.raises(ValueError, match="wm_action_encoder"):
+            LegendVLA(
+                backbone=DummyBackbone(hidden_size=H, num_layers=LAYERS,
+                                       num_heads=NH, num_kv_heads=NKV, head_dim=HD),
+                state_encoder=FourierActionEncoder(action_dim=SD, width=H, time_cond=False,
+                                                   enable_fourier_embed=False, mlp_depth=2,
+                                                   final_layer_norm=False, use_mlp_layer_norm=False),
+                action_encoder=ActionEncoder(action_dim=AD, width=AH, time_cond=False),
+                time_embedding=TimeEmbedding(TH),
+                flow_expert=DummyFlowExpert(hidden_size=AH, time_hidden_size=TH),
+                action_decoder=MLPProjector(input_dim=AH, output_dim=AD, width=AH, depth=2,
+                                            final_layer_norm=False, use_mlp_layer_norm=False),
+                shape_meta={"obs": {"state": {"shape": [SD], "horizon": 2}}, "action": {"shape": [AD], "horizon": 4}},
+                action_hidden_size=AH,
+                world_model_expert=DummyFlowExpert(hidden_size=AH, time_hidden_size=TH),
+                frozen_teacher=nn.Linear(AD, 32),
+                wm_action_encoder=None,
+                world_model_config=WorldModelConfig(
+                    num_future_frames=2, target_image_size=(32, 32),
+                    teacher_patch_size=16, upsample_factor=1,
+                    action_conditioning=True,
+                ),
+            )
+
+    def test_motion_conditioning_without_encoder_raises(self):
+        from src.model.action.action_head import ActionEncoder
+        import pytest
+        with pytest.raises(ValueError, match="wm_motion_encoder"):
+            LegendVLA(
+                backbone=DummyBackbone(hidden_size=H, num_layers=LAYERS,
+                                       num_heads=NH, num_kv_heads=NKV, head_dim=HD),
+                state_encoder=FourierActionEncoder(action_dim=SD, width=H, time_cond=False,
+                                                   enable_fourier_embed=False, mlp_depth=2,
+                                                   final_layer_norm=False, use_mlp_layer_norm=False),
+                action_encoder=ActionEncoder(action_dim=AD, width=AH, time_cond=False),
+                time_embedding=TimeEmbedding(TH),
+                flow_expert=DummyFlowExpert(hidden_size=AH, time_hidden_size=TH),
+                action_decoder=MLPProjector(input_dim=AH, output_dim=AD, width=AH, depth=2,
+                                            final_layer_norm=False, use_mlp_layer_norm=False),
+                shape_meta={"obs": {"state": {"shape": [SD], "horizon": 2}}, "action": {"shape": [AD], "horizon": 4}},
+                action_hidden_size=AH,
+                world_model_expert=DummyFlowExpert(hidden_size=AH, time_hidden_size=TH),
+                frozen_teacher=nn.Linear(AD, 32),
+                wm_motion_encoder=None,
+                world_model_config=WorldModelConfig(
+                    num_future_frames=2, target_image_size=(32, 32),
+                    teacher_patch_size=16, upsample_factor=1,
+                    motion_conditioning=True,
+                ),
+            )
+
+    def test_world_model_parameters_include_wm_encoders(self):
+        model = build_wm_enabled_model(action_conditioning=True, motion_conditioning=True)
+        wm_param_ids = {id(p) for p in model.world_model_parameters}
+        for p in model.wm_action_encoder.parameters():
+            assert id(p) in wm_param_ids
+        for p in model.wm_motion_encoder.parameters():
+            assert id(p) in wm_param_ids

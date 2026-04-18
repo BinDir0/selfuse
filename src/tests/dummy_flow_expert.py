@@ -24,30 +24,32 @@ class DummyFlowExpert(nn.Module):
 
     def forward(
         self,
-        action_embeds: torch.Tensor,
+        suffix_embeds: torch.Tensor,
         prefix_cache: PrefixKVCache,
-        action_position_ids: torch.Tensor,
+        suffix_position_ids: torch.Tensor,
         cond: torch.Tensor | None = None,
-        action_mask: torch.Tensor | None = None,
+        suffix_mask: torch.Tensor | None = None,
         num_parallel_chunks: int = 1,
         output_attentions: bool = False,
     ) -> torch.Tensor:
+        # Production Qwen3Expert renamed action_* → suffix_* when action + world-model
+        # tokens started sharing the expert; dummy mirrors that contract.
         if prefix_cache is None:
             raise ValueError("DummyFlowExpert requires a prefix cache.")
 
-        if action_position_ids.ndim == 3:
-            action_position_ids = action_position_ids[0]
-        if action_position_ids.ndim == 1:
-            action_position_ids = action_position_ids.unsqueeze(0).expand(action_embeds.shape[0], -1)
-        self.last_action_position_ids = action_position_ids.detach().clone()
+        if suffix_position_ids.ndim == 3:
+            suffix_position_ids = suffix_position_ids[0]
+        if suffix_position_ids.ndim == 1:
+            suffix_position_ids = suffix_position_ids.unsqueeze(0).expand(suffix_embeds.shape[0], -1)
+        self.last_action_position_ids = suffix_position_ids.detach().clone()
         self.last_num_parallel_chunks = num_parallel_chunks
 
-        if action_mask is None:
-            action_mask = torch.ones(
-                action_embeds.shape[0], action_embeds.shape[1],
-                device=action_embeds.device, dtype=torch.bool,
+        if suffix_mask is None:
+            suffix_mask = torch.ones(
+                suffix_embeds.shape[0], suffix_embeds.shape[1],
+                device=suffix_embeds.device, dtype=torch.bool,
             )
-        hidden_states = self.action_proj(action_embeds)
+        hidden_states = self.action_proj(suffix_embeds)
         # Aggregate prefix signal from stacked KV tensors
         # keys/values: [num_layers, B, num_kv_heads, prefix_len, head_dim]
         prefix_signal = (
@@ -57,7 +59,7 @@ class DummyFlowExpert(nn.Module):
         hidden_states = hidden_states + prefix_signal.view(-1, 1, 1)
         if cond is not None:
             hidden_states = hidden_states + self.time_proj(cond)
-        hidden_states = hidden_states + action_position_ids.unsqueeze(-1).to(hidden_states.dtype) * 0.01
+        hidden_states = hidden_states + suffix_position_ids.unsqueeze(-1).to(hidden_states.dtype) * 0.01
         for layer in self.layers:
             hidden_states = layer(hidden_states)
-        return hidden_states * action_mask.unsqueeze(-1).to(hidden_states.dtype)
+        return hidden_states * suffix_mask.unsqueeze(-1).to(hidden_states.dtype)

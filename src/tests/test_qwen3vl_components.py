@@ -86,6 +86,13 @@ class DummyBatchProcessor:
         has_token = token_mask.any(dim=1)
         return torch.where(has_token, first_positions, fallback)
 
+    def find_answer_start_idx(self, input_ids):
+        # Stub: DummyBatchProcessor always synthesizes 2-token prompts followed by
+        # the answer segment, so answer_start is the fixed index 2 for every row.
+        # The real processor scans for an `<|im_start|>assistant\n` header triple,
+        # which is too much machinery for the collator-layer unit tests.
+        return torch.full((input_ids.shape[0],), 2, dtype=torch.long, device=input_ids.device)
+
 
 class DummyTokenizerForBatchProcessor:
     def add_special_tokens(self, _tokens):
@@ -116,7 +123,7 @@ class TestQwen3VLBatchProcessor:
             processor=DummyProcessorForBatchProcessor(),
             mem_enabled=False,
         )
-        batch_inputs = batch_processor.build_vision_inputs([
+        batch_inputs, _video_entries = batch_processor.build_vision_inputs([
             {
                 "vision_type": "video",
                 "images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
@@ -143,7 +150,7 @@ class TestQwen3VLBatchProcessor:
             processor=DummyProcessorForBatchProcessor(),
             mem_enabled=False,
         )
-        batch_inputs = batch_processor.build_vision_inputs([
+        batch_inputs, _video_entries = batch_processor.build_vision_inputs([
             {
                 "vision_type": "image",
                 "images": torch.zeros(8, 8, 3, dtype=torch.uint8),
@@ -273,6 +280,51 @@ class TestUnifiedVLACollatorRaw:
         assert batch["states"].shape == (2, 4, 48)
         assert batch["actions"].shape == (2, 4, 48)
 
+    @staticmethod
+    def make_raw_vla_sample_with_breast():
+        sample = TestUnifiedVLACollatorRaw.make_raw_vla_sample()
+        sample["breast_images"] = torch.zeros(1, 8, 8, 3, dtype=torch.uint8)
+        sample["breast_intrinsic"] = torch.tensor([2.0, 2.0, 0.25, 0.25])
+        return sample
+
+    def test_token_mode_flattens_camera_intrinsic_per_slot(self):
+        """Token mode: one row per rendered <camera> slot (head + optional breast),
+        VLM samples contribute zero rows."""
+        collator = UnifiedVLACollator(
+            formatter=Qwen3VLChatFormatter(camera_intrinsic_mode="token"),
+            batch_processor=DummyBatchProcessor(),
+        )
+        batch = collator([
+            self.make_raw_vla_sample(),
+            self.make_raw_vla_sample_with_breast(),
+        ])
+        assert batch["camera_intrinsic"].shape == (3, 4)
+        torch.testing.assert_close(batch["camera_intrinsic"][0], torch.tensor([1.0, 1.0, 0.5, 0.5]))
+        torch.testing.assert_close(batch["camera_intrinsic"][1], torch.tensor([1.0, 1.0, 0.5, 0.5]))
+        torch.testing.assert_close(batch["camera_intrinsic"][2], torch.tensor([2.0, 2.0, 0.25, 0.25]))
+
+    def test_token_mode_skips_vlm_samples(self):
+        collator = UnifiedVLACollator(
+            formatter=Qwen3VLChatFormatter(camera_intrinsic_mode="token"),
+            batch_processor=DummyBatchProcessor(),
+        )
+        batch = collator([
+            self.make_raw_vla_sample(),
+            self.make_raw_vlm_sample(),
+        ])
+        assert batch["camera_intrinsic"].shape == (1, 4)
+
+    def test_text_mode_emits_no_camera_intrinsic_tensor(self):
+        collator = UnifiedVLACollator(
+            formatter=Qwen3VLChatFormatter(camera_intrinsic_mode="text"),
+            batch_processor=DummyBatchProcessor(),
+        )
+        batch = collator([
+            self.make_raw_vla_sample(),
+            self.make_raw_vla_sample_with_breast(),
+        ])
+        assert "camera_intrinsic" not in batch
+
     def test_mode_sets_padding_side_and_prompt_only(self):
         train_collator = UnifiedVLACollator(
             formatter=Qwen3VLChatFormatter(),
@@ -301,7 +353,9 @@ class TestBuildPrefixMask:
 
     def test_basic_prefix_mask(self):
         lengths = torch.tensor([3, 5, 1])
-        mask = build_prefix_mask(lengths)
+        # build_prefix_mask now requires max_prefix_len because the caller knows the
+        # full cache length; pass lengths.max() to reproduce the legacy auto-size.
+        mask = build_prefix_mask(lengths, max_prefix_len=int(lengths.max().item()))
         assert mask.shape == (3, 5)
         assert mask[0].tolist() == [True, True, True, False, False]
         assert mask[1].tolist() == [True, True, True, True, True]
@@ -316,7 +370,7 @@ class TestBuildPrefixMask:
 
     def test_zero_length_prefix(self):
         lengths = torch.tensor([0, 0])
-        mask = build_prefix_mask(lengths)
+        mask = build_prefix_mask(lengths, max_prefix_len=0)
         assert mask.shape == (2, 0)
 
 
@@ -332,9 +386,15 @@ class TestGetHfCacheLayers:
         assert isinstance(layers[0], LayerKV)
         torch.testing.assert_close(layers[0].key, key)
 
-    def test_none_returns_empty(self):
-        layers = get_hf_cache_layers(None)
+    def test_empty_tuple_returns_empty(self):
+        # get_hf_cache_layers now rejects None (stricter contract); callers must pass
+        # an explicit empty sequence to represent "no KV".
+        layers = get_hf_cache_layers(())
         assert layers == []
+
+    def test_none_raises_type_error(self):
+        with pytest.raises(TypeError, match="Expected list/tuple"):
+            get_hf_cache_layers(None)
 
 
 class TestSlicePrefixCache:
@@ -384,10 +444,13 @@ class TestSlicePrefixCache:
         assert prefix_cache.mask[:, :6].all()
         assert not prefix_cache.mask[:, 6:].any()
 
-    def test_empty_cache_returns_empty_tensors(self):
+    def test_none_cache_raises_value_error(self):
+        # slice_prefix_cache_from_full_kv now rejects None explicitly — the backbone
+        # must always return layer KV pairs, even if empty. Callers pass an empty
+        # sequence to represent "no layers".
         prefix_lengths = torch.tensor([5])
-        prefix_cache = slice_prefix_cache_from_full_kv(None, prefix_lengths)
-        assert prefix_cache.num_layers == 0
+        with pytest.raises(ValueError, match="full_kv must not be None"):
+            slice_prefix_cache_from_full_kv(None, prefix_lengths)
 
 
 # ======================================================================
@@ -438,13 +501,11 @@ class TestProcessorPromptBuilding:
         clean_text = text.replace(".", "").lower()
         assert clean_text == "Pick Up The CUP".lower()
 
-    def test_future_frame_tokens_follow_temporal_patch_count(self):
-        # 64x64 frames, patch_size=16, spatial_merge_size=2 → 2x2=4 tokens per temporal patch
-        # 4 frames, tps=2 → T_future=2 → 2*4=8 tokens
-        formatter = Qwen3VLChatFormatter(future_frame_token="<future_frame>")
-        formatter.patch_size = 16
-        formatter.spatial_merge_size = 2
-        formatter.temporal_patch_size = 2
+    def test_predict_future_frames_flag_changes_user_text(self):
+        # Future frames are now passed as a separate tensor to the world-model
+        # expert; the formatter's only observable change is the user prompt hint.
+        # The obsolete `<future_frame>` assistant-text tokens were removed when
+        # the world model was split out of the chat-text path.
         sample = {
             "is_vla_data": torch.tensor(True),
             "instruction": "Open drawer",
@@ -454,64 +515,23 @@ class TestProcessorPromptBuilding:
             "vision_type": "video",
             "images": torch.zeros(2, 64, 64, 3, dtype=torch.uint8),
             "video_fps": torch.tensor(15.0),
-            "future_frames": torch.zeros(4, 64, 64, 3, dtype=torch.uint8),
         }
 
-        messages = formatter.build_messages(sample, prompt_only=False)
-        assistant_text = messages[1]["content"][0]["text"]
-        user_text = messages[0]["content"][-1]["text"]
+        off_formatter = Qwen3VLChatFormatter(predict_future_frames=False)
+        off_messages = off_formatter.build_messages(sample, prompt_only=False)
+        off_user_text = off_messages[0]["content"][-1]["text"]
+        assert "future frames" not in off_user_text
+        assert "Predict the next action sequence." in off_user_text
 
-        assert assistant_text.startswith("<action><action>")
-        assert assistant_text.count("<future_frame>") == 8
-        assert "future visual observations" in user_text
+        on_formatter = Qwen3VLChatFormatter(predict_future_frames=True)
+        on_messages = on_formatter.build_messages(sample, prompt_only=False)
+        on_user_text = on_messages[0]["content"][-1]["text"]
+        assert "future frames" in on_user_text
 
-    def test_future_frame_tokens_zero_when_truncated_to_zero(self):
-        """K < tps → T_future = 0 → no future_frame tokens, no prompt hint."""
-        formatter = Qwen3VLChatFormatter(future_frame_token="<future_frame>")
-        formatter.patch_size = 16
-        formatter.spatial_merge_size = 2
-        formatter.temporal_patch_size = 2
-        sample = {
-            "is_vla_data": torch.tensor(True),
-            "instruction": "Open drawer",
-            "intrinsic": torch.tensor([1.0, 1.0, 0.5, 0.5]),
-            "n_states": torch.tensor(2, dtype=torch.int32),
-            "n_actions": torch.tensor(2, dtype=torch.int32),
-            "vision_type": "video",
-            "images": torch.zeros(2, 64, 64, 3, dtype=torch.uint8),
-            "video_fps": torch.tensor(15.0),
-            "future_frames": torch.zeros(1, 64, 64, 3, dtype=torch.uint8),
-        }
-
-        messages = formatter.build_messages(sample, prompt_only=False)
-        assistant_text = messages[1]["content"][0]["text"]
-        user_text = messages[0]["content"][-1]["text"]
-
-        assert "<future_frame>" not in assistant_text
-        assert "future visual observations" not in user_text
-
-    def test_future_frame_tokens_odd_frame_count(self):
-        """K=3, tps=2 → T_future=1 → 1*4=4 tokens emitted."""
-        formatter = Qwen3VLChatFormatter(future_frame_token="<future_frame>")
-        formatter.patch_size = 16
-        formatter.spatial_merge_size = 2
-        formatter.temporal_patch_size = 2
-        sample = {
-            "is_vla_data": torch.tensor(True),
-            "instruction": "Open drawer",
-            "intrinsic": torch.tensor([1.0, 1.0, 0.5, 0.5]),
-            "n_states": torch.tensor(2, dtype=torch.int32),
-            "n_actions": torch.tensor(2, dtype=torch.int32),
-            "vision_type": "video",
-            "images": torch.zeros(2, 64, 64, 3, dtype=torch.uint8),
-            "video_fps": torch.tensor(15.0),
-            "future_frames": torch.zeros(3, 64, 64, 3, dtype=torch.uint8),
-        }
-
-        messages = formatter.build_messages(sample, prompt_only=False)
-        assistant_text = messages[1]["content"][0]["text"]
-
-        assert assistant_text.count("<future_frame>") == 4
+        # Assistant text carries only action slots in both modes.
+        for messages in (off_messages, on_messages):
+            assistant_text = messages[1]["content"][0]["text"]
+            assert assistant_text == "<action><action>"
 
 
 # ======================================================================
@@ -571,9 +591,8 @@ class TestBreastCameraFormatting:
         assert "Head camera intrinsic" in text
         assert "Breast" not in text
 
-    def test_build_vla_user_text_token_mode_skips_breast_segment(self):
-        """Token mode wires a single <camera> slot; breast intrinsic falls off
-        the text so camera_encoder's single-view output keeps matching."""
+    def test_build_vla_user_text_token_mode_emits_two_camera_slots(self):
+        """Token mode with breast: two <camera> slots, one per view."""
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="token", camera_token="<cam>")
         text = formatter.build_vla_user_text(
             instruction="Pick up the cup",
@@ -581,8 +600,19 @@ class TestBreastCameraFormatting:
             n_states=torch.tensor(2, dtype=torch.int32),
             breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
-        assert text.count("<cam>") == 1
+        assert text.count("<cam>") == 2
         assert "Head camera intrinsic: <cam>" in text
+        assert "Breast camera intrinsic: <cam>" in text
+
+    def test_build_vla_user_text_token_mode_head_only_single_slot(self):
+        formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="token", camera_token="<cam>")
+        text = formatter.build_vla_user_text(
+            instruction="Pick up the cup",
+            head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
+            n_states=torch.tensor(2, dtype=torch.int32),
+            breast_intrinsic=None,
+        )
+        assert text.count("<cam>") == 1
         assert "Breast" not in text
 
     def test_build_vision_inputs_flattens_head_then_breast_per_sample(self):
