@@ -61,6 +61,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         debug_profile_timing: bool = False,
         load_depth: bool = True,
         load_breast_camera: bool = False,
+        keep_ratio: float = 1.0,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -81,6 +82,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # Saves ~25 ms/sample (depth augmentation is the single biggest CPU cost).
         self.load_depth = bool(load_depth)
         self.load_breast_camera = bool(load_breast_camera)
+        assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
+        self.keep_ratio = float(keep_ratio)
         # (H, W) tuple or None. Resize all RGB frames to this resolution
         # before HF processor. Required when world model is enabled so that
         # temporal attention patches share identical spatial semantics.
@@ -386,6 +389,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             shuffle_buffer=self.shuffle_buffer,
             mode=self.mode,
             load_depth=self.load_depth,
+            keep_ratio=self.keep_ratio,
         )
         return filter_none(pipeline)
 
@@ -414,6 +418,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             debug_profile_timing=self.debug_profile_timing,
             load_depth=self.load_depth,
             load_breast_camera=self.load_breast_camera,
+            keep_ratio=1.0,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)

@@ -10,6 +10,7 @@ import functools
 import glob
 import json
 import os
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -454,7 +455,8 @@ def select_lowdim_files(fname):
 def build_wds_pipeline(shard_urls, config=None, load_breast_camera=False,
                        preprocess_fn=None, shuffle_buffer=16384, mode='train',
                        use_sliding_window=True, lowdim_only=False,
-                       include_post_stages=True, load_depth=True):
+                       include_post_stages=True, load_depth=True,
+                       keep_ratio: float = 1.0):
     """Build a WebDataset pipeline for a single dataset.
 
     Training: resampled infinite stream with shard-level shuffle.
@@ -477,7 +479,12 @@ def build_wds_pipeline(shard_urls, config=None, load_breast_camera=False,
         use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
         lowdim_only: if True, only decode lowdim.npy and meta.json (skip image/depth)
         include_post_stages: if False, skip shuffle / materialize / preprocess
+        keep_ratio: per-sample Bernoulli keep probability, applied pre-shuffle in
+            train mode only. 1.0 disables. Lower values trade IO for shard diversity
+            (ref: DreamZero shard_sampling_rate).
     """
+    assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
+
     if config is None:
         config = WindowConfig()
 
@@ -512,6 +519,11 @@ def build_wds_pipeline(shard_urls, config=None, load_breast_camera=False,
             lambda src: sliding_window_compose(src, config, load_breast_camera, lowdim_only)
         )
 
+    # Drop before materialize_sample_media so dropped windows skip JPEG decode.
+    if is_train and keep_ratio < 1.0:
+        keep_threshold = keep_ratio
+        pipeline = pipeline.select(lambda _s: random.random() < keep_threshold)
+
     if not include_post_stages:
         return pipeline
 
@@ -543,7 +555,7 @@ def build_wds_pipeline(shard_urls, config=None, load_breast_camera=False,
 def build_blended_dataset(datasets_config, config=None, load_breast_camera=False,
                           preprocess_fn=None, shuffle_buffer=16384, mode='train',
                           use_sliding_window=True, lowdim_only=False,
-                          load_depth=True):
+                          load_depth=True, keep_ratio: float = 1.0):
     """Build a blended dataset from multiple WebDataset sources.
 
     Training: per-subset pipelines (no per-subset shuffle) mixed via
@@ -562,6 +574,8 @@ def build_blended_dataset(datasets_config, config=None, load_breast_camera=False
         mode: 'train' or 'val'
         use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
         lowdim_only: if True, only decode lowdim.npy and meta.json (skip image/depth)
+        keep_ratio: forwarded per-subset; RandomMix weights stay invariant since every
+            subset is thinned by the same factor.
     """
     if config is None:
         config = WindowConfig()
@@ -583,6 +597,7 @@ def build_blended_dataset(datasets_config, config=None, load_breast_camera=False
             lowdim_only=lowdim_only,
             include_post_stages=not is_train,
             load_depth=load_depth,
+            keep_ratio=keep_ratio,
         )
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))

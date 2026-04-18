@@ -68,6 +68,9 @@ dataset:
     # Decode breast (chest) camera when real-robot shards declare it.
     # Model side still ignores these keys; set true only once downstream is ready.
     load_breast_camera: false
+    # Pre-shuffle Bernoulli keep rate (train only). Lower = more shard diversity,
+    # higher IO. 1.0 disables. Ref: DreamZero shard_sampling_rate.
+    keep_ratio: 1.0
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
     wds_datasets: ${vlm_wds_datasets}
@@ -80,6 +83,7 @@ dataset:
     mem_enabled: ${policy.backbone.mem_temporal_attention.enabled}
     n_obs_image_steps: ${data.n_obs_image_steps}
     target_image_size: ${data.target_image_size}
+    keep_ratio: 1.0
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
 

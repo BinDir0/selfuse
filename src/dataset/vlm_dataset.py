@@ -41,6 +41,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         mem_enabled: bool = False,
         n_obs_image_steps: int = 1,
         target_image_size: Optional[Tuple[int, int]] = None,
+        keep_ratio: float = 1.0,
     ):
         super().__init__()
         self.wds_datasets = wds_datasets
@@ -56,6 +57,8 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         self.target_image_size = (
             tuple(target_image_size) if target_image_size is not None else None
         )
+        assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
+        self.keep_ratio = float(keep_ratio)
         if self.mem_enabled:
             assert self.n_obs_image_steps >= 1, "n_obs_image_steps must be >= 1 when mem_enabled"
             assert self.target_image_size is not None, "target_image_size required when mem_enabled"
@@ -98,6 +101,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             mem_enabled=self.mem_enabled,
             n_obs_image_steps=self.n_obs_image_steps,
             target_image_size=self.target_image_size,
+            keep_ratio=1.0,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -239,6 +243,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             shuffle_buffer=self.shuffle_buffer,
             mode=self.mode,
             use_sliding_window=False,
+            keep_ratio=self.keep_ratio,
         )
         return strip_key(pipeline)
 
