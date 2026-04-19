@@ -300,6 +300,7 @@ def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim
 
     # --- Future frames for world model supervision ---
     future_frame_refs = None
+    future_lowdims = None
     if not lowdim_only and config.future_frame_horizon > 0:
         # valid count is implied by len(ff_refs); sample_to_data derives it.
         ff_refs, _ = gather_future_refs(
@@ -308,6 +309,11 @@ def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim
         )
         if ff_refs:
             future_frame_refs = tuple(ff_refs)
+            # Stack future-frame lowdim once so WM motion conditioning can
+            # slice per-camera extrinsics without re-parsing meta per view.
+            future_lowdims = np.stack(
+                [frame["lowdim.npy"] for frame in ff_refs], axis=0
+            )
 
     # head_* slices map to the unprefixed canonical keys; breast_* surface
     # only when load_breast_camera is set.
@@ -338,6 +344,14 @@ def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim
         result["image_frame_refs"] = image_frame_refs
     if future_frame_refs is not None:
         result["future_frame_refs"] = future_frame_refs
+        # Future per-camera extrinsics for WM motion conditioning; stored flat
+        # [K_raw, 16] so sample_to_data can compose relative transforms.
+        if future_lowdims is not None:
+            hs, he = lowdim_slices["head_extrinsic"]
+            result["future_head_extrinsic"] = future_lowdims[:, hs:he].astype(np.float32)
+            if load_breast_camera and "breast_extrinsic" in lowdim_slices:
+                bs, be = lowdim_slices["breast_extrinsic"]
+                result["future_breast_extrinsic"] = future_lowdims[:, bs:be].astype(np.float32)
     return result
 
 

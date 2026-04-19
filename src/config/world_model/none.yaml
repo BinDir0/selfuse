@@ -10,4 +10,6 @@ world_model:
   teacher_patch_size: 16
   upsample_factor: 2
   action_conditioning: false
-  detach_action_cond: false
+  motion_conditioning: false
+  wm_action_encoder: null
+  wm_motion_encoder: null

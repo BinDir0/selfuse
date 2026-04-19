@@ -250,7 +250,13 @@ class TestEndToEndForwardBackward:
         assert has_diffloss_grad, "No gradient reached diffloss parameters"
 
     def test_train_mode_without_diffloss(self):
-        """mode='train' without DiffLoss should keep diffusion loss at zero."""
+        """mode='train' without DiffLoss should keep diffusion loss at zero
+        and not instantiate the diffloss-specific head modules.
+
+        (state_encoder is part of ar_action_heads_parameters but always gets
+        gradients through flow_loss / ce_loss via the backbone state slot, so
+        it is NOT a signal for diffloss activity.)
+        """
         model = build_model(with_diffloss=False)
         batch = build_batch()
         output = model("train", batch)
@@ -259,9 +265,11 @@ class TestEndToEndForwardBackward:
         assert output["diffusion_loss"].item() == 0.0
         output["total_loss"].backward()
 
-        projector_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0
-                                 for p in model.ar_action_heads_parameters)
-        assert not projector_has_grad, "Diffusion branch should be inactive when diffloss is disabled"
+        # use_diffloss gates the whole AR-action-via-diffloss path; without
+        # the diffloss module the trio is effectively disabled even if
+        # ar_action_encoder is still instantiated for other heads.
+        assert not model.use_diffloss
+        assert model.diffloss is None
 
     def test_train_ar_mode(self):
         """mode='train_ar': only CE + DiffLoss, no flow."""
@@ -593,13 +601,17 @@ class TestParameterGroups:
         assert all(not p.requires_grad for p in model.backbone.parameters())
 
     def test_freeze_ae_only_affects_action_modules(self):
+        """freeze_non_lora_weights_in_ae freezes the flow action-expert stack
+        (state_encoder, action_encoder, time_embedding, flow_expert,
+        action_decoder). ar_action_encoder belongs to the AR/diffloss head
+        attached to the backbone and is intentionally NOT in this scope.
+        """
         model = build_model()
         before_vlm = sum(p.requires_grad for p in model.trainable_vlm_parameters)
         model.freeze_non_lora_weights_in_ae()
         after_vlm = sum(p.requires_grad for p in model.trainable_vlm_parameters)
         assert before_vlm == after_vlm
         assert all(not p.requires_grad for p in model.state_encoder.parameters())
-        assert all(not p.requires_grad for p in model.ar_action_encoder.parameters())
         assert all(not p.requires_grad for p in model.action_encoder.parameters())
         assert all(not p.requires_grad for p in model.flow_expert.parameters())
 
@@ -764,3 +776,139 @@ class TestWorldModelDedicatedEncoders:
             assert id(p) in wm_param_ids
         for p in model.wm_motion_encoder.parameters():
             assert id(p) in wm_param_ids
+
+
+# ======================================================================
+# World model: single-forward bidirectional pass over both views
+# ======================================================================
+
+
+class FakeFrozenTeacher(nn.Module):
+    """Stand-in teacher: returns zeros with shape matching WM pred contract."""
+
+    def __init__(self, K: int, spatial: int, D: int):
+        super().__init__()
+        self.K = K
+        self.spatial = spatial
+        self.D = D
+        self.call_count = 0
+        self.last_input_batch = None
+
+    def forward(self, frames: torch.Tensor) -> torch.Tensor:
+        self.call_count += 1
+        self.last_input_batch = int(frames.shape[0])
+        return torch.zeros(frames.shape[0], self.K, self.spatial, self.D,
+                           dtype=torch.float32, device=frames.device)
+
+
+def build_wm_forward_fixture(has_breast: bool):
+    """Build a minimal WM-enabled LegendVLA whose forward_world_model_stream can run
+    end-to-end, plus a minimal batch + backbone output that satisfy the contract."""
+    from src.model.action.action_head import ActionEncoder, MLPProjector
+    from src.model.vlm.prefix_cache import BackboneStreamOutput, PrefixKVCache
+
+    B, K = 2, 2
+    target_hw = 32
+    teacher_patch, upsample = 16, 1
+    grid = target_hw // (teacher_patch * upsample)  # 2
+    spatial = (grid * upsample) ** 2                # 4
+    D = AH
+
+    wm_expert = DummyFlowExpert(hidden_size=D, time_hidden_size=TH)
+    teacher = FakeFrozenTeacher(K=K, spatial=spatial, D=D)
+    wm_action_encoder = ActionEncoder(action_dim=AD, width=D, time_cond=False)
+    wm_motion_encoder = MLPProjector(
+        input_dim=16, output_dim=D, width=D, depth=2,
+        final_layer_norm=False, use_mlp_layer_norm=False,
+    )
+
+    model = LegendVLA(
+        backbone=DummyBackbone(hidden_size=H, num_layers=LAYERS,
+                               num_heads=NH, num_kv_heads=NKV, head_dim=HD),
+        state_encoder=FourierActionEncoder(action_dim=SD, width=H, time_cond=False,
+                                           enable_fourier_embed=False, mlp_depth=2,
+                                           final_layer_norm=False, use_mlp_layer_norm=False),
+        action_encoder=FourierActionEncoder(action_dim=AD, width=D, time_cond=False,
+                                            enable_fourier_embed=False, mlp_depth=2,
+                                            final_layer_norm=False, use_mlp_layer_norm=False),
+        time_embedding=TimeEmbedding(TH),
+        flow_expert=DummyFlowExpert(hidden_size=D, time_hidden_size=TH),
+        action_decoder=MLPProjector(input_dim=D, output_dim=AD, width=D, depth=2,
+                                    final_layer_norm=False, use_mlp_layer_norm=False),
+        shape_meta={"obs": {"state": {"shape": [SD], "horizon": 2}},
+                    "action": {"shape": [AD], "horizon": 4}},
+        action_hidden_size=D,
+        flow_config=FlowConfig(num_parallel_t=1, num_inference_steps=3),
+        ar_action_train_config=ARActionTrainConfig(chunk_size=2),
+        rtc_config=RTCConfig(),
+        loss_config=LossConfig(),
+        knowledge_insulation=True,
+        world_model_expert=wm_expert,
+        frozen_teacher=teacher,
+        wm_action_encoder=wm_action_encoder,
+        wm_motion_encoder=wm_motion_encoder,
+        world_model_config=WorldModelConfig(
+            num_future_frames=K, target_image_size=(target_hw, target_hw),
+            teacher_patch_size=teacher_patch, upsample_factor=upsample,
+            action_conditioning=True, motion_conditioning=True,
+        ),
+    )
+
+    # Wrap expert.forward to count calls while keeping real behavior.
+    orig_expert_forward = wm_expert.forward
+    call_counter = {"expert": 0}
+    def counting_expert_forward(*args, **kwargs):
+        call_counter["expert"] += 1
+        return orig_expert_forward(*args, **kwargs)
+    wm_expert.forward = counting_expert_forward
+
+    prefix_len = 3
+    prefix_cache = PrefixKVCache(
+        keys=torch.randn(LAYERS, B, NKV, prefix_len, HD),
+        values=torch.randn(LAYERS, B, NKV, prefix_len, HD),
+        mask=torch.ones(B, prefix_len, dtype=torch.bool),
+        lengths=torch.full((B,), prefix_len, dtype=torch.long),
+    )
+    backbone_output = BackboneStreamOutput(
+        last_hidden_states=torch.zeros(B, prefix_len, H),
+        position_ids=torch.arange(prefix_len).unsqueeze(0).expand(B, -1),
+        past_key_values_hf=None,
+        prefix_cache=prefix_cache,
+    )
+
+    batch = {
+        "input_ids": torch.zeros(B, prefix_len, dtype=torch.long),
+        "answer_start_idx": torch.full((B,), prefix_len, dtype=torch.long),
+        "actions": torch.zeros(B, 4, AD),
+        "actions_valid_mask": torch.ones(B, 4, AD, dtype=torch.bool),
+        "n_future_frames": torch.full((B,), K, dtype=torch.long),
+        "future_frames": torch.zeros(B, K, target_hw, target_hw, 3, dtype=torch.uint8),
+        "future_head_motion": torch.zeros(B, K, 16),
+    }
+    if has_breast:
+        batch["breast_future_frames"] = torch.zeros(B, K, target_hw, target_hw, 3, dtype=torch.uint8)
+        batch["future_breast_motion"] = torch.zeros(B, K, 16)
+
+    return model, batch, backbone_output, teacher, call_counter, (B, K, spatial, D)
+
+
+class TestWorldModelSingleForward:
+    def test_single_view_calls_expert_and_teacher_once(self):
+        model, batch, bbo, teacher, counter, (B, K, spatial, D) = build_wm_forward_fixture(has_breast=False)
+        out = model.forward_world_model_stream(batch, bbo)
+        assert counter["expert"] == 1
+        assert teacher.call_count == 1
+        assert teacher.last_input_batch == B
+        assert out["pred"].shape == (B, 1, K, spatial, D)
+        assert out["target"].shape == (B, 1, K, spatial, D)
+
+    def test_dual_view_calls_expert_and_teacher_once(self):
+        model, batch, bbo, teacher, counter, (B, K, spatial, D) = build_wm_forward_fixture(has_breast=True)
+        out = model.forward_world_model_stream(batch, bbo)
+        # Key assertion: still one expert + one teacher call, regardless of V.
+        assert counter["expert"] == 1
+        assert teacher.call_count == 1
+        # Teacher saw head+breast stacked along batch dim → 2B.
+        assert teacher.last_input_batch == 2 * B
+        assert out["pred"].shape == (B, 2, K, spatial, D)
+        assert out["target"].shape == (B, 2, K, spatial, D)

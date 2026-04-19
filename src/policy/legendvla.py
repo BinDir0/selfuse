@@ -72,7 +72,7 @@ class WorldModelConfig:
     teacher_patch_size: int = 16
     upsample_factor: int = 2
     action_conditioning: bool = False
-    detach_action_cond: bool = False
+    motion_conditioning: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,6 +123,8 @@ class LegendVLA(nn.Module):
         world_model_expert: nn.Module | None = None,
         frozen_teacher: nn.Module | None = None,
         world_model_config: WorldModelConfig = WorldModelConfig(),
+        wm_action_encoder: nn.Module | None = None,
+        wm_motion_encoder: nn.Module | None = None,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -197,9 +199,19 @@ class LegendVLA(nn.Module):
         self.world_model_expert = world_model_expert
         self.frozen_teacher = frozen_teacher
         self.world_model_config = world_model_config
+        self.wm_action_encoder = wm_action_encoder
+        self.wm_motion_encoder = wm_motion_encoder
         self.use_world_model = world_model_expert is not None and frozen_teacher is not None
         if self.use_world_model:
             self._init_world_model(world_model_expert, world_model_config)
+            if world_model_config.action_conditioning and wm_action_encoder is None:
+                raise ValueError(
+                    "world_model.action_conditioning=True requires wm_action_encoder"
+                )
+            if world_model_config.motion_conditioning and wm_motion_encoder is None:
+                raise ValueError(
+                    "world_model.motion_conditioning=True requires wm_motion_encoder"
+                )
 
     def _init_world_model(self, expert: nn.Module, config: WorldModelConfig) -> None:
         tH, tW = config.target_image_size
@@ -354,6 +366,10 @@ class LegendVLA(nn.Module):
         if self.use_world_model:
             params.extend(p for p in self.world_model_expert.parameters() if p.requires_grad)
             params.extend(p for p in self.wm_head.parameters() if p.requires_grad)
+            if self.wm_action_encoder is not None:
+                params.extend(p for p in self.wm_action_encoder.parameters() if p.requires_grad)
+            if self.wm_motion_encoder is not None:
+                params.extend(p for p in self.wm_motion_encoder.parameters() if p.requires_grad)
         return params
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
@@ -515,61 +531,100 @@ class LegendVLA(nn.Module):
         self,
         batch: dict,
         backbone_output: BackboneStreamOutput,
-        action_cond_embeds: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Run world model expert and frozen teacher on future frames.
 
-        Per-view forwards are independent: queries are offset by a learned
-        ``view_embed[v]`` so the expert produces view-specific predictions.
-        Returns ``pred`` / ``target`` with a leading view dim (V=1 for
-        head-only, V=2 when breast_future_frames is present).
+        Single bidirectional forward over both views. Suffix layout:
+        ``[action_cond, head_motion, breast_motion?, head_queries, breast_queries?]``
+        with suffix-internal non-causal attention. Each per-view motion /
+        query segment is only appended when the batch carries the matching
+        keys (``breast_future_frames`` presence is the batch-level switch).
+        Teacher is called once on head/breast future frames stacked along the
+        batch dim. Returns ``pred`` / ``target`` with a leading view dim
+        (V=1 head-only, V=2 head+breast).
         """
+        cfg = self.world_model_config
         B = backbone_output.last_hidden_states.shape[0]
         device = backbone_output.last_hidden_states.device
         K = self.wm_num_future_frames
         gh, gw, uf = self.wm_grid_h, self.wm_grid_w, self.wm_upsample_factor
         D = self.world_model_expert.hidden_size
+        has_breast = "breast_future_frames" in batch
+        V = 2 if has_breast else 1
 
-        if action_cond_embeds is not None and self.world_model_config.detach_action_cond:
-            action_cond_embeds = action_cond_embeds.detach()
-        action_len = action_cond_embeds.shape[1] if action_cond_embeds is not None else 0
-
-        # Suffix mask: action tokens by actions_valid_mask; query tokens by n_future.
         n_future = batch["n_future_frames"].to(device=device)
         frame_valid = torch.arange(K, device=device).unsqueeze(0) < n_future.unsqueeze(1)
+        # Each of the K future steps owns gh*gw query tokens; replicate the
+        # per-step validity across that block then flatten to [B, K*gh*gw].
         query_mask = frame_valid.unsqueeze(-1).expand(-1, -1, gh * gw).reshape(B, -1)
-        if action_cond_embeds is not None:
-            action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
-            suffix_mask = torch.cat([action_mask, query_mask], dim=1)
-        else:
-            suffix_mask = query_mask
+
+        # Build suffix with per-segment RoPE positions. Views share the same
+        # temporal positions for both motion-cond and query tokens: they
+        # describe the same K future steps, just from different cameras.
+        # view_embed (zero-init) is the sole channel that differentiates
+        # which view each shared-position token belongs to.
+        segments: list[torch.Tensor] = []
+        seg_masks: list[torch.Tensor] = []
+        seg_positions: list[torch.Tensor] = []
+        cur_pos = 0
+
+        if cfg.action_conditioning and "actions" in batch:
+            action_cond = self.wm_action_encoder(batch["actions"])
+            action_len = action_cond.shape[1]
+            segments.append(action_cond)
+            seg_masks.append(batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool))
+            seg_positions.append(torch.arange(cur_pos, cur_pos + action_len, device=device))
+            cur_pos += action_len
+
+        if cfg.motion_conditioning:
+            motion_pos = torch.arange(cur_pos, cur_pos + K, device=device)
+            segments.append(self.wm_motion_encoder(batch["future_head_motion"]))
+            seg_masks.append(frame_valid)
+            seg_positions.append(motion_pos)
+            if has_breast:
+                segments.append(self.wm_motion_encoder(batch["future_breast_motion"]))
+                seg_masks.append(frame_valid)
+                seg_positions.append(motion_pos)  # shared with head_motion
+            cur_pos += K
 
         base_queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
-        suffix_len = action_len + base_queries.shape[1]
+        query_len = base_queries.shape[1]
+        query_pos = torch.arange(cur_pos, cur_pos + query_len, device=device)
+        for v in range(V):
+            segments.append(base_queries + self.wm_head.view_embed[v])
+            seg_masks.append(query_mask)
+            seg_positions.append(query_pos)  # shared across views
+
+        suffix = torch.cat(segments, dim=1)
+        suffix_mask = torch.cat(seg_masks, dim=1)
+        rel_pos = torch.cat(seg_positions, dim=0).unsqueeze(0)  # [1, suffix_len]
         base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
-        position_ids = base + torch.arange(suffix_len, device=device).unsqueeze(0)
+        position_ids = base + rel_pos
 
-        def run_view(view_idx: int, target_key: str) -> tuple[torch.Tensor, torch.Tensor]:
-            queries = base_queries + self.wm_head.view_embed[view_idx]
-            suffix = torch.cat([action_cond_embeds, queries], dim=1) if action_len else queries
-            wm_hidden = self.world_model_expert(
-                suffix_embeds=suffix,
-                prefix_cache=backbone_output.prefix_cache,
-                suffix_position_ids=position_ids,
-                suffix_mask=suffix_mask,
-            )[:, action_len:, :]
-            x = self.wm_head.output_proj(wm_hidden).reshape(B * K, gh, gw, uf, uf, D)
-            x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * K, gh * uf, gw * uf, D)
-            return x.flatten(1, 2).reshape(B, K, -1, D), self.frozen_teacher(batch[target_key])
+        hidden = self.world_model_expert(
+            suffix_embeds=suffix,
+            prefix_cache=backbone_output.prefix_cache,
+            suffix_position_ids=position_ids,
+            suffix_mask=suffix_mask,
+        )
 
-        views = [(0, "future_frames")]
-        if "breast_future_frames" in batch:
-            views.append((1, "breast_future_frames"))
-        preds, targets = zip(*(run_view(v, k) for v, k in views))
+        # Query block sits at the suffix tail; V views packed contiguously.
+        query_hidden = hidden[:, -V * query_len:, :].reshape(B, V, query_len, D)
+        x = self.wm_head.output_proj(query_hidden).reshape(B * V * K, gh, gw, uf, uf, D)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * V * K, gh * uf, gw * uf, D)
+        pred = x.flatten(1, 2).reshape(B, V, K, -1, D)
+
+        # Batch the teacher along B so DINOv3 only runs once.
+        if has_breast:
+            stacked = torch.cat([batch["future_frames"], batch["breast_future_frames"]], dim=0)
+            head_t, breast_t = self.frozen_teacher(stacked).chunk(2, dim=0)
+            target = torch.stack([head_t, breast_t], dim=1)
+        else:
+            target = self.frozen_teacher(batch["future_frames"]).unsqueeze(1)
 
         return {
-            "pred": torch.stack(preds, dim=1),        # [B, V, K, spatial, D]
-            "target": torch.stack(targets, dim=1),
+            "pred": pred,
+            "target": target,
             "n_future_frames": batch["n_future_frames"],
         }
 

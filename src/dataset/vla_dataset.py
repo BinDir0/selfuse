@@ -15,7 +15,12 @@ import torch
 from src.model.common.normalizer import LinearNormalizer
 from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.utils.pytorch_util import dict_apply
-from .data_transforms import process_state_action, process_image, resize_frames
+from .data_transforms import (
+    compute_relative_motion_padded,
+    process_state_action,
+    process_image,
+    resize_frames,
+)
 from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
 from .unified_vla_collator import ConcatDataCollator
 from .wds_dataset import (
@@ -311,9 +316,25 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             data["future_frames"] = ff
             data["n_future_frames"] = np.array(n_valid, dtype=np.int32)
 
+            # Relative head-camera motion = inv(T_current) @ T_future[k], i.e.
+            # future pose expressed in the current camera frame. Invalid steps
+            # (>= n_valid) are zero-filled; downstream mask drops them.
+            head_motion = compute_relative_motion_padded(
+                current_flat16=sample["extrinsic"],
+                future_flat=sample.get("future_head_extrinsic"),
+                n_valid=n_valid, K=K,
+            )
+            data["future_head_motion"] = head_motion
+
             if self.load_breast_camera:
                 breast_ff, _ = pad_future(sample.get("breast_future_frames"))
                 data["breast_future_frames"] = breast_ff
+                breast_motion = compute_relative_motion_padded(
+                    current_flat16=sample.get("breast_extrinsic"),
+                    future_flat=sample.get("future_breast_extrinsic"),
+                    n_valid=n_valid, K=K,
+                )
+                data["future_breast_motion"] = breast_motion
         else:
             data["n_future_frames"] = np.array(0, dtype=np.int32)
         if self.return_dataset_info:
@@ -572,6 +593,7 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
                 )
             tH, tW = tgt
             vlm_sample["future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
+            vlm_sample["future_head_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
         # Dummies so breast keys survive collate_raw's "all samples carry key"
         # filter when VLA side runs with breast enabled.
         if self.vla_dataset.load_breast_camera:
@@ -579,6 +601,7 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
             if ff_horizon > 0:
                 tH, tW = self.vla_dataset.target_image_size
                 vlm_sample["breast_future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
+                vlm_sample["future_breast_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
         if getattr(self.vla_dataset, "debug_capture_raw_sample", False):
             vlm_sample["debug_raw_sample"] = None
         if getattr(self.vla_dataset, "debug_capture_processed_sample", False):

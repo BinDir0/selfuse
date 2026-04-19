@@ -113,6 +113,7 @@ class UnifiedVLACollator:
             "depth_values", "has_depth_values", "future_frames",
             "intrinsic",
             "breast_intrinsic", "breast_future_frames",
+            "future_head_motion", "future_breast_motion",
         ]
         for key in collatable_keys:
             if all(key in s for s in samples):

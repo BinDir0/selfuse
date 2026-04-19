@@ -190,15 +190,7 @@ def run_world_model(model, batch: dict) -> dict:
     slot_embeds = model.build_slot_embeddings(batch, add_action_noise=False)
     with torch.no_grad():
         backbone_output = model.forward_backbone_stream(batch, slot_embeds)
-        action_cond_embeds = None
-        if (
-            model.world_model_config.action_conditioning
-            and "actions" in batch
-        ):
-            action_cond_embeds = model.action_encoder(batch["actions"])
-        wm_output = model.forward_world_model_stream(
-            batch, backbone_output, action_cond_embeds,
-        )
+        wm_output = model.forward_world_model_stream(batch, backbone_output)
     return {
         "pred": wm_output["pred"].float().cpu().numpy(),
         "target": wm_output["target"].float().cpu().numpy(),
