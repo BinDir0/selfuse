@@ -1,9 +1,11 @@
+import contextlib
 import multiprocessing as mp
 import os
 import time
 import traceback
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from queue import Empty
 from typing import Dict, List, Optional
 
@@ -53,6 +55,12 @@ def _build_pipeline_task(video_path: str, descriptor_map) -> PipelineVideoTask:
     return PipelineVideoTask.from_inputs(video_path=video_path, descriptor=descriptor_map.get(video_path))
 
 
+def _worker_log_path(config: BatchRunConfig, stage: str, gpu: int, worker_slot: int) -> Path:
+    log_dir = config.run_dir / "logs" / "workers"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / f"{stage}_gpu{gpu}_slot{worker_slot}.log"
+
+
 def _prefetch_video_data(video_path: str, stage: str, descriptor_map, config: BatchRunConfig):
     if stage != "motion":
         return None
@@ -97,70 +105,78 @@ def _run_single_video(video_path: str, stage: str, runtime: WorkerRuntime, descr
     return result.get("status") in ("success", "skipped")
 
 
-def _stage_worker_main(gpu: int, stage: str, video_queue: mp.Queue, result_queue: mp.Queue, descriptor_map, config: BatchRunConfig):
-    try:
-        runtime = _build_runtime(config, gpu)
-        runtime.ensure_runner(stage)
-    except Exception:
-        traceback.print_exc()
-        return
-
-    with ThreadPoolExecutor(max_workers=1) as prefetcher:
-        prefetch_future = None
-        video_path = video_queue.get()
-
-        while video_path is not None:
-            prefetched_data = None
-            if prefetch_future is not None:
-                try:
-                    prefetched_data = prefetch_future.result()
-                except Exception:
-                    prefetched_data = None
-
-            next_video = video_queue.get()
-
-            next_prefetch_future = None
-            if next_video is not None:
-                next_prefetch_future = prefetcher.submit(
-                    _prefetch_video_data,
-                    next_video,
-                    stage,
-                    descriptor_map,
-                    config,
-                )
-
+def _stage_worker_main(gpu: int, worker_slot: int, stage: str, video_queue: mp.Queue, result_queue: mp.Queue, descriptor_map, config: BatchRunConfig):
+    log_path = _worker_log_path(config, stage, gpu, worker_slot)
+    os.environ["HAWOR_QUIET"] = "1"
+    with log_path.open("a", encoding="utf-8", buffering=1) as log_handle:
+        with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
+            print(
+                f"[worker] stage={stage} gpu={gpu} slot={worker_slot} pid={os.getpid()}",
+                flush=True,
+            )
             try:
-                success = _run_single_video(
-                    video_path,
-                    stage,
-                    runtime,
-                    descriptor_map,
-                    config,
-                    prefetched_data=prefetched_data,
-                )
-                result_queue.put({"video": video_path, "success": success, "gpu": gpu})
-            except CorruptStageDataError as error:
-                result_queue.put(
-                    {
-                        "video": video_path,
-                        "success": False,
-                        "gpu": gpu,
-                        "error": str(error),
-                    }
-                )
-            except Exception as error:
+                runtime = _build_runtime(config, gpu)
+                runtime.ensure_runner(stage)
+            except Exception:
                 traceback.print_exc()
-                result_queue.put(
-                    {
-                        "video": video_path,
-                        "success": False,
-                        "gpu": gpu,
-                        "error": str(error),
-                    }
-                )
+                return
 
-            video_path = next_video
-            prefetch_future = next_prefetch_future
+            with ThreadPoolExecutor(max_workers=1) as prefetcher:
+                prefetch_future = None
+                video_path = video_queue.get()
+
+                while video_path is not None:
+                    prefetched_data = None
+                    if prefetch_future is not None:
+                        try:
+                            prefetched_data = prefetch_future.result()
+                        except Exception:
+                            prefetched_data = None
+
+                    next_video = video_queue.get()
+
+                    next_prefetch_future = None
+                    if next_video is not None:
+                        next_prefetch_future = prefetcher.submit(
+                            _prefetch_video_data,
+                            next_video,
+                            stage,
+                            descriptor_map,
+                            config,
+                        )
+
+                    try:
+                        success = _run_single_video(
+                            video_path,
+                            stage,
+                            runtime,
+                            descriptor_map,
+                            config,
+                            prefetched_data=prefetched_data,
+                        )
+                        result_queue.put({"video": video_path, "success": success, "gpu": gpu})
+                    except CorruptStageDataError as error:
+                        result_queue.put(
+                            {
+                                "video": video_path,
+                                "success": False,
+                                "gpu": gpu,
+                                "error": str(error),
+                            }
+                        )
+                    except Exception as error:
+                        traceback.print_exc()
+                        result_queue.put(
+                            {
+                                "video": video_path,
+                                "success": False,
+                                "gpu": gpu,
+                                "error": str(error),
+                            }
+                        )
+
+                    video_path = next_video
+                    prefetch_future = next_prefetch_future
 
 
 class StageWorkerPool:
@@ -260,10 +276,10 @@ class StageWorkerPool:
 
         workers = []
         for gpu in self.config.gpus:
-            for _ in range(worker_count_per_gpu):
+            for worker_slot in range(worker_count_per_gpu):
                 process = mp.Process(
                     target=_stage_worker_main,
-                    args=(gpu, stage, video_queue, result_queue, self.descriptor_map, self.config),
+                    args=(gpu, worker_slot, stage, video_queue, result_queue, self.descriptor_map, self.config),
                 )
                 process.start()
                 workers.append(process)

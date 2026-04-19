@@ -621,6 +621,9 @@ def _print_timing(video_path: str, timing: dict, num_keyframes: int, depth_frame
         elapsed = timing.get(key, 0.0)
         pct = elapsed / total_time * 100 if total_time > 0 else 0
         print(f"  {key:20s}: {elapsed:7.2f}s ({pct:5.1f}%)")
+    cached_slam_sec = timing.get("2_slam_cached_source")
+    if cached_slam_sec is not None:
+        print(f"  {'2_slam_cached_src':20s}: {cached_slam_sec:7.2f}s (metadata)")
     print(f"  {'total':20s}: {total_time:7.2f}s")
     print(f"  {'slam_backend':20s}: dpvo")
     print(f"  {'depth_backend':20s}: any4d")
@@ -682,7 +685,9 @@ def hawor_slam(
         traj = slam_outputs["traj"]
         tstamp = slam_outputs["tstamp"]
         disps = slam_outputs["disps"]
-        timing["2_slam"] = slam_outputs["cached_vo_sec"] if slam_outputs["used_cache"] and slam_outputs["cached_vo_sec"] is not None else time.time() - t0
+        timing["2_slam"] = time.time() - t0
+        if slam_outputs["used_cache"] and slam_outputs["cached_vo_sec"] is not None:
+            timing["2_slam_cached_source"] = float(slam_outputs["cached_vo_sec"])
 
         output_hw = get_dimention(stage3_frame_source)
         depth_cache_used = False
