@@ -13,7 +13,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples  # noqa: E402
-from lib.pipeline.wds_sanity import clip_id_from_sample, parse_instruction_entries  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +25,37 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episode_limit", type=int, default=None, help="Optional max number of clips to scan")
     parser.add_argument("--max_examples", type=int, default=64, help="Max issue examples to keep")
     return parser
+
+
+def parse_instruction_entries(meta: dict | None) -> tuple[int, list[str]]:
+    if not isinstance(meta, dict):
+        return 0, []
+
+    raw_instruction_num = meta.get("instruction_num", 0)
+    try:
+        instruction_num = max(0, int(raw_instruction_num))
+    except Exception:
+        instruction_num = 0
+
+    raw_instruction = meta.get("instruction", [])
+    if isinstance(raw_instruction, str):
+        slots = [raw_instruction]
+    elif isinstance(raw_instruction, (list, tuple)):
+        slots = list(raw_instruction)
+    else:
+        slots = []
+
+    slots = slots[:instruction_num]
+    cleaned = [str(item).strip() for item in slots if str(item).strip()]
+    return instruction_num, cleaned
+
+
+def clip_id_from_sample(sample: dict, meta: dict | None) -> str:
+    if isinstance(meta, dict):
+        clip_id = meta.get("clip_id")
+        if clip_id:
+            return str(clip_id)
+    return sample["key"].rsplit("_f", 1)[0]
 
 
 def select_shards(source_shard_dir: str, start_shard: int, end_shard: int | None) -> tuple[list[str], int, int]:
