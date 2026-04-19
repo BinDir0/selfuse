@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episode_limit", type=int, default=None, help="Optional max number of clips to scan")
     parser.add_argument("--max_examples", type=int, default=64, help="Max issue examples to keep")
     parser.add_argument(
+        "--summary_only",
+        action="store_true",
+        help="Only count summary stats; skip storing per-clip details and issue examples for lower overhead",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=max(1, min(8, os.cpu_count() or 1)),
@@ -125,7 +130,7 @@ def select_shards(source_shard_dir: str, start_shard: int, end_shard: int | None
     return selected, total_shards, resolved_end
 
 
-def init_shard_report(shard_name: str, max_examples: int) -> dict:
+def init_shard_report(shard_name: str, max_examples: int, summary_only: bool) -> dict:
     return {
         "shard_name": shard_name,
         "samples_total": 0,
@@ -137,12 +142,14 @@ def init_shard_report(shard_name: str, max_examples: int) -> dict:
             "empty_instruction_frames": 0,
             "instruction_num_mismatch_frames": 0,
         },
-        "issue_examples": [],
-        "problem_clips": {},
+        "issue_examples": [] if not summary_only else None,
+        "problem_clips": {} if not summary_only else None,
     }
 
 
 def append_example(container: dict, max_examples: int, reason: str, *, clip_id: str, sample_key: str, shard_name: str, detail=None) -> None:
+    if container["issue_examples"] is None:
+        return
     if len(container["issue_examples"]) >= max_examples:
         return
     record = {
@@ -157,6 +164,8 @@ def append_example(container: dict, max_examples: int, reason: str, *, clip_id: 
 
 
 def update_clip_issue(container: dict, clip_id: str, reason: str) -> None:
+    if container["problem_clips"] is None:
+        return
     clip_stats = container["problem_clips"].setdefault(
         clip_id,
         {
@@ -188,10 +197,10 @@ def iter_shard_meta_entries(shard_path: str):
             yield sample_key, member_file.read()
 
 
-def analyze_one_shard(task: tuple[str, int]) -> dict:
-    shard_path, max_examples = task
+def analyze_one_shard(task: tuple[str, int, bool]) -> dict:
+    shard_path, max_examples, summary_only = task
     shard_name = Path(shard_path).name
-    report = init_shard_report(shard_name, max_examples)
+    report = init_shard_report(shard_name, max_examples, summary_only)
     seen_clips: set[str] = set()
 
     for sample_key, meta_bytes in iter_shard_meta_entries(shard_path):
@@ -281,31 +290,33 @@ def merge_worker_report(report: dict, worker_report: dict) -> None:
     for key, value in worker_report["checks"].items():
         report["checks"][key] += int(value)
 
-    max_examples = int(report["config"]["max_examples"])
-    remaining = max(0, max_examples - len(report["issue_examples"]))
-    if remaining > 0:
-        report["issue_examples"].extend(worker_report["issue_examples"][:remaining])
+    if report["issue_examples"] is not None and worker_report["issue_examples"] is not None:
+        max_examples = int(report["config"]["max_examples"])
+        remaining = max(0, max_examples - len(report["issue_examples"]))
+        if remaining > 0:
+            report["issue_examples"].extend(worker_report["issue_examples"][:remaining])
 
-    for clip_id, clip_stats in worker_report["problem_clips"].items():
-        merged = report["problem_clips"].setdefault(
-            clip_id,
-            {
-                "clip_id": clip_id,
-                "missing_meta_frames": 0,
-                "invalid_meta_frames": 0,
-                "missing_instruction_frames": 0,
-                "empty_instruction_frames": 0,
-                "instruction_num_mismatch_frames": 0,
-            },
-        )
-        for key in (
-            "missing_meta_frames",
-            "invalid_meta_frames",
-            "missing_instruction_frames",
-            "empty_instruction_frames",
-            "instruction_num_mismatch_frames",
-        ):
-            merged[key] += int(clip_stats.get(key, 0))
+    if report["problem_clips"] is not None and worker_report["problem_clips"] is not None:
+        for clip_id, clip_stats in worker_report["problem_clips"].items():
+            merged = report["problem_clips"].setdefault(
+                clip_id,
+                {
+                    "clip_id": clip_id,
+                    "missing_meta_frames": 0,
+                    "invalid_meta_frames": 0,
+                    "missing_instruction_frames": 0,
+                    "empty_instruction_frames": 0,
+                    "instruction_num_mismatch_frames": 0,
+                },
+            )
+            for key in (
+                "missing_meta_frames",
+                "invalid_meta_frames",
+                "missing_instruction_frames",
+                "empty_instruction_frames",
+                "instruction_num_mismatch_frames",
+            ):
+                merged[key] += int(clip_stats.get(key, 0))
 
 
 def build_final_report(args, selected_shards: list[str], total_shards: int, resolved_end: int) -> dict:
@@ -320,6 +331,7 @@ def build_final_report(args, selected_shards: list[str], total_shards: int, reso
             "sample_limit": None if args.sample_limit is None else int(args.sample_limit),
             "episode_limit": None if args.episode_limit is None else int(args.episode_limit),
             "max_examples": int(args.max_examples),
+            "summary_only": bool(args.summary_only),
             "workers": int(args.workers),
             "shards_preview": [Path(path).name for path in selected_shards[:shard_preview_limit]],
             "shards_preview_truncated": max(0, len(selected_shards) - shard_preview_limit),
@@ -336,8 +348,8 @@ def build_final_report(args, selected_shards: list[str], total_shards: int, reso
             "empty_instruction_frames": 0,
             "instruction_num_mismatch_frames": 0,
         },
-        "issue_examples": [],
-        "problem_clips": {},
+        "issue_examples": [] if not args.summary_only else None,
+        "problem_clips": {} if not args.summary_only else None,
     }
 
 
@@ -372,7 +384,7 @@ def main() -> None:
     if workers <= 1:
         with tqdm(selected_shards, desc="Check shards", unit="shard") as progress:
             for shard_path in progress:
-                worker_report = analyze_one_shard((shard_path, int(args.max_examples)))
+                worker_report = analyze_one_shard((shard_path, int(args.max_examples), bool(args.summary_only)))
                 merge_worker_report(report, worker_report)
                 update_progress_postfix(progress, report)
                 if args.sample_limit is not None and report["summary"]["samples_total"] >= int(args.sample_limit):
@@ -380,7 +392,7 @@ def main() -> None:
                 if args.episode_limit is not None and report["summary"]["clips_total"] >= int(args.episode_limit):
                     break
     else:
-        tasks = [(shard_path, int(args.max_examples)) for shard_path in selected_shards]
+        tasks = [(shard_path, int(args.max_examples), bool(args.summary_only)) for shard_path in selected_shards]
         mp_context = get_context()
         with mp_context.Pool(workers) as pool:
             with tqdm(total=len(tasks), desc="Check shards", unit="shard") as progress:
@@ -389,21 +401,24 @@ def main() -> None:
                     progress.update(1)
                     update_progress_postfix(progress, report)
 
-    problem_clips = sorted(
-        report["problem_clips"].values(),
-        key=lambda item: (
-            -(
-                item["missing_meta_frames"]
-                + item["invalid_meta_frames"]
-                + item["missing_instruction_frames"]
-                + item["empty_instruction_frames"]
-                + item["instruction_num_mismatch_frames"]
+    if report["problem_clips"] is not None:
+        problem_clips = sorted(
+            report["problem_clips"].values(),
+            key=lambda item: (
+                -(
+                    item["missing_meta_frames"]
+                    + item["invalid_meta_frames"]
+                    + item["missing_instruction_frames"]
+                    + item["empty_instruction_frames"]
+                    + item["instruction_num_mismatch_frames"]
+                ),
+                item["clip_id"],
             ),
-            item["clip_id"],
-        ),
-    )
-    report["problem_clips"] = problem_clips
-    report["summary"]["problem_clips"] = len(problem_clips)
+        )
+        report["problem_clips"] = problem_clips
+        report["summary"]["problem_clips"] = len(problem_clips)
+    else:
+        report["summary"]["problem_clips"] = None
 
     if args.report_out:
         report_path = Path(args.report_out)
