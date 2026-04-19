@@ -108,6 +108,7 @@ Built-in adapters:
 
 - `buildai`
 - `flat_shard`
+- `fpha_tar`
 - `image_sequence`
 - `legacy_buildai`
 - `video_folder`

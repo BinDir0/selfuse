@@ -1,0 +1,67 @@
+dataset:
+  adapter: fpha_tar
+  source_id: processed_fpha
+  split: train
+
+adapter_config:
+  tar_root: /share_data/louwenjie/FPHA/Video_files/processed_FPHA
+  seq_folder_root: /share_data/louwenjie/FPHA/Video_files/processed_FPHA_outputs
+  fpha_skeleton:
+    enabled: true
+    skeleton_root: /share_data/louwenjie/FPHA/Hand_pose_annotation_v1_1
+    num_iters: 180
+    lr: 0.01
+    pose_reg: 0.0001
+    shape_reg: 0.001
+    temporal_reg: 0.001
+    shape_iters: 120
+    shape_sample_size: 96
+    chunk_size: 256
+    preserve_existing_left: true
+
+paths:
+  annotation_root: /share_data/louwenjie/FPHA/fpha_annotations
+  final_dataset_root: /share_data/louwenjie/FPHA/final_vla_dataset
+  log_root: /share_data/louwenjie/dataset_pipeline_logs
+
+runtimes:
+  hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
+  slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4d/bin/python3.10
+
+infer:
+  common:
+    gpus: 0
+    workers_per_gpu: 1
+    resume: true
+    checkpoint: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/hawor.ckpt
+    infiller_weight: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/infiller.pt
+  detect_motion: {}
+  slam:
+    any4d_batch_size: 32
+    depth_predict_all_frames: true
+  infiller: {}
+
+annotation:
+  command: >
+    echo "FPHA uses filename-derived actions; annotation stage is optional for this config."
+
+filter:
+  stages: detect_track,motion,slam,infiller
+  workers: 8
+  drop_nonfinite_world_res: true
+  drop_nonfinite_slam: true
+
+build:
+  require_annotation: false
+  preprocess_workers: 8
+  writer_workers: 4
+  frames_per_shard: 10000
+  repeat_episodes: 1
+  mano_device: cuda:0
+  source_fps: 30.0
+  target_fps: 30.0
+  interpolate_labels: false
+
+validation:
+  max_clips: 100
+  dataset_sample_checks: 20

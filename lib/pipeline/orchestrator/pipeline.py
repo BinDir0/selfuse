@@ -255,6 +255,50 @@ def run_pipeline(args) -> None:
             )
         return subset_manifest
 
+    def handle_partial_external_stage(
+        *,
+        stage_label: str,
+        source_manifest: Path,
+        return_code: int,
+        output_exists,
+    ) -> Path:
+        source_records = load_clip_manifest(source_manifest)
+        completed_records = []
+        incomplete_clip_ids = []
+
+        for record in source_records:
+            seq_folder = Path(record.descriptor.seq_folder)
+            if output_exists(seq_folder):
+                completed_records.append(record)
+            else:
+                incomplete_clip_ids.append(record.clip_id)
+
+        subset_path = run_dir / f"{source_manifest.stem}.{stage_label}.completed.jsonl"
+        write_clip_manifest(completed_records, subset_path)
+        summary = {
+            "source_manifest": str(source_manifest.resolve()),
+            "completed_manifest": str(subset_path.resolve()),
+            "total": len(source_records),
+            "completed": len(completed_records),
+            "incomplete": len(incomplete_clip_ids),
+            "incomplete_clip_ids_preview": incomplete_clip_ids[:16],
+        }
+        run_summary.setdefault("infer_stage_manifests", {})[stage_label] = summary
+        run_summary["active_manifest_path"] = str(subset_path.resolve())
+        summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if summary["completed"] <= 0:
+            raise RuntimeError(
+                f"{stage_label} failed with exit code {return_code} and produced no successful clips. "
+                f"Summary: {json.dumps(summary, ensure_ascii=False)}"
+            )
+        print(
+            f"[{stage_label}] partial failure tolerated: exit_code={return_code}, "
+            f"continuing with completed subset {summary['completed']}/{summary['total']}",
+            flush=True,
+        )
+        return subset_path
+
     if "preprocess" in stages:
         prepared = adapter.prepare(
             dataset_cfg=dataset_cfg,
@@ -485,64 +529,131 @@ def run_pipeline(args) -> None:
 
     if "infiller" in stages:
         ensure_manifest_exists("infiller", active_manifest_path)
-        infiller_args = tuple(
-            cli_args_from_mapping(
-                infer_cfg.get("infiller"),
-                negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
-            )
-        )
-        if multihost_runner is not None:
-            result = multihost_runner.run_stage(
-                MultihostStageSpec(
-                    pipeline_stage="infiller",
-                    batch_stages="infiller",
-                    runtime_key="hawor",
-                    extra_args=multihost_common_batch_args
-                    + tuple(
-                        cli_args_from_mapping(
-                            sanitize_infer_args_for_multihost(
-                                infer_cfg.get("infiller"),
-                                reserved_keys=MULTIHOST_DISALLOWED_INFER_KEYS,
-                            ),
-                            negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
-                        )
-                    ),
-                    worker_count_per_gpu=infer_stage_worker_count_per_gpu(
-                        pipeline_stage="infiller",
-                        infer_cfg=infer_cfg,
-                    ),
-                )
-            )
-            run_summary.setdefault("multihost_dispatch", {})["infiller"] = result["dispatch_path"]
-            summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
-            if not result["success"]:
-                raise RuntimeError(
-                    "infiller multihost stage failed: "
-                    + json.dumps(result["failed_shards"], ensure_ascii=False)
-                )
-        else:
+        fpha_skeleton_cfg = (
+            adapter_cfg.get("fpha_skeleton")
+            if adapter_name == "fpha_tar"
+            else None
+        ) or {}
+        use_fpha_skeleton_infiller = bool(fpha_skeleton_cfg.get("enabled"))
+        if use_fpha_skeleton_infiller:
+            if multihost_runner is not None:
+                raise ValueError("FPHA skeleton infiller path does not support infer.multihost")
+            common_infer_cfg = infer_cfg.get("common") or {}
+            device = str(fpha_skeleton_cfg.get("device") or "cuda:0")
+            raw_gpus = common_infer_cfg.get("gpus")
+            if fpha_skeleton_cfg.get("device") is None and raw_gpus is not None:
+                if isinstance(raw_gpus, list):
+                    first_gpu = str(raw_gpus[0]).strip() if raw_gpus else ""
+                else:
+                    first_gpu = str(raw_gpus).split(",")[0].strip()
+                if first_gpu:
+                    device = first_gpu if first_gpu.startswith("cuda:") else f"cuda:{first_gpu}"
+            fpha_cmd = [
+                hawor_python,
+                str(PROJECT_ROOT / "scripts" / "generate_fpha_world_res.py"),
+                "--descriptor_manifest",
+                str(active_manifest_path),
+                "--device",
+                device,
+                "--num_iters",
+                str(int(fpha_skeleton_cfg.get("num_iters", 180))),
+                "--lr",
+                str(float(fpha_skeleton_cfg.get("lr", 1e-2))),
+                "--pose_reg",
+                str(float(fpha_skeleton_cfg.get("pose_reg", 1e-4))),
+                "--shape_reg",
+                str(float(fpha_skeleton_cfg.get("shape_reg", 1e-3))),
+                "--temporal_reg",
+                str(float(fpha_skeleton_cfg.get("temporal_reg", 1e-3))),
+            ]
+            if fpha_skeleton_cfg.get("shape_iters") is not None:
+                fpha_cmd.extend(["--shape_iters", str(int(fpha_skeleton_cfg["shape_iters"]))])
+            if fpha_skeleton_cfg.get("shape_sample_size") is not None:
+                fpha_cmd.extend(["--shape_sample_size", str(int(fpha_skeleton_cfg["shape_sample_size"]))])
+            if fpha_skeleton_cfg.get("chunk_size") is not None:
+                fpha_cmd.extend(["--chunk_size", str(int(fpha_skeleton_cfg["chunk_size"]))])
+            if fpha_skeleton_cfg.get("skeleton_root"):
+                fpha_cmd.extend(["--skeleton_root", str(fpha_skeleton_cfg["skeleton_root"])])
+            if bool(common_infer_cfg.get("resume", False)):
+                fpha_cmd.append("--resume")
+            if not bool(fpha_skeleton_cfg.get("preserve_existing_left", True)):
+                fpha_cmd.append("--no-preserve_existing_left")
+
             infiller_return_code = run_logged(
                 "infiller",
-                [
-                    hawor_python,
-                    str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
-                    "--descriptor_manifest",
-                    str(active_manifest_path),
-                    "--run_dir",
-                    str(run_dir),
-                    "--stages",
-                    "infiller",
-                    *common_batch_args,
-                    *infiller_args,
-                ],
+                fpha_cmd,
                 raise_on_error=False,
             )
-            active_manifest_path = handle_partial_infer_stage(
-                stage_label="infiller",
-                completed_stage_name="infiller",
-                source_manifest=active_manifest_path,
-                return_code=infiller_return_code,
+            if infiller_return_code != 0:
+                active_manifest_path = handle_partial_external_stage(
+                    stage_label="infiller",
+                    source_manifest=active_manifest_path,
+                    return_code=infiller_return_code,
+                    output_exists=lambda seq_folder: (
+                        (seq_folder / "world_space_res.pth").is_file()
+                        and get_stage_done_marker(seq_folder, "infiller").exists()
+                    ),
+                )
+        else:
+            infiller_args = tuple(
+                cli_args_from_mapping(
+                    infer_cfg.get("infiller"),
+                    negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
+                )
             )
+            if multihost_runner is not None:
+                result = multihost_runner.run_stage(
+                    MultihostStageSpec(
+                        pipeline_stage="infiller",
+                        batch_stages="infiller",
+                        runtime_key="hawor",
+                        extra_args=multihost_common_batch_args
+                        + tuple(
+                            cli_args_from_mapping(
+                                sanitize_infer_args_for_multihost(
+                                    infer_cfg.get("infiller"),
+                                    reserved_keys=MULTIHOST_DISALLOWED_INFER_KEYS,
+                                ),
+                                negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
+                            )
+                        )
+                        ,
+                        worker_count_per_gpu=infer_stage_worker_count_per_gpu(
+                            pipeline_stage="infiller",
+                            infer_cfg=infer_cfg,
+                        ),
+                    )
+                )
+                run_summary.setdefault("multihost_dispatch", {})["infiller"] = result["dispatch_path"]
+                summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+                if not result["success"]:
+                    raise RuntimeError(
+                        "infiller multihost stage failed: "
+                        + json.dumps(result["failed_shards"], ensure_ascii=False)
+                    )
+            else:
+                infiller_return_code = run_logged(
+                    "infiller",
+                    [
+                        hawor_python,
+                        str(PROJECT_ROOT / "scripts" / "batch_infer.py"),
+                        "--descriptor_manifest",
+                        str(active_manifest_path),
+                        "--run_dir",
+                        str(run_dir),
+                        "--stages",
+                        "infiller",
+                        *common_batch_args,
+                        *infiller_args,
+                    ],
+                    raise_on_error=False,
+                )
+                active_manifest_path = handle_partial_infer_stage(
+                    stage_label="infiller",
+                    completed_stage_name="infiller",
+                    source_manifest=active_manifest_path,
+                    return_code=infiller_return_code,
+                )
 
     if "filter" in stages:
         ensure_manifest_exists("filter", active_manifest_path)

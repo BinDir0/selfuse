@@ -43,7 +43,9 @@ validation: {}
 
 - `dataset_pipeline_buildai.example.yaml`: standard BuildAI-style config
 - `dataset_pipeline_buildai.compact.example.yaml`: compact shorthand form
+- `dataset_pipeline_fpha.yaml`: ready-to-run FPHA config
 - `dataset_pipeline_flat_shard.example.yaml`: flat shard adapter example
+- `dataset_pipeline_fpha_tar.example.yaml`: FPHA sequence-per-tar adapter example
 - `dataset_pipeline_image_sequence.example.yaml`: image-sequence adapter example
 - `dataset_pipeline_video_folder.example.yaml`: video-folder adapter example
 - `dataset_pipeline_legacy_buildai.example.yaml`: old processed BuildAI layout
