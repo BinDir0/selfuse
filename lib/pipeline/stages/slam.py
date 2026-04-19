@@ -44,6 +44,7 @@ CORRUPT_STAGE_ERROR_TOKENS = (
     "truncated",
     "unexpected end of data",
     "cannot identify image file",
+    "failed to write stage3 frame cache file",
 )
 
 
@@ -105,7 +106,12 @@ def _resolve_any4d_batch_size(default_batch_size: int) -> int:
 
 
 def _resolve_stage3_tmp_root(args) -> str:
-    tmp_root = getattr(args, "stage3_tmp_root", None) or os.environ.get("HAWOR_STAGE3_TMP_ROOT") or "/DATA/guantianrui/tmp"
+    tmp_root = (
+        getattr(args, "stage3_tmp_root", None)
+        or os.environ.get("HAWOR_STAGE3_TMP_ROOT")
+        or os.environ.get("HAWOR_BATCH_TMPDIR")
+        or "/DATA/guantianrui/tmp"
+    )
     tmp_root = os.path.abspath(os.path.expanduser(tmp_root))
     if not os.path.isdir(tmp_root):
         raise FileNotFoundError(f"Stage3 tmp root does not exist: {tmp_root}")
@@ -127,6 +133,29 @@ def _direct_frame_path(frame_source, frame_idx: int):
         return None
     path = image_paths[frame_idx]
     return path if os.path.exists(path) else None
+
+
+def _raw_frame_bytes(frame_source, frame_idx: int):
+    getter = getattr(frame_source, "get_frame_bytes", None)
+    if not callable(getter):
+        return None
+    return getter(frame_idx)
+
+
+def _frame_output_extension(frame_source, frame_idx: int):
+    image_paths = getattr(frame_source, "image_paths", None)
+    if image_paths is not None and 0 <= frame_idx < len(image_paths):
+        suffix = Path(image_paths[frame_idx]).suffix.lower()
+        if suffix:
+            return suffix
+
+    frame_names = getattr(frame_source, "frame_names", None)
+    if frame_names is not None and 0 <= frame_idx < len(frame_names):
+        suffix = Path(frame_names[frame_idx]).suffix.lower()
+        if suffix:
+            return suffix
+
+    return ".png"
 
 
 def _stage3_frame_cache_dir(tmp_root: str, seq_folder: str, start_idx: int, end_idx: int) -> str:
@@ -161,7 +190,10 @@ def _build_stage3_workspace(frame_source, frame_ids: np.ndarray, seq_folder: str
 
     cache_dir = _stage3_frame_cache_dir(tmp_root, seq_folder, start_idx, end_idx)
     ready_marker = _stage3_frame_cache_marker(cache_dir)
-    expected_paths = {frame_id: os.path.join(cache_dir, f"{frame_id:06d}.png") for frame_id in frame_id_list}
+    expected_paths = {
+        frame_id: os.path.join(cache_dir, f"{frame_id:06d}{_frame_output_extension(frame_source, frame_id)}")
+        for frame_id in frame_id_list
+    }
 
     if os.path.isfile(ready_marker):
         if all(os.path.isfile(path) for path in expected_paths.values()):
@@ -183,15 +215,21 @@ def _build_stage3_workspace(frame_source, frame_ids: np.ndarray, seq_folder: str
     os.makedirs(cache_dir, exist_ok=True)
 
     for frame_id in frame_id_list:
+        out_path = expected_paths[frame_id]
         try:
+            payload = _raw_frame_bytes(frame_source, frame_id)
+            if payload is not None:
+                with open(out_path, "wb") as handle:
+                    handle.write(payload)
+                continue
+
             image = frame_source.get_frame(frame_id, rgb=False)
         except Exception as error:
             raise CorruptStageDataError(
                 f"Failed to materialize stage3 frame {frame_id} for {seq_folder}: {error}"
             ) from error
-        out_path = expected_paths[frame_id]
         if not cv2.imwrite(out_path, image):
-            raise CorruptStageDataError(f"Failed to write stage3 frame cache image: {out_path}")
+            raise CorruptStageDataError(f"Failed to write stage3 frame cache file: {out_path}")
 
     Path(ready_marker).touch()
     ordered_paths = [expected_paths[frame_id] for frame_id in frame_id_list]

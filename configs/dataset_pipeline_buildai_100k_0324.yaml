@@ -27,6 +27,7 @@ infer:
   slam:
     any4d_batch_size: 32
     depth_predict_all_frames: true
+    stage3_tmp_root: /DATA/guantianrui/tmp
   infiller:
     infiller_window_batch_size: 64
 

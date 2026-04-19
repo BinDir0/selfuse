@@ -45,6 +45,7 @@ infer:
     depth_predict_all_frames: true
     any4d_repo_root: /share_data/guantianrui/RoWaH/thirdparty/Any4D
     any4d_checkpoint_path: /share_data/guantianrui/Any4D/checkpoints/any4d_4v_combined.pth
+    stage3_tmp_root: /DATA/guantianrui/tmp
   infiller:
     infiller_window_batch_size: 64
 

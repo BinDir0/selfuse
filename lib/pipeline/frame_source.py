@@ -3,6 +3,7 @@ import numpy as np
 import os
 import threading
 from collections import OrderedDict
+from pathlib import Path
 
 import torch
 import torch.utils.data
@@ -48,6 +49,9 @@ class BaseFrameSource:
         raise NotImplementedError
 
     def get_frame(self, index: int, rgb: bool = False):
+        raise NotImplementedError
+
+    def get_frame_bytes(self, index: int):
         raise NotImplementedError
 
     def iter_frames(self, rgb: bool = False):
@@ -114,6 +118,14 @@ class ImageFolderFrameSource(BaseFrameSource):
         if rgb:
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return frame
+
+    def get_frame_bytes(self, index: int):
+        if index < 0 or index >= len(self.image_paths):
+            raise IndexError(
+                f"Frame index {index} out of range [0, {len(self.image_paths)}). "
+                f"Total frames available: {len(self.image_paths)}"
+            )
+        return Path(self.image_paths[index]).read_bytes()
 
 
 class ShardVideoFrameSource(BaseFrameSource):
@@ -182,36 +194,7 @@ class ShardVideoFrameSource(BaseFrameSource):
                 f"Total frames available: {len(self.frame_names)}"
             )
 
-        member_name = self.frame_names[index]
-
-        # Fast path: direct offset read using pread, which is thread-safe.
-        if self.frame_offsets is not None:
-            offset, size = self.frame_offsets[index]
-            jpeg_data = os.pread(self._get_fd(), size, offset)
-            if len(jpeg_data) != size:
-                raise RuntimeError(
-                    f"Short read from tar: {self.tar_path}/{member_name} "
-                    f"(expected {size} bytes, got {len(jpeg_data)})"
-                )
-        else:
-            member_index = _load_shard_member_index(self.tar_path)
-            offset_size = member_index.get(member_name)
-            if offset_size is not None:
-                offset, size = offset_size
-                jpeg_data = os.pread(self._get_fd(), size, offset)
-                if len(jpeg_data) != size:
-                    raise RuntimeError(
-                        f"Short read from tar: {self.tar_path}/{member_name} "
-                        f"(expected {size} bytes, got {len(jpeg_data)})"
-                    )
-            else:
-                # Fallback for unexpected tar metadata drift.
-                tar = self._get_tar()
-                member = tar.getmember(member_name)
-                extracted = tar.extractfile(member)
-                if extracted is None:
-                    raise RuntimeError(f"Failed to extract image from tar: {self.tar_path}/{member_name}")
-                jpeg_data = extracted.read()
+        member_name, jpeg_data = self._read_member_bytes(index)
 
         if self.use_turbojpeg and member_name.lower().endswith(('.jpg', '.jpeg')):
             try:
@@ -228,6 +211,48 @@ class ShardVideoFrameSource(BaseFrameSource):
         if rgb:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return frame
+
+    def _read_member_bytes(self, index: int):
+        if index < 0 or index >= len(self.frame_names):
+            raise IndexError(
+                f"Frame index {index} out of range [0, {len(self.frame_names)}). "
+                f"Total frames available: {len(self.frame_names)}"
+            )
+
+        member_name = self.frame_names[index]
+
+        if self.frame_offsets is not None:
+            offset, size = self.frame_offsets[index]
+            payload = os.pread(self._get_fd(), size, offset)
+            if len(payload) != size:
+                raise RuntimeError(
+                    f"Short read from tar: {self.tar_path}/{member_name} "
+                    f"(expected {size} bytes, got {len(payload)})"
+                )
+            return member_name, payload
+
+        member_index = _load_shard_member_index(self.tar_path)
+        offset_size = member_index.get(member_name)
+        if offset_size is not None:
+            offset, size = offset_size
+            payload = os.pread(self._get_fd(), size, offset)
+            if len(payload) != size:
+                raise RuntimeError(
+                    f"Short read from tar: {self.tar_path}/{member_name} "
+                    f"(expected {size} bytes, got {len(payload)})"
+                )
+            return member_name, payload
+
+        tar = self._get_tar()
+        member = tar.getmember(member_name)
+        extracted = tar.extractfile(member)
+        if extracted is None:
+            raise RuntimeError(f"Failed to extract image from tar: {self.tar_path}/{member_name}")
+        return member_name, extracted.read()
+
+    def get_frame_bytes(self, index: int):
+        _, payload = self._read_member_bytes(index)
+        return payload
 
     def __del__(self):
         if self._fd is not None:
