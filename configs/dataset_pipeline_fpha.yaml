@@ -8,7 +8,7 @@ adapter_config:
   seq_folder_root: /share_data/louwenjie/FPHA/Video_files/processed_FPHA_outputs
   fpha_skeleton:
     enabled: true
-    skeleton_root: /share_data/louwenjie/FPHA/Hand_pose_annotation_v1_1
+    skeleton_root: /share_data/louwenjie/FPHA/Hand_pose_annotation_v1
     device: cuda
     num_iters: 180
     lr: 0.01

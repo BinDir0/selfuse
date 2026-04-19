@@ -42,10 +42,23 @@ def parse_fpha_clip_identity(clip_id: str) -> tuple[str, str, str]:
 
 def resolve_fpha_skeleton_root(*, tar_root: str | Path | None = None, skeleton_root: str | Path | None = None) -> Path:
     if skeleton_root:
-        path = Path(skeleton_root).expanduser().resolve()
-        if not path.is_dir():
-            raise FileNotFoundError(f"FPHA skeleton_root not found: {path}")
-        return path
+        requested = Path(skeleton_root).expanduser()
+        candidates = [requested]
+        name = requested.name
+        parent = requested.parent
+        if name == "Hand_pose_annotation_v1_1":
+            candidates.append(parent / "Hand_pose_annotation_v1")
+        elif name == "Hand_pose_annotation_v1":
+            candidates.append(parent / "Hand_pose_annotation_v1_1")
+
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved.is_dir():
+                return resolved
+        raise FileNotFoundError(
+            "FPHA skeleton_root not found: "
+            f"{requested.resolve()}; tried {[str(candidate.resolve()) for candidate in candidates]}"
+        )
 
     if tar_root is None:
         raise ValueError("Either tar_root or skeleton_root must be provided")
