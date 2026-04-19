@@ -9,6 +9,7 @@ adapter_config:
   fpha_skeleton:
     enabled: true
     skeleton_root: /share_data/louwenjie/FPHA/Hand_pose_annotation_v1_1
+    device: cuda
     num_iters: 180
     lr: 0.01
     pose_reg: 0.0001
@@ -30,16 +31,22 @@ runtimes:
 
 infer:
   common:
-    gpus: 0
-    workers_per_gpu: 1
+    gpus: 0,1,2,3,4,5,6,7
     resume: true
     checkpoint: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/hawor.ckpt
     infiller_weight: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/infiller.pt
-  detect_motion: {}
+  detect_motion:
+    chunk_batch_size: 128
+    num_workers: 16
+    detect_batch_size: 128
+    detect_io_workers: 8
   slam:
     any4d_batch_size: 32
     depth_predict_all_frames: true
-  infiller: {}
+    any4d_repo_root: /share_data/guantianrui/RoWaH/thirdparty/Any4D
+    any4d_checkpoint_path: /share_data/guantianrui/Any4D/checkpoints/any4d_4v_combined.pth
+  infiller:
+    infiller_window_batch_size: 64
 
 annotation:
   command: >
@@ -60,7 +67,7 @@ build:
   mano_device: cuda:0
   source_fps: 30.0
   target_fps: 30.0
-  interpolate_labels: false
+  interpolate_labels: true
 
 validation:
   max_clips: 100
