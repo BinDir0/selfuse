@@ -43,7 +43,8 @@ def build_metadata(
     args,
     use_relative_action,
     history_pad_mode,
-    future_pad_mode,
+    action_pad_mode,
+    future_frame_pad_mode,
     selection_metadata,
     fit_metadata,
 ):
@@ -61,7 +62,8 @@ def build_metadata(
             "mode": "val",
             "use_relative_action": bool(use_relative_action),
             "history_pad_mode": history_pad_mode,
-            "future_pad_mode": future_pad_mode,
+            "action_pad_mode": action_pad_mode,
+            "future_frame_pad_mode": future_frame_pad_mode,
             "max_total_shards": args.max_total_shards,
             "min_shards_per_dataset": args.min_shards_per_dataset,
             "seed": args.seed,
@@ -185,8 +187,9 @@ def main():
     shape_meta_cfg = cfg.data.shape_meta if "data" in cfg and "shape_meta" in cfg.data else cfg.shape_meta
     shape_meta = OmegaConf.to_container(shape_meta_cfg, resolve=True)
     use_relative_action = vla_cfg.get("use_relative_action", False)
-    history_pad_mode = vla_cfg.get("history_pad_mode", "repeat")
-    future_pad_mode = vla_cfg.get("future_pad_mode", "repeat")
+    history_pad_mode = shape_meta.get("history_pad_mode", "repeat")
+    action_pad_mode = shape_meta["action"].get("pad_mode", "truncate")
+    future_frame_pad_mode = shape_meta.get("future_frame", {}).get("pad_mode", "repeat")
 
     normalizer_dataset = VLALowLevelWdsDataset(
         wds_datasets=wds_datasets,
@@ -196,8 +199,6 @@ def main():
         max_total_shards=args.max_total_shards,
         min_shards_per_dataset=args.min_shards_per_dataset,
         seed=args.seed,
-        history_pad_mode=history_pad_mode,
-        future_pad_mode=future_pad_mode,
     )
     selection_metadata = normalizer_dataset.describe_shard_selection()
     print("   Dataset created successfully")
@@ -245,7 +246,8 @@ def main():
             args=args,
             use_relative_action=use_relative_action,
             history_pad_mode=history_pad_mode,
-            future_pad_mode=future_pad_mode,
+            action_pad_mode=action_pad_mode,
+            future_frame_pad_mode=future_frame_pad_mode,
             selection_metadata=selection_metadata,
             fit_metadata=fit_metadata,
         )

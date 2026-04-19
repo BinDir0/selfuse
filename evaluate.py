@@ -176,8 +176,6 @@ def main(eval_cfg):
         mode="val",
         shuffle_buffer=0,
         depth_clip_range=depth_clip_range,
-        history_pad_mode=vla_ds_cfg.history_pad_mode,
-        future_pad_mode=vla_ds_cfg.future_pad_mode,
         video_base_fps=float(train_cfg.data.video_base_fps),
         target_image_size=list(target_image_size) if target_image_size else None,
     )

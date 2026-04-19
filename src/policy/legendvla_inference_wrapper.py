@@ -99,8 +99,7 @@ class LegendVLAInference(nn.Module):
         self.state_dim = self.model.shape_meta["obs"]["state"]["shape"][0]
         self.image_horizon = self.model.shape_meta["obs"]["rgb"]["horizon"]
         self.image_stride = self.model.shape_meta["obs"]["rgb"].get("stride", 1)
-        vla_dataset_cfg = model_cfg.dataset.vla_dataset
-        self.history_pad_mode = getattr(vla_dataset_cfg, "history_pad_mode", "truncate")
+        self.history_pad_mode = self.model.shape_meta.get("history_pad_mode", "repeat")
         data_cfg = model_cfg.data
         self.video_base_fps = float(getattr(data_cfg, "video_base_fps", 30.0))
         target_image_size = getattr(data_cfg, "target_image_size", None)

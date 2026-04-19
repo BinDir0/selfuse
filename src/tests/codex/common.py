@@ -106,7 +106,7 @@ def build_dummy_collator() -> UnifiedVLACollator:
 
 def build_wrapper_stub(
     *,
-    history_pad_mode: str = "truncate",
+    history_pad_mode: str = "repeat",
     mode: str = "flow",
     data_collator: Any | None = None,
 ) -> LegendVLAInference:

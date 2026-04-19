@@ -398,8 +398,6 @@ def build_real_dataloader(
         use_relative_action=False,
         mode="val",
         shuffle_buffer=1,
-        history_pad_mode="repeat",
-        future_pad_mode="repeat",
     )
     vlm_dataset = None
     if include_vlm:

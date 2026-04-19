@@ -50,8 +50,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         mode: str = "train",
         depth_clip_range=None,
         shuffle_buffer: int = 16384,
-        history_pad_mode: str = "repeat",
-        future_pad_mode: str = "repeat",
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
         video_base_fps: float = 30.0,
@@ -95,7 +93,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.collator = None
         self.normalizer = None
 
-        # Sampling config from shape_meta
+        # Sampling config from shape_meta.
         self.action_horizon = shape_meta["action"]["horizon"]
         self.state_horizon = shape_meta["obs"]["state"]["horizon"]
         self.image_horizon = shape_meta["obs"]["rgb"]["horizon"]
@@ -111,10 +109,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             state_stride=shape_meta["obs"]["state"]["stride"],
             image_horizon=shape_meta["obs"]["rgb"]["horizon"],
             image_stride=shape_meta["obs"]["rgb"]["stride"],
-            history_pad_mode=history_pad_mode,
-            future_pad_mode=future_pad_mode,
+            history_pad_mode=shape_meta.get("history_pad_mode", "repeat"),
+            action_pad_mode=shape_meta["action"].get("pad_mode", "truncate"),
             future_frame_horizon=self.future_frame_horizon,
             future_frame_stride=self.future_frame_stride,
+            future_frame_pad_mode=ff_cfg.get("pad_mode", "repeat"),
         )
 
         # process_image only checks truthiness; actual color aug lives in
@@ -164,7 +163,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
     def build_debug_raw_sample(self, sample):
         """Keep the dataset sample before state/image processing for offline inspection."""
         debug_sample = {
-            "valid_action_len": np.array(sample["valid_action_len"], dtype=np.int32),
             "wrist_state": sample["wrist_state"].astype(np.float32),
             "hand_state": sample["hand_state"].astype(np.float32),
             "wrist_action": sample["wrist_action"].astype(np.float32),
@@ -297,14 +295,14 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
                     "Set data.target_image_size in the config."
                 )
             tH, tW = self.target_image_size
-            shared_valid_len = sample.get("valid_future_frame_len")
 
             def pad_future(source):
+                # Valid count = len(source): gather_future_refs already respected
+                # future_frame_pad_mode (repeat fills to K, truncate yields real count).
                 frames = np.zeros((K, tH, tW, 3), dtype=np.uint8)
                 if source is None:
                     return frames, 0
-                raw = shared_valid_len if shared_valid_len is not None else source.shape[0]
-                n = min(raw, K)
+                n = min(source.shape[0], K)
                 if n > 0:
                     frames[:n] = resize_frames(source[:n], self.target_image_size)
                 return frames, n
@@ -409,8 +407,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             mode="val",
             depth_clip_range=self.depth_clip_range,
             shuffle_buffer=0,
-            history_pad_mode=self.window_config.history_pad_mode,
-            future_pad_mode=self.window_config.future_pad_mode,
             return_dataset_info=self.return_dataset_info,
             target_image_size=list(self.target_image_size) if self.target_image_size else None,
             debug_capture_raw_sample=self.debug_capture_raw_sample,
@@ -625,8 +621,6 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         max_total_shards: Optional[int] = None,
         min_shards_per_dataset: int = 8,
         seed: int = 0,
-        history_pad_mode: str = "repeat",
-        future_pad_mode: str = "repeat",
     ):
         super().__init__()
         self.wds_datasets = wds_datasets
@@ -649,6 +643,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         if self.max_total_shards is not None and self.max_total_shards < 1:
             raise ValueError("max_total_shards must be >= 1 when provided")
 
+        # Normalizer fitting only reads lowdim; no future-frame supervision.
         self.window_config = WindowConfig(
             action_horizon=shape_meta["action"]["horizon"],
             action_stride=shape_meta["action"]["stride"],
@@ -656,8 +651,8 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             state_stride=shape_meta["obs"]["state"]["stride"],
             image_horizon=shape_meta["obs"]["rgb"]["horizon"],
             image_stride=shape_meta["obs"]["rgb"]["stride"],
-            history_pad_mode=history_pad_mode,
-            future_pad_mode=future_pad_mode,
+            history_pad_mode=shape_meta.get("history_pad_mode", "repeat"),
+            action_pad_mode=shape_meta["action"].get("pad_mode", "truncate"),
         )
 
     def sample_to_data(self, sample):

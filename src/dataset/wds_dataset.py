@@ -112,16 +112,17 @@ class WindowConfig:
     image_horizon: int = 1
     image_stride: int = 30
     history_pad_mode: str = "repeat"
-    future_pad_mode: str = "repeat"
+    action_pad_mode: str = "truncate"
     future_frame_horizon: int = 0
     future_frame_stride: int = 30
+    future_frame_pad_mode: str = "repeat"
 
     def __post_init__(self):
         valid_modes = {"repeat", "truncate"}
-        if self.history_pad_mode not in valid_modes:
-            raise ValueError(f"Invalid history pad mode: {self.history_pad_mode}")
-        if self.future_pad_mode not in valid_modes:
-            raise ValueError(f"Invalid future pad mode: {self.future_pad_mode}")
+        for name in ("history_pad_mode", "action_pad_mode", "future_frame_pad_mode"):
+            value = getattr(self, name)
+            if value not in valid_modes:
+                raise ValueError(f"Invalid {name}: {value}")
 
     @property
     def past_size(self):
@@ -229,15 +230,17 @@ def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
     Action chunks use offset_base=0 (buf[0] is the first target),
     future frames use offset_base=stride (skip current frame).
 
-    Args:
-        buf: deque of frames, buf[0] is the current frame.
-        horizon: number of references to gather.
-        stride: temporal stride between references.
-        pad_mode: "repeat" (pad with last available) or "truncate" (skip).
-        offset_base: starting offset into buf for the first reference.
+    Pad-mode semantics (`valid_count` follows downstream supervision):
+    - ``repeat``: refs is always length ``horizon``; padded positions hold
+      copies of the last real frame and are treated as VALID supervision.
+      ``valid_count == horizon`` whenever the buffer is non-empty.
+    - ``truncate``: refs has only the truly-available refs; ``valid_count``
+      equals the real number of in-bound offsets. Downstream masks skip
+      the invalid tail.
 
     Returns:
-        (refs, valid_count): gathered references and how many came from buf.
+        (refs, valid_count): gathered references and count of positions
+        treated as valid supervision.
     """
     refs = []
     valid_count = 0
@@ -248,6 +251,7 @@ def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
             valid_count += 1
         elif pad_mode == "repeat":
             refs.append(buf[-1])
+            valid_count += 1
     return refs, valid_count
 
 
@@ -264,22 +268,23 @@ def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim
     lowdim_slices = build_lowdim_slices(cameras)
 
     # --- Action chunk: gather only action-horizon lowdim targets ---
-    action_refs, valid_action_len = gather_future_refs(
-        buf, config.action_horizon, config.action_stride, config.future_pad_mode,
+    # valid count is implied by len(lowdims_full): downstream reads action shape.
+    action_refs, _ = gather_future_refs(
+        buf, config.action_horizon, config.action_stride, config.action_pad_mode,
         offset_base=0,
     )
     lowdims = np.stack([frame["lowdim.npy"] for frame in action_refs], axis=0)
     len_lowdims = lowdims.shape[0]
-    if config.future_pad_mode == "repeat":
+    if config.action_pad_mode == "repeat":
         if len_lowdims < config.action_horizon:
             pad = np.tile(lowdims[-1:], (config.action_horizon - len_lowdims, 1))
             lowdims_full = np.concatenate([lowdims, pad], axis=0)
         else:
             lowdims_full = lowdims
-    elif config.future_pad_mode == "truncate":
+    elif config.action_pad_mode == "truncate":
         lowdims_full = lowdims
     else:
-        raise ValueError(f"Invalid future pad mode: {config.future_pad_mode}")
+        raise ValueError(f"Invalid action_pad_mode: {config.action_pad_mode}")
 
     # --- State: gather history frames ---
     state_frames = gather_history_frames(
@@ -296,9 +301,10 @@ def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim
     # --- Future frames for world model supervision ---
     future_frame_refs = None
     if not lowdim_only and config.future_frame_horizon > 0:
-        ff_refs, valid_ff_len = gather_future_refs(
+        # valid count is implied by len(ff_refs); sample_to_data derives it.
+        ff_refs, _ = gather_future_refs(
             buf, config.future_frame_horizon, config.future_frame_stride,
-            config.future_pad_mode, offset_base=config.future_frame_stride,
+            config.future_frame_pad_mode, offset_base=config.future_frame_stride,
         )
         if ff_refs:
             future_frame_refs = tuple(ff_refs)
@@ -306,7 +312,7 @@ def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim
     # head_* slices map to the unprefixed canonical keys; breast_* surface
     # only when load_breast_camera is set.
     ld = current["lowdim.npy"]
-    result = {"valid_action_len": valid_action_len}
+    result = {}
     for field, (s, e) in lowdim_slices.items():
         if field.endswith("_state"):
             result[field] = state_lds[:, s:e].astype(np.float32)
@@ -332,7 +338,6 @@ def build_sample_from_window(buf, past, config, load_breast_camera=False, lowdim
         result["image_frame_refs"] = image_frame_refs
     if future_frame_refs is not None:
         result["future_frame_refs"] = future_frame_refs
-        result["valid_future_frame_len"] = valid_ff_len
     return result
 
 

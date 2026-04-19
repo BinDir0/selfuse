@@ -56,13 +56,13 @@ policy:
     text_attn_implementation: ${pretrained.text_attn_implementation}
     vision_attn_implementation: ${pretrained.vision_attn_implementation}
     mem_temporal_attention:
-      enabled: True
+      enabled: False
       every_n_layers: 4
       max_temporal_len: 32
       sinusoidal_pe_base: 10000.0
       # T frames per entry. Dataset / collator pad VLM samples to this T so
       # MEM can do uniform-shape view + SDPA without per-entry mask.
-      num_frames: ${data.n_obs_image_steps}
+      num_frames: ${data.shape_meta.obs.rgb.horizon}
       # Whether to zero out non-VLA entries' MEM residual to preserve pretrained
       # VLM behavior. False = simplest code, VLM gets a small extra transform
       # from MEM (training adapts). True = strict semantic preservation but
@@ -196,6 +196,8 @@ policy:
   # World model (conditionally instantiated from world_model config group)
   world_model_expert: ${world_model.world_model_expert}
   frozen_teacher: ${world_model.frozen_teacher}
+  wm_action_encoder: ${world_model.wm_action_encoder}
+  wm_motion_encoder: ${world_model.wm_motion_encoder}
   world_model_config:
     _target_: src.policy.legendvla.WorldModelConfig
     num_future_frames: ${world_model.future_frame.horizon}
@@ -203,4 +205,4 @@ policy:
     teacher_patch_size: ${world_model.teacher_patch_size}
     upsample_factor: ${world_model.upsample_factor}
     action_conditioning: ${world_model.action_conditioning}
-    detach_action_cond: ${world_model.detach_action_cond}
+    motion_conditioning: ${world_model.motion_conditioning}

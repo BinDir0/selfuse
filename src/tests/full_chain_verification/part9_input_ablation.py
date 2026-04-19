@@ -80,8 +80,6 @@ def build_vla_dataset(cfg, normalizer_path: str, shard_pattern: str):
         mode="val",
         depth_clip_range=depth_clip,
         shuffle_buffer=0,
-        history_pad_mode=cfg.dataset.vla_dataset.get("history_pad_mode", "repeat"),
-        future_pad_mode=cfg.dataset.vla_dataset.get("future_pad_mode", "truncate"),
         target_image_size=target_size,
         video_base_fps=float(cfg.data.get("video_base_fps", 30.0)),
     )

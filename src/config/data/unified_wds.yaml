@@ -11,18 +11,15 @@ data:
   tokenizer_padding: max_length
   depth_clip_range: [0.0, 5.0]
   video_base_fps: 30.0
-  n_obs_image_steps: 6
-  n_obs_image_stride: 30
-  n_obs_state_steps: 6
-  n_obs_state_stride: 30
-  n_action_steps: 32
-  n_action_stride: 1
+  # Sampling contract: WindowConfig reads horizons/strides/pad_modes from here.
+  # history_pad_mode covers obs; action + future_frame each carry their own pad_mode.
   shape_meta:
+    history_pad_mode: repeat
     obs:
       rgb:
         type: rgb
-        horizon: ${data.n_obs_image_steps}
-        stride: ${data.n_obs_image_stride}
+        horizon: 6
+        stride: 30
       depth:
         shape: [224, 224]
         type: depth
@@ -36,17 +33,19 @@ data:
         shape:
           - ${dims.state_dim}
         type: fingertips
-        horizon: ${data.n_obs_state_steps}
-        stride: ${data.n_obs_state_stride}
+        horizon: 6
+        stride: 30
     action:
       shape:
         - ${dims.action_dim}
       type: fingertips
-      horizon: ${data.n_action_steps}
-      stride: ${data.n_action_stride}
+      horizon: 32
+      stride: 1
+      pad_mode: truncate
     future_frame:
       horizon: ${world_model.future_frame.horizon}
       stride: ${world_model.future_frame.stride}
+      pad_mode: repeat
 
 dataset:
   _target_: src.dataset.vla_dataset.UnifiedWdsDataset
@@ -58,8 +57,6 @@ dataset:
     use_relative_action: True
     depth_clip_range: ${data.depth_clip_range}
     val_wds_datasets: ${val_vla_wds_datasets}
-    history_pad_mode: repeat
-    future_pad_mode: repeat
     shuffle_buffer: 16384
     video_base_fps: ${data.video_base_fps}
     target_image_size: ${data.target_image_size}
@@ -81,7 +78,7 @@ dataset:
     # When MEM is on, repeat VLM image to T frames at the dataset layer so
     # collator + backbone see uniform (T, N) entries everywhere.
     mem_enabled: ${policy.backbone.mem_temporal_attention.enabled}
-    n_obs_image_steps: ${data.n_obs_image_steps}
+    n_obs_image_steps: ${data.shape_meta.obs.rgb.horizon}
     target_image_size: ${data.target_image_size}
     keep_ratio: 1.0
   vla_ratio: ${eval:'5/6'}

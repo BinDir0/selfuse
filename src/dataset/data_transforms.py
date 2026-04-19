@@ -350,3 +350,34 @@ def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
         depth_image = np.clip(depth_image, depth_clip_range[0], depth_clip_range[1])
 
     return image, depth_image, intrinsic
+
+
+def compute_relative_motion_padded(
+    current_flat16: Optional[np.ndarray],
+    future_flat: Optional[np.ndarray],
+    n_valid: int,
+    K: int,
+) -> np.ndarray:
+    """Future camera pose expressed in the current camera frame.
+
+    The dataset stores T_world→cam extrinsics, so the transform that takes
+    a point in future-cam coordinates back to current-cam coordinates is
+    ``T_cam_cur ← cam_fut = T_w2c_cur @ T_c2w_fut = T_w2c_cur @ inv(T_w2c_fut[k])``.
+
+    Invalid steps (k >= n_valid or source missing) are zero-filled;
+    downstream mask (frame_valid = arange(K) < n_future_frames) drops them.
+    Flattened to 16D (row-major) per future step for loader emission.
+    """
+    out = np.zeros((K, 16), dtype=np.float32)
+    if current_flat16 is None or future_flat is None or n_valid <= 0:
+        return out
+    n = min(int(n_valid), int(K), int(future_flat.shape[0]))
+    if n <= 0:
+        return out
+    T_cur = current_flat16.reshape(4, 4).astype(np.float32)
+    T_fut = future_flat[:n].reshape(n, 4, 4).astype(np.float32)
+    T_fut_inv = np.linalg.inv(T_fut)
+    # rel[k] = T_cur @ inv(T_fut[k])
+    rel = np.einsum("ij,kjl->kil", T_cur, T_fut_inv)
+    out[:n] = rel.reshape(n, 16)
+    return out

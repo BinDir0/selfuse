@@ -140,7 +140,7 @@ def test_state_repeat_partial_past():
 def test_action_repeat_padding():
     """Action chunk pads with last available frame in repeat mode."""
     config = WindowConfig(
-        action_horizon=6, future_pad_mode="repeat",
+        action_horizon=6, action_pad_mode="repeat",
         state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
     )
@@ -175,7 +175,7 @@ def test_state_truncate_no_past():
 def test_action_truncate():
     """Truncate mode: action chunk is shorter than horizon."""
     config = WindowConfig(
-        action_horizon=6, future_pad_mode="truncate",
+        action_horizon=6, action_pad_mode="truncate",
         state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
     )
@@ -192,9 +192,10 @@ def test_action_sampling_uses_own_horizon_when_future_frames_need_longer_buffer(
     config = WindowConfig(
         action_horizon=4,
         action_stride=1,
-        future_pad_mode="truncate",
+        action_pad_mode="truncate",
         future_frame_horizon=4,
         future_frame_stride=16,
+        future_frame_pad_mode="truncate",
         state_horizon=1,
         state_stride=1,
         image_horizon=1,
@@ -206,33 +207,39 @@ def test_action_sampling_uses_own_horizon_when_future_frames_need_longer_buffer(
     sample = build_sample_from_window(buf, past, config)
 
     assert config.future_size == 65
-    assert sample["valid_action_len"] == 4
     assert sample["wrist_action"].shape[0] == 4
     assert [sample["wrist_action"][i, 0] for i in range(4)] == [0.0, 1.0, 2.0, 3.0]
-    assert sample["valid_future_frame_len"] == 4
+    assert len(sample["future_frame_refs"]) == 4
     future_indices = [frame["lowdim.npy"][0] for frame in sample["future_frame_refs"]]
     assert future_indices == [16.0, 32.0, 48.0, 64.0]
 
 
-def test_history_and_future_pad_modes_are_independent():
-    """History and future padding policies should be configurable independently."""
+def test_history_action_and_future_frame_pad_modes_are_independent():
+    """Three pad modes (history / action / future_frame) are wired to their own streams."""
     config = WindowConfig(
         action_horizon=4,
         state_horizon=3,
         state_stride=1,
         image_horizon=1,
         image_stride=1,
+        future_frame_horizon=3,
+        future_frame_stride=1,
         history_pad_mode="repeat",
-        future_pad_mode="truncate",
+        action_pad_mode="truncate",
+        future_frame_pad_mode="repeat",
     )
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(5), make_frame(6)])
 
     sample = build_sample_from_window(buf, past, config)
 
+    # history_pad_mode=repeat ⇒ state padded to full horizon (left pad with earliest).
     assert sample["wrist_state"].shape[0] == 3
-    assert sample["wrist_action"].shape[0] == 2
     np.testing.assert_allclose(sample["wrist_state"][0], 5.0)
+    # action_pad_mode=truncate ⇒ action chunk kept at real length (2 frames).
+    assert sample["wrist_action"].shape[0] == 2
+    # future_frame_pad_mode=repeat ⇒ K refs emitted even when short on future frames.
+    assert len(sample["future_frame_refs"]) == 3
 
 
 def test_single_episode_state_progression():
@@ -395,12 +402,22 @@ def test_gather_future_refs_with_offset_base():
 
 
 def test_gather_future_refs_repeat_padding():
-    """When buf is shorter than needed, repeat last frame."""
+    """repeat mode: padded slots carry copies of the last real frame and
+    are treated as VALID supervision (valid_count == horizon)."""
     buf = collections.deque([make_frame(i) for i in range(3)])
     refs, valid_count = gather_future_refs(buf, horizon=4, stride=1, pad_mode="repeat", offset_base=0)
-    assert valid_count == 3
     assert len(refs) == 4
+    assert valid_count == 4
+    # Last slot is the repeated copy of buf[-1].
     assert refs[3]["lowdim.npy"][0] == 2.0
+
+
+def test_gather_future_refs_truncate_drops_invalid_tail():
+    """truncate mode: refs ends at the last real frame; valid_count == len(refs)."""
+    buf = collections.deque([make_frame(i) for i in range(3)])
+    refs, valid_count = gather_future_refs(buf, horizon=4, stride=1, pad_mode="truncate", offset_base=0)
+    assert len(refs) == 3
+    assert valid_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +590,7 @@ def test_sliding_window_compose_handles_mixed_cameras():
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
-        future_pad_mode="truncate",
+        action_pad_mode="truncate",
     )
     # Episode 0: head-only (legacy human data); Episode 1: head+breast (real robot).
     human_frames = [make_frame(i, episode_index=0, dataset_name="human") for i in range(3)]
