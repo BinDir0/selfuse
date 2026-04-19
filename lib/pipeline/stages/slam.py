@@ -235,7 +235,7 @@ def _build_stage3_workspace(frame_source, frame_ids: np.ndarray, seq_folder: str
     ordered_paths = [expected_paths[frame_id] for frame_id in frame_id_list]
     return {
         "frame_path_map": expected_paths,
-        "frame_source": ImageFolderFrameSource(ordered_paths, use_turbojpeg=False),
+        "frame_source": ImageFolderFrameSource(ordered_paths),
         "workspace_dir": cache_dir,
         "ready_marker": ready_marker,
         "materialized": True,
