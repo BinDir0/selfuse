@@ -412,6 +412,9 @@ def build_fpha_right_hand_prediction(
     pose_reg: float = 1e-4,
     shape_reg: float = 1e-3,
     temporal_reg: float = 1e-3,
+    shape_iters: int = 120,
+    shape_sample_size: int = 96,
+    chunk_size: int = 256,
 ) -> dict[str, np.ndarray]:
     joints_world, valid = build_fpha_world_targets(
         clip_id=clip_id,
@@ -435,6 +438,9 @@ def build_fpha_right_hand_prediction(
         pose_reg=pose_reg,
         shape_reg=shape_reg,
         temporal_reg=temporal_reg,
+        shape_iters=shape_iters,
+        shape_sample_size=shape_sample_size,
+        chunk_size=chunk_size,
     )
 
     pred_trans = np.zeros((num_frames, 3), dtype=np.float32)
