@@ -11,6 +11,7 @@ from lib.pipeline.datasets.descriptors import (
     STORAGE_IMAGE_SEQUENCE,
     STORAGE_TAR_SHARD,
 )
+from lib.pipeline.video_index import load_clip_frame_offsets
 
 
 def _normalized_frame_ext(ext: str) -> str:
@@ -112,6 +113,22 @@ def _ensure_tar_frame_names(descriptor: ClipDescriptor) -> list[str]:
     return descriptor.frame_names
 
 
+def _ensure_tar_frame_offsets(descriptor: ClipDescriptor) -> list[list[int]] | None:
+    validate_descriptor_for_frame_reads(descriptor)
+    if descriptor.frame_offsets is not None:
+        return descriptor.frame_offsets
+    if descriptor.storage_kind != STORAGE_TAR_SHARD:
+        return None
+    if not descriptor.root_dir:
+        return None
+
+    frame_offsets = load_clip_frame_offsets(descriptor.root_dir, descriptor.clip_id)
+    if frame_offsets is None:
+        return None
+    descriptor.frame_offsets = frame_offsets
+    return descriptor.frame_offsets
+
+
 def _descriptor_member_name(descriptor: ClipDescriptor, frame_idx: int) -> str:
     validate_descriptor_for_frame_reads(descriptor)
     if descriptor.frame_names:
@@ -125,6 +142,7 @@ def build_frame_source_from_descriptor(descriptor: ClipDescriptor):
     validate_descriptor_for_frame_reads(descriptor)
 
     if descriptor.storage_kind == STORAGE_TAR_SHARD:
+        _ensure_tar_frame_offsets(descriptor)
         frame_names = _ensure_tar_frame_names(descriptor)
         return ShardVideoFrameSource(
             descriptor.shard_path,
@@ -165,6 +183,7 @@ def build_frame_bytes_reader(
 
     if descriptor.storage_kind == STORAGE_TAR_SHARD:
         shard_path = descriptor.shard_path
+        _ensure_tar_frame_offsets(descriptor)
         if descriptor.frame_offsets is not None:
             frame_offsets = descriptor.frame_offsets
 

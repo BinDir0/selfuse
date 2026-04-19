@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import re
 import tarfile
+import gzip
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -15,7 +17,8 @@ from lib.pipeline.datasets.descriptors import ClipDescriptor as VideoDescriptor
 
 
 _FRAME_RE = re.compile(r"^(.+)_(f\d+)\.(jpg|jpeg|png)$", re.IGNORECASE)
-CLIP_INDEX_FORMAT_VERSION = 2
+CLIP_INDEX_FORMAT_VERSION = 3
+CLIP_OFFSET_INDEX_FORMAT_VERSION = 1
 
 
 def _list_tar_shards(factory_dir: str) -> list[str]:
@@ -36,6 +39,10 @@ def _clip_index_cache_path(factory_dir: str) -> str:
 
 def _legacy_index_cache_path(factory_dir: str) -> str:
     return os.path.join(factory_dir, "_video_index.json")
+
+
+def _clip_offset_index_path(factory_dir: str) -> str:
+    return os.path.join(factory_dir, "_clip_offset_index.pkl.gz")
 
 
 def _new_clip_summary(shard_file: str, clip_id: str, frame_sort: str, ext: str, video_name: str | None = None) -> dict:
@@ -160,6 +167,13 @@ def _is_clip_index_stale(index: dict, factory_dir: str) -> bool:
         return True
     if int(index.get("format_version", 0)) != CLIP_INDEX_FORMAT_VERSION:
         return True
+    offset_index = _load_pickle_file(_clip_offset_index_path(factory_dir))
+    if not isinstance(offset_index, dict):
+        return True
+    if int(offset_index.get("format_version", 0)) != CLIP_OFFSET_INDEX_FORMAT_VERSION:
+        return True
+    if offset_index.get("shards", []) != current_shards:
+        return True
     clips = index.get("clips", {})
     if clips:
         first_clip = next(iter(clips.values()))
@@ -185,6 +199,22 @@ def _write_json_file(path: str, payload: dict) -> None:
         pass
 
 
+def _load_pickle_file(path: str):
+    try:
+        with gzip.open(path, "rb") as handle:
+            return pickle.load(handle)
+    except Exception:
+        return None
+
+
+def _write_pickle_file(path: str, payload) -> None:
+    try:
+        with gzip.open(path, "wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    except OSError:
+        pass
+
+
 def build_video_index(factory_dir: str) -> dict:
     """Scan tar shards and build a lightweight clip-level index."""
     factory_dir = str(factory_dir)
@@ -194,6 +224,7 @@ def build_video_index(factory_dir: str) -> dict:
         raise FileNotFoundError(f"No tar shards found in {factory_dir}")
 
     clips: Dict[str, dict] = {}
+    clip_offsets: Dict[str, list[list[int]]] = {}
     skipped_cross_shard_clips: set[str] = set()
     n_frames_total = 0
     pbar = tqdm(shard_files, desc="Scanning shards", unit="shard")
@@ -223,10 +254,12 @@ def build_video_index(factory_dir: str) -> dict:
                             ext,
                             video_name=json_meta.pop(clip_id, None),
                         )
+                        clip_offsets[clip_id] = []
                     clip_summary = clips[clip_id]
                     if clip_summary["shard"] != shard_file:
                         skipped_cross_shard_clips.add(clip_id)
                         clips.pop(clip_id, None)
+                        clip_offsets.pop(clip_id, None)
                         continue
 
                     frame_idx = int(frame_sort[1:])
@@ -243,6 +276,9 @@ def build_video_index(factory_dir: str) -> dict:
                     clip_summary["frame_index_width"] = max(
                         int(clip_summary["frame_index_width"]),
                         max(1, len(frame_sort) - 1),
+                    )
+                    clip_offsets[clip_id].append(
+                        [frame_idx, int(member.offset_data), int(member.size)]
                     )
                     n_frames_total += 1
                     if n_frames_total % 500 == 0:
@@ -292,6 +328,28 @@ def build_video_index(factory_dir: str) -> dict:
                 f"start={min_frame_idx}, end={max_frame_idx}, frame_count={clip_summary['frame_count']}"
             )
         clip_summary["frame_start_idx"] = min_frame_idx
+        offsets = clip_offsets.get(clip_id) or []
+        offsets.sort(key=lambda item: int(item[0]))
+        if len(offsets) != expected_count:
+            raise RuntimeError(
+                f"Clip {clip_id} in {factory_dir} has inconsistent offset count: "
+                f"expected={expected_count}, got={len(offsets)}"
+            )
+        if [int(item[0]) for item in offsets] != list(range(min_frame_idx, max_frame_idx + 1)):
+            raise RuntimeError(
+                f"Clip {clip_id} in {factory_dir} has non-contiguous offset entries: "
+                f"start={min_frame_idx}, end={max_frame_idx}"
+            )
+        clip_offsets[clip_id] = [[int(item[1]), int(item[2])] for item in offsets]
+
+    _write_pickle_file(
+        _clip_offset_index_path(factory_dir),
+        {
+            "format_version": CLIP_OFFSET_INDEX_FORMAT_VERSION,
+            "clips": clip_offsets,
+            "shards": shard_files,
+        },
+    )
 
     return {
         "format_version": CLIP_INDEX_FORMAT_VERSION,
@@ -323,6 +381,25 @@ def load_or_build_index(factory_dir: str, force_rebuild: bool = False) -> dict:
     clip_index = build_video_index(factory_dir)
     _write_json_file(clip_index_path, clip_index)
     return clip_index
+
+
+def load_clip_frame_offsets(factory_dir: str, clip_id: str) -> Optional[list[list[int]]]:
+    factory_dir = str(Path(factory_dir).resolve())
+    offset_index = _load_pickle_file(_clip_offset_index_path(factory_dir))
+    if not isinstance(offset_index, dict) or int(offset_index.get("format_version", 0)) != CLIP_OFFSET_INDEX_FORMAT_VERSION:
+        load_or_build_index(factory_dir)
+        offset_index = _load_pickle_file(_clip_offset_index_path(factory_dir))
+    if not isinstance(offset_index, dict):
+        return None
+    if int(offset_index.get("format_version", 0)) != CLIP_OFFSET_INDEX_FORMAT_VERSION:
+        return None
+    clips = offset_index.get("clips")
+    if not isinstance(clips, dict):
+        return None
+    offsets = clips.get(clip_id)
+    if offsets is None:
+        return None
+    return [[int(offset), int(size)] for offset, size in offsets]
 
 
 def collect_videos_from_factory(factory_dir: str) -> List[VideoDescriptor]:
