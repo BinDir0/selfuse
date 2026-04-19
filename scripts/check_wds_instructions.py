@@ -17,6 +17,48 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, split_sample_member_name  # noqa: E402
 
+try:
+    from tqdm import tqdm  # type: ignore  # noqa: E402
+except ImportError:  # pragma: no cover
+    class tqdm:  # noqa: N801
+        def __init__(self, iterable=None, total=None, desc=None, unit=None):
+            self.iterable = iterable
+            self.total = total if total is not None else (len(iterable) if iterable is not None else None)
+            self.desc = desc or "Progress"
+            self.unit = unit or "item"
+            self.count = 0
+
+        def __iter__(self):
+            if self.iterable is None:
+                return iter(())
+            for item in self.iterable:
+                yield item
+                self.count += 1
+                self._print()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, n=1):
+            self.count += int(n)
+            self._print()
+
+        def set_postfix(self, refresh=False, **kwargs):
+            self.postfix = kwargs
+            self._print()
+
+        def _print(self):
+            total = "?" if self.total is None else str(self.total)
+            postfix = getattr(self, "postfix", {})
+            if postfix:
+                extra = " " + " ".join(f"{key}={value}" for key, value in postfix.items())
+            else:
+                extra = ""
+            print(f"{self.desc}: {self.count}/{total} {self.unit}{extra}", file=sys.stderr)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Check WDS instruction metadata only")
@@ -299,6 +341,21 @@ def build_final_report(args, selected_shards: list[str], total_shards: int, reso
     }
 
 
+def no_instruction_frames(report: dict) -> int:
+    checks = report["checks"]
+    return int(checks["missing_instruction_frames"]) + int(checks["empty_instruction_frames"])
+
+
+def update_progress_postfix(progress, report: dict) -> None:
+    progress.set_postfix(
+        samples=int(report["summary"]["samples_total"]),
+        no_inst=no_instruction_frames(report),
+        missing=int(report["checks"]["missing_instruction_frames"]),
+        empty=int(report["checks"]["empty_instruction_frames"]),
+        refresh=False,
+    )
+
+
 def main() -> None:
     args = build_parser().parse_args()
     selected_shards, total_shards, resolved_end = select_shards(
@@ -313,19 +370,24 @@ def main() -> None:
         workers = 1
 
     if workers <= 1:
-        for shard_path in selected_shards:
-            worker_report = analyze_one_shard((shard_path, int(args.max_examples)))
-            merge_worker_report(report, worker_report)
-            if args.sample_limit is not None and report["summary"]["samples_total"] >= int(args.sample_limit):
-                break
-            if args.episode_limit is not None and report["summary"]["clips_total"] >= int(args.episode_limit):
-                break
+        with tqdm(selected_shards, desc="Check shards", unit="shard") as progress:
+            for shard_path in progress:
+                worker_report = analyze_one_shard((shard_path, int(args.max_examples)))
+                merge_worker_report(report, worker_report)
+                update_progress_postfix(progress, report)
+                if args.sample_limit is not None and report["summary"]["samples_total"] >= int(args.sample_limit):
+                    break
+                if args.episode_limit is not None and report["summary"]["clips_total"] >= int(args.episode_limit):
+                    break
     else:
         tasks = [(shard_path, int(args.max_examples)) for shard_path in selected_shards]
         mp_context = get_context()
         with mp_context.Pool(workers) as pool:
-            for worker_report in pool.imap_unordered(analyze_one_shard, tasks, chunksize=1):
-                merge_worker_report(report, worker_report)
+            with tqdm(total=len(tasks), desc="Check shards", unit="shard") as progress:
+                for worker_report in pool.imap_unordered(analyze_one_shard, tasks, chunksize=1):
+                    merge_worker_report(report, worker_report)
+                    progress.update(1)
+                    update_progress_postfix(progress, report)
 
     problem_clips = sorted(
         report["problem_clips"].values(),
