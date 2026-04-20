@@ -94,6 +94,9 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
     infiller_cfg.update(_as_dict(infer_cfg.get("infiller")))
     infiller_cfg.update(_as_dict(raw.get("infiller")))
 
+    native_depth_cfg = _as_dict(infer_cfg.get("native_depth"))
+    native_depth_cfg.update(_as_dict(raw.get("native_depth")))
+
     multihost_cfg = _as_dict(infer_cfg.get("multihost"))
 
     build_cfg = _as_dict(raw.get("build"))
@@ -158,6 +161,7 @@ def normalize_pipeline_config(raw_config: dict | None) -> dict:
         "common": common_cfg,
         "detect_motion": detect_motion_cfg,
         "slam": slam_cfg,
+        "native_depth": native_depth_cfg,
         "infiller": infiller_cfg,
         "multihost": multihost_cfg,
     }
