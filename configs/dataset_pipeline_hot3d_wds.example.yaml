@@ -1,0 +1,63 @@
+dataset:
+  adapter: hot3d_wds
+  source_id: hot3d
+  split: train
+
+adapter_config:
+  shard_dir: /share_data/lvjianan/LegendaryVLA/hot3d_processing/hot3d_wds_lang
+  seq_folder_root: /share_data/lvjianan/LegendaryVLA/hot3d_processing/hot3d_pipeline_outputs
+  split_discontinuous: true
+  validate_sample_shards: 1
+
+paths:
+  annotation_root: /share_data/lvjianan/LegendaryVLA/hot3d_processing/hot3d_annotations
+  final_dataset_root: /share_data/lvjianan/LegendaryVLA/hot3d_processing/hot3d_final_vla_dataset
+  log_root: /share_data/lvjianan/LegendaryVLA/hot3d_processing/dataset_pipeline_logs
+
+runtimes:
+  hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
+  slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4d/bin/python3.10
+
+infer:
+  common:
+    gpus: 0,1,2,3,4,5,6,7
+    resume: true
+    infer_profile: throughput_80gb
+    local_cache_root: /DATA/guantianrui/tmp/hawor_local_cache
+    local_cache_quota_gb: 2000
+    local_cache_mode: all
+    local_cache_min_frames: 96
+  detect_motion: {}
+  slam:
+    depth_predict_all_frames: true
+  infiller: {}
+
+annotation:
+  command: >
+    {hawor_python} {project_root}/scripts/extract_hot3d_wds_annotations.py
+    --descriptor_manifest {manifest}
+    --annotation_root {annotation_root}
+    --report_out {run_dir}/hot3d_annotation_report.json
+
+filter:
+  stages: detect_track,motion,slam,infiller
+  workers: 8
+  drop_nonfinite_world_res: true
+  drop_nonfinite_slam: true
+  drop_nonfinite_lowdim: true
+  min_instruction_num: 1
+
+build:
+  require_annotation: true
+  preprocess_workers: 8
+  writer_workers: 4
+  frames_per_shard: 10000
+  repeat_episodes: 1
+  mano_device: cuda:0
+  source_fps: 30.0
+  target_fps: 30.0
+  interpolate_labels: false
+
+validation:
+  max_clips: 0
+  dataset_sample_checks: 0

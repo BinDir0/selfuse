@@ -17,6 +17,7 @@ _BUILTIN_ADAPTER_MODULES = {
     "flat_shard": "lib.pipeline.datasets.flat_shard",
     "fpha_tar": "lib.pipeline.datasets.fpha_tar",
     "image_sequence": "lib.pipeline.datasets.image_sequence",
+    "hot3d_wds": "lib.pipeline.datasets.hot3d_wds",
     "legacy_buildai": "lib.pipeline.datasets.legacy_buildai",
     "video_folder": "lib.pipeline.datasets.video_folder",
 }

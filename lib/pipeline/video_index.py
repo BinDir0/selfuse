@@ -167,13 +167,6 @@ def _is_clip_index_stale(index: dict, factory_dir: str) -> bool:
         return True
     if int(index.get("format_version", 0)) != CLIP_INDEX_FORMAT_VERSION:
         return True
-    offset_index = _load_pickle_file(_clip_offset_index_path(factory_dir))
-    if not isinstance(offset_index, dict):
-        return True
-    if int(offset_index.get("format_version", 0)) != CLIP_OFFSET_INDEX_FORMAT_VERSION:
-        return True
-    if offset_index.get("shards", []) != current_shards:
-        return True
     clips = index.get("clips", {})
     if clips:
         first_clip = next(iter(clips.values()))
@@ -386,9 +379,6 @@ def load_or_build_index(factory_dir: str, force_rebuild: bool = False) -> dict:
 def load_clip_frame_offsets(factory_dir: str, clip_id: str) -> Optional[list[list[int]]]:
     factory_dir = str(Path(factory_dir).resolve())
     offset_index = _load_pickle_file(_clip_offset_index_path(factory_dir))
-    if not isinstance(offset_index, dict) or int(offset_index.get("format_version", 0)) != CLIP_OFFSET_INDEX_FORMAT_VERSION:
-        load_or_build_index(factory_dir)
-        offset_index = _load_pickle_file(_clip_offset_index_path(factory_dir))
     if not isinstance(offset_index, dict):
         return None
     if int(offset_index.get("format_version", 0)) != CLIP_OFFSET_INDEX_FORMAT_VERSION:
