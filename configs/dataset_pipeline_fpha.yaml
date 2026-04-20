@@ -58,9 +58,10 @@ filter:
   workers: 8
   drop_nonfinite_world_res: true
   drop_nonfinite_slam: true
+  min_instruction_num: 1
 
 build:
-  require_annotation: false
+  require_annotation: true
   preprocess_workers: 8
   writer_workers: 4
   frames_per_shard: 10000

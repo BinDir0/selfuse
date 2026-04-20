@@ -28,35 +28,67 @@ def get_parser():
         default="detect_track,motion,slam,infiller",
         help="Comma-separated stages to validate",
     )
-    parser.add_argument("--max_clips", type=int, default=None, help="Limit manifest clips for quick validation")
-    parser.add_argument("--dataset_sample_checks", type=int, default=10, help="How many output samples to inspect")
+    parser.add_argument("--max_clips", type=int, default=None, help="Limit manifest clips for quick validation; <=0 means all clips")
+    parser.add_argument(
+        "--dataset_sample_checks",
+        type=int,
+        default=0,
+        help="How many output samples to inspect for dataset sanity; <=0 means full dataset scan",
+    )
+    parser.add_argument(
+        "--decode_images",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Decode JPEGs during dataset sanity checks",
+    )
     return parser
 
 
 def validate_manifest_outputs(records, stages):
-    from lib.pipeline.stage_api import get_track_range, validate_stage_output_fast
+    from lib.pipeline.stage_api import get_track_range, validate_stage_output
 
     stats = {
         "clips_total": len(records),
         "clips_ok": 0,
         "clips_failed": 0,
         "stage_failures": {stage: 0 for stage in stages},
+        "failure_examples": [],
+        "track_range_failures": [],
     }
 
     for record in records:
         seq_folder = Path(record.descriptor.seq_folder)
         clip_ok = True
         try:
-            start_idx, end_idx = get_track_range(seq_folder, fast=True)
-        except Exception:
+            start_idx, end_idx = get_track_range(seq_folder, fast=False)
+        except Exception as error:
             for stage in stages:
                 stats["stage_failures"][stage] += 1
             stats["clips_failed"] += 1
+            if len(stats["track_range_failures"]) < 32:
+                stats["track_range_failures"].append(
+                    {
+                        "clip_id": record.clip_id,
+                        "seq_folder": str(seq_folder),
+                        "error": str(error),
+                    }
+                )
             continue
         for stage in stages:
-            if not validate_stage_output_fast(stage, seq_folder, start_idx, end_idx):
+            try:
+                validate_stage_output(stage, seq_folder, start_idx, end_idx)
+            except Exception as error:
                 stats["stage_failures"][stage] += 1
                 clip_ok = False
+                if len(stats["failure_examples"]) < 64:
+                    stats["failure_examples"].append(
+                        {
+                            "clip_id": record.clip_id,
+                            "seq_folder": str(seq_folder),
+                            "stage": stage,
+                            "error": str(error),
+                        }
+                    )
         if clip_ok:
             stats["clips_ok"] += 1
         else:
@@ -90,38 +122,47 @@ def validate_annotations(records, annotation_root, annotation_suffix):
     return stats
 
 
-def validate_dataset(dataset_dir, sample_checks):
-    from lib.pipeline.exporters.webdataset_rewriter import iter_shard_samples
+def validate_dataset(dataset_dir, sample_checks, *, decode_images: bool):
+    from lib.pipeline.wds_sanity import analyze_webdataset
 
     if not dataset_dir:
         return None
 
-    root = Path(dataset_dir)
-    shard_paths = sorted(root.glob("*.tar"))
-    if not shard_paths:
-        raise RuntimeError(f"No dataset shards found in {dataset_dir}")
+    limit = None if sample_checks is None or int(sample_checks) <= 0 else int(sample_checks)
+    report = analyze_webdataset(
+        source_shard_dir=str(Path(dataset_dir)),
+        sample_limit=limit,
+        decode_images=bool(decode_images),
+        max_issue_examples=64,
+    )
+    report["full_dataset_scan"] = limit is None
+    return report
 
-    checked = 0
-    errors = []
-    for shard_path in shard_paths:
-        for sample in iter_shard_samples(str(shard_path)):
-            checked += 1
-            meta = json.loads(sample["meta_bytes"].decode("utf-8"))
-            required = ["clip_id", "instruction", "instruction_num", "presence"]
-            missing = [key for key in required if key not in meta]
-            if missing:
-                errors.append({"shard": shard_path.name, "sample": sample["key"], "missing_meta_keys": missing})
-            if checked >= sample_checks:
-                return {
-                    "shards": len(shard_paths),
-                    "samples_checked": checked,
-                    "errors": errors,
-                }
-    return {
-        "shards": len(shard_paths),
-        "samples_checked": checked,
-        "errors": errors,
-    }
+
+def summarize_validation_failures(summary: dict) -> list[str]:
+    failures = []
+
+    stage_stats = summary.get("stages") or {}
+    if int(stage_stats.get("clips_failed", 0)) > 0:
+        failures.append(f"stage validation failed for {stage_stats.get('clips_failed', 0)} clips")
+
+    annotation_stats = summary.get("annotations")
+    if annotation_stats:
+        annotation_bad = sum(
+            int(annotation_stats.get(key, 0))
+            for key in ("missing_annotation", "invalid_json", "invalid_status", "empty_instruction")
+        )
+        if annotation_bad > 0:
+            failures.append(f"annotation validation found {annotation_bad} problematic clips")
+
+    dataset_stats = summary.get("dataset")
+    if dataset_stats:
+        checks = dataset_stats.get("checks") or {}
+        dataset_bad = sum(int(value) for value in checks.values())
+        if dataset_bad > 0:
+            failures.append(f"dataset sanity found {dataset_bad} issues across built samples")
+
+    return failures
 
 
 def main():
@@ -129,7 +170,7 @@ def main():
     from lib.pipeline.clip_manifest import load_clip_manifest
 
     records = load_clip_manifest(args.descriptor_manifest)
-    if args.max_clips is not None:
+    if args.max_clips is not None and int(args.max_clips) > 0:
         records = records[: args.max_clips]
 
     stages = [stage.strip() for stage in args.stages.split(",") if stage.strip()]
@@ -140,9 +181,16 @@ def main():
         },
         "stages": validate_manifest_outputs(records, stages),
         "annotations": validate_annotations(records, args.annotation_root, args.annotation_suffix),
-        "dataset": validate_dataset(args.dataset_dir, args.dataset_sample_checks),
+        "dataset": validate_dataset(
+            args.dataset_dir,
+            args.dataset_sample_checks,
+            decode_images=bool(args.decode_images),
+        ),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    failures = summarize_validation_failures(summary)
+    if failures:
+        raise RuntimeError("; ".join(failures))
 
 
 if __name__ == "__main__":

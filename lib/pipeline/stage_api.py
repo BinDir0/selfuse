@@ -282,6 +282,10 @@ def _validate_slam_output(seq_folder: Path, start_idx: int, end_idx: int):
     assert slam_file.exists(), "SLAM npz missing"
     data = np.load(slam_file, allow_pickle=True)
     assert "traj" in data and "scale" in data, "invalid SLAM npz keys"
+    traj = np.asarray(data["traj"])
+    scale = np.asarray(data["scale"])
+    assert np.isfinite(traj).all(), "traj contains non-finite values"
+    assert np.isfinite(scale).all(), "scale contains non-finite values"
 
 
 def _validate_infiller_output(seq_folder: Path, _start_idx: int, _end_idx: int):
@@ -293,6 +297,16 @@ def _validate_infiller_output(seq_folder: Path, _start_idx: int, _end_idx: int):
     assert pred_hand_pose.shape[0] == 2 and pred_hand_pose.shape[-1] == 45, "pred_hand_pose shape invalid"
     assert pred_betas.shape[0] == 2 and pred_betas.shape[-1] == 10, "pred_betas shape invalid"
     assert pred_valid.shape[0] == 2, "pred_valid shape invalid"
+    frame_count = pred_trans.shape[1]
+    assert pred_rot.shape[1] == frame_count, "pred_rot frame count invalid"
+    assert pred_hand_pose.shape[1] == frame_count, "pred_hand_pose frame count invalid"
+    assert pred_betas.shape[1] == frame_count, "pred_betas frame count invalid"
+    assert pred_valid.shape[1] == frame_count, "pred_valid frame count invalid"
+    assert np.isfinite(np.asarray(pred_trans)).all(), "pred_trans contains non-finite values"
+    assert np.isfinite(np.asarray(pred_rot)).all(), "pred_rot contains non-finite values"
+    assert np.isfinite(np.asarray(pred_hand_pose)).all(), "pred_hand_pose contains non-finite values"
+    assert np.isfinite(np.asarray(pred_betas)).all(), "pred_betas contains non-finite values"
+    assert np.isfinite(np.asarray(pred_valid)).all(), "pred_valid contains non-finite values"
 
 
 def _validate_detect_track_output_fast(seq_folder: Path, start_idx: int, end_idx: int):
