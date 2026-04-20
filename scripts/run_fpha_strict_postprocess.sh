@@ -79,6 +79,11 @@ if [[ ! -f "$MANIFEST" ]]; then
   exit 1
 fi
 
+if [[ ! -d "$ANNOTATION_ROOT" ]]; then
+  echo "Annotation root not found: $ANNOTATION_ROOT" >&2
+  exit 1
+fi
+
 echo "[1/5] Strict manifest filter"
 sudo nice -n -15 "$PYTHON_BIN" scripts/filter_manifest_by_quality.py \
   --input_manifest "$MANIFEST" \
@@ -90,6 +95,20 @@ sudo nice -n -15 "$PYTHON_BIN" scripts/filter_manifest_by_quality.py \
   --min_instruction_num 1 \
   --annotation_root "$ANNOTATION_ROOT" \
   --require_annotation
+
+FILTERED_COUNT="$(wc -l < "$FILTERED" | tr -d ' ')"
+if [[ "$FILTERED_COUNT" == "0" ]]; then
+  echo >&2
+  echo "Strict filter produced zero clips; aborting before build." >&2
+  echo "  annotation_root: $ANNOTATION_ROOT" >&2
+  echo "  filtered_manifest: $FILTERED" >&2
+  echo "  filter_report: $FILTER_REPORT" >&2
+  echo "This usually means one of these:" >&2
+  echo "  1) annotation_root points to the wrong directory" >&2
+  echo "  2) annotation files are missing for these clip_ids" >&2
+  echo "  3) annotation JSON exists but status/instruction is invalid" >&2
+  exit 1
+fi
 
 echo "[2/5] Build final dataset"
 sudo nice -n -15 "$PYTHON_BIN" scripts/build_vla_from_manifest.py \
