@@ -565,11 +565,22 @@ def run_pipeline(args) -> None:
         gpus = native_depth_cfg.get("gpus", common_infer_cfg.get("gpus", "0"))
         if isinstance(gpus, (list, tuple)):
             gpus = ",".join(str(item).strip() for item in gpus if str(item).strip())
+        native_depth_common_cfg = {
+            key: common_infer_cfg.get(key)
+            for key in (
+                "infer_profile",
+                "local_cache_root",
+                "local_cache_quota_gb",
+                "local_cache_mode",
+                "local_cache_min_frames",
+            )
+            if common_infer_cfg.get(key) is not None
+        }
         native_depth_args = tuple(
             cli_args_from_mapping(
                 {
                     key: value
-                    for key, value in native_depth_cfg.items()
+                    for key, value in {**native_depth_common_cfg, **native_depth_cfg}.items()
                     if key not in {"enabled", "gpus"}
                 },
                 negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,

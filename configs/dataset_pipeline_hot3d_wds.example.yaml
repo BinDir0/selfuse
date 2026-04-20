@@ -22,6 +22,11 @@ infer:
   common:
     gpus: 0,1,2,3,4,5,6,7
     resume: true
+    infer_profile: throughput_80gb
+    local_cache_root: /DATA/guantianrui/tmp/hawor_local_cache
+    local_cache_quota_gb: 2000
+    local_cache_mode: all
+    local_cache_min_frames: 96
   detect_motion: {}
   slam:
     depth_predict_all_frames: true
