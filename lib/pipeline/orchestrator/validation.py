@@ -25,6 +25,23 @@ def validate_pipeline_cli_alignment(*, stages: list[str], infer_cfg: dict, build
             )
             for section in ("common", "detect_motion", "slam", "infiller")
         )
+    if "native_depth" in stages or bool((infer_cfg.get("native_depth") or {}).get("enabled")):
+        from scripts.run_hot3d_native_depth import build_parser as get_native_depth_parser
+
+        native_depth_supported = parser_supported_option_dests(get_native_depth_parser())
+        native_depth_reserved = {"descriptor_manifest", "run_dir", "report_out"}
+        errors.extend(
+            validate_cli_mapping_keys(
+                label="infer.native_depth",
+                mapping={
+                    key: value
+                    for key, value in (infer_cfg.get("native_depth") or {}).items()
+                    if key != "enabled"
+                },
+                supported_keys=native_depth_supported,
+                reserved_keys=native_depth_reserved,
+            )
+        )
 
     if "build" in stages:
         from scripts.build_vla_from_manifest import get_parser as get_build_parser

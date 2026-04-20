@@ -30,6 +30,9 @@ infer:
   detect_motion: {}
   slam:
     depth_predict_all_frames: true
+  native_depth:
+    enabled: true
+    save_dtype: float16
   infiller: {}
 
 annotation:
@@ -40,7 +43,7 @@ annotation:
     --report_out {run_dir}/hot3d_annotation_report.json
 
 filter:
-  stages: native_features
+  stages: native_features,native_depth
   workers: 8
   drop_nonfinite_world_res: true
   drop_nonfinite_slam: true
@@ -59,6 +62,6 @@ build:
   interpolate_labels: false
 
 validation:
-  stages: native_features
+  stages: native_features,native_depth
   max_clips: 0
   dataset_sample_checks: 0

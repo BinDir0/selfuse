@@ -15,6 +15,7 @@ INTERNAL_STAGE_ORDER = [
     "annotate",
     "detect_motion",
     "slam",
+    "native_depth",
     "infiller",
     "filter",
     "build",

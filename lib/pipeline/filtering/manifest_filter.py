@@ -117,13 +117,24 @@ def _append_build_reason(result: dict, reason: str, metric_key: str | None = Non
 
 def _validate_build_inputs(record, stages: list[str], result: dict) -> tuple[bool, tuple[int, int, dict | None] | None]:
     from lib.pipeline.exporters.manifest_vla import descriptor_uses_native_features, load_manifest_record_prediction
+    from lib.pipeline.native_depth import validate_native_depth_output
     from lib.pipeline.stage_api import get_track_range, validate_stage_output
 
     if descriptor_uses_native_features(record.descriptor):
-        unsupported_stages = [stage for stage in stages if stage != "native_features"]
+        unsupported_stages = [stage for stage in stages if stage not in ("native_features", "native_depth")]
         if unsupported_stages:
             _append_build_reason(result, "native_features_stage_mismatch", "unsupported_stages", unsupported_stages)
             return False, None
+        if "native_depth" in stages:
+            try:
+                native_depth_summary = validate_native_depth_output(
+                    record.descriptor.seq_folder,
+                    expected_frame_count=int(record.descriptor.frame_count),
+                )
+                result["metrics"]["native_depth"] = native_depth_summary
+            except Exception as error:
+                _append_build_reason(result, "invalid_stage_output:native_depth", "native_depth_error", str(error))
+                return False, None
         result["metrics"]["track_range"] = [0, int(record.descriptor.frame_count)]
         return True, (0, int(record.descriptor.frame_count), None)
 

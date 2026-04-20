@@ -46,6 +46,7 @@ def get_parser():
 
 def validate_manifest_outputs(records, stages):
     from lib.pipeline.exporters.manifest_vla import descriptor_uses_native_features, load_descriptor_episode_features, prepare_manifest_record_for_build
+    from lib.pipeline.native_depth import validate_native_depth_output
     from lib.pipeline.stage_api import get_track_range, validate_stage_output
 
     stats = {
@@ -61,7 +62,7 @@ def validate_manifest_outputs(records, stages):
         seq_folder = Path(record.descriptor.seq_folder)
         clip_ok = True
         if descriptor_uses_native_features(record.descriptor):
-            if any(stage != "native_features" for stage in stages):
+            if any(stage not in ("native_features", "native_depth") for stage in stages):
                 stats["clips_failed"] += 1
                 if len(stats["failure_examples"]) < 64:
                     stats["failure_examples"].append(
@@ -73,6 +74,26 @@ def validate_manifest_outputs(records, stages):
                         }
                     )
                 continue
+            if "native_depth" in stages:
+                try:
+                    validate_native_depth_output(
+                        record.descriptor.seq_folder,
+                        expected_frame_count=int(record.descriptor.frame_count),
+                    )
+                except Exception as error:
+                    stats["stage_failures"].setdefault("native_depth", 0)
+                    stats["stage_failures"]["native_depth"] += 1
+                    stats["clips_failed"] += 1
+                    if len(stats["failure_examples"]) < 64:
+                        stats["failure_examples"].append(
+                            {
+                                "clip_id": record.clip_id,
+                                "seq_folder": str(seq_folder),
+                                "stage": "native_depth",
+                                "error": str(error),
+                            }
+                        )
+                    continue
             episode, error_code = prepare_manifest_record_for_build(
                 record,
                 require_annotation=False,

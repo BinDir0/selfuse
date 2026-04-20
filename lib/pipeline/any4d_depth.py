@@ -4,6 +4,7 @@ import contextlib
 import os
 import sys
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -103,7 +104,7 @@ def _prepend_sys_path(path: str):
         sys.path.insert(0, path)
 
 
-def _any4d_config_dict(any4d_root: str):
+def _any4d_config_dict(any4d_root: str, *, task: str = "images_only"):
     use_sdpa = _env_flag_on("HAWOR_ANY4D_USE_PYTORCH_SDPA", default_on=True)
     sdpa_override = (
         "+model.encoder.use_pytorch_sdpa=true"
@@ -117,7 +118,7 @@ def _any4d_config_dict(any4d_root: str):
             "model=any4d",
             "model.encoder.uses_torch_hub=false",
             sdpa_override,
-            "model/task=images_only",
+            f"model/task={task}",
         ],
     }
 
@@ -172,6 +173,28 @@ def _import_any4d_modules(repo_root: str):
     return any4d_inference_test, load_images
 
 
+def _import_any4d_camera_modules(repo_root: str):
+    _prepend_sys_path(repo_root)
+
+    import torchvision.transforms as tvf
+    from PIL import Image
+    from PIL.ImageOps import exif_transpose
+    from any4d.utils.cropping import crop_resize_if_necessary
+    from any4d.utils.image import find_closest_aspect_ratio
+    from any4d.utils.inference import preprocess_input_views_for_inference
+    from uniception.models.encoders.image_normalizations import IMAGE_NORMALIZATION_DICT
+
+    return {
+        "tvf": tvf,
+        "Image": Image,
+        "exif_transpose": exif_transpose,
+        "crop_resize_if_necessary": crop_resize_if_necessary,
+        "find_closest_aspect_ratio": find_closest_aspect_ratio,
+        "preprocess_input_views_for_inference": preprocess_input_views_for_inference,
+        "image_normalization_dict": IMAGE_NORMALIZATION_DICT,
+    }
+
+
 def _load_any4d_views(load_images, image_paths, resolution_set: int):
     return load_images(
         image_paths,
@@ -183,6 +206,133 @@ def _load_any4d_views(load_images, image_paths, resolution_set: int):
         compute_moge_mask=False,
         binary_mask_path=None,
     )
+
+
+def _validate_camera_conditioning_inputs(image_payloads, intrinsics, camera_poses):
+    count = len(image_payloads)
+    if count <= 0:
+        raise ValueError("[Any4D] image_payloads is empty")
+    if len(intrinsics) != count:
+        raise ValueError(f"[Any4D] intrinsics count {len(intrinsics)} != image count {count}")
+    if len(camera_poses) != count:
+        raise ValueError(f"[Any4D] camera_poses count {len(camera_poses)} != image count {count}")
+
+
+def _as_intrinsics_matrix(value) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float32)
+    if array.shape == (4,):
+        fx, fy, cx, cy = array.tolist()
+        array = np.array(
+            [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+    if array.shape != (3, 3):
+        raise ValueError(f"[Any4D] expected intrinsics shape (3, 3) or (4,), got {array.shape}")
+    if not np.isfinite(array).all():
+        raise ValueError("[Any4D] intrinsics contain non-finite values")
+    if float(array[0, 0]) <= 0.0 or float(array[1, 1]) <= 0.0:
+        raise ValueError(f"[Any4D] invalid focal lengths: fx={array[0, 0]}, fy={array[1, 1]}")
+    return array
+
+
+def _as_camera_pose_matrix(value) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float32)
+    if array.shape != (4, 4):
+        raise ValueError(f"[Any4D] expected camera pose shape (4, 4), got {array.shape}")
+    if not np.isfinite(array).all():
+        raise ValueError("[Any4D] camera pose contains non-finite values")
+    if abs(float(np.linalg.det(array[:3, :3]))) < 1e-8:
+        raise ValueError("[Any4D] camera pose rotation is singular")
+    return array
+
+
+def build_any4d_camera_views_from_image_bytes(
+    image_payloads,
+    intrinsics,
+    camera_poses,
+    runner=None,
+    *,
+    any4d_repo_root=None,
+    checkpoint_path=None,
+    resolution_set=None,
+    use_amp=None,
+    task="mvs",
+    norm_type="dinov2",
+):
+    """Build Any4D views with calibrated intrinsics and OpenCV RDF cam2world poses.
+
+    ``camera_poses`` must already be cam2world. For HOT3D lowdim extrinsics this
+    means passing ``np.linalg.inv(world2cam)``.
+    """
+    _validate_camera_conditioning_inputs(image_payloads, intrinsics, camera_poses)
+
+    runner = runner or build_any4d_runner(
+        any4d_repo_root=any4d_repo_root,
+        checkpoint_path=checkpoint_path,
+        resolution_set=resolution_set,
+        use_amp=use_amp,
+        task=task,
+    )
+    modules = _import_any4d_camera_modules(runner["repo_root"])
+    image_norms = modules["image_normalization_dict"]
+    if norm_type not in image_norms:
+        raise ValueError(f"[Any4D] unknown image normalization type: {norm_type}")
+    img_norm = image_norms[norm_type]
+    img_transform = modules["tvf"].Compose(
+        [
+            modules["tvf"].ToTensor(),
+            modules["tvf"].Normalize(mean=img_norm.mean, std=img_norm.std),
+        ]
+    )
+
+    pil_images = []
+    aspect_ratios = []
+    for payload in image_payloads:
+        image = modules["exif_transpose"](modules["Image"].open(BytesIO(payload))).convert("RGB")
+        width, height = image.size
+        pil_images.append(image)
+        aspect_ratios.append(float(width) / float(height))
+
+    target_size = modules["find_closest_aspect_ratio"](
+        sum(aspect_ratios) / len(aspect_ratios),
+        int(runner["resolution_set"]),
+    )
+
+    views = []
+    resized_intrinsics = []
+    for view_idx, image in enumerate(pil_images):
+        intrinsics_matrix = _as_intrinsics_matrix(intrinsics[view_idx])
+        camera_pose = _as_camera_pose_matrix(camera_poses[view_idx])
+        resized_image, resized_intrinsics_matrix = modules["crop_resize_if_necessary"](
+            image,
+            resolution=target_size,
+            intrinsics=intrinsics_matrix,
+        )
+        resized_intrinsics_matrix = np.asarray(resized_intrinsics_matrix, dtype=np.float32)
+        if not np.isfinite(resized_intrinsics_matrix).all():
+            raise ValueError(
+                f"[Any4D] resized intrinsics contain non-finite values for view {view_idx}"
+            )
+        resized_intrinsics.append(resized_intrinsics_matrix)
+
+        mask = torch.ones((resized_image.size[1], resized_image.size[0]), dtype=torch.bool)
+        views.append(
+            {
+                "img": img_transform(resized_image)[None],
+                "intrinsics": torch.from_numpy(resized_intrinsics_matrix)[None].float(),
+                "camera_poses": torch.from_numpy(camera_pose)[None].float(),
+                "is_metric_scale": torch.ones(1, dtype=torch.bool),
+                "true_shape": np.int32([resized_image.size[::-1]]),
+                "idx": view_idx,
+                "instance": str(view_idx),
+                "data_norm_type": [norm_type],
+                "non_ambiguous_mask": mask,
+                "binary_mask": mask,
+            }
+        )
+
+    processed_views = modules["preprocess_input_views_for_inference"](views)
+    return processed_views, np.stack(resized_intrinsics, axis=0)
 
 
 def _predict_depths_from_views(any4d_inference_test, runner, views, frame_count: int):
@@ -245,7 +395,15 @@ def predict_any4d_depths_from_views(frame_indices, views, runner=None, *, any4d_
     return _predict_depths_from_views(any4d_inference_test, runner, views, len(frame_indices))
 
 
-def build_any4d_runner(any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None):
+def build_any4d_runner(
+    any4d_repo_root=None,
+    checkpoint_path=None,
+    resolution_set=None,
+    use_amp=None,
+    *,
+    task=None,
+    device=None,
+):
     repo_root, checkpoint_path, resolution_set, use_amp = resolve_any4d_paths(
         PROJECT_ROOT,
         any4d_repo_root,
@@ -258,10 +416,12 @@ def build_any4d_runner(any4d_repo_root=None, checkpoint_path=None, resolution_se
 
     any4d_inference_test, load_images = _import_any4d_modules(repo_root)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if task is None:
+        task = os.environ.get("HAWOR_ANY4D_TASK", "images_only")
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     with _suppress_any4d_init_io():
         model = any4d_inference_test.init_inference_model(
-            _any4d_config_dict(repo_root),
+            _any4d_config_dict(repo_root, task=str(task)),
             checkpoint_path,
             device,
         )
@@ -274,6 +434,8 @@ def build_any4d_runner(any4d_repo_root=None, checkpoint_path=None, resolution_se
         "checkpoint_path": checkpoint_path,
         "resolution_set": resolution_set,
         "use_amp": use_amp,
+        "task": str(task),
+        "device": str(device),
     }
 
 

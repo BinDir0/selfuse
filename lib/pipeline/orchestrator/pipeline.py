@@ -391,6 +391,7 @@ def run_pipeline(args) -> None:
         infer_cfg.get("common"),
         negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
     )
+    native_depth_cfg = infer_cfg.get("native_depth") or {}
     native_infer_stages = [stage for stage in ("detect_motion", "slam", "infiller") if stage in stages]
     if native_infer_stages:
         ensure_manifest_exists("infer", active_manifest_path)
@@ -406,6 +407,13 @@ def run_pipeline(args) -> None:
                 "skipped_internal_stages": native_infer_stages,
                 "reason": "native lowdim/mano/camera features are provided by source WDS",
             }
+            if bool(native_depth_cfg.get("enabled")) and "native_depth" not in stages:
+                slam_idx = stages.index("slam") if "slam" in stages else None
+                if slam_idx is not None:
+                    stages.insert(slam_idx + 1, "native_depth")
+                else:
+                    stages.append("native_depth")
+                run_summary["native_feature_infer_skip"]["appended_internal_stages"] = ["native_depth"]
             run_summary["expanded_internal_stages_after_native_skip"] = stages
             summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -549,6 +557,51 @@ def run_pipeline(args) -> None:
                 completed_stage_name="slam",
                 source_manifest=active_manifest_path,
                 return_code=slam_return_code,
+            )
+
+    if "native_depth" in stages:
+        ensure_manifest_exists("native_depth", active_manifest_path)
+        common_infer_cfg = infer_cfg.get("common") or {}
+        gpus = native_depth_cfg.get("gpus", common_infer_cfg.get("gpus", "0"))
+        if isinstance(gpus, (list, tuple)):
+            gpus = ",".join(str(item).strip() for item in gpus if str(item).strip())
+        native_depth_args = tuple(
+            cli_args_from_mapping(
+                {
+                    key: value
+                    for key, value in native_depth_cfg.items()
+                    if key not in {"enabled", "gpus"}
+                },
+                negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
+            )
+        )
+        native_depth_cmd = [
+            slam_python,
+            str(PROJECT_ROOT / "scripts" / "run_hot3d_native_depth.py"),
+            "--descriptor_manifest",
+            str(active_manifest_path),
+            "--run_dir",
+            str(run_dir),
+            "--gpus",
+            str(gpus),
+            *native_depth_args,
+        ]
+        if bool(common_infer_cfg.get("resume", False)):
+            native_depth_cmd.append("--resume")
+        native_depth_return_code = run_logged(
+            "native_depth",
+            native_depth_cmd,
+            raise_on_error=False,
+        )
+        if native_depth_return_code != 0:
+            active_manifest_path = handle_partial_external_stage(
+                stage_label="native_depth",
+                source_manifest=active_manifest_path,
+                return_code=native_depth_return_code,
+                output_exists=lambda seq_folder: (
+                    get_stage_done_marker(seq_folder, "native_depth").exists()
+                    and (seq_folder / "NATIVE_DEPTH" / "any4d_depth.npz").is_file()
+                ),
             )
 
     if "infiller" in stages:
