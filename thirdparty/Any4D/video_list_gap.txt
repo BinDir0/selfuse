@@ -1,0 +1,2283 @@
+(dust, brush, cup)/20231006_204 gap: 0 minlen: 68
+(dust, brush, cup)/20231006_194 gap: 0 minlen: 69
+(dust, brush, cup)/20231006_242 gap: 0 minlen: 73
+(dust, brush, cup)/20231005_253 gap: 0 minlen: 74
+(dust, brush, cup)/20231006_203 gap: 0 minlen: 74
+(dust, brush, cup)/20231006_200 gap: 0 minlen: 75
+(brush, brush, plate)/20231005_184 gap: 0 minlen: 77
+(dust, brush, cup)/20231005_254 gap: 0 minlen: 77
+(dust, brush, cup)/20231006_202 gap: 0 minlen: 79
+(dust, brush, teapot)/20231006_178 gap: 0 minlen: 79
+(dust, brush, teapot)/20231006_184 gap: 0 minlen: 80
+(dust, brush, bowl)/20230930_029 gap: 0 minlen: 81
+(dust, brush, cup)/20231006_246 gap: 0 minlen: 81
+(dust, brush, plate)/20231006_130 gap: 0 minlen: 81
+(dust, brush, kettle)/20230930_043 gap: 0 minlen: 82
+(dust, brush, teapot)/20231006_180 gap: 0 minlen: 82
+(dust, brush, teapot)/20231006_186 gap: 0 minlen: 82
+(smear, eraser, box)/20231103_073 gap: 0 minlen: 82
+(dust, brush, bowl)/20231006_140 gap: 0 minlen: 83
+(dust, brush, bowl)/20231006_146 gap: 0 minlen: 83
+(dust, brush, plate)/20231005_185 gap: 0 minlen: 84
+(dust, brush, plate)/20231006_132 gap: 0 minlen: 84
+(dust, brush, teapot)/20231006_188 gap: 0 minlen: 84
+(skim off, spatula, pan)/20230926_002 gap: 0 minlen: 84
+(dust, brush, box)/20231006_162 gap: 0 minlen: 85
+(dust, brush, cup)/20231005_251 gap: 0 minlen: 85
+(hit, hammer, helmet)/20231002_063 gap: 0 minlen: 85
+(brush, eraser, plate)/20231103_054 gap: 0 minlen: 86
+(dust, brush, plate)/20231006_124 gap: 0 minlen: 86
+(smear, eraser, box)/20231103_077 gap: 0 minlen: 86
+(brush, eraser, plate)/20231103_056 gap: 0 minlen: 87
+(pour in some, bowl, bowl)/20231013_158 gap: 0 minlen: 87
+(brush, eraser, box)/20231103_095 gap: 0 minlen: 88
+(dust, brush, cup)/20231005_244 gap: 0 minlen: 88
+(dust, brush, kettle)/20231006_166 gap: 0 minlen: 88
+(dust, brush, teapot)/20231006_226 gap: 0 minlen: 88
+(dust, brush, cup)/20231005_255 gap: 0 minlen: 89
+(dust, brush, kettle)/20231006_170 gap: 0 minlen: 89
+(dust, brush, teapot)/20231006_234 gap: 0 minlen: 89
+(hit, hammer, helmet)/20231002_062 gap: 0 minlen: 89
+(dust, brush, cup)/20231005_250 gap: 0 minlen: 90
+(dust, brush, cup)/20231006_240 gap: 0 minlen: 90
+(dust, brush, cup)/20231006_244 gap: 0 minlen: 90
+(dust, brush, teapot)/20231006_228 gap: 0 minlen: 90
+(smear, eraser, box)/20231103_071 gap: 0 minlen: 90
+(dust, brush, bowl)/20231006_138 gap: 0 minlen: 91
+(dust, brush, cup)/20231006_247 gap: 0 minlen: 91
+(pour in some, cup, bowl)/20231006_279 gap: 0 minlen: 91
+(brush, brush, bowl)/20231005_188 gap: 0 minlen: 92
+(brush, eraser, box)/20231103_078 gap: 0 minlen: 92
+(brush, eraser, kettle)/20231103_101 gap: 0 minlen: 92
+(brush, eraser, plate)/20231103_050 gap: 0 minlen: 92
+(brush, eraser, plate)/20231103_052 gap: 0 minlen: 92
+(brush, eraser, plate)/20231103_058 gap: 0 minlen: 92
+(dust, brush, box)/20231006_164 gap: 0 minlen: 92
+(dust, brush, cup)/20231006_196 gap: 0 minlen: 92
+(dust, brush, teapot)/20231006_176 gap: 0 minlen: 92
+(smear, eraser, box)/20231103_079 gap: 0 minlen: 92
+(smear, eraser, box)/20231103_087 gap: 0 minlen: 92
+(brush, brush, bowl)/20231005_190 gap: 0 minlen: 93
+(brush, eraser, plate)/20231103_060 gap: 0 minlen: 93
+(dust, brush, box)/20230930_033 gap: 0 minlen: 93
+(dust, brush, cup)/20231006_205 gap: 0 minlen: 93
+(dust, brush, cup)/20231006_235 gap: 0 minlen: 93
+(dust, brush, cup)/20231006_238 gap: 0 minlen: 93
+(dust, brush, pan)/20231103_180 gap: 0 minlen: 93
+(dust, brush, plate)/20231006_120 gap: 0 minlen: 93
+(dust, brush, teapot)/20231005_227 gap: 0 minlen: 93
+(dust, brush, teapot)/20231006_230 gap: 0 minlen: 93
+(smear, eraser, box)/20231103_075 gap: 0 minlen: 93
+(brush, eraser, box)/20231103_074 gap: 0 minlen: 94
+(brush, eraser, plate)/20231103_062 gap: 0 minlen: 94
+(brush, eraser, plate)/20231103_063 gap: 0 minlen: 94
+(dust, brush, teapot)/20231005_229 gap: 0 minlen: 94
+(hit, hammer, box)/20231031_181 gap: 0 minlen: 94
+(brush, brush, teapot)/20231006_179 gap: 0 minlen: 95
+(brush, eraser, plate)/20231103_059 gap: 0 minlen: 95
+(brush, roller, bowl)/20231103_207 gap: 0 minlen: 95
+(brush, eraser, box)/20231103_076 gap: 0 minlen: 96
+(dust, brush, cup)/20231005_248 gap: 0 minlen: 96
+(dust, brush, kettle)/20230930_045 gap: 0 minlen: 96
+(dust, brush, teapot)/20231006_222 gap: 0 minlen: 96
+(put out, spoon, bowl)/20231104_198 gap: 0 minlen: 96
+(brush, eraser, bowl)/20231103_044 gap: 0 minlen: 97
+(dust, brush, kettle)/20230930_047 gap: 0 minlen: 97
+(dust, brush, teapot)/20231005_235 gap: 0 minlen: 97
+(dust, roller, bowl)/20231013_297 gap: 0 minlen: 97
+(put out, spoon, bowl)/20231104_186 gap: 0 minlen: 97
+(brush, eraser, box)/20231103_096 gap: 0 minlen: 98
+(dust, brush, bowl)/20231005_195 gap: 0 minlen: 98
+(dust, brush, box)/20230930_035 gap: 0 minlen: 98
+(dust, brush, cup)/20231006_245 gap: 0 minlen: 98
+(dust, brush, teapot)/20230930_055 gap: 0 minlen: 98
+(dust, roller, kettle)/20231103_114 gap: 0 minlen: 98
+(dust, roller, kettle)/20231103_130 gap: 0 minlen: 98
+(hit, hammer, box)/20231031_180 gap: 0 minlen: 98
+(dust, brush, box)/20231006_158 gap: 0 minlen: 99
+(dust, brush, box)/20231103_189 gap: 0 minlen: 99
+(dust, brush, kettle)/20231006_210 gap: 0 minlen: 99
+(dust, roller, pan)/20231013_215 gap: 0 minlen: 99
+(scrape off, knife, box)/20231104_211 gap: 0 minlen: 99
+(brush, brush, bowl)/20231005_186 gap: 0 minlen: 100
+(brush, brush, bowl)/20231005_194 gap: 0 minlen: 100
+(brush, brush, teapot)/20231006_183 gap: 0 minlen: 100
+(brush, eraser, bowl)/20231103_027 gap: 0 minlen: 100
+(brush, eraser, bowl)/20231103_035 gap: 0 minlen: 100
+(brush, eraser, kettle)/20231103_105 gap: 0 minlen: 100
+(dust, brush, bowl)/20231005_189 gap: 0 minlen: 100
+(dust, brush, cup)/20231005_246 gap: 0 minlen: 100
+(dust, brush, kettle)/20231005_219 gap: 0 minlen: 100
+(dust, brush, teapot)/20231005_243 gap: 0 minlen: 100
+(skim off, bowl, bowl)/20231013_137 gap: 0 minlen: 100
+(brush, roller, plate)/20231013_236 gap: 0 minlen: 101
+(dust, brush, cup)/20231006_195 gap: 0 minlen: 101
+(dust, brush, kettle)/20231006_172 gap: 0 minlen: 101
+(dust, brush, teapot)/20231005_241 gap: 0 minlen: 101
+(pour in some, bowl, bowl)/20231013_163 gap: 0 minlen: 101
+(brush, brush, teapot)/20230930_056 gap: 0 minlen: 102
+(brush, eraser, plate)/20231103_064 gap: 0 minlen: 102
+(cut, spatula, bowl)/20231027_077 gap: 0 minlen: 102
+(empty, bowl, plate)/20231024_298 gap: 0 minlen: 102
+(scrape off, spoon, bowl)/20231104_194 gap: 0 minlen: 102
+(brush, brush, teapot)/20231006_189 gap: 0 minlen: 103
+(brush, eraser, bowl)/20231103_033 gap: 0 minlen: 103
+(brush, eraser, kettle)/20231103_099 gap: 0 minlen: 103
+(brush, eraser, pan)/20231103_007 gap: 0 minlen: 103
+(brush, eraser, pan)/20231103_008 gap: 0 minlen: 103
+(brush, eraser, plate)/20231103_055 gap: 0 minlen: 103
+(dust, brush, kettle)/20231005_217 gap: 0 minlen: 103
+(put in, spatula, bowl)/20231024_166 gap: 0 minlen: 103
+(brush, eraser, bowl)/20231103_036 gap: 0 minlen: 104
+(brush, eraser, box)/20231103_097 gap: 0 minlen: 104
+(brush, eraser, kettle)/20231103_110 gap: 0 minlen: 104
+(brush, eraser, plate)/20231103_051 gap: 0 minlen: 104
+(brush, roller, plate)/20231013_272 gap: 0 minlen: 104
+(dust, brush, kettle)/20231006_214 gap: 0 minlen: 104
+(dust, brush, teapot)/20231006_220 gap: 0 minlen: 104
+(dust, brush, teapot)/20231006_224 gap: 0 minlen: 104
+(dust, roller, pan)/20231013_249 gap: 0 minlen: 104
+(pour in some, cup, bowl)/20231006_267 gap: 0 minlen: 104
+(scrape off, spoon, bowl)/20231104_200 gap: 0 minlen: 104
+(skim off, spoon, bowl)/20231104_193 gap: 0 minlen: 104
+(brush, brush, teapot)/20231006_229 gap: 0 minlen: 105
+(brush, brush, teapot)/20231006_231 gap: 0 minlen: 105
+(brush, eraser, pan)/20231103_019 gap: 0 minlen: 105
+(brush, eraser, pan)/20231103_023 gap: 0 minlen: 105
+(brush, eraser, plate)/20231027_053 gap: 0 minlen: 105
+(brush, eraser, plate)/20231027_063 gap: 0 minlen: 105
+(brush, eraser, plate)/20231103_069 gap: 0 minlen: 105
+(cut, spatula, bowl)/20231027_075 gap: 0 minlen: 105
+(dust, brush, bowl)/20231103_183 gap: 0 minlen: 105
+(dust, brush, box)/20230930_031 gap: 0 minlen: 105
+(dust, brush, box)/20231103_190 gap: 0 minlen: 105
+(dust, brush, kettle)/20231005_221 gap: 0 minlen: 105
+(put out, bowl, bowl)/20231013_141 gap: 0 minlen: 105
+(put out, bowl, bowl)/20231013_161 gap: 0 minlen: 105
+(put out, bowl, plate)/20231024_249 gap: 0 minlen: 105
+(put out, spatula, plate)/20231104_173 gap: 0 minlen: 105
+(scrape off, knife, box)/20231104_205 gap: 0 minlen: 105
+(scrape off, knife, pan)/20231031_154 gap: 0 minlen: 105
+(scrape off, spatula, pan)/20231010_004 gap: 0 minlen: 105
+(skim off, spoon, bowl)/20231104_199 gap: 0 minlen: 105
+(smear, eraser, box)/20231103_089 gap: 0 minlen: 105
+(brush, eraser, bowl)/20231027_028 gap: 0 minlen: 106
+(brush, eraser, pan)/20231103_013 gap: 0 minlen: 106
+(brush, eraser, pan)/20231103_020 gap: 0 minlen: 106
+(brush, eraser, plate)/20231103_068 gap: 0 minlen: 106
+(dust, roller, bowl)/20231013_287 gap: 0 minlen: 106
+(scrape off, knife, box)/20231104_215 gap: 0 minlen: 106
+(scrape off, knife, plate)/20231020_232 gap: 0 minlen: 106
+(brush, brush, teapot)/20231006_185 gap: 0 minlen: 107
+(brush, brush, teapot)/20231006_227 gap: 0 minlen: 107
+(brush, eraser, bowl)/20231103_025 gap: 0 minlen: 107
+(brush, eraser, bowl)/20231103_043 gap: 0 minlen: 107
+(brush, eraser, plate)/20231027_058 gap: 0 minlen: 107
+(brush, eraser, plate)/20231103_053 gap: 0 minlen: 107
+(brush, eraser, plate)/20231103_061 gap: 0 minlen: 107
+(cut, spatula, bowl)/20231027_076 gap: 0 minlen: 107
+(dust, brush, box)/20230928_047 gap: 0 minlen: 107
+(dust, roller, bowl)/20231013_293 gap: 0 minlen: 107
+(dust, roller, bowl)/20231103_206 gap: 0 minlen: 107
+(put in, spatula, pan)/20231010_001 gap: 0 minlen: 107
+(put out, bowl, plate)/20231024_259 gap: 0 minlen: 107
+(put out, spoon, bowl)/20231104_180 gap: 0 minlen: 107
+(scrape off, knife, plate)/20231020_220 gap: 0 minlen: 107
+(scrape off, knife, plate)/20231020_228 gap: 0 minlen: 107
+(skim off, spoon, bowl)/20231104_181 gap: 0 minlen: 107
+(brush, brush, teapot)/20231006_225 gap: 0 minlen: 108
+(brush, eraser, bowl)/20231027_029 gap: 0 minlen: 108
+(brush, eraser, kettle)/20231103_100 gap: 0 minlen: 108
+(brush, eraser, plate)/20231027_046 gap: 0 minlen: 108
+(brush, eraser, plate)/20231103_048 gap: 0 minlen: 108
+(cut, spoon, bowl)/20231104_201 gap: 0 minlen: 108
+(dust, brush, bowl)/20231005_187 gap: 0 minlen: 108
+(dust, roller, kettle)/20231103_116 gap: 0 minlen: 108
+(put in, spoon, bowl)/20231104_179 gap: 0 minlen: 108
+(put in, spoon, bowl)/20231104_197 gap: 0 minlen: 108
+(put out, spoon, bowl)/20231104_192 gap: 0 minlen: 108
+(scrape off, knife, bowl)/20231031_169 gap: 0 minlen: 108
+(scrape off, spatula, plate)/20231104_147 gap: 0 minlen: 108
+(scrape off, spoon, bowl)/20231104_188 gap: 0 minlen: 108
+(skim off, spatula, pan)/20231006_010 gap: 0 minlen: 108
+(stir, spatula, plate)/20231002_055 gap: 0 minlen: 108
+(brush, brush, teapot)/20230930_054 gap: 0 minlen: 109
+(brush, brush, toy)/20231027_023 gap: 0 minlen: 109
+(brush, eraser, bowl)/20231027_031 gap: 0 minlen: 109
+(brush, eraser, box)/20231103_088 gap: 0 minlen: 109
+(brush, eraser, pan)/20231103_015 gap: 0 minlen: 109
+(brush, eraser, pan)/20231103_016 gap: 0 minlen: 109
+(cut, spatula, bowl)/20231027_066 gap: 0 minlen: 109
+(dust, brush, teapot)/20231005_231 gap: 0 minlen: 109
+(dust, roller, plate)/20231013_255 gap: 0 minlen: 109
+(pour in some, bowl, plate)/20231024_302 gap: 0 minlen: 109
+(pour in some, cup, bowl)/20231006_275 gap: 0 minlen: 109
+(put in, spoon, bowl)/20231005_127 gap: 0 minlen: 109
+(put in, spoon, pan)/20231006_036 gap: 0 minlen: 109
+(put out, bowl, pan)/20231020_088 gap: 0 minlen: 109
+(scrape off, knife, bowl)/20231031_163 gap: 0 minlen: 109
+(scrape off, spatula, plate)/20231104_175 gap: 0 minlen: 109
+(brush, eraser, bowl)/20231103_037 gap: 0 minlen: 110
+(brush, eraser, kettle)/20231103_103 gap: 0 minlen: 110
+(brush, eraser, plate)/20231103_057 gap: 0 minlen: 110
+(brush, roller, bowl)/20231013_286 gap: 0 minlen: 110
+(dust, brush, teapot)/20231006_218 gap: 0 minlen: 110
+(dust, roller, bowl)/20231013_281 gap: 0 minlen: 110
+(dust, roller, plate)/20231013_271 gap: 0 minlen: 110
+(dust, roller, plate)/20231013_275 gap: 0 minlen: 110
+(empty, bowl, bowl)/20231013_164 gap: 0 minlen: 110
+(pour in some, cup, bowl)/20230930_129 gap: 0 minlen: 110
+(put in, bowl, bowl)/20231013_140 gap: 0 minlen: 110
+(put out, bowl, bowl)/20231013_146 gap: 0 minlen: 110
+(scrape off, knife, bowl)/20231031_164 gap: 0 minlen: 110
+(scrape off, knife, box)/20231104_216 gap: 0 minlen: 110
+(scrape off, knife, plate)/20231020_208 gap: 0 minlen: 110
+(scrape off, knife, plate)/20231020_214 gap: 0 minlen: 110
+(skim off, spoon, bowl)/20231104_187 gap: 0 minlen: 110
+(skim off, spoon, pan)/20231006_045 gap: 0 minlen: 110
+(brush, brush, box)/20230930_034 gap: 0 minlen: 111
+(brush, eraser, bowl)/20231103_042 gap: 0 minlen: 111
+(brush, eraser, pan)/20231103_017 gap: 0 minlen: 111
+(brush, eraser, plate)/20231103_065 gap: 0 minlen: 111
+(dust, brush, bowl)/20231103_187 gap: 0 minlen: 111
+(dust, brush, box)/20231005_211 gap: 0 minlen: 111
+(dust, roller, kettle)/20231103_124 gap: 0 minlen: 111
+(put out, bowl, pan)/20231020_183 gap: 0 minlen: 111
+(put out, bowl, pan)/20231020_186 gap: 0 minlen: 111
+(scrape off, knife, plate)/20231020_222 gap: 0 minlen: 111
+(scrape off, spoon, pan)/20231006_053 gap: 0 minlen: 111
+(brush, brush, kettle)/20231006_165 gap: 0 minlen: 112
+(brush, roller, kettle)/20231103_113 gap: 0 minlen: 112
+(dust, brush, kettle)/20231005_223 gap: 0 minlen: 112
+(dust, brush, teapot)/20231006_216 gap: 0 minlen: 112
+(dust, roller, bowl)/20231013_289 gap: 0 minlen: 112
+(dust, roller, bowl)/20231103_204 gap: 0 minlen: 112
+(dust, roller, kettle)/20231103_140 gap: 0 minlen: 112
+(dust, roller, plate)/20231019_252 gap: 0 minlen: 112
+(empty, bowl, bowl)/20231013_159 gap: 0 minlen: 112
+(hit, hammer, box)/20231002_057 gap: 0 minlen: 112
+(put in, spatula, bowl)/20231024_183 gap: 0 minlen: 112
+(put out, spatula, bowl)/20231024_149 gap: 0 minlen: 112
+(put out, spatula, bowl)/20231024_161 gap: 0 minlen: 112
+(put out, spatula, bowl)/20231024_184 gap: 0 minlen: 112
+(scrape off, spatula, plate)/20230930_015 gap: 0 minlen: 112
+(skim off, spatula, bowl)/20231024_168 gap: 0 minlen: 112
+(brush, brush, helmet)/20231027_017 gap: 0 minlen: 113
+(brush, brush, teapot)/20231006_181 gap: 0 minlen: 113
+(brush, eraser, bowl)/20231103_032 gap: 0 minlen: 113
+(brush, eraser, bowl)/20231103_034 gap: 0 minlen: 113
+(brush, roller, bowl)/20231013_288 gap: 0 minlen: 113
+(brush, roller, box)/20231013_312 gap: 0 minlen: 113
+(brush, roller, kettle)/20231103_115 gap: 0 minlen: 113
+(brush, roller, plate)/20231013_234 gap: 0 minlen: 113
+(dust, brush, bowl)/20231005_197 gap: 0 minlen: 113
+(dust, brush, teapot)/20231005_225 gap: 0 minlen: 113
+(dust, roller, bowl)/20231103_216 gap: 0 minlen: 113
+(dust, roller, kettle)/20231103_132 gap: 0 minlen: 113
+(hit, hammer, box)/20231031_182 gap: 0 minlen: 113
+(pour in some, bowl, plate)/20231027_128 gap: 0 minlen: 113
+(put out, spatula, bowl)/20231024_167 gap: 0 minlen: 113
+(put out, spatula, pan)/20231015_023 gap: 0 minlen: 113
+(brush, eraser, kettle)/20231103_102 gap: 0 minlen: 114
+(brush, roller, bowl)/20231013_298 gap: 0 minlen: 114
+(brush, roller, bowl)/20231103_213 gap: 0 minlen: 114
+(brush, roller, box)/20231104_007 gap: 0 minlen: 114
+(brush, roller, plate)/20231013_270 gap: 0 minlen: 114
+(cut, knife, plate)/20231020_229 gap: 0 minlen: 114
+(cut, spatula, bowl)/20231027_074 gap: 0 minlen: 114
+(dust, brush, kettle)/20230930_041 gap: 0 minlen: 114
+(put in, spatula, bowl)/20231024_189 gap: 0 minlen: 114
+(put out, bowl, plate)/20231024_244 gap: 0 minlen: 114
+(scrape off, knife, box)/20231104_204 gap: 0 minlen: 114
+(skim off, spatula, plate)/20231104_146 gap: 0 minlen: 114
+(brush, brush, teapot)/20231006_233 gap: 0 minlen: 115
+(brush, eraser, bowl)/20231103_047 gap: 0 minlen: 115
+(brush, eraser, pan)/20231103_001 gap: 0 minlen: 115
+(brush, eraser, pan)/20231103_004 gap: 0 minlen: 115
+(brush, eraser, plate)/20231027_064 gap: 0 minlen: 115
+(brush, eraser, plate)/20231103_049 gap: 0 minlen: 115
+(cut, spatula, plate)/20231005_047 gap: 0 minlen: 115
+(dust, brush, bowl)/20231103_185 gap: 0 minlen: 115
+(dust, brush, kettle)/20231103_191 gap: 0 minlen: 115
+(dust, roller, box)/20231013_309 gap: 0 minlen: 115
+(dust, roller, box)/20231104_002 gap: 0 minlen: 115
+(dust, roller, plate)/20231013_235 gap: 0 minlen: 115
+(dust, roller, plate)/20231013_269 gap: 0 minlen: 115
+(empty, bowl, bowl)/20231013_114 gap: 0 minlen: 115
+(measure, ruler, cup)/20231104_131 gap: 0 minlen: 115
+(pour in some, bowl, bowl)/20231013_118 gap: 0 minlen: 115
+(pour in some, bowl, bowl)/20231013_138 gap: 0 minlen: 115
+(put out, bowl, plate)/20231024_300 gap: 0 minlen: 115
+(put out, spatula, plate)/20231104_159 gap: 0 minlen: 115
+(scrape off, knife, box)/20231104_213 gap: 0 minlen: 115
+(scrape off, spatula, bowl)/20231024_186 gap: 0 minlen: 115
+(skim off, spatula, plate)/20231104_121 gap: 0 minlen: 115
+(brush, brush, kettle)/20231103_168 gap: 0 minlen: 116
+(brush, eraser, bowl)/20231103_030 gap: 0 minlen: 116
+(brush, eraser, pan)/20231103_005 gap: 0 minlen: 116
+(brush, roller, bowl)/20231013_296 gap: 0 minlen: 116
+(brush, roller, box)/20231104_003 gap: 0 minlen: 116
+(brush, roller, box)/20231104_021 gap: 0 minlen: 116
+(cut, knife, plate)/20231020_195 gap: 0 minlen: 116
+(dust, brush, bowl)/20231005_191 gap: 0 minlen: 116
+(dust, brush, box)/20230930_037 gap: 0 minlen: 116
+(dust, brush, box)/20231005_209 gap: 0 minlen: 116
+(dust, brush, box)/20231005_213 gap: 0 minlen: 116
+(dust, roller, kettle)/20231103_142 gap: 0 minlen: 116
+(dust, roller, pan)/20231013_181 gap: 0 minlen: 116
+(dust, roller, pan)/20231013_217 gap: 0 minlen: 116
+(dust, roller, plate)/20231013_223 gap: 0 minlen: 116
+(dust, roller, plate)/20231013_233 gap: 0 minlen: 116
+(pour in some, teapot, teapot)/20231031_122 gap: 0 minlen: 116
+(put in, spatula, bowl)/20230930_069 gap: 0 minlen: 116
+(put in, spatula, plate)/20231104_137 gap: 0 minlen: 116
+(put out, spatula, pan)/20231010_002 gap: 0 minlen: 116
+(put out, spatula, pan)/20231015_009 gap: 0 minlen: 116
+(put out, spoon, pan)/20231006_044 gap: 0 minlen: 116
+(skim off, spatula, plate)/20231104_139 gap: 0 minlen: 116
+(skim off, spoon, pan)/20231006_052 gap: 0 minlen: 116
+(brush, brush, toy)/20231027_026 gap: 0 minlen: 117
+(brush, eraser, bowl)/20231103_028 gap: 0 minlen: 117
+(brush, eraser, bowl)/20231103_031 gap: 0 minlen: 117
+(brush, eraser, box)/20231103_094 gap: 0 minlen: 117
+(brush, eraser, plate)/20231027_056 gap: 0 minlen: 117
+(brush, roller, bowl)/20231103_205 gap: 0 minlen: 117
+(brush, roller, pan)/20231013_206 gap: 0 minlen: 117
+(brush, roller, pan)/20231013_250 gap: 0 minlen: 117
+(cut, knife, plate)/20231020_231 gap: 0 minlen: 117
+(cut, spatula, bowl)/20231027_065 gap: 0 minlen: 117
+(cut, spatula, plate)/20231104_155 gap: 0 minlen: 117
+(dust, roller, box)/20231104_004 gap: 0 minlen: 117
+(dust, roller, box)/20231104_006 gap: 0 minlen: 117
+(dust, roller, box)/20231104_022 gap: 0 minlen: 117
+(dust, roller, pan)/20231019_214 gap: 0 minlen: 117
+(pour in some, bowl, cup)/20231006_277 gap: 0 minlen: 117
+(pour in some, box, plate)/20231027_156 gap: 0 minlen: 117
+(put in, spoon, bowl)/20231104_191 gap: 0 minlen: 117
+(put out, bowl, bowl)/20231013_136 gap: 0 minlen: 117
+(put out, spoon, pan)/20231020_081 gap: 0 minlen: 117
+(scrape off, knife, bowl)/20231031_166 gap: 0 minlen: 117
+(scrape off, knife, bowl)/20231031_170 gap: 0 minlen: 117
+(scrape off, knife, pan)/20231031_155 gap: 0 minlen: 117
+(skim off, spatula, bowl)/20231006_031 gap: 0 minlen: 117
+(skim off, spatula, plate)/20231104_174 gap: 0 minlen: 117
+(brush, eraser, pan)/20231103_014 gap: 0 minlen: 118
+(brush, eraser, pan)/20231103_024 gap: 0 minlen: 118
+(brush, eraser, plate)/20231027_045 gap: 0 minlen: 118
+(dust, brush, bowl)/20231103_186 gap: 0 minlen: 118
+(dust, brush, box)/20231005_207 gap: 0 minlen: 118
+(dust, brush, kettle)/20231103_169 gap: 0 minlen: 118
+(dust, brush, kettle)/20231103_194 gap: 0 minlen: 118
+(dust, roller, pan)/20231013_213 gap: 0 minlen: 118
+(dust, roller, plate)/20231013_219 gap: 0 minlen: 118
+(dust, roller, plate)/20231019_082 gap: 0 minlen: 118
+(pour in some, bowl, cup)/20230930_123 gap: 0 minlen: 118
+(pour in some, bowl, plate)/20231027_136 gap: 0 minlen: 118
+(scrape off, knife, bowl)/20231031_168 gap: 0 minlen: 118
+(scrape off, knife, box)/20231104_203 gap: 0 minlen: 118
+(scrape off, knife, box)/20231104_214 gap: 0 minlen: 118
+(scrape off, spatula, pan)/20231006_025 gap: 0 minlen: 118
+(scrape off, spoon, pan)/20231006_046 gap: 0 minlen: 118
+(skim off, spatula, plate)/20231104_160 gap: 0 minlen: 118
+(brush, brush, teapot)/20230930_048 gap: 0 minlen: 119
+(brush, brush, teapot)/20231006_219 gap: 0 minlen: 119
+(brush, brush, teapot)/20231006_221 gap: 0 minlen: 119
+(brush, eraser, bowl)/20231027_033 gap: 0 minlen: 119
+(brush, eraser, bowl)/20231103_026 gap: 0 minlen: 119
+(brush, roller, bowl)/20231103_197 gap: 0 minlen: 119
+(brush, roller, kettle)/20231103_141 gap: 0 minlen: 119
+(cut, spatula, bowl)/20231027_073 gap: 0 minlen: 119
+(dust, roller, box)/20231013_313 gap: 0 minlen: 119
+(dust, roller, plate)/20231013_203 gap: 0 minlen: 119
+(dust, roller, plate)/20231013_265 gap: 0 minlen: 119
+(dust, roller, plate)/20231019_228 gap: 0 minlen: 119
+(measure, ruler, bowl)/20231104_091 gap: 0 minlen: 119
+(pour in some, bowl, plate)/20231024_256 gap: 0 minlen: 119
+(put in, bowl, pan)/20231020_087 gap: 0 minlen: 119
+(put out, bowl, pan)/20231015_079 gap: 0 minlen: 119
+(put out, bowl, pan)/20231020_174 gap: 0 minlen: 119
+(put out, spoon, pan)/20231015_065 gap: 0 minlen: 119
+(scrape off, knife, box)/20231104_217 gap: 0 minlen: 119
+(skim off, spatula, plate)/20231104_167 gap: 0 minlen: 119
+(stir, spatula, plate)/20231005_035 gap: 0 minlen: 119
+(stir, spoon, pan)/20231006_056 gap: 0 minlen: 119
+(brush, brush, kettle)/20230930_044 gap: 0 minlen: 120
+(brush, eraser, pan)/20231103_009 gap: 0 minlen: 120
+(brush, eraser, pan)/20231103_010 gap: 0 minlen: 120
+(brush, eraser, plate)/20231027_054 gap: 0 minlen: 120
+(brush, roller, pan)/20231013_252 gap: 0 minlen: 120
+(dust, brush, bowl)/20231005_199 gap: 0 minlen: 120
+(dust, brush, box)/20231005_201 gap: 0 minlen: 120
+(dust, brush, kettle)/20231103_192 gap: 0 minlen: 120
+(dust, brush, teapot)/20230930_049 gap: 0 minlen: 120
+(dust, roller, kettle)/20231103_148 gap: 0 minlen: 120
+(dust, roller, pan)/20231019_074 gap: 0 minlen: 120
+(hit, hammer, box)/20231031_186 gap: 0 minlen: 120
+(measure, ruler, cup)/20231104_108 gap: 0 minlen: 120
+(pour in some, teapot, teapot)/20231031_118 gap: 0 minlen: 120
+(pour in some, teapot, teapot)/20231031_124 gap: 0 minlen: 120
+(put in, spatula, bowl)/20231024_154 gap: 0 minlen: 120
+(put in, spatula, pan)/20231020_031 gap: 0 minlen: 120
+(put in, spoon, bowl)/20231104_185 gap: 0 minlen: 120
+(put out, bowl, pan)/20231015_091 gap: 0 minlen: 120
+(put out, bowl, plate)/20231024_224 gap: 0 minlen: 120
+(put out, spatula, plate)/20231104_119 gap: 0 minlen: 120
+(put out, spoon, plate)/20231024_084 gap: 0 minlen: 120
+(scrape off, knife, bowl)/20231031_161 gap: 0 minlen: 120
+(scrape off, knife, bowl)/20231031_174 gap: 0 minlen: 120
+(scrape off, knife, plate)/20231020_194 gap: 0 minlen: 120
+(scrape off, knife, plate)/20231020_224 gap: 0 minlen: 120
+(scrape off, spatula, pan)/20231006_011 gap: 0 minlen: 120
+(skim off, bowl, pan)/20231015_080 gap: 0 minlen: 120
+(brush, brush, box)/20231006_163 gap: 0 minlen: 121
+(brush, brush, helmet)/20231027_007 gap: 0 minlen: 121
+(brush, eraser, bowl)/20231027_038 gap: 0 minlen: 121
+(brush, eraser, pan)/20231103_011 gap: 0 minlen: 121
+(brush, roller, bowl)/20231103_209 gap: 0 minlen: 121
+(brush, roller, bowl)/20231103_215 gap: 0 minlen: 121
+(brush, roller, box)/20231013_304 gap: 0 minlen: 121
+(brush, roller, plate)/20231013_186 gap: 0 minlen: 121
+(brush, roller, plate)/20231013_264 gap: 0 minlen: 121
+(dust, roller, bowl)/20231103_202 gap: 0 minlen: 121
+(dust, roller, bowl)/20231103_214 gap: 0 minlen: 121
+(dust, roller, box)/20231104_012 gap: 0 minlen: 121
+(dust, roller, plate)/20231013_261 gap: 0 minlen: 121
+(dust, roller, plate)/20231013_273 gap: 0 minlen: 121
+(hit, hammer, box)/20231031_179 gap: 0 minlen: 121
+(measure, ruler, bowl)/20231104_090 gap: 0 minlen: 121
+(measure, ruler, bowl)/20231104_092 gap: 0 minlen: 121
+(pour in some, bowl, plate)/20231027_140 gap: 0 minlen: 121
+(pour in some, bowl, plate)/20231027_148 gap: 0 minlen: 121
+(pour in some, box, plate)/20231027_154 gap: 0 minlen: 121
+(put in, bowl, bowl)/20231013_150 gap: 0 minlen: 121
+(put out, spoon, pan)/20231020_164 gap: 0 minlen: 121
+(scrape off, knife, bowl)/20231031_162 gap: 0 minlen: 121
+(scrape off, knife, bowl)/20231031_165 gap: 0 minlen: 121
+(scrape off, knife, pan)/20231031_150 gap: 0 minlen: 121
+(scrape off, knife, plate)/20231015_260 gap: 0 minlen: 121
+(scrape off, knife, plate)/20231020_218 gap: 0 minlen: 121
+(brush, brush, bowl)/20231006_145 gap: 0 minlen: 122
+(brush, brush, teapot)/20231006_223 gap: 0 minlen: 122
+(brush, eraser, bowl)/20231027_030 gap: 0 minlen: 122
+(brush, eraser, bowl)/20231103_045 gap: 0 minlen: 122
+(brush, eraser, pan)/20231103_012 gap: 0 minlen: 122
+(brush, eraser, plate)/20231027_059 gap: 0 minlen: 122
+(brush, roller, plate)/20231019_251 gap: 0 minlen: 122
+(dust, brush, kettle)/20231103_196 gap: 0 minlen: 122
+(dust, roller, bowl)/20231103_208 gap: 0 minlen: 122
+(dust, roller, kettle)/20231103_152 gap: 0 minlen: 122
+(dust, roller, plate)/20231013_231 gap: 0 minlen: 122
+(pour in some, bowl, plate)/20231024_277 gap: 0 minlen: 122
+(put in, spoon, bowl)/20231005_113 gap: 0 minlen: 122
+(put out, spatula, bowl)/20231024_155 gap: 0 minlen: 122
+(scrape off, knife, plate)/20231020_226 gap: 0 minlen: 122
+(scrape off, spatula, pan)/20231020_117 gap: 0 minlen: 122
+(skim off, spatula, pan)/20231006_017 gap: 0 minlen: 122
+(skim off, spatula, pan)/20231006_024 gap: 0 minlen: 122
+(skim off, spatula, plate)/20231104_153 gap: 0 minlen: 122
+(smear, eraser, bowl)/20231104_041 gap: 0 minlen: 122
+(stir, spatula, bowl)/20231024_182 gap: 0 minlen: 122
+(brush, brush, box)/20231005_200 gap: 0 minlen: 123
+(brush, brush, pan)/20230928_048 gap: 0 minlen: 123
+(brush, eraser, bowl)/20231027_032 gap: 0 minlen: 123
+(brush, eraser, kettle)/20231103_108 gap: 0 minlen: 123
+(brush, eraser, pan)/20231103_021 gap: 0 minlen: 123
+(brush, eraser, plate)/20231027_050 gap: 0 minlen: 123
+(brush, roller, kettle)/20231103_123 gap: 0 minlen: 123
+(brush, roller, kettle)/20231103_143 gap: 0 minlen: 123
+(dust, brush, pan)/20231103_179 gap: 0 minlen: 123
+(dust, roller, kettle)/20231103_146 gap: 0 minlen: 123
+(dust, roller, plate)/20231013_277 gap: 0 minlen: 123
+(empty, bowl, bowl)/20231013_134 gap: 0 minlen: 123
+(measure, ruler, cup)/20231104_132 gap: 0 minlen: 123
+(pour in some, teapot, plate)/20231031_098 gap: 0 minlen: 123
+(put in, bowl, plate)/20231024_299 gap: 0 minlen: 123
+(put in, spatula, pan)/20231020_121 gap: 0 minlen: 123
+(put out, bowl, plate)/20231024_295 gap: 0 minlen: 123
+(put out, spatula, plate)/20231104_138 gap: 0 minlen: 123
+(scrape off, knife, pan)/20231031_146 gap: 0 minlen: 123
+(scrape off, knife, pan)/20231031_151 gap: 0 minlen: 123
+(scrape off, spatula, pan)/20231006_018 gap: 0 minlen: 123
+(scrape off, spatula, plate)/20231104_161 gap: 0 minlen: 123
+(skim off, spatula, bowl)/20231024_162 gap: 0 minlen: 123
+(skim off, spoon, bowl)/20231005_115 gap: 0 minlen: 123
+(stir, spatula, plate)/20231005_056 gap: 0 minlen: 123
+(brush, brush, bowl)/20231005_196 gap: 0 minlen: 124
+(brush, brush, teapot)/20231006_175 gap: 0 minlen: 124
+(brush, eraser, box)/20231103_072 gap: 0 minlen: 124
+(brush, roller, kettle)/20231103_137 gap: 0 minlen: 124
+(brush, roller, plate)/20231013_188 gap: 0 minlen: 124
+(cut, knife, plate)/20231020_225 gap: 0 minlen: 124
+(cut, knife, plate)/20231020_227 gap: 0 minlen: 124
+(dust, brush, bowl)/20231103_182 gap: 0 minlen: 124
+(dust, roller, kettle)/20231103_134 gap: 0 minlen: 124
+(dust, roller, pan)/20231013_253 gap: 0 minlen: 124
+(dust, roller, plate)/20231020_006 gap: 0 minlen: 124
+(hit, hammer, box)/20231031_189 gap: 0 minlen: 124
+(measure, ruler, cup)/20231104_107 gap: 0 minlen: 124
+(put in, spatula, plate)/20231104_117 gap: 0 minlen: 124
+(put in, spatula, plate)/20231104_118 gap: 0 minlen: 124
+(put out, bowl, plate)/20231024_285 gap: 0 minlen: 124
+(put out, spatula, pan)/20231015_016 gap: 0 minlen: 124
+(put out, spoon, pan)/20231006_037 gap: 0 minlen: 124
+(put out, spoon, pan)/20231020_074 gap: 0 minlen: 124
+(scrape off, knife, bowl)/20231031_160 gap: 0 minlen: 124
+(scrape off, knife, plate)/20231020_234 gap: 0 minlen: 124
+(scrape off, spoon, bowl)/20231104_182 gap: 0 minlen: 124
+(skim off, bowl, bowl)/20231013_157 gap: 0 minlen: 124
+(stir, spatula, plate)/20231005_042 gap: 0 minlen: 124
+(brush, brush, kettle)/20230930_040 gap: 0 minlen: 125
+(brush, eraser, plate)/20231027_048 gap: 0 minlen: 125
+(brush, eraser, plate)/20231027_060 gap: 0 minlen: 125
+(brush, roller, bowl)/20231013_280 gap: 0 minlen: 125
+(brush, roller, kettle)/20231103_135 gap: 0 minlen: 125
+(cut, spatula, bowl)/20231027_071 gap: 0 minlen: 125
+(cut, spoon, plate)/20231027_091 gap: 0 minlen: 125
+(dust, brush, box)/20230930_039 gap: 0 minlen: 125
+(dust, brush, kettle)/20231103_160 gap: 0 minlen: 125
+(dust, roller, bowl)/20231013_279 gap: 0 minlen: 125
+(dust, roller, bowl)/20231103_212 gap: 0 minlen: 125
+(dust, roller, plate)/20231013_259 gap: 0 minlen: 125
+(pour in some, bowl, cup)/20231006_265 gap: 0 minlen: 125
+(pour in some, bowl, kettle)/20231019_021 gap: 0 minlen: 125
+(pour in some, kettle, bowl)/20231019_001 gap: 0 minlen: 125
+(pour in some, teapot, plate)/20231031_085 gap: 0 minlen: 125
+(put in, bowl, plate)/20231024_223 gap: 0 minlen: 125
+(put in, bowl, plate)/20231024_274 gap: 0 minlen: 125
+(put in, spatula, bowl)/20231024_195 gap: 0 minlen: 125
+(scrape off, knife, bowl)/20231031_159 gap: 0 minlen: 125
+(scrape off, spoon, pan)/20231020_083 gap: 0 minlen: 125
+(brush, brush, kettle)/20231103_166 gap: 0 minlen: 126
+(brush, eraser, bowl)/20231027_034 gap: 0 minlen: 126
+(brush, eraser, bowl)/20231027_036 gap: 0 minlen: 126
+(brush, eraser, pan)/20231103_002 gap: 0 minlen: 126
+(brush, roller, plate)/20231013_266 gap: 0 minlen: 126
+(cut, spatula, bowl)/20231027_082 gap: 0 minlen: 126
+(cut, spatula, pan)/20231020_111 gap: 0 minlen: 126
+(cut, spatula, plate)/20231104_176 gap: 0 minlen: 126
+(cut, spoon, pan)/20231006_040 gap: 0 minlen: 126
+(dust, roller, kettle)/20231103_150 gap: 0 minlen: 126
+(dust, roller, pan)/20231019_068 gap: 0 minlen: 126
+(dust, roller, plate)/20231013_267 gap: 0 minlen: 126
+(put in, bowl, plate)/20231024_248 gap: 0 minlen: 126
+(put out, bowl, plate)/20231024_219 gap: 0 minlen: 126
+(scrape off, knife, box)/20231104_206 gap: 0 minlen: 126
+(scrape off, knife, box)/20231104_212 gap: 0 minlen: 126
+(scrape off, knife, plate)/20231020_192 gap: 0 minlen: 126
+(scrape off, spatula, bowl)/20231024_163 gap: 0 minlen: 126
+(skim off, bowl, bowl)/20231013_117 gap: 0 minlen: 126
+(skim off, bowl, plate)/20231024_301 gap: 0 minlen: 126
+(skim off, spatula, pan)/20231006_003 gap: 0 minlen: 126
+(skim off, spoon, pan)/20231006_038 gap: 0 minlen: 126
+(brush, eraser, box)/20231103_070 gap: 0 minlen: 127
+(brush, eraser, pan)/20231103_018 gap: 0 minlen: 127
+(brush, eraser, plate)/20231103_066 gap: 0 minlen: 127
+(brush, roller, bowl)/20231013_278 gap: 0 minlen: 127
+(brush, roller, kettle)/20231103_117 gap: 0 minlen: 127
+(brush, roller, pan)/20231013_242 gap: 0 minlen: 127
+(dust, roller, bowl)/20231103_198 gap: 0 minlen: 127
+(dust, roller, bowl)/20231103_200 gap: 0 minlen: 127
+(dust, roller, pan)/20231013_211 gap: 0 minlen: 127
+(empty, cup, bowl)/20231006_276 gap: 0 minlen: 127
+(measure, ruler, cup)/20231104_106 gap: 0 minlen: 127
+(pour in some, bowl, plate)/20231024_282 gap: 0 minlen: 127
+(pour in some, cup, bowl)/20231006_263 gap: 0 minlen: 127
+(pour in some, teapot, plate)/20231031_089 gap: 0 minlen: 127
+(put in, spatula, pan)/20231005_022 gap: 0 minlen: 127
+(scrape off, knife, bowl)/20231031_177 gap: 0 minlen: 127
+(scrape off, spoon, pan)/20231006_039 gap: 0 minlen: 127
+(skim off, bowl, pan)/20231020_089 gap: 0 minlen: 127
+(skim off, spatula, pan)/20231015_024 gap: 0 minlen: 127
+(brush, brush, helmet)/20231027_014 gap: 0 minlen: 128
+(brush, eraser, plate)/20231027_055 gap: 0 minlen: 128
+(brush, roller, bowl)/20231103_199 gap: 0 minlen: 128
+(brush, roller, pan)/20231019_217 gap: 0 minlen: 128
+(cut, knife, pan)/20231020_245 gap: 0 minlen: 128
+(cut, knife, plate)/20231020_221 gap: 0 minlen: 128
+(cut, spoon, bowl)/20231027_083 gap: 0 minlen: 128
+(cut, spoon, bowl)/20231027_085 gap: 0 minlen: 128
+(cut, spoon, bowl)/20231104_183 gap: 0 minlen: 128
+(cut, spoon, pan)/20231006_047 gap: 0 minlen: 128
+(dust, brush, kettle)/20231103_195 gap: 0 minlen: 128
+(dust, roller, pan)/20231019_066 gap: 0 minlen: 128
+(dust, roller, plate)/20231019_092 gap: 0 minlen: 128
+(empty, cup, bowl)/20231006_280 gap: 0 minlen: 128
+(hit, hammer, box)/20231031_188 gap: 0 minlen: 128
+(measure, ruler, cup)/20231104_102 gap: 0 minlen: 128
+(pour in some, kettle, bowl)/20231019_019 gap: 0 minlen: 128
+(put in, bowl, bowl)/20231013_135 gap: 0 minlen: 128
+(put in, bowl, plate)/20231024_258 gap: 0 minlen: 128
+(put in, spatula, pan)/20231015_001 gap: 0 minlen: 128
+(put in, spatula, plate)/20231104_144 gap: 0 minlen: 128
+(put out, bowl, bowl)/20231013_131 gap: 0 minlen: 128
+(put out, spatula, bowl)/20231024_196 gap: 0 minlen: 128
+(put out, spatula, pan)/20231020_108 gap: 0 minlen: 128
+(put out, spatula, plate)/20231104_152 gap: 0 minlen: 128
+(scrape off, knife, bowl)/20231031_157 gap: 0 minlen: 128
+(scrape off, knife, bowl)/20231031_171 gap: 0 minlen: 128
+(skim off, spatula, bowl)/20231024_185 gap: 0 minlen: 128
+(smear, eraser, bowl)/20231104_031 gap: 0 minlen: 128
+(smear, eraser, plate)/20231104_062 gap: 0 minlen: 128
+(stir, spoon, bowl)/20231104_184 gap: 0 minlen: 128
+(brush, eraser, bowl)/20231027_037 gap: 0 minlen: 129
+(brush, eraser, kettle)/20231103_106 gap: 0 minlen: 129
+(brush, eraser, pan)/20231103_003 gap: 0 minlen: 129
+(brush, roller, bowl)/20231103_203 gap: 0 minlen: 129
+(brush, roller, bowl)/20231103_211 gap: 0 minlen: 129
+(brush, roller, kettle)/20231103_121 gap: 0 minlen: 129
+(brush, roller, plate)/20231019_221 gap: 0 minlen: 129
+(brush, roller, plate)/20231019_245 gap: 0 minlen: 129
+(cut, spatula, bowl)/20231027_072 gap: 0 minlen: 129
+(cut, spatula, plate)/20231104_169 gap: 0 minlen: 129
+(cut, spoon, plate)/20231027_099 gap: 0 minlen: 129
+(dust, brush, bowl)/20231103_188 gap: 0 minlen: 129
+(dust, roller, box)/20231104_014 gap: 0 minlen: 129
+(dust, roller, kettle)/20231103_144 gap: 0 minlen: 129
+(dust, roller, pan)/20231019_076 gap: 0 minlen: 129
+(dust, roller, plate)/20231013_187 gap: 0 minlen: 129
+(empty, bowl, cup)/20230930_124 gap: 0 minlen: 129
+(hit, hammer, box)/20231031_178 gap: 0 minlen: 129
+(measure, ruler, plate)/20231104_069 gap: 0 minlen: 129
+(pour in some, bowl, plate)/20231024_241 gap: 0 minlen: 129
+(pour in some, box, plate)/20231027_152 gap: 0 minlen: 129
+(pour in some, kettle, plate)/20231031_063 gap: 0 minlen: 129
+(pour in some, teapot, plate)/20231031_096 gap: 0 minlen: 129
+(put in, bowl, plate)/20231024_243 gap: 0 minlen: 129
+(put in, spatula, bowl)/20231024_172 gap: 0 minlen: 129
+(put in, spatula, pan)/20231006_015 gap: 0 minlen: 129
+(put out, spatula, pan)/20231006_016 gap: 0 minlen: 129
+(put out, spatula, pan)/20231020_115 gap: 0 minlen: 129
+(put out, spoon, pan)/20231020_157 gap: 0 minlen: 129
+(put out, spoon, plate)/20231024_090 gap: 0 minlen: 129
+(scrape off, knife, bowl)/20231031_156 gap: 0 minlen: 129
+(scrape off, knife, bowl)/20231031_175 gap: 0 minlen: 129
+(scrape off, spatula, pan)/20231005_018 gap: 0 minlen: 129
+(skim off, bowl, pan)/20231015_092 gap: 0 minlen: 129
+(skim off, spatula, bowl)/20231024_191 gap: 0 minlen: 129
+(brush, brush, pan)/20231103_170 gap: 0 minlen: 130
+(brush, brush, toy)/20231027_025 gap: 0 minlen: 130
+(brush, eraser, pan)/20231103_022 gap: 0 minlen: 130
+(brush, roller, box)/20231104_005 gap: 0 minlen: 130
+(brush, roller, plate)/20231013_218 gap: 0 minlen: 130
+(cut, knife, plate)/20231013_107 gap: 0 minlen: 130
+(cut, spatula, plate)/20231005_033 gap: 0 minlen: 130
+(dust, roller, box)/20231013_303 gap: 0 minlen: 130
+(dust, roller, plate)/20231019_102 gap: 0 minlen: 130
+(dust, roller, plate)/20231019_226 gap: 0 minlen: 130
+(measure, ruler, bowl)/20231104_087 gap: 0 minlen: 130
+(pour in some, box, plate)/20231027_166 gap: 0 minlen: 130
+(pour in some, box, plate)/20231027_172 gap: 0 minlen: 130
+(pour in some, kettle, plate)/20231031_073 gap: 0 minlen: 130
+(pour in some, teapot, plate)/20231031_091 gap: 0 minlen: 130
+(put in, bowl, pan)/20231020_185 gap: 0 minlen: 130
+(put in, bowl, plate)/20231024_228 gap: 0 minlen: 130
+(put out, bowl, plate)/20231024_275 gap: 0 minlen: 130
+(put out, spoon, pan)/20231005_107 gap: 0 minlen: 130
+(scrape off, knife, box)/20231104_218 gap: 0 minlen: 130
+(scrape off, knife, pan)/20231031_153 gap: 0 minlen: 130
+(scrape off, knife, plate)/20231015_266 gap: 0 minlen: 130
+(stir, spoon, bowl)/20231104_196 gap: 0 minlen: 130
+(brush, brush, helmet)/20231027_019 gap: 0 minlen: 131
+(brush, brush, kettle)/20231006_207 gap: 0 minlen: 131
+(brush, brush, kettle)/20231103_159 gap: 0 minlen: 131
+(brush, eraser, bowl)/20231027_027 gap: 0 minlen: 131
+(brush, roller, bowl)/20231103_201 gap: 0 minlen: 131
+(brush, roller, plate)/20231013_232 gap: 0 minlen: 131
+(cut, spatula, bowl)/20231027_067 gap: 0 minlen: 131
+(cut, spatula, pan)/20231005_026 gap: 0 minlen: 131
+(dust, brush, box)/20231005_203 gap: 0 minlen: 131
+(dust, roller, box)/20231104_016 gap: 0 minlen: 131
+(dust, roller, kettle)/20231103_138 gap: 0 minlen: 131
+(dust, roller, plate)/20231013_237 gap: 0 minlen: 131
+(pour in some, teapot, kettle)/20231031_104 gap: 0 minlen: 131
+(pour in some, teapot, plate)/20231031_094 gap: 0 minlen: 131
+(pour in some, teapot, teapot)/20231031_120 gap: 0 minlen: 131
+(put in, spatula, bowl)/20231024_142 gap: 0 minlen: 131
+(scrape off, knife, bowl)/20231031_167 gap: 0 minlen: 131
+(scrape off, knife, bowl)/20231031_176 gap: 0 minlen: 131
+(scrape off, knife, pan)/20231031_144 gap: 0 minlen: 131
+(scrape off, knife, plate)/20231020_212 gap: 0 minlen: 131
+(scrape off, spatula, bowl)/20231024_175 gap: 0 minlen: 131
+(scrape off, spatula, plate)/20231005_046 gap: 0 minlen: 131
+(scrape off, spatula, plate)/20231104_123 gap: 0 minlen: 131
+(scrape off, spatula, plate)/20231104_140 gap: 0 minlen: 131
+(scrape off, spatula, plate)/20231104_168 gap: 0 minlen: 131
+(stir, spatula, pan)/20231020_037 gap: 0 minlen: 131
+(brush, roller, box)/20231013_302 gap: 0 minlen: 132
+(brush, roller, box)/20231104_013 gap: 0 minlen: 132
+(brush, roller, kettle)/20231103_139 gap: 0 minlen: 132
+(brush, roller, kettle)/20231103_147 gap: 0 minlen: 132
+(brush, roller, plate)/20231013_274 gap: 0 minlen: 132
+(cut, knife, bowl)/20231020_255 gap: 0 minlen: 132
+(cut, knife, plate)/20231020_217 gap: 0 minlen: 132
+(dust, roller, plate)/20231013_239 gap: 0 minlen: 132
+(empty, bowl, bowl)/20231013_119 gap: 0 minlen: 132
+(pour in some, bowl, kettle)/20231019_013 gap: 0 minlen: 132
+(pour in some, bowl, plate)/20231024_251 gap: 0 minlen: 132
+(pour in some, bowl, plate)/20231027_134 gap: 0 minlen: 132
+(pour in some, plate, bowl)/20230930_139 gap: 0 minlen: 132
+(put in, bowl, pan)/20231015_093 gap: 0 minlen: 132
+(put in, bowl, plate)/20231024_279 gap: 0 minlen: 132
+(put in, bowl, plate)/20231024_289 gap: 0 minlen: 132
+(put in, spoon, pan)/20231020_149 gap: 0 minlen: 132
+(put out, bowl, plate)/20231024_214 gap: 0 minlen: 132
+(put out, bowl, plate)/20231024_229 gap: 0 minlen: 132
+(put out, spoon, bowl)/20231005_114 gap: 0 minlen: 132
+(scrape off, knife, plate)/20231020_210 gap: 0 minlen: 132
+(scrape off, spatula, plate)/20231104_124 gap: 0 minlen: 132
+(skim off, spatula, plate)/20231005_059 gap: 0 minlen: 132
+(stir, spatula, plate)/20231005_049 gap: 0 minlen: 132
+(stir, spatula, plate)/20231104_164 gap: 0 minlen: 132
+(stir, spoon, bowl)/20231104_190 gap: 0 minlen: 132
+(stir-fry, spatula, plate)/20231104_170 gap: 0 minlen: 132
+(stir-fry, spoon, pan)/20231020_071 gap: 0 minlen: 132
+(brush, brush, box)/20230930_038 gap: 0 minlen: 133
+(brush, eraser, box)/20231103_086 gap: 0 minlen: 133
+(brush, roller, plate)/20231013_276 gap: 0 minlen: 133
+(cut, knife, bowl)/20231020_269 gap: 0 minlen: 133
+(cut, knife, pan)/20231020_244 gap: 0 minlen: 133
+(cut, knife, pan)/20231020_249 gap: 0 minlen: 133
+(cut, spatula, bowl)/20231027_081 gap: 0 minlen: 133
+(cut, spoon, bowl)/20231027_086 gap: 0 minlen: 133
+(dust, roller, box)/20231013_317 gap: 0 minlen: 133
+(dust, roller, box)/20231104_018 gap: 0 minlen: 133
+(dust, roller, kettle)/20231103_136 gap: 0 minlen: 133
+(dust, roller, plate)/20231013_225 gap: 0 minlen: 133
+(dust, roller, plate)/20231019_154 gap: 0 minlen: 133
+(dust, roller, plate)/20231020_010 gap: 0 minlen: 133
+(empty, bowl, bowl)/20231013_139 gap: 0 minlen: 133
+(pour in some, bowl, plate)/20231024_292 gap: 0 minlen: 133
+(pour in some, bowl, plate)/20231024_297 gap: 0 minlen: 133
+(pour in some, cup, cup)/20231005_258 gap: 0 minlen: 133
+(pour in some, kettle, bowl)/20231019_017 gap: 0 minlen: 133
+(pour in some, kettle, bowl)/20231019_027 gap: 0 minlen: 133
+(pour in some, kettle, plate)/20231031_061 gap: 0 minlen: 133
+(pour in some, teapot, plate)/20231031_092 gap: 0 minlen: 133
+(put in, bowl, bowl)/20231013_130 gap: 0 minlen: 133
+(put in, bowl, pan)/20231020_179 gap: 0 minlen: 133
+(put in, bowl, plate)/20231024_284 gap: 0 minlen: 133
+(put out, spatula, plate)/20231005_058 gap: 0 minlen: 133
+(put out, spatula, plate)/20231104_120 gap: 0 minlen: 133
+(scrape off, knife, pan)/20231031_145 gap: 0 minlen: 133
+(scrape off, spatula, bowl)/20231024_192 gap: 0 minlen: 133
+(scrape off, spatula, pan)/20231006_004 gap: 0 minlen: 133
+(smear, eraser, plate)/20231104_057 gap: 0 minlen: 133
+(stir-fry, spatula, plate)/20231104_177 gap: 0 minlen: 133
+(brush, brush, helmet)/20231027_009 gap: 0 minlen: 134
+(brush, roller, kettle)/20231103_129 gap: 0 minlen: 134
+(brush, roller, kettle)/20231103_151 gap: 0 minlen: 134
+(brush, roller, pan)/20231019_199 gap: 0 minlen: 134
+(brush, roller, plate)/20231013_254 gap: 0 minlen: 134
+(cut, knife, bowl)/20231020_268 gap: 0 minlen: 134
+(cut, spatula, bowl)/20230930_072 gap: 0 minlen: 134
+(cut, spoon, bowl)/20231104_189 gap: 0 minlen: 134
+(dust, brush, teapot)/20230930_053 gap: 0 minlen: 134
+(dust, roller, plate)/20231019_156 gap: 0 minlen: 134
+(empty, box, plate)/20231027_151 gap: 0 minlen: 134
+(hit, hammer, box)/20231031_187 gap: 0 minlen: 134
+(measure, ruler, bowl)/20231104_089 gap: 0 minlen: 134
+(pour in some, bowl, plate)/20231027_126 gap: 0 minlen: 134
+(pour in some, teapot, plate)/20231031_077 gap: 0 minlen: 134
+(put in, spatula, bowl)/20231024_160 gap: 0 minlen: 134
+(put out, bowl, pan)/20231015_094 gap: 0 minlen: 134
+(put out, bowl, pan)/20231020_180 gap: 0 minlen: 134
+(scrape off, knife, bowl)/20231031_158 gap: 0 minlen: 134
+(scrape off, knife, pan)/20231031_141 gap: 0 minlen: 134
+(scrape off, knife, pan)/20231031_143 gap: 0 minlen: 134
+(scrape off, knife, pan)/20231031_147 gap: 0 minlen: 134
+(scrape off, knife, plate)/20231015_268 gap: 0 minlen: 134
+(scrape off, knife, plate)/20231020_216 gap: 0 minlen: 134
+(scrape off, spatula, plate)/20231005_053 gap: 0 minlen: 134
+(scrape off, spatula, plate)/20231104_154 gap: 0 minlen: 134
+(skim off, bowl, bowl)/20231013_132 gap: 0 minlen: 134
+(skim off, spatula, bowl)/20231024_156 gap: 0 minlen: 134
+(smear, eraser, plate)/20231104_063 gap: 0 minlen: 134
+(stir, spatula, bowl)/20231024_200 gap: 0 minlen: 134
+(brush, brush, kettle)/20231103_161 gap: 0 minlen: 135
+(brush, brush, toy)/20231027_024 gap: 0 minlen: 135
+(brush, eraser, bowl)/20231027_035 gap: 0 minlen: 135
+(brush, roller, kettle)/20231103_149 gap: 0 minlen: 135
+(brush, roller, plate)/20231013_224 gap: 0 minlen: 135
+(brush, roller, plate)/20231019_083 gap: 0 minlen: 135
+(cut, spoon, plate)/20231027_105 gap: 0 minlen: 135
+(dust, roller, box)/20231104_010 gap: 0 minlen: 135
+(dust, roller, plate)/20231013_241 gap: 0 minlen: 135
+(empty, bowl, plate)/20231024_293 gap: 0 minlen: 135
+(measure, ruler, bowl)/20231104_093 gap: 0 minlen: 135
+(measure, ruler, cup)/20231104_134 gap: 0 minlen: 135
+(pour in some, bowl, plate)/20231027_122 gap: 0 minlen: 135
+(pour in some, teapot, kettle)/20231019_051 gap: 0 minlen: 135
+(put out, bowl, plate)/20231024_239 gap: 0 minlen: 135
+(scrape off, knife, bowl)/20231031_172 gap: 0 minlen: 135
+(scrape off, spatula, bowl)/20231024_151 gap: 0 minlen: 135
+(skim off, spatula, bowl)/20230930_070 gap: 0 minlen: 135
+(skim off, spatula, pan)/20231015_010 gap: 0 minlen: 135
+(skim off, spoon, pan)/20231020_075 gap: 0 minlen: 135
+(brush, brush, helmet)/20231027_020 gap: 0 minlen: 136
+(brush, brush, kettle)/20231006_171 gap: 0 minlen: 136
+(brush, brush, kettle)/20231006_213 gap: 0 minlen: 136
+(brush, brush, kettle)/20231103_157 gap: 0 minlen: 136
+(brush, brush, plate)/20231006_119 gap: 0 minlen: 136
+(brush, eraser, plate)/20231027_052 gap: 0 minlen: 136
+(brush, roller, plate)/20231013_182 gap: 0 minlen: 136
+(cut, knife, plate)/20231015_265 gap: 0 minlen: 136
+(cut, spatula, plate)/20231104_148 gap: 0 minlen: 136
+(dust, brush, bowl)/20231103_184 gap: 0 minlen: 136
+(dust, roller, plate)/20231019_188 gap: 0 minlen: 136
+(empty, kettle, bowl)/20231019_018 gap: 0 minlen: 136
+(empty, kettle, plate)/20231031_072 gap: 0 minlen: 136
+(measure, ruler, bowl)/20231104_088 gap: 0 minlen: 136
+(measure, ruler, cup)/20231104_104 gap: 0 minlen: 136
+(measure, ruler, cup)/20231104_112 gap: 0 minlen: 136
+(pour in some, bowl, plate)/20230930_137 gap: 0 minlen: 136
+(pour in some, kettle, teapot)/20231031_116 gap: 0 minlen: 136
+(put out, bowl, plate)/20231024_254 gap: 0 minlen: 136
+(scrape off, knife, pan)/20231031_152 gap: 0 minlen: 136
+(scrape off, spatula, bowl)/20231024_145 gap: 0 minlen: 136
+(skim off, spatula, bowl)/20231024_174 gap: 0 minlen: 136
+(skim off, spatula, plate)/20230930_014 gap: 0 minlen: 136
+(smear, eraser, bowl)/20231104_042 gap: 0 minlen: 136
+(stir-fry, spatula, plate)/20231104_163 gap: 0 minlen: 136
+(brush, brush, teapot)/20231006_187 gap: 0 minlen: 137
+(brush, eraser, kettle)/20231103_104 gap: 0 minlen: 137
+(brush, eraser, plate)/20231027_061 gap: 0 minlen: 137
+(brush, roller, pan)/20231019_205 gap: 0 minlen: 137
+(cut, knife, plate)/20231013_077 gap: 0 minlen: 137
+(cut, knife, plate)/20231020_223 gap: 0 minlen: 137
+(cut, spoon, pan)/20231020_146 gap: 0 minlen: 137
+(dust, roller, bowl)/20231013_299 gap: 0 minlen: 137
+(dust, roller, bowl)/20231103_210 gap: 0 minlen: 137
+(dust, roller, pan)/20231013_175 gap: 0 minlen: 137
+(dust, roller, plate)/20231013_229 gap: 0 minlen: 137
+(empty, cup, bowl)/20230930_122 gap: 0 minlen: 137
+(pour in some, bowl, plate)/20231027_142 gap: 0 minlen: 137
+(pour in some, kettle, plate)/20231031_059 gap: 0 minlen: 137
+(put in, bowl, plate)/20231024_233 gap: 0 minlen: 137
+(put out, bowl, pan)/20231020_171 gap: 0 minlen: 137
+(put out, spatula, pan)/20231006_023 gap: 0 minlen: 137
+(put out, spatula, pan)/20231020_122 gap: 0 minlen: 137
+(scrape off, knife, plate)/20231015_262 gap: 0 minlen: 137
+(scrape off, knife, plate)/20231020_230 gap: 0 minlen: 137
+(scrape off, spatula, plate)/20231005_032 gap: 0 minlen: 137
+(skim off, spoon, pan)/20231020_068 gap: 0 minlen: 137
+(brush, brush, box)/20231006_155 gap: 0 minlen: 138
+(brush, brush, kettle)/20231006_169 gap: 0 minlen: 138
+(brush, brush, plate)/20230928_050 gap: 0 minlen: 138
+(brush, roller, box)/20231104_011 gap: 0 minlen: 138
+(cut, spatula, bowl)/20231024_199 gap: 0 minlen: 138
+(cut, spatula, plate)/20231104_126 gap: 0 minlen: 138
+(cut, spoon, pan)/20231020_160 gap: 0 minlen: 138
+(cut, spoon, plate)/20231027_092 gap: 0 minlen: 138
+(dust, brush, kettle)/20231103_154 gap: 0 minlen: 138
+(dust, brush, kettle)/20231103_162 gap: 0 minlen: 138
+(dust, roller, pan)/20231013_177 gap: 0 minlen: 138
+(dust, roller, plate)/20231013_183 gap: 0 minlen: 138
+(dust, roller, plate)/20231019_080 gap: 0 minlen: 138
+(empty, bowl, plate)/20231024_257 gap: 0 minlen: 138
+(hit, hammer, box)/20231031_185 gap: 0 minlen: 138
+(measure, ruler, bowl)/20231104_094 gap: 0 minlen: 138
+(pour in some, bowl, plate)/20231027_124 gap: 0 minlen: 138
+(pour in some, bowl, plate)/20231027_138 gap: 0 minlen: 138
+(pour in some, teapot, plate)/20231031_087 gap: 0 minlen: 138
+(put in, spoon, pan)/20231020_073 gap: 0 minlen: 138
+(put in, spoon, pan)/20231020_156 gap: 0 minlen: 138
+(put out, spatula, bowl)/20231024_131 gap: 0 minlen: 138
+(put out, spatula, bowl)/20231024_137 gap: 0 minlen: 138
+(put out, spatula, bowl)/20231024_179 gap: 0 minlen: 138
+(put out, spoon, pan)/20231020_150 gap: 0 minlen: 138
+(scrape off, knife, plate)/20231013_106 gap: 0 minlen: 138
+(scrape off, spatula, bowl)/20231024_127 gap: 0 minlen: 138
+(scrape off, spoon, pan)/20231020_076 gap: 0 minlen: 138
+(scrape off, spoon, plate)/20231024_082 gap: 0 minlen: 138
+(skim off, bowl, plate)/20231024_296 gap: 0 minlen: 138
+(skim off, spatula, bowl)/20231005_066 gap: 0 minlen: 138
+(skim off, spatula, bowl)/20231024_150 gap: 0 minlen: 138
+(skim off, spoon, pan)/20231005_101 gap: 0 minlen: 138
+(stir, spoon, pan)/20231006_042 gap: 0 minlen: 138
+(stir, spoon, pan)/20231020_148 gap: 0 minlen: 138
+(brush, brush, helmet)/20231027_005 gap: 0 minlen: 139
+(brush, brush, helmet)/20231027_013 gap: 0 minlen: 139
+(brush, eraser, plate)/20231027_057 gap: 0 minlen: 139
+(brush, roller, box)/20231013_316 gap: 0 minlen: 139
+(brush, roller, pan)/20231019_129 gap: 0 minlen: 139
+(brush, roller, plate)/20231019_155 gap: 0 minlen: 139
+(cut, spoon, plate)/20231027_090 gap: 0 minlen: 139
+(cut, spoon, plate)/20231027_102 gap: 0 minlen: 139
+(cut, spoon, plate)/20231027_103 gap: 0 minlen: 139
+(dust, brush, bowl)/20231005_193 gap: 0 minlen: 139
+(dust, roller, plate)/20231019_240 gap: 0 minlen: 139
+(measure, ruler, bowl)/20231104_097 gap: 0 minlen: 139
+(measure, ruler, cup)/20231104_136 gap: 0 minlen: 139
+(pour in some, bowl, plate)/20231024_226 gap: 0 minlen: 139
+(put in, bowl, bowl)/20231005_137 gap: 0 minlen: 139
+(put in, bowl, bowl)/20231013_160 gap: 0 minlen: 139
+(put in, spatula, plate)/20231005_050 gap: 0 minlen: 139
+(put in, spatula, plate)/20231104_158 gap: 0 minlen: 139
+(put out, spoon, plate)/20231024_080 gap: 0 minlen: 139
+(scrape off, knife, pan)/20231031_149 gap: 0 minlen: 139
+(scrape off, knife, plate)/20231013_104 gap: 0 minlen: 139
+(scrape off, spatula, pan)/20231020_027 gap: 0 minlen: 139
+(smear, eraser, bowl)/20231104_029 gap: 0 minlen: 139
+(stir, spatula, pan)/20231020_113 gap: 0 minlen: 139
+(stir, spoon, pan)/20231020_169 gap: 0 minlen: 139
+(stir-fry, spatula, plate)/20231104_149 gap: 0 minlen: 139
+(brush, brush, helmet)/20231027_015 gap: 0 minlen: 140
+(brush, eraser, bowl)/20231027_043 gap: 0 minlen: 140
+(brush, roller, box)/20231104_001 gap: 0 minlen: 140
+(brush, roller, kettle)/20231103_145 gap: 0 minlen: 140
+(brush, roller, pan)/20231019_057 gap: 0 minlen: 140
+(brush, roller, plate)/20231019_091 gap: 0 minlen: 140
+(cut, knife, bowl)/20231020_256 gap: 0 minlen: 140
+(cut, knife, pan)/20231020_237 gap: 0 minlen: 140
+(cut, spatula, bowl)/20231024_110 gap: 0 minlen: 140
+(cut, spatula, bowl)/20231027_069 gap: 0 minlen: 140
+(cut, spoon, pan)/20231020_167 gap: 0 minlen: 140
+(cut, spoon, plate)/20231027_098 gap: 0 minlen: 140
+(cut, spoon, plate)/20231027_101 gap: 0 minlen: 140
+(dust, brush, kettle)/20231103_193 gap: 0 minlen: 140
+(dust, brush, pan)/20231103_174 gap: 0 minlen: 140
+(pour in some, bowl, plate)/20231027_146 gap: 0 minlen: 140
+(pour in some, box, plate)/20231027_176 gap: 0 minlen: 140
+(pour in some, kettle, bowl)/20231031_043 gap: 0 minlen: 140
+(put in, bowl, bowl)/20231013_155 gap: 0 minlen: 140
+(put in, bowl, plate)/20231024_294 gap: 0 minlen: 140
+(put out, spoon, pan)/20231006_051 gap: 0 minlen: 140
+(scrape off, spatula, bowl)/20231024_133 gap: 0 minlen: 140
+(scrape off, spatula, bowl)/20231024_139 gap: 0 minlen: 140
+(scrape off, spoon, plate)/20231024_092 gap: 0 minlen: 140
+(stir, spatula, plate)/20230930_068 gap: 0 minlen: 140
+(stir, spatula, plate)/20231104_171 gap: 0 minlen: 140
+(stir, spoon, pan)/20231020_155 gap: 0 minlen: 140
+(stir-fry, spatula, plate)/20231104_142 gap: 0 minlen: 140
+(brush, brush, kettle)/20231103_163 gap: 0 minlen: 141
+(brush, eraser, pan)/20231103_006 gap: 0 minlen: 141
+(brush, eraser, plate)/20231027_062 gap: 0 minlen: 141
+(brush, roller, pan)/20231019_133 gap: 0 minlen: 141
+(brush, roller, pan)/20231019_197 gap: 0 minlen: 141
+(brush, roller, plate)/20231019_153 gap: 0 minlen: 141
+(cut, spatula, bowl)/20231024_128 gap: 0 minlen: 141
+(cut, spoon, bowl)/20231027_088 gap: 0 minlen: 141
+(cut, spoon, plate)/20231027_089 gap: 0 minlen: 141
+(dust, roller, pan)/20231019_198 gap: 0 minlen: 141
+(dust, roller, pan)/20231019_206 gap: 0 minlen: 141
+(dust, roller, plate)/20231019_234 gap: 0 minlen: 141
+(measure, ruler, bowl)/20231104_095 gap: 0 minlen: 141
+(measure, ruler, plate)/20231104_077 gap: 0 minlen: 141
+(pour in some, bowl, plate)/20231027_130 gap: 0 minlen: 141
+(pour in some, box, plate)/20231027_150 gap: 0 minlen: 141
+(pour in some, teapot, kettle)/20231031_110 gap: 0 minlen: 141
+(put in, bowl, pan)/20231020_090 gap: 0 minlen: 141
+(put in, spatula, bowl)/20231024_178 gap: 0 minlen: 141
+(put in, spatula, pan)/20231020_024 gap: 0 minlen: 141
+(put in, spatula, pan)/20231020_114 gap: 0 minlen: 141
+(put out, bowl, pan)/20231020_177 gap: 0 minlen: 141
+(scrape off, spatula, bowl)/20230930_071 gap: 0 minlen: 141
+(scrape off, spatula, pan)/20231005_025 gap: 0 minlen: 141
+(skim off, spoon, pan)/20231005_087 gap: 0 minlen: 141
+(smear, eraser, plate)/20231104_059 gap: 0 minlen: 141
+(smear, eraser, plate)/20231104_061 gap: 0 minlen: 141
+(stir, spatula, bowl)/20231024_153 gap: 0 minlen: 141
+(stir-fry, spatula, plate)/20231104_127 gap: 0 minlen: 141
+(brush, brush, plate)/20230928_044 gap: 0 minlen: 142
+(brush, brush, plate)/20231006_121 gap: 0 minlen: 142
+(brush, brush, teapot)/20231006_217 gap: 0 minlen: 142
+(brush, roller, pan)/20231019_203 gap: 0 minlen: 142
+(brush, roller, plate)/20231020_013 gap: 0 minlen: 142
+(cut, knife, plate)/20231020_189 gap: 0 minlen: 142
+(cut, spoon, bowl)/20231027_084 gap: 0 minlen: 142
+(cut, spoon, plate)/20231024_098 gap: 0 minlen: 142
+(dust, brush, plate)/20230928_045 gap: 0 minlen: 142
+(dust, roller, plate)/20231019_084 gap: 0 minlen: 142
+(dust, roller, plate)/20231019_106 gap: 0 minlen: 142
+(dust, roller, plate)/20231019_248 gap: 0 minlen: 142
+(empty, bowl, plate)/20231024_278 gap: 0 minlen: 142
+(empty, bowl, plate)/20231024_303 gap: 0 minlen: 142
+(measure, ruler, bowl)/20231104_099 gap: 0 minlen: 142
+(measure, ruler, plate)/20231104_074 gap: 0 minlen: 142
+(pour in some, bowl, kettle)/20231031_045 gap: 0 minlen: 142
+(pour in some, kettle, bowl)/20231031_041 gap: 0 minlen: 142
+(pour in some, kettle, bowl)/20231031_049 gap: 0 minlen: 142
+(pour in some, kettle, teapot)/20231031_114 gap: 0 minlen: 142
+(put in, bowl, pan)/20231015_090 gap: 0 minlen: 142
+(put in, bowl, pan)/20231020_173 gap: 0 minlen: 142
+(put in, bowl, pan)/20231020_182 gap: 0 minlen: 142
+(put in, spatula, pan)/20231020_100 gap: 0 minlen: 142
+(put out, spoon, bowl)/20231005_128 gap: 0 minlen: 142
+(scrape off, spatula, bowl)/20231024_198 gap: 0 minlen: 142
+(skim off, spatula, bowl)/20231024_108 gap: 0 minlen: 142
+(skim off, spatula, bowl)/20231024_144 gap: 0 minlen: 142
+(skim off, spatula, plate)/20231005_045 gap: 0 minlen: 142
+(smear, eraser, bowl)/20231104_037 gap: 0 minlen: 142
+(stir, spatula, bowl)/20230930_073 gap: 0 minlen: 142
+(stir, spatula, pan)/20231005_028 gap: 0 minlen: 142
+(stir, spatula, plate)/20231104_129 gap: 0 minlen: 142
+(brush, eraser, plate)/20231027_049 gap: 0 minlen: 143
+(brush, roller, plate)/20231013_240 gap: 0 minlen: 143
+(brush, roller, plate)/20231019_183 gap: 0 minlen: 143
+(cut, knife, plate)/20231013_099 gap: 0 minlen: 143
+(cut, knife, plate)/20231013_109 gap: 0 minlen: 143
+(cut, knife, plate)/20231020_193 gap: 0 minlen: 143
+(cut, spatula, bowl)/20231024_146 gap: 0 minlen: 143
+(cut, spatula, pan)/20231020_118 gap: 0 minlen: 143
+(cut, spoon, bowl)/20231027_087 gap: 0 minlen: 143
+(cut, spoon, plate)/20231027_111 gap: 0 minlen: 143
+(dust, roller, plate)/20231019_078 gap: 0 minlen: 143
+(dust, roller, plate)/20231019_090 gap: 0 minlen: 143
+(dust, roller, plate)/20231019_122 gap: 0 minlen: 143
+(empty, bowl, kettle)/20231019_022 gap: 0 minlen: 143
+(empty, bowl, plate)/20231024_247 gap: 0 minlen: 143
+(pour in some, box, plate)/20231027_174 gap: 0 minlen: 143
+(pour in some, kettle, plate)/20230930_147 gap: 0 minlen: 143
+(pour in some, kettle, plate)/20231031_057 gap: 0 minlen: 143
+(put in, bowl, plate)/20231024_238 gap: 0 minlen: 143
+(put in, spatula, bowl)/20231024_118 gap: 0 minlen: 143
+(put in, spatula, pan)/20231006_008 gap: 0 minlen: 143
+(put out, spoon, pan)/20231020_067 gap: 0 minlen: 143
+(scrape off, knife, plate)/20231013_064 gap: 0 minlen: 143
+(scrape off, knife, plate)/20231013_096 gap: 0 minlen: 143
+(scrape off, knife, plate)/20231015_254 gap: 0 minlen: 143
+(skim off, spatula, pan)/20231005_024 gap: 0 minlen: 143
+(skim off, spatula, plate)/20231005_052 gap: 0 minlen: 143
+(smear, eraser, plate)/20231104_049 gap: 0 minlen: 143
+(brush, roller, box)/20231104_023 gap: 0 minlen: 144
+(brush, roller, plate)/20231013_260 gap: 0 minlen: 144
+(brush, roller, plate)/20231019_225 gap: 0 minlen: 144
+(brush, roller, plate)/20231020_007 gap: 0 minlen: 144
+(dust, roller, box)/20231104_020 gap: 0 minlen: 144
+(dust, roller, kettle)/20231103_118 gap: 0 minlen: 144
+(dust, roller, pan)/20231019_200 gap: 0 minlen: 144
+(dust, roller, plate)/20231013_205 gap: 0 minlen: 144
+(empty, bowl, plate)/20231024_227 gap: 0 minlen: 144
+(put in, bowl, plate)/20231024_253 gap: 0 minlen: 144
+(put in, spatula, bowl)/20231024_130 gap: 0 minlen: 144
+(put out, spatula, pan)/20231015_030 gap: 0 minlen: 144
+(put out, spoon, plate)/20231024_032 gap: 0 minlen: 144
+(scrape off, knife, plate)/20231013_078 gap: 0 minlen: 144
+(scrape off, knife, plate)/20231013_108 gap: 0 minlen: 144
+(scrape off, knife, plate)/20231015_282 gap: 0 minlen: 144
+(scrape off, spoon, pan)/20231020_062 gap: 0 minlen: 144
+(skim off, bowl, plate)/20231024_240 gap: 0 minlen: 144
+(smear, eraser, bowl)/20231104_045 gap: 0 minlen: 144
+(smear, eraser, plate)/20231104_064 gap: 0 minlen: 144
+(stir, spoon, plate)/20231024_078 gap: 0 minlen: 144
+(stir-fry, spatula, plate)/20231104_156 gap: 0 minlen: 144
+(brush, roller, pan)/20231013_176 gap: 0 minlen: 145
+(brush, roller, plate)/20230928_043 gap: 0 minlen: 145
+(brush, roller, plate)/20231019_189 gap: 0 minlen: 145
+(brush, roller, plate)/20231019_235 gap: 0 minlen: 145
+(brush, roller, plate)/20231020_011 gap: 0 minlen: 145
+(brush, roller, plate)/20231020_015 gap: 0 minlen: 145
+(cut, knife, plate)/20231020_213 gap: 0 minlen: 145
+(cut, spatula, bowl)/20231024_158 gap: 0 minlen: 145
+(cut, spatula, bowl)/20231024_176 gap: 0 minlen: 145
+(dust, roller, pan)/20231019_132 gap: 0 minlen: 145
+(dust, roller, plate)/20231013_263 gap: 0 minlen: 145
+(empty, bowl, plate)/20231027_129 gap: 0 minlen: 145
+(empty, cup, bowl)/20231006_268 gap: 0 minlen: 145
+(hit, hammer, box)/20231031_184 gap: 0 minlen: 145
+(measure, ruler, cup)/20231104_135 gap: 0 minlen: 145
+(pour in some, bowl, plate)/20231024_236 gap: 0 minlen: 145
+(pour in some, bowl, plate)/20231024_246 gap: 0 minlen: 145
+(pour in some, box, plate)/20231027_164 gap: 0 minlen: 145
+(put in, bowl, pan)/20231020_093 gap: 0 minlen: 145
+(put in, bowl, plate)/20231024_218 gap: 0 minlen: 145
+(put in, spatula, pan)/20231020_107 gap: 0 minlen: 145
+(put out, spatula, pan)/20231020_101 gap: 0 minlen: 145
+(scrape off, knife, bowl)/20231031_173 gap: 0 minlen: 145
+(scrape off, spatula, pan)/20230930_009 gap: 0 minlen: 145
+(scrape off, spatula, plate)/20230930_065 gap: 0 minlen: 145
+(scrape off, spoon, pan)/20231020_069 gap: 0 minlen: 145
+(skim off, bowl, pan)/20231020_187 gap: 0 minlen: 145
+(skim off, spatula, bowl)/20231024_126 gap: 0 minlen: 145
+(skim off, spoon, pan)/20231020_082 gap: 0 minlen: 145
+(skim off, spoon, plate)/20231024_081 gap: 0 minlen: 145
+(smear, eraser, bowl)/20231104_027 gap: 0 minlen: 145
+(stir, spatula, plate)/20231104_157 gap: 0 minlen: 145
+(stir-fry, spatula, pan)/20231005_020 gap: 0 minlen: 145
+(stir-fry, spoon, pan)/20231020_085 gap: 0 minlen: 145
+(brush, brush, helmet)/20231027_006 gap: 0 minlen: 146
+(brush, brush, toy)/20231027_021 gap: 0 minlen: 146
+(brush, eraser, plate)/20231027_051 gap: 0 minlen: 146
+(brush, roller, box)/20231104_017 gap: 0 minlen: 146
+(brush, roller, pan)/20231013_180 gap: 0 minlen: 146
+(brush, roller, plate)/20231019_085 gap: 0 minlen: 146
+(brush, roller, plate)/20231019_157 gap: 0 minlen: 146
+(cut, spoon, plate)/20231027_094 gap: 0 minlen: 146
+(dust, roller, box)/20231104_008 gap: 0 minlen: 146
+(dust, roller, plate)/20231013_189 gap: 0 minlen: 146
+(dust, roller, plate)/20231019_230 gap: 0 minlen: 146
+(measure, ruler, cup)/20231104_133 gap: 0 minlen: 146
+(measure, ruler, plate)/20231104_075 gap: 0 minlen: 146
+(pour in some, bowl, kettle)/20231031_053 gap: 0 minlen: 146
+(pour in some, box, plate)/20231027_160 gap: 0 minlen: 146
+(put in, bowl, plate)/20231024_213 gap: 0 minlen: 146
+(put out, bowl, plate)/20231024_280 gap: 0 minlen: 146
+(put out, spatula, pan)/20231005_023 gap: 0 minlen: 146
+(put out, spatula, plate)/20231005_044 gap: 0 minlen: 146
+(skim off, bowl, pan)/20231015_083 gap: 0 minlen: 146
+(skim off, spatula, pan)/20231005_017 gap: 0 minlen: 146
+(skim off, spatula, plate)/20231005_031 gap: 0 minlen: 146
+(smear, eraser, bowl)/20231104_034 gap: 0 minlen: 146
+(stir, spatula, bowl)/20231024_117 gap: 0 minlen: 146
+(stir-fry, spatula, plate)/20231015_115 gap: 0 minlen: 146
+(brush, roller, pan)/20230928_042 gap: 0 minlen: 147
+(brush, roller, pan)/20231019_213 gap: 0 minlen: 147
+(brush, roller, plate)/20231019_095 gap: 0 minlen: 147
+(brush, roller, plate)/20231019_105 gap: 0 minlen: 147
+(brush, roller, plate)/20231019_229 gap: 0 minlen: 147
+(cut, spatula, bowl)/20231024_116 gap: 0 minlen: 147
+(cut, spatula, bowl)/20231027_080 gap: 0 minlen: 147
+(cut, spoon, pan)/20231020_153 gap: 0 minlen: 147
+(cut, spoon, plate)/20231024_047 gap: 0 minlen: 147
+(cut, spoon, plate)/20231027_104 gap: 0 minlen: 147
+(dust, roller, pan)/20231019_202 gap: 0 minlen: 147
+(dust, roller, plate)/20231019_246 gap: 0 minlen: 147
+(dust, roller, plate)/20231020_008 gap: 0 minlen: 147
+(empty, bowl, kettle)/20231019_024 gap: 0 minlen: 147
+(empty, bowl, plate)/20231024_237 gap: 0 minlen: 147
+(empty, bowl, plate)/20231024_283 gap: 0 minlen: 147
+(empty, kettle, plate)/20231031_064 gap: 0 minlen: 147
+(empty, teapot, teapot)/20231031_123 gap: 0 minlen: 147
+(pour in some, kettle, bowl)/20231019_003 gap: 0 minlen: 147
+(pour in some, kettle, bowl)/20231019_025 gap: 0 minlen: 147
+(put in, spatula, bowl)/20231024_136 gap: 0 minlen: 147
+(put in, spatula, plate)/20231005_036 gap: 0 minlen: 147
+(put out, bowl, plate)/20231024_234 gap: 0 minlen: 147
+(put out, bowl, plate)/20231024_290 gap: 0 minlen: 147
+(skim off, spatula, pan)/20230930_008 gap: 0 minlen: 147
+(smear, eraser, bowl)/20231104_033 gap: 0 minlen: 147
+(brush, roller, box)/20231104_019 gap: 0 minlen: 148
+(brush, roller, kettle)/20231103_131 gap: 0 minlen: 148
+(brush, roller, pan)/20231019_145 gap: 0 minlen: 148
+(brush, roller, plate)/20231019_077 gap: 0 minlen: 148
+(cut, knife, pan)/20231020_236 gap: 0 minlen: 148
+(cut, spatula, pan)/20231020_104 gap: 0 minlen: 148
+(cut, spatula, plate)/20231104_125 gap: 0 minlen: 148
+(cut, spoon, pan)/20231020_084 gap: 0 minlen: 148
+(cut, spoon, plate)/20231024_087 gap: 0 minlen: 148
+(cut, spoon, plate)/20231027_097 gap: 0 minlen: 148
+(cut, spoon, plate)/20231027_114 gap: 0 minlen: 148
+(dust, roller, plate)/20231019_194 gap: 0 minlen: 148
+(empty, bowl, kettle)/20231019_006 gap: 0 minlen: 148
+(empty, bowl, plate)/20231024_232 gap: 0 minlen: 148
+(empty, teapot, plate)/20231031_084 gap: 0 minlen: 148
+(empty, teapot, plate)/20231031_101 gap: 0 minlen: 148
+(put out, spatula, pan)/20231006_009 gap: 0 minlen: 148
+(scrape off, knife, plate)/20231015_252 gap: 0 minlen: 148
+(scrape off, knife, plate)/20231015_300 gap: 0 minlen: 148
+(scrape off, spatula, bowl)/20231024_169 gap: 0 minlen: 148
+(skim off, bowl, plate)/20231024_220 gap: 0 minlen: 148
+(skim off, spatula, bowl)/20231024_132 gap: 0 minlen: 148
+(skim off, spatula, bowl)/20231024_138 gap: 0 minlen: 148
+(smear, eraser, bowl)/20231104_043 gap: 0 minlen: 148
+(stir, spatula, plate)/20231104_143 gap: 0 minlen: 148
+(stir-fry, spatula, pan)/20231020_112 gap: 0 minlen: 148
+(brush, roller, plate)/20231019_241 gap: 0 minlen: 149
+(brush, roller, plate)/20231019_249 gap: 0 minlen: 149
+(cut, knife, plate)/20231020_215 gap: 0 minlen: 149
+(cut, spatula, bowl)/20231024_170 gap: 0 minlen: 149
+(cut, spatula, plate)/20231104_141 gap: 0 minlen: 149
+(cut, spoon, plate)/20231027_107 gap: 0 minlen: 149
+(cut, spoon, plate)/20231027_113 gap: 0 minlen: 149
+(dust, roller, plate)/20231019_166 gap: 0 minlen: 149
+(measure, ruler, plate)/20231104_070 gap: 0 minlen: 149
+(measure, ruler, plate)/20231104_073 gap: 0 minlen: 149
+(pour in some, bowl, cup)/20231006_261 gap: 0 minlen: 149
+(pour in some, bowl, kettle)/20231019_029 gap: 0 minlen: 149
+(put in, spatula, bowl)/20231005_064 gap: 0 minlen: 149
+(put in, spatula, pan)/20231015_029 gap: 0 minlen: 149
+(put in, spoon, plate)/20231024_083 gap: 0 minlen: 149
+(scrape off, knife, pan)/20231031_142 gap: 0 minlen: 149
+(scrape off, knife, plate)/20231020_188 gap: 0 minlen: 149
+(skim off, spoon, plate)/20231024_085 gap: 0 minlen: 149
+(smear, eraser, bowl)/20231104_032 gap: 0 minlen: 149
+(stir, spatula, bowl)/20231024_129 gap: 0 minlen: 149
+(stir-fry, spoon, pan)/20231020_064 gap: 0 minlen: 149
+(brush, roller, box)/20231104_015 gap: 0 minlen: 150
+(brush, roller, pan)/20231019_147 gap: 0 minlen: 150
+(brush, roller, pan)/20231019_209 gap: 0 minlen: 150
+(cut, knife, plate)/20231013_097 gap: 0 minlen: 150
+(cut, spoon, plate)/20231027_100 gap: 0 minlen: 150
+(dust, roller, pan)/20231019_204 gap: 0 minlen: 150
+(dust, roller, pan)/20231019_208 gap: 0 minlen: 150
+(dust, roller, plate)/20231019_160 gap: 0 minlen: 150
+(dust, roller, plate)/20231019_170 gap: 0 minlen: 150
+(dust, roller, plate)/20231019_190 gap: 0 minlen: 150
+(empty, bowl, kettle)/20231019_008 gap: 0 minlen: 150
+(empty, teapot, plate)/20231031_097 gap: 0 minlen: 150
+(measure, ruler, cup)/20231104_103 gap: 0 minlen: 150
+(measure, ruler, cup)/20231104_115 gap: 0 minlen: 150
+(measure, ruler, plate)/20231104_067 gap: 0 minlen: 150
+(measure, ruler, plate)/20231104_068 gap: 0 minlen: 150
+(measure, ruler, plate)/20231104_086 gap: 0 minlen: 150
+(pour in some, cup, kettle)/20231019_033 gap: 0 minlen: 150
+(pour in some, kettle, plate)/20230930_145 gap: 0 minlen: 150
+(pour in some, kettle, plate)/20231031_069 gap: 0 minlen: 150
+(pour in some, plate, bowl)/20230930_135 gap: 0 minlen: 150
+(put in, spatula, bowl)/20231024_124 gap: 0 minlen: 150
+(put in, spoon, plate)/20231024_079 gap: 0 minlen: 150
+(put out, bowl, pan)/20231020_098 gap: 0 minlen: 150
+(put out, spatula, bowl)/20231024_143 gap: 0 minlen: 150
+(put out, spatula, plate)/20231005_030 gap: 0 minlen: 150
+(stir, spatula, bowl)/20231024_159 gap: 0 minlen: 150
+(stir, spatula, bowl)/20231024_194 gap: 0 minlen: 150
+(stir, spatula, pan)/20231020_120 gap: 0 minlen: 150
+(stir, spatula, plate)/20231104_178 gap: 0 minlen: 150
+(stir, spoon, plate)/20231024_088 gap: 0 minlen: 150
+(brush, brush, helmet)/20231027_011 gap: 0 minlen: 151
+(brush, roller, plate)/20231019_149 gap: 0 minlen: 151
+(brush, roller, plate)/20231019_223 gap: 0 minlen: 151
+(brush, roller, plate)/20231019_227 gap: 0 minlen: 151
+(brush, roller, plate)/20231019_233 gap: 0 minlen: 151
+(brush, roller, plate)/20231019_237 gap: 0 minlen: 151
+(dust, roller, pan)/20231019_058 gap: 0 minlen: 151
+(dust, roller, pan)/20231019_134 gap: 0 minlen: 151
+(dust, roller, pan)/20231019_144 gap: 0 minlen: 151
+(dust, roller, pan)/20231019_146 gap: 0 minlen: 151
+(dust, roller, pan)/20231019_210 gap: 0 minlen: 151
+(dust, roller, plate)/20231019_088 gap: 0 minlen: 151
+(empty, bowl, plate)/20231024_252 gap: 0 minlen: 151
+(measure, ruler, cup)/20231104_101 gap: 0 minlen: 151
+(measure, ruler, toy)/20231102_058 gap: 0 minlen: 151
+(put in, spatula, plate)/20231005_043 gap: 0 minlen: 151
+(put in, spoon, pan)/20231020_163 gap: 0 minlen: 151
+(put out, spatula, bowl)/20231024_119 gap: 0 minlen: 151
+(put out, spatula, bowl)/20231024_125 gap: 0 minlen: 151
+(put out, spatula, pan)/20231013_002 gap: 0 minlen: 151
+(put out, spoon, pan)/20231020_143 gap: 0 minlen: 151
+(scrape off, knife, pan)/20231031_148 gap: 0 minlen: 151
+(scrape off, knife, plate)/20231015_210 gap: 0 minlen: 151
+(scrape off, knife, plate)/20231015_216 gap: 0 minlen: 151
+(scrape off, spoon, pan)/20231020_055 gap: 0 minlen: 151
+(skim off, bowl, bowl)/20231013_142 gap: 0 minlen: 151
+(skim off, bowl, pan)/20231020_092 gap: 0 minlen: 151
+(skim off, bowl, plate)/20231024_245 gap: 0 minlen: 151
+(skim off, bowl, plate)/20231024_255 gap: 0 minlen: 151
+(skim off, bowl, plate)/20231024_286 gap: 0 minlen: 151
+(smear, eraser, bowl)/20231104_044 gap: 0 minlen: 151
+(stir, spatula, bowl)/20231024_212 gap: 0 minlen: 151
+(stir, spoon, plate)/20231024_023 gap: 0 minlen: 151
+(stir, spoon, plate)/20231024_030 gap: 0 minlen: 151
+(brush, brush, box)/20230928_046 gap: 0 minlen: 152
+(brush, brush, pan)/20231103_172 gap: 0 minlen: 152
+(brush, roller, kettle)/20231103_119 gap: 0 minlen: 152
+(brush, roller, pan)/20231019_139 gap: 0 minlen: 152
+(cut, knife, bowl)/20231020_254 gap: 0 minlen: 152
+(cut, knife, plate)/20231013_105 gap: 0 minlen: 152
+(cut, spoon, plate)/20231027_093 gap: 0 minlen: 152
+(cut, spoon, plate)/20231027_106 gap: 0 minlen: 152
+(dust, brush, kettle)/20231103_158 gap: 0 minlen: 152
+(dust, roller, plate)/20231019_114 gap: 0 minlen: 152
+(empty, bowl, plate)/20231024_222 gap: 0 minlen: 152
+(pour in some, bowl, kettle)/20231019_007 gap: 0 minlen: 152
+(pour in some, bowl, plate)/20231024_216 gap: 0 minlen: 152
+(pour in some, bowl, plate)/20231024_231 gap: 0 minlen: 152
+(put in, spoon, plate)/20231024_089 gap: 0 minlen: 152
+(put out, spoon, pan)/20231015_072 gap: 0 minlen: 152
+(put out, spoon, pan)/20231015_153 gap: 0 minlen: 152
+(scrape off, knife, plate)/20231015_302 gap: 0 minlen: 152
+(scrape off, spatula, pan)/20231020_110 gap: 0 minlen: 152
+(skim off, bowl, plate)/20231024_215 gap: 0 minlen: 152
+(skim off, spatula, bowl)/20231024_197 gap: 0 minlen: 152
+(stir, spatula, bowl)/20231024_123 gap: 0 minlen: 152
+(stir-fry, spatula, pan)/20231020_119 gap: 0 minlen: 152
+(brush, brush, helmet)/20231027_010 gap: 0 minlen: 153
+(cut, knife, plate)/20231013_101 gap: 0 minlen: 153
+(dust, roller, pan)/20231019_218 gap: 0 minlen: 153
+(dust, roller, plate)/20231019_232 gap: 0 minlen: 153
+(dust, roller, plate)/20231019_242 gap: 0 minlen: 153
+(empty, bowl, kettle)/20231019_014 gap: 0 minlen: 153
+(empty, teapot, kettle)/20231031_113 gap: 0 minlen: 153
+(empty, teapot, teapot)/20231031_121 gap: 0 minlen: 153
+(measure, ruler, toy)/20231102_074 gap: 0 minlen: 153
+(pour in some, cup, kettle)/20231019_037 gap: 0 minlen: 153
+(pour in some, kettle, plate)/20230930_149 gap: 0 minlen: 153
+(pour in some, kettle, plate)/20231031_075 gap: 0 minlen: 153
+(scrape off, knife, plate)/20231013_100 gap: 0 minlen: 153
+(scrape off, knife, plate)/20231020_190 gap: 0 minlen: 153
+(smear, eraser, plate)/20231104_058 gap: 0 minlen: 153
+(stir, spatula, bowl)/20231024_135 gap: 0 minlen: 153
+(stir, spoon, pan)/20231020_162 gap: 0 minlen: 153
+(stir-fry, spatula, plate)/20231104_128 gap: 0 minlen: 153
+(brush, brush, cup)/20231026_011 gap: 0 minlen: 154
+(brush, brush, helmet)/20231027_012 gap: 0 minlen: 154
+(brush, roller, pan)/20231019_135 gap: 0 minlen: 154
+(brush, roller, plate)/20231013_220 gap: 0 minlen: 154
+(brush, roller, plate)/20231013_258 gap: 0 minlen: 154
+(brush, roller, plate)/20231019_081 gap: 0 minlen: 154
+(brush, roller, plate)/20231019_187 gap: 0 minlen: 154
+(cut, knife, plate)/20231020_191 gap: 0 minlen: 154
+(dust, roller, pan)/20231019_062 gap: 0 minlen: 154
+(dust, roller, plate)/20231019_094 gap: 0 minlen: 154
+(dust, roller, plate)/20231019_096 gap: 0 minlen: 154
+(dust, roller, plate)/20231019_244 gap: 0 minlen: 154
+(empty, kettle, bowl)/20231019_020 gap: 0 minlen: 154
+(empty, kettle, plate)/20231031_074 gap: 0 minlen: 154
+(pour in some, box, plate)/20231027_162 gap: 0 minlen: 154
+(pour in some, teapot, plate)/20231031_083 gap: 0 minlen: 154
+(put in, spatula, pan)/20231006_001 gap: 0 minlen: 154
+(put in, spoon, plate)/20231024_061 gap: 0 minlen: 154
+(put out, bowl, pan)/20231020_095 gap: 0 minlen: 154
+(scrape off, knife, plate)/20231013_098 gap: 0 minlen: 154
+(scrape off, spoon, plate)/20231024_076 gap: 0 minlen: 154
+(skim off, bowl, pan)/20231020_175 gap: 0 minlen: 154
+(skim off, spatula, bowl)/20231024_114 gap: 0 minlen: 154
+(stir, spatula, bowl)/20231024_165 gap: 0 minlen: 154
+(stir, spatula, pan)/20231020_023 gap: 0 minlen: 154
+(brush, roller, pan)/20231019_143 gap: 0 minlen: 155
+(brush, roller, plate)/20230928_052 gap: 0 minlen: 155
+(cut, knife, pan)/20231020_241 gap: 0 minlen: 155
+(cut, spoon, pan)/20231020_063 gap: 0 minlen: 155
+(cut, spoon, plate)/20231027_108 gap: 0 minlen: 155
+(dust, roller, pan)/20231019_212 gap: 0 minlen: 155
+(dust, roller, plate)/20231019_098 gap: 0 minlen: 155
+(dust, roller, plate)/20231019_150 gap: 0 minlen: 155
+(dust, roller, plate)/20231019_158 gap: 0 minlen: 155
+(dust, roller, plate)/20231019_222 gap: 0 minlen: 155
+(empty, box, plate)/20231027_157 gap: 0 minlen: 155
+(empty, kettle, plate)/20231031_060 gap: 0 minlen: 155
+(empty, teapot, teapot)/20231031_125 gap: 0 minlen: 155
+(hit, hammer, toy)/20231102_053 gap: 0 minlen: 155
+(measure, ruler, plate)/20231104_085 gap: 0 minlen: 155
+(pour in some, box, plate)/20231027_158 gap: 0 minlen: 155
+(pour in some, kettle, plate)/20231031_065 gap: 0 minlen: 155
+(pour in some, teapot, plate)/20231031_081 gap: 0 minlen: 155
+(put out, bowl, pan)/20231020_091 gap: 0 minlen: 155
+(put out, spatula, bowl)/20231024_107 gap: 0 minlen: 155
+(scrape off, knife, plate)/20231015_236 gap: 0 minlen: 155
+(scrape off, knife, plate)/20231015_292 gap: 0 minlen: 155
+(scrape off, spoon, pan)/20231020_145 gap: 0 minlen: 155
+(scrape off, spoon, plate)/20231024_086 gap: 0 minlen: 155
+(stir, spatula, pan)/20231006_007 gap: 0 minlen: 155
+(stir, spoon, plate)/20231024_105 gap: 0 minlen: 155
+(brush, roller, box)/20231104_009 gap: 0 minlen: 156
+(brush, roller, pan)/20231019_141 gap: 0 minlen: 156
+(brush, roller, plate)/20231019_115 gap: 0 minlen: 156
+(brush, roller, plate)/20231019_191 gap: 0 minlen: 156
+(cut, knife, plate)/20231013_095 gap: 0 minlen: 156
+(cut, knife, plate)/20231020_233 gap: 0 minlen: 156
+(cut, spatula, bowl)/20231024_134 gap: 0 minlen: 156
+(dust, roller, pan)/20231019_072 gap: 0 minlen: 156
+(dust, roller, pan)/20231019_128 gap: 0 minlen: 156
+(dust, roller, plate)/20231019_086 gap: 0 minlen: 156
+(dust, roller, plate)/20231019_196 gap: 0 minlen: 156
+(empty, bowl, cup)/20231006_278 gap: 0 minlen: 156
+(empty, kettle, teapot)/20231031_117 gap: 0 minlen: 156
+(measure, ruler, plate)/20231104_072 gap: 0 minlen: 156
+(pour in some, kettle, plate)/20231031_067 gap: 0 minlen: 156
+(pour in some, teapot, kettle)/20231019_047 gap: 0 minlen: 156
+(put in, spatula, pan)/20231013_001 gap: 0 minlen: 156
+(put out, spatula, plate)/20231015_118 gap: 0 minlen: 156
+(skim off, bowl, plate)/20231024_225 gap: 0 minlen: 156
+(skim off, bowl, plate)/20231024_291 gap: 0 minlen: 156
+(skim off, spatula, pan)/20231020_026 gap: 0 minlen: 156
+(stir-fry, spoon, pan)/20231020_050 gap: 0 minlen: 156
+(brush, brush, helmet)/20231027_016 gap: 0 minlen: 157
+(brush, brush, kettle)/20231103_155 gap: 0 minlen: 157
+(brush, roller, pan)/20231019_065 gap: 0 minlen: 157
+(brush, roller, pan)/20231019_219 gap: 0 minlen: 157
+(brush, roller, plate)/20231019_079 gap: 0 minlen: 157
+(brush, roller, plate)/20231019_173 gap: 0 minlen: 157
+(cut, spoon, plate)/20231024_077 gap: 0 minlen: 157
+(cut, spoon, plate)/20231027_095 gap: 0 minlen: 157
+(dust, roller, plate)/20231019_172 gap: 0 minlen: 157
+(empty, kettle, teapot)/20231031_115 gap: 0 minlen: 157
+(measure, ruler, plate)/20231104_083 gap: 0 minlen: 157
+(pour in some, teapot, kettle)/20231031_102 gap: 0 minlen: 157
+(put out, spatula, plate)/20231005_037 gap: 0 minlen: 157
+(scrape off, knife, pan)/20231031_136 gap: 0 minlen: 157
+(scrape off, knife, plate)/20231015_278 gap: 0 minlen: 157
+(skim off, spatula, bowl)/20231024_120 gap: 0 minlen: 157
+(stir, spoon, plate)/20231024_048 gap: 0 minlen: 157
+(stir, spoon, plate)/20231024_093 gap: 0 minlen: 157
+(stir-fry, spatula, pan)/20231020_036 gap: 0 minlen: 157
+(brush, roller, pan)/20231013_170 gap: 0 minlen: 158
+(brush, roller, pan)/20231019_127 gap: 0 minlen: 158
+(cut, knife, plate)/20231013_079 gap: 0 minlen: 158
+(cut, knife, plate)/20231020_209 gap: 0 minlen: 158
+(dust, roller, pan)/20231019_138 gap: 0 minlen: 158
+(dust, roller, plate)/20231019_184 gap: 0 minlen: 158
+(dust, roller, plate)/20231020_014 gap: 0 minlen: 158
+(empty, bowl, plate)/20230930_134 gap: 0 minlen: 158
+(empty, teapot, plate)/20231031_095 gap: 0 minlen: 158
+(pour in some, bowl, kettle)/20231019_005 gap: 0 minlen: 158
+(pour in some, bowl, kettle)/20231031_055 gap: 0 minlen: 158
+(put out, spoon, plate)/20231024_062 gap: 0 minlen: 158
+(put out, spoon, plate)/20231024_095 gap: 0 minlen: 158
+(put out, spoon, plate)/20231024_101 gap: 0 minlen: 158
+(scrape off, knife, pan)/20231031_132 gap: 0 minlen: 158
+(scrape off, knife, plate)/20231013_042 gap: 0 minlen: 158
+(scrape off, knife, plate)/20231015_240 gap: 0 minlen: 158
+(skim off, bowl, bowl)/20231013_162 gap: 0 minlen: 158
+(skim off, bowl, plate)/20231024_281 gap: 0 minlen: 158
+(smear, eraser, plate)/20231104_065 gap: 0 minlen: 158
+(stir, spoon, bowl)/20231104_202 gap: 0 minlen: 158
+(brush, brush, box)/20231006_157 gap: 0 minlen: 159
+(brush, roller, pan)/20231019_069 gap: 0 minlen: 159
+(brush, roller, plate)/20231019_169 gap: 0 minlen: 159
+(brush, roller, plate)/20231019_193 gap: 0 minlen: 159
+(brush, roller, plate)/20231019_247 gap: 0 minlen: 159
+(cut, knife, pan)/20231020_239 gap: 0 minlen: 159
+(cut, knife, plate)/20231015_263 gap: 0 minlen: 159
+(cut, knife, plate)/20231020_219 gap: 0 minlen: 159
+(cut, spatula, pan)/20231005_019 gap: 0 minlen: 159
+(cut, spoon, plate)/20231024_104 gap: 0 minlen: 159
+(cut, spoon, plate)/20231027_096 gap: 0 minlen: 159
+(dust, roller, plate)/20231019_224 gap: 0 minlen: 159
+(empty, cup, bowl)/20231006_264 gap: 0 minlen: 159
+(pour in some, kettle, teapot)/20231031_106 gap: 0 minlen: 159
+(put in, bowl, pan)/20231020_097 gap: 0 minlen: 159
+(put out, spatula, bowl)/20231024_113 gap: 0 minlen: 159
+(put out, spoon, pan)/20231020_053 gap: 0 minlen: 159
+(skim off, bowl, pan)/20231020_172 gap: 0 minlen: 159
+(skim off, bowl, plate)/20231024_235 gap: 0 minlen: 159
+(skim off, spatula, pan)/20231020_019 gap: 0 minlen: 159
+(skim off, spoon, pan)/20231020_054 gap: 0 minlen: 159
+(skim off, spoon, pan)/20231020_151 gap: 0 minlen: 159
+(smear, eraser, plate)/20231104_050 gap: 0 minlen: 159
+(stir-fry, spoon, pan)/20231020_078 gap: 0 minlen: 159
+(stir-fry, spoon, pan)/20231020_147 gap: 0 minlen: 159
+(brush, roller, plate)/20231019_177 gap: 0 minlen: 160
+(cut, knife, pan)/20231020_252 gap: 0 minlen: 160
+(cut, spatula, bowl)/20231024_152 gap: 0 minlen: 160
+(cut, spatula, bowl)/20231027_068 gap: 0 minlen: 160
+(dust, brush, kettle)/20231103_156 gap: 0 minlen: 160
+(dust, roller, plate)/20231019_104 gap: 0 minlen: 160
+(dust, roller, plate)/20231019_174 gap: 0 minlen: 160
+(dust, roller, plate)/20231019_182 gap: 0 minlen: 160
+(measure, ruler, plate)/20231104_084 gap: 0 minlen: 160
+(measure, ruler, toy)/20231102_073 gap: 0 minlen: 160
+(pour in some, bowl, kettle)/20231031_047 gap: 0 minlen: 160
+(put in, spatula, plate)/20231005_029 gap: 0 minlen: 160
+(put out, spoon, plate)/20231024_044 gap: 0 minlen: 160
+(scrape off, knife, pan)/20231031_140 gap: 0 minlen: 160
+(scrape off, knife, plate)/20231015_218 gap: 0 minlen: 160
+(scrape off, knife, plate)/20231015_250 gap: 0 minlen: 160
+(scrape off, spatula, bowl)/20231024_157 gap: 0 minlen: 160
+(skim off, spoon, plate)/20231024_045 gap: 0 minlen: 160
+(smear, eraser, bowl)/20231104_035 gap: 0 minlen: 160
+(stir, spatula, pan)/20231020_106 gap: 0 minlen: 160
+(stir, spoon, plate)/20231024_054 gap: 0 minlen: 160
+(cut, knife, plate)/20231015_297 gap: 0 minlen: 161
+(dust, roller, pan)/20231019_070 gap: 0 minlen: 161
+(dust, roller, plate)/20231019_116 gap: 0 minlen: 161
+(dust, roller, plate)/20231019_152 gap: 0 minlen: 161
+(dust, roller, plate)/20231019_238 gap: 0 minlen: 161
+(empty, bowl, plate)/20231027_139 gap: 0 minlen: 161
+(empty, bowl, plate)/20231027_141 gap: 0 minlen: 161
+(empty, cup, bowl)/20231006_260 gap: 0 minlen: 161
+(hit, hammer, toy)/20231102_070 gap: 0 minlen: 161
+(pour in some, kettle, bowl)/20231019_009 gap: 0 minlen: 161
+(put in, spoon, pan)/20231020_142 gap: 0 minlen: 161
+(put out, spatula, pan)/20231006_002 gap: 0 minlen: 161
+(scrape off, knife, plate)/20231015_214 gap: 0 minlen: 161
+(scrape off, knife, plate)/20231015_294 gap: 0 minlen: 161
+(scrape off, spatula, pan)/20231020_103 gap: 0 minlen: 161
+(scrape off, spoon, plate)/20231024_046 gap: 0 minlen: 161
+(skim off, spoon, plate)/20231024_033 gap: 0 minlen: 161
+(smear, eraser, bowl)/20231104_038 gap: 0 minlen: 161
+(stir, spoon, plate)/20231024_099 gap: 0 minlen: 161
+(brush, brush, toy)/20231027_022 gap: 0 minlen: 162
+(brush, roller, pan)/20231019_073 gap: 0 minlen: 162
+(brush, roller, plate)/20231013_228 gap: 0 minlen: 162
+(brush, roller, plate)/20231019_167 gap: 0 minlen: 162
+(brush, roller, plate)/20231019_231 gap: 0 minlen: 162
+(brush, roller, plate)/20231019_239 gap: 0 minlen: 162
+(cut, knife, pan)/20231020_240 gap: 0 minlen: 162
+(cut, knife, plate)/20231013_093 gap: 0 minlen: 162
+(cut, spoon, plate)/20231024_041 gap: 0 minlen: 162
+(cut, spoon, plate)/20231027_110 gap: 0 minlen: 162
+(dust, roller, pan)/20231019_130 gap: 0 minlen: 162
+(empty, bowl, plate)/20231027_147 gap: 0 minlen: 162
+(empty, bowl, plate)/20231027_149 gap: 0 minlen: 162
+(empty, box, plate)/20231027_153 gap: 0 minlen: 162
+(empty, kettle, plate)/20231031_062 gap: 0 minlen: 162
+(empty, plate, bowl)/20230930_136 gap: 0 minlen: 162
+(empty, teapot, plate)/20231031_090 gap: 0 minlen: 162
+(measure, ruler, bowl)/20231104_096 gap: 0 minlen: 162
+(pour in some, cup, plate)/20230928_030 gap: 0 minlen: 162
+(pour in some, kettle, plate)/20231031_071 gap: 0 minlen: 162
+(pour in some, kettle, teapot)/20231031_108 gap: 0 minlen: 162
+(put in, bowl, pan)/20231020_176 gap: 0 minlen: 162
+(put in, spatula, bowl)/20231024_106 gap: 0 minlen: 162
+(put in, spatula, pan)/20231013_008 gap: 0 minlen: 162
+(put in, spoon, plate)/20231024_043 gap: 0 minlen: 162
+(scrape off, knife, plate)/20231015_288 gap: 0 minlen: 162
+(scrape off, knife, plate)/20231020_204 gap: 0 minlen: 162
+(scrape off, spatula, bowl)/20231024_180 gap: 0 minlen: 162
+(skim off, bowl, bowl)/20230928_023 gap: 0 minlen: 162
+(skim off, spatula, pan)/20231020_033 gap: 0 minlen: 162
+(skim off, spoon, pan)/20231020_144 gap: 0 minlen: 162
+(skim off, spoon, plate)/20231024_091 gap: 0 minlen: 162
+(skim off, spoon, plate)/20231024_096 gap: 0 minlen: 162
+(skim off, spoon, plate)/20231024_102 gap: 0 minlen: 162
+(smear, eraser, plate)/20231104_060 gap: 0 minlen: 162
+(stir, spoon, pan)/20231020_065 gap: 0 minlen: 162
+(brush, roller, pan)/20231019_067 gap: 0 minlen: 163
+(brush, roller, pan)/20231019_207 gap: 0 minlen: 163
+(cut, knife, pan)/20231020_250 gap: 0 minlen: 163
+(dust, roller, pan)/20231019_126 gap: 0 minlen: 163
+(measure, ruler, plate)/20231104_082 gap: 0 minlen: 163
+(put in, spoon, plate)/20231024_031 gap: 0 minlen: 163
+(put in, spoon, plate)/20231024_037 gap: 0 minlen: 163
+(put out, spoon, plate)/20231024_038 gap: 0 minlen: 163
+(scrape off, knife, plate)/20231015_212 gap: 0 minlen: 163
+(scrape off, spoon, plate)/20231024_064 gap: 0 minlen: 163
+(smear, eraser, plate)/20231104_056 gap: 0 minlen: 163
+(stir, spoon, plate)/20231024_072 gap: 0 minlen: 163
+(brush, brush, cup)/20231026_012 gap: 0 minlen: 164
+(brush, roller, pan)/20231019_131 gap: 0 minlen: 164
+(brush, roller, plate)/20231019_101 gap: 0 minlen: 164
+(cut, knife, bowl)/20231020_260 gap: 0 minlen: 164
+(cut, knife, pan)/20231020_248 gap: 0 minlen: 164
+(cut, spatula, bowl)/20231024_187 gap: 0 minlen: 164
+(cut, spoon, plate)/20231024_059 gap: 0 minlen: 164
+(cut, spoon, plate)/20231027_109 gap: 0 minlen: 164
+(dust, roller, plate)/20231019_176 gap: 0 minlen: 164
+(empty, bowl, plate)/20230930_138 gap: 0 minlen: 164
+(empty, box, plate)/20231027_155 gap: 0 minlen: 164
+(empty, box, plate)/20231027_165 gap: 0 minlen: 164
+(empty, kettle, bowl)/20231019_012 gap: 0 minlen: 164
+(measure, ruler, bowl)/20231104_098 gap: 0 minlen: 164
+(measure, ruler, plate)/20231104_076 gap: 0 minlen: 164
+(pour in some, cup, kettle)/20231019_043 gap: 0 minlen: 164
+(put in, bowl, pan)/20231020_170 gap: 0 minlen: 164
+(put in, spoon, pan)/20231020_066 gap: 0 minlen: 164
+(put in, spoon, plate)/20231024_100 gap: 0 minlen: 164
+(scrape off, knife, plate)/20231013_056 gap: 0 minlen: 164
+(scrape off, spoon, pan)/20231020_048 gap: 0 minlen: 164
+(stir, spoon, bowl)/20231105_066 gap: 0 minlen: 164
+(brush, brush, kettle)/20231103_153 gap: 0 minlen: 165
+(brush, roller, pan)/20231019_059 gap: 0 minlen: 165
+(dust, roller, pan)/20231019_142 gap: 0 minlen: 165
+(empty, bowl, kettle)/20231019_032 gap: 0 minlen: 165
+(empty, box, cup)/20231010_177 gap: 0 minlen: 165
+(empty, teapot, plate)/20231031_078 gap: 0 minlen: 165
+(empty, teapot, plate)/20231031_086 gap: 0 minlen: 165
+(pour in some, kettle, bowl)/20231031_051 gap: 0 minlen: 165
+(pour in some, teapot, kettle)/20231031_112 gap: 0 minlen: 165
+(put in, spatula, pan)/20230930_007 gap: 0 minlen: 165
+(put out, spoon, plate)/20231024_068 gap: 0 minlen: 165
+(scrape off, knife, plate)/20231015_248 gap: 0 minlen: 165
+(skim off, bowl, pan)/20231020_178 gap: 0 minlen: 165
+(skim off, bowl, pan)/20231020_184 gap: 0 minlen: 165
+(skim off, spatula, pan)/20231020_109 gap: 0 minlen: 165
+(stir, spatula, bowl)/20231024_177 gap: 0 minlen: 165
+(stir, spoon, plate)/20231024_042 gap: 0 minlen: 165
+(stir-fry, spoon, pan)/20231020_154 gap: 0 minlen: 165
+(cut, knife, plate)/20231015_269 gap: 0 minlen: 166
+(cut, spatula, pan)/20231020_035 gap: 0 minlen: 166
+(cut, spoon, pan)/20231020_070 gap: 0 minlen: 166
+(cut, spoon, plate)/20231024_053 gap: 0 minlen: 166
+(cut, spoon, plate)/20231027_112 gap: 0 minlen: 166
+(dust, brush, bowl)/20231103_181 gap: 0 minlen: 166
+(dust, brush, plate)/20230928_051 gap: 0 minlen: 166
+(dust, roller, plate)/20231019_124 gap: 0 minlen: 166
+(empty, box, plate)/20231027_163 gap: 0 minlen: 166
+(empty, kettle, bowl)/20231019_002 gap: 0 minlen: 166
+(empty, teapot, plate)/20231031_088 gap: 0 minlen: 166
+(empty, teapot, plate)/20231031_093 gap: 0 minlen: 166
+(pour in some, teapot, cup)/20230927_039 gap: 0 minlen: 166
+(put in, bowl, bowl)/20230927_019 gap: 0 minlen: 166
+(put in, spatula, bowl)/20231024_207 gap: 0 minlen: 166
+(put out, spatula, pan)/20231005_016 gap: 0 minlen: 166
+(scrape off, knife, plate)/20231015_220 gap: 0 minlen: 166
+(skim off, bowl, plate)/20231024_230 gap: 0 minlen: 166
+(stir, spoon, plate)/20231024_036 gap: 0 minlen: 166
+(stir-fry, spatula, plate)/20230930_067 gap: 0 minlen: 166
+(brush, roller, plate)/20231013_262 gap: 0 minlen: 167
+(dust, roller, box)/20231104_024 gap: 0 minlen: 167
+(dust, roller, pan)/20231019_054 gap: 0 minlen: 167
+(dust, roller, pan)/20231019_136 gap: 0 minlen: 167
+(dust, roller, plate)/20231019_162 gap: 0 minlen: 167
+(empty, bowl, kettle)/20231031_046 gap: 0 minlen: 167
+(empty, bowl, plate)/20231024_242 gap: 0 minlen: 167
+(measure, ruler, plate)/20231104_081 gap: 0 minlen: 167
+(pour in some, bowl, plate)/20231024_221 gap: 0 minlen: 167
+(pour in some, teapot, kettle)/20231019_045 gap: 0 minlen: 167
+(put out, spatula, pan)/20231020_032 gap: 0 minlen: 167
+(scrape off, knife, plate)/20231013_090 gap: 0 minlen: 167
+(scrape off, knife, plate)/20231015_272 gap: 0 minlen: 167
+(scrape off, spatula, bowl)/20231024_121 gap: 0 minlen: 167
+(scrape off, spoon, pan)/20231020_166 gap: 0 minlen: 167
+(scrape off, spoon, plate)/20231024_034 gap: 0 minlen: 167
+(skim off, spoon, plate)/20231024_063 gap: 0 minlen: 167
+(smear, eraser, bowl)/20231104_040 gap: 0 minlen: 167
+(brush, brush, cup)/20231026_017 gap: 0 minlen: 168
+(brush, roller, plate)/20231019_117 gap: 0 minlen: 168
+(cut, knife, plate)/20231013_083 gap: 0 minlen: 168
+(cut, spatula, bowl)/20231024_140 gap: 0 minlen: 168
+(dust, roller, box)/20231013_305 gap: 0 minlen: 168
+(dust, roller, pan)/20231019_220 gap: 0 minlen: 168
+(dust, roller, plate)/20231019_180 gap: 0 minlen: 168
+(dust, roller, plate)/20231019_236 gap: 0 minlen: 168
+(empty, teapot, plate)/20231031_082 gap: 0 minlen: 168
+(brush, roller, plate)/20231019_123 gap: 0 minlen: 169
+(cut, knife, plate)/20231013_039 gap: 0 minlen: 169
+(cut, knife, plate)/20231020_211 gap: 0 minlen: 169
+(cut, spoon, bowl)/20231105_030 gap: 0 minlen: 169
+(cut, spoon, plate)/20231024_024 gap: 0 minlen: 169
+(dust, brush, pan)/20230928_049 gap: 0 minlen: 169
+(dust, brush, plate)/20230929_036 gap: 0 minlen: 169
+(empty, kettle, bowl)/20231031_042 gap: 0 minlen: 169
+(measure, ruler, cup)/20231104_110 gap: 0 minlen: 169
+(pour in some, plate, plate)/20230930_143 gap: 0 minlen: 169
+(put in, spoon, plate)/20231024_094 gap: 0 minlen: 169
+(put out, spoon, plate)/20231024_056 gap: 0 minlen: 169
+(scrape off, knife, plate)/20231013_092 gap: 0 minlen: 169
+(scrape off, knife, plate)/20231015_298 gap: 0 minlen: 169
+(smear, eraser, plate)/20231104_052 gap: 0 minlen: 169
+(stir, spoon, pan)/20231020_079 gap: 0 minlen: 169
+(brush, roller, plate)/20231019_097 gap: 0 minlen: 170
+(cut, spatula, bowl)/20231024_122 gap: 0 minlen: 170
+(cut, spoon, pan)/20231020_077 gap: 0 minlen: 170
+(empty, kettle, bowl)/20231031_044 gap: 0 minlen: 170
+(empty, teapot, kettle)/20231031_105 gap: 0 minlen: 170
+(hit, hammer, box)/20231102_003 gap: 0 minlen: 170
+(pour in some, box, plate)/20231027_178 gap: 0 minlen: 170
+(pour in some, kettle, plate)/20230930_151 gap: 0 minlen: 170
+(put in, spatula, plate)/20231015_117 gap: 0 minlen: 170
+(put out, spatula, bowl)/20231024_208 gap: 0 minlen: 170
+(put out, spoon, pan)/20231020_060 gap: 0 minlen: 170
+(put out, spoon, plate)/20231024_050 gap: 0 minlen: 170
+(scrape off, knife, pan)/20231031_127 gap: 0 minlen: 170
+(scrape off, knife, plate)/20231013_082 gap: 0 minlen: 170
+(scrape off, spatula, bowl)/20231024_115 gap: 0 minlen: 170
+(scrape off, spatula, pan)/20231020_020 gap: 0 minlen: 170
+(skim off, bowl, plate)/20231024_250 gap: 0 minlen: 170
+(stir-fry, spatula, pan)/20231013_013 gap: 0 minlen: 170
+(stir-fry, spoon, pan)/20231020_168 gap: 0 minlen: 170
+(brush, roller, pan)/20231019_215 gap: 0 minlen: 171
+(brush, roller, plate)/20231013_226 gap: 0 minlen: 171
+(brush, roller, plate)/20231019_185 gap: 0 minlen: 171
+(cut, knife, plate)/20231015_241 gap: 0 minlen: 171
+(cut, knife, plate)/20231015_293 gap: 0 minlen: 171
+(dust, roller, plate)/20231020_016 gap: 0 minlen: 171
+(measure, ruler, cup)/20231104_109 gap: 0 minlen: 171
+(measure, ruler, plate)/20231104_078 gap: 0 minlen: 171
+(measure, ruler, plate)/20231104_080 gap: 0 minlen: 171
+(measure, ruler, toy)/20231102_057 gap: 0 minlen: 171
+(pour in some, plate, plate)/20230930_141 gap: 0 minlen: 171
+(scrape off, knife, plate)/20231015_208 gap: 0 minlen: 171
+(skim off, spoon, plate)/20231024_009 gap: 0 minlen: 171
+(stir, spatula, bowl)/20231024_147 gap: 0 minlen: 171
+(stir, spoon, pan)/20231020_051 gap: 0 minlen: 171
+(stir, spoon, plate)/20231024_066 gap: 0 minlen: 171
+(brush, roller, pan)/20231019_211 gap: 0 minlen: 172
+(cut, spoon, plate)/20231024_071 gap: 0 minlen: 172
+(empty, kettle, bowl)/20231019_028 gap: 0 minlen: 172
+(empty, kettle, teapot)/20231031_109 gap: 0 minlen: 172
+(scrape off, knife, pan)/20231031_130 gap: 0 minlen: 172
+(scrape off, knife, pan)/20231031_137 gap: 0 minlen: 172
+(scrape off, knife, plate)/20231013_038 gap: 0 minlen: 172
+(scrape off, spoon, plate)/20231024_070 gap: 0 minlen: 172
+(smear, eraser, plate)/20230930_061 gap: 0 minlen: 172
+(stir-fry, spoon, pan)/20231020_161 gap: 0 minlen: 172
+(brush, roller, plate)/20231019_171 gap: 0 minlen: 173
+(brush, roller, plate)/20231019_175 gap: 0 minlen: 173
+(brush, roller, plate)/20231020_009 gap: 0 minlen: 173
+(cut, knife, bowl)/20231020_262 gap: 0 minlen: 173
+(cut, spoon, plate)/20231024_035 gap: 0 minlen: 173
+(dust, brush, plate)/20230929_038 gap: 0 minlen: 173
+(empty, box, plate)/20231027_171 gap: 0 minlen: 173
+(empty, kettle, bowl)/20231019_026 gap: 0 minlen: 173
+(put out, spatula, plate)/20231005_051 gap: 0 minlen: 173
+(scrape off, spoon, bowl)/20231105_062 gap: 0 minlen: 173
+(scrape off, spoon, plate)/20231024_040 gap: 0 minlen: 173
+(skim off, spoon, pan)/20231020_158 gap: 0 minlen: 173
+(smear, eraser, bowl)/20231104_030 gap: 0 minlen: 173
+(stir, spatula, bowl)/20231024_141 gap: 0 minlen: 173
+(stir, spoon, pan)/20231020_072 gap: 0 minlen: 173
+(stir-fry, spatula, pan)/20231020_105 gap: 0 minlen: 173
+(brush, roller, pan)/20231019_053 gap: 0 minlen: 174
+(brush, roller, plate)/20231019_243 gap: 0 minlen: 174
+(cut, knife, bowl)/20231020_270 gap: 0 minlen: 174
+(cut, knife, plate)/20231013_081 gap: 0 minlen: 174
+(dust, roller, plate)/20231019_186 gap: 0 minlen: 174
+(empty, bowl, cup)/20231006_266 gap: 0 minlen: 174
+(empty, bowl, kettle)/20231031_056 gap: 0 minlen: 174
+(empty, bowl, plate)/20231027_135 gap: 0 minlen: 174
+(empty, bowl, plate)/20231027_137 gap: 0 minlen: 174
+(put in, spatula, bowl)/20231024_112 gap: 0 minlen: 174
+(put in, spatula, pan)/20231005_015 gap: 0 minlen: 174
+(put in, spoon, pan)/20231015_159 gap: 0 minlen: 174
+(put in, spoon, plate)/20231024_067 gap: 0 minlen: 174
+(put out, spoon, plate)/20231024_074 gap: 0 minlen: 174
+(scrape off, knife, pan)/20231031_138 gap: 0 minlen: 174
+(scrape off, knife, plate)/20231015_238 gap: 0 minlen: 174
+(stir, spatula, bowl)/20231024_171 gap: 0 minlen: 174
+(brush, roller, plate)/20231019_159 gap: 0 minlen: 175
+(brush, roller, plate)/20231019_181 gap: 0 minlen: 175
+(cut, spatula, bowl)/20231024_164 gap: 0 minlen: 175
+(dust, brush, pan)/20231103_173 gap: 0 minlen: 175
+(dust, roller, plate)/20231019_100 gap: 0 minlen: 175
+(dust, roller, plate)/20231020_004 gap: 0 minlen: 175
+(empty, bowl, kettle)/20231019_030 gap: 0 minlen: 175
+(empty, plate, box)/20230928_035 gap: 0 minlen: 175
+(put out, spatula, pan)/20231020_025 gap: 0 minlen: 175
+(put out, spoon, plate)/20231024_008 gap: 0 minlen: 175
+(scrape off, knife, plate)/20231013_094 gap: 0 minlen: 175
+(scrape off, knife, plate)/20231015_274 gap: 0 minlen: 175
+(scrape off, knife, plate)/20231020_200 gap: 0 minlen: 175
+(scrape off, spoon, plate)/20231024_022 gap: 0 minlen: 175
+(scrape off, spoon, plate)/20231024_103 gap: 0 minlen: 175
+(skim off, bowl, pan)/20231020_181 gap: 0 minlen: 175
+(skim off, spoon, plate)/20231024_039 gap: 0 minlen: 175
+(skim off, spoon, plate)/20231024_075 gap: 0 minlen: 175
+(smear, eraser, bowl)/20231104_036 gap: 0 minlen: 175
+(stir, spoon, bowl)/20231105_053 gap: 0 minlen: 175
+(stir, spoon, plate)/20231024_012 gap: 0 minlen: 175
+(stir-fry, spatula, pan)/20231020_029 gap: 0 minlen: 175
+(brush, roller, plate)/20231019_163 gap: 0 minlen: 176
+(cut, knife, plate)/20231015_217 gap: 0 minlen: 176
+(cut, spoon, plate)/20231024_029 gap: 0 minlen: 176
+(dust, roller, plate)/20231020_012 gap: 0 minlen: 176
+(empty, teapot, kettle)/20231031_111 gap: 0 minlen: 176
+(put in, spoon, plate)/20231024_019 gap: 0 minlen: 176
+(put in, spoon, plate)/20231024_073 gap: 0 minlen: 176
+(put out, spatula, pan)/20231013_009 gap: 0 minlen: 176
+(scrape off, knife, plate)/20231013_044 gap: 0 minlen: 176
+(scrape off, knife, plate)/20231015_296 gap: 0 minlen: 176
+(skim off, bowl, plate)/20231024_276 gap: 0 minlen: 176
+(brush, roller, plate)/20231019_121 gap: 0 minlen: 177
+(cut, knife, plate)/20231015_249 gap: 0 minlen: 177
+(dust, roller, plate)/20231019_168 gap: 0 minlen: 177
+(empty, bowl, plate)/20231024_217 gap: 0 minlen: 177
+(scrape off, knife, pan)/20231031_133 gap: 0 minlen: 177
+(scrape off, knife, plate)/20231013_054 gap: 0 minlen: 177
+(skim off, spoon, pan)/20231020_047 gap: 0 minlen: 177
+(brush, roller, plate)/20231019_161 gap: 0 minlen: 178
+(cut, knife, plate)/20231020_197 gap: 0 minlen: 178
+(dust, roller, plate)/20231019_178 gap: 0 minlen: 178
+(measure, ruler, toy)/20231102_075 gap: 0 minlen: 178
+(put in, spatula, pan)/20231020_038 gap: 0 minlen: 178
+(scrape off, knife, plate)/20231013_080 gap: 0 minlen: 178
+(scrape off, spatula, bowl)/20231024_109 gap: 0 minlen: 178
+(skim off, bowl, pan)/20231020_096 gap: 0 minlen: 178
+(smear, eraser, plate)/20231104_051 gap: 0 minlen: 178
+(stir, spoon, plate)/20231024_018 gap: 0 minlen: 178
+(brush, roller, plate)/20231019_195 gap: 0 minlen: 179
+(cut, knife, plate)/20231015_247 gap: 0 minlen: 179
+(dust, roller, pan)/20231019_056 gap: 0 minlen: 179
+(dust, roller, plate)/20231019_120 gap: 0 minlen: 179
+(dust, roller, plate)/20231019_192 gap: 0 minlen: 179
+(empty, kettle, plate)/20231031_066 gap: 0 minlen: 179
+(empty, teapot, kettle)/20231031_103 gap: 0 minlen: 179
+(put in, bowl, pan)/20231020_094 gap: 0 minlen: 179
+(put in, spatula, pan)/20231020_017 gap: 0 minlen: 179
+(put in, spoon, pan)/20231020_080 gap: 0 minlen: 179
+(put out, spatula, pan)/20231020_039 gap: 0 minlen: 179
+(scrape off, knife, plate)/20231013_088 gap: 0 minlen: 179
+(brush, roller, plate)/20231019_179 gap: 0 minlen: 180
+(cut, knife, bowl)/20231020_263 gap: 0 minlen: 180
+(cut, spatula, bowl)/20231024_181 gap: 0 minlen: 180
+(cut, spoon, plate)/20231024_011 gap: 0 minlen: 180
+(dust, roller, pan)/20231019_216 gap: 0 minlen: 180
+(dust, roller, plate)/20231020_002 gap: 0 minlen: 180
+(empty, bowl, kettle)/20231031_048 gap: 0 minlen: 180
+(empty, bowl, plate)/20231027_127 gap: 0 minlen: 180
+(scrape off, knife, plate)/20231015_244 gap: 0 minlen: 180
+(scrape off, spoon, plate)/20231024_028 gap: 0 minlen: 180
+(skim off, spatula, pan)/20231020_102 gap: 0 minlen: 180
+(stir, spatula, bowl)/20231024_111 gap: 0 minlen: 180
+(brush, brush, helmet)/20231027_008 gap: 0 minlen: 181
+(brush, roller, pan)/20231019_201 gap: 0 minlen: 181
+(empty, bowl, cup)/20230929_032 gap: 0 minlen: 181
+(empty, box, plate)/20231027_177 gap: 0 minlen: 181
+(put in, spoon, plate)/20231024_007 gap: 0 minlen: 181
+(skim off, spoon, plate)/20231024_027 gap: 0 minlen: 181
+(brush, roller, pan)/20231019_075 gap: 0 minlen: 182
+(brush, roller, plate)/20231019_109 gap: 0 minlen: 182
+(cut, knife, plate)/20231013_091 gap: 0 minlen: 182
+(dust, roller, plate)/20231019_118 gap: 0 minlen: 182
+(empty, kettle, plate)/20231031_070 gap: 0 minlen: 182
+(empty, teapot, plate)/20231031_099 gap: 0 minlen: 182
+(pour in some, plate, box)/20230927_049 gap: 0 minlen: 182
+(put out, spoon, plate)/20231024_026 gap: 0 minlen: 182
+(scrape off, knife, plate)/20231013_050 gap: 0 minlen: 182
+(skim off, bowl, plate)/20230928_020 gap: 0 minlen: 182
+(stir, spoon, pan)/20231015_165 gap: 0 minlen: 182
+(brush, brush, cup)/20231026_013 gap: 0 minlen: 183
+(brush, brush, plate)/20230929_035 gap: 0 minlen: 183
+(brush, roller, bowl)/20230927_035 gap: 0 minlen: 183
+(brush, roller, plate)/20231020_003 gap: 0 minlen: 183
+(brush, roller, plate)/20231020_005 gap: 0 minlen: 183
+(cut, knife, plate)/20231015_215 gap: 0 minlen: 183
+(cut, knife, plate)/20231015_245 gap: 0 minlen: 183
+(pour in some, bowl, cup)/20230928_028 gap: 0 minlen: 183
+(scrape off, knife, pan)/20231031_126 gap: 0 minlen: 183
+(scrape off, knife, plate)/20231013_052 gap: 0 minlen: 183
+(scrape off, knife, plate)/20231013_084 gap: 0 minlen: 183
+(scrape off, spatula, pan)/20231020_041 gap: 0 minlen: 183
+(stir-fry, spatula, pan)/20231013_006 gap: 0 minlen: 183
+(stir-fry, spoon, pan)/20231020_057 gap: 0 minlen: 183
+(brush, brush, cup)/20231026_006 gap: 0 minlen: 184
+(brush, brush, helmet)/20231027_001 gap: 0 minlen: 184
+(cut, spoon, bowl)/20231105_064 gap: 0 minlen: 184
+(dust, roller, pan)/20231019_140 gap: 0 minlen: 184
+(pour in some, bowl, bowl)/20230927_021 gap: 0 minlen: 184
+(scrape off, knife, pan)/20231031_131 gap: 0 minlen: 184
+(brush, brush, cup)/20231026_014 gap: 0 minlen: 185
+(brush, roller, pan)/20231019_061 gap: 0 minlen: 185
+(cut, spoon, bowl)/20231105_052 gap: 0 minlen: 185
+(empty, kettle, bowl)/20231019_010 gap: 0 minlen: 185
+(measure, ruler, box)/20231102_022 gap: 0 minlen: 185
+(pour in some, cup, kettle)/20231019_035 gap: 0 minlen: 185
+(scrape off, knife, plate)/20231015_246 gap: 0 minlen: 185
+(scrape off, knife, plate)/20231015_276 gap: 0 minlen: 185
+(scrape off, spoon, pan)/20231020_159 gap: 0 minlen: 185
+(skim off, bowl, pan)/20231013_037 gap: 0 minlen: 185
+(skim off, bowl, pan)/20231020_099 gap: 0 minlen: 185
+(cut, knife, plate)/20231015_251 gap: 0 minlen: 186
+(cut, spoon, bowl)/20231105_018 gap: 0 minlen: 186
+(dust, roller, plate)/20231019_110 gap: 0 minlen: 186
+(put in, spoon, bowl)/20231105_022 gap: 0 minlen: 186
+(skim off, spoon, pan)/20231020_165 gap: 0 minlen: 186
+(brush, roller, box)/20230928_053 gap: 0 minlen: 187
+(brush, roller, pan)/20231019_125 gap: 0 minlen: 187
+(cut, knife, plate)/20231013_085 gap: 0 minlen: 187
+(cut, knife, plate)/20231013_089 gap: 0 minlen: 187
+(cut, spatula, bowl)/20231027_079 gap: 0 minlen: 187
+(empty, bowl, plate)/20231027_123 gap: 0 minlen: 187
+(empty, kettle, bowl)/20231019_004 gap: 0 minlen: 187
+(measure, ruler, plate)/20231104_079 gap: 0 minlen: 187
+(scrape off, knife, pan)/20231031_139 gap: 0 minlen: 187
+(scrape off, knife, plate)/20231013_076 gap: 0 minlen: 187
+(scrape off, knife, plate)/20231015_242 gap: 0 minlen: 187
+(scrape off, knife, plate)/20231015_290 gap: 0 minlen: 187
+(scrape off, spoon, pan)/20231020_152 gap: 0 minlen: 187
+(skim off, spatula, pan)/20231020_116 gap: 0 minlen: 187
+(stir, spoon, plate)/20231024_006 gap: 0 minlen: 187
+(brush, roller, plate)/20231019_165 gap: 0 minlen: 188
+(cut, knife, plate)/20231015_267 gap: 0 minlen: 188
+(empty, bowl, plate)/20231027_145 gap: 0 minlen: 188
+(empty, kettle, bowl)/20231031_052 gap: 0 minlen: 188
+(empty, kettle, teapot)/20231031_107 gap: 0 minlen: 188
+(put in, spoon, plate)/20231024_055 gap: 0 minlen: 188
+(scrape off, knife, plate)/20231013_066 gap: 0 minlen: 188
+(scrape off, knife, plate)/20231015_264 gap: 0 minlen: 188
+(scrape off, knife, plate)/20231020_196 gap: 0 minlen: 188
+(stir, spatula, pan)/20231020_030 gap: 0 minlen: 188
+(cut, knife, bowl)/20231020_257 gap: 0 minlen: 189
+(cut, knife, pan)/20231020_246 gap: 0 minlen: 189
+(cut, knife, pan)/20231020_251 gap: 0 minlen: 189
+(cut, knife, plate)/20231015_301 gap: 0 minlen: 189
+(cut, spatula, pan)/20231020_042 gap: 0 minlen: 189
+(dust, roller, plate)/20231019_164 gap: 0 minlen: 189
+(empty, box, plate)/20230928_037 gap: 0 minlen: 189
+(empty, kettle, plate)/20231031_058 gap: 0 minlen: 189
+(put in, spoon, pan)/20231013_015 gap: 0 minlen: 189
+(put in, spoon, pan)/20231013_022 gap: 0 minlen: 189
+(put out, spoon, pan)/20231015_139 gap: 0 minlen: 189
+(scrape off, spoon, plate)/20231024_052 gap: 0 minlen: 189
+(skim off, spoon, bowl)/20231105_014 gap: 0 minlen: 189
+(brush, brush, plate)/20230929_039 gap: 0 minlen: 190
+(brush, roller, plate)/20230927_033 gap: 0 minlen: 190
+(cut, knife, bowl)/20231020_259 gap: 0 minlen: 190
+(cut, spoon, plate)/20231024_017 gap: 0 minlen: 190
+(pour in some, bowl, cup)/20230929_031 gap: 0 minlen: 190
+(pour in some, plate, cup)/20230928_032 gap: 0 minlen: 190
+(scrape off, knife, plate)/20231015_256 gap: 0 minlen: 190
+(scrape off, knife, plate)/20231020_202 gap: 0 minlen: 190
+(skim off, spatula, pan)/20231013_003 gap: 0 minlen: 190
+(smear, eraser, plate)/20231104_055 gap: 0 minlen: 190
+(brush, roller, pan)/20231019_071 gap: 0 minlen: 191
+(cut, knife, pan)/20231020_247 gap: 0 minlen: 191
+(cut, knife, plate)/20231013_087 gap: 0 minlen: 191
+(cut, knife, plate)/20231015_253 gap: 0 minlen: 191
+(cut, spatula, bowl)/20231024_205 gap: 0 minlen: 191
+(empty, bowl, plate)/20231027_125 gap: 0 minlen: 191
+(empty, kettle, plate)/20231031_076 gap: 0 minlen: 191
+(measure, ruler, box)/20231102_008 gap: 0 minlen: 191
+(measure, ruler, toy)/20231102_078 gap: 0 minlen: 191
+(pour in some, cup, teapot)/20230927_041 gap: 0 minlen: 191
+(pour in some, kettle, kettle)/20230926_047 gap: 0 minlen: 191
+(put in, spoon, plate)/20231024_013 gap: 0 minlen: 191
+(put in, spoon, plate)/20231024_049 gap: 0 minlen: 191
+(scrape off, knife, pan)/20231031_129 gap: 0 minlen: 191
+(scrape off, spatula, bowl)/20231024_204 gap: 0 minlen: 191
+(scrape off, spatula, pan)/20231013_011 gap: 0 minlen: 191
+(skim off, spoon, plate)/20231024_003 gap: 0 minlen: 191
+(stir, spatula, bowl)/20231024_206 gap: 0 minlen: 191
+(stir, spoon, plate)/20231024_060 gap: 0 minlen: 191
+(brush, roller, plate)/20231019_099 gap: 0 minlen: 192
+(cut, knife, plate)/20231015_255 gap: 0 minlen: 192
+(cut, knife, plate)/20231015_277 gap: 0 minlen: 192
+(cut, spoon, plate)/20231024_065 gap: 0 minlen: 192
+(empty, bowl, kettle)/20231031_054 gap: 0 minlen: 192
+(hit, hammer, toy)/20231102_054 gap: 0 minlen: 192
+(skim off, spoon, pan)/20231020_061 gap: 0 minlen: 192
+(skim off, spoon, plate)/20231024_021 gap: 0 minlen: 192
+(smear, eraser, bowl)/20231104_026 gap: 0 minlen: 192
+(smear, eraser, bowl)/20231104_028 gap: 0 minlen: 192
+(brush, brush, cup)/20231026_001 gap: 0 minlen: 193
+(cut, knife, plate)/20231013_043 gap: 0 minlen: 193
+(cut, knife, plate)/20231015_219 gap: 0 minlen: 193
+(cut, knife, plate)/20231015_239 gap: 0 minlen: 193
+(cut, knife, plate)/20231015_243 gap: 0 minlen: 193
+(empty, box, plate)/20230927_048 gap: 0 minlen: 193
+(empty, cup, kettle)/20231019_044 gap: 0 minlen: 193
+(empty, kettle, plate)/20231031_068 gap: 0 minlen: 193
+(measure, ruler, toy)/20231102_077 gap: 0 minlen: 193
+(pour in some, kettle, cup)/20231031_027 gap: 0 minlen: 193
+(pour in some, kettle, kettle)/20231031_021 gap: 0 minlen: 193
+(put in, spoon, bowl)/20231105_021 gap: 0 minlen: 193
+(scrape off, knife, plate)/20231015_280 gap: 0 minlen: 193
+(scrape off, spoon, plate)/20231024_004 gap: 0 minlen: 193
+(scrape off, spoon, plate)/20231024_010 gap: 0 minlen: 193
+(stir, spatula, pan)/20230930_006 gap: 0 minlen: 193
+(stir-fry, spatula, pan)/20231020_043 gap: 0 minlen: 193
+(cut, knife, plate)/20231020_199 gap: 0 minlen: 194
+(scrape off, knife, plate)/20231015_258 gap: 0 minlen: 194
+(stir, spoon, pan)/20231020_058 gap: 0 minlen: 194
+(cut, knife, plate)/20231020_201 gap: 0 minlen: 195
+(empty, bowl, bowl)/20230927_022 gap: 0 minlen: 195
+(empty, kettle, bowl)/20231031_050 gap: 0 minlen: 195
+(empty, plate, bowl)/20230930_140 gap: 0 minlen: 195
+(hit, hammer, toy)/20231102_052 gap: 0 minlen: 195
+(scrape off, knife, plate)/20231013_060 gap: 0 minlen: 195
+(skim off, spoon, plate)/20231024_051 gap: 0 minlen: 195
+(put in, spoon, bowl)/20231105_010 gap: 0 minlen: 196
+(scrape off, knife, plate)/20231013_046 gap: 0 minlen: 196
+(cut, knife, plate)/20231013_063 gap: 0 minlen: 197
+(cut, knife, plate)/20231015_209 gap: 0 minlen: 197
+(cut, knife, plate)/20231015_289 gap: 0 minlen: 197
+(cut, spoon, pan)/20231020_049 gap: 0 minlen: 197
+(empty, bowl, kettle)/20231019_016 gap: 0 minlen: 197
+(pour in some, box, plate)/20230927_047 gap: 0 minlen: 197
+(put in, spoon, bowl)/20231105_033 gap: 0 minlen: 197
+(scrape off, knife, plate)/20231013_074 gap: 0 minlen: 197
+(scrape off, knife, plate)/20231020_206 gap: 0 minlen: 197
+(brush, brush, cup)/20231026_005 gap: 0 minlen: 198
+(cut, knife, plate)/20231015_281 gap: 0 minlen: 198
+(cut, knife, plate)/20231015_299 gap: 0 minlen: 198
+(pour in some, bowl, plate)/20230927_017 gap: 0 minlen: 198
+(pour in some, cup, bowl)/20230930_121 gap: 0 minlen: 198
+(scrape off, knife, pan)/20231031_134 gap: 0 minlen: 198
+(skim off, spatula, pan)/20231015_031 gap: 0 minlen: 198
+(smear, eraser, plate)/20231104_066 gap: 0 minlen: 198
+(cut, knife, plate)/20231015_237 gap: 0 minlen: 199
+(cut, knife, plate)/20231015_291 gap: 0 minlen: 199
+(empty, box, plate)/20231027_159 gap: 0 minlen: 199
+(pour in some, cup, bowl)/20230929_029 gap: 0 minlen: 199
+(pour in some, kettle, kettle)/20231031_017 gap: 0 minlen: 199
+(put in, bowl, pan)/20230929_019 gap: 0 minlen: 199
+(skim off, spoon, plate)/20231024_015 gap: 0 minlen: 199
+(cut, knife, plate)/20230926_037 gap: 0 minlen: 200
+(cut, knife, plate)/20231013_069 gap: 0 minlen: 200
+(cut, knife, plate)/20231015_235 gap: 0 minlen: 200
+(cut, knife, plate)/20231015_259 gap: 0 minlen: 200
+(put in, spoon, bowl)/20231105_009 gap: 0 minlen: 200
+(put out, spoon, plate)/20231024_020 gap: 0 minlen: 200
+(scrape off, knife, plate)/20231013_062 gap: 0 minlen: 200
+(cut, knife, plate)/20231015_303 gap: 0 minlen: 201
+(empty, cup, kettle)/20231031_032 gap: 0 minlen: 201
+(measure, ruler, toy)/20231102_076 gap: 0 minlen: 201
+(pour in some, cup, kettle)/20231031_031 gap: 0 minlen: 201
+(pour in some, cup, kettle)/20231031_039 gap: 0 minlen: 201
+(scrape off, spoon, plate)/20231024_016 gap: 0 minlen: 201
+(scrape off, spoon, plate)/20231024_097 gap: 0 minlen: 201
+(skim off, bowl, pan)/20231013_031 gap: 0 minlen: 201
+(skim off, bowl, pan)/20231013_034 gap: 0 minlen: 201
+(stir, spatula, pan)/20231020_044 gap: 0 minlen: 201
+(cut, spatula, pan)/20231020_028 gap: 0 minlen: 202
+(empty, cup, plate)/20230928_031 gap: 0 minlen: 202
+(put out, spatula, bowl)/20231006_030 gap: 0 minlen: 202
+(put out, spoon, bowl)/20231105_024 gap: 0 minlen: 202
+(brush, brush, cup)/20231026_002 gap: 0 minlen: 203
+(brush, brush, cup)/20231026_008 gap: 0 minlen: 203
+(dust, roller, pan)/20231019_064 gap: 0 minlen: 203
+(pour in some, kettle, kettle)/20231031_013 gap: 0 minlen: 203
+(pour in some, plate, teapot)/20230927_045 gap: 0 minlen: 203
+(scrape off, knife, plate)/20231020_198 gap: 0 minlen: 203
+(skim off, bowl, pan)/20231015_095 gap: 0 minlen: 203
+(cut, knife, plate)/20231013_059 gap: 0 minlen: 204
+(pour in some, cup, bowl)/20230928_026 gap: 0 minlen: 204
+(put out, bowl, pan)/20231013_033 gap: 0 minlen: 204
+(skim off, spoon, plate)/20231024_057 gap: 0 minlen: 204
+(skim off, spoon, plate)/20231024_069 gap: 0 minlen: 204
+(cut, spatula, pan)/20230930_004 gap: 0 minlen: 205
+(dust, roller, plate)/20231013_227 gap: 0 minlen: 205
+(empty, kettle, kettle)/20231031_014 gap: 0 minlen: 205
+(put in, spoon, bowl)/20231105_043 gap: 0 minlen: 205
+(scrape off, knife, plate)/20231013_086 gap: 0 minlen: 205
+(skim off, spatula, bowl)/20231024_209 gap: 0 minlen: 205
+(skim off, spoon, bowl)/20231105_026 gap: 0 minlen: 205
+(cut, spoon, plate)/20231024_005 gap: 0 minlen: 206
+(pour in some, cup, kettle)/20230929_025 gap: 0 minlen: 206
+(pour in some, kettle, cup)/20231031_035 gap: 0 minlen: 206
+(put in, bowl, pan)/20230929_017 gap: 0 minlen: 206
+(cut, spoon, bowl)/20231105_017 gap: 0 minlen: 207
+(empty, bowl, plate)/20231027_131 gap: 0 minlen: 207
+(pour in some, cup, kettle)/20231031_029 gap: 0 minlen: 207
+(skim off, spoon, bowl)/20231105_047 gap: 0 minlen: 207
+(brush, brush, cup)/20231026_020 gap: 0 minlen: 208
+(cut, knife, plate)/20231020_203 gap: 0 minlen: 208
+(hit, hammer, toy)/20231102_069 gap: 0 minlen: 208
+(pour in some, kettle, cup)/20231031_033 gap: 0 minlen: 208
+(pour in some, kettle, kettle)/20231031_011 gap: 0 minlen: 208
+(put in, bowl, pan)/20230929_013 gap: 0 minlen: 208
+(put in, spoon, pan)/20231020_059 gap: 0 minlen: 208
+(scrape off, knife, plate)/20231013_058 gap: 0 minlen: 208
+(brush, brush, bowl)/20230927_027 gap: 0 minlen: 209
+(cut, knife, plate)/20231015_211 gap: 0 minlen: 209
+(pour in some, bowl, plate)/20230928_021 gap: 0 minlen: 209
+(scrape off, spatula, bowl)/20231024_210 gap: 0 minlen: 209
+(scrape off, spoon, plate)/20231024_058 gap: 0 minlen: 209
+(skim off, spoon, bowl)/20231105_038 gap: 0 minlen: 209
+(skim off, spoon, bowl)/20231105_060 gap: 0 minlen: 209
+(cut, knife, bowl)/20231020_261 gap: 0 minlen: 210
+(cut, knife, plate)/20230926_040 gap: 0 minlen: 210
+(dust, brush, box)/20230927_030 gap: 0 minlen: 210
+(dust, brush, pan)/20230927_024 gap: 0 minlen: 210
+(empty, box, plate)/20231027_161 gap: 0 minlen: 210
+(measure, ruler, box)/20231102_004 gap: 0 minlen: 210
+(pour in some, kettle, kettle)/20231031_015 gap: 0 minlen: 210
+(put out, bowl, pan)/20231013_030 gap: 0 minlen: 210
+(scrape off, knife, plate)/20231013_070 gap: 0 minlen: 210
+(scrape off, spatula, pan)/20230930_003 gap: 0 minlen: 210
+(skim off, spatula, pan)/20231013_010 gap: 0 minlen: 210
+(stir-fry, spoon, pan)/20231013_027 gap: 0 minlen: 210
+(cut, knife, plate)/20231015_257 gap: 0 minlen: 211
+(cut, knife, plate)/20231015_279 gap: 0 minlen: 211
+(pour in some, kettle, kettle)/20231031_009 gap: 0 minlen: 211
+(pour in some, kettle, kettle)/20231031_023 gap: 0 minlen: 211
+(put in, spoon, bowl)/20231105_067 gap: 0 minlen: 211
+(put in, spoon, pan)/20231020_052 gap: 0 minlen: 211
+(brush, brush, helmet)/20231027_004 gap: 0 minlen: 212
+(put in, bowl, pan)/20231013_032 gap: 0 minlen: 212
+(put out, spoon, bowl)/20231105_004 gap: 0 minlen: 212
+(scrape off, knife, plate)/20231013_048 gap: 0 minlen: 212
+(stir, spoon, pan)/20231020_086 gap: 0 minlen: 212
+(pour in some, cup, kettle)/20231031_037 gap: 0 minlen: 213
+(pour in some, kettle, kettle)/20231031_005 gap: 0 minlen: 213
+(stir, spoon, bowl)/20231105_054 gap: 0 minlen: 213
+(pour in some, kettle, kettle)/20231031_001 gap: 0 minlen: 214
+(skim off, spoon, bowl)/20231105_037 gap: 0 minlen: 214
+(brush, roller, pan)/20231019_063 gap: 0 minlen: 215
+(pour in some, kettle, kettle)/20231031_019 gap: 0 minlen: 215
+(put out, spoon, plate)/20231024_014 gap: 0 minlen: 215
+(brush, roller, pan)/20230927_031 gap: 0 minlen: 216
+(pour in some, kettle, kettle)/20231031_003 gap: 0 minlen: 216
+(put out, spatula, bowl)/20231024_173 gap: 0 minlen: 216
+(put out, spoon, bowl)/20231105_068 gap: 0 minlen: 216
+(put in, bowl, pan)/20231013_029 gap: 0 minlen: 217
+(put out, spoon, bowl)/20231105_058 gap: 0 minlen: 217
+(skim off, spatula, pan)/20230930_002 gap: 0 minlen: 217
+(stir, spoon, pan)/20231013_021 gap: 0 minlen: 217
+(empty, bowl, plate)/20231027_143 gap: 0 minlen: 218
+(empty, plate, box)/20230927_050 gap: 0 minlen: 218
+(put out, spoon, bowl)/20231105_011 gap: 0 minlen: 218
+(skim off, bowl, bowl)/20230927_020 gap: 0 minlen: 218
+(skim off, bowl, pan)/20230929_018 gap: 0 minlen: 218
+(cut, knife, plate)/20231015_285 gap: 0 minlen: 219
+(empty, teapot, plate)/20230927_044 gap: 0 minlen: 219
+(put in, bowl, pan)/20231013_035 gap: 0 minlen: 219
+(put out, spoon, bowl)/20231105_045 gap: 0 minlen: 219
+(put out, spoon, bowl)/20231105_012 gap: 0 minlen: 220
+(dust, roller, pan)/20230927_032 gap: 0 minlen: 221
+(dust, roller, plate)/20230927_034 gap: 0 minlen: 221
+(hit, hammer, toy)/20231102_051 gap: 0 minlen: 221
+(pour in some, box, plate)/20230928_036 gap: 0 minlen: 221
+(put out, spoon, bowl)/20231105_046 gap: 0 minlen: 221
+(cut, knife, plate)/20231013_045 gap: 0 minlen: 222
+(pour in some, kettle, kettle)/20231031_007 gap: 0 minlen: 222
+(skim off, spoon, bowl)/20231105_025 gap: 0 minlen: 222
+(brush, brush, helmet)/20231027_002 gap: 0 minlen: 223
+(brush, brush, pan)/20230926_044 gap: 0 minlen: 223
+(empty, kettle, kettle)/20231031_010 gap: 0 minlen: 223
+(pour in some, kettle, cup)/20230917_042 gap: 0 minlen: 223
+(put in, spatula, pan)/20230930_001 gap: 0 minlen: 223
+(put out, spoon, plate)/20231024_002 gap: 0 minlen: 223
+(cut, knife, plate)/20231015_295 gap: 0 minlen: 224
+(cut, spatula, bowl)/20231024_211 gap: 0 minlen: 224
+(cut, spoon, pan)/20231020_056 gap: 0 minlen: 224
+(brush, brush, helmet)/20231027_003 gap: 0 minlen: 225
+(empty, plate, plate)/20230930_142 gap: 0 minlen: 225
+(put out, spatula, bowl)/20231005_065 gap: 0 minlen: 225
+(empty, plate, plate)/20230930_144 gap: 0 minlen: 226
+(empty, teapot, cup)/20230927_040 gap: 0 minlen: 227
+(scrape off, spoon, bowl)/20231105_050 gap: 0 minlen: 227
+(cut, knife, plate)/20231013_057 gap: 0 minlen: 228
+(hit, hammer, box)/20231102_002 gap: 0 minlen: 228
+(scrape off, knife, plate)/20230926_034 gap: 0 minlen: 228
+(brush, brush, plate)/20230929_037 gap: 0 minlen: 229
+(brush, roller, plate)/20231019_093 gap: 0 minlen: 229
+(cut, knife, plate)/20231015_261 gap: 0 minlen: 229
+(empty, plate, teapot)/20230927_046 gap: 0 minlen: 229
+(put in, bowl, pan)/20230929_015 gap: 0 minlen: 230
+(put in, spoon, plate)/20231024_001 gap: 0 minlen: 230
+(skim off, spatula, plate)/20230927_002 gap: 0 minlen: 230
+(stir, spatula, pan)/20231013_014 gap: 0 minlen: 230
+(cut, knife, plate)/20231015_275 gap: 0 minlen: 231
+(empty, cup, bowl)/20230928_027 gap: 0 minlen: 233
+(put in, spoon, plate)/20231024_025 gap: 0 minlen: 233
+(put out, spoon, bowl)/20231105_003 gap: 0 minlen: 233
+(put out, spoon, bowl)/20231105_023 gap: 0 minlen: 233
+(skim off, spatula, plate)/20230930_064 gap: 0 minlen: 233
+(skim off, spoon, bowl)/20231105_048 gap: 0 minlen: 233
+(brush, brush, cup)/20231026_007 gap: 0 minlen: 234
+(brush, brush, pan)/20230926_045 gap: 0 minlen: 234
+(cut, knife, plate)/20230926_041 gap: 0 minlen: 234
+(dust, roller, bowl)/20230927_036 gap: 0 minlen: 234
+(stir, spatula, pan)/20231013_007 gap: 0 minlen: 234
+(cut, knife, plate)/20231013_067 gap: 0 minlen: 235
+(cut, knife, plate)/20231015_283 gap: 0 minlen: 235
+(cut, spoon, pan)/20231013_026 gap: 0 minlen: 235
+(put in, spoon, bowl)/20231105_044 gap: 0 minlen: 236
+(brush, brush, box)/20230927_029 gap: 0 minlen: 238
+(cut, knife, plate)/20231013_053 gap: 0 minlen: 238
+(empty, cup, teapot)/20230927_042 gap: 0 minlen: 238
+(pour in some, kettle, cup)/20231031_025 gap: 0 minlen: 238
+(dust, brush, bowl)/20230927_028 gap: 0 minlen: 239
+(empty, kettle, kettle)/20231031_024 gap: 0 minlen: 239
+(put in, spatula, plate)/20230927_001 gap: 0 minlen: 239
+(skim off, spoon, bowl)/20231105_059 gap: 0 minlen: 239
+(cut, knife, plate)/20231013_075 gap: 0 minlen: 240
+(pour in some, kettle, cup)/20230929_027 gap: 0 minlen: 241
+(put in, spoon, bowl)/20231105_034 gap: 0 minlen: 241
+(put in, bowl, pan)/20230926_014 gap: 0 minlen: 242
+(empty, kettle, cup)/20231031_034 gap: 0 minlen: 243
+(empty, kettle, kettle)/20231031_022 gap: 0 minlen: 245
+(put out, spoon, pan)/20231020_046 gap: 0 minlen: 245
+(cut, knife, plate)/20231013_073 gap: 0 minlen: 246
+(skim off, bowl, pan)/20230929_016 gap: 0 minlen: 246
+(empty, kettle, kettle)/20231031_018 gap: 0 minlen: 247
+(put in, bowl, plate)/20230927_015 gap: 0 minlen: 248
+(cut, knife, plate)/20231013_047 gap: 0 minlen: 249
+(scrape off, spoon, pan)/20230926_028 gap: 0 minlen: 249
+(stir, spoon, bowl)/20231105_019 gap: 0 minlen: 249
+(scrape off, spoon, bowl)/20231105_028 gap: 0 minlen: 250
+(skim off, bowl, pan)/20230926_017 gap: 0 minlen: 250
+(brush, brush, plate)/20230927_025 gap: 0 minlen: 251
+(cut, knife, plate)/20231020_205 gap: 0 minlen: 251
+(dust, brush, plate)/20230927_026 gap: 0 minlen: 251
+(empty, cup, kettle)/20231031_040 gap: 0 minlen: 251
+(scrape off, knife, plate)/20230926_039 gap: 0 minlen: 251
+(scrape off, knife, plate)/20230929_002 gap: 0 minlen: 251
+(empty, kettle, cup)/20231031_026 gap: 0 minlen: 252
+(pour in some, plate, box)/20230928_034 gap: 0 minlen: 252
+(empty, kettle, cup)/20231031_028 gap: 0 minlen: 253
+(empty, cup, kettle)/20231031_038 gap: 0 minlen: 254
+(empty, kettle, kettle)/20231031_008 gap: 0 minlen: 254
+(stir, spoon, pan)/20231013_028 gap: 0 minlen: 254
+(empty, cup, kettle)/20230929_026 gap: 0 minlen: 255
+(empty, kettle, kettle)/20231031_016 gap: 0 minlen: 256
+(cut, knife, plate)/20231013_049 gap: 0 minlen: 257
+(empty, cup, kettle)/20231031_030 gap: 0 minlen: 257
+(empty, kettle, cup)/20231031_036 gap: 0 minlen: 259
+(cut, knife, plate)/20231013_071 gap: 0 minlen: 261
+(brush, brush, cup)/20231026_003 gap: 0 minlen: 262
+(empty, bowl, plate)/20230928_022 gap: 0 minlen: 262
+(put in, bowl, pan)/20230927_013 gap: 0 minlen: 262
+(brush, roller, pan)/20231019_055 gap: 0 minlen: 263
+(empty, kettle, kettle)/20231031_012 gap: 0 minlen: 263
+(empty, plate, cup)/20230928_033 gap: 0 minlen: 263
+(scrape off, spoon, pan)/20230926_026 gap: 0 minlen: 263
+(brush, brush, pan)/20230927_023 gap: 0 minlen: 264
+(cut, knife, plate)/20231013_061 gap: 0 minlen: 264
+(empty, kettle, kettle)/20231031_002 gap: 0 minlen: 264
+(empty, kettle, kettle)/20231031_020 gap: 0 minlen: 265
+(scrape off, knife, plate)/20230926_038 gap: 0 minlen: 265
+(skim off, spoon, bowl)/20231105_005 gap: 0 minlen: 266
+(empty, kettle, kettle)/20231031_006 gap: 0 minlen: 267
+(scrape off, knife, plate)/20231013_072 gap: 0 minlen: 267
+(brush, roller, plate)/20231020_001 gap: 0 minlen: 268
+(put in, spoon, bowl)/20231105_002 gap: 0 minlen: 268
+(stir-fry, spoon, pan)/20230927_011 gap: 0 minlen: 268
+(scrape off, spatula, plate)/20230927_003 gap: 0 minlen: 271
+(scrape off, spoon, pan)/20230927_009 gap: 0 minlen: 271
+(brush, brush, plate)/20230929_033 gap: 0 minlen: 273
+(empty, kettle, kettle)/20231031_004 gap: 0 minlen: 274
+(cut, spatula, pan)/20231013_005 gap: 0 minlen: 275
+(scrape off, knife, plate)/20230929_006 gap: 0 minlen: 276
+(cut, knife, plate)/20230929_003 gap: 0 minlen: 280
+(cut, knife, plate)/20231013_051 gap: 0 minlen: 281
+(cut, knife, plate)/20231013_065 gap: 0 minlen: 281
+(dust, brush, pan)/20230926_042 gap: 0 minlen: 281
+(brush, brush, toy)/20230919_038 gap: 0 minlen: 282
+(cut, knife, plate)/20230929_005 gap: 0 minlen: 284
+(scrape off, knife, plate)/20231013_068 gap: 0 minlen: 285
+(empty, kettle, plate)/20230930_152 gap: 0 minlen: 288
+(put in, spoon, bowl)/20231105_001 gap: 0 minlen: 288
+(scrape off, spoon, plate)/20230926_030 gap: 0 minlen: 290
+(cut, spoon, pan)/20230927_010 gap: 0 minlen: 294
+(stir-fry, spatula, plate)/20230927_005 gap: 0 minlen: 294
+(cut, spatula, plate)/20230927_004 gap: 0 minlen: 297
+(skim off, bowl, pan)/20230929_020 gap: 0 minlen: 299
+(skim off, spoon, pan)/20230927_008 gap: 0 minlen: 300
+(put in, spoon, pan)/20230927_007 gap: 0 minlen: 301
+(skim off, bowl, pan)/20230927_014 gap: 0 minlen: 307
+(cut, spatula, plate)/20230917_021 gap: 0 minlen: 308
+(scrape off, spoon, pan)/20230926_029 gap: 0 minlen: 314
+(scrape off, spoon, plate)/20230926_032 gap: 0 minlen: 314
+(skim off, bowl, plate)/20230927_016 gap: 0 minlen: 321
+(put in, spatula, plate)/20230930_063 gap: 0 minlen: 330
+(stir, spoon, pan)/20230927_012 gap: 0 minlen: 330
+(put in, spatula, bowl)/20230926_005 gap: 0 minlen: 333
+(put in, spatula, plate)/20230926_003 gap: 0 minlen: 375
+(skim off, spatula, bowl)/20230926_006 gap: 0 minlen: 380
+(empty, kettle, kettle)/20230926_048 gap: 0 minlen: 386
+(skim off, spoon, pan)/20230926_011 gap: 0 minlen: 397
+(skim off, spatula, plate)/20230926_004 gap: 0 minlen: 400
+(stir, spatula, plate)/20230927_006 gap: 0 minlen: 412
+(put out, spatula, plate)/20231104_166 gap: 1 minlen: 99
+(put in, spatula, plate)/20231104_165 gap: 1 minlen: 113
+(stir, spatula, plate)/20231104_150 gap: 1 minlen: 129
+(put in, spatula, plate)/20231104_151 gap: 1 minlen: 132
+(pour in some, teapot, bowl)/20230917_032 gap: 1 minlen: 226
+(pour in some, teapot, cup)/20230917_041 gap: 1 minlen: 226
+(scrape off, spatula, plate)/20230917_031 gap: 1 minlen: 250
+(cut, spatula, plate)/20230917_022 gap: 1 minlen: 273
+(brush, brush, pan)/20230919_026 gap: 1 minlen: 291
+(stir-fry, spoon, pan)/20230923_019 gap: 1 minlen: 311
+(stir-fry, spatula, plate)/20230923_017 gap: 1 minlen: 314
+(cut, spatula, plate)/20231104_162 gap: 2 minlen: 134
+(brush, roller, plate)/20231019_087 gap: 2 minlen: 158
+(pour in some, kettle, cup)/20230917_043 gap: 2 minlen: 230
+(pour in some, kettle, cup)/20230917_037 gap: 2 minlen: 246
+(scrape off, spoon, plate)/20230917_026 gap: 2 minlen: 253
+(brush, brush, bowl)/20230919_036 gap: 2 minlen: 260
+(cut, spoon, plate)/20230917_017 gap: 2 minlen: 269
+(scrape off, spatula, plate)/20230917_030 gap: 2 minlen: 270
+(pour in some, kettle, plate)/20230917_045 gap: 2 minlen: 279
+(brush, brush, helmet)/20230919_040 gap: 2 minlen: 290
+(cut, spatula, plate)/20230917_023 gap: 2 minlen: 324
+(dust, brush, pan)/20230926_043 gap: 3 minlen: 228
+(brush, brush, plate)/20230919_032 gap: 3 minlen: 239
+(pour in some, teapot, plate)/20230917_044 gap: 3 minlen: 244
+(cut, spoon, plate)/20230917_019 gap: 3 minlen: 293
+(put in, spoon, plate)/20230917_006 gap: 3 minlen: 296
+(stir-fry, spatula, plate)/20230923_011 gap: 3 minlen: 318
+(stir, spoon, pan)/20230923_020 gap: 3 minlen: 351
+(brush, brush, helmet)/20230919_042 gap: 3 minlen: 356
+(cut, spatula, plate)/20230917_020 gap: 3 minlen: 358
+(brush, brush, pan)/20230919_027 gap: 4 minlen: 257
+(brush, brush, plate)/20230919_031 gap: 4 minlen: 277
+(brush, brush, helmet)/20230919_041 gap: 4 minlen: 317
+(brush, brush, pan)/20230919_043 gap: 4 minlen: 326
+(scrape off, spoon, plate)/20230917_024 gap: 4 minlen: 346
+(stir, spatula, pan)/20230923_008 gap: 4 minlen: 389
+(dust, brush, teapot)/20230930_059 gap: 5 minlen: 88
+(measure, ruler, cup)/20231104_111 gap: 5 minlen: 128
+(pour in some, kettle, plate)/20230917_046 gap: 5 minlen: 214
+(stir-fry, spatula, plate)/20230923_013 gap: 5 minlen: 267
+(stir-fry, spatula, pan)/20230923_001 gap: 5 minlen: 391
+(brush, brush, plate)/20230919_030 gap: 6 minlen: 253
+(scrape off, spoon, plate)/20230917_027 gap: 6 minlen: 263
+(pour in some, kettle, cup)/20230917_036 gap: 6 minlen: 277
+(hit, hammer, box)/20231002_058 gap: 7 minlen: 102
+(pour in some, kettle, bowl)/20230917_034 gap: 7 minlen: 210
+(scrape off, spoon, plate)/20230926_031 gap: 8 minlen: 203
+(brush, brush, toy)/20230919_039 gap: 8 minlen: 315
+(brush, brush, plate)/20230919_033 gap: 9 minlen: 362
+(cut, knife, plate)/20230926_036 gap: 10 minlen: 190
+(skim off, bowl, pan)/20230926_016 gap: 11 minlen: 192
+(stir-fry, spatula, pan)/20230923_009 gap: 11 minlen: 308
+(scrape off, spoon, pan)/20230926_027 gap: 14 minlen: 255
+(scrape off, knife, plate)/20230926_035 gap: 17 minlen: 236
+(skim off, bowl, pan)/20230926_015 gap: 18 minlen: 186
+(put in, spatula, bowl)/20230926_007 gap: 18 minlen: 294
+(put in, spoon, pan)/20230926_010 gap: 24 minlen: 404
+(skim off, spatula, bowl)/20230926_009 gap: 28 minlen: 469
+(stir-fry, spatula, pan)/20230923_007 gap: 161 minlen: 79

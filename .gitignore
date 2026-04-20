@@ -11,6 +11,9 @@
 # 权重与 checkpoint（按需下载；README 中有脚本说明）
 /weights/
 /checkpoints/
+# 任意子目录（如 thirdparty、实验输出下的 weights/checkpoints）
+**/weights/
+**/checkpoints/
 *.pth
 *.pt
 *.ckpt
@@ -63,6 +66,20 @@ batch_ui_runs/*
 /thirdparty/detection
 /thirdparty/ZoeDepth
 /thirdparty/aitviewer
+
+# Any4D（vendor 树）：本地脚本、大索引、演示资产、跑批日志不入库
+/thirdparty/Any4D/run_*.sh
+/thirdparty/Any4D/flat_episode_list.json
+/thirdparty/Any4D/assets/
+/thirdparty/Any4D/scripts/vitra_check_errors.txt
+/thirdparty/Any4D/egodex_video_list_*.txt
+/thirdparty/Any4D/vitra_check_results/
+/thirdparty/Any4D/vitra_check_results_old/
+
+# DPVO（vendor 树）：编译产物、本地解压 Eigen（*.pth 已由全局规则覆盖）
+/thirdparty/DPVO/build/
+/thirdparty/DPVO/thirdparty/eigen-3.4.0/
+/thirdparty/DPVO/eigen-3.4.0.zip
 
 # 其它项目内大块路径
 hot3d_*/
