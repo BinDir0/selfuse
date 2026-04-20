@@ -8,7 +8,7 @@ import os
 import joblib
 import numpy as np
 
-MANIFEST_FEATURE_CACHE_VERSION = 7
+MANIFEST_FEATURE_CACHE_VERSION = 8
 
 
 def feature_cache_path(seq_folder: str, feature_cache_dir: str) -> str:

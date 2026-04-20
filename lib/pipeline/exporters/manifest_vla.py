@@ -2,6 +2,7 @@
 
 from .manifest_build import (
     compute_descriptor_episode_quality_metrics,
+    descriptor_uses_native_features,
     load_descriptor_episode_features,
     load_manifest_record_prediction,
     plan_manifest_shards,
@@ -13,6 +14,7 @@ from .manifest_build import (
 
 __all__ = [
     "compute_descriptor_episode_quality_metrics",
+    "descriptor_uses_native_features",
     "load_descriptor_episode_features",
     "load_manifest_record_prediction",
     "plan_manifest_shards",

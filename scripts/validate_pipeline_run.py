@@ -45,6 +45,7 @@ def get_parser():
 
 
 def validate_manifest_outputs(records, stages):
+    from lib.pipeline.exporters.manifest_vla import descriptor_uses_native_features, load_descriptor_episode_features, prepare_manifest_record_for_build
     from lib.pipeline.stage_api import get_track_range, validate_stage_output
 
     stats = {
@@ -59,6 +60,54 @@ def validate_manifest_outputs(records, stages):
     for record in records:
         seq_folder = Path(record.descriptor.seq_folder)
         clip_ok = True
+        if descriptor_uses_native_features(record.descriptor):
+            if any(stage != "native_features" for stage in stages):
+                stats["clips_failed"] += 1
+                if len(stats["failure_examples"]) < 64:
+                    stats["failure_examples"].append(
+                        {
+                            "clip_id": record.clip_id,
+                            "seq_folder": str(seq_folder),
+                            "stage": ",".join(stages),
+                            "error": "native feature descriptors require --stages native_features",
+                        }
+                    )
+                continue
+            episode, error_code = prepare_manifest_record_for_build(
+                record,
+                require_annotation=False,
+                annotation_root=None,
+                annotation_suffix=".annotation.json",
+                source_fps=30.0,
+                target_fps=30.0,
+                interpolate_labels=False,
+            )
+            if episode is None or load_descriptor_episode_features(
+                episode,
+                None,
+                None,
+                None,
+                feature_cache_dir=None,
+                mano_dir=None,
+                source_fps=30.0,
+                target_fps=30.0,
+                interpolate_labels=False,
+            ) is None:
+                stats["stage_failures"].setdefault("native_features", 0)
+                stats["stage_failures"]["native_features"] += 1
+                stats["clips_failed"] += 1
+                if len(stats["failure_examples"]) < 64:
+                    stats["failure_examples"].append(
+                        {
+                            "clip_id": record.clip_id,
+                            "seq_folder": str(seq_folder),
+                            "stage": "native_features",
+                            "error": str(error_code or "invalid native features"),
+                        }
+                    )
+                continue
+            stats["clips_ok"] += 1
+            continue
         try:
             start_idx, end_idx = get_track_range(seq_folder, fast=False)
         except Exception as error:

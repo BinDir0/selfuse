@@ -173,6 +173,12 @@ def run_pipeline(args) -> None:
             "Run the manifest stage first, or reuse the previous run directory via --run_tag."
         )
 
+    def manifest_uses_only_native_features(manifest_to_check: Path) -> bool:
+        from lib.pipeline.exporters.manifest_vla import descriptor_uses_native_features
+
+        records = load_clip_manifest(manifest_to_check)
+        return bool(records) and all(descriptor_uses_native_features(record.descriptor) for record in records)
+
     def build_completed_stage_manifest(stage_name: str, source_manifest: Path) -> tuple[Path, dict]:
         status_path = run_dir / "status.json"
         events_path = run_dir / "events.jsonl"
@@ -385,6 +391,24 @@ def run_pipeline(args) -> None:
         infer_cfg.get("common"),
         negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
     )
+    native_infer_stages = [stage for stage in ("detect_motion", "slam", "infiller") if stage in stages]
+    if native_infer_stages:
+        ensure_manifest_exists("infer", active_manifest_path)
+        if manifest_uses_only_native_features(active_manifest_path):
+            print(
+                "[infer] native-feature manifest detected; skipping ordinary "
+                f"infer sub-stages {native_infer_stages}. "
+                "HOT3D final build reads lowdim/mano/cameras directly from raw WDS.",
+                flush=True,
+            )
+            stages = [stage for stage in stages if stage not in set(native_infer_stages)]
+            run_summary["native_feature_infer_skip"] = {
+                "skipped_internal_stages": native_infer_stages,
+                "reason": "native lowdim/mano/camera features are provided by source WDS",
+            }
+            run_summary["expanded_internal_stages_after_native_skip"] = stages
+            summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
     multihost_runner = None
     multihost_common_batch_args = ()
     if infer_multihost_cfg.enabled and any(stage in stages for stage in ("detect_motion", "slam", "infiller")):

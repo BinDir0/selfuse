@@ -227,6 +227,9 @@ class HOT3DWDSDatasetAdapter(BaseDatasetAdapter):
                         frame_offsets=[frame.offset_size for frame in segment.frames],
                         extra={
                             "adapter": self.name,
+                            "native_feature_source": "wds_lowdim_mano_v1",
+                            "lowdim_schema": "hot3d_wrist_world_v1",
+                            "mano_schema": "hot3d_mano_2x55_v1",
                             "dataset_name": dataset_cfg.get("source_id") or "hot3d",
                             "original_episode_id": episode_id,
                             "episode_index": segment.episode_index,

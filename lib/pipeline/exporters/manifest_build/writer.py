@@ -172,6 +172,11 @@ def add_prepared_sample_bytes_to_tar(
 
 
 def build_manifest_meta_prefix(episode_slice: dict) -> bytes:
+    descriptor = episode_slice.get("descriptor")
+    descriptor_extra = getattr(descriptor, "extra", None) or {}
+    mano_fields = mano_meta_fields()
+    if descriptor_extra.get("mano_schema"):
+        mano_fields["mano_schema"] = descriptor_extra["mano_schema"]
     meta = {
         "dataset_name": episode_slice["source_id"],
         "clip_id": episode_slice["clip_id"],
@@ -180,15 +185,16 @@ def build_manifest_meta_prefix(episode_slice: dict) -> bytes:
         "instruction": list(episode_slice.get("instruction", [])),
         "instruction_num": int(episode_slice.get("instruction_num", 0)),
         "language": episode_slice.get("language"),
-        "lowdim_schema": "hawor_wrist_world_v2",
+        "lowdim_schema": descriptor_extra.get("lowdim_schema") or "hawor_wrist_world_v2",
+        "native_feature_source": descriptor_extra.get("native_feature_source"),
         "wrist_translation_semantics": "mano_joint_0_world",
         "camera_extrinsic_convention": "w2c",
-        **mano_meta_fields(),
+        **mano_fields,
     }
     return (json.dumps(meta, ensure_ascii=False, separators=(",", ":"))[:-1] + ',"presence":').encode("utf-8")
 
 
-def worker_init(device_specs, mano_dir, feature_cache_dir):
+def worker_init(device_specs, mano_dir, feature_cache_dir, skip_mano_models=False):
     global _worker_mano_right, _worker_mano_left, _worker_device, _worker_mano_dir
     global _worker_feature_cache_dir, _worker_episode_cache
     global _worker_shard_fd_cache, _worker_shard_tar_cache
@@ -198,9 +204,13 @@ def worker_init(device_specs, mano_dir, feature_cache_dir):
     device_str = device_specs[worker_idx % len(device_specs)]
     _worker_device = torch.device(device_str)
     _worker_mano_dir = mano_dir
-    _worker_mano_right, _worker_mano_left = build_mano_models(_worker_device, mano_dir=mano_dir)
-    _worker_mano_right.eval()
-    _worker_mano_left.eval()
+    if skip_mano_models:
+        _worker_mano_right = None
+        _worker_mano_left = None
+    else:
+        _worker_mano_right, _worker_mano_left = build_mano_models(_worker_device, mano_dir=mano_dir)
+        _worker_mano_right.eval()
+        _worker_mano_left.eval()
     _worker_feature_cache_dir = feature_cache_dir
     _worker_episode_cache = {}
     _worker_shard_fd_cache = {}

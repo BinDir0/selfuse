@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from lib.pipeline.annotation_protocol import write_annotation_issue_report
 
-from .episodes import prepare_manifest_episodes
+from .episodes import descriptor_uses_native_features, prepare_manifest_episodes
 from .writer import (
     normalize_mano_devices,
     plan_manifest_shards,
@@ -81,6 +81,9 @@ def run_manifest_build(
     repeated = repeat_manifest_episodes(episodes, repeat_episodes)
     shard_tasks = plan_manifest_shards(repeated, frames_per_shard, output_dir)
     os.makedirs(output_dir, exist_ok=True)
+    skip_mano_models = bool(repeated) and all(
+        descriptor_uses_native_features(ep["descriptor"]) for ep in repeated
+    )
 
     existing_shard_tasks = []
     pending_shard_tasks = shard_tasks
@@ -119,14 +122,14 @@ def run_manifest_build(
 
     if pending_shard_tasks:
         if writer_workers <= 1:
-            worker_init(mano_device_specs, mano_dir, resolved_feature_cache_dir)
+            worker_init(mano_device_specs, mano_dir, resolved_feature_cache_dir, skip_mano_models)
             result_iter = (worker_process_shard(task) for task in pending_shard_tasks)
         else:
             mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
             pool = mp_context.Pool(
                 writer_workers,
                 initializer=worker_init,
-                initargs=(mano_device_specs, mano_dir, resolved_feature_cache_dir),
+                initargs=(mano_device_specs, mano_dir, resolved_feature_cache_dir, skip_mano_models),
             )
             result_iter = pool.imap_unordered(worker_process_shard, pending_shard_tasks)
 

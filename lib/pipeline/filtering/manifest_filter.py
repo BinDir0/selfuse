@@ -116,8 +116,16 @@ def _append_build_reason(result: dict, reason: str, metric_key: str | None = Non
 
 
 def _validate_build_inputs(record, stages: list[str], result: dict) -> tuple[bool, tuple[int, int, dict | None] | None]:
-    from lib.pipeline.exporters.manifest_vla import load_manifest_record_prediction
+    from lib.pipeline.exporters.manifest_vla import descriptor_uses_native_features, load_manifest_record_prediction
     from lib.pipeline.stage_api import get_track_range, validate_stage_output
+
+    if descriptor_uses_native_features(record.descriptor):
+        unsupported_stages = [stage for stage in stages if stage != "native_features"]
+        if unsupported_stages:
+            _append_build_reason(result, "native_features_stage_mismatch", "unsupported_stages", unsupported_stages)
+            return False, None
+        result["metrics"]["track_range"] = [0, int(record.descriptor.frame_count)]
+        return True, (0, int(record.descriptor.frame_count), None)
 
     seq_folder = Path(record.descriptor.seq_folder)
     try:
@@ -146,6 +154,7 @@ def _validate_build_inputs(record, stages: list[str], result: dict) -> tuple[boo
 def evaluate_record(record, config: dict) -> dict:
     from lib.pipeline.exporters.manifest_vla import (
         compute_descriptor_episode_quality_metrics,
+        descriptor_uses_native_features,
         load_manifest_record_prediction,
         prepare_manifest_record_for_build,
     )
@@ -155,7 +164,7 @@ def evaluate_record(record, config: dict) -> dict:
     if not ok:
         return result
     prediction = validate_payload[2] if validate_payload is not None and len(validate_payload) >= 3 else None
-    if prediction is None:
+    if prediction is None and not descriptor_uses_native_features(record.descriptor):
         prediction, error_code = load_manifest_record_prediction(record)
         if prediction is None:
             return _append_build_reason(result, str(error_code))
@@ -200,10 +209,17 @@ def evaluate_record(record, config: dict) -> dict:
 
 def worker_init(config: dict):
     import torch
-    from lib.pipeline.exporters.webdataset_features import build_mano_models
 
     global _WORKER_CONFIG, _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT, _WORKER_DEVICE
     _WORKER_CONFIG = config
+
+    if bool(config.get("skip_mano_models")):
+        _WORKER_DEVICE = torch.device("cpu")
+        _WORKER_MANO_RIGHT = None
+        _WORKER_MANO_LEFT = None
+        return
+
+    from lib.pipeline.exporters.webdataset_features import build_mano_models
 
     identity = current_process()._identity
     worker_idx = identity[0] - 1 if identity else 0
@@ -302,10 +318,12 @@ def build_report(
 def run_filter(args) -> dict:
     import torch
     from tqdm import tqdm
+    from lib.pipeline.exporters.manifest_vla import descriptor_uses_native_features
     from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
     from lib.pipeline.quality_metrics import decide_clip_quality, resolve_auto_quality_thresholds
 
     records = load_clip_manifest(args.input_manifest)
+    skip_mano_models = bool(records) and all(descriptor_uses_native_features(record.descriptor) for record in records)
     mano_device_obj = torch.device(args.mano_device if torch.cuda.is_available() else "cpu")
     mano_device_specs = normalize_mano_devices(
         str(mano_device_obj),
@@ -342,6 +360,7 @@ def run_filter(args) -> dict:
         "feature_cache_dir": args.feature_cache_dir,
         "mano_dir": args.mano_dir,
         "mano_device_specs": mano_device_specs,
+        "skip_mano_models": skip_mano_models,
     }
 
     if worker_count <= 1:

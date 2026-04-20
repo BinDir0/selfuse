@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import json
+import tarfile
 from multiprocessing import get_context
 from pathlib import Path
 
@@ -29,6 +32,146 @@ from lib.pipeline.quality_metrics import (
 
 from .cache import load_cached_features, write_cached_features
 from .resample import resample_episode_features
+
+
+NATIVE_FEATURE_SOURCE = "wds_lowdim_mano_v1"
+NATIVE_LOWDIM_SHAPE = (116,)
+NATIVE_MANO_SHAPE = (2, 55)
+NATIVE_WRIST_STATE_SLICE = slice(0, 18)
+NATIVE_HAND_STATE_SLICE = slice(18, 48)
+NATIVE_WRIST_ACTION_SLICE = slice(48, 66)
+NATIVE_HAND_ACTION_SLICE = slice(66, 96)
+NATIVE_EXTRINSIC_SLICE = slice(96, 112)
+NATIVE_INTRINSIC_SLICE = slice(112, 116)
+
+
+def descriptor_uses_native_features(descriptor) -> bool:
+    return (descriptor.extra or {}).get("native_feature_source") == NATIVE_FEATURE_SOURCE
+
+
+def _native_member_name_from_image(frame_name: str, suffix: str) -> str:
+    image_suffix = ".image.jpg"
+    if not str(frame_name).endswith(image_suffix):
+        raise ValueError(f"Native WDS frame name must end with {image_suffix}: {frame_name}")
+    return f"{str(frame_name)[:-len(image_suffix)]}{suffix}"
+
+
+def _decode_native_npy(payload: bytes, *, sample_key: str, field_name: str, expected_shape: tuple[int, ...]) -> np.ndarray:
+    try:
+        array = np.load(io.BytesIO(payload), allow_pickle=False)
+    except Exception as error:
+        raise ValueError(f"Failed to decode native {field_name} for {sample_key}: {error}") from error
+    array = np.asarray(array, dtype=np.float32)
+    if array.shape != expected_shape:
+        raise ValueError(f"Native {field_name} shape mismatch for {sample_key}: expected={expected_shape}, got={array.shape}")
+    if not np.isfinite(array).all():
+        raise ValueError(f"Native {field_name} contains non-finite values for {sample_key}")
+    return array
+
+
+def _decode_native_presence(payload: bytes, *, sample_key: str) -> int:
+    try:
+        meta = json.loads(payload.decode("utf-8"))
+    except Exception as error:
+        raise ValueError(f"Failed to decode native meta for {sample_key}: {error}") from error
+    try:
+        presence = int(meta.get("presence", 0))
+    except Exception as error:
+        raise ValueError(f"Invalid native presence for {sample_key}: {meta.get('presence')!r}") from error
+    if presence < 0 or presence > 3:
+        raise ValueError(f"Invalid native presence for {sample_key}: {presence}")
+    return presence
+
+
+def _validate_native_lowdim(lowdim_all: np.ndarray) -> None:
+    extrinsics = lowdim_all[:, NATIVE_EXTRINSIC_SLICE].reshape(-1, 4, 4)
+    intrinsics = lowdim_all[:, NATIVE_INTRINSIC_SLICE]
+    if not np.isfinite(extrinsics).all():
+        raise ValueError("Native lowdim extrinsics contain non-finite values")
+    if not np.isfinite(intrinsics).all():
+        raise ValueError("Native lowdim intrinsics contain non-finite values")
+    if (intrinsics[:, 0] <= 0).any() or (intrinsics[:, 1] <= 0).any():
+        raise ValueError("Native lowdim intrinsics contain non-positive focal length")
+    expected_bottom_row = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    if not np.allclose(extrinsics[:, 3, :], expected_bottom_row[None, :], atol=1e-3):
+        raise ValueError("Native lowdim extrinsics are not homogeneous World2Cam matrices")
+    rotation_dets = np.linalg.det(extrinsics[:, :3, :3].astype(np.float64))
+    if not np.isfinite(rotation_dets).all() or (np.abs(rotation_dets) < 1e-6).any():
+        raise ValueError("Native lowdim extrinsics contain singular camera rotations")
+    if lowdim_all.shape[0] > 1:
+        wrist_action = lowdim_all[:-1, NATIVE_WRIST_ACTION_SLICE]
+        next_wrist_state = lowdim_all[1:, NATIVE_WRIST_STATE_SLICE]
+        hand_action = lowdim_all[:-1, NATIVE_HAND_ACTION_SLICE]
+        next_hand_state = lowdim_all[1:, NATIVE_HAND_STATE_SLICE]
+        if not np.allclose(wrist_action, next_wrist_state, atol=1e-4, rtol=1e-4):
+            raise ValueError("Native lowdim wrist_action does not match next-frame wrist_state")
+        if not np.allclose(hand_action, next_hand_state, atol=1e-4, rtol=1e-4):
+            raise ValueError("Native lowdim hand_action does not match next-frame hand_state")
+
+
+def _load_native_descriptor_episode_features(ep: dict) -> dict | None:
+    descriptor = ep["descriptor"]
+    if not descriptor_uses_native_features(descriptor):
+        return None
+    if not descriptor.shard_path:
+        raise ValueError(f"Native feature descriptor {descriptor.clip_id} missing shard_path")
+
+    requested_frame_count = int(ep.get("num_valid_frames") or descriptor.frame_count)
+    frame_names = list(descriptor.frame_names[:requested_frame_count])
+    if not frame_names:
+        return None
+
+    wanted: dict[str, tuple[int, str, str]] = {}
+    sample_keys = []
+    for frame_idx, frame_name in enumerate(frame_names):
+        sample_key = str(frame_name)[: -len(".image.jpg")]
+        sample_keys.append(sample_key)
+        wanted[_native_member_name_from_image(frame_name, ".lowdim.npy")] = (frame_idx, "lowdim", sample_key)
+        wanted[_native_member_name_from_image(frame_name, ".mano.npy")] = (frame_idx, "mano", sample_key)
+        wanted[_native_member_name_from_image(frame_name, ".meta.json")] = (frame_idx, "meta", sample_key)
+
+    lowdim_all = np.empty((len(frame_names), 116), dtype=np.float32)
+    mano_all = np.empty((len(frame_names), 2, 55), dtype=np.float32)
+    presence_per_frame = np.zeros((len(frame_names),), dtype=np.uint8)
+    seen = set()
+
+    with tarfile.open(descriptor.shard_path, "r|") as tar_reader:
+        for member in tar_reader:
+            if not member.isfile() or member.name not in wanted:
+                continue
+            frame_idx, field_name, sample_key = wanted[member.name]
+            member_file = tar_reader.extractfile(member)
+            if member_file is None:
+                raise ValueError(f"Failed to extract native {field_name}: {member.name}")
+            payload = member_file.read()
+            if field_name == "lowdim":
+                lowdim_all[frame_idx] = _decode_native_npy(
+                    payload,
+                    sample_key=sample_key,
+                    field_name=field_name,
+                    expected_shape=NATIVE_LOWDIM_SHAPE,
+                )
+            elif field_name == "mano":
+                mano_all[frame_idx] = _decode_native_npy(
+                    payload,
+                    sample_key=sample_key,
+                    field_name=field_name,
+                    expected_shape=NATIVE_MANO_SHAPE,
+                )
+            else:
+                presence_per_frame[frame_idx] = _decode_native_presence(payload, sample_key=sample_key)
+            seen.add(member.name)
+
+    missing = sorted(set(wanted) - seen)
+    if missing:
+        raise ValueError(f"Native WDS feature payloads missing for {descriptor.clip_id}: {missing[:8]}")
+    _validate_native_lowdim(lowdim_all)
+    return {
+        "frame_count": len(frame_names),
+        "lowdim_all": lowdim_all,
+        "mano_all": mano_all,
+        "presence_per_frame": presence_per_frame,
+    }
 
 
 def load_descriptor_episode_features(
@@ -64,6 +207,24 @@ def load_descriptor_episode_features(
         )
         if cached is not None:
             return cached
+
+    if descriptor_uses_native_features(ep["descriptor"]):
+        try:
+            episode_data = _load_native_descriptor_episode_features(ep)
+        except Exception as error:
+            print(f"  Skip {ep['episode_id']}: invalid native WDS features: {error}")
+            return None
+        if episode_data is None:
+            return None
+        write_cached_features(
+            seq_folder,
+            feature_cache_dir,
+            episode_data,
+            source_fps=source_fps,
+            target_fps=target_fps,
+            interpolate_labels=interpolate_labels,
+        )
+        return episode_data
 
     if prediction is None:
         prediction = _load_world_space_prediction({"episode_id": ep["episode_id"]}, str(Path(seq_folder) / "world_space_res.pth"))
@@ -226,23 +387,68 @@ def _prepare_manifest_episode(
     try:
         validate_descriptor_for_frame_reads(record.descriptor)
     except Exception:
-        return None, "invalid_descriptor"
+        return None, "invalid_descriptor", None
 
     seq_folder = Path(record.descriptor.seq_folder)
+    if descriptor_uses_native_features(record.descriptor):
+        source_num_frames = int(record.descriptor.frame_count)
+        target_num_frames = int(record.descriptor.frame_count)
+        num_frames = int(target_num_frames if interpolate_labels else min(source_num_frames, target_num_frames))
+        if num_frames <= 0:
+            return None, "empty_frames", None
+        language = None
+        instruction = []
+        annotation_issue = None
+        if annotation_root:
+            annotation, error_code, resolved_path = load_clip_annotation(
+                annotation_root,
+                record.clip_id,
+                annotation_suffix=annotation_suffix,
+            )
+            if annotation is None:
+                annotation_issue = build_annotation_issue_from_candidates(
+                    annotation_root,
+                    record.clip_id,
+                    error_code,
+                    annotation_suffix=annotation_suffix,
+                    resolved_path=resolved_path,
+                )
+                if require_annotation:
+                    return None, error_code, annotation_issue
+            else:
+                instruction = annotation.instruction
+                language = annotation.language
+        return {
+            "clip_id": record.clip_id,
+            "episode_id": record.clip_id,
+            "seq_folder": str(seq_folder),
+            "source_id": record.source_id,
+            "split": record.split,
+            "descriptor": record.descriptor,
+            "num_valid_frames": num_frames,
+            "source_num_frames": source_num_frames,
+            "source_fps": float(source_fps),
+            "target_fps": float(target_fps),
+            "interpolate_labels": bool(interpolate_labels),
+            "instruction": instruction,
+            "instruction_num": len(instruction),
+            "language": language,
+        }, None, annotation_issue
+
     world_res_path = seq_folder / "world_space_res.pth"
     if not world_res_path.exists():
-        return None, "missing_world_res"
+        return None, "missing_world_res", None
 
     try:
         pred_trans, *_ = joblib.load(world_res_path)
     except Exception:
-        return None, "invalid_world_res"
+        return None, "invalid_world_res", None
 
     source_num_frames = int(np.asarray(pred_trans).shape[1])
     target_num_frames = int(record.descriptor.frame_count)
     num_frames = int(target_num_frames if interpolate_labels else min(source_num_frames, target_num_frames))
     if num_frames <= 0:
-        return None, "empty_frames"
+        return None, "empty_frames", None
 
     language = None
     instruction = []
@@ -297,7 +503,7 @@ def prepare_manifest_record_for_build(
     prediction: dict | None = None,
 ):
     if prediction is None:
-        return _prepare_manifest_episode(
+        episode, error_code, _annotation_issue = _prepare_manifest_episode(
             record,
             require_annotation,
             annotation_root,
@@ -306,6 +512,7 @@ def prepare_manifest_record_for_build(
             target_fps,
             interpolate_labels,
         )
+        return episode, error_code
 
     try:
         source_num_frames = int(prediction["pred_trans"].shape[1])
@@ -351,6 +558,8 @@ def prepare_manifest_record_for_build(
 
 
 def load_manifest_record_prediction(record: ClipManifestRecord):
+    if descriptor_uses_native_features(record.descriptor):
+        return None, "native_features"
     seq_folder = Path(record.descriptor.seq_folder)
     world_res_path = seq_folder / "world_space_res.pth"
     if not world_res_path.exists():

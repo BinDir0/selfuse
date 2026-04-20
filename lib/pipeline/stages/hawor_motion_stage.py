@@ -225,7 +225,7 @@ def _build_motion_context(
     first_frame = frame_source.get_frame(0, rgb=False)
     img_center = [first_frame.shape[1] / 2, first_frame.shape[0] / 2]
     height, width = first_frame.shape[:2]
-    model_masks_tensor = torch.zeros((len(frame_source), height, width), device=device, dtype=torch.bool)
+    model_masks_tensor = torch.zeros((len(frame_source), height, width), dtype=torch.bool)
     faces_right, faces_left = _build_hand_faces()
 
     context = MotionStageContext(
@@ -282,7 +282,7 @@ def _render_chunk_masks(context, frame_ck, data_out, do_flip):
     for mask_index, _frame_idx in enumerate(frame_ck):
         triangles = verts_2d_np[mask_index][faces_np]
         cv2.fillPoly(batch_masks[mask_index], triangles, 1)
-    batch_masks_tensor = torch.from_numpy(batch_masks.view(np.bool_)).to(device=context.device)
+    batch_masks_tensor = torch.from_numpy(batch_masks.view(np.bool_))
     for mask_index, frame_idx in enumerate(frame_ck):
         context.model_masks_tensor[frame_idx] |= batch_masks_tensor[mask_index]
 
