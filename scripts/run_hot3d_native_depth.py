@@ -99,7 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Compatibility local cache minimum frames. Accepted for config parity with batch infer.",
     )
-    parser.add_argument("--any4d_batch_size", type=int, default=32, help="Reserved compatibility arg; currently clip-level inference uses all frames per clip")
+    parser.add_argument(
+        "--any4d_batch_size",
+        type=int,
+        default=32,
+        help="Number of target frames per Any4D chunk; each chunk prepends one middle-frame reference view",
+    )
     parser.add_argument("--any4d_repo_root", type=str, default=None, help="Optional Any4D repo root")
     parser.add_argument("--any4d_checkpoint_path", type=str, default=None, help="Optional Any4D checkpoint path")
     parser.add_argument("--any4d_resolution_set", type=int, default=None, help="Any4D fixed resolution set, e.g. 518")
@@ -212,6 +217,14 @@ def _get_done_marker(seq_folder: Path) -> Path:
     return seq_folder / f".{NATIVE_DEPTH_STAGE_NAME}.done"
 
 
+def _iter_chunk_ranges(frame_count: int, chunk_size: int):
+    if chunk_size < 1:
+        raise ValueError(f"any4d_batch_size must be >= 1, got {chunk_size}")
+    for start_idx in range(0, frame_count, chunk_size):
+        end_idx = min(frame_count, start_idx + chunk_size)
+        yield start_idx, end_idx
+
+
 def _process_record(record, args, runner: dict) -> dict:
     from lib.pipeline.any4d_depth import (
         build_any4d_camera_views_from_image_bytes,
@@ -238,7 +251,6 @@ def _process_record(record, args, runner: dict) -> dict:
 
     reader = build_frame_bytes_reader(descriptor)
     frame_names = list(descriptor.frame_names)
-    image_payloads: list[bytes] = []
     source_intrinsics_4 = []
     intrinsics_3 = []
     cam2world_poses = []
@@ -250,33 +262,70 @@ def _process_record(record, args, runner: dict) -> dict:
             lowdim = _load_npy_from_tar(tar_reader, f"{sample_key}.lowdim.npy")
             intrinsics_4, intrinsics_3_matrix, cam2world = _hot3d_camera_inputs_from_lowdim(lowdim)
 
-            image_payloads.append(reader(frame_idx))
             source_intrinsics_4.append(intrinsics_4)
             intrinsics_3.append(intrinsics_3_matrix)
             cam2world_poses.append(cam2world)
             world2cam_poses.append(lowdim[96:112].reshape(4, 4).astype(np.float32))
 
-    views, resized_intrinsics = build_any4d_camera_views_from_image_bytes(
-        image_payloads,
-        intrinsics_3,
-        cam2world_poses,
-        runner=runner,
-        any4d_repo_root=args.any4d_repo_root,
-        checkpoint_path=args.any4d_checkpoint_path,
-        resolution_set=args.any4d_resolution_set,
-        use_amp=args.any4d_use_amp,
-        task="mvs",
-    )
     frame_indices = list(range(len(frame_names)))
-    depths = predict_any4d_depths_from_views(
-        frame_indices,
-        views,
-        runner=runner,
-        any4d_repo_root=args.any4d_repo_root,
-        checkpoint_path=args.any4d_checkpoint_path,
-        resolution_set=args.any4d_resolution_set,
-        use_amp=args.any4d_use_amp,
-    )
+    pred_depths: list[np.ndarray | None] = [None] * len(frame_indices)
+    resized_intrinsics_by_frame: list[np.ndarray | None] = [None] * len(frame_indices)
+
+    for batch_start, batch_end in _iter_chunk_ranges(len(frame_indices), int(args.any4d_batch_size)):
+        batch_indices = frame_indices[batch_start:batch_end]
+        ref_frame_idx = int(batch_indices[len(batch_indices) // 2])
+        infer_indices = [ref_frame_idx, *batch_indices]
+        batch_payloads = [reader(frame_idx) for frame_idx in infer_indices]
+        batch_intrinsics = [intrinsics_3[frame_idx] for frame_idx in infer_indices]
+        batch_cam2world = [cam2world_poses[frame_idx] for frame_idx in infer_indices]
+
+        views, batch_resized_intrinsics = build_any4d_camera_views_from_image_bytes(
+            batch_payloads,
+            batch_intrinsics,
+            batch_cam2world,
+            runner=runner,
+            any4d_repo_root=args.any4d_repo_root,
+            checkpoint_path=args.any4d_checkpoint_path,
+            resolution_set=args.any4d_resolution_set,
+            use_amp=args.any4d_use_amp,
+            task="mvs",
+        )
+        if batch_resized_intrinsics.shape[0] != len(batch_indices) + 1:
+            raise RuntimeError(
+                f"Unexpected resized intrinsics count {batch_resized_intrinsics.shape[0]} "
+                f"for HOT3D batch of {len(batch_indices)} target frames"
+            )
+        batch_depths = predict_any4d_depths_from_views(
+            batch_indices,
+            views,
+            runner=runner,
+            any4d_repo_root=args.any4d_repo_root,
+            checkpoint_path=args.any4d_checkpoint_path,
+            resolution_set=args.any4d_resolution_set,
+            use_amp=args.any4d_use_amp,
+            prediction_view_offset=2,
+        )
+        if len(batch_depths) != len(batch_indices):
+            raise RuntimeError(
+                f"Unexpected depth count {len(batch_depths)} for HOT3D batch of {len(batch_indices)} target frames"
+            )
+
+        for local_idx, frame_idx in enumerate(batch_indices):
+            pred_depths[frame_idx] = np.asarray(batch_depths[local_idx], dtype=np.float32)
+            resized_intrinsics_by_frame[frame_idx] = np.asarray(
+                batch_resized_intrinsics[local_idx + 1],
+                dtype=np.float32,
+            )
+
+    if any(depth is None for depth in pred_depths):
+        missing = [idx for idx, depth in enumerate(pred_depths) if depth is None][:16]
+        raise RuntimeError(f"Missing HOT3D native depth predictions for frames: {missing}")
+    if any(value is None for value in resized_intrinsics_by_frame):
+        missing = [idx for idx, value in enumerate(resized_intrinsics_by_frame) if value is None][:16]
+        raise RuntimeError(f"Missing HOT3D resized intrinsics for frames: {missing}")
+
+    depths = np.stack(pred_depths, axis=0).astype(np.float32)
+    resized_intrinsics = np.stack(resized_intrinsics_by_frame, axis=0).astype(np.float32)
 
     try:
         if output_path.exists():

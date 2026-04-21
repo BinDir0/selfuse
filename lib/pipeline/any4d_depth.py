@@ -335,7 +335,14 @@ def build_any4d_camera_views_from_image_bytes(
     return processed_views, np.stack(resized_intrinsics, axis=0)
 
 
-def _predict_depths_from_views(any4d_inference_test, runner, views, frame_count: int):
+def _predict_depths_from_views(
+    any4d_inference_test,
+    runner,
+    views,
+    frame_count: int,
+    *,
+    prediction_view_offset: int,
+):
     device = str(next(runner["model"].parameters()).device)
     pred_result = any4d_inference_test.sample_inference(
         model=runner["model"],
@@ -346,9 +353,15 @@ def _predict_depths_from_views(any4d_inference_test, runner, views, frame_count:
 
     depth_list = []
     for target_i in range(frame_count):
-        view_idx = 1 + target_i
+        view_idx = int(prediction_view_offset) + target_i
+        key_name = f"pred{view_idx}"
+        if key_name not in pred_result:
+            available = sorted(pred_result.keys())
+            raise KeyError(
+                f"[Any4D] missing prediction key {key_name}; available keys: {available[:8]}"
+            )
         depth_z = (
-            pred_result[f"pred{view_idx}"]["pts3d_cam"][..., 2:3][0]
+            pred_result[key_name]["pts3d_cam"][..., 2:3][0]
             .squeeze(-1)
             .detach()
             .cpu()
@@ -379,10 +392,24 @@ def build_any4d_views(frame_source, frame_indices, runner=None, *, any4d_repo_ro
     return _load_any4d_views(load_images, image_paths, runner["resolution_set"])
 
 
-def predict_any4d_depths_from_views(frame_indices, views, runner=None, *, any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None):
+def predict_any4d_depths_from_views(
+    frame_indices,
+    views,
+    runner=None,
+    *,
+    any4d_repo_root=None,
+    checkpoint_path=None,
+    resolution_set=None,
+    use_amp=None,
+    prediction_view_offset: int = 2,
+):
     frame_indices = [int(frame_idx) for frame_idx in frame_indices]
     if not frame_indices:
         raise ValueError("[Any4D] frame_indices is empty")
+    if int(prediction_view_offset) < 1:
+        raise ValueError(
+            f"[Any4D] prediction_view_offset must be >= 1, got {prediction_view_offset}"
+        )
 
     runner = runner or build_any4d_runner(
         any4d_repo_root=any4d_repo_root,
@@ -392,7 +419,13 @@ def predict_any4d_depths_from_views(frame_indices, views, runner=None, *, any4d_
     )
 
     any4d_inference_test = runner["inference_module"]
-    return _predict_depths_from_views(any4d_inference_test, runner, views, len(frame_indices))
+    return _predict_depths_from_views(
+        any4d_inference_test,
+        runner,
+        views,
+        len(frame_indices),
+        prediction_view_offset=int(prediction_view_offset),
+    )
 
 
 def build_any4d_runner(
@@ -469,4 +502,5 @@ def predict_any4d_depth_batch(frame_source, frame_indices, runner=None, *, any4d
         checkpoint_path=checkpoint_path,
         resolution_set=resolution_set,
         use_amp=use_amp,
+        prediction_view_offset=2,
     )
