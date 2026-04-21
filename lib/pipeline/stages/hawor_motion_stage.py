@@ -83,6 +83,28 @@ def _load_motion_inputs(args, seq_folder, start_idx, end_idx, prefetched_data=No
     return frame_source, tracks
 
 
+def _resolve_motion_frame_cache_size(frame_source) -> int:
+    raw = os.environ.get("HAWOR_MOTION_FRAME_CACHE_SIZE", "").strip()
+    try:
+        configured = int(raw) if raw else 128
+    except ValueError:
+        configured = 128
+    if configured <= 0:
+        return 0
+    return min(int(len(frame_source)), configured)
+
+
+def _maybe_wrap_motion_frame_cache(frame_source):
+    from lib.pipeline.frame_source import CachedFrameSource
+
+    if isinstance(frame_source, CachedFrameSource):
+        return frame_source
+    cache_size = _resolve_motion_frame_cache_size(frame_source)
+    if cache_size <= 0:
+        return frame_source
+    return CachedFrameSource(frame_source, max_items=cache_size)
+
+
 def _sanitize_tracks_for_available_frames(tracks, num_frames):
     if len(tracks) == 0:
         return tracks
@@ -219,6 +241,7 @@ def _build_motion_context(
         prefetched_data=prefetched_data,
         frame_source=frame_source,
     )
+    frame_source = _maybe_wrap_motion_frame_cache(frame_source)
     tracks = _sanitize_tracks_for_available_frames(tracks, len(frame_source))
     img_focal = _resolve_img_focal(args, seq_folder)
 
@@ -386,7 +409,7 @@ def _save_and_render_chunk(context, idx, frame_ck, chunk_results, do_flip):
 def _process_hand_track(args, idx, track, context, profiler=None):
     track_inputs = _prepare_track_inference_inputs(track)
     if track_inputs is None:
-        return [], 0.0, 0.0, 0.0
+        return [], 0.0, 0.0, 0.0, {}
 
     frame_chunks = track_inputs["frame_chunks"]
     all_frame_indices = track_inputs["all_frame_indices"]
@@ -418,6 +441,7 @@ def _process_hand_track(args, idx, track, context, profiler=None):
         chunk_batch_size=getattr(args, "chunk_batch_size", 4),
         num_workers=getattr(args, "num_workers", 16),
         output_device=context.device,
+        return_perf=True,
     )
     if profiler:
         print(f"[PROFILER] Step after inference (track {idx})")
@@ -438,7 +462,10 @@ def _process_hand_track(args, idx, track, context, profiler=None):
         render_time += time.time() - t_render
 
     postprocess_time += time.time() - t_post
-    return frame_chunks, inference_time, postprocess_time, render_time
+    perf = dict(results.get("_perf") or {})
+    perf["track_frames"] = int(len(all_frame_indices))
+    perf["track_chunks"] = int(len(frame_chunks))
+    return frame_chunks, inference_time, postprocess_time, render_time, perf
 
 
 def _finalize_motion_outputs(context, frame_chunks_all, profiler=None):
@@ -475,6 +502,7 @@ def run_motion_for_video(
     prefetched_data=None,
     frame_source=None,
     force=False,
+    return_timing=False,
 ):
     timing = {}
     t_start_total = time.time()
@@ -487,6 +515,19 @@ def run_motion_for_video(
         force=force,
     )
     if cached_frame_chunks_all is not None:
+        cached_timing = {
+            "cache_hit": 1,
+            "1_load_data": 0.0,
+            "2_setup": 0.0,
+            "3_track_processing": 0.0,
+            "3a_inference": 0.0,
+            "3b_postprocess": 0.0,
+            "3c_render": 0.0,
+            "4_save_results": 0.0,
+            "total": 0.0,
+        }
+        if return_timing:
+            return cached_frame_chunks_all, img_focal, cached_timing
         return cached_frame_chunks_all, img_focal
 
     context = _build_motion_context(
@@ -515,11 +556,12 @@ def run_motion_for_video(
     timing_inference = 0.0
     timing_postprocess = 0.0
     timing_render = 0.0
+    inference_perf = {}
 
     for idx in [0, 1]:
         vprint(f"tracklet {idx}:")
         track = final_tracks[idx]
-        frame_chunks, inference_time, postprocess_time, render_time = _process_hand_track(
+        frame_chunks, inference_time, postprocess_time, render_time, perf = _process_hand_track(
             args,
             idx,
             track,
@@ -530,11 +572,22 @@ def run_motion_for_video(
         timing_inference += inference_time
         timing_postprocess += postprocess_time
         timing_render += render_time
+        if perf:
+            inference_perf[f"track_{idx}"] = perf
 
     timing["3_track_processing"] = time.time() - t_tracks
     timing["3a_inference"] = timing_inference
     timing["3b_postprocess"] = timing_postprocess
     timing["3c_render"] = timing_render
+    for track_key, perf in inference_perf.items():
+        prefix = f"3a_{track_key}"
+        timing[f"{prefix}_wait_prefetch"] = float(perf.get("wait_prefetch_sec", 0.0))
+        timing[f"{prefix}_host_to_device"] = float(perf.get("host_to_device_sec", 0.0))
+        timing[f"{prefix}_forward"] = float(perf.get("forward_sec", 0.0))
+        timing[f"{prefix}_concat"] = float(perf.get("concat_sec", 0.0))
+        timing[f"{prefix}_frames"] = int(perf.get("track_frames", 0))
+        timing[f"{prefix}_chunks"] = int(perf.get("track_chunks", 0))
+        timing[f"{prefix}_batches"] = int(perf.get("batch_count", 0))
 
     t_save = time.time()
     _finalize_motion_outputs(context, frame_chunks_all, profiler=profiler)
@@ -547,12 +600,18 @@ def run_motion_for_video(
     for key in sorted(timing.keys()):
         if key == "total":
             continue
-        pct = (timing[key] / timing["total"]) * 100
-        print(f"  {key:25s}: {timing[key]:6.2f}s ({pct:5.1f}%)")
+        value = timing[key]
+        if key.endswith(("_frames", "_chunks", "_batches")):
+            print(f"  {key:25s}: {int(value):6d}")
+            continue
+        pct = (float(value) / timing["total"]) * 100
+        print(f"  {key:25s}: {float(value):6.2f}s ({pct:5.1f}%)")
     print(f"  {'total':25s}: {timing['total']:6.2f}s")
     print(f"{'=' * 60}\n")
     print(f"Motion stage completed successfully for {os.path.basename(context.video_path)}")
 
+    if return_timing:
+        return frame_chunks_all, context.img_focal, timing
     return frame_chunks_all, context.img_focal
 
 

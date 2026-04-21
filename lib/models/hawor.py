@@ -383,9 +383,11 @@ class HAWOR(pl.LightningModule):
         chunk_batch_size=32,
         num_workers=16,
         output_device='cpu',
+        return_perf=False,
     ):
         import queue
         import threading
+        import time
         from concurrent.futures import ThreadPoolExecutor
 
         db = TrackDatasetEval(frame_source, frame_indices, boxes, img_focal=img_focal,
@@ -427,6 +429,8 @@ class HAWOR(pl.LightningModule):
         # Main thread runs GPU inference on current batch while next batch loads
         load_workers = min(num_workers, 32)
         prefetch_q = queue.Queue(maxsize=2)
+        target_device = torch.device(device)
+        use_non_blocking = target_device.type == 'cuda'
 
         def _collate(items):
             tensors = {}
@@ -457,22 +461,41 @@ class HAWOR(pl.LightningModule):
         pred_shape = []
         pred_rotmat = []
         pred_trans = []
+        perf = {
+            'total_frames': int(total_frames),
+            'batch_count': 0,
+            'load_workers': int(load_workers),
+            'wait_prefetch_sec': 0.0,
+            'host_to_device_sec': 0.0,
+            'forward_sec': 0.0,
+            'concat_sec': 0.0,
+        }
 
         while True:
+            t_wait = time.time()
             item = prefetch_q.get()
+            perf['wait_prefetch_sec'] += time.time() - t_wait
             if item is None:
                 break
             batch_tensors, current_batch_size = item
             current_chunks = current_batch_size // seq_len
+            perf['batch_count'] += 1
 
             batch = {}
+            t_h2d = time.time()
             for k, v in batch_tensors.items():
-                batch[k] = v.view(current_chunks, seq_len, *v.shape[1:]).to(device)
+                shaped = v.view(current_chunks, seq_len, *v.shape[1:])
+                if use_non_blocking and shaped.device.type == 'cpu':
+                    shaped = shaped.pin_memory()
+                batch[k] = shaped.to(device, non_blocking=use_non_blocking)
+            perf['host_to_device_sec'] += time.time() - t_h2d
             del batch_tensors
 
-            with torch.no_grad():
+            t_forward = time.time()
+            with torch.inference_mode():
                 output = self.forward(batch)
                 out = output['out']
+            perf['forward_sec'] += time.time() - t_forward
 
             expected = current_batch_size
             out = {k: v[:expected] for k, v in out.items()}
@@ -484,11 +507,13 @@ class HAWOR(pl.LightningModule):
             pred_trans.append(out['trans_full'])
 
         # Concatenate on GPU, then transfer to CPU once
+        t_concat = time.time()
         pred_cam = torch.cat(pred_cam, dim=0)[:total_frames]
         pred_pose = torch.cat(pred_pose, dim=0)[:total_frames]
         pred_shape = torch.cat(pred_shape, dim=0)[:total_frames]
         pred_rotmat = torch.cat(pred_rotmat, dim=0)[:total_frames]
         pred_trans = torch.cat(pred_trans, dim=0)[:total_frames]
+        perf['concat_sec'] += time.time() - t_concat
 
         if output_device is not None:
             target_device = torch.device(output_device)
@@ -499,7 +524,7 @@ class HAWOR(pl.LightningModule):
                 pred_rotmat = pred_rotmat.to(target_device)
                 pred_trans = pred_trans.to(target_device)
 
-        return {
+        result = {
             'pred_cam': pred_cam,
             'pred_pose': pred_pose,
             'pred_shape': pred_shape,
@@ -508,6 +533,9 @@ class HAWOR(pl.LightningModule):
             'img_focal': img_focal,
             'img_center': img_center,
         }
+        if return_perf:
+            result['_perf'] = perf
+        return result
 
     def validation_step(self, batch: Dict, batch_idx: int, dataloader_idx=0) -> Dict:
         """

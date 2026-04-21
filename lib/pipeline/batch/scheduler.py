@@ -17,31 +17,67 @@ class BatchScheduler:
         self.worker_pool = StageWorkerPool(config)
 
     @staticmethod
-    def _update_progress_bar(pbar, stage_results: Dict[str, bool]):
+    def _summarize_hotspot(metrics: Dict[str, object] | None) -> str:
+        timing = {}
+        if isinstance(metrics, dict):
+            maybe_timing = metrics.get("timing")
+            if isinstance(maybe_timing, dict):
+                timing = maybe_timing
+        best_key = None
+        best_value = 0.0
+        for key, value in timing.items():
+            if key == "total" or key.endswith(("_frames", "_chunks", "_batches")):
+                continue
+            if not isinstance(value, (int, float)):
+                continue
+            numeric = float(value)
+            if numeric > best_value:
+                best_key = key
+                best_value = numeric
+        if best_key is None:
+            return "-"
+        return f"{best_key}:{best_value:.1f}s"
+
+    @staticmethod
+    def _update_progress_bar(pbar, stage_results: Dict[str, bool], perf_state: Dict[str, object]):
         if pbar is None:
             return
         pbar.update(1)
+        processed = int(perf_state.get("processed", 0))
+        total_wall = float(perf_state.get("total_wall_sec", 0.0))
+        avg_wall = total_wall / processed if processed > 0 else 0.0
         pbar.set_postfix(
             {
                 "success": sum(1 for ok in stage_results.values() if ok),
                 "failed": sum(1 for ok in stage_results.values() if not ok),
+                "avg_s": f"{avg_wall:.2f}",
+                "last_s": f"{float(perf_state.get('last_wall_sec', 0.0)):.2f}",
+                "hot": str(perf_state.get("last_hotspot", "-")),
             }
         )
 
-    def _apply_stage_result(self, stage: str, result: Dict[str, object], stage_results: Dict[str, bool], pbar=None):
+    def _apply_stage_result(self, stage: str, result: Dict[str, object], stage_results: Dict[str, bool], perf_state: Dict[str, object], pbar=None):
         video_path = result["video"]
         success = result["success"]
         gpu = result.get("gpu")
+        wall_sec = float(result.get("wall_sec", 0.0) or 0.0)
+        metrics = result.get("metrics")
 
         self.state.mark_stage_result(video_path, stage, success)
         event_name = "stage_success" if success else "stage_failure"
-        event_payload = {"video": video_path, "stage": stage, "gpu": gpu}
+        event_payload = {"video": video_path, "stage": stage, "gpu": gpu, "wall_sec": wall_sec}
+        if metrics is not None:
+            event_payload["metrics"] = metrics
         if not success and result.get("error"):
             event_payload["error"] = result["error"]
         self.events.emit(event_name, **event_payload)
 
         stage_results[video_path] = success
-        self._update_progress_bar(pbar, stage_results)
+        perf_state["processed"] = int(perf_state.get("processed", 0)) + 1
+        perf_state["total_wall_sec"] = float(perf_state.get("total_wall_sec", 0.0)) + wall_sec
+        perf_state["last_wall_sec"] = wall_sec
+        perf_state["last_hotspot"] = self._summarize_hotspot(metrics)
+        self._update_progress_bar(pbar, stage_results, perf_state)
 
     def _run_stage_with_retries(self, stage: str, pbar=None, initial_pending_videos=None):
         final_results = {}
@@ -67,10 +103,16 @@ class BatchScheduler:
             self.events.emit("wave_start", stage=stage, total=len(pending_videos), attempt=attempt)
             stage_results = {}
             completed_since_save = 0
+            perf_state = {
+                "processed": 0,
+                "total_wall_sec": 0.0,
+                "last_wall_sec": 0.0,
+                "last_hotspot": "-",
+            }
 
             def on_result(result):
                 nonlocal completed_since_save
-                self._apply_stage_result(stage, result, stage_results, pbar=pbar)
+                self._apply_stage_result(stage, result, stage_results, perf_state, pbar=pbar)
                 completed_since_save += 1
                 if completed_since_save >= 10:
                     self.state.save()

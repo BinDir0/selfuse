@@ -55,6 +55,20 @@ def _build_pipeline_task(video_path: str, descriptor_map) -> PipelineVideoTask:
     return PipelineVideoTask.from_inputs(video_path=video_path, descriptor=descriptor_map.get(video_path))
 
 
+def _configure_worker_env(config: BatchRunConfig) -> None:
+    env_values = {
+        "HAWOR_LOCAL_CACHE_ROOT": config.local_cache_root,
+        "HAWOR_LOCAL_CACHE_QUOTA_GB": None if config.local_cache_quota_gb is None else str(config.local_cache_quota_gb),
+        "HAWOR_LOCAL_CACHE_MODE": config.local_cache_mode,
+        "HAWOR_LOCAL_CACHE_MIN_FRAMES": str(config.local_cache_min_frames),
+    }
+    for key, value in env_values.items():
+        if value is None or value == "":
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def _worker_log_path(config: BatchRunConfig, stage: str, gpu: int, worker_slot: int) -> Path:
     log_dir = config.run_dir / "logs" / "workers"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +107,7 @@ def _prefetch_video_data(video_path: str, stage: str, descriptor_map, config: Ba
 
 def _run_single_video(video_path: str, stage: str, runtime: WorkerRuntime, descriptor_map, config: BatchRunConfig, prefetched_data=None):
     pipeline_task = _build_pipeline_task(video_path, descriptor_map)
-    result = run_pipeline_stage(
+    return run_pipeline_stage(
         stage,
         pipeline_task,
         runtime.stage_config,
@@ -102,12 +116,12 @@ def _run_single_video(video_path: str, stage: str, runtime: WorkerRuntime, descr
         resume=config.resume,
         force=not config.resume,
     )
-    return result.get("status") in ("success", "skipped")
 
 
 def _stage_worker_main(gpu: int, worker_slot: int, stage: str, video_queue: mp.Queue, result_queue: mp.Queue, descriptor_map, config: BatchRunConfig):
     log_path = _worker_log_path(config, stage, gpu, worker_slot)
     os.environ["HAWOR_QUIET"] = "1"
+    _configure_worker_env(config)
     with log_path.open("a", encoding="utf-8", buffering=1) as log_handle:
         with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
             print(
@@ -146,7 +160,7 @@ def _stage_worker_main(gpu: int, worker_slot: int, stage: str, video_queue: mp.Q
                         )
 
                     try:
-                        success = _run_single_video(
+                        stage_result = _run_single_video(
                             video_path,
                             stage,
                             runtime,
@@ -154,7 +168,16 @@ def _stage_worker_main(gpu: int, worker_slot: int, stage: str, video_queue: mp.Q
                             config,
                             prefetched_data=prefetched_data,
                         )
-                        result_queue.put({"video": video_path, "success": success, "gpu": gpu})
+                        result_queue.put(
+                            {
+                                "video": video_path,
+                                "success": stage_result.get("status") in ("success", "skipped"),
+                                "status": stage_result.get("status"),
+                                "gpu": gpu,
+                                "wall_sec": float(stage_result.get("wall_sec", 0.0)),
+                                "metrics": stage_result.get("metrics"),
+                            }
+                        )
                     except CorruptStageDataError as error:
                         result_queue.put(
                             {
@@ -202,14 +225,17 @@ class StageWorkerPool:
         except OSError:
             return 0
 
-    def _prioritize_detect_track_videos(self, video_paths: List[str]) -> List[str]:
+    def _prioritize_descriptor_locality_videos(self, video_paths: List[str], stage: str) -> List[str]:
         shard_groups = defaultdict(list)
         shard_work = {}
 
         for video_path in video_paths:
             descriptor = self.descriptor_map.get(video_path)
-            shard_key = descriptor.shard_path if descriptor is not None and descriptor.shard_path else video_path
-            estimated_work = self._estimate_video_work(video_path, "detect_track")
+            if descriptor is not None:
+                shard_key = descriptor.shard_path or descriptor.frame_dir or video_path
+            else:
+                shard_key = video_path
+            estimated_work = self._estimate_video_work(video_path, stage)
             shard_groups[shard_key].append((video_path, estimated_work))
             shard_work[shard_key] = shard_work.get(shard_key, 0) + estimated_work
 
@@ -230,8 +256,8 @@ class StageWorkerPool:
         return prioritized
 
     def _prioritize_videos(self, video_paths: List[str], stage: str) -> List[str]:
-        if stage == "detect_track" and self.descriptor_map:
-            return self._prioritize_detect_track_videos(video_paths)
+        if stage in {"detect_track", "motion"} and self.descriptor_map:
+            return self._prioritize_descriptor_locality_videos(video_paths, stage)
         return sorted(video_paths, key=lambda video_path: self._estimate_video_work(video_path, stage), reverse=True)
 
     @staticmethod

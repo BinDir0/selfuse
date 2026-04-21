@@ -1,5 +1,6 @@
 import argparse
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -447,7 +448,7 @@ def _run_detect_track_stage(task, stage_args, config, runtime, frame_source, for
 def _run_motion_stage(task, stage_args, config, runtime, frame_source, profiler, prefetched_data, force, start_idx, end_idx):
     from lib.pipeline.stages.hawor_video import run_motion_for_video
 
-    run_motion_for_video(
+    _frame_chunks_all, _img_focal, timing = run_motion_for_video(
         stage_args,
         start_idx,
         end_idx,
@@ -458,13 +459,15 @@ def _run_motion_stage(task, stage_args, config, runtime, frame_source, profiler,
         prefetched_data=prefetched_data,
         frame_source=frame_source,
         force=force,
+        return_timing=True,
     )
+    return {"timing": timing}
 
 
 def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, end_idx):
     from lib.pipeline.stages.slam import hawor_slam
 
-    hawor_slam(
+    timing = hawor_slam(
         stage_args,
         start_idx,
         end_idx,
@@ -472,7 +475,9 @@ def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, 
         any4d_batch_size=config.any4d_batch_size,
         frame_source=frame_source,
         seq_folder=str(task.seq_folder),
+        return_timing=True,
     )
+    return {"timing": timing}
 
 
 def _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_idx):
@@ -495,27 +500,33 @@ def _run_non_detect_stage(stage, task, stage_args, config, runtime, frame_source
     artifacts = resolve_stage_artifacts(stage, task.seq_folder)
     start_idx = artifacts.start_idx
     end_idx = artifacts.end_idx
+    metrics = {}
 
     if stage == "motion":
-        _run_motion_stage(task, stage_args, config, runtime, frame_source, profiler, prefetched_data, force, start_idx, end_idx)
+        metrics = _run_motion_stage(task, stage_args, config, runtime, frame_source, profiler, prefetched_data, force, start_idx, end_idx)
     elif stage == "slam":
-        _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, end_idx)
+        metrics = _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, end_idx)
     elif stage == "infiller":
         _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_idx)
     else:
         raise ValueError(f"Unknown stage: {stage}")
 
-    return start_idx, end_idx
+    return start_idx, end_idx, metrics
 
 
-def _finalize_stage_run(stage: str, seq_folder: Path, start_idx: int, end_idx: int):
+def _finalize_stage_run(stage: str, seq_folder: Path, start_idx: int, end_idx: int, *, metrics: dict | None = None, wall_sec: float | None = None):
     validate_stage_output(stage, seq_folder, start_idx, end_idx)
     _mark_stage_done(seq_folder, stage)
-    return {
+    result = {
         "status": "success",
         "start_idx": start_idx,
         "end_idx": end_idx,
     }
+    if metrics:
+        result["metrics"] = metrics
+    if wall_sec is not None:
+        result["wall_sec"] = float(wall_sec)
+    return result
 
 
 def run_pipeline_stage(
@@ -533,17 +544,20 @@ def run_pipeline_stage(
         return {
             "status": "skipped",
             "reason": "existing_valid_output",
+            "wall_sec": 0.0,
         }
 
     _ensure_runtime_for_stage(runtime, stage)
 
     frame_source = task.build_frame_source()
     stage_args = config.to_stage_args(task.video_path)
+    stage_start_time = time.time()
+    metrics = None
 
     if stage == "detect_track":
         start_idx, end_idx = _run_detect_track_stage(task, stage_args, config, runtime, frame_source, force)
     else:
-        start_idx, end_idx = _run_non_detect_stage(
+        start_idx, end_idx, metrics = _run_non_detect_stage(
             stage,
             task,
             stage_args,
@@ -555,4 +569,11 @@ def run_pipeline_stage(
             force,
         )
 
-    return _finalize_stage_run(stage, task.seq_folder, start_idx, end_idx)
+    return _finalize_stage_run(
+        stage,
+        task.seq_folder,
+        start_idx,
+        end_idx,
+        metrics=metrics,
+        wall_sec=time.time() - stage_start_time,
+    )

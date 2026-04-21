@@ -180,9 +180,10 @@ def _build_stage3_workspace(frame_source, frame_ids: np.ndarray, seq_folder: str
         direct_paths[frame_id] = path
     if use_direct_paths:
         ordered_paths = [direct_paths[frame_id] for frame_id in frame_id_list]
+        force_stable_decode = bool(getattr(frame_source, "force_stage3_stable_decode", False))
         return {
             "frame_path_map": direct_paths,
-            "frame_source": ImageFolderFrameSource(ordered_paths),
+            "frame_source": ImageFolderFrameSource(ordered_paths, use_turbojpeg=not force_stable_decode),
             "workspace_dir": None,
             "ready_marker": None,
             "materialized": False,
@@ -200,7 +201,7 @@ def _build_stage3_workspace(frame_source, frame_ids: np.ndarray, seq_folder: str
             ordered_paths = [expected_paths[frame_id] for frame_id in frame_id_list]
             return {
                 "frame_path_map": expected_paths,
-                "frame_source": ImageFolderFrameSource(ordered_paths),
+                "frame_source": ImageFolderFrameSource(ordered_paths, use_turbojpeg=False),
                 "workspace_dir": cache_dir,
                 "ready_marker": ready_marker,
                 "materialized": True,
@@ -464,6 +465,7 @@ def _predict_any4d_depths_for_frames(
     end_idx: int,
     frame_path_map,
     any4d_cache_suffix: str = "",
+    timing: dict | None = None,
 ):
     cache_path = _any4d_cache_path(seq_folder, start_idx, end_idx, suffix=any4d_cache_suffix)
     force = os.environ.get("HAWOR_ANY4D_FORCE_RERUN", "0") == "1"
@@ -474,7 +476,10 @@ def _predict_any4d_depths_for_frames(
             pass
 
     if not force:
+        t_cache_lookup = time.time()
         cached_depths = _load_matching_any4d_cache(cache_path, frame_ids, output_hw)
+        if timing is not None:
+            timing["3b_depth_cache_lookup"] = timing.get("3b_depth_cache_lookup", 0.0) + (time.time() - t_cache_lookup)
         if cached_depths is not None:
             return cached_depths, cache_path, True
 
@@ -505,9 +510,15 @@ def _predict_any4d_depths_for_frames(
             tqdm(batch_specs, desc=desc, disable=QUIET_MODE)
         ):
             if next_views_future is None:
+                t_view_prep = time.time()
                 views = _prepare_views(batch_indices, batch_image_paths)
+                if timing is not None:
+                    timing["3c_any4d_view_prep"] = timing.get("3c_any4d_view_prep", 0.0) + (time.time() - t_view_prep)
             else:
+                t_view_wait = time.time()
                 views = next_views_future.result()
+                if timing is not None:
+                    timing["3c_any4d_view_prep"] = timing.get("3c_any4d_view_prep", 0.0) + (time.time() - t_view_wait)
 
             if batch_idx + 1 < len(batch_specs):
                 next_batch_indices = batch_specs[batch_idx + 1][1]
@@ -516,6 +527,7 @@ def _predict_any4d_depths_for_frames(
             else:
                 next_views_future = None
 
+            t_forward = time.time()
             batch_depths = predict_any4d_depths_from_views(
                 batch_indices.tolist(),
                 views,
@@ -525,15 +537,23 @@ def _predict_any4d_depths_for_frames(
                 resolution_set=getattr(args, "any4d_resolution_set", None),
                 use_amp=getattr(args, "any4d_use_amp", None),
             )
+            if timing is not None:
+                timing["3d_any4d_forward"] = timing.get("3d_any4d_forward", 0.0) + (time.time() - t_forward)
             batch_size = len(batch_indices)
+            t_resize = time.time()
             pred_depths[batch_start : batch_start + batch_size] = _resize_depths(np.asarray(batch_depths), output_hw)
+            if timing is not None:
+                timing["3e_any4d_resize"] = timing.get("3e_any4d_resize", 0.0) + (time.time() - t_resize)
 
     os.makedirs(os.path.join(seq_folder, "SLAM"), exist_ok=True)
+    t_cache_save = time.time()
     np.savez(
         cache_path,
         depths=np.asarray(pred_depths, dtype=np.float32),
         frame_indices=np.asarray(frame_ids, dtype=np.int64),
     )
+    if timing is not None:
+        timing["3f_any4d_cache_save"] = timing.get("3f_any4d_cache_save", 0.0) + (time.time() - t_cache_save)
     return pred_depths, cache_path, False
 
 
@@ -617,13 +637,40 @@ def _print_timing(video_path: str, timing: dict, num_keyframes: int, depth_frame
     print(f"\n{'=' * 60}")
     print(f"SLAM Stage Timing for {os.path.basename(video_path)}")
     print(f"{'=' * 60}")
-    for key in ("1_load_masks", "2_slam", "3_depth", "4_scale_est", "5_save"):
-        elapsed = timing.get(key, 0.0)
+    summary_keys = (
+        "0_stage3_workspace",
+        "1_load_masks",
+        "2_slam",
+        "3a_any4d_init",
+        "3_depth",
+        "4_scale_est",
+        "5_save",
+    )
+    for key in summary_keys:
+        elapsed = float(timing.get(key, 0.0))
         pct = elapsed / total_time * 100 if total_time > 0 else 0
         print(f"  {key:20s}: {elapsed:7.2f}s ({pct:5.1f}%)")
     cached_slam_sec = timing.get("2_slam_cached_source")
     if cached_slam_sec is not None:
         print(f"  {'2_slam_cached_src':20s}: {cached_slam_sec:7.2f}s (metadata)")
+    for key in (
+        "3b_dense_depth_cache_lookup",
+        "3b_depth_cache_lookup",
+        "3c_any4d_view_prep",
+        "3d_any4d_forward",
+        "3e_any4d_resize",
+        "3f_any4d_cache_save",
+        "3g_dense_depth_cache_save",
+        "3h_gather_keyframe_depths",
+    ):
+        if key not in timing:
+            continue
+        elapsed = float(timing[key])
+        pct = elapsed / total_time * 100 if total_time > 0 else 0
+        print(f"  {key:20s}: {elapsed:7.2f}s ({pct:5.1f}%)")
+    for key in ("0_stage3_materialized", "0_stage3_frame_count"):
+        if key in timing:
+            print(f"  {key:20s}: {int(timing[key])}")
     print(f"  {'total':20s}: {total_time:7.2f}s")
     print(f"  {'slam_backend':20s}: dpvo")
     print(f"  {'depth_backend':20s}: any4d")
@@ -642,6 +689,7 @@ def hawor_slam(
     any4d_batch_size=32,
     frame_source=None,
     seq_folder=None,
+    return_timing=False,
 ):
     timing = {}
     start_time = time.time()
@@ -654,9 +702,13 @@ def hawor_slam(
     if segment_frame_ids.size == 0:
         raise ValueError("stage3: empty frame range after clipping to available frames")
     stage3_tmp_root = _resolve_stage3_tmp_root(args)
+    t_workspace = time.time()
     workspace = _build_stage3_workspace(frame_source, segment_frame_ids, seq_folder, start_idx, end_idx, stage3_tmp_root)
+    timing["0_stage3_workspace"] = time.time() - t_workspace
     stage3_frame_source = workspace["frame_source"]
     stage3_frame_path_map = workspace["frame_path_map"]
+    timing["0_stage3_materialized"] = int(bool(workspace.get("materialized")))
+    timing["0_stage3_frame_count"] = int(segment_frame_ids.shape[0])
     predict_all_frames = _depth_predict_all_frames_enabled(getattr(args, "depth_predict_all_frames", None))
     any4d_batch_size = _resolve_any4d_batch_size(any4d_batch_size)
     vprint(
@@ -700,7 +752,9 @@ def hawor_slam(
                 resolution_set=getattr(args, "any4d_resolution_set", None),
                 use_amp=getattr(args, "any4d_use_amp", None),
             )
+        timing["3a_any4d_init"] = time.time() - t0
 
+        t0 = time.time()
         if predict_all_frames:
             frame_ids = segment_frame_ids
 
@@ -713,6 +767,7 @@ def hawor_slam(
                     except OSError:
                         pass
             cached_dense = None if force_any4d_rerun else _load_matching_dense_depth_cache(seq_folder, start_idx, end_idx, frame_ids)
+            timing["3b_dense_depth_cache_lookup"] = time.time() - t0
             if cached_dense is not None:
                 depth_frame_indices, depth_predictions, depth_cache_path = cached_dense
                 depth_cache_used = True
@@ -729,13 +784,18 @@ def hawor_slam(
                     end_idx=end_idx,
                     frame_path_map=stage3_frame_path_map,
                     any4d_cache_suffix="_allframes",
+                    timing=timing,
                 )
                 depth_frame_indices = frame_ids.astype(np.int64)
                 dense_cache_path = _dense_depth_cache_path(seq_folder, start_idx, end_idx)
+                t_dense_save = time.time()
                 _save_dense_depth_uint16_npz(dense_cache_path, depth_frame_indices, depth_predictions)
+                timing["3g_dense_depth_cache_save"] = time.time() - t_dense_save
                 depth_cache_path = any4d_cache_path if used_any4d_cache else dense_cache_path
                 depth_cache_used = used_any4d_cache
+            t_gather = time.time()
             keyframe_depths = _gather_keyframe_depths_from_dense(depth_predictions, depth_frame_indices, tstamp)
+            timing["3h_gather_keyframe_depths"] = time.time() - t_gather
         else:
             depth_frame_indices = np.asarray(tstamp, dtype=np.int64)
             depth_predictions, depth_cache_path, depth_cache_used = _predict_any4d_depths_for_frames(
@@ -750,6 +810,7 @@ def hawor_slam(
                 end_idx=end_idx,
                 frame_path_map=stage3_frame_path_map,
                 any4d_cache_suffix="",
+                timing=timing,
             )
             keyframe_depths = [depth_predictions[i] for i in range(len(depth_predictions))]
 
@@ -786,6 +847,8 @@ def hawor_slam(
         predict_all_frames=predict_all_frames,
         used_depth_cache=depth_cache_used,
     )
+    if return_timing:
+        return timing
 
 
 if __name__ == "__main__":
