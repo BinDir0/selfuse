@@ -6,6 +6,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+def _ensure_utc(ts: datetime | None) -> datetime | None:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
 def parse_iso8601(raw: str | None) -> datetime | None:
     if not raw:
         return None
@@ -13,7 +22,7 @@ def parse_iso8601(raw: str | None) -> datetime | None:
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return _ensure_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
     except ValueError:
         return None
 
@@ -22,7 +31,7 @@ def format_age(ts: datetime | None) -> str:
     if ts is None:
         return "-"
     now = datetime.now(timezone.utc)
-    delta = now - ts.astimezone(timezone.utc)
+    delta = now - _ensure_utc(ts)
     total = int(max(0, delta.total_seconds()))
     if total < 60:
         return f"{total}s"
@@ -76,6 +85,10 @@ def _build_status_payload_from_events(
             except json.JSONDecodeError as error:
                 malformed_lines += 1
                 last_error = f"line {line_no}: {error}"
+                continue
+            if not isinstance(payload, dict):
+                malformed_lines += 1
+                last_error = f"line {line_no}: expected object, got {type(payload).__name__}"
                 continue
             parsed_lines += 1
             event = payload.get("event")
@@ -165,6 +178,8 @@ def _tail_last_event_time(events_path: Path) -> datetime | None:
                             payload = json.loads(line.decode("utf-8"))
                         except Exception:
                             continue
+                        if not isinstance(payload, dict):
+                            continue
                         return parse_iso8601(payload.get("time"))
     except OSError:
         return None
@@ -176,7 +191,10 @@ def _load_run_summary(run_dir: Path) -> tuple[dict[str, Any], list[str]]:
     if not summary_path.exists():
         return {}, []
     try:
-        return _read_json(summary_path), []
+        payload = _read_json(summary_path)
+        if not isinstance(payload, dict):
+            return {}, [f"run_summary:{summary_path}: expected object, got {type(payload).__name__}"]
+        return payload, []
     except Exception as error:
         return {}, [f"run_summary:{summary_path}: {error}"]
 
@@ -264,8 +282,32 @@ def compute_run_summary(run_dir: Path, *, stall_seconds: int = 1800) -> dict[str
             "annotation_root": run_summary.get("annotation_root"),
         }
 
-    tasks = {} if status_payload is None else (status_payload.get("tasks") or {})
-    stages = list(status_payload.get("stages") or [])
+    if status_payload is not None and not isinstance(status_payload, dict):
+        summary_errors.append(f"status_payload:{status_path}: expected object, got {type(status_payload).__name__}")
+        status_payload = None
+
+    tasks_raw = {} if status_payload is None else (status_payload.get("tasks") or {})
+    if not isinstance(tasks_raw, dict):
+        summary_errors.append(f"tasks:{status_path}: expected object, got {type(tasks_raw).__name__}")
+        tasks_raw = {}
+
+    tasks: dict[str, dict[str, Any]] = {}
+    invalid_task_records = 0
+    invalid_stage_status_records = 0
+    for video_key, task in tasks_raw.items():
+        if not isinstance(task, dict):
+            invalid_task_records += 1
+            continue
+        stage_status = task.get("stage_status") or {}
+        if not isinstance(stage_status, dict):
+            invalid_stage_status_records += 1
+            stage_status = {}
+        tasks[video_key] = {
+            **task,
+            "stage_status": stage_status,
+        }
+
+    stages = list((status_payload or {}).get("stages") or [])
     if not stages:
         stages = list(run_summary.get("expanded_internal_stages") or run_summary.get("stages") or [])
 
@@ -302,7 +344,7 @@ def compute_run_summary(run_dir: Path, *, stall_seconds: int = 1800) -> dict[str
                 state = "pending"
             stage_counts[stage][state] += 1
 
-    last_event_time = _tail_last_event_time(events_path)
+    last_event_time = _ensure_utc(_tail_last_event_time(events_path))
     health, health_reason = _compute_health(
         total=total,
         completed=completed,
@@ -316,6 +358,10 @@ def compute_run_summary(run_dir: Path, *, stall_seconds: int = 1800) -> dict[str
     config_name = Path(run_summary.get("config", "")).name if run_summary.get("config") else "-"
     status_errors = list(summary_errors)
     status_errors.extend(status_meta.get("load_errors") or [])
+    if invalid_task_records > 0:
+        status_errors.append(f"ignored {invalid_task_records} invalid task record(s) in batch status")
+    if invalid_stage_status_records > 0:
+        status_errors.append(f"ignored {invalid_stage_status_records} invalid stage_status record(s) in batch status")
 
     return {
         "run_tag": run_dir.name,
@@ -352,7 +398,10 @@ def summarize_runs(
     stall_seconds: int = 1800,
 ) -> list[dict[str, Any]]:
     rows = [compute_run_summary(run_dir, stall_seconds=stall_seconds) for run_dir in discover_run_dirs(log_root, run_tags, pattern, limit)]
-    rows.sort(key=lambda item: (item["last_event_time"] or datetime.fromtimestamp(0, timezone.utc)), reverse=True)
+    rows.sort(
+        key=lambda item: _ensure_utc(item["last_event_time"]) or datetime.fromtimestamp(0, timezone.utc),
+        reverse=True,
+    )
     return rows
 
 
