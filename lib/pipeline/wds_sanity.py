@@ -12,13 +12,29 @@ from typing import Optional
 import numpy as np
 
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples
-from lib.pipeline.quality_metrics import LOWDIM_SIZE, decode_lowdim, parse_frame_index
+from lib.pipeline.quality_metrics import LOWDIM_SIZE, decode_lowdim, parse_frame_index, parse_instruction_metadata
 
 LOWDIM_STATE_SLICE = slice(0, 48)
 LOWDIM_ACTION_SLICE = slice(48, 96)
 LOWDIM_EXTRINSIC_SLICE = slice(96, 112)
 LOWDIM_INTRINSIC_SLICE = slice(112, 116)
 REQUIRED_META_KEYS = ("clip_id", "instruction", "instruction_num", "presence")
+HARD_FILTER_ISSUES = {
+    "missing_image",
+    "missing_lowdim",
+    "missing_meta",
+    "invalid_meta",
+    "missing_meta_keys",
+    "lowdim_decode_failure",
+    "nonfinite_lowdim",
+    "invalid_state",
+    "invalid_action",
+    "invalid_extrinsic",
+    "invalid_intrinsic",
+    "missing_instruction",
+    "empty_instruction",
+    "instruction_num_mismatch",
+}
 
 
 def build_lowdim_dimension_names() -> list[str]:
@@ -59,28 +75,6 @@ def build_lowdim_dimension_names() -> list[str]:
 
 
 LOWDIM_DIMENSION_NAMES = build_lowdim_dimension_names()
-
-
-def parse_instruction_entries(meta: dict | None) -> tuple[int, list[str]]:
-    if not isinstance(meta, dict):
-        return 0, []
-    raw_instruction_num = meta.get("instruction_num", 0)
-    try:
-        instruction_num = max(0, int(raw_instruction_num))
-    except Exception:
-        instruction_num = 0
-
-    raw_instruction = meta.get("instruction", [])
-    if isinstance(raw_instruction, str):
-        slots = [raw_instruction]
-    elif isinstance(raw_instruction, (list, tuple)):
-        slots = list(raw_instruction)
-    else:
-        slots = []
-
-    slots = slots[:instruction_num]
-    cleaned = [str(item).strip() for item in slots if str(item).strip()]
-    return instruction_num, cleaned
 
 
 def clip_id_from_sample(sample: dict, meta: dict | None) -> str:
@@ -238,6 +232,7 @@ def init_sanity_report(
             "samples_total": 0,
             "episodes_total": 0,
             "issue_episodes": 0,
+            "hard_filter_drop_episodes": 0,
             "valid_lowdim_frames": 0,
         },
         "checks": {
@@ -255,9 +250,11 @@ def init_sanity_report(
             "invalid_intrinsic_frames": 0,
             "missing_instruction_frames": 0,
             "empty_instruction_frames": 0,
+            "instruction_num_mismatch_frames": 0,
             "missing_mano_samples": 0,
         },
         "issue_examples": [],
+        "hard_filter_reason_counts": {},
         "episode_examples": {
             "problematic": [],
             "clean": [],
@@ -400,6 +397,11 @@ def analyze_webdataset(
             return False
         report["summary"]["episodes_total"] += 1
         is_problematic = bool(current_episode.issue_reasons)
+        hard_filter_reasons = sorted(current_episode.issue_reasons & HARD_FILTER_ISSUES)
+        if hard_filter_reasons:
+            report["summary"]["hard_filter_drop_episodes"] += 1
+            for reason in hard_filter_reasons:
+                report["hard_filter_reason_counts"][reason] = int(report["hard_filter_reason_counts"].get(reason, 0)) + 1
         if is_problematic:
             report["summary"]["issue_episodes"] += 1
             if len(report["episode_examples"]["problematic"]) < 8:
@@ -479,6 +481,10 @@ def analyze_webdataset(
                             report["checks"]["image_decode_failures"] += 1
                             current_episode.mark_issue("image_decode_failure")
 
+                if sample.get("meta_bytes") is None:
+                    current_episode.mark_issue("missing_meta")
+                    append_issue("missing_meta", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
+
                 if "lowdim_bytes" in missing_fields:
                     report["checks"]["missing_lowdim_samples"] += 1
                     current_episode.mark_issue("missing_lowdim")
@@ -515,17 +521,33 @@ def analyze_webdataset(
                             detail=missing_meta_keys,
                         )
 
-                    instruction_num, instructions = parse_instruction_entries(meta)
+                    parsed_instruction = parse_instruction_metadata(meta)
+                    instruction_num = int(parsed_instruction["instruction_num"])
+                    instructions = list(parsed_instruction["instructions"])
                     if not current_episode.instruction_preview and instructions:
                         current_episode.instruction_preview = instructions[0][:160]
-                    if instruction_num <= 0:
+                    if parsed_instruction["missing_instruction"]:
                         report["checks"]["missing_instruction_frames"] += 1
                         current_episode.mark_issue("missing_instruction")
                         append_issue("missing_instruction", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
-                    elif not instructions:
+                    elif parsed_instruction["empty_instruction"]:
                         report["checks"]["empty_instruction_frames"] += 1
                         current_episode.mark_issue("empty_instruction")
                         append_issue("empty_instruction", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
+                    elif parsed_instruction["instruction_num_mismatch"]:
+                        report["checks"]["instruction_num_mismatch_frames"] += 1
+                        current_episode.mark_issue("instruction_num_mismatch")
+                        append_issue(
+                            "instruction_num_mismatch",
+                            clip_id=clip_id,
+                            sample_key=sample_key,
+                            shard_name=shard_name,
+                            detail={
+                                "instruction_num": instruction_num,
+                                "non_empty_slots": len(instructions),
+                                "instruction": list(parsed_instruction["effective_slots"]),
+                            },
+                        )
                 else:
                     current_episode.mark_issue("invalid_meta")
 
@@ -592,4 +614,5 @@ def analyze_webdataset(
             if render_result is not None:
                 report["renders"].append(render_result)
 
+    report["hard_filter_reason_counts"] = dict(sorted(report["hard_filter_reason_counts"].items()))
     return report

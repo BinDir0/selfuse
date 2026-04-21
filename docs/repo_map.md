@@ -43,6 +43,8 @@ Use these as the maintained public scripts:
 - `scripts/build_clip_manifest.py`
 - `scripts/build_vla_from_manifest.py`
 - `scripts/filter_manifest_by_quality.py`
+- `scripts/filter_webdataset.py`
+- `scripts/sanity_check_webdataset.py`
 - `scripts/batch_infer.py`
 - `scripts/validate_pipeline_run.py`
 

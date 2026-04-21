@@ -23,6 +23,13 @@ python scripts/filter_manifest_by_quality.py ...
 python scripts/build_vla_from_manifest.py ...
 ```
 
+For already-built WebDataset outputs, use the maintained pair only:
+
+```bash
+python scripts/filter_webdataset.py ...
+python scripts/sanity_check_webdataset.py ...
+```
+
 ## Compatibility Wrappers
 
 Several old script paths are now thin wrappers around canonical tools:

@@ -17,6 +17,51 @@ FRAME_INDEX_PATTERN = re.compile(r"_f(\d+)$")
 CAMERA_AXES = ("x", "y", "z")
 
 
+def parse_instruction_metadata(meta: dict | None) -> dict:
+    """Normalize one frame/episode instruction payload and expose fail-closed flags."""
+    if not isinstance(meta, dict):
+        return {
+            "instruction_num": 0,
+            "instructions": [],
+            "slots": [],
+            "effective_slots": [],
+            "missing_instruction": False,
+            "empty_instruction": False,
+            "instruction_num_mismatch": False,
+        }
+
+    raw_instruction_num = meta.get("instruction_num", 0)
+    try:
+        instruction_num = max(0, int(raw_instruction_num))
+    except Exception:
+        instruction_num = 0
+
+    raw_instruction = meta.get("instruction", [])
+    if isinstance(raw_instruction, str):
+        slots = [raw_instruction]
+    elif isinstance(raw_instruction, (list, tuple)):
+        slots = list(raw_instruction)
+    else:
+        slots = []
+
+    effective_slots = slots[:instruction_num]
+    instructions = [str(item).strip() for item in effective_slots if str(item).strip()]
+    missing_instruction = instruction_num <= 0
+    empty_instruction = instruction_num > 0 and len(instructions) == 0
+    instruction_num_mismatch = instruction_num > 0 and (
+        len(slots) < instruction_num or len(instructions) != min(instruction_num, len(effective_slots))
+    )
+    return {
+        "instruction_num": int(instruction_num),
+        "instructions": instructions,
+        "slots": slots,
+        "effective_slots": effective_slots,
+        "missing_instruction": bool(missing_instruction),
+        "empty_instruction": bool(empty_instruction),
+        "instruction_num_mismatch": bool(instruction_num_mismatch),
+    }
+
+
 def is_finite_array(value) -> bool:
     array = np.asarray(value)
     return bool(np.isfinite(array).all())
@@ -193,6 +238,9 @@ def new_clip_quality_stats(clip_id: str) -> dict:
         "nonfinite_lowdim_frames": 0,
         "invalid_meta_frames": 0,
         "invalid_lowdim_frames": 0,
+        "missing_instruction_frames": 0,
+        "empty_instruction_frames": 0,
+        "instruction_num_mismatch_frames": 0,
         "instruction_num_max": 0,
         "max_hand_translation_step": 0.0,
         "max_camera_translation_step": 0.0,
@@ -218,10 +266,21 @@ def update_clip_quality_stats(
     presence: int,
     lowdim,
     *,
+    missing_instruction: bool = False,
+    empty_instruction: bool = False,
+    instruction_num_mismatch: bool = False,
     count_invalid_lowdim: bool = True,
+    compute_motion_metrics: bool = True,
+    compute_camera_space_metrics: bool = True,
 ) -> None:
     stats["frames_total"] += 1
     stats["instruction_num_max"] = max(stats["instruction_num_max"], int(instruction_num))
+    if missing_instruction:
+        stats["missing_instruction_frames"] += 1
+    if empty_instruction:
+        stats["empty_instruction_frames"] += 1
+    if instruction_num_mismatch:
+        stats["instruction_num_mismatch_frames"] += 1
     if int(presence) > 0:
         stats["presence_nonzero_frames"] += 1
 
@@ -259,6 +318,14 @@ def update_clip_quality_stats(
         return
 
     stats["frames_kept_candidate"] += 1
+    if not compute_motion_metrics and not compute_camera_space_metrics:
+        stats["_prev_frame_idx"] = None
+        stats["_prev_left"] = None
+        stats["_prev_right"] = None
+        stats["_prev_extrinsic"] = None
+        stats["_prev_finite"] = False
+        return
+
     parts = extract_lowdim_components(lowdim_array)
     current_left = parts["left_translation"]
     current_right = parts["right_translation"]
@@ -266,78 +333,86 @@ def update_clip_quality_stats(
     right_fingertips = parts["right_fingertips"]
     current_extrinsic = parts["extrinsic"]
 
-    wrist_camera_metrics = camera_space_abs_metrics(
-        np.stack([current_left, current_right], axis=0),
-        current_extrinsic,
-    )
-    wrist_axis_metrics = camera_space_axis_metrics(
-        np.stack([current_left, current_right], axis=0),
-        current_extrinsic,
-    )
-    hand_camera_metrics = camera_space_abs_metrics(
-        np.concatenate([left_fingertips, right_fingertips], axis=0),
-        current_extrinsic,
-    )
-    hand_axis_metrics = camera_space_axis_metrics(
-        np.concatenate([left_fingertips, right_fingertips], axis=0),
-        current_extrinsic,
-    )
-    stats["max_camera_space_wrist_abs"] = max(
-        stats["max_camera_space_wrist_abs"],
-        wrist_camera_metrics["max_abs"],
-    )
-    stats["max_camera_space_hand_abs"] = max(
-        stats["max_camera_space_hand_abs"],
-        hand_camera_metrics["max_abs"],
-    )
-    stats["_camera_space_wrist_min"] = np.minimum(
-        stats["_camera_space_wrist_min"],
-        np.asarray([wrist_axis_metrics["min_x"], wrist_axis_metrics["min_y"], wrist_axis_metrics["min_z"]], dtype=np.float32),
-    )
-    stats["_camera_space_wrist_max"] = np.maximum(
-        stats["_camera_space_wrist_max"],
-        np.asarray([wrist_axis_metrics["max_x"], wrist_axis_metrics["max_y"], wrist_axis_metrics["max_z"]], dtype=np.float32),
-    )
-    stats["_camera_space_hand_min"] = np.minimum(
-        stats["_camera_space_hand_min"],
-        np.asarray([hand_axis_metrics["min_x"], hand_axis_metrics["min_y"], hand_axis_metrics["min_z"]], dtype=np.float32),
-    )
-    stats["_camera_space_hand_max"] = np.maximum(
-        stats["_camera_space_hand_max"],
-        np.asarray([hand_axis_metrics["max_x"], hand_axis_metrics["max_y"], hand_axis_metrics["max_z"]], dtype=np.float32),
-    )
-
-    prev_idx = stats["_prev_frame_idx"]
-    if stats["_prev_finite"] and prev_idx is not None:
-        frame_gap = max(1, int(frame_idx) - int(prev_idx))
-        left_step = float(np.linalg.norm(current_left - stats["_prev_left"]) / frame_gap)
-        right_step = float(np.linalg.norm(current_right - stats["_prev_right"]) / frame_gap)
-        prev_rot = stats["_prev_extrinsic"][:3, :3]
-        prev_trans = stats["_prev_extrinsic"][:3, 3]
-        curr_rot = current_extrinsic[:3, :3]
-        curr_trans = current_extrinsic[:3, 3]
-        camera_translation_step = float(np.linalg.norm(curr_trans - prev_trans) / frame_gap)
-        camera_rotation_step = float(np.linalg.norm((curr_rot - prev_rot).reshape(-1)) / frame_gap)
-
-        stats["max_hand_translation_step"] = max(
-            stats["max_hand_translation_step"],
-            left_step,
-            right_step,
+    if compute_camera_space_metrics:
+        wrist_camera_metrics = camera_space_abs_metrics(
+            np.stack([current_left, current_right], axis=0),
+            current_extrinsic,
         )
-        stats["max_camera_translation_step"] = max(
-            stats["max_camera_translation_step"],
-            camera_translation_step,
+        wrist_axis_metrics = camera_space_axis_metrics(
+            np.stack([current_left, current_right], axis=0),
+            current_extrinsic,
         )
-        stats["max_camera_rotation_step"] = max(
-            stats["max_camera_rotation_step"],
-            camera_rotation_step,
+        hand_camera_metrics = camera_space_abs_metrics(
+            np.concatenate([left_fingertips, right_fingertips], axis=0),
+            current_extrinsic,
+        )
+        hand_axis_metrics = camera_space_axis_metrics(
+            np.concatenate([left_fingertips, right_fingertips], axis=0),
+            current_extrinsic,
+        )
+        stats["max_camera_space_wrist_abs"] = max(
+            stats["max_camera_space_wrist_abs"],
+            wrist_camera_metrics["max_abs"],
+        )
+        stats["max_camera_space_hand_abs"] = max(
+            stats["max_camera_space_hand_abs"],
+            hand_camera_metrics["max_abs"],
+        )
+        stats["_camera_space_wrist_min"] = np.minimum(
+            stats["_camera_space_wrist_min"],
+            np.asarray([wrist_axis_metrics["min_x"], wrist_axis_metrics["min_y"], wrist_axis_metrics["min_z"]], dtype=np.float32),
+        )
+        stats["_camera_space_wrist_max"] = np.maximum(
+            stats["_camera_space_wrist_max"],
+            np.asarray([wrist_axis_metrics["max_x"], wrist_axis_metrics["max_y"], wrist_axis_metrics["max_z"]], dtype=np.float32),
+        )
+        stats["_camera_space_hand_min"] = np.minimum(
+            stats["_camera_space_hand_min"],
+            np.asarray([hand_axis_metrics["min_x"], hand_axis_metrics["min_y"], hand_axis_metrics["min_z"]], dtype=np.float32),
+        )
+        stats["_camera_space_hand_max"] = np.maximum(
+            stats["_camera_space_hand_max"],
+            np.asarray([hand_axis_metrics["max_x"], hand_axis_metrics["max_y"], hand_axis_metrics["max_z"]], dtype=np.float32),
         )
 
-    stats["_prev_frame_idx"] = int(frame_idx)
-    stats["_prev_left"] = current_left
-    stats["_prev_right"] = current_right
-    stats["_prev_extrinsic"] = current_extrinsic
-    stats["_prev_finite"] = True
+    if compute_motion_metrics:
+        prev_idx = stats["_prev_frame_idx"]
+        if stats["_prev_finite"] and prev_idx is not None:
+            frame_gap = max(1, int(frame_idx) - int(prev_idx))
+            left_step = float(np.linalg.norm(current_left - stats["_prev_left"]) / frame_gap)
+            right_step = float(np.linalg.norm(current_right - stats["_prev_right"]) / frame_gap)
+            prev_rot = stats["_prev_extrinsic"][:3, :3]
+            prev_trans = stats["_prev_extrinsic"][:3, 3]
+            curr_rot = current_extrinsic[:3, :3]
+            curr_trans = current_extrinsic[:3, 3]
+            camera_translation_step = float(np.linalg.norm(curr_trans - prev_trans) / frame_gap)
+            camera_rotation_step = float(np.linalg.norm((curr_rot - prev_rot).reshape(-1)) / frame_gap)
+
+            stats["max_hand_translation_step"] = max(
+                stats["max_hand_translation_step"],
+                left_step,
+                right_step,
+            )
+            stats["max_camera_translation_step"] = max(
+                stats["max_camera_translation_step"],
+                camera_translation_step,
+            )
+            stats["max_camera_rotation_step"] = max(
+                stats["max_camera_rotation_step"],
+                camera_rotation_step,
+            )
+
+        stats["_prev_frame_idx"] = int(frame_idx)
+        stats["_prev_left"] = current_left
+        stats["_prev_right"] = current_right
+        stats["_prev_extrinsic"] = current_extrinsic
+        stats["_prev_finite"] = True
+    else:
+        stats["_prev_frame_idx"] = None
+        stats["_prev_left"] = None
+        stats["_prev_right"] = None
+        stats["_prev_extrinsic"] = None
+        stats["_prev_finite"] = False
 
 
 def finalize_clip_quality_metrics(stats: dict) -> dict:
@@ -358,6 +433,9 @@ def finalize_clip_quality_metrics(stats: dict) -> dict:
         "nonfinite_lowdim_frames": int(stats["nonfinite_lowdim_frames"]),
         "invalid_meta_frames": int(stats["invalid_meta_frames"]),
         "invalid_lowdim_frames": int(stats["invalid_lowdim_frames"]),
+        "missing_instruction_frames": int(stats["missing_instruction_frames"]),
+        "empty_instruction_frames": int(stats["empty_instruction_frames"]),
+        "instruction_num_mismatch_frames": int(stats["instruction_num_mismatch_frames"]),
         "max_hand_translation_step": float(stats["max_hand_translation_step"]),
         "max_camera_translation_step": float(stats["max_camera_translation_step"]),
         "max_camera_rotation_step": float(stats["max_camera_rotation_step"]),
@@ -496,6 +574,18 @@ def resolve_auto_quality_thresholds(clip_metrics: list[dict], criteria: dict) ->
         resolved["max_camera_space_wrist_abs"] is not None
         or resolved["max_camera_space_hand_abs"] is not None
     )
+    if not criteria.get("use_auto_camera_space_thresholds", True) and not use_manual_abs:
+        return {
+            "resolved": resolved,
+            "distribution": summaries,
+            "auto_rule": {
+                "method": "disabled",
+                "percentile": percentile,
+                "scale": scale,
+                "iqr_multiplier": iqr_multiplier,
+                "axis_abs_cap": axis_abs_cap,
+            },
+        }
 
     if not use_manual_abs and auto_method == "iqr_bounds":
         wrist_bounds, wrist_distributions = _camera_space_bound_metrics("wrist", candidate_metrics, iqr_multiplier)
@@ -578,34 +668,40 @@ def decide_clip_quality(
         reasons.append("invalid_meta")
     if metrics["invalid_lowdim_frames"] > 0:
         reasons.append("invalid_lowdim")
-    if criteria["drop_nonfinite_lowdim"] and metrics["nonfinite_lowdim_frames"] > 0:
+    if metrics["nonfinite_lowdim_frames"] > 0:
         reasons.append("nonfinite_lowdim")
-    if criteria["min_instruction_num"] is not None and metrics["instruction_num_max"] < criteria["min_instruction_num"]:
+    if metrics.get("missing_instruction_frames", 0) > 0:
+        reasons.append("missing_instruction_frame")
+    if metrics.get("empty_instruction_frames", 0) > 0:
+        reasons.append("empty_instruction_frame")
+    if metrics.get("instruction_num_mismatch_frames", 0) > 0:
+        reasons.append("instruction_num_mismatch_frame")
+    if criteria.get("min_instruction_num") is not None and metrics["instruction_num_max"] < criteria["min_instruction_num"]:
         reasons.append("instruction_num_below_min")
-    if criteria["min_presence_ratio"] is not None and metrics["presence_ratio"] < criteria["min_presence_ratio"]:
+    if criteria.get("min_presence_ratio") is not None and metrics["presence_ratio"] < criteria["min_presence_ratio"]:
         reasons.append("presence_ratio_below_min")
     if (
-        criteria["max_hand_translation_step"] is not None
+        criteria.get("max_hand_translation_step") is not None
         and metrics["max_hand_translation_step"] > criteria["max_hand_translation_step"]
     ):
         reasons.append("hand_translation_step_exceeded")
     if (
-        criteria["max_camera_translation_step"] is not None
+        criteria.get("max_camera_translation_step") is not None
         and metrics["max_camera_translation_step"] > criteria["max_camera_translation_step"]
     ):
         reasons.append("camera_translation_step_exceeded")
     if (
-        criteria["max_camera_rotation_step"] is not None
+        criteria.get("max_camera_rotation_step") is not None
         and metrics["max_camera_rotation_step"] > criteria["max_camera_rotation_step"]
     ):
         reasons.append("camera_rotation_step_exceeded")
     if (
-        criteria["max_camera_space_wrist_abs"] is not None
+        criteria.get("max_camera_space_wrist_abs") is not None
         and metrics["max_camera_space_wrist_abs"] > criteria["max_camera_space_wrist_abs"]
     ):
         reasons.append("camera_space_wrist_abs_exceeded")
     if (
-        criteria["max_camera_space_hand_abs"] is not None
+        criteria.get("max_camera_space_hand_abs") is not None
         and metrics["max_camera_space_hand_abs"] > criteria["max_camera_space_hand_abs"]
     ):
         reasons.append("camera_space_hand_abs_exceeded")

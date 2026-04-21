@@ -11,7 +11,11 @@ from collections import Counter
 from multiprocessing import get_context
 from pathlib import Path
 
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 import sys
@@ -30,6 +34,7 @@ from lib.pipeline.quality_metrics import (  # noqa: E402
     decode_lowdim,
     finalize_clip_quality_metrics,
     new_clip_quality_stats,
+    parse_instruction_metadata,
     parse_frame_index,
     resolve_auto_quality_thresholds,
     update_clip_quality_stats,
@@ -43,12 +48,24 @@ _WORKER_KEEP_BY_CLIP = None
 _SHARD_DATA_EXCEPTIONS = (OSError, tarfile.TarError, ValueError)
 
 
+def _auto_chunksize(total_items: int, workers: int) -> int:
+    if total_items <= 0:
+        return 1
+    return max(1, min(64, total_items // max(1, workers * 4) or 1))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Analyze and filter existing WebDataset shards")
     parser.add_argument("--source_shard_dir", required=True, help="Source directory containing shard tar files")
     parser.add_argument("--output_dir", default=None, help="Optional output directory for filtered shards")
     parser.add_argument("--report_out", default=None, help="Optional JSON report path")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
+    parser.add_argument(
+        "--chunksize",
+        type=int,
+        default=0,
+        help="Pool chunksize; 0 selects an automatic chunksize",
+    )
     parser.add_argument(
         "--start_shard",
         type=int,
@@ -60,12 +77,6 @@ def build_parser():
         type=int,
         default=None,
         help="End shard index in sorted shard order (exclusive)",
-    )
-    parser.add_argument(
-        "--drop_nonfinite_lowdim",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Drop clips containing any NaN/Inf lowdim frame",
     )
     parser.add_argument(
         "--min_instruction_num",
@@ -140,6 +151,12 @@ def build_parser():
         default=2.5,
         help="Scale multiplier applied to the chosen percentile for automatic camera-space thresholds",
     )
+    parser.add_argument(
+        "--outlier_checks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable optional outlier checks; NaN/Inf and missing-language hard filters always stay enabled",
+    )
     return parser
 
 
@@ -147,15 +164,40 @@ def _new_clip_stats(clip_id: str) -> dict:
     return new_clip_quality_stats(clip_id)
 
 
-def _update_clip_stats(stats: dict, sample_key: str, meta: dict, lowdim, *, count_invalid_lowdim: bool = True) -> None:
+def _parse_instruction_flags(meta: dict | None) -> tuple[int, bool, bool, bool]:
+    parsed = parse_instruction_metadata(meta)
+    return (
+        int(parsed["instruction_num"]),
+        bool(parsed["missing_instruction"]),
+        bool(parsed["empty_instruction"]),
+        bool(parsed["instruction_num_mismatch"]),
+    )
+
+
+def _update_clip_stats(
+    stats: dict,
+    sample_key: str,
+    meta: dict,
+    lowdim,
+    *,
+    count_invalid_lowdim: bool = True,
+    compute_motion_metrics: bool = True,
+    compute_camera_space_metrics: bool = True,
+) -> None:
     frame_idx = parse_frame_index(sample_key)
+    instruction_num, missing_instruction, empty_instruction, instruction_num_mismatch = _parse_instruction_flags(meta)
     update_clip_quality_stats(
         stats,
         frame_idx,
-        int(meta.get("instruction_num", 0) or 0),
+        instruction_num,
         int(meta.get("presence", 0) or 0),
         lowdim,
+        missing_instruction=missing_instruction,
+        empty_instruction=empty_instruction,
+        instruction_num_mismatch=instruction_num_mismatch,
         count_invalid_lowdim=count_invalid_lowdim,
+        compute_motion_metrics=compute_motion_metrics,
+        compute_camera_space_metrics=compute_camera_space_metrics,
     )
 
 
@@ -205,7 +247,12 @@ def _serialize_shard_error(exc: Exception) -> dict:
     }
 
 
-def analyze_shard(shard_path: str) -> dict:
+def analyze_shard(
+    shard_path: str,
+    *,
+    compute_motion_metrics: bool = True,
+    compute_camera_space_metrics: bool = True,
+) -> dict:
     shard_name = os.path.basename(shard_path)
     shard_result = {
         "shard_name": shard_name,
@@ -251,20 +298,43 @@ def analyze_shard(shard_path: str) -> dict:
                     current_clip_stats["invalid_meta_frames"] += 1
                 if "image_bytes" in missing_fields or "lowdim_bytes" in missing_fields:
                     current_clip_stats["invalid_lowdim_frames"] += 1
-                _update_clip_stats(current_clip_stats, sample["key"], {}, None, count_invalid_lowdim=False)
+                _update_clip_stats(
+                    current_clip_stats,
+                    sample["key"],
+                    meta if meta is not None else {},
+                    None,
+                    count_invalid_lowdim=False,
+                    compute_motion_metrics=compute_motion_metrics,
+                    compute_camera_space_metrics=compute_camera_space_metrics,
+                )
                 continue
 
             validate_sample_record(sample)
 
             if meta is None:
                 current_clip_stats["invalid_meta_frames"] += 1
-                _update_clip_stats(current_clip_stats, sample["key"], {}, None, count_invalid_lowdim=False)
+                _update_clip_stats(
+                    current_clip_stats,
+                    sample["key"],
+                    {},
+                    None,
+                    count_invalid_lowdim=False,
+                    compute_motion_metrics=compute_motion_metrics,
+                    compute_camera_space_metrics=compute_camera_space_metrics,
+                )
             else:
                 try:
                     lowdim = decode_lowdim(sample["lowdim_bytes"])
                 except Exception:
                     lowdim = None
-                _update_clip_stats(current_clip_stats, sample["key"], meta, lowdim)
+                _update_clip_stats(
+                    current_clip_stats,
+                    sample["key"],
+                    meta,
+                    lowdim,
+                    compute_motion_metrics=compute_motion_metrics,
+                    compute_camera_space_metrics=compute_camera_space_metrics,
+                )
     except _SHARD_DATA_EXCEPTIONS as exc:
         shard_result["clips_total"] = 0
         shard_result["clip_metrics"] = []
@@ -374,7 +444,11 @@ def _worker_init(args_dict: dict, output_dir: str | None, keep_by_clip: dict[str
 
 
 def _worker_analyze_shard(shard_path: str) -> dict:
-    return analyze_shard(shard_path)
+    return analyze_shard(
+        shard_path,
+        compute_motion_metrics=bool(_WORKER_ARGS.get("compute_motion_metrics", True)),
+        compute_camera_space_metrics=bool(_WORKER_ARGS.get("compute_camera_space_metrics", True)),
+    )
 
 
 def _worker_rewrite_shard(shard_path: str) -> dict:
@@ -484,13 +558,21 @@ def build_report(
             "total_shards_available": int(args_dict["total_shards_available"]),
         },
         "mode": (
-            f"two_pass_auto_{threshold_info['auto_rule']['method']}"
-            if args_dict["use_auto_camera_space_thresholds"]
-            else "two_pass_manual_threshold"
+            "hard_rules_only"
+            if not args_dict["outlier_checks"]
+            else (
+                f"two_pass_auto_{threshold_info['auto_rule']['method']}"
+                if args_dict["use_auto_camera_space_thresholds"]
+                else "two_pass_manual_threshold"
+            )
         ),
         "criteria": {
-            "drop_nonfinite_lowdim": bool(args_dict["drop_nonfinite_lowdim"]),
+            "hard_rules": {
+                "drop_nonfinite_lowdim": True,
+                "require_instruction_every_frame": True,
+            },
             "min_instruction_num": args_dict["min_instruction_num"],
+            "outlier_checks": bool(args_dict["outlier_checks"]),
             "min_presence_ratio": args_dict["min_presence_ratio"],
             "max_hand_translation_step": args_dict["max_hand_translation_step"],
             "max_camera_translation_step": args_dict["max_camera_translation_step"],
@@ -502,7 +584,9 @@ def build_report(
             "camera_space_wrist_bounds": threshold_info["resolved"]["camera_space_wrist_bounds"],
             "camera_space_hand_bounds": threshold_info["resolved"]["camera_space_hand_bounds"],
             "camera_space_axis_abs_cap": args_dict["camera_space_axis_abs_cap"],
-    },
+            "compute_motion_metrics": bool(args_dict["compute_motion_metrics"]),
+            "compute_camera_space_metrics": bool(args_dict["compute_camera_space_metrics"]),
+        },
         "auto_thresholds": threshold_info,
         "total_shards": len(analysis_results),
         "total_samples": total_samples,
@@ -550,6 +634,8 @@ def main():
     args = build_parser().parse_args()
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
+    if args.chunksize < 0:
+        raise ValueError("--chunksize must be >= 0")
 
     source_dir = Path(args.source_shard_dir)
     if not source_dir.is_dir():
@@ -572,9 +658,38 @@ def main():
     if not shard_paths:
         raise RuntimeError(f"No shards selected in range [{start_shard}, {end_shard}) from {source_dir}")
 
+    if not args.outlier_checks:
+        args.min_presence_ratio = None
+        args.max_hand_translation_step = None
+        args.max_camera_translation_step = None
+        args.max_camera_rotation_step = None
+        args.max_camera_space_wrist_abs = None
+        args.max_camera_space_hand_abs = None
+        args.camera_space_axis_abs_cap = None
+
+    use_auto_camera_space_thresholds = (
+        bool(args.outlier_checks)
+        and (args.max_camera_space_wrist_abs is None or args.max_camera_space_hand_abs is None)
+    )
+    compute_motion_metrics = any(
+        value is not None
+        for value in (
+            args.max_hand_translation_step,
+            args.max_camera_translation_step,
+            args.max_camera_rotation_step,
+        )
+    )
+    compute_camera_space_metrics = (
+        use_auto_camera_space_thresholds
+        or args.max_camera_space_wrist_abs is not None
+        or args.max_camera_space_hand_abs is not None
+        or args.camera_space_axis_abs_cap is not None
+    )
+    chunksize = int(args.chunksize) if args.chunksize > 0 else _auto_chunksize(len(shard_paths), args.workers)
+
     args_dict = {
-        "drop_nonfinite_lowdim": bool(args.drop_nonfinite_lowdim),
         "min_instruction_num": args.min_instruction_num,
+        "outlier_checks": bool(args.outlier_checks),
         "min_presence_ratio": args.min_presence_ratio,
         "max_hand_translation_step": args.max_hand_translation_step,
         "max_camera_translation_step": args.max_camera_translation_step,
@@ -586,9 +701,10 @@ def main():
         "camera_space_axis_abs_cap": args.camera_space_axis_abs_cap,
         "camera_space_abs_percentile": args.camera_space_abs_percentile,
         "camera_space_abs_scale": args.camera_space_abs_scale,
-        "use_auto_camera_space_thresholds": (
-            args.max_camera_space_wrist_abs is None or args.max_camera_space_hand_abs is None
-        ),
+        "use_auto_camera_space_thresholds": use_auto_camera_space_thresholds,
+        "compute_motion_metrics": bool(compute_motion_metrics),
+        "compute_camera_space_metrics": bool(compute_camera_space_metrics),
+        "chunksize": chunksize,
         "start_shard": start_shard,
         "end_shard": end_shard,
         "total_shards_available": total_shards,
@@ -596,7 +712,14 @@ def main():
     }
 
     if args.workers <= 1:
-        analysis_results = [analyze_shard(shard_path) for shard_path in tqdm(shard_paths, desc="Analyze shards")]
+        analysis_results = [
+            analyze_shard(
+                shard_path,
+                compute_motion_metrics=compute_motion_metrics,
+                compute_camera_space_metrics=compute_camera_space_metrics,
+            )
+            for shard_path in tqdm(shard_paths, desc="Analyze shards")
+        ]
     else:
         mp_context = get_context()
         with mp_context.Pool(
@@ -606,7 +729,7 @@ def main():
         ) as pool:
             analysis_results = list(
                 tqdm(
-                    pool.imap_unordered(_worker_analyze_shard, shard_paths, chunksize=1),
+                    pool.imap_unordered(_worker_analyze_shard, shard_paths, chunksize=chunksize),
                     total=len(shard_paths),
                     desc="Analyze shards",
                 )
@@ -656,7 +779,7 @@ def main():
             ) as pool:
                 rewrite_results = list(
                     tqdm(
-                        pool.imap_unordered(_worker_rewrite_shard, shard_paths, chunksize=1),
+                        pool.imap_unordered(_worker_rewrite_shard, shard_paths, chunksize=chunksize),
                         total=len(shard_paths),
                         desc="Rewrite shards",
                     )

@@ -56,8 +56,6 @@ annotation:
 filter:
   stages: detect_track,motion,slam,infiller
   workers: 8
-  drop_nonfinite_world_res: true
-  drop_nonfinite_slam: true
   min_instruction_num: 1
 
 build:

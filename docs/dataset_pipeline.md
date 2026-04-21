@@ -171,6 +171,25 @@ python scripts/filter_manifest_by_quality.py \
   --report_out /path/to/run/filter_report.json
 ```
 
+Filter an already-built WebDataset with the same hard quality rules:
+
+```bash
+python scripts/filter_webdataset.py \
+  --source_shard_dir /path/to/wds \
+  --output_dir /path/to/wds.filtered \
+  --report_out /path/to/wds_filter_report.json
+```
+
+Analyze an already-built WebDataset:
+
+```bash
+python scripts/sanity_check_webdataset.py \
+  --source_shard_dir /path/to/wds \
+  --report_out /path/to/wds_sanity_report.json
+```
+
+Hard rules are always enabled in both filter paths: any `NaN/Inf` lowdim frame or any missing/empty/mismatched instruction frame drops the whole episode. Optional outlier checks can be disabled with `--no-outlier_checks`.
+
 Build the final dataset directly from a manifest:
 
 ```bash

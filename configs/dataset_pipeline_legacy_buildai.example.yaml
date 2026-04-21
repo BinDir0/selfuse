@@ -33,8 +33,6 @@ annotation:
 filter:
   stages: detect_track,motion,slam,infiller
   workers: 8
-  drop_nonfinite_world_res: true
-  drop_nonfinite_slam: true
 
 build:
   require_annotation: false

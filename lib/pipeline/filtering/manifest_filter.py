@@ -37,25 +37,13 @@ def build_parser():
         default=None,
         help="Optional shared feature cache directory for lowdim/MANO episode features",
     )
-    parser.add_argument(
-        "--drop_nonfinite_world_res",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Legacy compatibility flag retained in reports; build-equivalent filtering uses lowdim semantics",
-    )
-    parser.add_argument(
-        "--drop_nonfinite_slam",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Legacy compatibility flag retained in reports; build-equivalent filtering uses lowdim semantics",
-    )
-    parser.add_argument(
-        "--drop_nonfinite_lowdim",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Drop clips containing any NaN/Inf lowdim frame after build-equivalent feature generation",
-    )
     parser.add_argument("--min_instruction_num", type=int, default=None, help="Optional minimum instruction_num required to keep a clip")
+    parser.add_argument(
+        "--outlier_checks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable optional outlier checks; NaN/Inf and missing-language hard filters always stay enabled",
+    )
     parser.add_argument("--min_presence_ratio", type=float, default=None, help="Optional minimum fraction of frames with presence > 0")
     parser.add_argument("--max_hand_translation_step", type=float, default=None, help="Optional max allowed per-frame wrist translation step in meters")
     parser.add_argument("--max_camera_translation_step", type=float, default=None, help="Optional max allowed per-frame camera translation step in meters")
@@ -282,8 +270,12 @@ def build_report(
             build_invalid_reason_counts.update(item["build_reasons"])
 
     resolved_criteria = {
-        "drop_nonfinite_lowdim": bool(criteria["drop_nonfinite_lowdim"]),
+        "hard_rules": {
+            "drop_nonfinite_lowdim": True,
+            "require_instruction_every_frame": True,
+        },
         "min_instruction_num": criteria["min_instruction_num"],
+        "outlier_checks": bool(criteria["outlier_checks"]),
         "min_presence_ratio": criteria["min_presence_ratio"],
         "max_hand_translation_step": criteria["max_hand_translation_step"],
         "max_camera_translation_step": criteria["max_camera_translation_step"],
@@ -309,8 +301,6 @@ def build_report(
             "interpolate_labels": bool(criteria["interpolate_labels"]),
             "chunksize": int(criteria["chunksize"]),
             "feature_cache_dir": criteria["feature_cache_dir"],
-            "drop_nonfinite_world_res": bool(criteria["drop_nonfinite_world_res"]),
-            "drop_nonfinite_slam": bool(criteria["drop_nonfinite_slam"]),
             **resolved_criteria,
         },
         "auto_thresholds": threshold_info,
@@ -352,10 +342,8 @@ def run_filter(args) -> dict:
         "source_fps": float(args.source_fps),
         "target_fps": float(args.target_fps),
         "interpolate_labels": bool(args.interpolate_labels),
-        "drop_nonfinite_world_res": bool(args.drop_nonfinite_world_res),
-        "drop_nonfinite_slam": bool(args.drop_nonfinite_slam),
-        "drop_nonfinite_lowdim": bool(args.drop_nonfinite_lowdim),
         "min_instruction_num": args.min_instruction_num,
+        "outlier_checks": bool(args.outlier_checks),
         "min_presence_ratio": args.min_presence_ratio,
         "max_hand_translation_step": args.max_hand_translation_step,
         "max_camera_translation_step": args.max_camera_translation_step,
@@ -373,6 +361,22 @@ def run_filter(args) -> dict:
         "mano_device_specs": mano_device_specs,
         "skip_mano_models": skip_mano_models,
     }
+    if not config["outlier_checks"]:
+        for key in (
+            "min_presence_ratio",
+            "max_hand_translation_step",
+            "max_camera_translation_step",
+            "max_camera_rotation_step",
+            "max_camera_space_wrist_abs",
+            "max_camera_space_hand_abs",
+            "camera_space_axis_abs_cap",
+        ):
+            config[key] = None
+        config["use_auto_camera_space_thresholds"] = False
+    else:
+        config["use_auto_camera_space_thresholds"] = (
+            config["max_camera_space_wrist_abs"] is None or config["max_camera_space_hand_abs"] is None
+        )
 
     if worker_count <= 1:
         worker_init(config)

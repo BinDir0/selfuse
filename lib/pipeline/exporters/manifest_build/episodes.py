@@ -27,6 +27,7 @@ from lib.pipeline.exporters.webdataset_features import (
 from lib.pipeline.quality_metrics import (
     finalize_clip_quality_metrics,
     new_clip_quality_stats,
+    parse_instruction_metadata,
     update_clip_quality_stats,
 )
 
@@ -363,7 +364,8 @@ def compute_descriptor_episode_quality_metrics(
         return None
 
     stats = new_clip_quality_stats(ep["clip_id"])
-    instruction_num = int(ep.get("instruction_num", 0))
+    parsed_instruction = parse_instruction_metadata(ep)
+    instruction_num = int(parsed_instruction["instruction_num"])
     for frame_idx in range(frame_count):
         update_clip_quality_stats(
             stats,
@@ -371,6 +373,9 @@ def compute_descriptor_episode_quality_metrics(
             instruction_num,
             int(presence_per_frame[frame_idx]),
             lowdim_all[frame_idx],
+            missing_instruction=bool(parsed_instruction["missing_instruction"]),
+            empty_instruction=bool(parsed_instruction["empty_instruction"]),
+            instruction_num_mismatch=bool(parsed_instruction["instruction_num_mismatch"]),
         )
     return finalize_clip_quality_metrics(stats)
 
