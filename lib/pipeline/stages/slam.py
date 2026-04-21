@@ -7,7 +7,6 @@ import sys
 import time
 import zipfile
 import zlib
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -23,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from lib.pipeline.any4d_depth import (
     build_any4d_runner,
     build_any4d_views,
-    predict_any4d_depths_from_views,
+    iter_any4d_depth_sequence_batches,
 )
 from lib.pipeline.errors import CorruptStageDataError
 from lib.pipeline.dpvo_slam import run_dpvo_slam
@@ -485,17 +484,12 @@ def _predict_any4d_depths_for_frames(
 
     pred_depths = np.empty((len(frame_ids),) + tuple(output_hw), dtype=np.float32)
     desc = "Any4D batches (all frames)" if any4d_cache_suffix else "Any4D batches"
-    batch_specs = []
-    for batch_start in range(0, len(frame_ids), any4d_batch_size):
-        batch_indices = frame_ids[batch_start : batch_start + any4d_batch_size]
-        ref_frame_idx = int(batch_indices[len(batch_indices) // 2])
-        batch_image_paths = [frame_path_map[ref_frame_idx], *[frame_path_map[int(frame_idx)] for frame_idx in batch_indices.tolist()]]
-        batch_specs.append((batch_start, batch_indices, batch_image_paths))
 
-    def _prepare_views(batch_indices, batch_image_paths):
+    def _prepare_views(batch_indices, ref_frame_idx):
+        batch_image_paths = [frame_path_map[int(ref_frame_idx)], *[frame_path_map[int(frame_idx)] for frame_idx in batch_indices]]
         return build_any4d_views(
             frame_source,
-            batch_indices.tolist(),
+            list(batch_indices),
             runner=any4d_runner,
             any4d_repo_root=getattr(args, "any4d_repo_root", None),
             checkpoint_path=getattr(args, "any4d_checkpoint_path", None),
@@ -504,46 +498,37 @@ def _predict_any4d_depths_for_frames(
             image_paths=batch_image_paths,
         )
 
-    with ThreadPoolExecutor(max_workers=1) as prefetcher:
-        next_views_future = None
-        for batch_idx, (batch_start, batch_indices, batch_image_paths) in enumerate(
-            tqdm(batch_specs, desc=desc, disable=QUIET_MODE)
-        ):
-            if next_views_future is None:
-                t_view_prep = time.time()
-                views = _prepare_views(batch_indices, batch_image_paths)
-                if timing is not None:
-                    timing["3c_any4d_view_prep"] = timing.get("3c_any4d_view_prep", 0.0) + (time.time() - t_view_prep)
-            else:
-                t_view_wait = time.time()
-                views = next_views_future.result()
-                if timing is not None:
-                    timing["3c_any4d_view_prep"] = timing.get("3c_any4d_view_prep", 0.0) + (time.time() - t_view_wait)
+    def _record_any4d_timing(name: str, elapsed: float) -> None:
+        if timing is None:
+            return
+        if name == "view_prep":
+            key = "3c_any4d_view_prep"
+        elif name == "forward":
+            key = "3d_any4d_forward"
+        else:
+            key = f"3_any4d_{name}"
+        timing[key] = timing.get(key, 0.0) + float(elapsed)
 
-            if batch_idx + 1 < len(batch_specs):
-                next_batch_indices = batch_specs[batch_idx + 1][1]
-                next_batch_image_paths = batch_specs[batch_idx + 1][2]
-                next_views_future = prefetcher.submit(_prepare_views, next_batch_indices, next_batch_image_paths)
-            else:
-                next_views_future = None
-
-            t_forward = time.time()
-            batch_depths = predict_any4d_depths_from_views(
-                batch_indices.tolist(),
-                views,
-                runner=any4d_runner,
-                any4d_repo_root=getattr(args, "any4d_repo_root", None),
-                checkpoint_path=getattr(args, "any4d_checkpoint_path", None),
-                resolution_set=getattr(args, "any4d_resolution_set", None),
-                use_amp=getattr(args, "any4d_use_amp", None),
-            )
-            if timing is not None:
-                timing["3d_any4d_forward"] = timing.get("3d_any4d_forward", 0.0) + (time.time() - t_forward)
-            batch_size = len(batch_indices)
-            t_resize = time.time()
-            pred_depths[batch_start : batch_start + batch_size] = _resize_depths(np.asarray(batch_depths), output_hw)
-            if timing is not None:
-                timing["3e_any4d_resize"] = timing.get("3e_any4d_resize", 0.0) + (time.time() - t_resize)
+    for batch_result in iter_any4d_depth_sequence_batches(
+        frame_ids.tolist(),
+        any4d_batch_size=any4d_batch_size,
+        build_views_for_chunk=_prepare_views,
+        runner=any4d_runner,
+        progress_desc=desc,
+        progress_disable=QUIET_MODE,
+        timing_callback=_record_any4d_timing,
+        prediction_view_offset=2,
+    ):
+        batch_start = int(batch_result["batch_start"])
+        batch_indices = list(batch_result["batch_indices"])
+        batch_size = len(batch_indices)
+        t_resize = time.time()
+        pred_depths[batch_start : batch_start + batch_size] = _resize_depths(
+            np.asarray(batch_result["depths"], dtype=np.float32),
+            output_hw,
+        )
+        if timing is not None:
+            timing["3e_any4d_resize"] = timing.get("3e_any4d_resize", 0.0) + (time.time() - t_resize)
 
     os.makedirs(os.path.join(seq_folder, "SLAM"), exist_ok=True)
     t_cache_save = time.time()

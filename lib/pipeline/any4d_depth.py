@@ -4,6 +4,8 @@ import contextlib
 import os
 import sys
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 from typing import Optional, Sequence
@@ -11,6 +13,13 @@ from typing import Optional, Sequence
 import cv2
 import numpy as np
 import torch
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, *args, **kwargs):
+        del args, kwargs
+        return iterable if iterable is not None else []
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -392,6 +401,95 @@ def build_any4d_views(frame_source, frame_indices, runner=None, *, any4d_repo_ro
     return _load_any4d_views(load_images, image_paths, runner["resolution_set"])
 
 
+def build_any4d_chunk_specs(frame_indices, any4d_batch_size: int):
+    frame_indices = [int(frame_idx) for frame_idx in frame_indices]
+    if not frame_indices:
+        raise ValueError("[Any4D] frame_indices is empty")
+    if int(any4d_batch_size) < 1:
+        raise ValueError(f"[Any4D] any4d_batch_size must be >= 1, got {any4d_batch_size}")
+
+    batch_specs = []
+    for batch_start in range(0, len(frame_indices), int(any4d_batch_size)):
+        batch_indices = frame_indices[batch_start : batch_start + int(any4d_batch_size)]
+        ref_frame_idx = int(batch_indices[len(batch_indices) // 2])
+        batch_specs.append(
+            {
+                "batch_start": int(batch_start),
+                "batch_indices": batch_indices,
+                "ref_frame_idx": ref_frame_idx,
+            }
+        )
+    return batch_specs
+
+
+def iter_any4d_depth_sequence_batches(
+    frame_indices,
+    *,
+    any4d_batch_size: int,
+    build_views_for_chunk,
+    runner,
+    progress_desc: str | None = None,
+    progress_disable: bool = False,
+    timing_callback=None,
+    prediction_view_offset: int = 2,
+):
+    batch_specs = build_any4d_chunk_specs(frame_indices, any4d_batch_size)
+
+    def _record(name: str, elapsed: float) -> None:
+        if timing_callback is not None:
+            timing_callback(str(name), float(elapsed))
+
+    def _prepare(spec):
+        prepared = build_views_for_chunk(
+            list(spec["batch_indices"]),
+            int(spec["ref_frame_idx"]),
+        )
+        if isinstance(prepared, tuple) and len(prepared) == 2:
+            return prepared[0], prepared[1]
+        return prepared, None
+
+    with ThreadPoolExecutor(max_workers=1) as prefetcher:
+        next_views_future = None
+        for batch_idx, spec in enumerate(
+            tqdm(batch_specs, total=len(batch_specs), desc=progress_desc, disable=progress_disable)
+        ):
+            if next_views_future is None:
+                t_view_prep = time.time()
+                views, batch_meta = _prepare(spec)
+                _record("view_prep", time.time() - t_view_prep)
+            else:
+                t_view_wait = time.time()
+                views, batch_meta = next_views_future.result()
+                _record("view_prep", time.time() - t_view_wait)
+
+            if batch_idx + 1 < len(batch_specs):
+                next_views_future = prefetcher.submit(_prepare, batch_specs[batch_idx + 1])
+            else:
+                next_views_future = None
+
+            t_forward = time.time()
+            batch_depths = predict_any4d_depths_from_views(
+                spec["batch_indices"],
+                views,
+                runner=runner,
+                prediction_view_offset=prediction_view_offset,
+            )
+            _record("forward", time.time() - t_forward)
+            batch_depths = np.asarray(batch_depths, dtype=np.float32)
+            if batch_depths.shape[0] != len(spec["batch_indices"]):
+                raise RuntimeError(
+                    f"[Any4D] unexpected depth count {batch_depths.shape[0]} "
+                    f"for chunk with {len(spec['batch_indices'])} target frames"
+                )
+            yield {
+                "batch_start": int(spec["batch_start"]),
+                "batch_indices": list(spec["batch_indices"]),
+                "ref_frame_idx": int(spec["ref_frame_idx"]),
+                "depths": batch_depths,
+                "meta": batch_meta,
+            }
+
+
 def predict_any4d_depths_from_views(
     frame_indices,
     views,
@@ -401,7 +499,7 @@ def predict_any4d_depths_from_views(
     checkpoint_path=None,
     resolution_set=None,
     use_amp=None,
-    prediction_view_offset: int = 2,
+    prediction_view_offset: int = 1,
 ):
     frame_indices = [int(frame_idx) for frame_idx in frame_indices]
     if not frame_indices:

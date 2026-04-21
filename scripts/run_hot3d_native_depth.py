@@ -217,18 +217,10 @@ def _get_done_marker(seq_folder: Path) -> Path:
     return seq_folder / f".{NATIVE_DEPTH_STAGE_NAME}.done"
 
 
-def _iter_chunk_ranges(frame_count: int, chunk_size: int):
-    if chunk_size < 1:
-        raise ValueError(f"any4d_batch_size must be >= 1, got {chunk_size}")
-    for start_idx in range(0, frame_count, chunk_size):
-        end_idx = min(frame_count, start_idx + chunk_size)
-        yield start_idx, end_idx
-
-
 def _process_record(record, args, runner: dict) -> dict:
     from lib.pipeline.any4d_depth import (
         build_any4d_camera_views_from_image_bytes,
-        predict_any4d_depths_from_views,
+        iter_any4d_depth_sequence_batches,
     )
     from lib.pipeline.frame_sources import build_frame_bytes_reader
 
@@ -271,15 +263,13 @@ def _process_record(record, args, runner: dict) -> dict:
     pred_depths: list[np.ndarray | None] = [None] * len(frame_indices)
     resized_intrinsics_by_frame: list[np.ndarray | None] = [None] * len(frame_indices)
 
-    for batch_start, batch_end in _iter_chunk_ranges(len(frame_indices), int(args.any4d_batch_size)):
-        batch_indices = frame_indices[batch_start:batch_end]
-        ref_frame_idx = int(batch_indices[len(batch_indices) // 2])
+    def _prepare_views(batch_indices, ref_frame_idx):
         infer_indices = [ref_frame_idx, *batch_indices]
         batch_payloads = [reader(frame_idx) for frame_idx in infer_indices]
         batch_intrinsics = [intrinsics_3[frame_idx] for frame_idx in infer_indices]
         batch_cam2world = [cam2world_poses[frame_idx] for frame_idx in infer_indices]
 
-        views, batch_resized_intrinsics = build_any4d_camera_views_from_image_bytes(
+        return build_any4d_camera_views_from_image_bytes(
             batch_payloads,
             batch_intrinsics,
             batch_cam2world,
@@ -290,21 +280,24 @@ def _process_record(record, args, runner: dict) -> dict:
             use_amp=args.any4d_use_amp,
             task="mvs",
         )
+
+    for batch_result in iter_any4d_depth_sequence_batches(
+        frame_indices,
+        any4d_batch_size=int(args.any4d_batch_size),
+        build_views_for_chunk=_prepare_views,
+        runner=runner,
+        progress_disable=True,
+        prediction_view_offset=2,
+    ):
+        batch_start = int(batch_result["batch_start"])
+        batch_indices = list(batch_result["batch_indices"])
+        batch_depths = np.asarray(batch_result["depths"], dtype=np.float32)
+        batch_resized_intrinsics = np.asarray(batch_result["meta"], dtype=np.float32)
         if batch_resized_intrinsics.shape[0] != len(batch_indices) + 1:
             raise RuntimeError(
                 f"Unexpected resized intrinsics count {batch_resized_intrinsics.shape[0]} "
                 f"for HOT3D batch of {len(batch_indices)} target frames"
             )
-        batch_depths = predict_any4d_depths_from_views(
-            batch_indices,
-            views,
-            runner=runner,
-            any4d_repo_root=args.any4d_repo_root,
-            checkpoint_path=args.any4d_checkpoint_path,
-            resolution_set=args.any4d_resolution_set,
-            use_amp=args.any4d_use_amp,
-            prediction_view_offset=2,
-        )
         if len(batch_depths) != len(batch_indices):
             raise RuntimeError(
                 f"Unexpected depth count {len(batch_depths)} for HOT3D batch of {len(batch_indices)} target frames"
