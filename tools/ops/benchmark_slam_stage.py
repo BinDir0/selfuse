@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from argparse import Namespace
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.batch.config import BatchRunConfig
+from lib.pipeline.batch.cli import (
+    add_any4d_runtime_args,
+    add_infer_profile_arg,
+    add_local_cache_args,
+    normalize_batch_infer_args,
+)
 from lib.pipeline.batch.scheduler import BatchScheduler
 from lib.pipeline.stage_api import get_track_range
 from lib.pipeline.video_index import VideoDescriptor, collect_videos_from_factories, collect_videos_from_factory
@@ -129,6 +136,7 @@ def parse_args():
         help="Base dir for --factory_range",
     )
     parser.add_argument("--gpus", type=str, default="0")
+    add_infer_profile_arg(parser)
     parser.add_argument("--workers_per_gpu", type=int, default=1)
     parser.add_argument("--slam_workers_per_gpu", type=int, default=None)
     parser.add_argument("--num_videos", type=int, default=64, help="How many sampled videos to benchmark")
@@ -154,16 +162,15 @@ def parse_args():
     parser.add_argument("--detect_io_workers", type=int, default=8)
     parser.add_argument("--rebuild_cam_space_cache", action="store_true")
     parser.add_argument("--depth_predict_all_frames", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--any4d_repo_root", type=str, default=None)
-    parser.add_argument("--any4d_checkpoint_path", type=str, default=None)
-    parser.add_argument("--any4d_resolution_set", type=int, default=None)
-    parser.add_argument("--any4d_use_amp", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--stage3_tmp_root", type=str, default=None)
+    add_any4d_runtime_args(parser, include_depth_predict_all_frames=False)
+    add_local_cache_args(parser)
     parser.add_argument("--max_stage_retries", type=int, default=0)
     parser.add_argument("--wave_stall_timeout_sec", type=int, default=3600)
     parser.add_argument("--enable_profiler", action="store_true")
     parser.add_argument("--sample_interval_sec", type=float, default=1.0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    normalize_batch_infer_args(args)
+    return args
 
 
 def build_run_dir(args) -> Path:
@@ -253,44 +260,12 @@ def prepare_benchmark_descriptor(src_desc: VideoDescriptor, benchmark_inputs_dir
 
 
 def build_config(args, run_dir: Path, benchmark_descriptors: List[VideoDescriptor]) -> BatchRunConfig:
-    gpu_ids = [int(part.strip()) for part in args.gpus.split(",") if part.strip()]
-    if not gpu_ids:
-        raise ValueError("At least one GPU must be provided")
-
-    return BatchRunConfig(
+    config_ns = Namespace(**vars(args), stages="slam")
+    return BatchRunConfig.from_namespace(
+        config_ns,
         video_paths=[desc.video_key for desc in benchmark_descriptors],
         descriptors=benchmark_descriptors,
-        gpus=gpu_ids,
-        stages=["slam"],
-        resume=args.resume,
         run_dir=run_dir,
-        checkpoint=args.checkpoint,
-        infiller_weight=args.infiller_weight,
-        img_focal=args.img_focal,
-        chunk_batch_size=args.chunk_batch_size,
-        num_workers=args.num_workers,
-        any4d_batch_size=args.any4d_batch_size,
-        render_batch_size=args.render_batch_size,
-        infiller_window_batch_size=args.infiller_window_batch_size,
-        detect_batch_size=args.detect_batch_size,
-        detect_device=args.detect_device,
-        detect_half_precision=args.detect_half_precision,
-        detect_io_workers=args.detect_io_workers,
-        rebuild_cam_space_cache=args.rebuild_cam_space_cache,
-        depth_predict_all_frames=args.depth_predict_all_frames,
-        any4d_repo_root=args.any4d_repo_root,
-        any4d_checkpoint_path=args.any4d_checkpoint_path,
-        any4d_resolution_set=args.any4d_resolution_set,
-        any4d_use_amp=args.any4d_use_amp,
-        stage3_tmp_root=args.stage3_tmp_root,
-        max_stage_retries=args.max_stage_retries,
-        wave_stall_timeout_sec=args.wave_stall_timeout_sec,
-        workers_per_gpu=args.workers_per_gpu,
-        detect_track_workers_per_gpu=None,
-        motion_workers_per_gpu=None,
-        slam_workers_per_gpu=args.slam_workers_per_gpu,
-        infiller_workers_per_gpu=None,
-        enable_profiler=args.enable_profiler,
     )
 
 

@@ -9,20 +9,12 @@ from lib.pipeline.batch.cli import build_batch_infer_parser
 from .constants import MULTIHOST_DISALLOWED_INFER_KEYS
 from .helpers import parser_supported_option_dests, validate_cli_mapping_keys
 
-INFER_COMMON_COMPAT_KEYS = {
-    "infer_profile",
-    "local_cache_root",
-    "local_cache_quota_gb",
-    "local_cache_mode",
-    "local_cache_min_frames",
-}
-
 
 def validate_pipeline_cli_alignment(*, stages: list[str], infer_cfg: dict, build_cfg: dict, filter_cfg: dict, validation_cfg: dict) -> None:
     errors = []
 
     if any(stage in stages for stage in ("detect_motion", "slam", "infiller")):
-        infer_supported = parser_supported_option_dests(build_batch_infer_parser()) | INFER_COMMON_COMPAT_KEYS
+        infer_supported = parser_supported_option_dests(build_batch_infer_parser())
         infer_reserved = {"descriptor_manifest", "video_list", "video_dir", "run_dir"}
         errors.extend(
             validate_cli_mapping_keys(

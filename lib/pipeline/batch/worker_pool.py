@@ -56,12 +56,7 @@ def _build_pipeline_task(video_path: str, descriptor_map) -> PipelineVideoTask:
 
 
 def _configure_worker_env(config: BatchRunConfig) -> None:
-    env_values = {
-        "HAWOR_LOCAL_CACHE_ROOT": config.local_cache_root,
-        "HAWOR_LOCAL_CACHE_QUOTA_GB": None if config.local_cache_quota_gb is None else str(config.local_cache_quota_gb),
-        "HAWOR_LOCAL_CACHE_MODE": config.local_cache_mode,
-        "HAWOR_LOCAL_CACHE_MIN_FRAMES": str(config.local_cache_min_frames),
-    }
+    env_values = config.worker_env_overrides()
     for key, value in env_values.items():
         if value is None or value == "":
             os.environ.pop(key, None)

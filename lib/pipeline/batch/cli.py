@@ -12,6 +12,16 @@ DEFAULT_BATCH_STAGES = "detect_track,motion,slam,infiller"
 DEFAULT_ANY4D_BATCH_SIZE = 32
 DEFAULT_INFILLER_WINDOW_BATCH_SIZE = 64
 DEFAULT_WAVE_STALL_TIMEOUT_SEC = 3600
+DEFAULT_INFER_PROFILE = "standard"
+INFER_PROFILE_CHOICES = ("standard", "throughput_80gb")
+LOCAL_CACHE_MODE_CHOICES = ("off", "tar", "image_sequence", "all")
+SHARED_PROFILE_CACHE_OPTION_DESTS = (
+    "infer_profile",
+    "local_cache_root",
+    "local_cache_quota_gb",
+    "local_cache_mode",
+    "local_cache_min_frames",
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +40,60 @@ def collect_videos(video_dir: Path, extensions=(".mp4", ".avi", ".mov")) -> list
     for ext in extensions:
         videos.extend(str(path) for path in video_dir.rglob(f"*{ext}"))
     return sorted(videos)
+
+
+def add_infer_profile_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--infer_profile",
+        type=str,
+        default=DEFAULT_INFER_PROFILE,
+        choices=list(INFER_PROFILE_CHOICES),
+        help="Optional throughput tuning profile that only adjusts scheduling/cache defaults.",
+    )
+
+
+def add_any4d_runtime_args(
+    parser: argparse.ArgumentParser,
+    *,
+    include_depth_predict_all_frames: bool = True,
+    include_stage3_tmp_root: bool = True,
+) -> None:
+    if include_depth_predict_all_frames:
+        parser.add_argument(
+            "--depth_predict_all_frames",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Predict dense depth for all frames in the SLAM stage. Default: enabled.",
+        )
+    parser.add_argument("--any4d_repo_root", type=str, default=None, help="Optional Any4D repository root.")
+    parser.add_argument("--any4d_checkpoint_path", type=str, default=None, help="Optional Any4D checkpoint path.")
+    parser.add_argument("--any4d_resolution_set", type=int, default=None, help="Optional Any4D resolution set.")
+    parser.add_argument(
+        "--any4d_use_amp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override AMP usage for Any4D inference.",
+    )
+    if include_stage3_tmp_root:
+        parser.add_argument("--stage3_tmp_root", type=str, default=None, help="Temporary workspace root for Any4D SLAM.")
+
+
+def add_local_cache_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--local_cache_root", type=str, default=None, help="Optional local scratch root for shared per-clip frame cache.")
+    parser.add_argument("--local_cache_quota_gb", type=float, default=None, help="Optional quota for the shared local clip cache.")
+    parser.add_argument(
+        "--local_cache_mode",
+        type=str,
+        default="off",
+        choices=list(LOCAL_CACHE_MODE_CHOICES),
+        help="Which descriptor types should use the shared local clip cache.",
+    )
+    parser.add_argument(
+        "--local_cache_min_frames",
+        type=int,
+        default=1,
+        help="Only materialize clips with at least this many frames into the local clip cache.",
+    )
 
 
 def build_batch_infer_parser() -> argparse.ArgumentParser:
@@ -53,6 +117,7 @@ def build_batch_infer_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--gpus", type=str, default="0", help="Comma-separated GPU IDs (e.g. '0,1,2,3').")
     parser.add_argument("--stages", type=str, default=DEFAULT_BATCH_STAGES, help="Comma-separated stage names.")
+    add_infer_profile_arg(parser)
     parser.add_argument(
         "--resume",
         action=argparse.BooleanOptionalAction,
@@ -216,26 +281,12 @@ def build_batch_infer_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--any4d", action="store_true", help="Deprecated shorthand for --depth_backend any4d.")
     parser.add_argument(
-        "--depth_predict_all_frames",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Predict dense depth for all frames in the SLAM stage. Default: enabled.",
-    )
-    parser.add_argument(
         "--rebuild_cam_space_cache",
         action="store_true",
         help="Rebuild cached camera-space infiller inputs before running infiller.",
     )
-    parser.add_argument("--any4d_repo_root", type=str, default=None, help="Optional Any4D repository root.")
-    parser.add_argument("--any4d_checkpoint_path", type=str, default=None, help="Optional Any4D checkpoint path.")
-    parser.add_argument("--any4d_resolution_set", type=int, default=None, help="Optional Any4D resolution set.")
-    parser.add_argument(
-        "--any4d_use_amp",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override AMP usage for Any4D inference.",
-    )
-    parser.add_argument("--stage3_tmp_root", type=str, default=None, help="Temporary workspace root for Any4D SLAM.")
+    add_any4d_runtime_args(parser)
+    add_local_cache_args(parser)
     return parser
 
 
@@ -246,25 +297,51 @@ def normalize_batch_infer_args(args, *, raw_argv: list[str] | None = None) -> li
     if getattr(args, "any4d", False):
         args.depth_backend = "any4d"
 
-    if args.any4d_batch_size is None:
-        if args.metric3d_batch_size is not None:
-            args.any4d_batch_size = int(args.metric3d_batch_size)
+    any4d_batch_size = getattr(args, "any4d_batch_size", None)
+    metric3d_batch_size = getattr(args, "metric3d_batch_size", None)
+    if any4d_batch_size is None:
+        if metric3d_batch_size is not None:
+            args.any4d_batch_size = int(metric3d_batch_size)
             notes.append("`--metric3d_batch_size` is deprecated; using it as `--any4d_batch_size`.")
         else:
             args.any4d_batch_size = DEFAULT_ANY4D_BATCH_SIZE
-    elif args.metric3d_batch_size is not None and int(args.metric3d_batch_size) != int(args.any4d_batch_size):
+    elif metric3d_batch_size is not None and int(metric3d_batch_size) != int(any4d_batch_size):
         notes.append("Ignoring deprecated `--metric3d_batch_size` because `--any4d_batch_size` is set.")
 
-    if args.retries is not None and "--max_stage_retries" not in raw_argv:
-        args.max_stage_retries = int(args.retries)
+    retries = getattr(args, "retries", None)
+    if retries is not None and "--max_stage_retries" not in raw_argv:
+        args.max_stage_retries = int(retries)
         notes.append("`--retries` is deprecated; treating it as `--max_stage_retries`.")
 
-    if args.scheduler_mode != "wave":
+    scheduler_mode = getattr(args, "scheduler_mode", "wave")
+    if scheduler_mode != "wave":
         notes.append(
-            f"`--scheduler_mode {args.scheduler_mode}` is retained for compatibility; the unified scheduler uses wave mode."
+            f"`--scheduler_mode {scheduler_mode}` is retained for compatibility; the unified scheduler uses wave mode."
         )
-    if args.persistent_worker:
+    if getattr(args, "persistent_worker", False):
         notes.append("`--persistent_worker` is retained for compatibility and has no effect in the unified scheduler.")
+
+    infer_profile = getattr(args, "infer_profile", DEFAULT_INFER_PROFILE)
+    if infer_profile == "throughput_80gb":
+        if getattr(args, "detect_track_workers_per_gpu", None) is None:
+            args.detect_track_workers_per_gpu = 2
+        if getattr(args, "motion_workers_per_gpu", None) is None:
+            args.motion_workers_per_gpu = 1
+        if getattr(args, "slam_workers_per_gpu", None) is None:
+            args.slam_workers_per_gpu = 1
+        if getattr(args, "infiller_workers_per_gpu", None) is None:
+            args.infiller_workers_per_gpu = 2
+        if getattr(args, "local_cache_mode", "off") == "off":
+            args.local_cache_mode = "all"
+        if getattr(args, "local_cache_quota_gb", None) is None:
+            args.local_cache_quota_gb = 2000.0
+        if getattr(args, "local_cache_root", None) is None:
+            args.local_cache_root = getattr(args, "stage3_tmp_root", None)
+        if getattr(args, "local_cache_min_frames", 1) < 96:
+            args.local_cache_min_frames = 96
+        notes.append(
+            "`--infer_profile throughput_80gb` enabled shared local clip cache and stage-specific worker defaults."
+        )
 
     return notes
 

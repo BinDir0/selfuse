@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Mapping, Optional
+
+from lib.pipeline.batch.cli import DEFAULT_INFER_PROFILE
 
 if TYPE_CHECKING:
     from lib.pipeline.datasets.descriptors import ClipDescriptor
@@ -13,67 +15,90 @@ STAGE_ALIASES = {
 VALID_BATCH_STAGES = ["detect_track", "motion", "slam", "infiller"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class BatchRunConfig:
     video_paths: List[str]
-    descriptors: Optional[List["ClipDescriptor"]]
     gpus: List[int]
     stages: List[str]
-    resume: bool
     run_dir: Path
-    checkpoint: str
-    infiller_weight: str
-    img_focal: Optional[float]
-    chunk_batch_size: int
-    num_workers: int
-    any4d_batch_size: int
-    render_batch_size: int
-    infiller_window_batch_size: int
-    detect_batch_size: int
-    detect_device: str
-    detect_half_precision: bool
-    detect_io_workers: int
-    rebuild_cam_space_cache: bool
-    depth_predict_all_frames: Optional[bool]
-    any4d_repo_root: Optional[str]
-    any4d_checkpoint_path: Optional[str]
-    any4d_resolution_set: Optional[int]
-    any4d_use_amp: Optional[bool]
-    stage3_tmp_root: Optional[str]
-    max_stage_retries: int
-    wave_stall_timeout_sec: int
-    workers_per_gpu: int
-    detect_track_workers_per_gpu: Optional[int]
-    motion_workers_per_gpu: Optional[int]
-    slam_workers_per_gpu: Optional[int]
-    infiller_workers_per_gpu: Optional[int]
+    descriptors: Optional[List["ClipDescriptor"]] = None
+    resume: bool = True
+    checkpoint: str = "./weights/hawor/checkpoints/hawor.ckpt"
+    infiller_weight: str = "./weights/hawor/checkpoints/infiller.pt"
+    img_focal: Optional[float] = None
+    chunk_batch_size: int = 64
+    num_workers: int = 16
+    any4d_batch_size: int = 32
+    render_batch_size: int = 8
+    infiller_window_batch_size: int = 64
+    detect_batch_size: int = 128
+    detect_device: str = "cuda:0"
+    detect_half_precision: bool = False
+    detect_io_workers: int = 8
+    rebuild_cam_space_cache: bool = False
+    depth_predict_all_frames: Optional[bool] = True
+    any4d_repo_root: Optional[str] = None
+    any4d_checkpoint_path: Optional[str] = None
+    any4d_resolution_set: Optional[int] = None
+    any4d_use_amp: Optional[bool] = None
+    stage3_tmp_root: Optional[str] = None
+    infer_profile: str = DEFAULT_INFER_PROFILE
+    local_cache_root: Optional[str] = None
+    local_cache_quota_gb: Optional[float] = None
+    local_cache_mode: str = "off"
+    local_cache_min_frames: int = 1
+    max_stage_retries: int = 1
+    wave_stall_timeout_sec: int = 3600
+    workers_per_gpu: int = 1
+    detect_track_workers_per_gpu: Optional[int] = None
+    motion_workers_per_gpu: Optional[int] = None
+    slam_workers_per_gpu: Optional[int] = None
+    infiller_workers_per_gpu: Optional[int] = None
     enable_profiler: bool = False
 
     @classmethod
     def from_args(cls, args, *, video_paths: List[str], descriptors: Optional[List["ClipDescriptor"]], run_dir: Path):
-        raw_stages = [part.strip() for part in args.stages.split(",") if part.strip()]
+        return cls.from_namespace(args, video_paths=video_paths, descriptors=descriptors, run_dir=run_dir)
+
+    @classmethod
+    def from_namespace(
+        cls,
+        ns,
+        *,
+        video_paths: List[str],
+        descriptors: Optional[List["ClipDescriptor"]],
+        run_dir: Path,
+    ):
+        raw_stages = [part.strip() for part in str(getattr(ns, "stages", "")).split(",") if part.strip()]
         stages = [STAGE_ALIASES.get(stage, stage) for stage in raw_stages]
         invalid = [stage for stage in stages if stage not in VALID_BATCH_STAGES]
         if invalid:
             raise ValueError(f"Unknown stages: {invalid}. Valid stages: {VALID_BATCH_STAGES}")
 
-        gpus = [int(gpu.strip()) for gpu in args.gpus.split(",") if gpu.strip()]
+        gpus = [int(gpu.strip()) for gpu in str(getattr(ns, "gpus", "")).split(",") if gpu.strip()]
         if not gpus:
             raise ValueError("At least one GPU must be specified via --gpus")
 
+        any4d_batch_size = getattr(ns, "any4d_batch_size", None)
+        if any4d_batch_size is None:
+            any4d_batch_size = 32
+        wave_stall_timeout_sec = getattr(ns, "wave_stall_timeout_sec", None)
+        if wave_stall_timeout_sec is None:
+            wave_stall_timeout_sec = 3600
+
         worker_counts = {
-            "workers_per_gpu": args.workers_per_gpu,
-            "detect_track_workers_per_gpu": args.detect_track_workers_per_gpu,
-            "motion_workers_per_gpu": args.motion_workers_per_gpu,
-            "slam_workers_per_gpu": args.slam_workers_per_gpu,
-            "infiller_workers_per_gpu": args.infiller_workers_per_gpu,
+            "workers_per_gpu": getattr(ns, "workers_per_gpu", 1),
+            "detect_track_workers_per_gpu": getattr(ns, "detect_track_workers_per_gpu", None),
+            "motion_workers_per_gpu": getattr(ns, "motion_workers_per_gpu", None),
+            "slam_workers_per_gpu": getattr(ns, "slam_workers_per_gpu", None),
+            "infiller_workers_per_gpu": getattr(ns, "infiller_workers_per_gpu", None),
         }
         invalid_counts = {name: value for name, value in worker_counts.items() if value is not None and value < 1}
         if invalid_counts:
             raise ValueError(f"Worker counts must be >= 1: {invalid_counts}")
-        if args.any4d_batch_size < 1:
+        if any4d_batch_size < 1:
             raise ValueError("--any4d_batch_size must be >= 1")
-        if args.wave_stall_timeout_sec < 1:
+        if wave_stall_timeout_sec < 1:
             raise ValueError("--wave_stall_timeout_sec must be >= 1")
 
         return cls(
@@ -81,35 +106,40 @@ class BatchRunConfig:
             descriptors=descriptors,
             gpus=gpus,
             stages=stages,
-            resume=args.resume,
+            resume=bool(getattr(ns, "resume", True)),
             run_dir=run_dir,
-            checkpoint=args.checkpoint,
-            infiller_weight=args.infiller_weight,
-            img_focal=args.img_focal,
-            chunk_batch_size=args.chunk_batch_size,
-            num_workers=args.num_workers,
-            any4d_batch_size=args.any4d_batch_size,
-            render_batch_size=args.render_batch_size,
-            infiller_window_batch_size=args.infiller_window_batch_size,
-            detect_batch_size=args.detect_batch_size,
-            detect_device=args.detect_device,
-            detect_half_precision=args.detect_half_precision,
-            detect_io_workers=args.detect_io_workers,
-            rebuild_cam_space_cache=args.rebuild_cam_space_cache,
-            depth_predict_all_frames=args.depth_predict_all_frames,
-            any4d_repo_root=args.any4d_repo_root,
-            any4d_checkpoint_path=args.any4d_checkpoint_path,
-            any4d_resolution_set=args.any4d_resolution_set,
-            any4d_use_amp=args.any4d_use_amp,
-            stage3_tmp_root=args.stage3_tmp_root,
-            max_stage_retries=args.max_stage_retries,
-            wave_stall_timeout_sec=args.wave_stall_timeout_sec,
-            workers_per_gpu=args.workers_per_gpu,
-            detect_track_workers_per_gpu=args.detect_track_workers_per_gpu,
-            motion_workers_per_gpu=args.motion_workers_per_gpu,
-            slam_workers_per_gpu=args.slam_workers_per_gpu,
-            infiller_workers_per_gpu=args.infiller_workers_per_gpu,
-            enable_profiler=args.enable_profiler,
+            checkpoint=getattr(ns, "checkpoint", "./weights/hawor/checkpoints/hawor.ckpt"),
+            infiller_weight=getattr(ns, "infiller_weight", "./weights/hawor/checkpoints/infiller.pt"),
+            img_focal=getattr(ns, "img_focal", None),
+            chunk_batch_size=getattr(ns, "chunk_batch_size", 64),
+            num_workers=getattr(ns, "num_workers", 16),
+            any4d_batch_size=any4d_batch_size,
+            render_batch_size=getattr(ns, "render_batch_size", 8),
+            infiller_window_batch_size=getattr(ns, "infiller_window_batch_size", 64),
+            detect_batch_size=getattr(ns, "detect_batch_size", 128),
+            detect_device=getattr(ns, "detect_device", "cuda:0"),
+            detect_half_precision=bool(getattr(ns, "detect_half_precision", False)),
+            detect_io_workers=getattr(ns, "detect_io_workers", 8),
+            rebuild_cam_space_cache=bool(getattr(ns, "rebuild_cam_space_cache", False)),
+            depth_predict_all_frames=getattr(ns, "depth_predict_all_frames", True),
+            any4d_repo_root=getattr(ns, "any4d_repo_root", None),
+            any4d_checkpoint_path=getattr(ns, "any4d_checkpoint_path", None),
+            any4d_resolution_set=getattr(ns, "any4d_resolution_set", None),
+            any4d_use_amp=getattr(ns, "any4d_use_amp", None),
+            stage3_tmp_root=getattr(ns, "stage3_tmp_root", None),
+            infer_profile=getattr(ns, "infer_profile", DEFAULT_INFER_PROFILE),
+            local_cache_root=getattr(ns, "local_cache_root", None),
+            local_cache_quota_gb=getattr(ns, "local_cache_quota_gb", None),
+            local_cache_mode=getattr(ns, "local_cache_mode", "off"),
+            local_cache_min_frames=getattr(ns, "local_cache_min_frames", 1),
+            max_stage_retries=getattr(ns, "max_stage_retries", 1),
+            wave_stall_timeout_sec=wave_stall_timeout_sec,
+            workers_per_gpu=getattr(ns, "workers_per_gpu", 1),
+            detect_track_workers_per_gpu=getattr(ns, "detect_track_workers_per_gpu", None),
+            motion_workers_per_gpu=getattr(ns, "motion_workers_per_gpu", None),
+            slam_workers_per_gpu=getattr(ns, "slam_workers_per_gpu", None),
+            infiller_workers_per_gpu=getattr(ns, "infiller_workers_per_gpu", None),
+            enable_profiler=bool(getattr(ns, "enable_profiler", False)),
         )
 
     @property
@@ -126,3 +156,11 @@ class BatchRunConfig:
             "infiller": self.infiller_workers_per_gpu,
         }
         return overrides.get(stage) or self.workers_per_gpu
+
+    def worker_env_overrides(self) -> Mapping[str, str | None]:
+        return {
+            "HAWOR_LOCAL_CACHE_ROOT": self.local_cache_root,
+            "HAWOR_LOCAL_CACHE_QUOTA_GB": None if self.local_cache_quota_gb is None else str(self.local_cache_quota_gb),
+            "HAWOR_LOCAL_CACHE_MODE": self.local_cache_mode,
+            "HAWOR_LOCAL_CACHE_MIN_FRAMES": str(self.local_cache_min_frames),
+        }

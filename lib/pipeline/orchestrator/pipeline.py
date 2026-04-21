@@ -18,6 +18,7 @@ from lib.pipeline.clip_manifest import (
     write_clip_manifest,
     write_shard_dir_list,
 )
+from lib.pipeline.batch.cli import SHARED_PROFILE_CACHE_OPTION_DESTS
 from lib.pipeline.batch.state import load_status_payload_with_fallback
 from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
 from lib.pipeline.frame_sources import classify_descriptor_storage
@@ -75,10 +76,10 @@ def run_pipeline(args) -> None:
     dataset_cfg = config.get("dataset", {})
     paths_cfg = config.get("paths", {})
     runtimes_cfg = config.get("runtimes", {})
-    infer_cfg = config.get("infer", config.get("batch_infer", {}))
+    infer_cfg = config.get("infer", {})
     build_cfg = config.get("build", {})
     filter_cfg = config.get("filter", {})
-    adapter_cfg = config.get("adapter_config", config.get("buildai", {}))
+    adapter_cfg = config.get("adapter_config", {})
     annotation_cfg = config.get("annotation", {})
     validation_cfg = config.get("validation", {})
 
@@ -567,13 +568,7 @@ def run_pipeline(args) -> None:
             gpus = ",".join(str(item).strip() for item in gpus if str(item).strip())
         native_depth_common_cfg = {
             key: common_infer_cfg.get(key)
-            for key in (
-                "infer_profile",
-                "local_cache_root",
-                "local_cache_quota_gb",
-                "local_cache_mode",
-                "local_cache_min_frames",
-            )
+            for key in SHARED_PROFILE_CACHE_OPTION_DESTS
             if common_infer_cfg.get(key) is not None
         }
         native_depth_args = tuple(

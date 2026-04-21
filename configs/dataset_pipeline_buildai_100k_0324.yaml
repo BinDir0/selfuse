@@ -1,24 +1,32 @@
-adapter: buildai
-source_id: buildai_100k_0324
-split: train
+dataset:
+  adapter: buildai
+  source_id: buildai_100k_0324
+  split: train
+  # Smoke-test range first. Expand to 1-238 after validating the pipeline.
+  start_factory_id: 213
+  end_factory_id: 214
 
-# Smoke-test range first. Expand to 1-238 after validating the pipeline.
-factory_range: 213-214
+paths:
+  shard_root: /share_data/guantianrui/datasets/Egocentric-100K/processed_0324_jpg
+  annotation_root: /share_data/guantianrui/datasets/Egocentric-100K/annotations_0324
+  final_dataset_root: /share_data/guantianrui/datasets/Egocentric-100K/vla_0324
+  log_root: /share_data/guantianrui/dataset_pipeline_logs
 
-shard_root: /share_data/guantianrui/datasets/Egocentric-100K/processed_0324_jpg
-annotation_root: /share_data/guantianrui/datasets/Egocentric-100K/annotations_0324
-final_dataset_root: /share_data/guantianrui/datasets/Egocentric-100K/vla_0324
-log_root: /share_data/guantianrui/dataset_pipeline_logs
-
-hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
-slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4d/bin/python3.10
+runtimes:
+  hawor_python: /share_data/guantianrui/environment/anaconda3/envs/hawor/bin/python3.10
+  slam_python: /share_data/guantianrui/environment/anaconda3/envs/any4d/bin/python3.10
 
 infer:
   common:
     gpus: 0,1,2,3
     resume: true
+    infer_profile: throughput_80gb
     checkpoint: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/hawor.ckpt
     infiller_weight: /share_data/guantianrui/webhaworset/facHaWoRy/weights/hawor/checkpoints/infiller.pt
+    local_cache_root: /DATA/guantianrui/tmp/hawor_local_cache
+    local_cache_quota_gb: 2000
+    local_cache_mode: all
+    local_cache_min_frames: 96
   detect_motion:
     chunk_batch_size: 64
     num_workers: 16
@@ -38,9 +46,8 @@ filter:
   # max_camera_translation_step: 0.5
   # max_camera_rotation_step: 1.0
 
-require_annotation: false
-
 build:
+  require_annotation: false
   source_fps: 5.0
   target_fps: 30.0
   interpolate_labels: true

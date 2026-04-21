@@ -1,6 +1,6 @@
 # Configs
 
-This directory currently contains both examples and active recipe-style configs for the dataset pipeline.
+This directory contains active recipe-style configs and reusable examples for the official dataset pipeline schema.
 
 ## Naming Convention
 
@@ -8,11 +8,11 @@ Recommended interpretation:
 
 - `*.example.yaml`: templates to copy from for new runs
 - recipe-like files such as `dataset_pipeline_buildai_v9_30fps_part1.yaml`: concrete configs used for specific datasets or launches
-- `legacy_*`: configs for older layouts that are still supported through compatibility adapters
+- `legacy_*`: configs for legacy dataset adapters, still expressed in the official nested pipeline schema
 
 ## Official Config Shape
 
-New configs should prefer the normalized nested shape used by `scripts/run_dataset_pipeline.py`:
+All configs consumed by `scripts/run_dataset_pipeline.py` must use the nested shape below:
 
 ```yaml
 dataset:
@@ -42,7 +42,6 @@ validation: {}
 ## Current Examples
 
 - `dataset_pipeline_buildai.example.yaml`: standard BuildAI-style config
-- `dataset_pipeline_buildai.compact.example.yaml`: compact shorthand form
 - `dataset_pipeline_fpha.yaml`: ready-to-run FPHA config
 - `dataset_pipeline_flat_shard.example.yaml`: flat shard adapter example
 - `dataset_pipeline_fpha_tar.example.yaml`: FPHA sequence-per-tar adapter example
@@ -52,4 +51,16 @@ validation: {}
 
 ## Stability
 
-Existing config paths are intentionally not being renamed yet to avoid breaking launch scripts. The cleanup here is documentation-first: make the intended structure obvious without forcing a path migration immediately.
+Compact top-level pipeline configs are no longer supported. Breaking changes to the pipeline schema should be made by updating the official nested shape and the first-party callers together.
+
+## Throughput Knobs
+
+Useful safe-throughput keys now supported under `infer.common`:
+
+- `infer_profile: throughput_80gb`
+- `local_cache_root: /DATA/.../hawor_local_cache`
+- `local_cache_quota_gb: 2000`
+- `local_cache_mode: all`
+- `local_cache_min_frames: 96`
+
+These only change scheduling/cache defaults and do not change model or SLAM algorithm settings.

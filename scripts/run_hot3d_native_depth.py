@@ -50,6 +50,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.clip_manifest import load_clip_manifest  # noqa: E402
+from lib.pipeline.batch.cli import (  # noqa: E402
+    add_any4d_runtime_args,
+    add_infer_profile_arg,
+    add_local_cache_args,
+    normalize_batch_infer_args,
+)
 from lib.pipeline.native_depth import (  # noqa: E402
     NATIVE_DEPTH_DIRNAME,
     NATIVE_DEPTH_FILENAME,
@@ -67,53 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end", type=int, default=None, help="Exclusive end clip index in manifest")
     parser.add_argument("--gpus", type=str, default="0", help="Comma-separated CUDA device ids; use cpu for CPU mode")
     parser.add_argument("--resume", action="store_true", help="Skip clips whose native depth artifact already validates")
-    parser.add_argument(
-        "--infer_profile",
-        type=str,
-        default="standard",
-        choices=("standard", "throughput_80gb"),
-        help="Compatibility throughput profile. Currently accepted for config parity with batch infer.",
-    )
-    parser.add_argument(
-        "--local_cache_root",
-        type=str,
-        default=None,
-        help="Compatibility local cache root. Accepted for config parity with batch infer.",
-    )
-    parser.add_argument(
-        "--local_cache_quota_gb",
-        type=float,
-        default=None,
-        help="Compatibility local cache quota in GB. Accepted for config parity with batch infer.",
-    )
-    parser.add_argument(
-        "--local_cache_mode",
-        type=str,
-        default="off",
-        choices=("off", "tar", "image_sequence", "all"),
-        help="Compatibility local cache mode. Accepted for config parity with batch infer.",
-    )
-    parser.add_argument(
-        "--local_cache_min_frames",
-        type=int,
-        default=1,
-        help="Compatibility local cache minimum frames. Accepted for config parity with batch infer.",
-    )
+    add_infer_profile_arg(parser)
+    add_local_cache_args(parser)
     parser.add_argument(
         "--any4d_batch_size",
         type=int,
         default=32,
         help="Number of target frames per Any4D chunk; each chunk prepends one middle-frame reference view",
     )
-    parser.add_argument("--any4d_repo_root", type=str, default=None, help="Optional Any4D repo root")
-    parser.add_argument("--any4d_checkpoint_path", type=str, default=None, help="Optional Any4D checkpoint path")
-    parser.add_argument("--any4d_resolution_set", type=int, default=None, help="Any4D fixed resolution set, e.g. 518")
-    parser.add_argument(
-        "--any4d_use_amp",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Enable AMP during Any4D inference",
-    )
+    add_any4d_runtime_args(parser, include_depth_predict_all_frames=False, include_stage3_tmp_root=False)
     parser.add_argument(
         "--save_dtype",
         choices=("float16", "float32"),
@@ -400,9 +368,9 @@ def _build_summary(results: list[dict], manifest_path: Path, devices: list[str],
 
 
 def main() -> None:
-    args, unknown = build_parser().parse_known_args()
-    if unknown:
-        print(f"[native_depth] ignoring unknown args: {unknown}", file=sys.stderr, flush=True)
+    raw_argv = list(sys.argv[1:])
+    args = build_parser().parse_args(raw_argv)
+    normalize_batch_infer_args(args, raw_argv=raw_argv)
 
     manifest_path = Path(args.descriptor_manifest)
     records = load_clip_manifest(manifest_path)
