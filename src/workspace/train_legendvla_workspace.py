@@ -258,6 +258,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if cfg.training.train_depth is False:
             model.freeze_weights_in_depth()
 
+        # Without VLM data, language_model.norm.weight has no grad path;
+        # freeze it so it stays out of the optimizer and the DCP schema is
+        # stable across runs (no missing Adam-state keys on resume).
+        if OmegaConf.select(cfg, "dataset.vlm_dataset", default=None) is None:
+            model.freeze_final_lm_norm()
+
         self.vlm_freeze_updates, self.vlm_rewarmup_updates = self.get_vlm_stage_steps(cfg.training)
 
         # Dataset + dataloaders.

@@ -685,6 +685,14 @@ class LegendVLA(nn.Module):
         for param in self.parameters():
             param.requires_grad = False
 
+    def freeze_final_lm_norm(self) -> None:
+        # final RMSNorm only participates in last_hidden_states (CE / diffloss /
+        # reg_action_head). Without VLM data and without heads consuming
+        # last_hidden_states, it never sees a grad, Adam skips state allocation,
+        # and DCP metadata drops `exp_avg`/`exp_avg_sq`/`step` for it — which
+        # then blocks resume.
+        self.backbone.hf_language_model.norm.weight.requires_grad_(False)
+
     def infer_action(self, input: dict, **kwargs):
         from src.policy.legendvla_inference import infer_flow_action
 
