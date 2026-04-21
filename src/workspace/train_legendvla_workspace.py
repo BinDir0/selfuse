@@ -22,7 +22,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import wandb
-import webdataset as wds
 from omegaconf import OmegaConf
 from torch.profiler import (
     ProfilerActivity,
@@ -34,7 +33,11 @@ from torch.utils.data import DataLoader
 from .base_workspace import BaseWorkspace
 from src.model.common.model_average import ModelAveraging
 from src.policy.legendvla import LegendVLA
-from src.utils.checkpoint_util import TopKCheckpointManager, load_checkpoint
+from src.utils.checkpoint_util import (
+    TopKCheckpointManager,
+    enable_pathlib_local_pickle_compat,
+    load_checkpoint,
+)
 from src.utils.distributed_utils import (
     apply_fsdp2,
     build_mixed_precision_policy,
@@ -280,23 +283,35 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         dataset.distribute(rank=rank, world_size=world_size)
 
-        # WebLoader + unbatched→shuffle→batched: Level-2 shuffle across worker
-        # streams. Dataset yields single samples, so no .unbatched() needed;
-        # .batched() runs the custom collator after the cross-worker shuffle.
-        # Ref: https://aistore.nvidia.com/blog/2023/06/09/aisio-transforms-with-webdataset-pt-3
-        train_loader_kwargs = dict(cfg.dataloader.loader)
-        train_batch_size = train_loader_kwargs.pop("batch_size")
-        cross_worker_shuffle = int(cfg.dataloader.get("cross_worker_shuffle", 2000))
-        train_dataloader = wds.WebLoader(
-            dataset=dataset,
-            batch_size=None,
-            **train_loader_kwargs,
-        )
-        if cross_worker_shuffle > 0:
-            train_dataloader = train_dataloader.shuffle(cross_worker_shuffle)
-        train_dataloader = train_dataloader.batched(
-            train_batch_size, collation_fn=dataset.get_collator(),
-        )
+        # Two dataloader paths:
+        # - use_webloader=True: WebLoader + .shuffle().batched() for Level-2
+        #   cross-worker shuffle. Dataset yields single samples, .batched()
+        #   runs the custom collator after shuffle.
+        #   Ref: https://aistore.nvidia.com/blog/2023/06/09/aisio-transforms-with-webdataset-pt-3
+        # - use_webloader=False (default): plain DataLoader, no cross-worker shuffle.
+        webloader_cfg = cfg.dataloader.get("webloader", {}) or {}
+        use_webloader = bool(webloader_cfg.get("use_webloader", False))
+        if use_webloader:
+            import webdataset as wds
+            train_loader_kwargs = dict(cfg.dataloader.loader)
+            train_batch_size = train_loader_kwargs.pop("batch_size")
+            cross_worker_shuffle = int(webloader_cfg.get("cross_worker_shuffle", 0))
+            train_dataloader = wds.WebLoader(
+                dataset=dataset,
+                batch_size=None,
+                **train_loader_kwargs,
+            )
+            if cross_worker_shuffle > 0:
+                train_dataloader = train_dataloader.shuffle(cross_worker_shuffle)
+            train_dataloader = train_dataloader.batched(
+                train_batch_size, collation_fn=dataset.get_collator(),
+            )
+        else:
+            train_dataloader = DataLoader(
+                dataset=dataset,
+                collate_fn=dataset.get_collator(),
+                **cfg.dataloader.loader,
+            )
         # Eval is purely local (eval_with_averaged_model pre-unshards FSDP params),
         # so unequal batch counts across ranks are safe.
         val_dataset = dataset.get_validation_dataset()
@@ -395,6 +410,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if cfg.training.resume_checkpoint_path:
             if rank == 0:
                 print(f"[ckpt] resume: loading full workspace state from {cfg.training.resume_checkpoint_path}")
+            # Same as load_checkpoint(): DCP .metadata pickle compat (e.g. Py3.13 pathlib on Py3.10 workers).
+            enable_pathlib_local_pickle_compat()
             app_state = FSDPWorkspaceAppState(
                 model=self.model,
                 optimizer=self.optimizer,

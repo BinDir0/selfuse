@@ -116,10 +116,12 @@ data_collator:
     mem_enabled: ${policy.backbone.mem_temporal_attention.enabled}
 
 dataloader:
-  # Cross-worker shuffle buffer applied AFTER DataLoader round-robin, BEFORE
-  # .batched(). 0 disables. Default 2000 is enough to de-correlate batches
-  # across 4 workers without meaningful warmup cost.
-  cross_worker_shuffle: 2000
+  # Switch between plain DataLoader (default) and WebLoader with cross-worker
+  # shuffle. When use_webloader=true, cross_worker_shuffle > 0 enables a
+  # post-round-robin shuffle buffer to de-correlate batches across workers.
+  webloader:
+    use_webloader: false
+    cross_worker_shuffle: 0
   loader:
     batch_size: 20
     num_workers: 4

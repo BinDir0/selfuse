@@ -89,10 +89,18 @@ class ARActionTrainConfig:
 
 
 class InputMaskEmbeddings(nn.Module):
-    def __init__(self, hidden_size: int):
+    """Learnable vectors for span-masking state/action slot embeddings.
+
+    ``action`` is only registered when ``include_action`` is True, matching
+    ``build_slot_embeddings`` (action masking only runs under ``use_diffloss``).
+    """
+
+    def __init__(self, hidden_size: int, *, include_action: bool = True):
         super().__init__()
-        self.action = nn.Parameter(torch.randn(hidden_size) * 0.02)
         self.state = nn.Parameter(torch.randn(hidden_size) * 0.02)
+        if include_action:
+            self.action = nn.Parameter(torch.randn(hidden_size) * 0.02)
+
 
 
 class LegendVLA(nn.Module):
@@ -191,9 +199,13 @@ class LegendVLA(nn.Module):
             and self.ar_action_encoder is not None
         )
 
-        # Mask embeddings only needed when input_mask_enabled is True.
+        # Mask embeddings only when input_mask_enabled. Action vector only when
+        # use_diffloss (same as build_slot_embeddings: action branch is gated there).
         if self.ar_action_train_config.input_mask_enabled:
-            self.input_mask_embeddings = InputMaskEmbeddings(self.vlm_hidden_size)
+            self.input_mask_embeddings = InputMaskEmbeddings(
+                self.vlm_hidden_size,
+                include_action=self.use_diffloss,
+            )
 
         # World model components
         self.world_model_expert = world_model_expert
