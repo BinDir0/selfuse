@@ -22,6 +22,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import wandb
+import webdataset as wds
 from omegaconf import OmegaConf
 from torch.profiler import (
     ProfilerActivity,
@@ -279,10 +280,22 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         dataset.distribute(rank=rank, world_size=world_size)
 
-        train_dataloader = DataLoader(
+        # WebLoader + unbatched→shuffle→batched: Level-2 shuffle across worker
+        # streams. Dataset yields single samples, so no .unbatched() needed;
+        # .batched() runs the custom collator after the cross-worker shuffle.
+        # Ref: https://aistore.nvidia.com/blog/2023/06/09/aisio-transforms-with-webdataset-pt-3
+        train_loader_kwargs = dict(cfg.dataloader.loader)
+        train_batch_size = train_loader_kwargs.pop("batch_size")
+        cross_worker_shuffle = int(cfg.dataloader.get("cross_worker_shuffle", 2000))
+        train_dataloader = wds.WebLoader(
             dataset=dataset,
-            collate_fn=dataset.get_collator(),
-            **cfg.dataloader.loader,
+            batch_size=None,
+            **train_loader_kwargs,
+        )
+        if cross_worker_shuffle > 0:
+            train_dataloader = train_dataloader.shuffle(cross_worker_shuffle)
+        train_dataloader = train_dataloader.batched(
+            train_batch_size, collation_fn=dataset.get_collator(),
         )
         # Eval is purely local (eval_with_averaged_model pre-unshards FSDP params),
         # so unequal batch counts across ranks are safe.

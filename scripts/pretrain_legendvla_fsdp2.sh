@@ -72,9 +72,9 @@ echo "Master Port: $MASTER_PORT"
 echo "Total Processes: $TOTAL_PROCESSES"
 echo "Hostlist: $HOSTLIST"
 
-echo "Cleaning up previous runs on all nodes..."
-remote_cleanup
-echo "Cleanup complete."
+# echo "Cleaning up previous runs on all nodes..."
+# remote_cleanup
+# echo "Cleanup complete."
 
 read -r -d '' REMOTE_SCRIPT <<EOF || true
 cd "$PROJECT_DIR"
