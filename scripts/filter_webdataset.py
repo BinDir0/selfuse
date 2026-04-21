@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from lib.pipeline.exporters.webdataset_rewriter import (  # noqa: E402
     iter_shard_paths,
     iter_shard_samples,
+    split_sample_member_name,
     validate_sample_record,
     write_sample_to_tar,
 )
@@ -46,12 +47,27 @@ _WORKER_ARGS = None
 _WORKER_OUTPUT_DIR = None
 _WORKER_KEEP_BY_CLIP = None
 _SHARD_DATA_EXCEPTIONS = (OSError, tarfile.TarError, ValueError)
+TAR_BLOCK_SIZE = 512
+REGULAR_TAR_TYPES = {b"", b"0", b"\0", b"7"}
 
 
 def _auto_chunksize(total_items: int, workers: int) -> int:
     if total_items <= 0:
         return 1
-    return max(1, min(64, total_items // max(1, workers * 4) or 1))
+    # Shard analysis/rewrite is heavy enough that large pool chunks make tqdm
+    # look stuck for minutes before the first worker returns a batch.
+    return max(1, min(4, total_items // max(1, workers * 16) or 1))
+
+
+def _parse_tar_int(field: bytes) -> int:
+    raw = field.rstrip(b"\0 ").strip()
+    if not raw:
+        return 0
+    return int(raw, 8)
+
+
+def _round_tar_size(size: int) -> int:
+    return ((int(size) + TAR_BLOCK_SIZE - 1) // TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE
 
 
 def build_parser():
@@ -221,6 +237,75 @@ def _sample_missing_fields(sample: dict) -> list[str]:
     return missing
 
 
+def _new_analysis_sample(sample_key: str) -> dict:
+    return {
+        "key": sample_key,
+        "image_present": False,
+        "lowdim_bytes": None,
+        "meta_bytes": None,
+    }
+
+
+def _iter_analysis_samples_fast(shard_path: str):
+    current_sample = None
+
+    with open(shard_path, "rb", buffering=1024 * 1024) as handle:
+        while True:
+            header = handle.read(TAR_BLOCK_SIZE)
+            if not header:
+                break
+            if len(header) != TAR_BLOCK_SIZE:
+                raise ValueError(f"Short tar header in {shard_path}")
+            if header == b"\0" * TAR_BLOCK_SIZE:
+                break
+
+            typeflag = header[156:157]
+            try:
+                size = _parse_tar_int(header[124:136])
+            except Exception as error:
+                raise ValueError(f"Invalid tar size field in {shard_path}: {error}") from error
+
+            name = header[0:100].rstrip(b"\0")
+            prefix = header[345:500].rstrip(b"\0")
+            member_name = (prefix + b"/" + name).decode("utf-8") if prefix else name.decode("utf-8")
+            rounded_size = _round_tar_size(size)
+
+            if typeflag not in REGULAR_TAR_TYPES:
+                handle.seek(rounded_size, os.SEEK_CUR)
+                continue
+
+            sample_key, _, field_name = split_sample_member_name(member_name)
+            if sample_key is None:
+                raise ValueError(f"Unsupported shard member: {member_name}")
+
+            if current_sample is None:
+                current_sample = _new_analysis_sample(sample_key)
+            elif current_sample["key"] != sample_key:
+                yield current_sample
+                current_sample = _new_analysis_sample(sample_key)
+
+            if field_name == "image_bytes":
+                current_sample["image_present"] = True
+                handle.seek(rounded_size, os.SEEK_CUR)
+                continue
+
+            if field_name == "mano_bytes":
+                handle.seek(rounded_size, os.SEEK_CUR)
+                continue
+
+            payload = handle.read(size)
+            if len(payload) != size:
+                raise ValueError(f"Short tar payload for {member_name} in {shard_path}")
+            padding = rounded_size - size
+            if padding > 0:
+                handle.seek(padding, os.SEEK_CUR)
+
+            current_sample[field_name] = payload
+
+    if current_sample is not None:
+        yield current_sample
+
+
 def _flush_analyze_clip_block(
     *,
     clip_id: str | None,
@@ -253,6 +338,9 @@ def analyze_shard(
     compute_motion_metrics: bool = True,
     compute_camera_space_metrics: bool = True,
 ) -> dict:
+    if not compute_motion_metrics and not compute_camera_space_metrics:
+        return analyze_shard_fast_hard_rules(shard_path)
+
     shard_name = os.path.basename(shard_path)
     shard_result = {
         "shard_name": shard_name,
@@ -350,6 +438,108 @@ def analyze_shard(
     return shard_result
 
 
+def analyze_shard_fast_hard_rules(shard_path: str) -> dict:
+    shard_name = os.path.basename(shard_path)
+    shard_result = {
+        "shard_name": shard_name,
+        "samples_total": 0,
+        "clips_total": 0,
+        "incomplete_samples": 0,
+        "clip_metrics": [],
+        "shard_error": None,
+    }
+
+    current_clip_id = None
+    current_clip_stats = None
+
+    try:
+        for sample in _iter_analysis_samples_fast(shard_path):
+            shard_result["samples_total"] += 1
+            missing_fields = []
+            if not sample["image_present"]:
+                missing_fields.append("image_bytes")
+            if sample["lowdim_bytes"] is None:
+                missing_fields.append("lowdim_bytes")
+            if sample["meta_bytes"] is None:
+                missing_fields.append("meta_bytes")
+
+            meta = None
+            if sample["meta_bytes"] is not None:
+                try:
+                    meta = json.loads(sample["meta_bytes"].decode("utf-8"))
+                except Exception:
+                    meta = None
+            clip_id = _sample_clip_id(sample, meta)
+
+            if current_clip_id is None:
+                current_clip_id = clip_id
+                current_clip_stats = _new_clip_stats(clip_id)
+            elif clip_id != current_clip_id:
+                shard_result = _flush_analyze_clip_block(
+                    clip_id=current_clip_id,
+                    clip_stats=current_clip_stats,
+                    shard_result=shard_result,
+                )
+                current_clip_id = clip_id
+                current_clip_stats = _new_clip_stats(clip_id)
+
+            if missing_fields:
+                shard_result["incomplete_samples"] += 1
+                current_clip_stats["incomplete_sample_frames"] += 1
+                if "meta_bytes" in missing_fields:
+                    current_clip_stats["invalid_meta_frames"] += 1
+                if "image_bytes" in missing_fields or "lowdim_bytes" in missing_fields:
+                    current_clip_stats["invalid_lowdim_frames"] += 1
+                _update_clip_stats(
+                    current_clip_stats,
+                    sample["key"],
+                    meta if meta is not None else {},
+                    None,
+                    count_invalid_lowdim=False,
+                    compute_motion_metrics=False,
+                    compute_camera_space_metrics=False,
+                )
+                continue
+
+            if meta is None:
+                current_clip_stats["invalid_meta_frames"] += 1
+                _update_clip_stats(
+                    current_clip_stats,
+                    sample["key"],
+                    {},
+                    None,
+                    count_invalid_lowdim=False,
+                    compute_motion_metrics=False,
+                    compute_camera_space_metrics=False,
+                )
+                continue
+
+            try:
+                lowdim = decode_lowdim(sample["lowdim_bytes"])
+            except Exception:
+                lowdim = None
+            _update_clip_stats(
+                current_clip_stats,
+                sample["key"],
+                meta,
+                lowdim,
+                compute_motion_metrics=False,
+                compute_camera_space_metrics=False,
+            )
+    except _SHARD_DATA_EXCEPTIONS as exc:
+        shard_result["clips_total"] = 0
+        shard_result["clip_metrics"] = []
+        shard_result["shard_error"] = _serialize_shard_error(exc)
+        return shard_result
+
+    shard_result = _flush_analyze_clip_block(
+        clip_id=current_clip_id,
+        clip_stats=current_clip_stats,
+        shard_result=shard_result,
+    )
+    return shard_result
+
+
 def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool]) -> dict:
     shard_name = os.path.basename(shard_path)
     output_path = os.path.join(output_dir, shard_name)
@@ -361,6 +551,8 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
         "incomplete_samples": 0,
         "frames_written": 0,
         "clips_written": 0,
+        "frames_dropped": 0,
+        "clips_dropped": 0,
         "shard_written": 0,
         "shard_error": None,
     }
@@ -369,6 +561,7 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
     current_clip_id = None
     current_keep = False
     clip_wrote_frames = False
+    current_clip_frames = 0
     try:
         for sample in iter_shard_samples(shard_path):
             result["samples_total"] += 1
@@ -389,10 +582,15 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
             if clip_id != current_clip_id:
                 if current_clip_id is not None and current_keep and clip_wrote_frames:
                     result["clips_written"] += 1
+                elif current_clip_id is not None and not current_keep and current_clip_frames > 0:
+                    result["clips_dropped"] += 1
+                    result["frames_dropped"] += current_clip_frames
                 current_clip_id = clip_id
                 current_keep = bool(keep_by_clip.get(clip_id, False))
                 clip_wrote_frames = False
+                current_clip_frames = 0
 
+            current_clip_frames += 1
             if not current_keep:
                 continue
 
@@ -413,6 +611,9 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
 
         if current_clip_id is not None and current_keep and clip_wrote_frames:
             result["clips_written"] += 1
+        elif current_clip_id is not None and not current_keep and current_clip_frames > 0:
+            result["clips_dropped"] += 1
+            result["frames_dropped"] += current_clip_frames
     except _SHARD_DATA_EXCEPTIONS as exc:
         if tar_writer is not None:
             tar_writer.close()
@@ -420,6 +621,8 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
             os.remove(tmp_path)
         result["frames_written"] = 0
         result["clips_written"] = 0
+        result["frames_dropped"] = 0
+        result["clips_dropped"] = 0
         result["shard_written"] = 0
         result["shard_error"] = _serialize_shard_error(exc)
         return result
@@ -474,6 +677,8 @@ def build_report(
         "shards_written": 0,
         "frames_written": 0,
         "clips_written": 0,
+        "frames_dropped": 0,
+        "clips_dropped": 0,
         "incomplete_samples": 0,
         "errored_shards": 0,
         "errored_shard_details": [],
@@ -537,6 +742,8 @@ def build_report(
             rewrite["shards_written"] += rewrite_item["shard_written"]
             rewrite["frames_written"] += rewrite_item["frames_written"]
             rewrite["clips_written"] += rewrite_item["clips_written"]
+            rewrite["frames_dropped"] += int(rewrite_item.get("frames_dropped", 0))
+            rewrite["clips_dropped"] += int(rewrite_item.get("clips_dropped", 0))
             rewrite["incomplete_samples"] += int(rewrite_item.get("incomplete_samples", 0))
             if rewrite_item.get("shard_error") is not None:
                 shard_summary["rewrite_error"] = rewrite_item["shard_error"]
@@ -603,6 +810,81 @@ def build_report(
     if output_dir:
         report["rewrite"] = rewrite
     return report
+
+
+def _new_analysis_progress_state() -> dict:
+    return {
+        "samples_total": 0,
+        "clips_total": 0,
+        "incomplete_samples": 0,
+        "errored_shards": 0,
+        "dropped_clips": 0,
+        "dropped_frames": 0,
+    }
+
+
+def _update_analysis_progress_state(state: dict, shard_result: dict, decision_criteria: dict | None = None) -> None:
+    state["samples_total"] += int(shard_result.get("samples_total", 0))
+    state["clips_total"] += int(shard_result.get("clips_total", 0))
+    state["incomplete_samples"] += int(shard_result.get("incomplete_samples", 0))
+    if shard_result.get("shard_error") is not None:
+        state["errored_shards"] += 1
+    if decision_criteria is None:
+        return
+    for item in shard_result.get("clip_metrics", []):
+        keep, _ = decide_clip_quality(item["metrics"], decision_criteria)
+        if keep:
+            continue
+        state["dropped_clips"] += 1
+        state["dropped_frames"] += int(item["metrics"].get("frames_total", 0))
+
+
+def _set_analysis_progress_postfix(progress, state: dict, *, show_drop: bool) -> None:
+    postfix = {
+        "samples": int(state["samples_total"]),
+        "clips": int(state["clips_total"]),
+        "incomplete": int(state["incomplete_samples"]),
+    }
+    if int(state["errored_shards"]) > 0:
+        postfix["err"] = int(state["errored_shards"])
+    if show_drop:
+        postfix["drop_clips"] = int(state["dropped_clips"])
+        postfix["drop_frames"] = int(state["dropped_frames"])
+    progress.set_postfix(refresh=False, **postfix)
+
+
+def _new_rewrite_progress_state() -> dict:
+    return {
+        "frames_written": 0,
+        "clips_written": 0,
+        "frames_dropped": 0,
+        "clips_dropped": 0,
+        "incomplete_samples": 0,
+        "errored_shards": 0,
+    }
+
+
+def _update_rewrite_progress_state(state: dict, shard_result: dict) -> None:
+    state["frames_written"] += int(shard_result.get("frames_written", 0))
+    state["clips_written"] += int(shard_result.get("clips_written", 0))
+    state["frames_dropped"] += int(shard_result.get("frames_dropped", 0))
+    state["clips_dropped"] += int(shard_result.get("clips_dropped", 0))
+    state["incomplete_samples"] += int(shard_result.get("incomplete_samples", 0))
+    if shard_result.get("shard_error") is not None:
+        state["errored_shards"] += 1
+
+
+def _set_rewrite_progress_postfix(progress, state: dict) -> None:
+    postfix = {
+        "keep_clips": int(state["clips_written"]),
+        "drop_clips": int(state["clips_dropped"]),
+        "keep_frames": int(state["frames_written"]),
+        "drop_frames": int(state["frames_dropped"]),
+        "incomplete": int(state["incomplete_samples"]),
+    }
+    if int(state["errored_shards"]) > 0:
+        postfix["err"] = int(state["errored_shards"])
+    progress.set_postfix(refresh=False, **postfix)
 
 
 def _is_same_or_nested(path_a: Path, path_b: Path) -> bool:
@@ -710,16 +992,21 @@ def main():
         "total_shards_available": total_shards,
         "output_dir": str(output_dir) if output_dir else None,
     }
+    progress_decision_criteria = None if args.outlier_checks else dict(args_dict)
 
     if args.workers <= 1:
-        analysis_results = [
-            analyze_shard(
-                shard_path,
-                compute_motion_metrics=compute_motion_metrics,
-                compute_camera_space_metrics=compute_camera_space_metrics,
-            )
-            for shard_path in tqdm(shard_paths, desc="Analyze shards")
-        ]
+        analysis_results = []
+        progress_state = _new_analysis_progress_state()
+        with tqdm(shard_paths, desc="Analyze shards") as progress:
+            for shard_path in progress:
+                shard_result = analyze_shard(
+                    shard_path,
+                    compute_motion_metrics=compute_motion_metrics,
+                    compute_camera_space_metrics=compute_camera_space_metrics,
+                )
+                analysis_results.append(shard_result)
+                _update_analysis_progress_state(progress_state, shard_result, progress_decision_criteria)
+                _set_analysis_progress_postfix(progress, progress_state, show_drop=progress_decision_criteria is not None)
     else:
         mp_context = get_context()
         with mp_context.Pool(
@@ -727,13 +1014,14 @@ def main():
             initializer=_worker_init,
             initargs=(args_dict, str(output_dir) if output_dir else None, None),
         ) as pool:
-            analysis_results = list(
-                tqdm(
-                    pool.imap_unordered(_worker_analyze_shard, shard_paths, chunksize=chunksize),
-                    total=len(shard_paths),
-                    desc="Analyze shards",
-                )
-            )
+            analysis_results = []
+            progress_state = _new_analysis_progress_state()
+            with tqdm(total=len(shard_paths), desc="Analyze shards") as progress:
+                for shard_result in pool.imap_unordered(_worker_analyze_shard, shard_paths, chunksize=chunksize):
+                    analysis_results.append(shard_result)
+                    progress.update(1)
+                    _update_analysis_progress_state(progress_state, shard_result, progress_decision_criteria)
+                    _set_analysis_progress_postfix(progress, progress_state, show_drop=progress_decision_criteria is not None)
 
     analysis_results.sort(key=lambda item: item["shard_name"])
     clip_metrics = []
@@ -766,10 +1054,14 @@ def main():
     rewrite_results = None
     if output_dir:
         if args.workers <= 1:
-            rewrite_results = [
-                rewrite_shard(shard_path, str(output_dir), keep_by_clip)
-                for shard_path in tqdm(shard_paths, desc="Rewrite shards")
-            ]
+            rewrite_results = []
+            progress_state = _new_rewrite_progress_state()
+            with tqdm(shard_paths, desc="Rewrite shards") as progress:
+                for shard_path in progress:
+                    shard_result = rewrite_shard(shard_path, str(output_dir), keep_by_clip)
+                    rewrite_results.append(shard_result)
+                    _update_rewrite_progress_state(progress_state, shard_result)
+                    _set_rewrite_progress_postfix(progress, progress_state)
         else:
             mp_context = get_context()
             with mp_context.Pool(
@@ -777,13 +1069,14 @@ def main():
                 initializer=_worker_init,
                 initargs=(resolved_args, str(output_dir), keep_by_clip),
             ) as pool:
-                rewrite_results = list(
-                    tqdm(
-                        pool.imap_unordered(_worker_rewrite_shard, shard_paths, chunksize=chunksize),
-                        total=len(shard_paths),
-                        desc="Rewrite shards",
-                    )
-                )
+                rewrite_results = []
+                progress_state = _new_rewrite_progress_state()
+                with tqdm(total=len(shard_paths), desc="Rewrite shards") as progress:
+                    for shard_result in pool.imap_unordered(_worker_rewrite_shard, shard_paths, chunksize=chunksize):
+                        rewrite_results.append(shard_result)
+                        progress.update(1)
+                        _update_rewrite_progress_state(progress_state, shard_result)
+                        _set_rewrite_progress_postfix(progress, progress_state)
         rewrite_results.sort(key=lambda item: item["shard_name"])
 
     report = build_report(source_dir, output_dir, analysis_results, clip_decisions, resolved_args, threshold_info, rewrite_results)
