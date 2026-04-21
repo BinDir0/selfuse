@@ -9,6 +9,7 @@ import os
 import queue as queue_module
 import sys
 import tarfile
+import traceback
 from io import BytesIO
 from multiprocessing import get_context
 from pathlib import Path
@@ -309,10 +310,10 @@ def _process_record(record, args, runner: dict) -> dict:
     }
 
 
-def _worker_main(records, args_dict: dict, device: str, queue) -> None:
-    from lib.pipeline.any4d_depth import build_any4d_runner
-
+def _worker_main(records, args_dict: dict, device: str, worker_index: int, queue) -> None:
     try:
+        from lib.pipeline.any4d_depth import build_any4d_runner
+
         os.environ.setdefault("OMP_NUM_THREADS", "1")
         args = argparse.Namespace(**args_dict)
         runner = build_any4d_runner(
@@ -332,10 +333,26 @@ def _worker_main(records, args_dict: dict, device: str, queue) -> None:
                     "seq_folder": str(record.descriptor.seq_folder),
                     "status": "failed",
                     "error": str(error),
+                    "traceback": traceback.format_exc(),
+                    "worker_index": worker_index,
+                    "device": device,
                 }
             queue.put(result)
+    except BaseException as error:
+        queue.put(
+            {
+                "clip_id": None,
+                "seq_folder": None,
+                "status": "failed",
+                "error": str(error),
+                "traceback": traceback.format_exc(),
+                "worker_index": worker_index,
+                "device": device,
+                "phase": "worker_init_or_loop",
+            }
+        )
     finally:
-        queue.put({"status": "_worker_done"})
+        queue.put({"status": "_worker_done", "worker_index": worker_index, "device": device})
 
 
 def _build_summary(results: list[dict], manifest_path: Path, devices: list[str], start: int, end: int | None) -> dict:
@@ -400,6 +417,9 @@ def main() -> None:
                         "seq_folder": str(record.descriptor.seq_folder),
                         "status": "failed",
                         "error": str(error),
+                        "traceback": traceback.format_exc(),
+                        "worker_index": 0,
+                        "device": devices[0],
                     }
                 )
     else:
@@ -408,12 +428,12 @@ def main() -> None:
         processes = []
         args_dict = vars(args).copy()
         active_workers = 0
-        for device, worker_records in zip(devices, assignments):
+        for worker_index, (device, worker_records) in enumerate(zip(devices, assignments)):
             if not worker_records:
                 continue
             process = ctx.Process(
                 target=_worker_main,
-                args=(worker_records, args_dict, device, queue),
+                args=(worker_records, args_dict, device, worker_index, queue),
             )
             process.start()
             processes.append(process)
@@ -458,6 +478,7 @@ def main() -> None:
                         "seq_folder": None,
                         "status": "failed",
                         "error": f"worker exited with code {process.exitcode}",
+                        "traceback": None,
                     }
                 )
 
