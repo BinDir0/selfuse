@@ -125,6 +125,7 @@ class RepackWriter:
                 sample["lowdim_bytes"],
                 sample["meta_bytes"],
                 mano_bytes=sample.get("mano_bytes"),
+                depth_bytes=sample.get("depth_bytes"),
             )
         self._current_frame_count += clip_frame_count
         self._current_clip_count += 1

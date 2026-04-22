@@ -181,6 +181,7 @@ def rewrite_shard(
                 sample["lowdim_bytes"],
                 updated_meta,
                 mano_bytes=sample.get("mano_bytes"),
+                depth_bytes=sample.get("depth_bytes"),
             )
             frames_written += 1
     except Exception:

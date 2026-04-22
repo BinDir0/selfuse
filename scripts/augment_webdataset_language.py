@@ -157,6 +157,7 @@ def rewrite_shard(shard_path, output_dir, episode_lookup):
                 sample["lowdim_bytes"],
                 updated_meta,
                 mano_bytes=sample.get("mano_bytes"),
+                depth_bytes=sample.get("depth_bytes"),
             )
             frames_written += 1
             written_episodes.add(episode_index)

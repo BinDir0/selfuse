@@ -13,6 +13,7 @@ from multiprocessing import current_process
 import numpy as np
 import torch
 
+from lib.pipeline.depth_artifacts import DEPTH_EXPORT_ENCODING, DEPTH_EXPORT_SCHEMA, encode_depth_npy
 from lib.pipeline.exporters.mano_codec import MANO_SAMPLE_SHAPE, mano_meta_fields
 from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
 from lib.pipeline.frame_sources import (
@@ -93,6 +94,7 @@ def plan_manifest_shards(episodes: list[dict], frames_per_shard: int, output_dir
                 "source_fps": float(ep.get("source_fps", 5.0)),
                 "target_fps": float(ep.get("target_fps", 30.0)),
                 "interpolate_labels": bool(ep.get("interpolate_labels", False)),
+                "export_depth": bool(ep.get("export_depth", False)),
             }
         )
         shard_frame_count += num_frames
@@ -136,12 +138,13 @@ def encode_array_npy(array) -> bytes:
     return buf.getvalue()
 
 
-def prepare_sample_payload_from_bytes(key: str, image_bytes: bytes, lowdim, mano, meta_bytes: bytes):
+def prepare_sample_payload_from_bytes(key: str, image_bytes: bytes, lowdim, mano, meta_bytes: bytes, depth=None):
     return (
         key,
         image_bytes,
         encode_lowdim_npy(lowdim),
         encode_array_npy(mano),
+        None if depth is None else encode_depth_npy(depth),
         meta_bytes,
     )
 
@@ -152,6 +155,7 @@ def add_prepared_sample_bytes_to_tar(
     image_bytes: bytes,
     lowdim_bytes: bytes,
     mano_bytes: bytes,
+    depth_bytes: bytes | None,
     meta_bytes: bytes,
 ) -> None:
     img_info = tarfile.TarInfo(name=f"{key}.image.jpg")
@@ -165,6 +169,11 @@ def add_prepared_sample_bytes_to_tar(
     mano_info = tarfile.TarInfo(name=f"{key}.mano.npy")
     mano_info.size = len(mano_bytes)
     tar_writer.addfile(mano_info, io.BytesIO(mano_bytes))
+
+    if depth_bytes is not None:
+        depth_info = tarfile.TarInfo(name=f"{key}.depth.npy")
+        depth_info.size = len(depth_bytes)
+        tar_writer.addfile(depth_info, io.BytesIO(depth_bytes))
 
     meta_info = tarfile.TarInfo(name=f"{key}.meta.json")
     meta_info.size = len(meta_bytes)
@@ -191,6 +200,9 @@ def build_manifest_meta_prefix(episode_slice: dict) -> bytes:
         "camera_extrinsic_convention": "w2c",
         **mano_fields,
     }
+    if episode_slice.get("export_depth"):
+        meta["depth_schema"] = DEPTH_EXPORT_SCHEMA
+        meta["depth_encoding"] = DEPTH_EXPORT_ENCODING
     return (json.dumps(meta, ensure_ascii=False, separators=(",", ":"))[:-1] + ',"presence":').encode("utf-8")
 
 
@@ -255,6 +267,7 @@ def worker_process_shard(task):
                         source_fps=float(episode_slice.get("source_fps", 5.0)),
                         target_fps=float(episode_slice.get("target_fps", 30.0)),
                         interpolate_labels=bool(episode_slice.get("interpolate_labels", False)),
+                        export_depth=bool(episode_slice.get("export_depth", False)),
                     )
 
                 episode_data = _worker_episode_cache[cache_key]
@@ -286,6 +299,7 @@ def worker_process_shard(task):
                                 episode_data["lowdim_all"][frame_idx],
                                 episode_data["mano_all"][frame_idx],
                                 meta_bytes,
+                                None if not episode_slice.get("export_depth", False) else episode_data["depth_all"][frame_idx],
                             )
                         )
                         if len(pending) >= WRITE_PREFETCH_DEPTH:
@@ -313,13 +327,14 @@ def worker_process_shard(task):
                     os.makedirs(os.path.dirname(task["output_path"]), exist_ok=True)
                     tar_writer = tarfile.open(task["tmp_path"], "w")
 
-                for key, image_bytes, lowdim_bytes, mano_bytes, meta_bytes in clip_samples:
+                for key, image_bytes, lowdim_bytes, mano_bytes, depth_bytes, meta_bytes in clip_samples:
                     add_prepared_sample_bytes_to_tar(
                         tar_writer,
                         key,
                         image_bytes,
                         lowdim_bytes,
                         mano_bytes,
+                        depth_bytes,
                         meta_bytes,
                     )
                     frames_written += 1

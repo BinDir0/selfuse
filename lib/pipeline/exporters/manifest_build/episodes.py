@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from lib.pipeline.annotation_protocol import build_annotation_issue_from_candidates, load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
+from lib.pipeline.depth_artifacts import load_export_depths
 from lib.pipeline.frame_sources import classify_descriptor_storage, validate_descriptor_for_frame_reads
 from lib.pipeline.exporters.mano_codec import build_mano_pca_frame_features
 from lib.pipeline.exporters.webdataset_features import (
@@ -187,6 +188,7 @@ def load_descriptor_episode_features(
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
+    export_depth: bool = False,
 ):
     seq_folder = ep["seq_folder"]
     requested_frame_count = ep.get("num_valid_frames")
@@ -207,6 +209,12 @@ def load_descriptor_episode_features(
             else None
         )
         if cached is not None:
+            if export_depth:
+                try:
+                    cached["depth_all"] = load_export_depths(seq_folder, int(cached["frame_count"]))
+                except Exception as error:
+                    print(f"  Skip {ep['episode_id']}: invalid depth artifact: {error}")
+                    return None
             return cached
 
     if descriptor_uses_native_features(ep["descriptor"]):
@@ -217,6 +225,12 @@ def load_descriptor_episode_features(
             return None
         if episode_data is None:
             return None
+        if export_depth:
+            try:
+                episode_data["depth_all"] = load_export_depths(seq_folder, int(episode_data["frame_count"]))
+            except Exception as error:
+                print(f"  Skip {ep['episode_id']}: invalid depth artifact: {error}")
+                return None
         write_cached_features(
             seq_folder,
             feature_cache_dir,
@@ -313,6 +327,12 @@ def load_descriptor_episode_features(
         "mano_all": mano_all[:frame_count],
         "presence_per_frame": presence_per_frame[:frame_count],
     }
+    if export_depth:
+        try:
+            episode_data["depth_all"] = load_export_depths(seq_folder, int(frame_count))
+        except Exception as error:
+            print(f"  Skip {ep['episode_id']}: invalid depth artifact: {error}")
+            return None
     write_cached_features(
         seq_folder,
         feature_cache_dir,

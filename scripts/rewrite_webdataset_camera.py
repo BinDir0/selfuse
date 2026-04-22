@@ -372,6 +372,7 @@ def process_shard(shard_path: str) -> dict:
                     lowdim_bytes,
                     sample["meta_bytes"],
                     mano_bytes=sample.get("mano_bytes"),
+                    depth_bytes=sample.get("depth_bytes"),
                 )
                 frames_rewritten += 1
                 clips_touched.add(clip_id)

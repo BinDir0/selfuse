@@ -57,6 +57,7 @@ build:
   source_fps: 5.0
   target_fps: 30.0
   interpolate_labels: true
+  export_depth: true
 
 validation:
   max_clips: 200

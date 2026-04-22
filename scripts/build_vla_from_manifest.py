@@ -58,6 +58,11 @@ def get_parser():
         action="store_true",
         help="Skip non-empty shard tar files that already exist in output_dir",
     )
+    parser.add_argument(
+        "--export_depth",
+        action="store_true",
+        help="Export per-frame depth as {key}.depth.npy encoded as uint16 millimeters when seq_folder depth artifacts exist",
+    )
     return parser
 
 
@@ -83,6 +88,7 @@ def main():
         source_fps=args.source_fps,
         target_fps=args.target_fps,
         interpolate_labels=args.interpolate_labels,
+        export_depth=args.export_depth,
         annotation_issue_report_out=args.annotation_issue_report_out,
         resume=args.resume,
     )

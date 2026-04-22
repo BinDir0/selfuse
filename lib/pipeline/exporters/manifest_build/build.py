@@ -40,6 +40,7 @@ def run_manifest_build(
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
+    export_depth: bool = False,
     annotation_issue_report_out: str | None = None,
     resume: bool = False,
 ):
@@ -77,6 +78,10 @@ def run_manifest_build(
 
     if not episodes:
         raise RuntimeError(f"No valid manifest episodes found: {prepare_stats}")
+
+    if export_depth:
+        for episode in episodes:
+            episode["export_depth"] = True
 
     repeated = repeat_manifest_episodes(episodes, repeat_episodes)
     shard_tasks = plan_manifest_shards(repeated, frames_per_shard, output_dir)
