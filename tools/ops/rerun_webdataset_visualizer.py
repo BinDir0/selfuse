@@ -27,10 +27,12 @@ RIGHT_WORLD_ROOT = "/world/hands/right"
 LEFT_IMAGE_ROOT = "/world/camera/pinhole/image/hands/left"
 RIGHT_IMAGE_ROOT = "/world/camera/pinhole/image/hands/right"
 
-LEFT_COLOR = np.array([255, 210, 0], dtype=np.uint8)
-LEFT_LINE_COLOR = np.array([255, 160, 0], dtype=np.uint8)
-RIGHT_COLOR = np.array([0, 220, 255], dtype=np.uint8)
-RIGHT_LINE_COLOR = np.array([0, 180, 255], dtype=np.uint8)
+# Match demo_offline.py hand overlay colors as closely as possible.
+# demo_offline uses left=(200,100,128) and right=(202,152,53) on RGB frames.
+LEFT_COLOR = np.array([200, 100, 128], dtype=np.uint8)
+LEFT_LINE_COLOR = np.array([176, 82, 110], dtype=np.uint8)
+RIGHT_COLOR = np.array([202, 152, 53], dtype=np.uint8)
+RIGHT_LINE_COLOR = np.array([176, 128, 42], dtype=np.uint8)
 MANO_FACE_EXTRA = np.array(
     [
         [92, 38, 234],
@@ -119,6 +121,14 @@ def build_parser():
     parser.add_argument("--filter-key", default="", help="Initial substring filter on key / clip_id / instruction")
     parser.add_argument("--filter-presence", type=int, default=None, choices=[0, 1, 2, 3], help="Initial presence filter")
     parser.add_argument("--sample-limit", type=int, default=None, help="Only index the first N matched samples")
+    parser.add_argument(
+        "--episode-limit",
+        "--episode_limit",
+        dest="episode_limit",
+        type=int,
+        default=None,
+        help="Only index the first N matched episodes during initial scan",
+    )
     parser.add_argument("--clip-id", type=str, default=None, help="Exact clip_id to open")
     parser.add_argument("--episode-key", type=str, default=None, help="Exact episode key to open")
     parser.add_argument(
@@ -384,6 +394,7 @@ def main():
     summaries = scan_sample_summaries(
         tar_paths,
         sample_limit=args.sample_limit,
+        episode_limit=args.episode_limit,
         filter_key=args.filter_key,
         filter_presence=args.filter_presence,
     )
