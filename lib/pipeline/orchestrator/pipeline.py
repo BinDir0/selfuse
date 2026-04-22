@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import socket
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -64,6 +65,29 @@ def _resolve_runtime_python_path(raw_path: str | None, *, runtime_name: str) -> 
     return path_text
 
 
+def _hostname_slug() -> str:
+    raw = socket.gethostname().strip().lower()
+    cleaned = "".join(char if (char.isalnum() or char in {"-", "_"}) else "-" for char in raw).strip("-_")
+    return cleaned or "host"
+
+
+def _resolve_run_tag(*, cli_run_tag: str | None, config_run_tag: str | None) -> str:
+    if cli_run_tag:
+        return str(cli_run_tag)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    hostname = _hostname_slug()
+    template = str(config_run_tag).strip() if config_run_tag is not None else ""
+    if not template:
+        template = "{hostname}_{timestamp}"
+    return template.format(
+        hostname=hostname,
+        timestamp=timestamp,
+        date=timestamp.split("_", 1)[0],
+        time=timestamp.split("_", 1)[1],
+    )
+
+
 def run_pipeline(args) -> None:
     config_path = Path(args.config).resolve()
     config = normalize_pipeline_config(load_yaml(config_path))
@@ -92,7 +116,7 @@ def run_pipeline(args) -> None:
     )
 
     run_root = Path(paths_cfg.get("log_root", PROJECT_ROOT / "pipeline_runs"))
-    run_tag = args.run_tag or config.get("run_tag") or datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_tag = _resolve_run_tag(cli_run_tag=args.run_tag, config_run_tag=config.get("run_tag"))
     run_dir = run_root / run_tag
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,6 +126,7 @@ def run_pipeline(args) -> None:
     summary_path = run_dir / "run_summary.json"
     filter_report_path = run_dir / "filter_report.json"
     shared_feature_cache_dir = run_dir / "_episode_feature_cache"
+    external_manifest_path = Path(args.descriptor_manifest).resolve() if getattr(args, "descriptor_manifest", None) else None
 
     adapter_name = dataset_cfg.get("adapter") or dataset_cfg.get("source_type", "buildai")
     source_type = adapter_name
@@ -143,11 +168,22 @@ def run_pipeline(args) -> None:
         "requested_stage_tokens": requested_stage_tokens,
         "expanded_internal_stages": stages,
     }
+    if external_manifest_path is not None:
+        run_summary["descriptor_manifest_override"] = str(external_manifest_path)
     if infer_multihost_cfg.enabled:
         run_summary["infer_multihost"] = infer_multihost_cfg.to_summary()
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    active_manifest_path = manifest_path
-    annotation_manifest_path = manifest_path
+    use_external_manifest = external_manifest_path is not None and "manifest" not in stages
+    if external_manifest_path is not None and "manifest" in stages:
+        print(
+            "Warning: --descriptor_manifest is ignored because the manifest stage is selected; "
+            "later stages will use the newly generated run_dir manifest.",
+            flush=True,
+        )
+    active_manifest_path = external_manifest_path if use_external_manifest else manifest_path
+    annotation_manifest_path = external_manifest_path if use_external_manifest else manifest_path
+    run_summary["active_manifest_path"] = str(active_manifest_path.resolve())
+    summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if deprecated_stages:
         print(

@@ -24,4 +24,10 @@ def get_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resume compatible stages. Currently forwarded to the build stage to skip existing non-empty shards.",
     )
+    parser.add_argument(
+        "--descriptor_manifest",
+        type=str,
+        default=None,
+        help="Optional existing descriptor manifest JSONL to use when starting from infer/filter/build/validate without rerunning prepare/manifest.",
+    )
     return parser
