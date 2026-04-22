@@ -15,6 +15,37 @@ if str(DPVO_ROOT) not in sys.path:
     sys.path.insert(0, str(DPVO_ROOT))
 
 
+def _processed_frame_count(frame_source, stride=1, frame_indices=None) -> int:
+    stride = max(1, int(stride))
+    if frame_indices is None:
+        total = len(frame_source)
+    else:
+        total = len(frame_indices)
+    return max(0, (int(total) + stride - 1) // stride)
+
+
+def _resolve_dpvo_buffer_size(current_buffer_size: int, *, frame_source, stride=1, frame_indices=None) -> int:
+    env_raw = os.environ.get("HAWOR_DPVO_BUFFER_SIZE")
+    if env_raw is not None and str(env_raw).strip():
+        return max(32, int(env_raw))
+
+    processed_frames = _processed_frame_count(
+        frame_source,
+        stride=stride,
+        frame_indices=frame_indices,
+    )
+    # DPVO checks `(self.n + 1) >= self.N` before inserting a new frame, so
+    # the buffer must be strictly larger than the number of frames we plan to feed.
+    required = max(int(current_buffer_size), processed_frames + 32)
+    if required <= 1024:
+        align = 128
+    elif required <= 4096:
+        align = 256
+    else:
+        align = 512
+    return int(((required + align - 1) // align) * align)
+
+
 def _frame_stream(frame_source, calib, stride=1, max_size=800, frame_indices=None):
     """Yield DPVO-ready frames and intrinsics from a generic frame_source."""
     fx, fy, cx, cy = np.array(calib[:4], dtype=np.float64)
@@ -115,6 +146,7 @@ def run_dpvo_slam(imagedir, masks, calib=None, stride=1, frame_indices=None):
         cfg.merge_from_file(str(config_path))
 
     env_to_cfg = {
+        "HAWOR_DPVO_BUFFER_SIZE": "BUFFER_SIZE",
         "HAWOR_DPVO_PATCHES_PER_FRAME": "PATCHES_PER_FRAME",
         "HAWOR_DPVO_REMOVAL_WINDOW": "REMOVAL_WINDOW",
         "HAWOR_DPVO_OPTIMIZATION_WINDOW": "OPTIMIZATION_WINDOW",
@@ -136,6 +168,13 @@ def run_dpvo_slam(imagedir, masks, calib=None, stride=1, frame_indices=None):
             setattr(cfg, cfg_name, int(raw))
         else:
             setattr(cfg, cfg_name, float(raw))
+
+    cfg.BUFFER_SIZE = _resolve_dpvo_buffer_size(
+        int(cfg.BUFFER_SIZE),
+        frame_source=frame_source,
+        stride=stride,
+        frame_indices=frame_indices,
+    )
 
     weight_path = str(DPVO_ROOT / "models" / "dpvo.pth")
 
