@@ -26,9 +26,9 @@ class BatchScheduler:
         best_key = None
         best_value = 0.0
         for key, value in timing.items():
-            if key == "total" or key.endswith(("_frames", "_chunks", "_batches")):
+            if key == "total" or key.endswith(("_frames", "_chunks", "_batches", "_count", "_hit")):
                 continue
-            if not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue
             numeric = float(value)
             if numeric > best_value:

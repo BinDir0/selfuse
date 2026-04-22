@@ -467,7 +467,7 @@ def _run_motion_stage(task, stage_args, config, runtime, frame_source, profiler,
 def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, end_idx):
     from lib.pipeline.stages.slam import hawor_slam
 
-    timing = hawor_slam(
+    metrics = hawor_slam(
         stage_args,
         start_idx,
         end_idx,
@@ -477,7 +477,9 @@ def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, 
         seq_folder=str(task.seq_folder),
         return_timing=True,
     )
-    return {"timing": timing}
+    if isinstance(metrics, dict) and isinstance(metrics.get("timing"), dict):
+        return metrics
+    return {"timing": metrics}
 
 
 def _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_idx):
@@ -549,7 +551,10 @@ def run_pipeline_stage(
 
     _ensure_runtime_for_stage(runtime, stage)
 
-    frame_source = task.build_frame_source()
+    prefetched_frame_source = None
+    if isinstance(prefetched_data, dict):
+        prefetched_frame_source = prefetched_data.get("frame_source")
+    frame_source = prefetched_frame_source if prefetched_frame_source is not None else task.build_frame_source()
     stage_args = config.to_stage_args(task.video_path)
     stage_start_time = time.time()
     metrics = None

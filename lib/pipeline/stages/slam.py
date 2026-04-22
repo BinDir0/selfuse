@@ -617,7 +617,16 @@ def _save_slam_outputs(seq_folder, start_idx, end_idx, tstamp, disps, traj, foca
     return save_path
 
 
-def _print_timing(video_path: str, timing: dict, num_keyframes: int, depth_frame_count: int, *, predict_all_frames: bool, used_depth_cache: bool):
+def _print_timing(
+    video_path: str,
+    timing: dict,
+    stats: dict,
+    num_keyframes: int,
+    depth_frame_count: int,
+    *,
+    predict_all_frames: bool,
+    used_depth_cache: bool,
+):
     total_time = timing["total"]
     print(f"\n{'=' * 60}")
     print(f"SLAM Stage Timing for {os.path.basename(video_path)}")
@@ -653,9 +662,17 @@ def _print_timing(video_path: str, timing: dict, num_keyframes: int, depth_frame
         elapsed = float(timing[key])
         pct = elapsed / total_time * 100 if total_time > 0 else 0
         print(f"  {key:20s}: {elapsed:7.2f}s ({pct:5.1f}%)")
-    for key in ("0_stage3_materialized", "0_stage3_frame_count"):
-        if key in timing:
-            print(f"  {key:20s}: {int(timing[key])}")
+    for key in (
+        "stage3_workspace_mode",
+        "frame_source_local_cache_hit",
+        "dpvo_cache_hit",
+        "dense_depth_cache_hit",
+        "any4d_batch_cache_hit",
+        "stage3_materialized",
+        "frame_count",
+    ):
+        if key in stats:
+            print(f"  {key:20s}: {stats[key]}")
     print(f"  {'total':20s}: {total_time:7.2f}s")
     print(f"  {'slam_backend':20s}: dpvo")
     print(f"  {'depth_backend':20s}: any4d")
@@ -677,6 +694,7 @@ def hawor_slam(
     return_timing=False,
 ):
     timing = {}
+    stats = {}
     start_time = time.time()
     success = False
 
@@ -692,8 +710,10 @@ def hawor_slam(
     timing["0_stage3_workspace"] = time.time() - t_workspace
     stage3_frame_source = workspace["frame_source"]
     stage3_frame_path_map = workspace["frame_path_map"]
-    timing["0_stage3_materialized"] = int(bool(workspace.get("materialized")))
-    timing["0_stage3_frame_count"] = int(segment_frame_ids.shape[0])
+    stats["stage3_materialized"] = int(bool(workspace.get("materialized")))
+    stats["frame_count"] = int(segment_frame_ids.shape[0])
+    stats["stage3_workspace_mode"] = "materialized_tmp" if workspace.get("materialized") else "direct_paths"
+    stats["frame_source_local_cache_hit"] = int(bool(getattr(frame_source, "local_cache_hit", False)))
     predict_all_frames = _depth_predict_all_frames_enabled(getattr(args, "depth_predict_all_frames", None))
     any4d_batch_size = _resolve_any4d_batch_size(any4d_batch_size)
     vprint(
@@ -723,11 +743,14 @@ def hawor_slam(
         tstamp = slam_outputs["tstamp"]
         disps = slam_outputs["disps"]
         timing["2_slam"] = time.time() - t0
+        stats["dpvo_cache_hit"] = int(bool(slam_outputs["used_cache"]))
         if slam_outputs["used_cache"] and slam_outputs["cached_vo_sec"] is not None:
             timing["2_slam_cached_source"] = float(slam_outputs["cached_vo_sec"])
 
         output_hw = get_dimention(stage3_frame_source)
         depth_cache_used = False
+        stats["dense_depth_cache_hit"] = 0
+        stats["any4d_batch_cache_hit"] = 0
 
         t0 = time.time()
         if any4d_runner is None:
@@ -756,6 +779,7 @@ def hawor_slam(
             if cached_dense is not None:
                 depth_frame_indices, depth_predictions, depth_cache_path = cached_dense
                 depth_cache_used = True
+                stats["dense_depth_cache_hit"] = 1
             else:
                 depth_predictions, any4d_cache_path, used_any4d_cache = _predict_any4d_depths_for_frames(
                     stage3_frame_source,
@@ -778,6 +802,7 @@ def hawor_slam(
                 timing["3g_dense_depth_cache_save"] = time.time() - t_dense_save
                 depth_cache_path = any4d_cache_path if used_any4d_cache else dense_cache_path
                 depth_cache_used = used_any4d_cache
+                stats["any4d_batch_cache_hit"] = int(bool(used_any4d_cache))
             t_gather = time.time()
             keyframe_depths = _gather_keyframe_depths_from_dense(depth_predictions, depth_frame_indices, tstamp)
             timing["3h_gather_keyframe_depths"] = time.time() - t_gather
@@ -798,6 +823,7 @@ def hawor_slam(
                 timing=timing,
             )
             keyframe_depths = [depth_predictions[i] for i in range(len(depth_predictions))]
+            stats["any4d_batch_cache_hit"] = int(bool(depth_cache_used))
 
         if depth_cache_used:
             vprint(f"Loaded cached Any4D depth from {depth_cache_path}")
@@ -827,13 +853,17 @@ def hawor_slam(
     _print_timing(
         args.video_path,
         timing,
+        stats,
         len(tstamp),
         len(depth_frame_indices),
         predict_all_frames=predict_all_frames,
         used_depth_cache=depth_cache_used,
     )
     if return_timing:
-        return timing
+        return {
+            "timing": timing,
+            "stats": stats,
+        }
 
 
 if __name__ == "__main__":

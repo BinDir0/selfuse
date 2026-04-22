@@ -71,7 +71,7 @@ def _worker_log_path(config: BatchRunConfig, stage: str, gpu: int, worker_slot: 
 
 
 def _prefetch_video_data(video_path: str, stage: str, descriptor_map, config: BatchRunConfig):
-    if stage != "motion":
+    if stage not in {"motion", "slam"}:
         return None
 
     try:
@@ -80,6 +80,12 @@ def _prefetch_video_data(video_path: str, stage: str, descriptor_map, config: Ba
 
         if config.resume and is_stage_complete(stage, seq_folder, fast_check=True):
             return None
+
+        if stage == "slam":
+            frame_source = pipeline_task.build_frame_source() or build_frame_source(video_path)
+            return {
+                "frame_source": frame_source,
+            }
 
         start_idx, end_idx = get_track_range(seq_folder)
         tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
