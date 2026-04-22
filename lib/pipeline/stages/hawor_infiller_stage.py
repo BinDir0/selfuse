@@ -13,7 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.eval_utils.custom_utils import cam2world_convert, load_slam_cam
+from lib.eval_utils.custom_utils import (
+    cam2world_convert,
+    interpolate_slam_cameras_at_video_frames,
+    load_slam_cam,
+)
 from lib.eval_utils.filling_utils import filling_postprocess, filling_preprocess
 from lib.pipeline.frame_source import build_frame_source
 from lib.pipeline.tools import parse_chunks_hand_frame
