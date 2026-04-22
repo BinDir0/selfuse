@@ -48,6 +48,7 @@ class _DummyConfig:
     def __init__(self, descriptors):
         self._descriptor_map = {descriptor.video_key: descriptor for descriptor in descriptors}
         self.resume = True
+        self.rebuild_cam_space_cache = False
 
     @property
     def descriptor_map(self):
@@ -55,7 +56,7 @@ class _DummyConfig:
 
 
 class BatchWorkerPoolTests(unittest.TestCase):
-    def test_motion_prioritizes_shard_locality(self):
+    def test_motion_and_slam_prioritize_shard_locality(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             shard_a = os.path.join(tmp_dir, "shard_a.tar")
             shard_b = os.path.join(tmp_dir, "shard_b.tar")
@@ -93,9 +94,12 @@ class BatchWorkerPoolTests(unittest.TestCase):
             ]
 
             pool = StageWorkerPool(_DummyConfig(descriptors))
-            ordered = pool._prioritize_videos([descriptor.video_key for descriptor in descriptors], "motion")
+            expected = [descriptors[0].video_key, descriptors[1].video_key, descriptors[2].video_key]
+            motion_ordered = pool._prioritize_videos([descriptor.video_key for descriptor in descriptors], "motion")
+            slam_ordered = pool._prioritize_videos([descriptor.video_key for descriptor in descriptors], "slam")
 
-            self.assertEqual(ordered, [descriptors[0].video_key, descriptors[1].video_key, descriptors[2].video_key])
+            self.assertEqual(motion_ordered, expected)
+            self.assertEqual(slam_ordered, expected)
 
     def test_slam_prefetch_builds_frame_source_only(self):
         marker = object()
@@ -112,6 +116,40 @@ class BatchWorkerPoolTests(unittest.TestCase):
             prefetched = _prefetch_video_data("video_key", "slam", {}, config)
 
         self.assertEqual(prefetched, {"frame_source": marker})
+
+    def test_infiller_prefetch_loads_chunks_and_cache(self):
+        config = _DummyConfig([])
+        frame_chunks_all = {"dummy": [1, 2, 3]}
+        cam_space_cache = {"cached": True}
+
+        class _DummyTask:
+            seq_folder = Path("/tmp/infiller-prefetch")
+
+            def build_frame_source(self):
+                raise AssertionError("infiller prefetch should not build frame source")
+
+        def _fake_joblib_load(path):
+            path = str(path)
+            if path.endswith("frame_chunks_all.npy"):
+                return frame_chunks_all
+            if path.endswith("cam_space_cache.joblib"):
+                return cam_space_cache
+            raise AssertionError(f"unexpected load path: {path}")
+
+        with mock.patch("lib.pipeline.batch.worker_pool._build_pipeline_task", return_value=_DummyTask()), \
+            mock.patch("lib.pipeline.batch.worker_pool.is_stage_complete", return_value=False), \
+            mock.patch("lib.pipeline.batch.worker_pool.get_track_range", return_value=(0, 10)), \
+            mock.patch("lib.pipeline.batch.worker_pool.joblib.load", side_effect=_fake_joblib_load), \
+            mock.patch("lib.pipeline.batch.worker_pool.Path.exists", return_value=True):
+            prefetched = _prefetch_video_data("video_key", "infiller", {}, config)
+
+        self.assertEqual(
+            prefetched,
+            {
+                "frame_chunks_all": frame_chunks_all,
+                "cam_space_cache": cam_space_cache,
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -209,7 +209,11 @@ def _flush_infiller_windows(
     pred_valid,
 ):
     if not pending_windows:
-        return 0
+        return {
+            "batch_size": 0,
+            "forward_time": 0.0,
+            "postprocess_time": 0.0,
+        }
 
     batch_size = len(pending_windows)
     batch_inputs = np.stack([window["filling_input"] for window in pending_windows], axis=1)
@@ -225,11 +229,14 @@ def _flush_infiller_windows(
     atten_mask = torch.ones((batch_size, 1, horizon, horizon), device=device, dtype=torch.bool)
     atten_mask[valid_atten.unsqueeze(2).expand(-1, -1, horizon, -1)] = False
 
+    t_forward = time.time()
     with torch.no_grad():
         batch_output = filling_model(filling_input, src_mask, data_mask, atten_mask)
+    forward_time = time.time() - t_forward
 
     batch_output = batch_output.permute(1, 0, 2).cpu().detach()
 
+    t_postprocess = time.time()
     for window_idx, window in enumerate(pending_windows):
         output_ck = batch_output[window_idx, : window["t_original"]].reshape(window["t_original"], 2, -1)
         filling_output = filling_postprocess(output_ck, window["transform_w_canon"])
@@ -249,7 +256,11 @@ def _flush_infiller_windows(
         pred_betas[:, start:end] = torch.from_numpy(filling_seq["betas"]).float()
         pred_valid[:, start:end] = True
 
-    return batch_size
+    return {
+        "batch_size": batch_size,
+        "forward_time": forward_time,
+        "postprocess_time": time.time() - t_postprocess,
+    }
 
 
 def _resolve_seq_folder(args, seq_folder):
@@ -261,6 +272,26 @@ def _resolve_seq_folder(args, seq_folder):
 
 def _prepare_infiller_state(seq_folder, start_idx, end_idx, frame_chunks_all, frame_source, rebuild_cam_space_cache):
     num_frames = len(frame_source)
+    return _prepare_infiller_state_with_cache(
+        seq_folder,
+        start_idx,
+        end_idx,
+        frame_chunks_all,
+        num_frames=num_frames,
+        rebuild_cam_space_cache=rebuild_cam_space_cache,
+    )
+
+
+def _prepare_infiller_state_with_cache(
+    seq_folder,
+    start_idx,
+    end_idx,
+    frame_chunks_all,
+    *,
+    num_frames,
+    rebuild_cam_space_cache,
+    cam_space_cache=None,
+):
     slam_path = os.path.join(seq_folder, "SLAM", f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
     use_dpvo_infiller = _use_dpvo_infiller_mode(seq_folder)
     if use_dpvo_infiller and not QUIET_MODE:
@@ -278,11 +309,12 @@ def _prepare_infiller_state(seq_folder, start_idx, end_idx, frame_chunks_all, fr
         max_slam_frames = num_frames
     else:
         max_slam_frames = min(pred_trans.shape[1], r_c2w_sla_all.shape[0], t_c2w_sla_all.shape[0])
-    cam_space_cache = _load_or_build_cam_space_cache(
-        seq_folder,
-        frame_chunks_all,
-        rebuild=rebuild_cam_space_cache,
-    )
+    if cam_space_cache is None:
+        cam_space_cache = _load_or_build_cam_space_cache(
+            seq_folder,
+            frame_chunks_all,
+            rebuild=rebuild_cam_space_cache,
+        )
     return InfillerState(
         pred_trans=pred_trans,
         pred_rot=pred_rot,
@@ -380,8 +412,7 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
             )
 
             if len(pending_windows) >= window_batch_size:
-                t_forward = time.time()
-                _flush_infiller_windows(
+                flush_stats = _flush_infiller_windows(
                     pending_windows,
                     filling_model,
                     src_mask,
@@ -393,12 +424,12 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
                     state.pred_betas,
                     pred_valid_numpy,
                 )
-                timing["model_forward"] += time.time() - t_forward
+                timing["model_forward"] += float(flush_stats["forward_time"])
+                timing["postprocess"] += float(flush_stats["postprocess_time"])
                 pending_windows = []
 
         if pending_windows:
-            t_forward = time.time()
-            _flush_infiller_windows(
+            flush_stats = _flush_infiller_windows(
                 pending_windows,
                 filling_model,
                 src_mask,
@@ -410,25 +441,31 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
                 state.pred_betas,
                 pred_valid_numpy,
             )
-            timing["model_forward"] += time.time() - t_forward
+            timing["model_forward"] += float(flush_stats["forward_time"])
+            timing["postprocess"] += float(flush_stats["postprocess_time"])
 
     return total_windows, timing
 
 
 def _save_infiller_result(seq_folder, state, total_windows, window_batch_size, timing, load_cam_space_time):
+    t_save = time.time()
     _sanitize_infiller_tensors(state)
     save_path = os.path.join(seq_folder, "world_space_res.pth")
     joblib.dump(
         [state.pred_trans, state.pred_rot, state.pred_hand_pose, state.pred_betas, state.pred_valid],
         save_path,
     )
+    save_time = time.time() - t_save
     print(
         f"[infiller] {os.path.basename(seq_folder)} windows={total_windows} "
         f"batch_size={window_batch_size} "
         f"load_cam_space={load_cam_space_time:.2f}s "
         f"prepare={timing['prepare_windows']:.2f}s "
-        f"forward={timing['model_forward']:.2f}s"
+        f"forward={timing['model_forward']:.2f}s "
+        f"postprocess={timing['postprocess']:.2f}s "
+        f"save={save_time:.2f}s"
     )
+    return save_time
 
 
 def run_infiller_for_video(
@@ -439,6 +476,9 @@ def run_infiller_for_video(
     infiller_runner=None,
     frame_source=None,
     seq_folder=None,
+    num_frames=None,
+    cam_space_cache=None,
+    return_timing=False,
 ):
     infiller_runner = infiller_runner or build_infiller_runner(args.infiller_weight)
     filling_model = infiller_runner["model"]
@@ -449,21 +489,30 @@ def run_infiller_for_video(
     rebuild_cam_space_cache = bool(getattr(args, "rebuild_cam_space_cache", False))
 
     seq_folder = _resolve_seq_folder(args, seq_folder)
-    if frame_source is None:
-        frame_source = build_frame_source(args.video_path)
+    if num_frames is None:
+        if frame_source is None:
+            frame_source = build_frame_source(args.video_path)
+        num_frames = len(frame_source)
 
+    cache_path = os.path.join(seq_folder, "cam_space_cache.joblib")
+    cache_hit = bool(cam_space_cache is not None)
+    if not cache_hit and not rebuild_cam_space_cache and os.path.exists(cache_path):
+        cache_hit = True
     t_load = time.time()
-    state = _prepare_infiller_state(
+    state = _prepare_infiller_state_with_cache(
         seq_folder,
         start_idx,
         end_idx,
         frame_chunks_all,
-        frame_source,
+        num_frames=num_frames,
         rebuild_cam_space_cache=rebuild_cam_space_cache,
+        cam_space_cache=cam_space_cache,
     )
     load_cam_space_time = time.time() - t_load
 
+    t_project = time.time()
     _project_cam_space_chunks_to_world(state, frame_chunks_all)
+    project_world_time = time.time() - t_project
     total_windows, timing = _run_infiller_pass(
         state,
         filling_model,
@@ -472,7 +521,7 @@ def run_infiller_for_video(
         horizon,
         window_batch_size=window_batch_size,
     )
-    _save_infiller_result(
+    save_time = _save_infiller_result(
         seq_folder,
         state,
         total_windows,
@@ -480,6 +529,32 @@ def run_infiller_for_video(
         timing,
         load_cam_space_time,
     )
+    if return_timing:
+        return {
+            "timing": {
+                "load_cam_space": float(load_cam_space_time),
+                "project_world": float(project_world_time),
+                "prepare_windows": float(timing["prepare_windows"]),
+                "model_forward": float(timing["model_forward"]),
+                "postprocess": float(timing["postprocess"]),
+                "save": float(save_time),
+                "total": float(
+                    load_cam_space_time
+                    + project_world_time
+                    + timing["prepare_windows"]
+                    + timing["model_forward"]
+                    + timing["postprocess"]
+                    + save_time
+                ),
+            },
+            "stats": {
+                "frame_count": int(state.num_frames),
+                "chunk_count": int(sum(len(frame_chunks_all.get(idx, [])) for idx in [0, 1])),
+                "window_count": int(total_windows),
+                "cam_space_cache_hit": bool(cache_hit),
+                "dpvo_infiller_mode": bool(state.use_dpvo_infiller),
+            },
+        }
     return state.pred_trans, state.pred_rot, state.pred_hand_pose, state.pred_betas, state.pred_valid
 
 

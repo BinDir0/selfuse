@@ -9,6 +9,7 @@ from pathlib import Path
 from queue import Empty
 from typing import Dict, List, Optional
 
+import joblib
 import numpy as np
 
 from lib.pipeline.batch.config import BatchRunConfig
@@ -71,7 +72,7 @@ def _worker_log_path(config: BatchRunConfig, stage: str, gpu: int, worker_slot: 
 
 
 def _prefetch_video_data(video_path: str, stage: str, descriptor_map, config: BatchRunConfig):
-    if stage not in {"motion", "slam"}:
+    if stage not in {"motion", "slam", "infiller"}:
         return None
 
     try:
@@ -86,6 +87,17 @@ def _prefetch_video_data(video_path: str, stage: str, descriptor_map, config: Ba
             return {
                 "frame_source": frame_source,
             }
+
+        if stage == "infiller":
+            start_idx, end_idx = get_track_range(seq_folder, fast=True)
+            tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
+            prefetched = {
+                "frame_chunks_all": joblib.load(tracks_dir / "frame_chunks_all.npy"),
+            }
+            cache_path = Path(seq_folder) / "cam_space_cache.joblib"
+            if cache_path.exists() and not config.rebuild_cam_space_cache:
+                prefetched["cam_space_cache"] = joblib.load(cache_path)
+            return prefetched
 
         start_idx, end_idx = get_track_range(seq_folder)
         tracks_dir = get_tracks_dir(seq_folder, start_idx, end_idx)
@@ -257,7 +269,7 @@ class StageWorkerPool:
         return prioritized
 
     def _prioritize_videos(self, video_paths: List[str], stage: str) -> List[str]:
-        if stage in {"detect_track", "motion"} and self.descriptor_map:
+        if stage in {"detect_track", "motion", "slam"} and self.descriptor_map:
             return self._prioritize_descriptor_locality_videos(video_paths, stage)
         return sorted(video_paths, key=lambda video_path: self._estimate_video_work(video_path, stage), reverse=True)
 

@@ -482,12 +482,21 @@ def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, 
     return {"timing": metrics}
 
 
-def _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_idx):
+def _run_infiller_stage(task, stage_args, runtime, frame_source, prefetched_data, start_idx, end_idx):
     from lib.pipeline.stages.hawor_video import run_infiller_for_video
 
     tracks_dir = get_tracks_dir(task.seq_folder, start_idx, end_idx)
-    frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
-    run_infiller_for_video(
+    frame_chunks_all = None
+    cam_space_cache = None
+    if isinstance(prefetched_data, dict):
+        frame_chunks_all = prefetched_data.get("frame_chunks_all")
+        cam_space_cache = prefetched_data.get("cam_space_cache")
+    if frame_chunks_all is None:
+        frame_chunks_all = joblib.load(tracks_dir / "frame_chunks_all.npy")
+    num_frames = None
+    if task.descriptor is not None:
+        num_frames = int(task.descriptor.frame_count)
+    return run_infiller_for_video(
         stage_args,
         start_idx,
         end_idx,
@@ -495,6 +504,9 @@ def _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_
         infiller_runner=getattr(runtime, "infiller_runner", None),
         frame_source=frame_source,
         seq_folder=str(task.seq_folder),
+        num_frames=num_frames,
+        cam_space_cache=cam_space_cache,
+        return_timing=True,
     )
 
 
@@ -509,7 +521,7 @@ def _run_non_detect_stage(stage, task, stage_args, config, runtime, frame_source
     elif stage == "slam":
         metrics = _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, end_idx)
     elif stage == "infiller":
-        _run_infiller_stage(task, stage_args, runtime, frame_source, start_idx, end_idx)
+        metrics = _run_infiller_stage(task, stage_args, runtime, frame_source, prefetched_data, start_idx, end_idx)
     else:
         raise ValueError(f"Unknown stage: {stage}")
 
@@ -554,7 +566,9 @@ def run_pipeline_stage(
     prefetched_frame_source = None
     if isinstance(prefetched_data, dict):
         prefetched_frame_source = prefetched_data.get("frame_source")
-    frame_source = prefetched_frame_source if prefetched_frame_source is not None else task.build_frame_source()
+    frame_source = prefetched_frame_source
+    if frame_source is None and stage != "infiller":
+        frame_source = task.build_frame_source()
     stage_args = config.to_stage_args(task.video_path)
     stage_start_time = time.time()
     metrics = None
