@@ -13,6 +13,7 @@ RIGHT_HAND_TRANSLATION_SLICE = slice(3, 6)
 LEFT_FINGERTIPS_SLICE = slice(18, 33)
 RIGHT_FINGERTIPS_SLICE = slice(33, 48)
 EXTRINSIC_SLICE = slice(96, 112)
+INTRINSIC_SLICE = slice(112, 116)
 FRAME_INDEX_PATTERN = re.compile(r"_f(\d+)$")
 CAMERA_AXES = ("x", "y", "z")
 
@@ -185,6 +186,7 @@ def extract_lowdim_components(lowdim: np.ndarray) -> dict:
         "left_fingertips": array[LEFT_FINGERTIPS_SLICE].reshape(5, 3),
         "right_fingertips": array[RIGHT_FINGERTIPS_SLICE].reshape(5, 3),
         "extrinsic": array[EXTRINSIC_SLICE].reshape(4, 4),
+        "intrinsic": array[INTRINSIC_SLICE].reshape(4),
     }
 
 
@@ -228,6 +230,51 @@ def camera_space_axis_metrics(points_world, extrinsic) -> dict:
     }
 
 
+def project_points_world_to_image(points_world, extrinsic, intrinsic) -> tuple[np.ndarray, np.ndarray]:
+    points_cam = transform_points_world_to_camera(points_world, extrinsic)
+    intr = np.asarray(intrinsic, dtype=np.float32).reshape(4)
+    uv = np.full((points_cam.shape[0], 2), np.nan, dtype=np.float32)
+    valid = np.isfinite(points_cam).all(axis=1) & np.isfinite(intr).all() & (points_cam[:, 2] > 1e-6)
+    if np.any(valid):
+        uv[valid, 0] = intr[0] * points_cam[valid, 0] / points_cam[valid, 2] + intr[2]
+        uv[valid, 1] = intr[1] * points_cam[valid, 1] / points_cam[valid, 2] + intr[3]
+    valid &= np.isfinite(uv).all(axis=1)
+    return uv, valid
+
+
+def classify_hand_projection(points_world, extrinsic, intrinsic, image_size, *, severe_offscreen_scale: float) -> dict:
+    width, height = int(image_size[0]), int(image_size[1])
+    uv, valid = project_points_world_to_image(points_world, extrinsic, intrinsic)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Invalid image_size: {image_size}")
+
+    inframe = (
+        valid
+        & (uv[:, 0] >= 0.0)
+        & (uv[:, 0] < float(width))
+        & (uv[:, 1] >= 0.0)
+        & (uv[:, 1] < float(height))
+    )
+
+    margin_x = max(0.0, float(severe_offscreen_scale) - 1.0) * float(width)
+    margin_y = max(0.0, float(severe_offscreen_scale) - 1.0) * float(height)
+    severe_bounds = (
+        valid
+        & (uv[:, 0] >= -margin_x)
+        & (uv[:, 0] < float(width) + margin_x)
+        & (uv[:, 1] >= -margin_y)
+        & (uv[:, 1] < float(height) + margin_y)
+    )
+
+    return {
+        "uv": uv,
+        "valid": valid,
+        "any_point_inframe": bool(np.any(inframe)),
+        "all_points_out_of_frame": bool(np.all(~inframe)),
+        "all_points_severe_offscreen": bool(np.all(~severe_bounds)),
+    }
+
+
 def new_clip_quality_stats(clip_id: str) -> dict:
     return {
         "clip_id": clip_id,
@@ -247,10 +294,22 @@ def new_clip_quality_stats(clip_id: str) -> dict:
         "max_camera_rotation_step": 0.0,
         "max_camera_space_wrist_abs": 0.0,
         "max_camera_space_hand_abs": 0.0,
+        "visible_left_frames": 0,
+        "visible_right_frames": 0,
+        "visible_left_any_point_inframe_frames": 0,
+        "visible_right_any_point_inframe_frames": 0,
+        "visible_left_all_points_out_of_frame_frames": 0,
+        "visible_right_all_points_out_of_frame_frames": 0,
+        "fatal_visible_left_severe_offscreen_frames": 0,
+        "fatal_visible_right_severe_offscreen_frames": 0,
+        "max_visible_left_out_of_frame_streak": 0,
+        "max_visible_right_out_of_frame_streak": 0,
         "_camera_space_wrist_min": np.full((3,), np.inf, dtype=np.float32),
         "_camera_space_wrist_max": np.full((3,), -np.inf, dtype=np.float32),
         "_camera_space_hand_min": np.full((3,), np.inf, dtype=np.float32),
         "_camera_space_hand_max": np.full((3,), -np.inf, dtype=np.float32),
+        "_visible_left_out_of_frame_streak": 0,
+        "_visible_right_out_of_frame_streak": 0,
         "_prev_frame_idx": None,
         "_prev_left": None,
         "_prev_right": None,
@@ -272,6 +331,8 @@ def update_clip_quality_stats(
     count_invalid_lowdim: bool = True,
     compute_motion_metrics: bool = True,
     compute_camera_space_metrics: bool = True,
+    image_size: tuple[int, int] | None = None,
+    severe_offscreen_scale: float = 1.4,
 ) -> None:
     stats["frames_total"] += 1
     stats["instruction_num_max"] = max(stats["instruction_num_max"], int(instruction_num))
@@ -332,6 +393,7 @@ def update_clip_quality_stats(
     left_fingertips = parts["left_fingertips"]
     right_fingertips = parts["right_fingertips"]
     current_extrinsic = parts["extrinsic"]
+    intrinsic = parts["intrinsic"]
 
     if compute_camera_space_metrics:
         wrist_camera_metrics = camera_space_abs_metrics(
@@ -374,6 +436,47 @@ def update_clip_quality_stats(
             stats["_camera_space_hand_max"],
             np.asarray([hand_axis_metrics["max_x"], hand_axis_metrics["max_y"], hand_axis_metrics["max_z"]], dtype=np.float32),
         )
+
+    if image_size is not None:
+        left_visible = bool(int(presence) & 1)
+        right_visible = bool(int(presence) & 2)
+        hand_projection_specs = (
+            (
+                "left",
+                left_visible,
+                np.concatenate([current_left.reshape(1, 3), left_fingertips], axis=0),
+            ),
+            (
+                "right",
+                right_visible,
+                np.concatenate([current_right.reshape(1, 3), right_fingertips], axis=0),
+            ),
+        )
+        for hand_name, is_visible, points_world in hand_projection_specs:
+            if not is_visible:
+                stats[f"_visible_{hand_name}_out_of_frame_streak"] = 0
+                continue
+            stats[f"visible_{hand_name}_frames"] += 1
+            projection = classify_hand_projection(
+                points_world,
+                current_extrinsic,
+                intrinsic,
+                image_size,
+                severe_offscreen_scale=severe_offscreen_scale,
+            )
+            if projection["any_point_inframe"]:
+                stats[f"visible_{hand_name}_any_point_inframe_frames"] += 1
+                stats[f"_visible_{hand_name}_out_of_frame_streak"] = 0
+            else:
+                stats[f"_visible_{hand_name}_out_of_frame_streak"] += 1
+                stats[f"max_visible_{hand_name}_out_of_frame_streak"] = max(
+                    stats[f"max_visible_{hand_name}_out_of_frame_streak"],
+                    stats[f"_visible_{hand_name}_out_of_frame_streak"],
+                )
+            if projection["all_points_out_of_frame"]:
+                stats[f"visible_{hand_name}_all_points_out_of_frame_frames"] += 1
+            if projection["all_points_severe_offscreen"]:
+                stats[f"fatal_visible_{hand_name}_severe_offscreen_frames"] += 1
 
     if compute_motion_metrics:
         prev_idx = stats["_prev_frame_idx"]
@@ -441,6 +544,32 @@ def finalize_clip_quality_metrics(stats: dict) -> dict:
         "max_camera_rotation_step": float(stats["max_camera_rotation_step"]),
         "max_camera_space_wrist_abs": float(stats["max_camera_space_wrist_abs"]),
         "max_camera_space_hand_abs": float(stats["max_camera_space_hand_abs"]),
+        "visible_left_frames": int(stats["visible_left_frames"]),
+        "visible_right_frames": int(stats["visible_right_frames"]),
+        "visible_left_any_point_inframe_ratio": (
+            float(stats["visible_left_any_point_inframe_frames"]) / float(stats["visible_left_frames"])
+            if stats["visible_left_frames"] > 0
+            else 1.0
+        ),
+        "visible_right_any_point_inframe_ratio": (
+            float(stats["visible_right_any_point_inframe_frames"]) / float(stats["visible_right_frames"])
+            if stats["visible_right_frames"] > 0
+            else 1.0
+        ),
+        "visible_left_all_points_out_of_frame_ratio": (
+            float(stats["visible_left_all_points_out_of_frame_frames"]) / float(stats["visible_left_frames"])
+            if stats["visible_left_frames"] > 0
+            else 0.0
+        ),
+        "visible_right_all_points_out_of_frame_ratio": (
+            float(stats["visible_right_all_points_out_of_frame_frames"]) / float(stats["visible_right_frames"])
+            if stats["visible_right_frames"] > 0
+            else 0.0
+        ),
+        "fatal_visible_left_severe_offscreen_frames": int(stats["fatal_visible_left_severe_offscreen_frames"]),
+        "fatal_visible_right_severe_offscreen_frames": int(stats["fatal_visible_right_severe_offscreen_frames"]),
+        "max_visible_left_out_of_frame_streak": int(stats["max_visible_left_out_of_frame_streak"]),
+        "max_visible_right_out_of_frame_streak": int(stats["max_visible_right_out_of_frame_streak"]),
         "min_camera_space_wrist_x": _axis_value(stats["_camera_space_wrist_min"], 0, fallback=0.0),
         "max_camera_space_wrist_x": _axis_value(stats["_camera_space_wrist_max"], 0, fallback=0.0),
         "min_camera_space_wrist_y": _axis_value(stats["_camera_space_wrist_min"], 1, fallback=0.0),
@@ -676,6 +805,32 @@ def decide_clip_quality(
         reasons.append("empty_instruction_frame")
     if metrics.get("instruction_num_mismatch_frames", 0) > 0:
         reasons.append("instruction_num_mismatch_frame")
+    if metrics.get("fatal_visible_left_severe_offscreen_frames", 0) > 0:
+        reasons.append("fatal_visible_left_severe_offscreen")
+    if metrics.get("fatal_visible_right_severe_offscreen_frames", 0) > 0:
+        reasons.append("fatal_visible_right_severe_offscreen")
+    if (
+        criteria.get("min_visible_hand_any_point_inframe_ratio") is not None
+        and metrics.get("visible_left_frames", 0) > 0
+        and metrics["visible_left_any_point_inframe_ratio"] < criteria["min_visible_hand_any_point_inframe_ratio"]
+    ):
+        reasons.append("visible_left_inframe_ratio_below_min")
+    if (
+        criteria.get("min_visible_hand_any_point_inframe_ratio") is not None
+        and metrics.get("visible_right_frames", 0) > 0
+        and metrics["visible_right_any_point_inframe_ratio"] < criteria["min_visible_hand_any_point_inframe_ratio"]
+    ):
+        reasons.append("visible_right_inframe_ratio_below_min")
+    if (
+        criteria.get("max_visible_hand_all_points_out_of_frame_streak") is not None
+        and metrics.get("max_visible_left_out_of_frame_streak", 0) > criteria["max_visible_hand_all_points_out_of_frame_streak"]
+    ):
+        reasons.append("visible_left_out_of_frame_streak_exceeded")
+    if (
+        criteria.get("max_visible_hand_all_points_out_of_frame_streak") is not None
+        and metrics.get("max_visible_right_out_of_frame_streak", 0) > criteria["max_visible_hand_all_points_out_of_frame_streak"]
+    ):
+        reasons.append("visible_right_out_of_frame_streak_exceeded")
     if criteria.get("min_instruction_num") is not None and metrics["instruction_num_max"] < criteria["min_instruction_num"]:
         reasons.append("instruction_num_below_min")
     if criteria.get("min_presence_ratio") is not None and metrics["presence_ratio"] < criteria["min_presence_ratio"]:

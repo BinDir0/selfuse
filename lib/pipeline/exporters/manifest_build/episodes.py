@@ -10,12 +10,13 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
 
 from lib.pipeline.annotation_protocol import build_annotation_issue_from_candidates, load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, load_clip_manifest
 from lib.pipeline.depth_artifacts import load_export_depths
-from lib.pipeline.frame_sources import classify_descriptor_storage, validate_descriptor_for_frame_reads
+from lib.pipeline.frame_sources import build_frame_bytes_reader, classify_descriptor_storage, validate_descriptor_for_frame_reads
 from lib.pipeline.exporters.mano_codec import build_mano_pca_frame_features
 from lib.pipeline.exporters.webdataset_features import (
     InvalidCameraDataError,
@@ -356,6 +357,7 @@ def compute_descriptor_episode_quality_metrics(
     source_fps: float,
     target_fps: float,
     interpolate_labels: bool,
+    fatal_offscreen_scale: float = 1.4,
 ):
     episode_data = load_descriptor_episode_features(
         ep,
@@ -386,6 +388,7 @@ def compute_descriptor_episode_quality_metrics(
     stats = new_clip_quality_stats(ep["clip_id"])
     parsed_instruction = parse_instruction_metadata(ep)
     instruction_num = int(parsed_instruction["instruction_num"])
+    image_size = _load_descriptor_image_size(ep["descriptor"])
     for frame_idx in range(frame_count):
         update_clip_quality_stats(
             stats,
@@ -396,8 +399,18 @@ def compute_descriptor_episode_quality_metrics(
             missing_instruction=bool(parsed_instruction["missing_instruction"]),
             empty_instruction=bool(parsed_instruction["empty_instruction"]),
             instruction_num_mismatch=bool(parsed_instruction["instruction_num_mismatch"]),
+            image_size=image_size,
+            severe_offscreen_scale=float(fatal_offscreen_scale),
         )
     return finalize_clip_quality_metrics(stats)
+
+
+def _load_descriptor_image_size(descriptor) -> tuple[int, int]:
+    read_frame_bytes = build_frame_bytes_reader(descriptor)
+    first_frame_bytes = read_frame_bytes(0)
+    with Image.open(io.BytesIO(first_frame_bytes)) as image:
+        width, height = image.size
+    return int(width), int(height)
 
 
 def _prepare_manifest_episode(

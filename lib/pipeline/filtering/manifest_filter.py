@@ -48,6 +48,24 @@ def build_parser():
     parser.add_argument("--max_hand_translation_step", type=float, default=None, help="Optional max allowed per-frame wrist translation step in meters")
     parser.add_argument("--max_camera_translation_step", type=float, default=None, help="Optional max allowed per-frame camera translation step in meters")
     parser.add_argument("--max_camera_rotation_step", type=float, default=None, help="Optional max allowed per-frame camera rotation delta (Frobenius norm)")
+    parser.add_argument(
+        "--fatal_offscreen_scale",
+        type=float,
+        default=1.4,
+        help="Visible-hand fatal bound multiplier for image size; e.g. 1.4 means wrist/fingertips entirely beyond [-0.4W,1.4W]x[-0.4H,1.4H] are dropped",
+    )
+    parser.add_argument(
+        "--min_visible_hand_any_point_inframe_ratio",
+        type=float,
+        default=0.2,
+        help="Minimum ratio of visible-hand frames where wrist/fingertips have at least one projected point inside the image",
+    )
+    parser.add_argument(
+        "--max_visible_hand_all_points_out_of_frame_streak",
+        type=int,
+        default=30,
+        help="Maximum allowed consecutive visible-hand frames with all projected wrist/fingertips points outside the image",
+    )
     parser.add_argument("--max_camera_space_wrist_abs", type=float, default=None, help="Optional max absolute camera-space coordinate allowed for wrist positions in meters")
     parser.add_argument("--max_camera_space_hand_abs", type=float, default=None, help="Optional max absolute camera-space coordinate allowed for stored hand keypoints in meters")
     parser.add_argument("--camera_space_auto_method", type=str, default="iqr_bounds", choices=("iqr_bounds", "percentile_abs"), help="Automatic camera-space filter mode when manual abs thresholds are not provided")
@@ -192,6 +210,7 @@ def evaluate_record(record, config: dict) -> dict:
         source_fps=float(config["source_fps"]),
         target_fps=float(config["target_fps"]),
         interpolate_labels=bool(config["interpolate_labels"]),
+        fatal_offscreen_scale=float(config["fatal_offscreen_scale"]),
     )
     if metrics is None:
         return _append_build_reason(result, "invalid_episode_features")
@@ -280,6 +299,9 @@ def build_report(
         "max_hand_translation_step": criteria["max_hand_translation_step"],
         "max_camera_translation_step": criteria["max_camera_translation_step"],
         "max_camera_rotation_step": criteria["max_camera_rotation_step"],
+        "fatal_offscreen_scale": criteria["fatal_offscreen_scale"],
+        "min_visible_hand_any_point_inframe_ratio": criteria["min_visible_hand_any_point_inframe_ratio"],
+        "max_visible_hand_all_points_out_of_frame_streak": criteria["max_visible_hand_all_points_out_of_frame_streak"],
         "camera_space_auto_method": criteria["camera_space_auto_method"],
         "camera_space_iqr_multiplier": criteria["camera_space_iqr_multiplier"],
         "max_camera_space_wrist_abs": threshold_info["resolved"]["max_camera_space_wrist_abs"],
@@ -348,6 +370,9 @@ def run_filter(args) -> dict:
         "max_hand_translation_step": args.max_hand_translation_step,
         "max_camera_translation_step": args.max_camera_translation_step,
         "max_camera_rotation_step": args.max_camera_rotation_step,
+        "fatal_offscreen_scale": float(args.fatal_offscreen_scale),
+        "min_visible_hand_any_point_inframe_ratio": args.min_visible_hand_any_point_inframe_ratio,
+        "max_visible_hand_all_points_out_of_frame_streak": args.max_visible_hand_all_points_out_of_frame_streak,
         "max_camera_space_wrist_abs": args.max_camera_space_wrist_abs,
         "max_camera_space_hand_abs": args.max_camera_space_hand_abs,
         "camera_space_auto_method": args.camera_space_auto_method,
