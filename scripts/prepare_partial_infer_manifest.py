@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import sys
 from dataclasses import dataclass
@@ -30,7 +31,20 @@ def parse_args() -> argparse.Namespace:
             "and optionally split the result into balanced partitions."
         )
     )
-    parser.add_argument("--source_manifest", type=str, required=True, help="Input clip manifest JSONL.")
+    parser.add_argument(
+        "--source_manifest",
+        type=str,
+        action="append",
+        default=[],
+        help="Input clip manifest JSONL. May be passed multiple times.",
+    )
+    parser.add_argument(
+        "--source_manifest_glob",
+        type=str,
+        action="append",
+        default=[],
+        help="Glob pattern for input manifests. May be passed multiple times.",
+    )
     parser.add_argument(
         "--required_stages",
         type=str,
@@ -80,6 +94,81 @@ def _record_weight(record) -> int:
     return max(1, int(getattr(record.descriptor, "frame_count", 0) or 0))
 
 
+def _resolve_source_manifests(args: argparse.Namespace) -> list[Path]:
+    manifest_paths = []
+    seen = set()
+
+    for raw_path in args.source_manifest:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"source manifest not found: {path}")
+        text = str(path)
+        if text not in seen:
+            seen.add(text)
+            manifest_paths.append(path)
+
+    for pattern in args.source_manifest_glob:
+        matches = sorted(glob.glob(pattern, recursive=True))
+        if not matches:
+            raise FileNotFoundError(f"source manifest glob matched nothing: {pattern}")
+        for raw_path in matches:
+            path = Path(raw_path).expanduser().resolve()
+            if not path.is_file():
+                continue
+            text = str(path)
+            if text not in seen:
+                seen.add(text)
+                manifest_paths.append(path)
+
+    if not manifest_paths:
+        raise ValueError("at least one --source_manifest or --source_manifest_glob is required")
+    return manifest_paths
+
+
+def _choose_record(current, candidate):
+    current_seq_exists = Path(current.descriptor.seq_folder).exists()
+    candidate_seq_exists = Path(candidate.descriptor.seq_folder).exists()
+    if candidate_seq_exists and not current_seq_exists:
+        return candidate
+    if current_seq_exists and not candidate_seq_exists:
+        return current
+    if _record_weight(candidate) > _record_weight(current):
+        return candidate
+    return current
+
+
+def _load_merged_records(manifest_paths: list[Path]):
+    merged = {}
+    duplicate_clip_ids = set()
+    duplicate_conflicts = []
+
+    for manifest_path in manifest_paths:
+        for record in load_clip_manifest(manifest_path):
+            existing = merged.get(record.clip_id)
+            if existing is None:
+                merged[record.clip_id] = record
+                continue
+            duplicate_clip_ids.add(record.clip_id)
+            if (
+                existing.descriptor.seq_folder != record.descriptor.seq_folder
+                or existing.descriptor.frame_count != record.descriptor.frame_count
+            ):
+                if len(duplicate_conflicts) < 32:
+                    duplicate_conflicts.append(
+                        {
+                            "clip_id": record.clip_id,
+                            "kept_seq_folder": existing.descriptor.seq_folder,
+                            "candidate_seq_folder": record.descriptor.seq_folder,
+                            "kept_frame_count": existing.descriptor.frame_count,
+                            "candidate_frame_count": record.descriptor.frame_count,
+                            "chosen_seq_folder": _choose_record(existing, record).descriptor.seq_folder,
+                        }
+                    )
+            merged[record.clip_id] = _choose_record(existing, record)
+
+    return list(merged.values()), sorted(duplicate_clip_ids), duplicate_conflicts
+
+
 def _get_stage_done_marker(seq_folder: Path, stage: str) -> Path:
     return seq_folder / f".{stage}.done"
 
@@ -108,9 +197,7 @@ def _assign_balanced(records: list, split_count: int) -> list[Partition]:
 def main() -> None:
     args = parse_args()
     required_stages = _parse_required_stages(args.required_stages)
-    source_manifest = Path(args.source_manifest).expanduser().resolve()
-    if not source_manifest.is_file():
-        raise FileNotFoundError(f"source manifest not found: {source_manifest}")
+    source_manifests = _resolve_source_manifests(args)
     if args.split_count < 1:
         raise ValueError("--split_count must be >= 1")
 
@@ -119,7 +206,7 @@ def main() -> None:
     if args.split_count > 1 and not args.split_prefix:
         raise ValueError("--split_prefix is required when --split_count>1")
 
-    records = load_clip_manifest(source_manifest)
+    records, duplicate_clip_ids, duplicate_conflicts = _load_merged_records(source_manifests)
     kept_records = []
     dropped_examples = []
     stage_missing_counts = {stage: 0 for stage in required_stages}
@@ -145,11 +232,14 @@ def main() -> None:
         kept_records.append(record)
 
     report = {
-        "source_manifest": str(source_manifest),
+        "source_manifests": [str(path) for path in source_manifests],
         "required_stages": required_stages,
         "total_records": len(records),
         "kept_records": len(kept_records),
         "dropped_records": len(records) - len(kept_records),
+        "duplicate_clip_id_count": len(duplicate_clip_ids),
+        "duplicate_clip_ids_preview": duplicate_clip_ids[:32],
+        "duplicate_conflicts": duplicate_conflicts,
         "stage_missing_counts": stage_missing_counts,
         "dropped_examples": dropped_examples,
     }
