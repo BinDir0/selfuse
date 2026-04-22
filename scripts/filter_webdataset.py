@@ -10,6 +10,9 @@ import tarfile
 from collections import Counter
 from multiprocessing import get_context
 from pathlib import Path
+from io import BytesIO
+
+from PIL import Image
 
 try:
     from tqdm import tqdm
@@ -125,6 +128,24 @@ def build_parser():
         help="Optional max allowed per-frame camera rotation delta (Frobenius norm)",
     )
     parser.add_argument(
+        "--fatal_offscreen_scale",
+        type=float,
+        default=1.4,
+        help="Visible-hand fatal bound multiplier for image size; 1.4 means the allowed box is [-0.4W,1.4W] x [-0.4H,1.4H]",
+    )
+    parser.add_argument(
+        "--min_visible_hand_any_point_inframe_ratio",
+        type=float,
+        default=0.2,
+        help="Minimum ratio of visible-hand frames where wrist/fingertips have at least one projected point inside the image",
+    )
+    parser.add_argument(
+        "--max_visible_hand_all_points_out_of_frame_streak",
+        type=int,
+        default=30,
+        help="Maximum allowed consecutive visible-hand frames with all projected wrist/fingertips points outside the image",
+    )
+    parser.add_argument(
         "--max_camera_space_wrist_abs",
         type=float,
         default=None,
@@ -199,6 +220,8 @@ def _update_clip_stats(
     count_invalid_lowdim: bool = True,
     compute_motion_metrics: bool = True,
     compute_camera_space_metrics: bool = True,
+    image_size: tuple[int, int] | None = None,
+    severe_offscreen_scale: float = 1.4,
 ) -> None:
     frame_idx = parse_frame_index(sample_key)
     instruction_num, missing_instruction, empty_instruction, instruction_num_mismatch = _parse_instruction_flags(meta)
@@ -214,6 +237,8 @@ def _update_clip_stats(
         count_invalid_lowdim=count_invalid_lowdim,
         compute_motion_metrics=compute_motion_metrics,
         compute_camera_space_metrics=compute_camera_space_metrics,
+        image_size=image_size,
+        severe_offscreen_scale=severe_offscreen_scale,
     )
 
 
@@ -337,6 +362,7 @@ def analyze_shard(
     *,
     compute_motion_metrics: bool = True,
     compute_camera_space_metrics: bool = True,
+    fatal_offscreen_scale: float = 1.4,
 ) -> dict:
     if not compute_motion_metrics and not compute_camera_space_metrics:
         return analyze_shard_fast_hard_rules(shard_path)
@@ -394,6 +420,7 @@ def analyze_shard(
                     count_invalid_lowdim=False,
                     compute_motion_metrics=compute_motion_metrics,
                     compute_camera_space_metrics=compute_camera_space_metrics,
+                    severe_offscreen_scale=fatal_offscreen_scale,
                 )
                 continue
 
@@ -409,12 +436,20 @@ def analyze_shard(
                     count_invalid_lowdim=False,
                     compute_motion_metrics=compute_motion_metrics,
                     compute_camera_space_metrics=compute_camera_space_metrics,
+                    severe_offscreen_scale=fatal_offscreen_scale,
                 )
             else:
                 try:
                     lowdim = decode_lowdim(sample["lowdim_bytes"])
                 except Exception:
                     lowdim = None
+                image_size = None
+                if sample.get("image_bytes") is not None:
+                    try:
+                        with Image.open(BytesIO(sample["image_bytes"])) as image:
+                            image_size = tuple(int(v) for v in image.size)
+                    except Exception:
+                        image_size = None
                 _update_clip_stats(
                     current_clip_stats,
                     sample["key"],
@@ -422,6 +457,8 @@ def analyze_shard(
                     lowdim,
                     compute_motion_metrics=compute_motion_metrics,
                     compute_camera_space_metrics=compute_camera_space_metrics,
+                    image_size=image_size,
+                    severe_offscreen_scale=fatal_offscreen_scale,
                 )
     except _SHARD_DATA_EXCEPTIONS as exc:
         shard_result["clips_total"] = 0
@@ -652,6 +689,7 @@ def _worker_analyze_shard(shard_path: str) -> dict:
         shard_path,
         compute_motion_metrics=bool(_WORKER_ARGS.get("compute_motion_metrics", True)),
         compute_camera_space_metrics=bool(_WORKER_ARGS.get("compute_camera_space_metrics", True)),
+        fatal_offscreen_scale=float(_WORKER_ARGS.get("fatal_offscreen_scale", 1.4)),
     )
 
 
@@ -785,6 +823,9 @@ def build_report(
             "max_hand_translation_step": args_dict["max_hand_translation_step"],
             "max_camera_translation_step": args_dict["max_camera_translation_step"],
             "max_camera_rotation_step": args_dict["max_camera_rotation_step"],
+            "fatal_offscreen_scale": args_dict["fatal_offscreen_scale"],
+            "min_visible_hand_any_point_inframe_ratio": args_dict["min_visible_hand_any_point_inframe_ratio"],
+            "max_visible_hand_all_points_out_of_frame_streak": args_dict["max_visible_hand_all_points_out_of_frame_streak"],
             "camera_space_auto_method": args_dict["camera_space_auto_method"],
             "camera_space_iqr_multiplier": args_dict["camera_space_iqr_multiplier"],
             "max_camera_space_wrist_abs": threshold_info["resolved"]["max_camera_space_wrist_abs"],
@@ -946,6 +987,8 @@ def main():
         args.max_hand_translation_step = None
         args.max_camera_translation_step = None
         args.max_camera_rotation_step = None
+        args.min_visible_hand_any_point_inframe_ratio = None
+        args.max_visible_hand_all_points_out_of_frame_streak = None
         args.max_camera_space_wrist_abs = None
         args.max_camera_space_hand_abs = None
         args.camera_space_axis_abs_cap = None
@@ -977,6 +1020,9 @@ def main():
         "max_hand_translation_step": args.max_hand_translation_step,
         "max_camera_translation_step": args.max_camera_translation_step,
         "max_camera_rotation_step": args.max_camera_rotation_step,
+        "fatal_offscreen_scale": float(args.fatal_offscreen_scale),
+        "min_visible_hand_any_point_inframe_ratio": args.min_visible_hand_any_point_inframe_ratio,
+        "max_visible_hand_all_points_out_of_frame_streak": args.max_visible_hand_all_points_out_of_frame_streak,
         "max_camera_space_wrist_abs": args.max_camera_space_wrist_abs,
         "max_camera_space_hand_abs": args.max_camera_space_hand_abs,
         "camera_space_auto_method": args.camera_space_auto_method,
