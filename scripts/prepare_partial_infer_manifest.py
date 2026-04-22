@@ -194,6 +194,48 @@ def _assign_balanced(records: list, split_count: int) -> list[Partition]:
     return partitions
 
 
+def _summarize_records(records: list) -> dict:
+    frame_total = sum(_record_weight(record) for record in records)
+    clip_total = len(records)
+    return {
+        "clip_count": clip_total,
+        "frame_count": frame_total,
+        "avg_frames_per_clip": (float(frame_total) / float(clip_total)) if clip_total > 0 else 0.0,
+    }
+
+
+def _print_human_summary(report: dict) -> None:
+    dataset = report["dataset_summary"]
+    print()
+    print("=== Partial Infer Manifest Summary ===")
+    print(f"Source manifests        : {len(report['source_manifests'])}")
+    print(f"Required stages         : {', '.join(report['required_stages'])}")
+    print(
+        f"Total clips / frames    : {dataset['total_records']} / {dataset['total_frames']}"
+    )
+    print(
+        f"Kept clips / frames     : {dataset['kept_records']} / {dataset['kept_frames']}"
+    )
+    print(
+        f"Dropped clips / frames  : {dataset['dropped_records']} / {dataset['dropped_frames']}"
+    )
+    print(f"Duplicate clip_ids      : {report['duplicate_clip_id_count']}")
+    if report.get("partitions"):
+        print("Partitions:")
+        for partition in report["partitions"]:
+            print(
+                f"  part{partition['part_id']:04d}: clips={partition['clip_count']} "
+                f"frames={partition['frame_count']} avg_frames={partition['avg_frames_per_clip']:.1f}"
+            )
+        if len(report["partitions"]) > 1:
+            frame_counts = [partition["frame_count"] for partition in report["partitions"]]
+            print(
+                f"Partition frame range   : min={min(frame_counts)} max={max(frame_counts)} "
+                f"gap={max(frame_counts) - min(frame_counts)}"
+            )
+    print()
+
+
 def main() -> None:
     args = parse_args()
     required_stages = _parse_required_stages(args.required_stages)
@@ -231,12 +273,27 @@ def main() -> None:
             continue
         kept_records.append(record)
 
+    total_summary = _summarize_records(records)
+    kept_summary = _summarize_records(kept_records)
     report = {
         "source_manifests": [str(path) for path in source_manifests],
         "required_stages": required_stages,
         "total_records": len(records),
         "kept_records": len(kept_records),
         "dropped_records": len(records) - len(kept_records),
+        "total_frames": total_summary["frame_count"],
+        "kept_frames": kept_summary["frame_count"],
+        "dropped_frames": total_summary["frame_count"] - kept_summary["frame_count"],
+        "dataset_summary": {
+            "total_records": len(records),
+            "kept_records": len(kept_records),
+            "dropped_records": len(records) - len(kept_records),
+            "total_frames": total_summary["frame_count"],
+            "kept_frames": kept_summary["frame_count"],
+            "dropped_frames": total_summary["frame_count"] - kept_summary["frame_count"],
+            "avg_frames_per_clip": total_summary["avg_frames_per_clip"],
+            "avg_frames_per_kept_clip": kept_summary["avg_frames_per_clip"],
+        },
         "duplicate_clip_id_count": len(duplicate_clip_ids),
         "duplicate_clip_ids_preview": duplicate_clip_ids[:32],
         "duplicate_conflicts": duplicate_conflicts,
@@ -252,8 +309,8 @@ def main() -> None:
             {
                 "part_id": 0,
                 "manifest_path": str(output_manifest),
-                "clip_count": len(kept_records),
-                "total_weight": sum(_record_weight(record) for record in kept_records),
+                **kept_summary,
+                "total_weight": kept_summary["frame_count"],
             }
         ]
     else:
@@ -270,7 +327,7 @@ def main() -> None:
                 {
                     "part_id": partition.part_id,
                     "manifest_path": str(manifest_path),
-                    "clip_count": len(partition.records),
+                    **_summarize_records(partition.records),
                     "total_weight": partition.total_weight,
                 }
             )
@@ -278,6 +335,7 @@ def main() -> None:
         report["partitions"] = partition_summaries
 
     report_text = json.dumps(report, ensure_ascii=False, indent=2)
+    _print_human_summary(report)
     print(report_text)
     if args.report_out:
         report_path = Path(args.report_out).expanduser().resolve()
