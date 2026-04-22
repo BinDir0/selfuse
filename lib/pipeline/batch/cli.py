@@ -339,8 +339,10 @@ def normalize_batch_infer_args(args, *, raw_argv: list[str] | None = None) -> li
             args.local_cache_root = getattr(args, "stage3_tmp_root", None)
         if getattr(args, "local_cache_min_frames", 1) < 96:
             args.local_cache_min_frames = 96
+        if "--num_workers" not in raw_argv:
+            args.num_workers = max(int(getattr(args, "num_workers", 16)), 32)
         notes.append(
-            "`--infer_profile throughput_80gb` enabled shared local clip cache and stage-specific worker defaults."
+            "`--infer_profile throughput_80gb` enabled shared local clip cache and more aggressive motion loading defaults."
         )
 
     return notes

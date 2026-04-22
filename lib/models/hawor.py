@@ -424,10 +424,13 @@ class HAWOR(pl.LightningModule):
             batch_ranges.append((start, min(start + dataloader_batch_size, total_padded)))
 
         # --- Multi-threaded batch loading + GPU pipeline ---
-        # Background thread uses ThreadPoolExecutor(32) for parallel frame loading
-        # (JPEG decode, crop, resize are all C extensions that release GIL)
+        # Background thread uses a thread pool for parallel frame loading.
+        # JPEG decode, crop, and resize are C extensions that release the GIL,
+        # so honoring the requested worker count materially improves throughput
+        # on high-core hosts backed by slower shared storage.
         # Main thread runs GPU inference on current batch while next batch loads
-        load_workers = min(num_workers, 32)
+        cpu_workers = max(1, int(os.cpu_count() or 1))
+        load_workers = max(1, min(int(num_workers), cpu_workers))
         prefetch_q = queue.Queue(maxsize=2)
         target_device = torch.device(device)
         use_non_blocking = target_device.type == 'cuda'
