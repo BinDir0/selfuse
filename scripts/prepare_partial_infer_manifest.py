@@ -16,6 +16,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.clip_manifest import load_clip_manifest, write_clip_manifest
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, **_kwargs):
+        return iterable
+
 
 @dataclass
 class Partition:
@@ -142,7 +148,7 @@ def _load_merged_records(manifest_paths: list[Path]):
     duplicate_clip_ids = set()
     duplicate_conflicts = []
 
-    for manifest_path in manifest_paths:
+    for manifest_path in tqdm(manifest_paths, desc="Load manifests", unit="manifest", dynamic_ncols=True):
         for record in load_clip_manifest(manifest_path):
             existing = merged.get(record.clip_id)
             if existing is None:
@@ -239,7 +245,9 @@ def _print_human_summary(report: dict) -> None:
 def main() -> None:
     args = parse_args()
     required_stages = _parse_required_stages(args.required_stages)
+    print("Resolving source manifests...", flush=True)
     source_manifests = _resolve_source_manifests(args)
+    print(f"Matched {len(source_manifests)} manifest(s).", flush=True)
     if args.split_count < 1:
         raise ValueError("--split_count must be >= 1")
 
@@ -248,12 +256,16 @@ def main() -> None:
     if args.split_count > 1 and not args.split_prefix:
         raise ValueError("--split_prefix is required when --split_count>1")
 
+    print("Loading and merging manifests...", flush=True)
     records, duplicate_clip_ids, duplicate_conflicts = _load_merged_records(source_manifests)
+    print(f"Merged into {len(records)} unique clip(s).", flush=True)
     kept_records = []
     dropped_examples = []
+    dropped_count = 0
     stage_missing_counts = {stage: 0 for stage in required_stages}
 
-    for record in records:
+    check_iter = tqdm(records, desc="Check stage completion", unit="clip", dynamic_ncols=True)
+    for record in check_iter:
         seq_folder = Path(record.descriptor.seq_folder)
         missing = []
         for stage in required_stages:
@@ -261,6 +273,7 @@ def main() -> None:
                 stage_missing_counts[stage] += 1
                 missing.append(stage)
         if missing:
+            dropped_count += 1
             if len(dropped_examples) < 32:
                 dropped_examples.append(
                     {
@@ -270,8 +283,12 @@ def main() -> None:
                         "frame_count": _record_weight(record),
                     }
                 )
+            if hasattr(check_iter, "set_postfix"):
+                check_iter.set_postfix(kept=len(kept_records), dropped=dropped_count, refresh=False)
             continue
         kept_records.append(record)
+        if hasattr(check_iter, "set_postfix"):
+            check_iter.set_postfix(kept=len(kept_records), dropped=dropped_count, refresh=False)
 
     total_summary = _summarize_records(records)
     kept_summary = _summarize_records(kept_records)
@@ -316,10 +333,11 @@ def main() -> None:
     else:
         prefix = Path(args.split_prefix).expanduser().resolve()
         prefix.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Writing {args.split_count} partition manifest(s)...", flush=True)
         partitions = _assign_balanced(kept_records, args.split_count)
         output_manifests = []
         partition_summaries = []
-        for partition in partitions:
+        for partition in tqdm(partitions, desc="Write partitions", unit="part", dynamic_ncols=True):
             manifest_path = prefix.parent / f"{prefix.name}.part{partition.part_id:04d}.jsonl"
             write_clip_manifest(partition.records, manifest_path)
             output_manifests.append(str(manifest_path))
