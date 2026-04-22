@@ -41,8 +41,9 @@ infer:
 filter:
   stages: detect_track,motion,slam,infiller
   workers: 8
-  drop_nonfinite_world_res: true
-  drop_nonfinite_slam: true
+  # max_hand_translation_step: 0.35
+  # max_camera_translation_step: 0.5
+  # max_camera_rotation_step: 1.0
 
 build:
   require_annotation: false
