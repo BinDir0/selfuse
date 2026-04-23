@@ -27,9 +27,8 @@ from lib.pipeline.quality_metrics import decode_lowdim, parse_frame_index
 from scripts.rewrite_webdataset_lowdim import (
     DEFAULT_WORKERS,
     _sample_clip_id,
-    build_clip_index_from_processed_root,
     build_legacy_episode_index,
-    build_legacy_episode_index_from_processed_root,
+    iter_buildai_seq_folders,
     source_contains_legacy_buildai_keys,
 )
 
@@ -182,6 +181,35 @@ def _action_consistency_stats(lowdim_all: np.ndarray) -> dict:
         "wrist_max_abs_diff": float(wrist_diff.max()),
         "hand_max_abs_diff": float(hand_diff.max()),
     }
+
+
+def _build_clip_index_with_progress(processed_root: Path, factory_range) -> dict[str, dict]:
+    print(f"[audit] scanning processed root for clip index: {processed_root}", flush=True)
+    clip_index = {}
+    for idx, seq_folder in enumerate(iter_buildai_seq_folders(str(processed_root), factory_range=factory_range), start=1):
+        clip_id = seq_folder.name
+        clip_index[clip_id] = {
+            "clip_id": clip_id,
+            "episode_id": clip_id,
+            "seq_folder": str(seq_folder),
+            "source_id": "buildai",
+            "split": "unknown",
+        }
+        if idx <= 5 or idx % 2000 == 0:
+            print(f"[audit] indexed clips={idx}", flush=True)
+    if not clip_index:
+        raise RuntimeError(f"No BuildAI seq_folder with world_space_res.pth found under {processed_root}")
+    print(f"[audit] clip index ready: clips={len(clip_index)}", flush=True)
+    return clip_index
+
+
+def _build_legacy_episode_index_from_clip_index(clip_index: dict[str, dict]) -> dict[int, dict]:
+    legacy_episodes = {}
+    for episode_index, clip_info in enumerate(clip_index.values()):
+        record = dict(clip_info)
+        record["legacy_episode_index"] = int(episode_index)
+        legacy_episodes[episode_index] = record
+    return legacy_episodes
 
 def _worker_init(
     device_specs,
@@ -559,8 +587,8 @@ def main():
     feature_cache_dir = Path(args.feature_cache_dir) if args.feature_cache_dir else source_dir / "_audit_episode_feature_cache"
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    clip_index = build_clip_index_from_processed_root(
-        str(buildai_processed_root),
+    clip_index = _build_clip_index_with_progress(
+        buildai_processed_root,
         factory_range=args.legacy_factory_range,
     )
 
@@ -574,6 +602,7 @@ def main():
 
     legacy_episodes = {}
     if args.legacy_buildai_input_dir or legacy_episode_cache:
+        print("[audit] building legacy episode mapping from explicit legacy source/cache", flush=True)
         legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
         legacy_episodes = build_legacy_episode_index(
             legacy_input_dir,
@@ -582,10 +611,9 @@ def main():
             cache_file=legacy_episode_cache,
         )
     if not legacy_episodes:
-        legacy_episodes = build_legacy_episode_index_from_processed_root(
-            str(buildai_processed_root),
-            factory_range=args.legacy_factory_range,
-        )
+        print("[audit] reusing clip index order for legacy episode mapping", flush=True)
+        legacy_episodes = _build_legacy_episode_index_from_clip_index(clip_index)
+    print(f"[audit] legacy episode mapping ready: episodes={len(legacy_episodes)}", flush=True)
 
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
@@ -597,10 +625,18 @@ def main():
     start = int(args.shard_start)
     end = total if args.shard_end is None else min(int(args.shard_end), total)
     selected = shard_paths[start:end]
+    print(
+        f"[audit] shard selection: total={total} range=[{start}, {end}) selected={len(selected)}",
+        flush=True,
+    )
 
     mano_device_obj = torch.device(args.mano_device if torch.cuda.is_available() else "cpu")
     device_specs = normalize_mano_devices(str(mano_device_obj), args.mano_gpus if mano_device_obj.type == "cuda" else None)
     workers = min(int(args.workers), len(device_specs)) if mano_device_obj.type == "cuda" else int(args.workers)
+    print(
+        f"[audit] runtime: device={mano_device_obj} workers={workers} feature_cache_dir={feature_cache_dir}",
+        flush=True,
+    )
     tasks = [(path, float(args.source_fps), float(args.target_fps), bool(args.interpolate_labels)) for path in selected]
 
     if workers <= 1:
