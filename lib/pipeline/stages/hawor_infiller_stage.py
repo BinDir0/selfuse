@@ -382,6 +382,14 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
     state.pred_valid = (state.pred_valid > 0).numpy()
     pred_valid_numpy = state.pred_valid
     for idx in [1, 0]:
+        observed_count = int(pred_valid_numpy[idx].sum())
+        if observed_count == 0:
+            if not QUIET_MODE:
+                vprint(
+                    f"[infiller] skip {idx_to_hand[idx]} hand: "
+                    "no observed cam-space frames, keep hand invalid instead of hallucinating"
+                )
+            continue
         missing = ~pred_valid_numpy[idx]
         frame = frame_list[missing]
         frame_chunks = parse_chunks_hand_frame(frame)

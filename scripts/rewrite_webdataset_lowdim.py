@@ -39,6 +39,8 @@ from lib.pipeline.quality_metrics import parse_frame_index  # noqa: E402
 DEFAULT_WORKERS = max(1, min(4, os.cpu_count() or 1))
 BUILDAI_CLIP_RE = re.compile(r"^factory(\d{3})_worker(\d{3})_")
 LEGACY_BUILDAI_EP_RE = re.compile(r"^buildai_ep(\d+)$")
+FACTORY_DIR_RE = re.compile(r"^factory_(\d+)$")
+FACTORY_PLAIN_DIR_RE = re.compile(r"^factory(\d+)$")
 _WORKER_CLIP_INDEX = None
 _WORKER_LEGACY_EPISODES = None
 _WORKER_FEATURE_CACHE_DIR = None
@@ -49,6 +51,9 @@ _WORKER_MANO_DIR = None
 _WORKER_BUILDAI_ROOT = None
 _WORKER_EPISODE_CACHE = {}
 _WORKER_OUTPUT_DIR = None
+_WORKER_SOURCE_FPS = 5.0
+_WORKER_TARGET_FPS = 5.0
+_WORKER_INTERPOLATE_LABELS = False
 
 
 def build_parser():
@@ -98,6 +103,14 @@ def build_parser():
         type=str,
         default=None,
         help="Optional cache dir for corrected episode features; defaults to <output_dir>/_episode_feature_cache",
+    )
+    parser.add_argument("--source_fps", type=float, default=5.0, help="Source label fps used during build")
+    parser.add_argument("--target_fps", type=float, default=5.0, help="Target label fps used during build")
+    parser.add_argument(
+        "--interpolate_labels",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Whether to rebuild lowdim with the interpolated label path",
     )
     return parser
 
@@ -149,6 +162,79 @@ def _build_updated_meta(meta: dict, clip_info: dict, presence: int) -> bytes:
     return json.dumps(updated, ensure_ascii=False).encode("utf-8")
 
 
+def _parse_factory_id(factory_dir: Path) -> int | None:
+    for pattern in (FACTORY_DIR_RE, FACTORY_PLAIN_DIR_RE):
+        match = pattern.match(factory_dir.name)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def _matches_factory_range(factory_dir: Path, factory_range) -> bool:
+    if factory_range is None:
+        return True
+    factory_id = _parse_factory_id(factory_dir)
+    if factory_id is None:
+        return False
+    if isinstance(factory_range, str):
+        start_str, end_str = factory_range.split("-", 1)
+        start, end = int(start_str.strip()), int(end_str.strip())
+    else:
+        start, end = int(factory_range[0]), int(factory_range[1])
+    return start <= factory_id <= end
+
+
+def iter_buildai_seq_folders(processed_root: str, *, factory_range: str | tuple[int, int] | None = None):
+    root = Path(processed_root).resolve()
+    seen = set()
+    patterns = (
+        "factory_*/worker_*/processed/*",
+        "factory*/outputs/*",
+    )
+    for pattern in patterns:
+        for seq_folder in sorted(root.glob(pattern)):
+            if not seq_folder.is_dir():
+                continue
+            if not (seq_folder / "world_space_res.pth").is_file():
+                continue
+            factory_dir = seq_folder.parents[2] if seq_folder.parent.name == "processed" else seq_folder.parent.parent
+            if not _matches_factory_range(factory_dir, factory_range):
+                continue
+            resolved = seq_folder.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            yield resolved
+
+
+def build_clip_index_from_processed_root(
+    processed_root: str,
+    *,
+    factory_range: str | tuple[int, int] | None = None,
+) -> dict[str, dict]:
+    root = Path(processed_root).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"BuildAI processed root not found: {root}")
+
+    clip_index = {}
+    for seq_folder in iter_buildai_seq_folders(str(root), factory_range=factory_range):
+        clip_id = seq_folder.name
+        clip_index[clip_id] = {
+            "clip_id": clip_id,
+            "episode_id": clip_id,
+            "seq_folder": str(seq_folder),
+            "source_id": "buildai",
+            "split": "unknown",
+        }
+    if not clip_index:
+        raise RuntimeError(
+            "Failed to auto-discover any BuildAI seq_folder under "
+            f"{root}. Expected either factory_<id>/worker_<id>/processed/<clip_id> "
+            "or factory<id>/outputs/<clip_id> with world_space_res.pth"
+        )
+    return clip_index
+
+
 def build_legacy_episode_index(
     input_dir: str,
     *,
@@ -184,31 +270,9 @@ def build_legacy_episode_index_from_processed_root(
     *,
     factory_range: str | None,
 ) -> dict[int, dict]:
-    from lib.pipeline.exporters.webdataset_discovery import matches_factory_range
-
     root = Path(processed_root).resolve()
-    if not root.is_dir():
-        raise FileNotFoundError(f"BuildAI processed root not found: {root}")
-
-    seq_folders = []
-    for factory_dir in sorted(root.glob("factory_*")):
-        if not factory_dir.is_dir():
-            continue
-        if not matches_factory_range(str(factory_dir), factory_range):
-            continue
-        for worker_dir in sorted(factory_dir.glob("worker_*")):
-            processed_dir = worker_dir / "processed"
-            if not processed_dir.is_dir():
-                continue
-            for seq_folder in sorted(processed_dir.iterdir()):
-                if not seq_folder.is_dir():
-                    continue
-                if not (seq_folder / "world_space_res.pth").is_file():
-                    continue
-                seq_folders.append(seq_folder.resolve())
-
     legacy_index = {}
-    for episode_index, seq_folder in enumerate(seq_folders):
+    for episode_index, seq_folder in enumerate(iter_buildai_seq_folders(processed_root, factory_range=factory_range)):
         clip_id = seq_folder.name
         legacy_index[episode_index] = {
             "clip_id": clip_id,
@@ -221,7 +285,8 @@ def build_legacy_episode_index_from_processed_root(
     if not legacy_index:
         raise RuntimeError(
             "Failed to auto-discover any BuildAI seq_folder under "
-            f"{root}. Expected paths like factory_<id>/worker_<id>/processed/<clip_id>/world_space_res.pth"
+            f"{root}. Expected either factory_<id>/worker_<id>/processed/<clip_id> "
+            "or factory<id>/outputs/<clip_id> with world_space_res.pth"
         )
     return legacy_index
 
@@ -245,10 +310,14 @@ def _worker_init(
     feature_cache_dir: str | None,
     output_dir: str,
     buildai_root: str,
+    source_fps: float,
+    target_fps: float,
+    interpolate_labels: bool,
 ):
     global _WORKER_CLIP_INDEX, _WORKER_LEGACY_EPISODES, _WORKER_FEATURE_CACHE_DIR, _WORKER_DEVICE
     global _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT, _WORKER_EPISODE_CACHE
     global _WORKER_MANO_DIR, _WORKER_OUTPUT_DIR, _WORKER_BUILDAI_ROOT
+    global _WORKER_SOURCE_FPS, _WORKER_TARGET_FPS, _WORKER_INTERPOLATE_LABELS
 
     from multiprocessing import current_process
     import torch
@@ -266,13 +335,17 @@ def _worker_init(
     _WORKER_EPISODE_CACHE = {}
     _WORKER_OUTPUT_DIR = output_dir
     _WORKER_BUILDAI_ROOT = buildai_root
+    _WORKER_SOURCE_FPS = float(source_fps)
+    _WORKER_TARGET_FPS = float(target_fps)
+    _WORKER_INTERPOLATE_LABELS = bool(interpolate_labels)
 
 
 def _get_episode_data(clip_id: str):
     from lib.pipeline.exporters.manifest_vla import load_descriptor_episode_features
 
-    if clip_id in _WORKER_EPISODE_CACHE:
-        return _WORKER_EPISODE_CACHE[clip_id]
+    cache_key = (clip_id, _WORKER_SOURCE_FPS, _WORKER_TARGET_FPS, _WORKER_INTERPOLATE_LABELS)
+    if cache_key in _WORKER_EPISODE_CACHE:
+        return _WORKER_EPISODE_CACHE[cache_key]
 
     clip_info = _WORKER_CLIP_INDEX.get(clip_id)
     if clip_info is None:
@@ -289,13 +362,13 @@ def _get_episode_data(clip_id: str):
         _WORKER_DEVICE,
         _WORKER_FEATURE_CACHE_DIR,
         _WORKER_MANO_DIR,
-        source_fps=5.0,
-        target_fps=5.0,
-        interpolate_labels=False,
+        source_fps=_WORKER_SOURCE_FPS,
+        target_fps=_WORKER_TARGET_FPS,
+        interpolate_labels=_WORKER_INTERPOLATE_LABELS,
     )
     if episode_data is None:
         raise RuntimeError(f"Failed to load corrected features for clip {clip_id}")
-    _WORKER_EPISODE_CACHE[clip_id] = episode_data
+    _WORKER_EPISODE_CACHE[cache_key] = episode_data
     return episode_data
 
 
@@ -307,16 +380,16 @@ def _build_buildai_clip_info(clip_id: str) -> dict:
         )
     factory_id = int(match.group(1))
     worker_id = int(match.group(2))
-    seq_folder = (
-        Path(_WORKER_BUILDAI_ROOT)
-        / f"factory_{factory_id:03d}"
-        / f"worker_{worker_id:03d}"
-        / "processed"
-        / clip_id
-    )
-    if not seq_folder.is_dir():
+    root = Path(_WORKER_BUILDAI_ROOT)
+    candidates = [
+        root / f"factory_{factory_id:03d}" / f"worker_{worker_id:03d}" / "processed" / clip_id,
+        root / f"factory{factory_id:03d}" / "outputs" / clip_id,
+    ]
+    seq_folder = next((path for path in candidates if path.is_dir()), None)
+    if seq_folder is None:
         raise FileNotFoundError(
-            f"BuildAI seq_folder not found for {clip_id}: {seq_folder}"
+            "BuildAI seq_folder not found for "
+            f"{clip_id}. Checked: {', '.join(str(path) for path in candidates)}"
         )
     return {
         "clip_id": clip_id,
@@ -458,6 +531,9 @@ def build_report(
     shard_results: list[dict],
     feature_cache_dir: Path,
     *,
+    source_fps: float,
+    target_fps: float,
+    interpolate_labels: bool,
     shard_start: int,
     shard_end: int,
     selected_shards: int,
@@ -468,6 +544,11 @@ def build_report(
         "output_dir": str(output_dir.resolve()),
         "buildai_processed_root": str(buildai_processed_root.resolve()),
         "feature_cache_dir": str(feature_cache_dir.resolve()),
+        "export_settings": {
+            "source_fps": float(source_fps),
+            "target_fps": float(target_fps),
+            "interpolate_labels": bool(interpolate_labels),
+        },
         "shard_range": {
             "start": int(shard_start),
             "end": int(shard_end),
@@ -524,8 +605,7 @@ def select_shard_paths(shard_paths: list[str], output_dir: Path, shard_start: in
     return pending, reused, selected_end
 
 
-def main():
-    args = build_parser().parse_args()
+def run_from_args(args):
     import torch
     from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
 
@@ -545,7 +625,10 @@ def main():
     feature_cache_dir = Path(args.feature_cache_dir) if args.feature_cache_dir else output_dir / "_episode_feature_cache"
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    clip_index = {}
+    clip_index = build_clip_index_from_processed_root(
+        str(buildai_processed_root),
+        factory_range=args.legacy_factory_range,
+    )
     legacy_episodes = {}
     legacy_episode_source = None
     legacy_episode_cache = args.legacy_episode_cache
@@ -609,6 +692,9 @@ def main():
             str(feature_cache_dir),
             str(output_dir),
             str(buildai_processed_root),
+            float(args.source_fps),
+            float(args.target_fps),
+            bool(args.interpolate_labels),
         )
         shard_results = [process_shard(shard_path) for shard_path in tqdm(shard_paths, desc="Rewrite shards")]
     else:
@@ -624,6 +710,9 @@ def main():
                 str(feature_cache_dir),
                 str(output_dir),
                 str(buildai_processed_root),
+                float(args.source_fps),
+                float(args.target_fps),
+                bool(args.interpolate_labels),
             ),
         ) as pool:
             shard_results = list(
@@ -641,6 +730,9 @@ def main():
         legacy_episode_source,
         shard_results,
         feature_cache_dir,
+        source_fps=float(args.source_fps),
+        target_fps=float(args.target_fps),
+        interpolate_labels=bool(args.interpolate_labels),
         shard_start=args.shard_start,
         shard_end=selected_end,
         selected_shards=len(shard_paths) + len(reused_shards),
@@ -651,6 +743,11 @@ def main():
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def main():
+    args = build_parser().parse_args()
+    run_from_args(args)
 
 
 if __name__ == "__main__":
