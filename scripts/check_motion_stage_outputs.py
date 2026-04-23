@@ -34,10 +34,7 @@ from lib.pipeline.exporters.webdataset_features import (
     _load_world_space_prediction,
     build_mano_models,
 )
-from lib.pipeline.quality_metrics import (
-    decode_lowdim,
-    validate_lowdim_numeric_sanity,
-)
+from lib.pipeline.quality_metrics import decode_lowdim
 from lib.pipeline.stage_api import get_track_range
 from lib.pipeline.wds_sanity import LOWDIM_DIMENSION_NAMES
 
@@ -66,6 +63,84 @@ WDS_MEMBER_SUFFIXES = {
     ".meta.json": "meta_bytes",
     ".mano.npy": "mano_bytes",
 }
+ROT6D_UNIT_NORM_TOL = 0.2
+ROT6D_ORTHOGONALITY_TOL = 0.2
+ROT6D_MIN_CROSS_NORM = 0.5
+EXTRINSIC_BOTTOM_ROW_TOL = 1e-3
+EXTRINSIC_ROTATION_ORTHO_FROB_TOL = 0.2
+EXTRINSIC_ROTATION_DET_TOL = 0.2
+
+try:
+    from lib.pipeline.quality_metrics import validate_lowdim_numeric_sanity  # type: ignore
+except ImportError:
+    def _rot6d_is_sane(rot6d: np.ndarray) -> bool:
+        array = np.asarray(rot6d, dtype=np.float32).reshape(-1)
+        if array.shape != (6,) or not np.isfinite(array).all():
+            return False
+        col_a = array[:3]
+        col_b = array[3:]
+        norm_a = float(np.linalg.norm(col_a))
+        norm_b = float(np.linalg.norm(col_b))
+        if norm_a <= 1e-8 or norm_b <= 1e-8:
+            return False
+        if abs(norm_a - 1.0) > ROT6D_UNIT_NORM_TOL or abs(norm_b - 1.0) > ROT6D_UNIT_NORM_TOL:
+            return False
+        unit_a = col_a / norm_a
+        unit_b = col_b / norm_b
+        if abs(float(np.dot(unit_a, unit_b))) > ROT6D_ORTHOGONALITY_TOL:
+            return False
+        if float(np.linalg.norm(np.cross(unit_a, unit_b))) < ROT6D_MIN_CROSS_NORM:
+            return False
+        return True
+
+    def _extrinsic_is_sane(extrinsic: np.ndarray) -> bool:
+        matrix = np.asarray(extrinsic, dtype=np.float32).reshape(4, 4)
+        if not np.isfinite(matrix).all():
+            return False
+        if not np.allclose(matrix[3], np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), atol=EXTRINSIC_BOTTOM_ROW_TOL):
+            return False
+        rotation = matrix[:3, :3].astype(np.float64)
+        det = float(np.linalg.det(rotation))
+        if not np.isfinite(det) or abs(det - 1.0) > EXTRINSIC_ROTATION_DET_TOL:
+            return False
+        ortho_err = float(np.linalg.norm(rotation.T @ rotation - np.eye(3, dtype=np.float64), ord="fro"))
+        if ortho_err > EXTRINSIC_ROTATION_ORTHO_FROB_TOL:
+            return False
+        return True
+
+    def _intrinsic_is_sane(intrinsic: np.ndarray) -> bool:
+        array = np.asarray(intrinsic, dtype=np.float32).reshape(-1)
+        if array.shape != (4,) or not np.isfinite(array).all():
+            return False
+        return float(array[0]) > 0.0 and float(array[1]) > 0.0
+
+    def validate_lowdim_numeric_sanity(lowdim: np.ndarray) -> dict:
+        array = np.asarray(lowdim, dtype=np.float32).reshape(-1)
+        invalid_rot6d = any(
+            not _rot6d_is_sane(array[rot_slice])
+            for rot_slice in (
+                slice(6, 12),
+                slice(12, 18),
+                slice(54, 60),
+                slice(60, 66),
+            )
+        )
+        invalid_extrinsic = not _extrinsic_is_sane(array[EXTRINSIC_SLICE].reshape(4, 4))
+        invalid_intrinsic = not _intrinsic_is_sane(array[INTRINSIC_SLICE])
+        issues = []
+        if invalid_rot6d:
+            issues.append("invalid_rot6d")
+        if invalid_extrinsic:
+            issues.append("invalid_extrinsic")
+        if invalid_intrinsic:
+            issues.append("invalid_intrinsic")
+        return {
+            "valid": not issues,
+            "invalid_rot6d": bool(invalid_rot6d),
+            "invalid_extrinsic": bool(invalid_extrinsic),
+            "invalid_intrinsic": bool(invalid_intrinsic),
+            "issues": issues,
+        }
 
 
 def build_parser() -> argparse.ArgumentParser:
