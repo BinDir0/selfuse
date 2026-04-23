@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lib.pipeline.datasets.descriptors import ClipDescriptor
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples, validate_sample_record
 from lib.pipeline.quality_metrics import decode_lowdim, parse_frame_index
 from scripts.rewrite_webdataset_lowdim import (
@@ -195,6 +196,7 @@ def _build_clip_index_with_progress(processed_root: Path, factory_range) -> dict
             "seq_folder": str(seq_folder),
             "source_id": "buildai",
             "split": "unknown",
+            "descriptor": _make_legacy_buildai_descriptor(seq_folder, clip_id),
         }
         if idx <= 5 or idx % 2000 == 0:
             print(f"[audit] indexed clips={idx}", flush=True)
@@ -202,6 +204,27 @@ def _build_clip_index_with_progress(processed_root: Path, factory_range) -> dict
         raise RuntimeError(f"No BuildAI seq_folder with world_space_res.pth found under {processed_root}")
     print(f"[audit] clip index ready: clips={len(clip_index)}", flush=True)
     return clip_index
+
+
+def _make_legacy_buildai_descriptor(seq_folder: Path, clip_id: str) -> ClipDescriptor:
+    frame_dir = seq_folder / "extracted_images"
+    frame_names: list[str] = []
+    if frame_dir.is_dir():
+        jpgs = sorted(path.name for path in frame_dir.glob("*.jpg"))
+        pngs = sorted(path.name for path in frame_dir.glob("*.png"))
+        frame_names = jpgs if jpgs else pngs
+    root_dir = str(seq_folder.parent.resolve()) if seq_folder.parent.exists() else str(seq_folder.resolve())
+    return ClipDescriptor.from_image_sequence(
+        clip_id=clip_id,
+        clip_name=clip_id,
+        root_dir=root_dir,
+        seq_folder=str(seq_folder.resolve()),
+        frame_dir=str(frame_dir.resolve()) if frame_dir.is_dir() else str(seq_folder.resolve()),
+        frame_names=frame_names,
+        media_path=None,
+        fps=30.0,
+        extra={},
+    )
 
 
 def _resolve_direct_buildai_clip_info(processed_root: Path, clip_id: str) -> dict | None:
@@ -223,6 +246,7 @@ def _resolve_direct_buildai_clip_info(processed_root: Path, clip_id: str) -> dic
         "seq_folder": str(seq_folder.resolve()),
         "source_id": "buildai",
         "split": "unknown",
+        "descriptor": _make_legacy_buildai_descriptor(seq_folder, clip_id),
     }
 
 
