@@ -115,6 +115,17 @@ data_collator:
     # of placeholders and the LM sees the full temporal sequence.
     mem_enabled: ${policy.backbone.mem_temporal_attention.enabled}
 
+# Dataloader host-memory tuning:
+# PyTorch's CachingHostAllocator caches pinned pages and never returns them
+# to the OS, so DataLoader with pin_memory=True + high prefetch_factor
+# accumulates host RSS in long-running training. For train we reduce
+# prefetch_factor to keep the pinned pool water level small; for val we
+# fully disable pin_memory because each eval's tensor shape distribution
+# triggers fresh cudaHostAlloc buckets that then stick around forever.
+# Refs:
+#   https://github.com/pytorch/pytorch/issues/97432
+#   https://github.com/pytorch/pytorch/issues/106606
+#   https://github.com/pytorch/pytorch/issues/134332
 dataloader:
   # Switch between plain DataLoader (default) and WebLoader with cross-worker
   # shuffle. When use_webloader=true, cross_worker_shuffle > 0 enables a
@@ -127,14 +138,14 @@ dataloader:
     num_workers: 4
     pin_memory: True
     persistent_workers: True
-    prefetch_factor: 32
+    prefetch_factor: 4
 
 val_dataloader:
   loader:
     batch_size: 16
     shuffle: False
     drop_last: False
-    num_workers: 8
-    pin_memory: True
+    num_workers: 4
+    pin_memory: False
     persistent_workers: False
-    prefetch_factor: 8
+    prefetch_factor: 2

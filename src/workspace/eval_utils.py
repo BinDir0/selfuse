@@ -4,6 +4,7 @@ Evaluation and checkpoint utilities for LegendVLA training workspace.
 Extracted from train_legendvla_workspace.py for modularity.
 '''
 
+import gc
 import os
 import numpy as np
 import torch
@@ -425,3 +426,9 @@ def evaluation(workspace, rank, device, dataloader, step_log):
         save_attn_samples(workspace, rank, min_loss_sample, max_loss_sample)
 
     clear_attn_weights(model)
+    # FSDP2's post_forward_order (PyTorch source comment: "will cause ref
+    # cycles") holds pinned tensor wrappers alive across eval; a gen-2 gc
+    # collect breaks those cycles so pinned storage can return to
+    # CachingHostAllocator's free list instead of accumulating in the pool.
+    # Ref: https://github.com/pytorch/pytorch/issues/97432
+    gc.collect(generation=2)
