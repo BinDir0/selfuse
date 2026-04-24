@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit old BuildAI interpolated WebDataset shards against current export logic."""
+"""Audit BuildAI outputs either against old WDS shards or from processed intermediates only."""
 
 from __future__ import annotations
 
@@ -25,7 +25,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.datasets.descriptors import ClipDescriptor
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples, validate_sample_record
-from lib.pipeline.quality_metrics import decode_lowdim, max_translation_step, parse_frame_index
+from lib.pipeline.quality_metrics import (
+    classify_hand_projection,
+    decode_lowdim,
+    extract_lowdim_components,
+    max_camera_step,
+    max_translation_step,
+    parse_frame_index,
+)
 from scripts.rewrite_webdataset_lowdim import (
     DEFAULT_WORKERS,
     _sample_clip_id,
@@ -127,11 +134,21 @@ except ImportError:
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Audit old BuildAI interpolated WDS shards against current export logic")
-    parser.add_argument("--source_shard_dir", required=True, help="Source directory containing old WDS shard tar files")
+    parser = argparse.ArgumentParser(description="Audit BuildAI WDS shards or processed intermediates")
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "wds_compare", "processed_only"),
+        default="auto",
+        help="Audit old WDS shards against current export logic, or inspect processed intermediates only",
+    )
+    parser.add_argument("--source_shard_dir", default=None, help="Source directory containing old WDS shard tar files")
     parser.add_argument("--buildai_processed_root", required=True, help="BuildAI processed root containing stage outputs")
     parser.add_argument("--shard_start", type=int, default=0, help="Inclusive shard index in sorted shard order")
     parser.add_argument("--shard_end", type=int, default=None, help="Exclusive shard index in sorted shard order")
+    parser.add_argument("--factory_range", default=None, help="Optional processed-root factory range like 1-50")
+    parser.add_argument("--clip_ids", default=None, help="Optional comma-separated clip ids for processed-only audit")
+    parser.add_argument("--clip_ids_file", default=None, help="Optional newline-delimited clip id file for processed-only audit")
+    parser.add_argument("--clip_limit", type=int, default=None, help="Optional max number of clips in processed-only audit")
     parser.add_argument("--report_out", default=None, help="Optional JSON summary report path")
     parser.add_argument("--clip_report_out", default=None, help="Optional JSONL per-clip report path")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
@@ -147,6 +164,28 @@ def build_parser():
     parser.add_argument("--legacy_factory_range", default=None, help="Optional old builder factory range like 1-50")
     parser.add_argument("--legacy_episode_cache", default=None, help="Optional path to old builder _vla_episodes_cache.json")
     return parser
+
+
+def _parse_clip_ids(args) -> list[str]:
+    clip_ids = []
+    if args.clip_ids:
+        clip_ids.extend(part.strip() for part in str(args.clip_ids).split(","))
+    if args.clip_ids_file:
+        clip_ids_file = Path(args.clip_ids_file).expanduser().resolve()
+        if not clip_ids_file.is_file():
+            raise FileNotFoundError(f"clip_ids_file not found: {clip_ids_file}")
+        clip_ids.extend(
+            line.strip()
+            for line in clip_ids_file.read_text(encoding="utf-8").splitlines()
+        )
+    deduped = []
+    seen = set()
+    for clip_id in clip_ids:
+        if not clip_id or clip_id in seen:
+            continue
+        seen.add(clip_id)
+        deduped.append(clip_id)
+    return deduped
 
 
 def _load_cam_space_chunks(seq_folder: Path) -> dict[int, list[dict]]:
@@ -269,6 +308,127 @@ def _camera_space_wrist_metrics(lowdim_all: np.ndarray, image_size: tuple[int, i
         "image_size": [int(width), int(height)] if width is not None and height is not None else None,
         "hands": hands,
     }
+
+
+def _hand_projection_metrics(lowdim_all: np.ndarray, image_size: tuple[int, int] | None) -> dict:
+    metrics = {
+        "image_size": list(image_size) if image_size is not None else None,
+        "max_camera_translation_step": 0.0,
+        "camera_translation_pair_index": None,
+        "max_camera_rotation_step": 0.0,
+        "camera_rotation_pair_index": None,
+        "valid_camera_step_pairs": 0,
+        "hands": {},
+    }
+    lowdim = np.asarray(lowdim_all, dtype=np.float32)
+    if lowdim.ndim != 2 or lowdim.shape[1] < 116:
+        return metrics
+
+    extrinsics = lowdim[:, 96:112].reshape(-1, 4, 4)
+    camera_step = max_camera_step(extrinsics)
+    metrics.update(
+        {
+            "max_camera_translation_step": float(camera_step["max_translation_step"]),
+            "camera_translation_pair_index": camera_step["translation_pair_index"],
+            "max_camera_rotation_step": float(camera_step["max_rotation_step"]),
+            "camera_rotation_pair_index": camera_step["rotation_pair_index"],
+            "valid_camera_step_pairs": int(camera_step["valid_pairs"]),
+        }
+    )
+    if image_size is None:
+        return metrics
+
+    per_hand = {
+        "left": {
+            "valid_projection_frames": 0,
+            "any_point_inframe_frames": 0,
+            "all_points_out_of_frame_frames": 0,
+            "all_points_severe_offscreen_frames": 0,
+        },
+        "right": {
+            "valid_projection_frames": 0,
+            "any_point_inframe_frames": 0,
+            "all_points_out_of_frame_frames": 0,
+            "all_points_severe_offscreen_frames": 0,
+        },
+    }
+    for row in lowdim:
+        parts = extract_lowdim_components(row)
+        hand_points = {
+            "left": np.concatenate([parts["left_translation"].reshape(1, 3), parts["left_fingertips"]], axis=0),
+            "right": np.concatenate([parts["right_translation"].reshape(1, 3), parts["right_fingertips"]], axis=0),
+        }
+        for hand_name, points_world in hand_points.items():
+            projection = classify_hand_projection(
+                points_world,
+                parts["extrinsic"],
+                parts["intrinsic"],
+                image_size,
+                severe_offscreen_scale=1.4,
+            )
+            if bool(np.any(projection["valid"])):
+                per_hand[hand_name]["valid_projection_frames"] += 1
+            if projection["any_point_inframe"]:
+                per_hand[hand_name]["any_point_inframe_frames"] += 1
+            if projection["all_points_out_of_frame"]:
+                per_hand[hand_name]["all_points_out_of_frame_frames"] += 1
+            if projection["all_points_severe_offscreen"]:
+                per_hand[hand_name]["all_points_severe_offscreen_frames"] += 1
+
+    frame_count = int(lowdim.shape[0])
+    for hand_name, stats in per_hand.items():
+        valid_projection_frames = int(stats["valid_projection_frames"])
+        metrics["hands"][hand_name] = {
+            "frames": frame_count,
+            "valid_projection_frames": valid_projection_frames,
+            "any_point_inframe_frames": int(stats["any_point_inframe_frames"]),
+            "any_point_inframe_ratio": (
+                float(stats["any_point_inframe_frames"]) / float(valid_projection_frames)
+                if valid_projection_frames > 0
+                else None
+            ),
+            "all_points_out_of_frame_frames": int(stats["all_points_out_of_frame_frames"]),
+            "all_points_out_of_frame_ratio": (
+                float(stats["all_points_out_of_frame_frames"]) / float(valid_projection_frames)
+                if valid_projection_frames > 0
+                else None
+            ),
+            "all_points_severe_offscreen_frames": int(stats["all_points_severe_offscreen_frames"]),
+            "all_points_severe_offscreen_ratio": (
+                float(stats["all_points_severe_offscreen_frames"]) / float(valid_projection_frames)
+                if valid_projection_frames > 0
+                else None
+            ),
+        }
+    return metrics
+
+
+def _world_wrist_metrics(lowdim_all: np.ndarray) -> dict:
+    lowdim = np.asarray(lowdim_all, dtype=np.float32)
+    if lowdim.ndim != 2 or lowdim.shape[1] < 6:
+        return {"hands": {}}
+
+    hands = {}
+    for hand_name, wrist_slice in (("left", slice(0, 3)), ("right", slice(3, 6))):
+        world_xyz = lowdim[:, wrist_slice]
+        valid = np.isfinite(world_xyz).all(axis=1)
+        norms = np.linalg.norm(world_xyz, axis=1)
+        step_stats = max_translation_step(world_xyz, valid_mask=valid)
+        valid_xyz = world_xyz[valid]
+        hands[hand_name] = {
+            "frames": int(world_xyz.shape[0]),
+            "valid_frames": int(valid.sum()),
+            "xyz_min": [float(valid_xyz[:, axis].min()) if bool(valid.any()) else None for axis in range(3)],
+            "xyz_max": [float(valid_xyz[:, axis].max()) if bool(valid.any()) else None for axis in range(3)],
+            "norm_range": [
+                float(np.nanmin(norms[valid])) if bool(valid.any()) else None,
+                float(np.nanmax(norms[valid])) if bool(valid.any()) else None,
+            ],
+            "max_world_translation_step": float(step_stats["max_step"]),
+            "max_world_translation_pair_index": step_stats["pair_index"],
+            "valid_world_step_pairs": int(step_stats["valid_pairs"]),
+        }
+    return {"hands": hands}
 
 
 def _action_consistency_stats(lowdim_all: np.ndarray) -> dict:
@@ -539,6 +699,118 @@ def _load_slam_summary(seq_folder: Path) -> dict:
     return {"slam_traj_count": int(traj.shape[0])}
 
 
+def _load_raw_slam_metrics(seq_folder: Path, *, num_frames: int) -> dict:
+    from lib.pipeline.exporters.webdataset_geometry import interpolate_extrinsics, normalize_slam_keyframes, quat_to_4x4
+
+    slam_dir = seq_folder / "SLAM"
+    slam_files = sorted(slam_dir.glob("hawor_slam_w_scale_*.npz")) if slam_dir.is_dir() else []
+    if not slam_files:
+        return {
+            "has_slam_file": False,
+            "slam_file": None,
+            "slam_traj_count": 0,
+            "slam_tstamp_count": 0,
+            "normalized_tstamp_count": 0,
+            "traj_nonfinite": False,
+            "tstamp_nonfinite": False,
+            "scale_nonfinite": False,
+            "img_focal_nonfinite": False,
+            "img_center_nonfinite": False,
+            "negative_or_zero_scale": False,
+            "non_monotonic_timestamps": False,
+            "duplicate_timestamps_removed": 0,
+            "quaternion_norm_range": [None, None],
+            "keyframe_camera_translation_step_max": 0.0,
+            "keyframe_camera_rotation_step_max": 0.0,
+            "interpolated_camera_translation_step_max": 0.0,
+            "interpolated_camera_rotation_step_max": 0.0,
+            "direct_export_would_repeat_or_truncate": False,
+            "direct_export_repeat_or_truncate_frame_delta": 0,
+        }
+
+    slam_path = slam_files[0]
+    slam_data = np.load(str(slam_path), allow_pickle=True)
+    traj = np.asarray(slam_data["traj"], dtype=np.float32)
+    tstamp = np.asarray(slam_data.get("tstamp", np.arange(len(traj))), dtype=np.float64).reshape(-1)
+    scale = float(slam_data.get("scale", np.nan))
+    img_focal = float(slam_data.get("img_focal", np.nan))
+    img_center = np.asarray(slam_data.get("img_center", np.array([np.nan, np.nan], dtype=np.float32)), dtype=np.float32)
+
+    traj_nonfinite = not bool(np.isfinite(traj).all())
+    tstamp_nonfinite = not bool(np.isfinite(tstamp).all())
+    scale_nonfinite = not bool(np.isfinite(scale))
+    img_focal_nonfinite = not bool(np.isfinite(img_focal))
+    img_center_nonfinite = not bool(np.isfinite(img_center).all())
+    negative_or_zero_scale = bool(np.isfinite(scale) and scale <= 0.0)
+    non_monotonic_timestamps = bool(np.any(np.diff(tstamp) < 0)) if tstamp.size >= 2 else False
+
+    quat_norm_range = [None, None]
+    if traj.ndim == 2 and traj.shape[1] >= 7:
+        quat_norms = np.linalg.norm(traj[:, 3:7], axis=1)
+        if quat_norms.size > 0 and bool(np.isfinite(quat_norms).any()):
+            finite_quat_norms = quat_norms[np.isfinite(quat_norms)]
+            if finite_quat_norms.size > 0:
+                quat_norm_range = [float(finite_quat_norms.min()), float(finite_quat_norms.max())]
+
+    keyframe_translation_step_max = 0.0
+    keyframe_rotation_step_max = 0.0
+    interpolated_translation_step_max = 0.0
+    interpolated_rotation_step_max = 0.0
+    normalized_tstamp_count = 0
+    duplicate_timestamps_removed = 0
+    if (
+        not traj_nonfinite
+        and not tstamp_nonfinite
+        and not scale_nonfinite
+        and traj.ndim == 2
+        and traj.shape[1] >= 7
+        and traj.shape[0] > 0
+    ):
+        keyframe_c2w = np.stack([quat_to_4x4(row, scale) for row in traj], axis=0)
+        keyframe_w2c = np.linalg.inv(keyframe_c2w).astype(np.float32)
+        keyframe_step = max_camera_step(keyframe_w2c)
+        keyframe_translation_step_max = float(keyframe_step["max_translation_step"])
+        keyframe_rotation_step_max = float(keyframe_step["max_rotation_step"])
+
+        normalized_tstamp, normalized_traj = normalize_slam_keyframes(tstamp.astype(np.int64), traj)
+        normalized_tstamp_count = int(len(normalized_tstamp))
+        duplicate_timestamps_removed = int(len(tstamp) - len(normalized_tstamp))
+        if len(normalized_tstamp) > 0:
+            interpolated_w2c = interpolate_extrinsics(
+                normalized_tstamp,
+                normalized_traj,
+                scale,
+                max(0, int(num_frames)),
+            )
+            interpolated_step = max_camera_step(interpolated_w2c)
+            interpolated_translation_step_max = float(interpolated_step["max_translation_step"])
+            interpolated_rotation_step_max = float(interpolated_step["max_rotation_step"])
+
+    frame_delta = int(traj.shape[0] - int(num_frames))
+    return {
+        "has_slam_file": True,
+        "slam_file": str(slam_path),
+        "slam_traj_count": int(traj.shape[0]),
+        "slam_tstamp_count": int(tstamp.shape[0]),
+        "normalized_tstamp_count": int(normalized_tstamp_count),
+        "traj_nonfinite": bool(traj_nonfinite),
+        "tstamp_nonfinite": bool(tstamp_nonfinite),
+        "scale_nonfinite": bool(scale_nonfinite),
+        "img_focal_nonfinite": bool(img_focal_nonfinite),
+        "img_center_nonfinite": bool(img_center_nonfinite),
+        "negative_or_zero_scale": bool(negative_or_zero_scale),
+        "non_monotonic_timestamps": bool(non_monotonic_timestamps),
+        "duplicate_timestamps_removed": int(max(0, duplicate_timestamps_removed)),
+        "quaternion_norm_range": quat_norm_range,
+        "keyframe_camera_translation_step_max": float(keyframe_translation_step_max),
+        "keyframe_camera_rotation_step_max": float(keyframe_rotation_step_max),
+        "interpolated_camera_translation_step_max": float(interpolated_translation_step_max),
+        "interpolated_camera_rotation_step_max": float(interpolated_rotation_step_max),
+        "direct_export_would_repeat_or_truncate": bool(int(traj.shape[0]) != int(num_frames)),
+        "direct_export_repeat_or_truncate_frame_delta": int(frame_delta),
+    }
+
+
 def _permute_old_rot6_layout(lowdim_all: np.ndarray) -> np.ndarray:
     output = np.asarray(lowdim_all, dtype=np.float32).copy()
     for rot_slice in (slice(6, 12), slice(12, 18), slice(54, 60), slice(60, 66)):
@@ -615,6 +887,20 @@ def _classify_clip(metrics: dict) -> str:
     return "legacy_export_bug_beyond_rot6d"
 
 
+def _classify_processed_clip(metrics: dict) -> str:
+    if metrics["has_infiller_hallucinated_hand"]:
+        return "world_or_infiller_bug"
+    if (
+        metrics["current_export_invalid_rot6d_frames"] > 0
+        or metrics["current_export_invalid_extrinsic_frames"] > 0
+        or metrics["current_export_invalid_intrinsic_frames"] > 0
+        or metrics["current_export_wrist_action_next_state_max_abs_diff"] > COMPARE_TOL
+        or metrics["current_export_hand_action_next_state_max_abs_diff"] > COMPARE_TOL
+    ):
+        return "current_export_bug"
+    return "processed_only_ok"
+
+
 def _analyze_clip_samples(samples: list[dict], *, source_fps: float, target_fps: float, interpolate_labels: bool) -> dict:
     ordered_samples = sorted(samples, key=lambda sample: parse_frame_index(sample["key"]))
     meta = None
@@ -677,6 +963,55 @@ def _analyze_clip_samples(samples: list[dict], *, source_fps: float, target_fps:
     metrics["old_wds_vs_current_raw"] = _lowdim_diff_summary(old_lowdim, current_lowdim)
     metrics["old_wds_vs_current_rot6d_permuted"] = _lowdim_diff_summary(old_lowdim_permuted, current_lowdim)
     metrics["category"] = _classify_clip(metrics)
+    return metrics
+
+
+def _analyze_processed_clip(
+    clip_info: dict,
+    *,
+    source_fps: float,
+    target_fps: float,
+    interpolate_labels: bool,
+) -> dict:
+    seq_folder = Path(clip_info["seq_folder"]).resolve()
+    current_episode = _get_episode_data(
+        clip_info,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        interpolate_labels=interpolate_labels,
+    )
+    lowdim_all = np.asarray(current_episode["lowdim_all"], dtype=np.float32)
+    image_size = _load_image_size(clip_info)
+    motion_summary = _load_motion_summary(seq_folder)
+    world_summary = _load_world_summary(seq_folder)
+    slam_summary = _load_slam_summary(seq_folder)
+    current_metrics = _current_export_metrics(lowdim_all)
+    camera_wrist_metrics = _camera_space_wrist_metrics(lowdim_all, image_size=image_size)
+    hand_projection_metrics = _hand_projection_metrics(lowdim_all, image_size=image_size)
+    world_wrist_metrics = _world_wrist_metrics(lowdim_all)
+    raw_slam_metrics = _load_raw_slam_metrics(seq_folder, num_frames=int(lowdim_all.shape[0]))
+
+    metrics = {
+        "clip_id": clip_info["clip_id"],
+        "seq_folder": str(seq_folder),
+        "rebuilt_frame_count": int(lowdim_all.shape[0]),
+        **motion_summary,
+        **world_summary,
+        **slam_summary,
+        **current_metrics,
+        "camera_space_wrist_metrics": camera_wrist_metrics,
+        "hand_projection_metrics": hand_projection_metrics,
+        "world_wrist_metrics": world_wrist_metrics,
+        "raw_slam_metrics": raw_slam_metrics,
+    }
+    metrics["has_slam_frame_mismatch"] = bool(
+        metrics["slam_traj_count"] > 0 and metrics["source_frame_count"] > 0 and metrics["slam_traj_count"] < metrics["source_frame_count"]
+    )
+    metrics["has_infiller_hallucinated_hand"] = bool(
+        (metrics["cam_space_left_chunks"] == 0 and metrics["world_valid_left"] > 0)
+        or (metrics["cam_space_right_chunks"] == 0 and metrics["world_valid_right"] > 0)
+    )
+    metrics["category"] = _classify_processed_clip(metrics)
     return metrics
 
 
@@ -804,12 +1139,32 @@ def _process_shard(args_tuple) -> dict:
     }
 
 
-def _build_report(source_dir: Path, buildai_processed_root: Path, clip_reports: list[dict], feature_cache_dir: Path, shard_count: int) -> dict:
+def _process_processed_clip(args_tuple) -> dict:
+    clip_id, source_fps, target_fps, interpolate_labels = args_tuple
+    clip_info = _resolve_clip_info(clip_id, clip_id)
+    return _analyze_processed_clip(
+        clip_info,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        interpolate_labels=interpolate_labels,
+    )
+
+
+def _build_report(
+    source_dir: Path | None,
+    buildai_processed_root: Path,
+    clip_reports: list[dict],
+    feature_cache_dir: Path,
+    shard_count: int,
+    *,
+    mode: str,
+) -> dict:
     category_counts = {}
     for item in clip_reports:
         category_counts[item["category"]] = int(category_counts.get(item["category"], 0) + 1)
-    return {
-        "source_shard_dir": str(source_dir.resolve()),
+    report = {
+        "mode": mode,
+        "source_shard_dir": str(source_dir.resolve()) if source_dir is not None else None,
         "buildai_processed_root": str(buildai_processed_root.resolve()),
         "feature_cache_dir": str(feature_cache_dir.resolve()),
         "shards_scanned": int(shard_count),
@@ -830,6 +1185,9 @@ def _build_report(source_dir: Path, buildai_processed_root: Path, clip_reports: 
             )
         ),
     }
+    if mode == "processed_only":
+        report["clips_with_ok_processed_export"] = int(sum(1 for item in clip_reports if item["category"] == "processed_only_ok"))
+    return report
 
 
 def main():
@@ -837,15 +1195,24 @@ def main():
     import torch
     from lib.pipeline.exporters.webdataset_workers import normalize_mano_devices
 
-    source_dir = Path(args.source_shard_dir).resolve()
-    if not source_dir.is_dir():
-        raise FileNotFoundError(f"Source shard dir not found: {source_dir}")
     buildai_processed_root = Path(args.buildai_processed_root).resolve()
     if not buildai_processed_root.is_dir():
         raise FileNotFoundError(f"BuildAI processed root not found: {buildai_processed_root}")
+    mode = str(args.mode)
+    if mode == "auto":
+        mode = "wds_compare" if args.source_shard_dir else "processed_only"
+    source_dir = Path(args.source_shard_dir).resolve() if args.source_shard_dir else None
+    if mode == "wds_compare":
+        if source_dir is None or not source_dir.is_dir():
+            raise FileNotFoundError(f"Source shard dir not found: {source_dir}")
 
-    feature_cache_dir = Path(args.feature_cache_dir) if args.feature_cache_dir else source_dir / "_audit_episode_feature_cache"
+    feature_cache_dir = (
+        Path(args.feature_cache_dir)
+        if args.feature_cache_dir
+        else (source_dir / "_audit_episode_feature_cache" if source_dir is not None else buildai_processed_root / "_audit_episode_feature_cache")
+    )
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
+    factory_range = args.factory_range or args.legacy_factory_range
 
     legacy_episode_cache = args.legacy_episode_cache
     if legacy_episode_cache:
@@ -855,62 +1222,88 @@ def main():
         if default_cache.is_file():
             legacy_episode_cache = str(default_cache)
 
-    shard_paths = list(iter_shard_paths(str(source_dir)))
-    if not shard_paths:
-        raise RuntimeError(f"No shard tar files found in {source_dir}")
-
-    total = len(shard_paths)
-    start = int(args.shard_start)
-    end = total if args.shard_end is None else min(int(args.shard_end), total)
-    selected = shard_paths[start:end]
-    print(
-        f"[audit] shard selection: total={total} range=[{start}, {end}) selected={len(selected)}",
-        flush=True,
-    )
-    selected_clip_ids, selected_has_legacy_keys = _collect_selected_clip_ids(selected)
-
     legacy_episodes = {}
-    if not selected_has_legacy_keys:
-        clip_index, unresolved_clip_ids = _build_subset_clip_index(buildai_processed_root, selected_clip_ids)
-        if unresolved_clip_ids:
-            preview = unresolved_clip_ids[:8]
-            print(
-                f"[audit] direct clip resolution missed {len(unresolved_clip_ids)} clips; fallback to full processed-root scan. preview={preview}",
-                flush=True,
-            )
+    if mode == "wds_compare":
+        shard_paths = list(iter_shard_paths(str(source_dir)))
+        if not shard_paths:
+            raise RuntimeError(f"No shard tar files found in {source_dir}")
+
+        total = len(shard_paths)
+        start = int(args.shard_start)
+        end = total if args.shard_end is None else min(int(args.shard_end), total)
+        selected = shard_paths[start:end]
+        print(
+            f"[audit] shard selection: total={total} range=[{start}, {end}) selected={len(selected)}",
+            flush=True,
+        )
+        selected_clip_ids, selected_has_legacy_keys = _collect_selected_clip_ids(selected)
+
+        if not selected_has_legacy_keys:
+            clip_index, unresolved_clip_ids = _build_subset_clip_index(buildai_processed_root, selected_clip_ids)
+            if unresolved_clip_ids:
+                preview = unresolved_clip_ids[:8]
+                print(
+                    f"[audit] direct clip resolution missed {len(unresolved_clip_ids)} clips; fallback to full processed-root scan. preview={preview}",
+                    flush=True,
+                )
+                clip_index = _build_clip_index_with_progress(
+                    buildai_processed_root,
+                    factory_range=factory_range,
+                )
+                print("[audit] reusing full clip index order for legacy episode mapping", flush=True)
+                legacy_episodes = _build_legacy_episode_index_from_clip_index(clip_index)
+            else:
+                print(f"[audit] subset clip index ready: clips={len(clip_index)}", flush=True)
+        else:
+            print("[audit] selected shards contain legacy buildai_ep keys; need processed-root/legacy mapping", flush=True)
             clip_index = _build_clip_index_with_progress(
                 buildai_processed_root,
-                factory_range=args.legacy_factory_range,
+                factory_range=factory_range,
             )
-            print("[audit] reusing full clip index order for legacy episode mapping", flush=True)
-            legacy_episodes = _build_legacy_episode_index_from_clip_index(clip_index)
+            if args.legacy_buildai_input_dir or legacy_episode_cache:
+                print("[audit] building legacy episode mapping from explicit legacy source/cache", flush=True)
+                legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
+                legacy_episodes = build_legacy_episode_index(
+                    legacy_input_dir,
+                    episode_list=args.legacy_episode_list,
+                    factory_range=factory_range,
+                    cache_file=legacy_episode_cache,
+                )
+            if not legacy_episodes:
+                print("[audit] reusing full clip index order for legacy episode mapping", flush=True)
+                legacy_episodes = _build_legacy_episode_index_from_clip_index(clip_index)
+        if legacy_episodes:
+            print(f"[audit] legacy episode mapping ready: episodes={len(legacy_episodes)}", flush=True)
         else:
-            print(f"[audit] subset clip index ready: clips={len(clip_index)}", flush=True)
-    else:
-        print("[audit] selected shards contain legacy buildai_ep keys; need processed-root/legacy mapping", flush=True)
-        clip_index = _build_clip_index_with_progress(
-            buildai_processed_root,
-            factory_range=args.legacy_factory_range,
-        )
-        if args.legacy_buildai_input_dir or legacy_episode_cache:
-            print("[audit] building legacy episode mapping from explicit legacy source/cache", flush=True)
-            legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
-            legacy_episodes = build_legacy_episode_index(
-                legacy_input_dir,
-                episode_list=args.legacy_episode_list,
-                factory_range=args.legacy_factory_range,
-                cache_file=legacy_episode_cache,
-            )
-        if not legacy_episodes:
-            print("[audit] reusing full clip index order for legacy episode mapping", flush=True)
-            legacy_episodes = _build_legacy_episode_index_from_clip_index(clip_index)
-    if legacy_episodes:
-        print(f"[audit] legacy episode mapping ready: episodes={len(legacy_episodes)}", flush=True)
-    else:
-        print("[audit] no legacy episode mapping needed for selected shards", flush=True)
+            print("[audit] no legacy episode mapping needed for selected shards", flush=True)
 
-    if selected_has_legacy_keys and not legacy_episodes:
-        raise RuntimeError("Detected legacy buildai_ep keys but no legacy episode index could be built")
+        if selected_has_legacy_keys and not legacy_episodes:
+            raise RuntimeError("Detected legacy buildai_ep keys but no legacy episode index could be built")
+    else:
+        selected_clip_ids = _parse_clip_ids(args)
+        if selected_clip_ids:
+            clip_index, unresolved_clip_ids = _build_subset_clip_index(buildai_processed_root, set(selected_clip_ids))
+            if unresolved_clip_ids:
+                preview = unresolved_clip_ids[:8]
+                raise RuntimeError(
+                    f"Failed to resolve {len(unresolved_clip_ids)} processed clip ids under {buildai_processed_root}. preview={preview}"
+                )
+        else:
+            clip_index = _build_clip_index_with_progress(
+                buildai_processed_root,
+                factory_range=factory_range,
+            )
+        selected_clip_ids = sorted(clip_index.keys())
+        if args.clip_limit is not None:
+            selected_clip_ids = selected_clip_ids[: max(0, int(args.clip_limit))]
+        if not selected_clip_ids:
+            raise RuntimeError("No processed clips selected for audit")
+        clip_index = {clip_id: clip_index[clip_id] for clip_id in selected_clip_ids}
+        selected = selected_clip_ids
+        print(
+            f"[audit] processed-only selection: clips={len(selected_clip_ids)} factory_range={factory_range}",
+            flush=True,
+        )
 
     mano_device_obj = torch.device(args.mano_device if torch.cuda.is_available() else "cpu")
     device_specs = normalize_mano_devices(str(mano_device_obj), args.mano_gpus if mano_device_obj.type == "cuda" else None)
@@ -929,7 +1322,10 @@ def main():
             legacy_episodes,
             str(feature_cache_dir),
         )
-        shard_results = [_process_shard(task) for task in tqdm(tasks, desc="Audit shards")]
+        if mode == "wds_compare":
+            shard_results = [_process_shard(task) for task in tqdm(tasks, desc="Audit shards")]
+        else:
+            shard_results = [_process_processed_clip(task) for task in tqdm(tasks, desc="Audit clips")]
     else:
         mp_context = get_context("spawn") if mano_device_obj.type == "cuda" else get_context()
         with mp_context.Pool(
@@ -943,15 +1339,23 @@ def main():
                 str(feature_cache_dir),
             ),
         ) as pool:
-            shard_results = list(tqdm(pool.imap_unordered(_process_shard, tasks), total=len(tasks), desc="Audit shards"))
+            if mode == "wds_compare":
+                shard_results = list(tqdm(pool.imap_unordered(_process_shard, tasks), total=len(tasks), desc="Audit shards"))
+            else:
+                shard_results = list(tqdm(pool.imap_unordered(_process_processed_clip, tasks), total=len(tasks), desc="Audit clips"))
 
-    merged = {}
-    for shard_result in shard_results:
-        for item in shard_result["clips"]:
-            merged[item["clip_id"]] = _merge_clip_metrics(merged.get(item["clip_id"]), item)
+    if mode == "wds_compare":
+        merged = {}
+        for shard_result in shard_results:
+            for item in shard_result["clips"]:
+                merged[item["clip_id"]] = _merge_clip_metrics(merged.get(item["clip_id"]), item)
+        clip_reports = sorted(merged.values(), key=lambda item: item["clip_id"])
+        shard_count = len(selected)
+    else:
+        clip_reports = sorted(shard_results, key=lambda item: item["clip_id"])
+        shard_count = 0
 
-    clip_reports = sorted(merged.values(), key=lambda item: item["clip_id"])
-    report = _build_report(source_dir, buildai_processed_root, clip_reports, feature_cache_dir, len(selected))
+    report = _build_report(source_dir, buildai_processed_root, clip_reports, feature_cache_dir, shard_count, mode=mode)
 
     if args.clip_report_out:
         clip_report_out = Path(args.clip_report_out).expanduser().resolve()
