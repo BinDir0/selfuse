@@ -68,6 +68,9 @@ class LegendVLAInference(nn.Module):
         if attention_recording:
             OmegaConf.update(model_cfg, "policy.flow_expert.attn_implementation", "eager")
             log.info("Attention recording: set flow_expert attn_implementation to eager")
+        self._mem_temporal_attention_enabled = bool(
+            OmegaConf.select(model_cfg, "policy.backbone.mem_temporal_attention.enabled", default=False)
+        )
 
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
@@ -301,7 +304,37 @@ class LegendVLAInference(nn.Module):
         T_g, H_g, W_g = (int(v) for v in batch["video_grid_thw"][0])
 
         vis_flat = stack_visual_attention(expert_attn, visual_indices)
-        vis_grid, _, _ = reshape_visual_to_grid(vis_flat, T_g, H_g, W_g)
+        n_visual_tokens = int(vis_flat.shape[-1])
+        tried_dims = []
+        vis_grid = None
+
+        if self._mem_temporal_attention_enabled:
+            # MEM-on: force T=1 reshape for attention saving, because visual
+            # placeholder tokens can be single-frame even when video_grid_thw
+            # carries full-T metadata.
+            try:
+                vis_grid, _, _ = reshape_visual_to_grid(vis_flat, 1, H_g, W_g)
+                tried_dims.append((1, H_g, W_g, "ok"))
+            except ValueError as e:
+                tried_dims.append((1, H_g, W_g, f"failed: {e}"))
+        else:
+            # MEM-off: keep the original behavior.
+            try:
+                vis_grid, _, _ = reshape_visual_to_grid(vis_flat, T_g, H_g, W_g)
+                tried_dims.append((T_g, H_g, W_g, "ok"))
+            except ValueError as e:
+                tried_dims.append((T_g, H_g, W_g, f"failed: {e}"))
+
+        if vis_grid is None:
+            attempts = "; ".join(
+                f"(T={t},H={h},W={w}) -> {status}" for t, h, w, status in tried_dims
+            )
+            raise ValueError(
+                "Failed to reshape visual attention grid. "
+                f"mem_enabled={self._mem_temporal_attention_enabled}; "
+                f"n_visual_tokens={n_visual_tokens}; attempts: {attempts}"
+            )
+
         agg = aggregate_visual_attention(
             vis_grid,
             strategy="middle_layers_mean_heads",
