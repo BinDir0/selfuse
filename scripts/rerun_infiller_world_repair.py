@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON report path.",
     )
+    parser.add_argument(
+        "--progress_dir",
+        default=None,
+        help="Optional directory for per-seq rerun success markers to support resume without rerunning completed seqs.",
+    )
     return parser
 
 
@@ -177,6 +182,34 @@ def _backup_world(seq_folder: Path, backup_dir: Path | None) -> str | None:
     return str(target)
 
 
+def _write_json(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _progress_marker_path(progress_dir: Path, seq_folder: Path) -> Path:
+    return progress_dir / f"{seq_folder.name}.success.json"
+
+
+def _load_existing_progress(progress_dir: Path | None, seq_folder: Path) -> dict | None:
+    if progress_dir is None:
+        return None
+    marker_path = _progress_marker_path(progress_dir, seq_folder)
+    if not marker_path.is_file():
+        return None
+    try:
+        return json.loads(marker_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _write_success_progress(progress_dir: Path | None, report: dict) -> None:
+    if progress_dir is None:
+        return
+    marker_path = _progress_marker_path(progress_dir, Path(str(report["seq_folder"])))
+    _write_json(marker_path, report)
+
+
 def rerun_seq_folder(
     seq_folder: Path,
     *,
@@ -226,6 +259,8 @@ def main() -> None:
     args = build_parser().parse_args()
     seq_folders = _collect_seq_folders(args)
     backup_dir = Path(args.backup_dir).expanduser().resolve() if args.backup_dir else None
+    progress_dir = Path(args.progress_dir).expanduser().resolve() if args.progress_dir else None
+    report_path = Path(args.report_out).expanduser().resolve() if args.report_out else None
 
     runtime = None
     if not args.dry_run:
@@ -237,21 +272,37 @@ def main() -> None:
             rebuild_cam_space_cache=bool(args.rebuild_cam_space_cache),
         )
 
-    report = [
-        rerun_seq_folder(
+    report = []
+    for seq_folder in seq_folders:
+        existing = _load_existing_progress(progress_dir, seq_folder)
+        if existing is not None:
+            report.append(
+                {
+                    "seq_folder": str(seq_folder),
+                    "clip_id": seq_folder.name,
+                    "status": "skipped_completed",
+                    "resume_source": str(_progress_marker_path(progress_dir, seq_folder)),
+                    "result": existing.get("result"),
+                    "world_exists_after": existing.get("world_exists_after", True),
+                    "done_marker_exists_after": existing.get("done_marker_exists_after", True),
+                }
+            )
+            if report_path is not None:
+                _write_json(report_path, report)
+            continue
+
+        item = rerun_seq_folder(
             seq_folder,
             runtime=runtime,
             force=bool(args.force),
             dry_run=bool(args.dry_run),
             backup_dir=backup_dir,
         )
-        for seq_folder in seq_folders
-    ]
-
-    if args.report_out:
-        report_path = Path(args.report_out).expanduser().resolve()
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report.append(item)
+        if item.get("status") == "success":
+            _write_success_progress(progress_dir, item)
+        if report_path is not None:
+            _write_json(report_path, report)
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

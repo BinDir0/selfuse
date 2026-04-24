@@ -182,166 +182,222 @@ def main() -> None:
     batch_id = f"shards_{int(args.shard_start):06d}_{int(selected_end):06d}"
     batch_output_dir = output_root / batch_id
     report_dir = report_root / batch_id
+    per_shard_report_root = report_dir / "per_shard"
+    global_seq_progress_dir = report_root / "_seq_progress"
     feature_cache_dir = batch_output_dir / "_feature_cache"
     vis_dir = vis_root / batch_id if vis_root is not None else None
     backup_dir = backup_root / batch_id
 
     report_dir.mkdir(parents=True, exist_ok=True)
+    per_shard_report_root.mkdir(parents=True, exist_ok=True)
+    global_seq_progress_dir.mkdir(parents=True, exist_ok=True)
     batch_output_dir.mkdir(parents=True, exist_ok=True)
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
     if vis_dir is not None:
         vis_dir.mkdir(parents=True, exist_ok=True)
     backup_dir.mkdir(parents=True, exist_ok=True)
+    all_ordered_clips: list[str] = []
+    all_clip_to_seq: dict[str, str] = {}
+    all_clip_to_shard: dict[str, str] = {}
+    processed_shards = []
+    skipped_completed_shards = []
 
-    ordered_clips, clip_to_seq, clip_to_shard = _scan_selected_shards(selected_shards, processed_root)
-    seq_folders = sorted(set(clip_to_seq.values()))
-    seq_folder_list = report_dir / "seq_folders.txt"
-    clip_id_list = report_dir / "clip_ids.txt"
-    _write_lines(seq_folder_list, seq_folders)
-    _write_lines(clip_id_list, ordered_clips)
+    for local_idx, shard_path in enumerate(selected_shards):
+        shard_name = shard_path.name
+        shard_stem = shard_path.stem
+        shard_report_dir = per_shard_report_root / shard_stem
+        shard_report_dir.mkdir(parents=True, exist_ok=True)
+        shard_summary_path = shard_report_dir / "shard_summary.json"
+        shard_abs_idx = int(args.shard_start) + local_idx
 
-    scan_report = {
-        "batch_id": batch_id,
-        "source_shard_dir": str(source_dir),
-        "buildai_processed_root": str(processed_root),
-        "selected_shards": [path.name for path in selected_shards],
-        "clip_count": int(len(ordered_clips)),
-        "seq_folder_count": int(len(seq_folders)),
-        "seq_folder_list": str(seq_folder_list),
-        "clip_id_list": str(clip_id_list),
-        "batch_output_dir": str(batch_output_dir),
-        "report_dir": str(report_dir),
-    }
-    (report_dir / "scan_report.json").write_text(json.dumps(scan_report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if shard_summary_path.is_file():
+            skipped_completed_shards.append(shard_name)
+            continue
 
-    if bool(args.repair_dense_slam):
-        repair_slam_cmd = [
+        ordered_clips, clip_to_seq, clip_to_shard = _scan_selected_shards([shard_path], processed_root)
+        seq_folders = sorted(set(clip_to_seq.values()))
+        seq_folder_list = shard_report_dir / "seq_folders.txt"
+        clip_id_list = shard_report_dir / "clip_ids.txt"
+        _write_lines(seq_folder_list, seq_folders)
+        _write_lines(clip_id_list, ordered_clips)
+        for clip_id in ordered_clips:
+            all_ordered_clips.append(clip_id)
+            all_clip_to_seq[clip_id] = clip_to_seq[clip_id]
+            all_clip_to_shard[clip_id] = shard_name
+
+        print(
+            f"[shard] start {shard_name} shard_idx={shard_abs_idx} clips={len(ordered_clips)} seqs={len(seq_folders)}",
+            flush=True,
+        )
+
+        scan_report = {
+            "batch_id": batch_id,
+            "shard_name": shard_name,
+            "shard_index": int(shard_abs_idx),
+            "source_shard_dir": str(source_dir),
+            "buildai_processed_root": str(processed_root),
+            "selected_shards": [shard_name],
+            "clip_count": int(len(ordered_clips)),
+            "seq_folder_count": int(len(seq_folders)),
+            "seq_folder_list": str(seq_folder_list),
+            "clip_id_list": str(clip_id_list),
+            "batch_output_dir": str(batch_output_dir),
+            "report_dir": str(shard_report_dir),
+        }
+        (shard_report_dir / "scan_report.json").write_text(json.dumps(scan_report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if bool(args.repair_dense_slam):
+            repair_slam_cmd = [
+                args.python_bin,
+                "-u",
+                str(PROJECT_ROOT / "scripts" / "repair_dpvo_dense_slam_exports.py"),
+                "--seq_folder_list",
+                str(seq_folder_list),
+                "--report_out",
+                str(shard_report_dir / "repair_dense_slam_report.json"),
+            ]
+            _run_command(repair_slam_cmd, dry_run=bool(args.dry_run))
+
+        rerun_cmd = [
             args.python_bin,
             "-u",
-            str(PROJECT_ROOT / "scripts" / "repair_dpvo_dense_slam_exports.py"),
+            str(PROJECT_ROOT / "scripts" / "rerun_infiller_world_repair.py"),
             "--seq_folder_list",
             str(seq_folder_list),
+            "--gpu",
+            str(args.gpu),
+            "--checkpoint",
+            str(args.checkpoint),
+            "--infiller_weight",
+            str(args.infiller_weight),
+            "--infiller_window_batch_size",
+            str(int(args.infiller_window_batch_size)),
+            "--rebuild_cam_space_cache",
+            "--backup_dir",
+            str(backup_dir),
+            "--progress_dir",
+            str(global_seq_progress_dir),
             "--report_out",
-            str(report_dir / "repair_dense_slam_report.json"),
+            str(shard_report_dir / "rerun_report.json"),
         ]
-        _run_command(repair_slam_cmd, dry_run=bool(args.dry_run))
+        _run_command(rerun_cmd, dry_run=bool(args.dry_run))
 
-    rerun_cmd = [
-        args.python_bin,
-        "-u",
-        str(PROJECT_ROOT / "scripts" / "rerun_infiller_world_repair.py"),
-        "--seq_folder_list",
-        str(seq_folder_list),
-        "--gpu",
-        str(args.gpu),
-        "--checkpoint",
-        str(args.checkpoint),
-        "--infiller_weight",
-        str(args.infiller_weight),
-        "--infiller_window_batch_size",
-        str(int(args.infiller_window_batch_size)),
-        "--rebuild_cam_space_cache",
-        "--backup_dir",
-        str(backup_dir),
-        "--report_out",
-        str(report_dir / "rerun_report.json"),
-    ]
-    _run_command(rerun_cmd, dry_run=bool(args.dry_run))
-
-    rewrite_cmd = [
-        args.python_bin,
-        "-u",
-        str(PROJECT_ROOT / "scripts" / "rewrite_buildai_interpolated_wds.py"),
-        "--source_shard_dir",
-        str(source_dir),
-        "--output_dir",
-        str(batch_output_dir),
-        "--buildai_processed_root",
-        str(processed_root),
-        "--shard_start",
-        str(int(args.shard_start)),
-        "--shard_end",
-        str(int(selected_end)),
-        "--workers",
-        str(int(args.rewrite_workers)),
-        "--mano_device",
-        str(args.mano_device),
-        "--feature_cache_dir",
-        str(feature_cache_dir),
-        "--source_fps",
-        str(float(args.source_fps)),
-        "--target_fps",
-        str(float(args.target_fps)),
-        "--report_out",
-        str(report_dir / "rewrite_report.json"),
-    ]
-    if args.mano_gpus:
-        rewrite_cmd.extend(["--mano_gpus", str(args.mano_gpus)])
-    if args.mano_dir:
-        rewrite_cmd.extend(["--mano_dir", str(args.mano_dir)])
-    _append_bool_flag(rewrite_cmd, "--resume", bool(args.rewrite_resume))
-    _append_bool_flag(rewrite_cmd, "--interpolate_labels", bool(args.interpolate_labels))
-    _run_command(rewrite_cmd, dry_run=bool(args.dry_run))
-
-    verify_sample_clips = _parse_sample_clip_ids(args, ordered_clips, int(args.verify_sample_count))
-    for clip_id in verify_sample_clips:
-        shard_name = clip_to_shard[clip_id]
-        check_cmd = [
+        rewrite_cmd = [
             args.python_bin,
-            str(PROJECT_ROOT / "scripts" / "check_motion_stage_outputs.py"),
-            "--seq_folder",
-            clip_to_seq[clip_id],
-            "--wds-shard",
-            str(batch_output_dir / shard_name),
-            "--device",
-            str(args.verify_device),
-            "--source-fps",
+            "-u",
+            str(PROJECT_ROOT / "scripts" / "rewrite_buildai_interpolated_wds.py"),
+            "--source_shard_dir",
+            str(source_dir),
+            "--output_dir",
+            str(batch_output_dir),
+            "--buildai_processed_root",
+            str(processed_root),
+            "--shard_start",
+            str(int(shard_abs_idx)),
+            "--shard_end",
+            str(int(shard_abs_idx + 1)),
+            "--workers",
+            str(int(args.rewrite_workers)),
+            "--mano_device",
+            str(args.mano_device),
+            "--feature_cache_dir",
+            str(feature_cache_dir),
+            "--source_fps",
             str(float(args.source_fps)),
-            "--target-fps",
+            "--target_fps",
             str(float(args.target_fps)),
             "--report_out",
-            str(report_dir / f"check_{clip_id}.json"),
+            str(shard_report_dir / "rewrite_report.json"),
         ]
+        if args.mano_gpus:
+            rewrite_cmd.extend(["--mano_gpus", str(args.mano_gpus)])
         if args.mano_dir:
-            check_cmd.extend(["--mano-dir", str(args.mano_dir)])
-        _append_bool_flag(check_cmd, "--interpolate-labels", bool(args.interpolate_labels))
-        _run_command(check_cmd, dry_run=bool(args.dry_run))
+            rewrite_cmd.extend(["--mano_dir", str(args.mano_dir)])
+        _append_bool_flag(rewrite_cmd, "--resume", bool(args.rewrite_resume))
+        _append_bool_flag(rewrite_cmd, "--interpolate_labels", bool(args.interpolate_labels))
+        _run_command(rewrite_cmd, dry_run=bool(args.dry_run))
 
-    visualize_sample_clips = _parse_sample_clip_ids(args, ordered_clips, int(args.visualize_sample_count))
-    if vis_dir is not None:
-        for clip_id in visualize_sample_clips:
-            shard_name = clip_to_shard[clip_id]
-            vis_cmd = [
+        verify_sample_clips = _parse_sample_clip_ids(args, ordered_clips, int(args.verify_sample_count))
+        for clip_id in verify_sample_clips:
+            check_cmd = [
                 args.python_bin,
-                str(PROJECT_ROOT / "tools" / "ops" / "webdataset_visualizer.py"),
-                "--input",
+                str(PROJECT_ROOT / "scripts" / "check_motion_stage_outputs.py"),
+                "--seq_folder",
+                clip_to_seq[clip_id],
+                "--wds-shard",
                 str(batch_output_dir / shard_name),
-                "--output-mode",
-                "video",
-                "--filter-key",
-                clip_id,
-                "--episode-limit",
-                "1",
-                "--render-mode",
-                "keypoint",
-                "--keypoint-source",
-                "lowdim",
-                "--video-out",
-                str(vis_dir / f"{clip_id}.lowdim.mp4"),
+                "--device",
+                str(args.verify_device),
+                "--source-fps",
+                str(float(args.source_fps)),
+                "--target-fps",
+                str(float(args.target_fps)),
+                "--report_out",
+                str(shard_report_dir / f"check_{clip_id}.json"),
             ]
-            _run_command(vis_cmd, dry_run=bool(args.dry_run))
+            if args.mano_dir:
+                check_cmd.extend(["--mano-dir", str(args.mano_dir)])
+            _append_bool_flag(check_cmd, "--interpolate-labels", bool(args.interpolate_labels))
+            _run_command(check_cmd, dry_run=bool(args.dry_run))
+
+        visualize_sample_clips = _parse_sample_clip_ids(args, ordered_clips, int(args.visualize_sample_count))
+        if vis_dir is not None:
+            shard_vis_dir = vis_dir / shard_stem
+            shard_vis_dir.mkdir(parents=True, exist_ok=True)
+            for clip_id in visualize_sample_clips:
+                vis_cmd = [
+                    args.python_bin,
+                    str(PROJECT_ROOT / "tools" / "ops" / "webdataset_visualizer.py"),
+                    "--input",
+                    str(batch_output_dir / shard_name),
+                    "--output-mode",
+                    "video",
+                    "--filter-key",
+                    clip_id,
+                    "--episode-limit",
+                    "1",
+                    "--render-mode",
+                    "keypoint",
+                    "--keypoint-source",
+                    "lowdim",
+                    "--video-out",
+                    str(shard_vis_dir / f"{clip_id}.lowdim.mp4"),
+                ]
+                _run_command(vis_cmd, dry_run=bool(args.dry_run))
+
+        shard_summary = {
+            "batch_id": batch_id,
+            "shard_name": shard_name,
+            "shard_index": int(shard_abs_idx),
+            "clip_count": int(len(ordered_clips)),
+            "seq_folder_count": int(len(seq_folders)),
+            "repair_dense_slam": bool(args.repair_dense_slam),
+            "batch_output_dir": str(batch_output_dir),
+            "report_dir": str(shard_report_dir),
+            "backup_dir": str(backup_dir),
+            "verify_sample_clips": verify_sample_clips,
+            "visualize_sample_clips": visualize_sample_clips if vis_dir is not None else [],
+        }
+        shard_summary_path.write_text(json.dumps(shard_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        processed_shards.append(shard_name)
+        print(f"[shard] done {shard_name}", flush=True)
 
     summary = {
         "batch_id": batch_id,
         "selected_shards": [path.name for path in selected_shards],
-        "clip_count": int(len(ordered_clips)),
-        "seq_folder_count": int(len(seq_folders)),
+        "selected_shard_count": int(len(selected_shards)),
+        "processed_shards": processed_shards,
+        "processed_shard_count": int(len(processed_shards)),
+        "skipped_completed_shards": skipped_completed_shards,
+        "skipped_completed_shard_count": int(len(skipped_completed_shards)),
+        "clip_count": int(len(all_ordered_clips)),
+        "seq_folder_count": int(len(set(all_clip_to_seq.values()))),
         "repair_dense_slam": bool(args.repair_dense_slam),
         "batch_output_dir": str(batch_output_dir),
         "report_dir": str(report_dir),
+        "per_shard_report_root": str(per_shard_report_root),
+        "global_seq_progress_dir": str(global_seq_progress_dir),
         "backup_dir": str(backup_dir),
-        "verify_sample_clips": verify_sample_clips,
-        "visualize_sample_clips": visualize_sample_clips if vis_dir is not None else [],
     }
     (report_dir / "batch_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
