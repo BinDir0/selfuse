@@ -222,7 +222,7 @@ def main() -> None:
         str(args.infiller_weight),
         "--infiller_window_batch_size",
         str(int(args.infiller_window_batch_size)),
-        "--rebuild-cam-space-cache",
+        "--rebuild_cam_space_cache",
         "--backup_dir",
         str(backup_dir),
         "--report_out",
