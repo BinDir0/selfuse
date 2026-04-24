@@ -359,17 +359,34 @@ def _resolve_clip_info(sample_key: str, clip_id: str) -> dict:
     raise KeyError(f"Clip {clip_id} not found in processed root index")
 
 
-def _get_episode_data(clip_info: dict, *, source_fps: float, target_fps: float, interpolate_labels: bool) -> dict:
+def _get_episode_data(
+    clip_info: dict,
+    *,
+    source_fps: float,
+    target_fps: float,
+    interpolate_labels: bool,
+    requested_frame_count: int | None = None,
+) -> dict:
     from lib.pipeline.exporters.manifest_vla import load_descriptor_episode_features
 
     clip_id = clip_info["clip_id"]
-    cache_key = (clip_id, float(source_fps), float(target_fps), bool(interpolate_labels))
+    normalized_requested_frame_count = None if requested_frame_count is None else int(requested_frame_count)
+    cache_key = (
+        clip_id,
+        float(source_fps),
+        float(target_fps),
+        bool(interpolate_labels),
+        normalized_requested_frame_count,
+    )
     if cache_key in _WORKER_EPISODE_CACHE:
         return _WORKER_EPISODE_CACHE[cache_key]
 
     _ensure_worker_models()
+    feature_request = dict(clip_info)
+    if normalized_requested_frame_count is not None:
+        feature_request["num_valid_frames"] = int(normalized_requested_frame_count)
     episode_data = load_descriptor_episode_features(
-        dict(clip_info),
+        feature_request,
         _WORKER_MANO_RIGHT,
         _WORKER_MANO_LEFT,
         _WORKER_DEVICE,
@@ -505,14 +522,16 @@ def _analyze_clip_samples(samples: list[dict], *, source_fps: float, target_fps:
     clip_id = _sample_clip_id(ordered_samples[0], meta)
     clip_info = _resolve_clip_info(ordered_samples[0]["key"], clip_id)
     seq_folder = Path(clip_info["seq_folder"]).resolve()
+    frame_indices = [int(parse_frame_index(sample["key"])) for sample in ordered_samples]
+    requested_frame_count = int(max(frame_indices) + 1) if frame_indices else None
 
     current_episode = _get_episode_data(
         clip_info,
         source_fps=source_fps,
         target_fps=target_fps,
         interpolate_labels=interpolate_labels,
+        requested_frame_count=requested_frame_count,
     )
-    frame_indices = [int(parse_frame_index(sample["key"])) for sample in ordered_samples]
     current_lowdim = np.stack(
         [current_episode["lowdim_all"][frame_idx] for frame_idx in frame_indices],
         axis=0,
