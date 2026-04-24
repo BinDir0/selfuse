@@ -12,14 +12,19 @@ import torch
 
 from .mano_codec import build_mano_pca_frame_features
 from .webdataset_discovery import get_episode_feature_cache_path, load_or_build_frame_index
-from .webdataset_geometry import axis_angle_to_rot6d, quat_to_4x4
+from .webdataset_geometry import (
+    axis_angle_to_rot6d,
+    interpolate_extrinsics,
+    normalize_slam_keyframes,
+    quat_to_4x4,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 FINGERTIP_INDICES = [4, 8, 12, 16, 20]
 DEFAULT_INTRINSIC = np.array([500.0, 500.0, 320.0, 240.0], dtype=np.float32)
 LOWDIM_SIZE = 116
-EPISODE_FEATURE_CACHE_VERSION = 6
+EPISODE_FEATURE_CACHE_VERSION = 8
 _SLAM_WARNING_COUNTS = {}
 
 
@@ -214,6 +219,7 @@ def _load_episode_camera_features(ep, num_frames):
 
     try:
         slam_data = np.load(str(slam_files[0]), allow_pickle=True)
+        tstamps = np.asarray(slam_data.get("tstamp", np.arange(len(slam_data["traj"]))), dtype=np.int64).reshape(-1)
         traj = _ensure_finite_array("traj", np.asarray(slam_data["traj"], dtype=np.float32))
         scale = float(slam_data["scale"])
         img_focal = float(slam_data["img_focal"])
@@ -234,28 +240,22 @@ def _load_episode_camera_features(ep, num_frames):
         )
         _ensure_finite_array("intrinsic", intrinsic)
 
-        c2w = np.stack([quat_to_4x4(traj_row, scale) for traj_row in traj], axis=0)
-        _ensure_finite_array("c2w", c2w)
-        direct_extrinsics = np.linalg.inv(c2w).astype(np.float32)
-        _ensure_finite_array("direct_extrinsics", direct_extrinsics)
-        direct_count = min(int(direct_extrinsics.shape[0]), int(num_frames))
-        if direct_count <= 0:
-            raise InvalidCameraDataError("empty direct SLAM trajectory")
-        extrinsics[:direct_count] = direct_extrinsics[:direct_count]
-        if direct_count < num_frames:
-            extrinsics[direct_count:] = direct_extrinsics[direct_count - 1]
+        if int(traj.shape[0]) == int(num_frames):
+            c2w = np.stack([quat_to_4x4(traj_row, scale) for traj_row in traj], axis=0)
+            _ensure_finite_array("c2w", c2w)
+            extrinsics = np.linalg.inv(c2w).astype(np.float32)
+            _ensure_finite_array("direct_extrinsics", extrinsics)
+        else:
+            tstamps, traj = normalize_slam_keyframes(tstamps, traj)
+            if len(tstamps) <= 0:
+                raise InvalidCameraDataError("empty normalized SLAM trajectory")
+            extrinsics = interpolate_extrinsics(tstamps, traj, scale, int(num_frames))
+            _ensure_finite_array("interpolated_extrinsics", extrinsics)
             _log_slam_warning(
-                "frame_count_mismatch_repeat",
+                "frame_count_mismatch_interpolate",
                 f"SLAM/frame count mismatch for {ep['episode_id']}: "
-                f"traj={direct_extrinsics.shape[0]} num_frames={num_frames}; "
-                "used direct traj without interpolation and repeated the last pose.",
-            )
-        elif direct_extrinsics.shape[0] != num_frames:
-            _log_slam_warning(
-                "frame_count_mismatch_truncate",
-                f"SLAM/frame count mismatch for {ep['episode_id']}: "
-                f"traj={direct_extrinsics.shape[0]} num_frames={num_frames}; "
-                "used direct traj without interpolation and truncated the remainder.",
+                f"traj={traj.shape[0]} num_frames={num_frames}; "
+                "used timestamp interpolation instead of direct traj repeat/truncate.",
             )
     except InvalidCameraDataError:
         raise
