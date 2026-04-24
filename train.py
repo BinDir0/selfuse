@@ -1,5 +1,20 @@
 import os
 import sys
+import resource
+
+# Raise NOFILE soft to hard so DataLoader IPC shm-fd allocations do not
+# hit the low soft limit inherited from ssh non-interactive sessions.
+_nofile_soft, _nofile_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (_nofile_hard, _nofile_hard))
+
+# Raise MEMLOCK soft to hard so NCCL/RDMA pinned memory registration has
+# room to grow (Linux default 64MB cap is too small).  Only helps when
+# the container's hard limit is already raised; otherwise a no-op.
+_memlock_soft, _memlock_hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+try:
+    resource.setrlimit(resource.RLIMIT_MEMLOCK, (_memlock_hard, _memlock_hard))
+except (ValueError, OSError):
+    pass
 
 # ================== debugpy 调试配置 ==================
 # 通过环境变量 ENABLE_DEBUGPY=1 来启用调试
