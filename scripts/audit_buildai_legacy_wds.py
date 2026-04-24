@@ -37,6 +37,7 @@ from scripts.rewrite_webdataset_lowdim import (
 COMPARE_TOL = 1e-4
 ROT6_OLD_TO_NEW = np.array([0, 2, 4, 1, 3, 5], dtype=np.int64)
 BUILDAI_CLIP_RE = re.compile(r"^factory(\d{3})_worker(\d{3})_")
+BUILDAI_SHORT_CLIP_RE = re.compile(r"^f(\d{3})_w(\d{3})_")
 ROT6D_UNIT_NORM_TOL = 0.2
 ROT6D_ORTHOGONALITY_TOL = 0.2
 ROT6D_MIN_CROSS_NORM = 0.5
@@ -229,13 +230,19 @@ def _make_legacy_buildai_descriptor(seq_folder: Path, clip_id: str) -> ClipDescr
 
 def _resolve_direct_buildai_clip_info(processed_root: Path, clip_id: str) -> dict | None:
     match = BUILDAI_CLIP_RE.match(clip_id)
-    if not match:
+    short_match = BUILDAI_SHORT_CLIP_RE.match(clip_id)
+    if match is not None:
+        factory_id = int(match.group(1))
+        worker_id = int(match.group(2))
+    elif short_match is not None:
+        factory_id = int(short_match.group(1))
+        worker_id = int(short_match.group(2))
+    else:
         return None
-    factory_id = int(match.group(1))
-    worker_id = int(match.group(2))
     candidates = [
         processed_root / f"factory_{factory_id:03d}" / f"worker_{worker_id:03d}" / "processed" / clip_id,
         processed_root / f"factory{factory_id:03d}" / "outputs" / clip_id,
+        processed_root / f"factory_{factory_id:03d}" / "outputs" / clip_id,
     ]
     seq_folder = next((path for path in candidates if path.is_dir() and (path / "world_space_res.pth").is_file()), None)
     if seq_folder is None:
