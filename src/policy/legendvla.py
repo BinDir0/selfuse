@@ -224,6 +224,12 @@ class LegendVLA(nn.Module):
                 raise ValueError(
                     "world_model.motion_conditioning=True requires wm_motion_encoder"
                 )
+            if wm_action_encoder is not None and not world_model_config.action_conditioning:
+                for param in wm_action_encoder.parameters():
+                    param.requires_grad = False
+            if wm_motion_encoder is not None and not world_model_config.motion_conditioning:
+                for param in wm_motion_encoder.parameters():
+                    param.requires_grad = False
 
     def _init_world_model(self, expert: nn.Module, config: WorldModelConfig) -> None:
         tH, tW = config.target_image_size
@@ -378,9 +384,13 @@ class LegendVLA(nn.Module):
         if self.use_world_model:
             params.extend(p for p in self.world_model_expert.parameters() if p.requires_grad)
             params.extend(p for p in self.wm_head.parameters() if p.requires_grad)
-            if self.wm_action_encoder is not None:
+            # Gate by the conditioning flags: if the forward path won't call
+            # the encoder, don't put its params in the optimizer — otherwise
+            # fused AdamW never sees a gradient, never creates `step` state,
+            # and checkpoint load fails on the missing key.
+            if self.wm_action_encoder is not None and self.world_model_config.action_conditioning:
                 params.extend(p for p in self.wm_action_encoder.parameters() if p.requires_grad)
-            if self.wm_motion_encoder is not None:
+            if self.wm_motion_encoder is not None and self.world_model_config.motion_conditioning:
                 params.extend(p for p in self.wm_motion_encoder.parameters() if p.requires_grad)
         return params
 
