@@ -84,14 +84,34 @@ def load_slam_cam(fpath):
     return R_w2c_sla, t_w2c_sla, R_c2w_sla, t_c2w_sla
 
 
+def validate_dense_slam_export(fpath):
+    """
+    Validate that hawor_slam_w_scale export is already dense per video frame.
+    Old sparse DPVO exports must be repaired before infiller runs.
+    """
+    pred_cam = dict(np.load(fpath, allow_pickle=False))
+    pred_traj = pred_cam["traj"]
+    tstamp = np.asarray(pred_cam.get("tstamp", np.arange(len(pred_traj)))).astype(
+        np.int64
+    ).reshape(-1)
+
+    dense_by_video_frame = pred_traj.shape[0] != tstamp.shape[0]
+    dense_by_contiguous_tstamp = pred_traj.shape[0] == tstamp.shape[0] and np.array_equal(
+        tstamp,
+        np.arange(pred_traj.shape[0], dtype=np.int64),
+    )
+    if not dense_by_video_frame and not dense_by_contiguous_tstamp:
+        raise RuntimeError(
+            f"DPVO infiller requires dense per-frame SLAM cameras; interpolation is disabled for {fpath}. "
+            "Repair old exports first, e.g. with scripts/repair_dpvo_dense_slam_exports.py."
+        )
+
+
 def interpolate_slam_cameras_at_video_frames(fpath, video_frame_indices):
     """
-    按视频帧号从 SLAM npz（tstamp + traj）插值得到 c2w 的 R、t。
-    稀疏轨迹（DPVO/DROID 关键帧）不能把视频帧号当作 traj 行下标。
+    按视频帧号获取 c2w 的 R、t。
+    仅支持逐帧 dense 轨迹；如果仍需关键帧插值，则直接报错，由上层将该视频记为 failed。
     """
-    from scipy.spatial.transform import Rotation as Rsci
-    from scipy.spatial.transform import Slerp
-
     pred_cam = dict(np.load(fpath, allow_pickle=True))
     pred_traj = pred_cam["traj"]
     scale = float(pred_cam["scale"])
@@ -104,48 +124,14 @@ def interpolate_slam_cameras_at_video_frames(fpath, video_frame_indices):
 
     vf = np.asarray(video_frame_indices, dtype=np.int64).reshape(-1)
 
-    # DPVO fixed exports keep dense per-frame traj for downstream world conversion,
-    # while preserving sparse tstamp/disps only for scale estimation.
-    if pred_traj.shape[0] != tstamp.shape[0]:
-        if pred_traj.shape[0] <= 0:
-            raise ValueError("empty SLAM trajectory")
-        vf_clipped = np.clip(vf, 0, pred_traj.shape[0] - 1)
-        return (
-            torch.tensor(R_c2w[vf_clipped], dtype=torch.float32),
-            torch.tensor(t_c2w[vf_clipped], dtype=torch.float32),
-        )
+    validate_dense_slam_export(fpath)
 
-    order = np.argsort(tstamp)
-    ts = tstamp[order]
-    R_ord = R_c2w[order]
-    t_ord = t_c2w[order]
-    K = len(ts)
-    if K < 1:
+    if pred_traj.shape[0] <= 0:
         raise ValueError("empty SLAM trajectory")
-
-    R_list, t_list = [], []
-    for f in vf:
-        fi = int(f)
-        if fi <= int(ts[0]):
-            R_list.append(R_ord[0])
-            t_list.append(t_ord[0])
-        elif fi >= int(ts[-1]):
-            R_list.append(R_ord[-1])
-            t_list.append(t_ord[-1])
-        else:
-            j = int(np.searchsorted(ts, fi))
-            if int(ts[j]) == fi:
-                R_list.append(R_ord[j])
-                t_list.append(t_ord[j])
-            else:
-                t0, t1 = int(ts[j - 1]), int(ts[j])
-                alpha = (fi - t0) / (t1 - t0) if t1 > t0 else 0.0
-                rseq = Rsci.from_matrix(np.stack([R_ord[j - 1], R_ord[j]]))
-                slerp = Slerp([0.0, 1.0], rseq)
-                R_list.append(slerp([alpha]).as_matrix()[0])
-                t_list.append((1.0 - alpha) * t_ord[j - 1] + alpha * t_ord[j])
-    return torch.tensor(np.stack(R_list), dtype=torch.float32), torch.tensor(
-        np.stack(t_list), dtype=torch.float32
+    vf_clipped = np.clip(vf, 0, pred_traj.shape[0] - 1)
+    return (
+        torch.tensor(R_c2w[vf_clipped], dtype=torch.float32),
+        torch.tensor(t_c2w[vf_clipped], dtype=torch.float32),
     )
 
 

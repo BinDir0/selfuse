@@ -15,8 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.eval_utils.custom_utils import (
     cam2world_convert,
-    interpolate_slam_cameras_at_video_frames,
     load_slam_cam,
+    validate_dense_slam_export,
 )
 from lib.eval_utils.filling_utils import filling_postprocess, filling_preprocess
 from lib.pipeline.frame_source import build_frame_source
@@ -295,7 +295,8 @@ def _prepare_infiller_state_with_cache(
     slam_path = os.path.join(seq_folder, "SLAM", f"hawor_slam_w_scale_{start_idx}_{end_idx}.npz")
     use_dpvo_infiller = _use_dpvo_infiller_mode(seq_folder)
     if use_dpvo_infiller and not QUIET_MODE:
-        vprint("[infiller] DPVO: SLAM cameras from hawor_slam_w_scale npz use per-frame timestamp interpolation")
+        vprint("[infiller] DPVO: dense per-frame SLAM cameras from hawor_slam_w_scale npz use direct frame lookup")
+        validate_dense_slam_export(slam_path)
 
     _r_w2c_sla_all, _t_w2c_sla_all, r_c2w_sla_all, t_c2w_sla_all = load_slam_cam(slam_path)
 
@@ -353,9 +354,9 @@ def _project_cam_space_chunks_to_world(state, frame_chunks_all):
             data_out = {name: torch.from_numpy(value) for name, value in pred_dict.items()}
 
             if state.use_dpvo_infiller:
-                r_c2w_sla, t_c2w_sla = interpolate_slam_cameras_at_video_frames(
-                    state.slam_path, frame_ck
-                )
+                slam_frame_idx = np.clip(frame_ck, 0, state.r_c2w_sla_all.shape[0] - 1)
+                r_c2w_sla = state.r_c2w_sla_all[slam_frame_idx]
+                t_c2w_sla = state.t_c2w_sla_all[slam_frame_idx]
             else:
                 r_c2w_sla = state.r_c2w_sla_all[frame_ck]
                 t_c2w_sla = state.t_c2w_sla_all[frame_ck]
