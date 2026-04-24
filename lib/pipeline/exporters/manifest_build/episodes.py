@@ -201,6 +201,7 @@ def load_descriptor_episode_features(
     export_depth: bool = False,
 ):
     seq_folder = ep["seq_folder"]
+    descriptor = ep.get("descriptor")
     requested_frame_count = ep.get("num_valid_frames")
     if requested_frame_count is None and "frame_end" in ep:
         requested_frame_count = int(ep["frame_end"] - ep.get("frame_start", 0))
@@ -227,7 +228,7 @@ def load_descriptor_episode_features(
                     return None
             return cached
 
-    if descriptor_uses_native_features(ep["descriptor"]):
+    if descriptor is not None and descriptor_uses_native_features(descriptor):
         try:
             episode_data = _load_native_descriptor_episode_features(ep)
         except Exception as error:
