@@ -214,6 +214,12 @@ class GarbageCollection:
             print(f"[GC] {reason} took {elapsed:.2f}s")
 
 
+def dataloader_worker_enable_gc(worker_id: int) -> None:
+    """Re-enable gc in a DataLoader worker; main process disables it."""
+    del worker_id
+    gc.enable()
+
+
 class FullMemoryTracker:
     def __init__(self, model):
         self.model = model
