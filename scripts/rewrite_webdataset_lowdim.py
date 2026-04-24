@@ -304,6 +304,82 @@ def build_legacy_episode_index_from_processed_root(
     return legacy_index
 
 
+def _resolve_direct_buildai_clip_info(processed_root: Path, clip_id: str) -> dict | None:
+    match = BUILDAI_CLIP_RE.match(clip_id)
+    if match is None:
+        short_match = re.match(r"^f(\d{3})_w(\d{3})_", clip_id)
+        if short_match is None:
+            return None
+        factory_id = int(short_match.group(1))
+        worker_id = int(short_match.group(2))
+    else:
+        factory_id = int(match.group(1))
+        worker_id = int(match.group(2))
+
+    candidates = [
+        processed_root / f"factory_{factory_id:03d}" / f"worker_{worker_id:03d}" / "processed" / clip_id,
+        processed_root / f"factory{factory_id:03d}" / "outputs" / clip_id,
+        processed_root / f"factory_{factory_id:03d}" / "outputs" / clip_id,
+    ]
+    seq_folder = next((path for path in candidates if path.is_dir() and (path / "world_space_res.pth").is_file()), None)
+    if seq_folder is None:
+        return None
+    return {
+        "clip_id": clip_id,
+        "episode_id": clip_id,
+        "seq_folder": str(seq_folder.resolve()),
+        "source_id": "buildai",
+        "split": "unknown",
+    }
+
+
+def build_subset_clip_index_from_clip_ids(processed_root: str, clip_ids: set[str]) -> tuple[dict[str, dict], list[str]]:
+    root = Path(processed_root).resolve()
+    print(f"[clip-index] resolve subset clip ids: clips={len(clip_ids)}", flush=True)
+    clip_index = {}
+    unresolved = []
+    ordered_clip_ids = sorted(clip_ids)
+    for idx, clip_id in enumerate(ordered_clip_ids, start=1):
+        clip_info = _resolve_direct_buildai_clip_info(root, clip_id)
+        if clip_info is None:
+            unresolved.append(clip_id)
+        else:
+            clip_index[clip_id] = clip_info
+        if idx <= 5 or idx % 2000 == 0 or idx == len(ordered_clip_ids):
+            print(
+                f"[clip-index] subset progress {idx}/{len(ordered_clip_ids)} resolved={len(clip_index)} unresolved={len(unresolved)}",
+                flush=True,
+            )
+    return clip_index, unresolved
+
+
+def collect_selected_clip_ids(shard_paths: list[str]) -> tuple[set[str], bool]:
+    clip_ids: set[str] = set()
+    has_legacy_keys = False
+    sample_count = 0
+    for shard_idx, shard_path in enumerate(shard_paths, start=1):
+        for sample in iter_shard_samples(shard_path):
+            meta = None
+            try:
+                meta = json.loads(sample["meta_bytes"].decode("utf-8"))
+            except Exception:
+                meta = None
+            clip_id = _sample_clip_id(sample, meta)
+            clip_ids.add(clip_id)
+            has_legacy_keys = has_legacy_keys or LEGACY_BUILDAI_EP_RE.match(clip_id) is not None
+            sample_count += 1
+        if shard_idx <= 4 or shard_idx % 8 == 0 or shard_idx == len(shard_paths):
+            print(
+                f"[clip-index] selected-shard scan {shard_idx}/{len(shard_paths)} clips={len(clip_ids)} samples={sample_count}",
+                flush=True,
+            )
+    print(
+        f"[clip-index] selected clip-id scan ready: unique_clips={len(clip_ids)} legacy_keys={has_legacy_keys}",
+        flush=True,
+    )
+    return clip_ids, has_legacy_keys
+
+
 def _ensure_worker_models():
     global _WORKER_MANO_RIGHT, _WORKER_MANO_LEFT
     from lib.pipeline.exporters.webdataset_features import build_mano_models
@@ -645,56 +721,10 @@ def run_from_args(args):
     feature_cache_dir = Path(args.feature_cache_dir) if args.feature_cache_dir else output_dir / "_episode_feature_cache"
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[phase] build clip index from {buildai_processed_root}", flush=True)
-    clip_index = build_clip_index_from_processed_root(
-        str(buildai_processed_root),
-        factory_range=args.legacy_factory_range,
-    )
-    print(f"[phase] clip index ready: {len(clip_index)} clips", flush=True)
-    legacy_episodes = {}
-    legacy_episode_source = None
-    legacy_episode_cache = args.legacy_episode_cache
-    if legacy_episode_cache:
-        legacy_episode_cache = str(Path(legacy_episode_cache).resolve())
-    else:
-        default_cache = buildai_processed_root / "_vla_episodes_cache.json"
-        if default_cache.is_file():
-            legacy_episode_cache = str(default_cache)
-
-    if args.legacy_buildai_input_dir or legacy_episode_cache:
-        print("[phase] load legacy episode index", flush=True)
-        legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
-        legacy_episodes = build_legacy_episode_index(
-            legacy_input_dir,
-            episode_list=args.legacy_episode_list,
-            factory_range=args.legacy_factory_range,
-            cache_file=legacy_episode_cache,
-        )
-        if legacy_episodes:
-            if legacy_episode_cache:
-                legacy_episode_source = legacy_episode_cache
-            else:
-                legacy_episode_source = legacy_input_dir
-
-    if not legacy_episodes:
-        print("[phase] build legacy episode index from processed root", flush=True)
-        legacy_episodes = build_legacy_episode_index_from_processed_root(
-            str(buildai_processed_root),
-            factory_range=args.legacy_factory_range,
-        )
-        legacy_episode_source = f"{buildai_processed_root} [auto-scan]"
-    print(f"[phase] legacy episode index ready: {len(legacy_episodes)} episodes", flush=True)
-
     print(f"[phase] scan source shards under {source_dir}", flush=True)
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
-    if source_contains_legacy_buildai_keys(shard_paths) and not legacy_episodes:
-        raise RuntimeError(
-            "Detected legacy buildai_epXXXX shard keys, but no legacy BuildAI episodes "
-            f"were discovered under {buildai_processed_root}. "
-            "Check --buildai_processed_root or pass --legacy_buildai_input_dir / --legacy_episode_cache."
-        )
 
     mano_device_obj = torch.device(args.mano_device if torch.cuda.is_available() else "cpu")
     device_specs = normalize_mano_devices(str(mano_device_obj), args.mano_gpus if mano_device_obj.type == "cuda" else None)
@@ -708,6 +738,68 @@ def run_from_args(args):
         args.shard_end,
         args.resume,
     )
+    clip_index = {}
+    legacy_episodes = {}
+    legacy_episode_source = None
+    legacy_episode_cache = args.legacy_episode_cache
+    if legacy_episode_cache:
+        legacy_episode_cache = str(Path(legacy_episode_cache).resolve())
+    else:
+        default_cache = buildai_processed_root / "_vla_episodes_cache.json"
+        if default_cache.is_file():
+            legacy_episode_cache = str(default_cache)
+
+    if shard_paths:
+        selected_clip_ids, selected_has_legacy_keys = collect_selected_clip_ids(shard_paths)
+        if not selected_has_legacy_keys:
+            clip_index, unresolved_clip_ids = build_subset_clip_index_from_clip_ids(
+                str(buildai_processed_root),
+                selected_clip_ids,
+            )
+            if unresolved_clip_ids:
+                preview = unresolved_clip_ids[:8]
+                print(
+                    f"[clip-index] subset resolve missed {len(unresolved_clip_ids)} clips; fallback to full processed-root scan. preview={preview}",
+                    flush=True,
+                )
+                print(f"[phase] build clip index from {buildai_processed_root}", flush=True)
+                clip_index = build_clip_index_from_processed_root(
+                    str(buildai_processed_root),
+                    factory_range=args.legacy_factory_range,
+                )
+                print(f"[phase] clip index ready: {len(clip_index)} clips", flush=True)
+            else:
+                print(f"[phase] subset clip index ready: {len(clip_index)} clips", flush=True)
+        else:
+            print("[phase] selected shards contain legacy buildai_ep keys; fallback to full processed-root scan", flush=True)
+            print(f"[phase] build clip index from {buildai_processed_root}", flush=True)
+            clip_index = build_clip_index_from_processed_root(
+                str(buildai_processed_root),
+                factory_range=args.legacy_factory_range,
+            )
+            print(f"[phase] clip index ready: {len(clip_index)} clips", flush=True)
+
+            if args.legacy_buildai_input_dir or legacy_episode_cache:
+                print("[phase] load legacy episode index", flush=True)
+                legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
+                legacy_episodes = build_legacy_episode_index(
+                    legacy_input_dir,
+                    episode_list=args.legacy_episode_list,
+                    factory_range=args.legacy_factory_range,
+                    cache_file=legacy_episode_cache,
+                )
+                if legacy_episodes:
+                    legacy_episode_source = legacy_episode_cache or legacy_input_dir
+
+            if not legacy_episodes:
+                print("[phase] build legacy episode index from processed root", flush=True)
+                legacy_episodes = build_legacy_episode_index_from_processed_root(
+                    str(buildai_processed_root),
+                    factory_range=args.legacy_factory_range,
+                )
+                legacy_episode_source = f"{buildai_processed_root} [auto-scan]"
+            print(f"[phase] legacy episode index ready: {len(legacy_episodes)} episodes", flush=True)
+
     print("[phase] start shard rewrite", flush=True)
 
     if args.workers <= 1:
