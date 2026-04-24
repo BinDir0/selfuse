@@ -56,9 +56,9 @@ def _patched_vision_attn_forward(
     max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
     attn_output = flash_attn_varlen_func(
-        query_states,
-        key_states,
-        value_states,
+        query_states.contiguous(),
+        key_states.contiguous(),
+        value_states.contiguous(),
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_k=cu_seqlens,
         max_seqlen_q=max_seqlen,

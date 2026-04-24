@@ -96,7 +96,7 @@ class TemporalCausalAttention(nn.Module):
         # qkv: (B, N, T, 3, H, head_dim)
         qkv = qkv_proj(x).view(B, -1, T, 3, H, head_dim)
         # each: (B, N, T, H, head_dim) -> (B, N, H, T, head_dim)
-        q, k, v = (t.transpose(-3, -2) for t in qkv.unbind(3))
+        q, k, v = (t.transpose(-3, -2).contiguous() for t in qkv.unbind(3))
 
         attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # (B, N, H, T, head_dim) -> (B, N, T, D) -> (B, T, N, D) -> (B*T*N, D)
