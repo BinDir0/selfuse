@@ -503,7 +503,7 @@ def test_build_sample_from_window_legacy_meta_is_head_only():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_frame(1), make_frame(2)])
 
-    sample = build_sample_from_window(buf, past, config, load_breast_camera=True)
+    sample = build_sample_from_window(buf, past, config)
 
     assert sample["extrinsic"].shape == (16,)
     assert sample["intrinsic"].shape == (4,)
@@ -511,8 +511,9 @@ def test_build_sample_from_window_legacy_meta_is_head_only():
     assert "breast_intrinsic" not in sample
 
 
-def test_build_sample_from_window_breast_disabled_drops_breast_calibration():
-    """Even if meta declares 'breast', load_breast_camera=False hides it."""
+def test_build_sample_from_window_breast_calibration_driven_by_meta():
+    """Breast ext/intr are emitted whenever meta['cameras'] declares breast;
+    media filtering is done upstream by select_files, not this function."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
@@ -520,52 +521,45 @@ def test_build_sample_from_window_breast_disabled_drops_breast_calibration():
     past = collections.deque(maxlen=config.past_size)
     buf = collections.deque([make_dual_camera_frame(1), make_dual_camera_frame(2)])
 
-    sample = build_sample_from_window(buf, past, config, load_breast_camera=False)
+    sample = build_sample_from_window(buf, past, config)
 
     # Head canonical keys: always filled from lowdim[96:116].
     np.testing.assert_allclose(sample["intrinsic"], [500, 500, 320, 240])
-    assert "breast_extrinsic" not in sample
-    assert "breast_intrinsic" not in sample
-
-
-def test_build_sample_from_window_breast_enabled_surfaces_breast_calibration():
-    """With load_breast_camera=True, breast ext/intr appear as optional keys."""
-    config = WindowConfig(
-        action_horizon=2, state_horizon=1, state_stride=1,
-        image_horizon=1, image_stride=1,
-    )
-    past = collections.deque(maxlen=config.past_size)
-    buf = collections.deque([make_dual_camera_frame(1), make_dual_camera_frame(2)])
-
-    sample = build_sample_from_window(buf, past, config, load_breast_camera=True)
-
+    # Breast calibration is meta-driven and cheap, always emitted.
     assert sample["breast_extrinsic"].shape == (16,)
     assert sample["breast_intrinsic"].shape == (4,)
     np.testing.assert_allclose(sample["breast_intrinsic"], [600, 600, 320, 240])
 
 
-def test_materialize_sample_media_breast_disabled_skips_breast_media():
-    """load_breast_camera=False should not decode breast media even if present."""
+def test_materialize_sample_media_skips_breast_when_bytes_absent():
+    """When select_files filtered out breast_* members upstream, the frame
+    refs carry no breast bytes and materialize skips the breast decode."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
     )
     past = collections.deque(maxlen=config.past_size)
-    buf = collections.deque([
-        make_dual_camera_frame(1, with_media_bytes=True),
-        make_dual_camera_frame(2, with_media_bytes=True),
-    ])
+    # Build frames with breast declared in meta but no breast media bytes,
+    # mimicking what build_select_files(load_breast=False) yields.
+    frames = []
+    for i in (1, 2):
+        f = make_dual_camera_frame(i, with_media_bytes=True)
+        del f["breast_image.jpg"]
+        del f["breast_depth.npy"]
+        frames.append(f)
+    buf = collections.deque(frames)
 
-    sample = build_sample_from_window(buf, past, config, load_breast_camera=False)
-    materialize_sample_media(sample, load_breast_camera=False)
+    sample = build_sample_from_window(buf, past, config)
+    materialize_sample_media(sample)
 
     assert "image" in sample
+    assert "depth" in sample
     assert "breast_image" not in sample
     assert "breast_depth" not in sample
 
 
-def test_materialize_sample_media_breast_enabled_decodes_both_views():
-    """load_breast_camera=True should decode both head and breast streams."""
+def test_materialize_sample_media_decodes_both_views_when_bytes_present():
+    """All modalities present → both head and breast streams are decoded."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
@@ -576,8 +570,8 @@ def test_materialize_sample_media_breast_enabled_decodes_both_views():
         make_dual_camera_frame(2, with_media_bytes=True),
     ])
 
-    sample = build_sample_from_window(buf, past, config, load_breast_camera=True)
-    materialize_sample_media(sample, load_breast_camera=True)
+    sample = build_sample_from_window(buf, past, config)
+    materialize_sample_media(sample)
 
     assert sample["image"].shape == (1, 4, 4, 3)
     assert sample["breast_image"].shape == (1, 4, 4, 3)
@@ -600,7 +594,7 @@ def test_sliding_window_compose_handles_mixed_cameras():
     ]
     frames = human_frames + real_frames
 
-    samples = list(sliding_window_compose(iter(frames), config, load_breast_camera=True))
+    samples = list(sliding_window_compose(iter(frames), config))
     assert len(samples) == 6
 
     head_only_samples = samples[:3]

@@ -60,11 +60,12 @@ dataset:
     shuffle_buffer: 16384
     video_base_fps: ${data.video_base_fps}
     target_image_size: ${data.target_image_size}
-    # When training does not need depth, skip depth decoding + augment_depth
+    # When training does not need depth, skip depth reading entirely at the
+    # tar layer (also disables augment_depth downstream).
     load_depth: ${training.train_depth}
     # Decode breast (chest) camera when real-robot shards declare it.
     # Model side still ignores these keys; set true only once downstream is ready.
-    load_breast_camera: false
+    load_breast: false
     # Pre-shuffle Bernoulli keep rate (train only). Lower = more shard diversity,
     # higher IO. 1.0 disables. Ref: DreamZero shard_sampling_rate.
     keep_ratio: 1.0

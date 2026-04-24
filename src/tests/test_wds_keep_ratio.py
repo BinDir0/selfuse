@@ -73,26 +73,26 @@ def test_keep_ratio_assert_rejects_above_one():
 
 
 def test_keep_ratio_default_inserts_no_select_stage():
-    pipeline = _build_with_dummy_wds(mode="train", lowdim_only=True)
+    pipeline = _build_with_dummy_wds(mode="train", load_image=False, load_depth=False)
     select_calls = [c for c in pipeline.calls if c[0] == "select"]
     assert select_calls == [], "default keep_ratio=1.0 must not insert a .select() stage"
 
 
 def test_keep_ratio_below_one_inserts_select_in_train():
-    pipeline = _build_with_dummy_wds(mode="train", lowdim_only=True, keep_ratio=0.1)
+    pipeline = _build_with_dummy_wds(mode="train", load_image=False, load_depth=False, keep_ratio=0.1)
     select_calls = [c for c in pipeline.calls if c[0] == "select"]
     assert len(select_calls) == 1, "train mode with keep_ratio<1.0 must insert exactly one .select()"
 
 
 def test_keep_ratio_below_one_skipped_in_val():
-    pipeline = _build_with_dummy_wds(mode="val", lowdim_only=True, keep_ratio=0.1)
+    pipeline = _build_with_dummy_wds(mode="val", load_image=False, load_depth=False, keep_ratio=0.1)
     select_calls = [c for c in pipeline.calls if c[0] == "select"]
     assert select_calls == [], "val mode must skip keep_ratio drop so full val set is evaluated"
 
 
 def test_keep_ratio_predicate_distribution_is_bernoulli():
     """The injected predicate should keep samples with probability ~keep_ratio."""
-    pipeline = _build_with_dummy_wds(mode="train", lowdim_only=True, keep_ratio=0.25)
+    pipeline = _build_with_dummy_wds(mode="train", load_image=False, load_depth=False, keep_ratio=0.25)
     select_calls = [c for c in pipeline.calls if c[0] == "select"]
     assert len(select_calls) == 1
     predicate = select_calls[0][1]

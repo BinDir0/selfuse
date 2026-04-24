@@ -195,7 +195,7 @@ def test_sample_to_data_surfaces_breast_fields_when_breast_image_present():
         wds_datasets=[{"name": "demo", "shard_urls": "/tmp/unused/shard-*.tar"}],
         shape_meta=_shape_meta(),
         mode="val",
-        load_breast_camera=True,
+        load_breast=True,
         target_image_size=(4, 4),
     )
     sample = {
@@ -528,7 +528,8 @@ def test_build_wds_pipeline_expands_listconfig_globs_into_one_subset(tmp_path):
         build_wds_pipeline(
             shard_urls_cfg.shard_urls,
             mode="val",
-            lowdim_only=True,
+            load_image=False,
+            load_depth=False,
         )
 
     assert captured["shard_urls"] == [

@@ -73,8 +73,8 @@ class MockVlaDataset(torch.utils.data.IterableDataset):
         self.depth_image_shape = (4, 4)
         # future_frame_horizon=0 disables future-frame padding in UnifiedWdsDataset.pad_vlm_sample.
         self.future_frame_horizon = 0
-        # load_breast_camera=False keeps pad_vlm_sample on the head-only branch.
-        self.load_breast_camera = False
+        # load_breast=False keeps pad_vlm_sample on the head-only branch.
+        self.load_breast = False
         self.debug_capture_raw_sample = False
         self.debug_capture_processed_sample = False
         self.debug_profile_timing = False

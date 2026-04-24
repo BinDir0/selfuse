@@ -33,7 +33,7 @@ open in any browser; no asset directory to ship along.
 #         --shuffle-buffer 16
 #
 # Dual-view run (sources only from shard subsets that actually ship a breast
-# camera; the preset sets load_breast_camera=True and narrows
+# camera; the preset sets load_breast=True and narrows
 # vla_wds_datasets to those subsets automatically):
 #     python -m scripts.viz_loaded_data \
 #         --preset with-breast \
@@ -101,8 +101,8 @@ def parse_args() -> argparse.Namespace:
         "--preset",
         choices=["head-only", "with-breast"],
         default="head-only",
-        help="head-only: load_breast_camera=False (default recipe). "
-             "with-breast: force load_breast_camera=True and filter to teleop_xiaozi.",
+        help="head-only: load_breast=False (default recipe). "
+             "with-breast: force load_breast=True and filter to teleop_xiaozi.",
     )
     parser.add_argument(
         "--config-path",
@@ -171,7 +171,7 @@ def load_config(args: argparse.Namespace):
         cfg.dataset.vlm_dataset.shuffle_buffer = int(args.shuffle_buffer)
 
     if args.preset == "with-breast":
-        cfg.dataset.vla_dataset.load_breast_camera = True
+        cfg.dataset.vla_dataset.load_breast = True
         # Filter VLA subsets to those that declare a breast camera so every
         # sampled batch exercises the dual-view branch. teleop_xiaozi is the
         # only production dataset with breast shards today.
@@ -189,7 +189,7 @@ def load_config(args: argparse.Namespace):
         # confirm the VLA path's breast handling, not VLM.
         cfg.dataset.vlm_dataset = None
     else:
-        cfg.dataset.vla_dataset.load_breast_camera = False
+        cfg.dataset.vla_dataset.load_breast = False
 
     # Single-process DataLoader settings are applied in build_dataloader.
     return cfg
@@ -284,13 +284,13 @@ def split_per_sample_videos(
     pixel_values_videos: torch.Tensor,
     video_grid_thw: torch.Tensor,
     is_vla_mask: np.ndarray,
-    load_breast_camera: bool,
+    load_breast: bool,
 ):
     """Return per-sample dict with {"head": (T,H,W,3), "breast": ... | None}.
 
     Grid rows are laid out per sample: one row when breast is absent for that
     sample (VLM sample in token-padded mode still emits a video), two rows
-    (head first, then breast) when load_breast_camera=True and the sample has
+    (head first, then breast) when load_breast=True and the sample has
     a breast shard. We use `is_vla_mask` + the existence of breast slots
     (inferred from total rows) to split.
     """
@@ -314,7 +314,7 @@ def split_per_sample_videos(
         head_patches = pixel_values_videos[offsets[start_v]: offsets[start_v + 1]]
         head_video = depatchify_video(head_patches, video_grid_thw[start_v])
         entry = {"head": head_video}
-        if load_breast_camera and videos_per_sample >= 2:
+        if load_breast and videos_per_sample >= 2:
             breast_patches = pixel_values_videos[
                 offsets[start_v + 1]: offsets[start_v + 2]
             ]
@@ -489,7 +489,7 @@ def main():
         return
     per_sample = split_per_sample_videos(
         pixel_values_videos, video_grid_thw, is_vla_mask,
-        load_breast_camera=(args.preset == "with-breast"),
+        load_breast=(args.preset == "with-breast"),
     )
 
     sections = []

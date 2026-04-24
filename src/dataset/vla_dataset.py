@@ -62,8 +62,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         debug_capture_raw_sample: bool = False,
         debug_capture_processed_sample: bool = False,
         debug_profile_timing: bool = False,
-        load_depth: bool = True,
-        load_breast_camera: bool = False,
+        load_depth: bool = False,
+        load_breast: bool = False,
         keep_ratio: float = 1.0,
     ):
         super().__init__()
@@ -81,10 +81,12 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.val_wds_datasets = val_wds_datasets
         self.return_dataset_info = return_dataset_info
         self.video_base_fps = float(video_base_fps)
-        # Skip depth decoding + augment_depth when training does not need depth.
-        # Saves ~25 ms/sample (depth augmentation is the single biggest CPU cost).
+        # Modality flags are forwarded to build_blended_dataset so the
+        # WebDataset tar reader filters members at read time.  Skipping
+        # depth decoding + augment_depth saves ~25 ms/sample (depth
+        # augmentation is the single biggest CPU cost).
         self.load_depth = bool(load_depth)
-        self.load_breast_camera = bool(load_breast_camera)
+        self.load_breast = bool(load_breast)
         assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
         self.keep_ratio = float(keep_ratio)
         # (H, W) tuple or None. Resize all RGB frames to this resolution
@@ -326,7 +328,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             )
             data["future_head_motion"] = head_motion
 
-            if self.load_breast_camera:
+            if "breast_future_frames" in sample:
                 breast_ff, _ = pad_future(sample.get("breast_future_frames"))
                 data["breast_future_frames"] = breast_ff
                 breast_motion = compute_relative_motion_padded(
@@ -403,11 +405,12 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         pipeline = build_blended_dataset(
             datasets_config=datasets_config,
             config=self.window_config,
-            load_breast_camera=self.load_breast_camera,
+            load_image=True,
+            load_depth=self.load_depth,
+            load_breast=self.load_breast,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=self.shuffle_buffer,
             mode=self.mode,
-            load_depth=self.load_depth,
             keep_ratio=self.keep_ratio,
         )
         return filter_none(pipeline)
@@ -434,7 +437,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             debug_capture_processed_sample=self.debug_capture_processed_sample,
             debug_profile_timing=self.debug_profile_timing,
             load_depth=self.load_depth,
-            load_breast_camera=self.load_breast_camera,
+            load_breast=self.load_breast,
             keep_ratio=1.0,
         )
         if self.collator is not None:
@@ -596,7 +599,7 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
             vlm_sample["future_head_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
         # Dummies so breast keys survive collate_raw's "all samples carry key"
         # filter when VLA side runs with breast enabled.
-        if self.vla_dataset.load_breast_camera:
+        if self.vla_dataset.load_breast:
             vlm_sample["breast_intrinsic"] = torch.zeros(4, dtype=torch.float32)
             if ff_horizon > 0:
                 tH, tW = self.vla_dataset.target_image_size
@@ -831,12 +834,15 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         pipeline = build_wds_pipeline(
             shard_urls=shard_urls,
             config=self.window_config,
-            load_breast_camera=False,  # Normalizer fitting only touches base lowdim [0:96]
+            # Normalizer fitting only touches base lowdim [0:96]; skip image
+            # and depth entirely at tar-read time.
+            load_image=False,
+            load_depth=False,
+            load_breast=False,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=0,
             mode=self.mode,
             use_sliding_window=True,
-            lowdim_only=True,
         )
         return filter_none(pipeline)
 
