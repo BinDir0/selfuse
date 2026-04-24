@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 FINGERTIP_INDICES = [4, 8, 12, 16, 20]
 DEFAULT_INTRINSIC = np.array([500.0, 500.0, 320.0, 240.0], dtype=np.float32)
 LOWDIM_SIZE = 116
-EPISODE_FEATURE_CACHE_VERSION = 8
+EPISODE_FEATURE_CACHE_VERSION = 9
 _SLAM_WARNING_COUNTS = {}
 
 
@@ -38,6 +38,10 @@ def _log_slam_warning(kind: str, message: str):
 
 class InvalidCameraDataError(ValueError):
     """Raised when episode camera data is present but too dirty to trust."""
+
+
+def export_frame_count_with_action(num_frames: int) -> int:
+    return max(int(num_frames) - 1, 0)
 
 
 def _ensure_finite_array(name: str, value):
@@ -297,7 +301,8 @@ def _build_lowdim_features(wrist_state, hand_state, extrinsics, intrinsic):
 
 def _build_episode_data(extracted_dir, num_frames, lowdim_all, presence_per_frame, rescan_frame_index):
     frame_index = load_or_build_frame_index(extracted_dir, rescan=rescan_frame_index)
-    frame_ids = sorted(frame_idx for frame_idx in frame_index if frame_idx < num_frames)
+    export_frame_count = export_frame_count_with_action(num_frames)
+    frame_ids = sorted(frame_idx for frame_idx in frame_index if frame_idx < export_frame_count)
     if not frame_ids:
         return None
 
@@ -310,7 +315,8 @@ def _build_episode_data(extracted_dir, num_frames, lowdim_all, presence_per_fram
 
 
 def _build_episode_data_from_known_frame_ids(extracted_dir, frame_ids, lowdim_all, presence_per_frame):
-    valid_frame_ids = [int(frame_idx) for frame_idx in frame_ids if int(frame_idx) < int(lowdim_all.shape[0])]
+    export_frame_count = export_frame_count_with_action(int(lowdim_all.shape[0]))
+    valid_frame_ids = [int(frame_idx) for frame_idx in frame_ids if int(frame_idx) < export_frame_count]
     if not valid_frame_ids:
         return None
 

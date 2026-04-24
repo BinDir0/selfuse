@@ -441,6 +441,7 @@ def process_shard(shard_path: str) -> dict:
     output_path = os.path.join(_WORKER_OUTPUT_DIR, shard_name)
     tmp_path = f"{output_path}.tmp"
     frames_rewritten = 0
+    frames_skipped = 0
     clips_touched = set()
     tar_writer = None
 
@@ -459,10 +460,8 @@ def process_shard(shard_path: str) -> dict:
 
             episode_data = _get_episode_data(clip_id)
             if frame_idx >= int(episode_data["lowdim_all"].shape[0]):
-                raise IndexError(
-                    f"Sample {sample['key']} requests frame {frame_idx}, "
-                    f"but corrected features only have {episode_data['lowdim_all'].shape[0]} frames"
-                )
+                frames_skipped += 1
+                continue
 
             lowdim_bytes = _encode_lowdim(episode_data["lowdim_all"][frame_idx])
             meta_bytes = _build_updated_meta(meta, clip_info, int(episode_data["presence_per_frame"][frame_idx]))
@@ -497,6 +496,7 @@ def process_shard(shard_path: str) -> dict:
         "shard_name": shard_name,
         "output_path": output_path,
         "frames_rewritten": frames_rewritten,
+        "frames_skipped": frames_skipped,
         "clips_touched": len(clips_touched),
         "shard_written": 1 if frames_rewritten > 0 else 0,
     }
@@ -558,10 +558,12 @@ def build_report(
         "shards_total": len(shard_results),
         "shards_written": int(sum(item["shard_written"] for item in shard_results)),
         "frames_rewritten": int(sum(item["frames_rewritten"] for item in shard_results)),
+        "frames_skipped": int(sum(item.get("frames_skipped", 0) for item in shard_results)),
         "clips_touched": int(sum(item["clips_touched"] for item in shard_results)),
         "shards": {
             item["shard_name"]: {
                 "frames_rewritten": item["frames_rewritten"],
+                "frames_skipped": int(item.get("frames_skipped", 0)),
                 "clips_touched": item["clips_touched"],
             }
             for item in shard_results

@@ -179,7 +179,7 @@ def load_episode_stats(ep, rescan_frame_index=False):
         return None
 
     seq_len = int(np.array(pred_trans).shape[1])
-    frame_ids = sorted(frame_idx for frame_idx in frame_index if frame_idx < seq_len)
+    frame_ids = sorted(frame_idx for frame_idx in frame_index if frame_idx < max(seq_len - 1, 0))
     if not frame_ids:
         return None
 

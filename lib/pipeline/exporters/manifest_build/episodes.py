@@ -25,12 +25,14 @@ from lib.pipeline.exporters.webdataset_features import (
     _compute_presence_per_frame,
     _load_episode_camera_features,
     _load_world_space_prediction,
+    export_frame_count_with_action,
 )
 from lib.pipeline.quality_metrics import (
     finalize_clip_quality_metrics,
     new_clip_quality_stats,
     parse_instruction_metadata,
     update_clip_quality_stats,
+    validate_lowdim_numeric_sanity,
 )
 
 from .cache import load_cached_features, write_cached_features
@@ -101,6 +103,12 @@ def _validate_native_lowdim(lowdim_all: np.ndarray) -> None:
     rotation_dets = np.linalg.det(extrinsics[:, :3, :3].astype(np.float64))
     if not np.isfinite(rotation_dets).all() or (np.abs(rotation_dets) < 1e-6).any():
         raise ValueError("Native lowdim extrinsics contain singular camera rotations")
+    for frame_idx, lowdim in enumerate(lowdim_all):
+        sanity = validate_lowdim_numeric_sanity(lowdim)
+        if not sanity["valid"]:
+            raise ValueError(
+                f"Native lowdim frame {frame_idx} failed numeric sanity: {','.join(sanity['issues'])}"
+            )
     if lowdim_all.shape[0] > 1:
         wrist_action = lowdim_all[:-1, NATIVE_WRIST_ACTION_SLICE]
         next_wrist_state = lowdim_all[1:, NATIVE_WRIST_STATE_SLICE]
@@ -121,6 +129,7 @@ def _load_native_descriptor_episode_features(ep: dict) -> dict | None:
 
     requested_frame_count = int(ep.get("num_valid_frames") or descriptor.frame_count)
     frame_names = list(descriptor.frame_names[:requested_frame_count])
+    frame_names = frame_names[:export_frame_count_with_action(len(frame_names))]
     if not frame_names:
         return None
 
@@ -263,13 +272,14 @@ def load_descriptor_episode_features(
     frame_count = int(
         requested_frame_count if interpolate_labels else min(int(requested_frame_count), source_frame_count)
     )
-    if frame_count <= 0:
+    export_frame_count = export_frame_count_with_action(frame_count)
+    if export_frame_count <= 0:
         return None
 
     cached = (
         load_cached_features(
             seq_folder,
-            frame_count,
+            export_frame_count,
             feature_cache_dir,
             source_fps=source_fps,
             target_fps=target_fps,
@@ -323,14 +333,14 @@ def load_descriptor_episode_features(
     )
 
     episode_data = {
-        "frame_count": frame_count,
-        "lowdim_all": lowdim_all[:frame_count],
-        "mano_all": mano_all[:frame_count],
-        "presence_per_frame": presence_per_frame[:frame_count],
+        "frame_count": export_frame_count,
+        "lowdim_all": lowdim_all[:export_frame_count],
+        "mano_all": mano_all[:export_frame_count],
+        "presence_per_frame": presence_per_frame[:export_frame_count],
     }
     if export_depth:
         try:
-            episode_data["depth_all"] = load_export_depths(seq_folder, int(frame_count))
+            episode_data["depth_all"] = load_export_depths(seq_folder, int(export_frame_count))
         except Exception as error:
             print(f"  Skip {ep['episode_id']}: invalid depth artifact: {error}")
             return None
@@ -463,7 +473,7 @@ def _prepare_manifest_episode(
             "source_id": record.source_id,
             "split": record.split,
             "descriptor": record.descriptor,
-            "num_valid_frames": num_frames,
+            "num_valid_frames": export_frame_count_with_action(num_frames),
             "source_num_frames": source_num_frames,
             "source_fps": float(source_fps),
             "target_fps": float(target_fps),
@@ -518,7 +528,7 @@ def _prepare_manifest_episode(
         "source_id": record.source_id,
         "split": record.split,
         "descriptor": record.descriptor,
-        "num_valid_frames": num_frames,
+        "num_valid_frames": export_frame_count_with_action(num_frames),
         "source_num_frames": source_num_frames,
         "source_fps": float(source_fps),
         "target_fps": float(target_fps),
@@ -584,7 +594,7 @@ def prepare_manifest_record_for_build(
         "source_id": record.source_id,
         "split": record.split,
         "descriptor": record.descriptor,
-        "num_valid_frames": num_frames,
+        "num_valid_frames": export_frame_count_with_action(num_frames),
         "source_num_frames": source_num_frames,
         "source_fps": float(source_fps),
         "target_fps": float(target_fps),

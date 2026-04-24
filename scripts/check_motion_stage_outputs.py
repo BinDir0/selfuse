@@ -33,6 +33,7 @@ from lib.pipeline.exporters.webdataset_features import (
     _load_episode_camera_features,
     _load_world_space_prediction,
     build_mano_models,
+    export_frame_count_with_action,
 )
 from lib.pipeline.quality_metrics import decode_lowdim
 from lib.pipeline.stage_api import get_track_range
@@ -763,13 +764,14 @@ def _build_current_export_lowdim(
         interpolate_labels=interpolate_labels,
     )
     lowdim_all = _build_lowdim_features(wrist_state, hand_state, extrinsics_resampled[:target_count], intrinsic)
+    export_frame_count = export_frame_count_with_action(target_count)
     return {
-        "lowdim_all": lowdim_all.astype(np.float32),
-        "presence_per_frame": np.asarray(presence_resampled),
-        "pred_rot": pred_rot_resampled,
-        "pred_hand_pose": pred_hand_pose_resampled,
-        "pred_betas": pred_betas_resampled,
-        "extrinsics": extrinsics_resampled.astype(np.float32),
+        "lowdim_all": lowdim_all[:export_frame_count].astype(np.float32),
+        "presence_per_frame": np.asarray(presence_resampled)[:export_frame_count],
+        "pred_rot": pred_rot_resampled[:, :export_frame_count],
+        "pred_hand_pose": pred_hand_pose_resampled[:, :export_frame_count],
+        "pred_betas": pred_betas_resampled[:, :export_frame_count],
+        "extrinsics": extrinsics_resampled[:export_frame_count].astype(np.float32),
         "intrinsic": np.asarray(intrinsic, dtype=np.float32),
     }
 

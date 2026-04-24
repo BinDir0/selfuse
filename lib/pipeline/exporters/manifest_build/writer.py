@@ -286,7 +286,8 @@ def worker_process_shard(task):
                 meta_prefix = build_manifest_meta_prefix(episode_slice)
 
                 try:
-                    for frame_idx in range(episode_slice["frame_start"], episode_slice["frame_end"]):
+                    frame_end = min(int(episode_slice["frame_end"]), int(episode_data["frame_count"]))
+                    for frame_idx in range(int(episode_slice["frame_start"]), frame_end):
                         image_bytes = read_frame_bytes(frame_idx)
                         presence = int(episode_data["presence_per_frame"][frame_idx])
                         key = f"{episode_slice['clip_id']}_f{frame_idx:06d}"
