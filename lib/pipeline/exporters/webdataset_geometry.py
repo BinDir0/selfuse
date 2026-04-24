@@ -11,7 +11,7 @@ def axis_angle_to_rot6d(axis_angle):
     orig_shape = axis_angle.shape[:-1]
     flat = axis_angle.reshape(-1, 3)
     rotmat = aa_to_rotmat(flat)
-    rot6d = rotmat[:, :, :2].transpose(0, 2, 1).reshape(-1, 6)
+    rot6d = rotmat[:, :, :2].permute(0, 2, 1).contiguous().reshape(-1, 6)
     return rot6d.reshape(*orig_shape, 6)
 
 
