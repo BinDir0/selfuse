@@ -190,6 +190,8 @@ def iter_buildai_seq_folders(processed_root: str, *, factory_range: str | tuple[
     patterns = (
         "factory_*/worker_*/processed/*",
         "factory*/outputs/*",
+        "worker_*/processed/*",
+        "outputs/*",
     )
     for pattern in patterns:
         for seq_folder in sorted(root.glob(pattern)):
@@ -217,7 +219,7 @@ def build_clip_index_from_processed_root(
         raise FileNotFoundError(f"BuildAI processed root not found: {root}")
 
     clip_index = {}
-    for seq_folder in iter_buildai_seq_folders(str(root), factory_range=factory_range):
+    for count, seq_folder in enumerate(iter_buildai_seq_folders(str(root), factory_range=factory_range), start=1):
         clip_id = seq_folder.name
         clip_index[clip_id] = {
             "clip_id": clip_id,
@@ -226,6 +228,8 @@ def build_clip_index_from_processed_root(
             "source_id": "buildai",
             "split": "unknown",
         }
+        if count <= 5 or count % 1000 == 0:
+            print(f"[clip-index] discovered={count} last={clip_id}", flush=True)
     if not clip_index:
         raise RuntimeError(
             "Failed to auto-discover any BuildAI seq_folder under "
@@ -282,6 +286,9 @@ def build_legacy_episode_index_from_processed_root(
             "split": "unknown",
             "legacy_episode_index": episode_index,
         }
+        count = episode_index + 1
+        if count <= 5 or count % 1000 == 0:
+            print(f"[legacy-index] discovered={count} last={clip_id}", flush=True)
     if not legacy_index:
         raise RuntimeError(
             "Failed to auto-discover any BuildAI seq_folder under "
@@ -627,10 +634,12 @@ def run_from_args(args):
     feature_cache_dir = Path(args.feature_cache_dir) if args.feature_cache_dir else output_dir / "_episode_feature_cache"
     feature_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"[phase] build clip index from {buildai_processed_root}", flush=True)
     clip_index = build_clip_index_from_processed_root(
         str(buildai_processed_root),
         factory_range=args.legacy_factory_range,
     )
+    print(f"[phase] clip index ready: {len(clip_index)} clips", flush=True)
     legacy_episodes = {}
     legacy_episode_source = None
     legacy_episode_cache = args.legacy_episode_cache
@@ -642,6 +651,7 @@ def run_from_args(args):
             legacy_episode_cache = str(default_cache)
 
     if args.legacy_buildai_input_dir or legacy_episode_cache:
+        print("[phase] load legacy episode index", flush=True)
         legacy_input_dir = str(Path(args.legacy_buildai_input_dir or buildai_processed_root).resolve())
         legacy_episodes = build_legacy_episode_index(
             legacy_input_dir,
@@ -656,12 +666,15 @@ def run_from_args(args):
                 legacy_episode_source = legacy_input_dir
 
     if not legacy_episodes:
+        print("[phase] build legacy episode index from processed root", flush=True)
         legacy_episodes = build_legacy_episode_index_from_processed_root(
             str(buildai_processed_root),
             factory_range=args.legacy_factory_range,
         )
         legacy_episode_source = f"{buildai_processed_root} [auto-scan]"
+    print(f"[phase] legacy episode index ready: {len(legacy_episodes)} episodes", flush=True)
 
+    print(f"[phase] scan source shards under {source_dir}", flush=True)
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
         raise RuntimeError(f"No shard tar files found in {source_dir}")
@@ -684,6 +697,7 @@ def run_from_args(args):
         args.shard_end,
         args.resume,
     )
+    print("[phase] start shard rewrite", flush=True)
 
     if args.workers <= 1:
         _worker_init(
