@@ -300,6 +300,9 @@ def _run_dpvo_with_cache(frame_source, masks, calib, seq_folder: str, start_idx:
         _drop_corrupt_cache(cache_path, error)
         return _run_dpvo_with_cache(frame_source, masks, calib, seq_folder, start_idx, end_idx, frame_indices=frame_indices)
 
+    traj_dense = traj_full.astype(np.float32)
+    tstamp_dense = tstamp_full.astype(np.int32)
+
     if tstamp_disps is not None and tstamp_disps.shape[0] == disps_full.shape[0]:
         order = np.argsort(tstamp_full)
         tstamp_sorted = tstamp_full[order]
@@ -320,6 +323,11 @@ def _run_dpvo_with_cache(frame_source, masks, calib, seq_folder: str, start_idx:
         "traj": traj_metric,
         "tstamp": tstamp_metric,
         "disps": disps_metric,
+        "traj_metric": traj_metric,
+        "tstamp_metric": tstamp_metric,
+        "disps_metric": disps_metric,
+        "traj_dense": traj_dense,
+        "tstamp_dense": tstamp_dense,
         "used_cache": not ran_fresh,
         "cache_path": cache_path,
         "cached_vo_sec": cached_vo_sec,
@@ -739,9 +747,9 @@ def hawor_slam(
             end_idx,
             frame_indices=segment_frame_ids,
         )
-        traj = slam_outputs["traj"]
-        tstamp = slam_outputs["tstamp"]
-        disps = slam_outputs["disps"]
+        traj_dense = slam_outputs.get("traj_dense", slam_outputs["traj"])
+        tstamp = slam_outputs.get("tstamp_metric", slam_outputs["tstamp"])
+        disps = slam_outputs.get("disps_metric", slam_outputs["disps"])
         timing["2_slam"] = time.time() - t0
         stats["dpvo_cache_hit"] = int(bool(slam_outputs["used_cache"]))
         if slam_outputs["used_cache"] and slam_outputs["cached_vo_sec"] is not None:
@@ -837,7 +845,7 @@ def hawor_slam(
         timing["4_scale_est"] = time.time() - t0
 
         t0 = time.time()
-        _save_slam_outputs(seq_folder, start_idx, end_idx, tstamp, disps, traj, focal, calib, scale)
+        _save_slam_outputs(seq_folder, start_idx, end_idx, tstamp, disps, traj_dense, focal, calib, scale)
         timing["5_save"] = time.time() - t0
         success = True
     except Exception as error:

@@ -811,10 +811,11 @@ def hawor_slam(
 
     t0 = time.time()
     vprint('Estimating Metric Scale ...')
-    # Replace with DPVO keyframe-only depth evidence for scale estimation.
+    # Use DPVO keyframe-only depth evidence for scale estimation, but keep the
+    # dense DPVO trajectory for the final export.
     tstamp = tstamp_metric
     disps = disps_metric
-    traj = traj_metric
+    traj = traj_full.astype(np.float32)
 
     slam_depth_list = [1.0 / disps[int(i)] for i in kf_idx]
     mask_list = [masks[int(tstamp_metric[i])].numpy().astype(np.uint8) for i in kf_idx]

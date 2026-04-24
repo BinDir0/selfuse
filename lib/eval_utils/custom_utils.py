@@ -102,6 +102,19 @@ def interpolate_slam_cameras_at_video_frames(fpath, video_frame_indices):
     pred_camq = torch.tensor(pred_traj[:, 3:])
     R_c2w = quaternion_to_matrix(pred_camq[:, [3, 0, 1, 2]]).numpy()
 
+    vf = np.asarray(video_frame_indices, dtype=np.int64).reshape(-1)
+
+    # DPVO fixed exports keep dense per-frame traj for downstream world conversion,
+    # while preserving sparse tstamp/disps only for scale estimation.
+    if pred_traj.shape[0] != tstamp.shape[0]:
+        if pred_traj.shape[0] <= 0:
+            raise ValueError("empty SLAM trajectory")
+        vf_clipped = np.clip(vf, 0, pred_traj.shape[0] - 1)
+        return (
+            torch.tensor(R_c2w[vf_clipped], dtype=torch.float32),
+            torch.tensor(t_c2w[vf_clipped], dtype=torch.float32),
+        )
+
     order = np.argsort(tstamp)
     ts = tstamp[order]
     R_ord = R_c2w[order]
@@ -110,7 +123,6 @@ def interpolate_slam_cameras_at_video_frames(fpath, video_frame_indices):
     if K < 1:
         raise ValueError("empty SLAM trajectory")
 
-    vf = np.asarray(video_frame_indices, dtype=np.int64).reshape(-1)
     R_list, t_list = [], []
     for f in vf:
         fi = int(f)
