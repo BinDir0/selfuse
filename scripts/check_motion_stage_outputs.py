@@ -145,7 +145,14 @@ except ImportError:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Diagnose one clip across motion/world/final-WDS stages")
-    parser.add_argument("--seq-folder", required=True, help="Processed clip output folder, e.g. factory*/outputs/<clip_id>")
+    parser.add_argument(
+        "--seq-folder",
+        "--seq_folder",
+        dest="seq_folders",
+        action="append",
+        required=True,
+        help="Processed clip output folder, e.g. factory*/outputs/<clip_id>. Repeat for multiple clips.",
+    )
     parser.add_argument("--frame-dir", default=None, help="Optional extracted_images directory override")
     parser.add_argument("--mano-dir", default=None, help="Optional MANO model directory override")
     parser.add_argument("--device", default="cpu", help="Torch device for MANO forward, e.g. cpu or cuda:0")
@@ -158,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interpolate-labels", action=argparse.BooleanOptionalAction, default=True, help="Use the current build-time label interpolation path")
     parser.add_argument("--wds-shard", default=None, help="Optional final WDS shard path for comparing exported lowdim/image samples")
     parser.add_argument("--wds-clip-id", default=None, help="Optional clip_id override for WDS lookup; default uses seq-folder name")
-    parser.add_argument("--report-out", default=None, help="Optional JSON report output path")
+    parser.add_argument("--report-out", "--report_out", default=None, help="Optional JSON report output path")
     return parser
 
 
@@ -931,9 +938,7 @@ def _compare_lowdim_arrays(label_a: str, a: np.ndarray, label_b: str, b: np.ndar
     return summary
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    seq_folder = Path(args.seq_folder).expanduser().resolve()
+def _analyze_seq_folder(args, seq_folder: Path, *, render_dir_override: str | None = None) -> dict:
     if not seq_folder.is_dir():
         raise FileNotFoundError(f"seq_folder not found: {seq_folder}")
 
@@ -950,7 +955,7 @@ def main() -> None:
         print(f"Warning: failed to resolve frame_dir: {error}")
         report["frame_dir_error"] = str(error)
 
-    render_dir = _resolve_render_dir(seq_folder, args.render_dir)
+    render_dir = _resolve_render_dir(seq_folder, render_dir_override if render_dir_override is not None else args.render_dir)
     render_dir.mkdir(parents=True, exist_ok=True)
     report["render_dir"] = str(render_dir)
 
@@ -1069,11 +1074,49 @@ def main() -> None:
             print(f"Warning: failed WDS comparison: {error}")
             report["wds_error"] = str(error)
 
+    return report
+
+
+def _multi_report_path(base_path: Path, clip_id: str) -> Path:
+    suffix = base_path.suffix or ".json"
+    stem = base_path.stem if base_path.suffix else base_path.name
+    return base_path.with_name(f"{stem}.{clip_id}{suffix}")
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    seq_folders = [Path(item).expanduser().resolve() for item in args.seq_folders]
+    multi_clip = len(seq_folders) > 1
+    reports = []
+
+    for index, seq_folder in enumerate(seq_folders):
+        if multi_clip:
+            if index > 0:
+                print()
+            print("=" * 120)
+
+        render_dir_override = None
+        if args.render_dir:
+            render_root = Path(args.render_dir).expanduser().resolve()
+            render_dir_override = str(render_root / seq_folder.name) if multi_clip else str(render_root)
+
+        report = _analyze_seq_folder(args, seq_folder, render_dir_override=render_dir_override)
+        reports.append(report)
+
     if args.report_out:
         report_out = Path(args.report_out).expanduser().resolve()
         report_out.parent.mkdir(parents=True, exist_ok=True)
-        report_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\nreport_out: {report_out}")
+        if multi_clip:
+            aggregate = {"clips": reports}
+            report_out.write_text(json.dumps(aggregate, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"\nreport_out: {report_out}")
+            for item in reports:
+                per_clip_path = _multi_report_path(report_out, Path(item["seq_folder"]).name)
+                per_clip_path.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"per_clip_report: {per_clip_path}")
+        else:
+            report_out.write_text(json.dumps(reports[0], ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"\nreport_out: {report_out}")
 
 
 if __name__ == "__main__":
