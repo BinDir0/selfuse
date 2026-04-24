@@ -150,6 +150,12 @@ def _encode_lowdim(lowdim) -> bytes:
     return buffer.getvalue()
 
 
+def _encode_mano(mano) -> bytes:
+    buffer = io.BytesIO()
+    np.save(buffer, np.asarray(mano, dtype=np.float32), allow_pickle=False)
+    return buffer.getvalue()
+
+
 def _build_updated_meta(meta: dict, clip_info: dict, presence: int) -> bytes:
     updated = dict(meta)
     updated.setdefault("dataset_name", clip_info.get("source_id") or "buildai")
@@ -471,6 +477,11 @@ def process_shard(shard_path: str) -> dict:
                 continue
 
             lowdim_bytes = _encode_lowdim(episode_data["lowdim_all"][frame_idx])
+            mano_bytes = (
+                _encode_mano(episode_data["mano_all"][frame_idx])
+                if episode_data.get("mano_all") is not None
+                else sample.get("mano_bytes")
+            )
             meta_bytes = _build_updated_meta(meta, clip_info, int(episode_data["presence_per_frame"][frame_idx]))
 
             if tar_writer is None:
@@ -483,7 +494,7 @@ def process_shard(shard_path: str) -> dict:
                 sample["image_bytes"],
                 lowdim_bytes,
                 meta_bytes,
-                mano_bytes=sample.get("mano_bytes"),
+                mano_bytes=mano_bytes,
                 depth_bytes=sample.get("depth_bytes"),
             )
             frames_rewritten += 1
