@@ -25,7 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.datasets.descriptors import ClipDescriptor
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples, validate_sample_record
-from lib.pipeline.quality_metrics import decode_lowdim, parse_frame_index
+from lib.pipeline.quality_metrics import decode_lowdim, max_translation_step, parse_frame_index
 from scripts.rewrite_webdataset_lowdim import (
     DEFAULT_WORKERS,
     _sample_clip_id,
@@ -173,6 +173,102 @@ def _load_world_prediction(seq_folder: Path) -> dict | None:
     if not world_path.is_file():
         return None
     return _load_world_space_prediction({"episode_id": seq_folder.name}, str(world_path))
+
+
+def _load_image_size(clip_info: dict) -> tuple[int, int] | None:
+    descriptor = clip_info.get("descriptor")
+    if descriptor is None:
+        return None
+    width = getattr(descriptor, "width", None)
+    height = getattr(descriptor, "height", None)
+    if width and height:
+        return int(width), int(height)
+    frame_dir = getattr(descriptor, "frame_dir", None)
+    frame_names = list(getattr(descriptor, "frame_names", []) or [])
+    if not frame_dir or not frame_names:
+        return None
+    frame_path = Path(frame_dir) / frame_names[0]
+    if not frame_path.is_file():
+        return None
+    try:
+        import cv2
+
+        image = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+        if image is None:
+            return None
+        height, width = image.shape[:2]
+        return int(width), int(height)
+    except Exception:
+        return None
+
+
+def _camera_space_wrist_metrics(lowdim_all: np.ndarray, image_size: tuple[int, int] | None) -> dict:
+    lowdim = np.asarray(lowdim_all, dtype=np.float32)
+    if lowdim.ndim != 2 or lowdim.shape[1] < 116:
+        return {"image_size": list(image_size) if image_size is not None else None, "hands": {}}
+
+    extrinsics = lowdim[:, 96:112].reshape(-1, 4, 4)
+    intrinsics = lowdim[:, 112:116]
+    width, height = image_size if image_size is not None else (None, None)
+    hands = {}
+    for hand_name, wrist_slice in (("left", slice(0, 3)), ("right", slice(3, 6))):
+        world_xyz = lowdim[:, wrist_slice]
+        homo = np.concatenate([world_xyz, np.ones((world_xyz.shape[0], 1), dtype=np.float32)], axis=1)
+        cam_xyz = np.einsum("tij,tj->ti", extrinsics, homo)[:, :3]
+        cam_valid = np.isfinite(cam_xyz).all(axis=1)
+        z = cam_xyz[:, 2]
+        proj_valid = cam_valid & (z > 1e-6)
+
+        uv = np.full((cam_xyz.shape[0], 2), np.nan, dtype=np.float32)
+        fx = intrinsics[:, 0]
+        fy = intrinsics[:, 1]
+        cx = intrinsics[:, 2]
+        cy = intrinsics[:, 3]
+        uv[proj_valid, 0] = cam_xyz[proj_valid, 0] / z[proj_valid] * fx[proj_valid] + cx[proj_valid]
+        uv[proj_valid, 1] = cam_xyz[proj_valid, 1] / z[proj_valid] * fy[proj_valid] + cy[proj_valid]
+
+        step_stats = max_translation_step(cam_xyz, valid_mask=proj_valid)
+        inframe = np.zeros((cam_xyz.shape[0],), dtype=bool)
+        severe_offscreen = np.zeros((cam_xyz.shape[0],), dtype=bool)
+        if width is not None and height is not None:
+            inframe = (
+                proj_valid
+                & (uv[:, 0] >= 0.0)
+                & (uv[:, 0] < float(width))
+                & (uv[:, 1] >= 0.0)
+                & (uv[:, 1] < float(height))
+            )
+            severe_offscreen = (
+                proj_valid
+                & (
+                    (uv[:, 0] < -0.4 * float(width))
+                    | (uv[:, 0] >= 1.4 * float(width))
+                    | (uv[:, 1] < -0.4 * float(height))
+                    | (uv[:, 1] >= 1.4 * float(height))
+                )
+            )
+
+        valid_count = int(proj_valid.sum())
+        hands[hand_name] = {
+            "frames": int(cam_xyz.shape[0]),
+            "valid_cam_frames": valid_count,
+            "z_range": [
+                float(np.nanmin(z[cam_valid])) if bool(cam_valid.any()) else None,
+                float(np.nanmax(z[cam_valid])) if bool(cam_valid.any()) else None,
+            ],
+            "negative_or_zero_z_frames": int((cam_valid & (z <= 1e-6)).sum()),
+            "max_camera_translation_step": float(step_stats["max_step"]),
+            "max_camera_translation_pair_index": step_stats["pair_index"],
+            "valid_camera_step_pairs": int(step_stats["valid_pairs"]),
+            "inframe_frames": int(inframe.sum()),
+            "inframe_ratio": float(inframe.sum()) / float(valid_count) if valid_count > 0 else None,
+            "severe_offscreen_frames": int(severe_offscreen.sum()),
+            "severe_offscreen_ratio": float(severe_offscreen.sum()) / float(valid_count) if valid_count > 0 else None,
+        }
+    return {
+        "image_size": [int(width), int(height)] if width is not None and height is not None else None,
+        "hands": hands,
+    }
 
 
 def _action_consistency_stats(lowdim_all: np.ndarray) -> dict:
@@ -553,6 +649,10 @@ def _analyze_clip_samples(samples: list[dict], *, source_fps: float, target_fps:
     world_summary = _load_world_summary(seq_folder)
     slam_summary = _load_slam_summary(seq_folder)
     current_metrics = _current_export_metrics(current_episode["lowdim_all"])
+    camera_wrist_metrics = _camera_space_wrist_metrics(
+        current_episode["lowdim_all"],
+        image_size=_load_image_size(clip_info),
+    )
 
     metrics = {
         "clip_id": clip_info["clip_id"],
@@ -565,6 +665,7 @@ def _analyze_clip_samples(samples: list[dict], *, source_fps: float, target_fps:
         **world_summary,
         **slam_summary,
         **current_metrics,
+        "camera_space_wrist_metrics": camera_wrist_metrics,
     }
     metrics["has_slam_frame_mismatch"] = bool(
         metrics["slam_traj_count"] > 0 and metrics["source_frame_count"] > 0 and metrics["slam_traj_count"] < metrics["source_frame_count"]
@@ -605,6 +706,45 @@ def _merge_clip_metrics(existing: dict | None, incoming: dict) -> dict:
         merged[key] = float(max(existing[key], incoming[key]))
     for key in ("has_slam_frame_mismatch", "has_infiller_hallucinated_hand"):
         merged[key] = bool(existing[key] or incoming[key])
+    merged_camera = {
+        "image_size": existing.get("camera_space_wrist_metrics", {}).get("image_size")
+        or incoming.get("camera_space_wrist_metrics", {}).get("image_size"),
+        "hands": {},
+    }
+    for hand_name in ("left", "right"):
+        old_hand = (existing.get("camera_space_wrist_metrics") or {}).get("hands", {}).get(hand_name, {})
+        new_hand = (incoming.get("camera_space_wrist_metrics") or {}).get("hands", {}).get(hand_name, {})
+        old_valid = int(old_hand.get("valid_cam_frames", 0))
+        new_valid = int(new_hand.get("valid_cam_frames", 0))
+        inframe_frames = int(old_hand.get("inframe_frames", 0)) + int(new_hand.get("inframe_frames", 0))
+        severe_offscreen_frames = int(old_hand.get("severe_offscreen_frames", 0)) + int(new_hand.get("severe_offscreen_frames", 0))
+        valid_total = old_valid + new_valid
+        z_candidates = [
+            value
+            for pair in (old_hand.get("z_range") or [None, None], new_hand.get("z_range") or [None, None])
+            for value in pair
+            if value is not None
+        ]
+        merged_camera["hands"][hand_name] = {
+            "frames": int(old_hand.get("frames", 0)) + int(new_hand.get("frames", 0)),
+            "valid_cam_frames": valid_total,
+            "z_range": [min(z_candidates) if z_candidates else None, max(z_candidates) if z_candidates else None],
+            "negative_or_zero_z_frames": int(old_hand.get("negative_or_zero_z_frames", 0))
+            + int(new_hand.get("negative_or_zero_z_frames", 0)),
+            "max_camera_translation_step": float(
+                max(old_hand.get("max_camera_translation_step", 0.0), new_hand.get("max_camera_translation_step", 0.0))
+            ),
+            "max_camera_translation_pair_index": old_hand.get("max_camera_translation_pair_index")
+            if float(old_hand.get("max_camera_translation_step", 0.0)) >= float(new_hand.get("max_camera_translation_step", 0.0))
+            else new_hand.get("max_camera_translation_pair_index"),
+            "valid_camera_step_pairs": int(old_hand.get("valid_camera_step_pairs", 0))
+            + int(new_hand.get("valid_camera_step_pairs", 0)),
+            "inframe_frames": inframe_frames,
+            "inframe_ratio": (float(inframe_frames) / float(valid_total)) if valid_total > 0 else None,
+            "severe_offscreen_frames": severe_offscreen_frames,
+            "severe_offscreen_ratio": (float(severe_offscreen_frames) / float(valid_total)) if valid_total > 0 else None,
+        }
+    merged["camera_space_wrist_metrics"] = merged_camera
     for compare_key in ("old_wds_vs_current_raw", "old_wds_vs_current_rot6d_permuted"):
         merged_compare = dict(existing[compare_key])
         incoming_compare = incoming[compare_key]
