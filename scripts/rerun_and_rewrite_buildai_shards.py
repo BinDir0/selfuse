@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", default="./weights/hawor/checkpoints/hawor.ckpt", help="Optional motion checkpoint path")
     parser.add_argument("--infiller_weight", default="./weights/hawor/checkpoints/infiller.pt", help="Optional infiller checkpoint path")
     parser.add_argument("--infiller_window_batch_size", type=int, default=64, help="Infiller window batch size")
+    parser.add_argument(
+        "--repair_dense_slam",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Repair hawor_slam_w_scale exports using dense dpvo_raw trajectories before rerunning world",
+    )
     parser.add_argument("--rewrite_workers", type=int, default=1, help="Worker count for shard rewrite")
     parser.add_argument("--rewrite_resume", action=argparse.BooleanOptionalAction, default=True, help="Resume rewrite if output shard already exists")
     parser.add_argument("--mano_device", default="cuda:0", help="MANO device for rewrite/check steps")
@@ -208,6 +214,18 @@ def main() -> None:
     }
     (report_dir / "scan_report.json").write_text(json.dumps(scan_report, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    if bool(args.repair_dense_slam):
+        repair_slam_cmd = [
+            args.python_bin,
+            "-u",
+            str(PROJECT_ROOT / "scripts" / "repair_dpvo_dense_slam_exports.py"),
+            "--seq_folder_list",
+            str(seq_folder_list),
+            "--report_out",
+            str(report_dir / "repair_dense_slam_report.json"),
+        ]
+        _run_command(repair_slam_cmd, dry_run=bool(args.dry_run))
+
     rerun_cmd = [
         args.python_bin,
         "-u",
@@ -318,6 +336,7 @@ def main() -> None:
         "selected_shards": [path.name for path in selected_shards],
         "clip_count": int(len(ordered_clips)),
         "seq_folder_count": int(len(seq_folders)),
+        "repair_dense_slam": bool(args.repair_dense_slam),
         "batch_output_dir": str(batch_output_dir),
         "report_dir": str(report_dir),
         "backup_dir": str(backup_dir),
