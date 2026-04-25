@@ -78,6 +78,12 @@ def build_parser():
     parser.add_argument("--source_shard_dir", required=True, help="Source directory containing shard tar files")
     parser.add_argument("--output_dir", default=None, help="Optional output directory for filtered shards")
     parser.add_argument("--report_out", default=None, help="Optional JSON report path")
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When rewriting with --no-outlier_checks, skip shards already processed in output_dir",
+    )
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Parallel shard workers")
     parser.add_argument(
         "--chunksize",
@@ -676,6 +682,37 @@ def rewrite_shard(shard_path: str, output_dir: str, keep_by_clip: dict[str, bool
     return result
 
 
+def _resume_state_dir(output_dir: str) -> str:
+    return os.path.join(output_dir, ".filter_state")
+
+
+def _resume_marker_path(output_dir: str, shard_name: str) -> str:
+    return os.path.join(_resume_state_dir(output_dir), f"{shard_name}.done.json")
+
+
+def _write_resume_marker(output_dir: str, shard_result: dict) -> None:
+    state_dir = _resume_state_dir(output_dir)
+    os.makedirs(state_dir, exist_ok=True)
+    marker_path = _resume_marker_path(output_dir, shard_result["shard_name"])
+    payload = dict(shard_result)
+    with open(marker_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def _select_pending_shards_for_resume(shard_paths: list[str], output_dir: Path) -> tuple[list[str], list[str]]:
+    pending = []
+    reused = []
+    for shard_path in shard_paths:
+        shard_name = os.path.basename(shard_path)
+        output_path = output_dir / shard_name
+        marker_path = Path(_resume_marker_path(str(output_dir), shard_name))
+        if output_path.is_file() or marker_path.is_file():
+            reused.append(shard_path)
+        else:
+            pending.append(shard_path)
+    return pending, reused
+
+
 def _worker_init(args_dict: dict, output_dir: str | None, keep_by_clip: dict[str, bool] | None = None):
     global _WORKER_ARGS, _WORKER_OUTPUT_DIR, _WORKER_KEEP_BY_CLIP
     _WORKER_ARGS = dict(args_dict)
@@ -802,6 +839,9 @@ def build_report(
             "end_shard": int(args_dict["end_shard"]),
             "selected_shards": len(analysis_results),
             "total_shards_available": int(args_dict["total_shards_available"]),
+            "selected_shards_before_resume": int(args_dict.get("selected_shards_before_resume", len(analysis_results))),
+            "reused_shards": int(args_dict.get("reused_shards", 0)),
+            "resume_enabled": bool(args_dict.get("resume_enabled", False)),
         },
         "mode": (
             "hard_rules_only"
@@ -982,6 +1022,9 @@ def main():
     if not shard_paths:
         raise RuntimeError(f"No shards selected in range [{start_shard}, {end_shard}) from {source_dir}")
 
+    selected_shards_before_resume = len(shard_paths)
+    reused_shards = []
+
     if not args.outlier_checks:
         args.min_presence_ratio = None
         args.max_hand_translation_step = None
@@ -1011,6 +1054,18 @@ def main():
         or args.max_camera_space_hand_abs is not None
         or args.camera_space_axis_abs_cap is not None
     )
+    effective_resume = bool(args.resume) and output_dir is not None and not bool(args.outlier_checks)
+    if bool(args.resume) and output_dir is not None and bool(args.outlier_checks):
+        print(
+            "[resume] disabled: outlier_checks requires full-dataset analysis for threshold resolution",
+            flush=True,
+        )
+    if effective_resume:
+        shard_paths, reused_shards = _select_pending_shards_for_resume(shard_paths, output_dir)
+        print(
+            f"[resume] selected={selected_shards_before_resume} reused={len(reused_shards)} pending={len(shard_paths)}",
+            flush=True,
+        )
     chunksize = int(args.chunksize) if args.chunksize > 0 else _auto_chunksize(len(shard_paths), args.workers)
 
     args_dict = {
@@ -1038,11 +1093,14 @@ def main():
         "end_shard": end_shard,
         "total_shards_available": total_shards,
         "output_dir": str(output_dir) if output_dir else None,
+        "selected_shards_before_resume": selected_shards_before_resume,
+        "reused_shards": len(reused_shards),
+        "resume_enabled": bool(effective_resume),
     }
     progress_decision_criteria = None if args.outlier_checks else dict(args_dict)
 
+    analysis_results = []
     if args.workers <= 1:
-        analysis_results = []
         progress_state = _new_analysis_progress_state()
         with tqdm(shard_paths, desc="Analyze shards") as progress:
             for shard_path in progress:
@@ -1061,7 +1119,6 @@ def main():
             initializer=_worker_init,
             initargs=(args_dict, str(output_dir) if output_dir else None, None),
         ) as pool:
-            analysis_results = []
             progress_state = _new_analysis_progress_state()
             with tqdm(total=len(shard_paths), desc="Analyze shards") as progress:
                 for shard_result in pool.imap_unordered(_worker_analyze_shard, shard_paths, chunksize=chunksize):
@@ -1107,6 +1164,8 @@ def main():
                 for shard_path in progress:
                     shard_result = rewrite_shard(shard_path, str(output_dir), keep_by_clip)
                     rewrite_results.append(shard_result)
+                    if shard_result.get("shard_error") is None:
+                        _write_resume_marker(str(output_dir), shard_result)
                     _update_rewrite_progress_state(progress_state, shard_result)
                     _set_rewrite_progress_postfix(progress, progress_state)
         else:
@@ -1122,6 +1181,8 @@ def main():
                     for shard_result in pool.imap_unordered(_worker_rewrite_shard, shard_paths, chunksize=chunksize):
                         rewrite_results.append(shard_result)
                         progress.update(1)
+                        if shard_result.get("shard_error") is None:
+                            _write_resume_marker(str(output_dir), shard_result)
                         _update_rewrite_progress_state(progress_state, shard_result)
                         _set_rewrite_progress_postfix(progress, progress_state)
         rewrite_results.sort(key=lambda item: item["shard_name"])
