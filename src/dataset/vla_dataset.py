@@ -21,7 +21,7 @@ from .data_transforms import (
     process_image,
     resize_frames,
 )
-from .sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
+from .sanity_checks import DataChecker, current_worker_id
 from .unified_vla_collator import ConcatDataCollator
 from .wds_dataset import (
     build_blended_dataset, build_wds_pipeline, WindowConfig,
@@ -129,6 +129,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # data_transforms.COLOR_AUG (albumentations-based).
         self.aug_transform = (self.mode == "train")
 
+        self.checker = DataChecker()
+
     def set_collator(self, collator):
         """Set the batch collator used to build model inputs."""
         self.collator = collator
@@ -204,37 +206,68 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         The returned mapping contains visual history, instruction text, intrinsic parameters, padded state/action
         tensors, action-valid masks, and bookkeeping fields such as `n_states`, `n_actions`, and `is_vla_data`.
         """
-        sample_context = build_sample_context(sample)
+        # Cheap structural checks first so bad samples skip JPEG decode + transforms.
+        intrinsic_raw = sample["intrinsic"].astype(np.float32)
+        extrinsic_raw = sample["extrinsic"].astype(np.float32).reshape(4, 4)
+        self.checker.check(
+            intrinsic=intrinsic_raw,
+            extrinsic=extrinsic_raw,
+            instruction=(sample["instruction"], sample["instruction_num"]),
+        )
+        if sample.get("breast_image") is not None:
+            self.checker.check(
+                intrinsic=sample["breast_intrinsic"].astype(np.float32),
+                extrinsic=sample["breast_extrinsic"].astype(np.float32).reshape(4, 4),
+            )
+        future_head_ext_raw = sample.get("future_head_extrinsic")
+        if self.future_frame_horizon > 0 and future_head_ext_raw is not None:
+            self.checker.check(
+                extrinsic=future_head_ext_raw.astype(np.float32).reshape(-1, 4, 4),
+            )
+
+        # Pre-check raw lowdim before process_state_action: the downstream
+        # transform_hand_points_to_wrist_frame -> torch.linalg.pinv path
+        # crashes (LinAlgError) when wrist_state contains non-finite values
+        # rather than producing a finite-but-bad output the post-check could
+        # catch. Hoisting the finite check upstream lets DataSkipError fire
+        # cleanly on shards with corrupt poses (e.g. buildai-100k-part1
+        # rot6d failures).
+        wrist_state = sample["wrist_state"].astype(np.float32)
+        hand_state = sample["hand_state"].astype(np.float32)
+        wrist_action = sample["wrist_action"].astype(np.float32)
+        hand_action = sample["hand_action"].astype(np.float32)
+        self.checker.check(finite={
+            "wrist_state": wrist_state,
+            "hand_state": hand_state,
+            "wrist_action": wrist_action,
+            "hand_action": hand_action,
+        })
+
         state, action = process_state_action(
-            wrist_state=sample["wrist_state"].astype(np.float32),
-            hand_state=sample["hand_state"].astype(np.float32),
-            wrist_action=sample["wrist_action"].astype(np.float32),
-            hand_action=sample["hand_action"].astype(np.float32),
-            extrinsic=sample["extrinsic"].astype(np.float32).reshape(4, 4),
+            wrist_state=wrist_state,
+            hand_state=hand_state,
+            wrist_action=wrist_action,
+            hand_action=hand_action,
+            extrinsic=extrinsic_raw,
             normalizer=self.normalizer,
             hand_ndim=self.hand_ndim,
             motion_type=self.motion_type,
             use_relative_action=self.use_relative_action,
         )
-        ensure_mapping_finite(
-            {"state": state, "action": action},
-            stage="vla_after_state_action",
-            context=sample_context,
-        )
+        self.checker.check(finite={"state": state, "action": action})
 
-        intrinsic = sample["intrinsic"].astype(np.float32)
         image, depth_images, intrinsic = process_image(
             sample["image"],
             sample.get("depth", None),
-            intrinsic,
+            intrinsic_raw,
             self.aug_transform,
             self.depth_clip_range,
             target_size=self.target_image_size,
         )
-        ensure_mapping_finite(
-            {"image": image, "depth_images": depth_images},
-            stage="vla_after_image_process",
-            context=sample_context,
+        self.checker.check(
+            image=image,
+            depth=(depth_images, self.depth_clip_range),
+            finite={"image": image, "depth_images": depth_images},
         )
 
         breast_image = None
@@ -249,11 +282,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
                 self.depth_clip_range,
                 target_size=self.target_image_size,
             )
-            ensure_mapping_finite(
-                {"breast_image": breast_image},
-                stage="vla_after_breast_image_process",
-                context=sample_context,
-            )
+            self.checker.check(image=breast_image, finite={"breast_image": breast_image})
         instruction = sample["instruction"]
         instruction_num = sample["instruction_num"]
 
@@ -344,11 +373,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         if self.return_dataset_info:
             data["dataset_name"] = sample["dataset_name"]
             data["episode_index"] = sample["episode_index"]
-        ensure_mapping_finite(
-            data,
-            stage="vla_dataset_output",
-            context=sample_context,
-        )
+        self.checker.check(finite=data, post_normalize=data)
 
         if self.debug_capture_raw_sample:
             data["debug_raw_sample"] = self.build_debug_raw_sample(sample)
@@ -371,38 +396,32 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             })
 
         def preprocess_fn(sample):
-            worker_info = torch.utils.data.get_worker_info()
-            worker_id = -1 if worker_info is None else int(worker_info.id)
+            # DataSkipError -> attach_sample_ctx logs and drops the sample;
+            # any other failure -> attach_sample_ctx re-raises with locator.
+            self.checker.note_sample_seen()
             preprocess_start = time.perf_counter()
-            try:
-                sample_to_data_start = time.perf_counter()
-                data = self.sample_to_data(sample)
-                sample_to_data_s = time.perf_counter() - sample_to_data_start
-                torch_data = dict_apply(
-                    data,
-                    lambda x: torch.from_numpy(x)
-                    if isinstance(x, np.ndarray) else x,
-                )
-                preprocess_total_s = time.perf_counter() - preprocess_start
-                if self.debug_profile_timing:
-                    torch_data["debug_sample_profile"] = {
-                        "worker_id": worker_id,
-                        "sample_to_data_s": sample_to_data_s,
-                        "preprocess_total_s": preprocess_total_s,
-                    }
-                return torch_data
-            except NonFiniteDataError:
-                raise
-            except Exception as e:
-                warnings.warn(f"Error in preprocess: {e}")
-                return None
+            sample_to_data_start = time.perf_counter()
+            data = self.sample_to_data(sample)
+            sample_to_data_s = time.perf_counter() - sample_to_data_start
+            torch_data = dict_apply(
+                data,
+                lambda x: torch.from_numpy(x)
+                if isinstance(x, np.ndarray) else x,
+            )
+            preprocess_total_s = time.perf_counter() - preprocess_start
+            if self.debug_profile_timing:
+                torch_data["debug_sample_profile"] = {
+                    "worker_id": current_worker_id(),
+                    "sample_to_data_s": sample_to_data_s,
+                    "preprocess_total_s": preprocess_total_s,
+                }
+            return torch_data
 
-        def filter_none(src):
+        def strip_key(src):
+            # wds .map() may auto-inject __key__; collation expects it gone.
             for sample in src:
-                if sample is not None:
-                    # wds .map() auto-injects __key__; strip it before collation
-                    sample.pop("__key__", None)
-                    yield sample
+                sample.pop("__key__", None)
+                yield sample
 
         pipeline = build_blended_dataset(
             datasets_config=datasets_config,
@@ -415,8 +434,9 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             shuffle_initial=self.shuffle_initial,
             mode=self.mode,
             keep_ratio=self.keep_ratio,
+            checker=self.checker,
         )
-        return filter_none(pipeline)
+        return strip_key(pipeline)
 
     def __iter__(self):
         pipeline = self.build_pipeline()
@@ -684,19 +704,38 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             action_pad_mode=shape_meta["action"].get("pad_mode", "truncate"),
         )
 
+        self.checker = DataChecker()
+
     def sample_to_data(self, sample):
         """Extract lowdim fields and compute state/action."""
+        extrinsic = sample["extrinsic"].astype(np.float32).reshape(4, 4)
+        self.checker.check(extrinsic=extrinsic)
+
+        # Same hoisted finite check as VLAWdsDataset.sample_to_data: catch
+        # NaN/Inf in raw lowdim before process_state_action's pinv blows up.
+        wrist_state = sample["wrist_state"].astype(np.float32)
+        hand_state = sample["hand_state"].astype(np.float32)
+        wrist_action = sample["wrist_action"].astype(np.float32)
+        hand_action = sample["hand_action"].astype(np.float32)
+        self.checker.check(finite={
+            "wrist_state": wrist_state,
+            "hand_state": hand_state,
+            "wrist_action": wrist_action,
+            "hand_action": hand_action,
+        })
+
         state, action = process_state_action(
-            wrist_state=sample["wrist_state"].astype(np.float32),
-            hand_state=sample["hand_state"].astype(np.float32),
-            wrist_action=sample["wrist_action"].astype(np.float32),
-            hand_action=sample["hand_action"].astype(np.float32),
-            extrinsic=sample["extrinsic"].astype(np.float32).reshape(4, 4),
+            wrist_state=wrist_state,
+            hand_state=hand_state,
+            wrist_action=wrist_action,
+            hand_action=hand_action,
+            extrinsic=extrinsic,
             normalizer=None,
             hand_ndim=self.hand_ndim,
             motion_type=self.motion_type,
             use_relative_action=self.use_relative_action,
         )
+        self.checker.check(finite={"state": state, "action": action})
 
         if not self.use_relative_action:
             return {
@@ -818,21 +857,17 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         shard_urls = self.build_shard_urls()
 
         def preprocess_fn(sample):
-            try:
-                data = self.sample_to_data(sample)
-                return {
-                    key: torch.from_numpy(value) if isinstance(value, np.ndarray) else value
-                    for key, value in data.items()
-                }
-            except Exception as exc:
-                warnings.warn(f"Error in lowlevel preprocess: {exc}")
-                return None
+            self.checker.note_sample_seen()
+            data = self.sample_to_data(sample)
+            return {
+                key: torch.from_numpy(value) if isinstance(value, np.ndarray) else value
+                for key, value in data.items()
+            }
 
-        def filter_none(src):
+        def strip_key(src):
             for sample in src:
-                if sample is not None:
-                    sample.pop("__key__", None)
-                    yield sample
+                sample.pop("__key__", None)
+                yield sample
 
         pipeline = build_wds_pipeline(
             shard_urls=shard_urls,
@@ -846,8 +881,9 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             shuffle_buffer=0,
             mode=self.mode,
             use_sliding_window=True,
+            checker=self.checker,
         )
-        return filter_none(pipeline)
+        return strip_key(pipeline)
 
     def __iter__(self):
         pipeline = self.build_pipeline()

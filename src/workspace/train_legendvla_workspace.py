@@ -55,7 +55,7 @@ from src.utils.training_utils import (
     build_training_step_log,
     capture_output_to_training_log,
     clip_and_check_grads,
-    dataloader_worker_enable_gc,
+    data_worker_init,
     reset_run_seed,
 )
 from src.workspace.eval_utils import (
@@ -306,7 +306,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             train_dataloader = wds.WebLoader(
                 dataset=dataset,
                 batch_size=None,
-                worker_init_fn=dataloader_worker_enable_gc,
+                worker_init_fn=data_worker_init,
                 **train_loader_kwargs,
             )
             if cross_worker_shuffle > 0:
@@ -318,7 +318,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             train_dataloader = DataLoader(
                 dataset=dataset,
                 collate_fn=dataset.get_collator(),
-                worker_init_fn=dataloader_worker_enable_gc,
+                worker_init_fn=data_worker_init,
                 **cfg.dataloader.loader,
             )
         # Eval is purely local (eval_with_averaged_model pre-unshards FSDP params),
@@ -327,7 +327,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         val_dataloader = DataLoader(
             dataset=val_dataset,
             collate_fn=val_dataset.get_collator(),
-            worker_init_fn=dataloader_worker_enable_gc,
+            worker_init_fn=data_worker_init,
             **cfg.val_dataloader.loader,
         )
 

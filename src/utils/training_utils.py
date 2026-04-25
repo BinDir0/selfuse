@@ -214,10 +214,18 @@ class GarbageCollection:
             print(f"[GC] {reason} took {elapsed:.2f}s")
 
 
-def dataloader_worker_enable_gc(worker_id: int) -> None:
-    """Re-enable gc in a DataLoader worker; main process disables it."""
+def data_worker_init(worker_id: int) -> None:
+    """DataLoader worker_init_fn.
+
+    Re-enables Python GC (main process disables it via GarbageCollection
+    helper) and configures the data-quality skip logger handler. The logger
+    setup is a no-op on fork once the parent has run it; needed under spawn
+    where workers re-import the module fresh.
+    """
     del worker_id
     gc.enable()
+    from src.dataset.sanity_checks import configure_logger
+    configure_logger()
 
 
 class FullMemoryTracker:

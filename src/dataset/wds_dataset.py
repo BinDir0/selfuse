@@ -18,6 +18,8 @@ import numpy as np
 import webdataset as wds
 from webdataset.tariterators import base_plus_ext
 
+from .sanity_checks import attach_sample_ctx, build_sample_context
+
 
 # lowdim.npy layout: base 96D (wrist/hand state+action) + 20D per camera
 # (extrinsic 16 + intrinsic 4) appended in meta["cameras"] order.
@@ -317,6 +319,10 @@ def build_sample_from_window(buf, past, config):
         "presence": int(meta.get("presence", 3)),
         "dataset_name": meta.get("dataset_name", ""),
         "episode_index": meta.get("episode_index", 0),
+        # Propagate webdataset locators so downstream skip logs can pinpoint
+        # the exact tar shard + current-frame key for offline triage.
+        "shard_url": current.get("__url__", ""),
+        "__key__": current.get("__key__", ""),
     })
 
     result["image_frame_refs"] = image_frame_refs
@@ -391,19 +397,41 @@ def sliding_window_compose(src, config):
     buffering).  Assumes shard order is contiguous within an episode;
     yields as soon as ``future_size`` future frames are buffered and
     clamps the tail at episode boundary.
+
+    Failures inside ``build_sample_from_window`` are re-raised with the
+    locator of ``buf[0]`` (the frame being windowed), and meta-access
+    failures with the locator of the just-fetched ``sample``, so the
+    error message points at the actual bad data rather than a buffered
+    neighbour.
     """
     buf = collections.deque()
     past = collections.deque(maxlen=config.past_size)
     cur_ep = None
 
+    def build_window():
+        # ``buf[0]`` is the current frame the window is centered on,
+        # captured before yielding so the closure stays cheap.
+        current = buf[0]
+        try:
+            return build_sample_from_window(buf, past, config)
+        except Exception as e:
+            raise RuntimeError(
+                f"data error on {build_sample_context(current)}"
+            ) from e
+
     for sample in src:
-        meta = sample["meta.json"]
-        ep_key = (meta.get("dataset_name", ""), meta["episode_index"])
+        try:
+            meta = sample["meta.json"]
+            ep_key = (meta.get("dataset_name", ""), meta["episode_index"])
+        except Exception as e:
+            raise RuntimeError(
+                f"data error on {build_sample_context(sample)}"
+            ) from e
 
         if ep_key != cur_ep:
             # Episode boundary: flush with clamped actions.
             while buf:
-                yield build_sample_from_window(buf, past, config)
+                yield build_window()
                 past.append(buf.popleft())
             past.clear()
             cur_ep = ep_key
@@ -411,11 +439,11 @@ def sliding_window_compose(src, config):
         buf.append(sample)
 
         if len(buf) > config.future_size:
-            yield build_sample_from_window(buf, past, config)
+            yield build_window()
             past.append(buf.popleft())
 
     while buf:
-        yield build_sample_from_window(buf, past, config)
+        yield build_window()
         past.append(buf.popleft())
 
 
@@ -463,7 +491,8 @@ def build_wds_pipeline(shard_urls, config=None,
                        mode='train',
                        use_sliding_window=True,
                        include_post_stages=True,
-                       keep_ratio: float = 1.0):
+                       keep_ratio: float = 1.0,
+                       *, checker):
     """Build a WebDataset pipeline for a single dataset.
 
     Train: resampled infinite stream with shard-level shuffle.
@@ -492,6 +521,9 @@ def build_wds_pipeline(shard_urls, config=None,
         keep_ratio: Bernoulli pre-shuffle keep probability (train only).
             Lower = more shard diversity, higher IO.
             Ref: DreamZero shard_sampling_rate.
+        checker: required ``DataChecker``. Every per-sample stage is
+            wrapped via ``attach_sample_ctx`` so DataSkipError is logged
+            and other failures carry sample locator info.
     """
     assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
 
@@ -511,48 +543,46 @@ def build_wds_pipeline(shard_urls, config=None,
     # resampled=True's ResampledShards already gives per-worker/node
     # independent shard sequences, so explicit splitters are redundant in
     # train mode. Ref: webdataset/shardlists.py::ResampledShards.__iter__
-    pipeline = wds.WebDataset(
-        shard_urls,
-        shardshuffle=False,
-        nodesplitter=no_split if is_train else wds.split_by_node,
-        workersplitter=no_split if is_train else wds.shardlists.split_by_worker,
-        resampled=is_train,
-        empty_check=False,
-        select_files=select_files,
-    )
-    # Eager meta/lowdim decode; media stays as bytes through shuffle.
-    pipeline = pipeline.map(decode_sample_fields)
+    stages = [
+        wds.WebDataset(
+            shard_urls,
+            shardshuffle=False,
+            nodesplitter=no_split if is_train else wds.split_by_node,
+            workersplitter=no_split if is_train else wds.shardlists.split_by_worker,
+            resampled=is_train,
+            empty_check=False,
+            select_files=select_files,
+        ),
+        # Eager meta/lowdim decode; media stays as bytes through shuffle.
+        attach_sample_ctx(decode_sample_fields, checker=checker),
+    ]
 
     if use_sliding_window:
-        pipeline = pipeline.compose(
-            lambda src: sliding_window_compose(src, config)
-        )
+        stages.append(lambda src: sliding_window_compose(src, config))
 
     # Drop pre-materialize so dropped windows skip JPEG decode.
     if is_train and keep_ratio < 1.0:
         keep_threshold = keep_ratio
-        pipeline = pipeline.select(lambda _s: random.random() < keep_threshold)
+        stages.append(wds.select(lambda _s: random.random() < keep_threshold))
 
-    if not include_post_stages:
-        return pipeline
+    if include_post_stages:
+        # Shuffle holds lightweight window descriptors (frame refs), not
+        # decoded images.
+        if is_train and shuffle_buffer and shuffle_buffer > 0:
+            stages.append(wds.shuffle(
+                shuffle_buffer, 
+                initial=resolve_shuffle_initial(shuffle_buffer, shuffle_initial), 
+            ))
 
-    # Shuffle holds lightweight window descriptors (frame refs), not
-    # decoded images.
-    if is_train and shuffle_buffer and shuffle_buffer > 0:
-        pipeline = pipeline.shuffle(
-            shuffle_buffer,
-            initial=resolve_shuffle_initial(shuffle_buffer, shuffle_initial),
-        )
+        if use_sliding_window:
+            stages.append(attach_sample_ctx(materialize_sample_media, checker=checker))
+        else:
+            stages.append(attach_sample_ctx(decode_media_fields, checker=checker))
 
-    if use_sliding_window:
-        pipeline = pipeline.map(materialize_sample_media)
-    else:
-        pipeline = pipeline.map(decode_media_fields)
+        if preprocess_fn is not None:
+            stages.append(attach_sample_ctx(preprocess_fn, checker=checker))
 
-    if preprocess_fn is not None:
-        pipeline = pipeline.map(preprocess_fn)
-
-    return pipeline
+    return wds.DataPipeline(*stages)
 
 
 def build_blended_dataset(datasets_config, config=None,
@@ -560,7 +590,8 @@ def build_blended_dataset(datasets_config, config=None,
                           preprocess_fn=None, shuffle_buffer=16384, shuffle_initial=None,
                           mode='train',
                           use_sliding_window=True,
-                          keep_ratio: float = 1.0):
+                          keep_ratio: float = 1.0,
+                          *, checker):
     """Build a blended dataset from multiple WebDataset sources.
 
     Train: per-subset pipelines mixed via RandomMix, then one shared
@@ -579,6 +610,9 @@ def build_blended_dataset(datasets_config, config=None,
         use_sliding_window: VLA=True, VLM=False.
         keep_ratio: forwarded per-subset; RandomMix weights are invariant
             because every subset is thinned by the same factor.
+        checker: required ``DataChecker``; forwarded to per-subset
+            pipelines and used to wrap post-mix stages so failures carry
+            sample locator info.
     """
     if config is None:
         config = WindowConfig()
@@ -603,6 +637,7 @@ def build_blended_dataset(datasets_config, config=None,
             use_sliding_window=use_sliding_window,
             include_post_stages=not is_train,
             keep_ratio=keep_ratio,
+            checker=checker,
         )
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))
@@ -627,11 +662,11 @@ def build_blended_dataset(datasets_config, config=None,
         ))
 
     if use_sliding_window:
-        stages.append(wds.map(materialize_sample_media))
+        stages.append(attach_sample_ctx(materialize_sample_media, checker=checker))
     else:
-        stages.append(wds.map(decode_media_fields))
+        stages.append(attach_sample_ctx(decode_media_fields, checker=checker))
 
     if preprocess_fn is not None:
-        stages.append(wds.map(preprocess_fn))
+        stages.append(attach_sample_ctx(preprocess_fn, checker=checker))
 
     return wds.DataPipeline(*stages)

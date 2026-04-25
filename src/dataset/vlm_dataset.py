@@ -9,7 +9,7 @@ import torch
 import numpy as np
 from src.utils.pytorch_util import dict_apply
 from src.dataset.data_transforms import process_image
-from src.dataset.sanity_checks import NonFiniteDataError, build_sample_context, ensure_mapping_finite
+from src.dataset.sanity_checks import DataChecker
 from src.dataset.wds_dataset import build_blended_dataset
 
 
@@ -54,6 +54,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         self.return_dataset_info = return_dataset_info
         self.val_wds_datasets = val_wds_datasets
         self.collator = None
+        self.checker = DataChecker()
         self.mem_enabled = mem_enabled
         self.n_obs_image_steps = n_obs_image_steps
         self.target_image_size = (
@@ -112,11 +113,6 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
     def sample_to_data(self, sample):
         """Convert one WDS sample to model-ready fields."""
         meta = sample['meta.json']
-        sample_context = build_sample_context({
-            'dataset_name': meta.get('source', meta.get('dataset_name', 'unknown')),
-            'episode_index': meta.get('sample_idx', -1),
-            '__key__': sample.get('__key__'),
-        })
 
         image_keys = sorted([
             k for k in sample.keys()
@@ -146,6 +142,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             text = text[0]
         question = str(text['user'])
         answer = str(text['assistant'])
+        self.checker.check(instruction=(question, 1))
 
         raw_images = []
         for img_pil in images:
@@ -163,10 +160,9 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             aug_transform=(self.mode == 'train'),
             target_size=self.target_image_size if self.mem_enabled else None,
         )
-        ensure_mapping_finite(
-            {'images_processed': images_processed},
-            stage='vlm_after_image_process',
-            context=sample_context,
+        self.checker.check(
+            image=images_processed,
+            finite={'images_processed': images_processed},
         )
 
         if self.mem_enabled:
@@ -204,11 +200,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             data['episode_index'] = np.array(
                 meta.get('sample_idx', -1), dtype=np.int32
             )
-        ensure_mapping_finite(
-            data,
-            stage='vlm_dataset_output',
-            context=sample_context,
-        )
+        self.checker.check(finite=data)
         return data
 
     def build_pipeline(self):
@@ -221,23 +213,18 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             })
 
         def preprocess_fn(sample):
-            try:
-                data = self.sample_to_data(sample)
-                torch_data = dict_apply(
-                    data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
-                )
-                return torch_data
-            except NonFiniteDataError:
-                raise
-            except Exception as e:
-                warnings.warn(f"Error in preprocess: {e}")
-                return None
+            # DataSkipError -> attach_sample_ctx logs and drops the sample;
+            # any other failure -> attach_sample_ctx re-raises with locator.
+            self.checker.note_sample_seen()
+            data = self.sample_to_data(sample)
+            return dict_apply(
+                data, lambda x: torch.from_numpy(x) if isinstance(x, np.ndarray) else x
+            )
 
         def strip_key(src):
             for sample in src:
-                if sample is not None:
-                    sample.pop("__key__", None)
-                    yield sample
+                sample.pop("__key__", None)
+                yield sample
 
         pipeline = build_blended_dataset(
             datasets_config=datasets_config,
@@ -247,6 +234,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             mode=self.mode,
             use_sliding_window=False,
             keep_ratio=self.keep_ratio,
+            checker=self.checker,
         )
         return strip_key(pipeline)
 

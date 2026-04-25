@@ -200,17 +200,11 @@ def process_state_action(
     if use_relative_action:
         processed_action = get_relative_action(processed_state[-1], processed_action)
 
-    if normalizer is not None:
-        if not use_relative_action: # Use unified normalizer for both state and action
-            state = normalizer['motions'](processed_state)
-            action = normalizer['motions'](processed_action)
-        else: # Use separate normalizers for state and action
-            state = normalizer['states'](processed_state)
-            action = normalizer['actions'](processed_action)
-    else: # No normalizer
-        state = processed_state
-        action = processed_action
-    return state, action
+    if normalizer is None:
+        return processed_state, processed_action
+    if use_relative_action:
+        return normalizer['states'](processed_state), normalizer['actions'](processed_action)
+    return normalizer['motions'](processed_state), normalizer['motions'](processed_action)
 
 def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0)):
     '''Random crop then resize back. Same crop for all frames (temporal consistency).'''
