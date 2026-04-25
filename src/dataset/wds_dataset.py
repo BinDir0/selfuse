@@ -424,6 +424,15 @@ def no_split(src):
     yield from src
 
 
+def resolve_shuffle_initial(shuffle_buffer: int | None, shuffle_initial: int | None) -> int:
+    """Cap WebDataset shuffle warmup so low keep_ratio does not stall startup."""
+    if not shuffle_buffer or shuffle_buffer <= 0:
+        return 0
+    if shuffle_initial is None:
+        return int(shuffle_buffer)
+    return max(1, min(int(shuffle_initial), int(shuffle_buffer)))
+
+
 def build_select_files(load_image: bool, load_depth: bool, load_breast: bool):
     """Allow-list predicate for ``wds.WebDataset(select_files=...)``.
     ``meta.json`` + ``lowdim.npy`` always pass; other VLA members gated
@@ -450,7 +459,8 @@ def build_select_files(load_image: bool, load_depth: bool, load_breast: bool):
 
 def build_wds_pipeline(shard_urls, config=None,
                        load_image=True, load_depth=False, load_breast=False,
-                       preprocess_fn=None, shuffle_buffer=16384, mode='train',
+                       preprocess_fn=None, shuffle_buffer=16384, shuffle_initial=None,
+                       mode='train',
                        use_sliding_window=True,
                        include_post_stages=True,
                        keep_ratio: float = 1.0):
@@ -472,6 +482,9 @@ def build_wds_pipeline(shard_urls, config=None,
             are meta-driven (independent of load_breast).
         preprocess_fn: optional final map(sample) -> sample.
         shuffle_buffer: sample-level buffer (train only).
+        shuffle_initial: number of kept samples to preload before yielding
+            from shuffle. Keep this much smaller than shuffle_buffer when
+            keep_ratio < 1.0 to avoid distributed startup stalls.
         mode: 'train' or 'val'.
         use_sliding_window: VLA=True, VLM=False. VLM path skips
             ``select_files`` since image_N.jpg has variable N.
@@ -526,7 +539,10 @@ def build_wds_pipeline(shard_urls, config=None,
     # Shuffle holds lightweight window descriptors (frame refs), not
     # decoded images.
     if is_train and shuffle_buffer and shuffle_buffer > 0:
-        pipeline = pipeline.shuffle(shuffle_buffer, initial=shuffle_buffer)
+        pipeline = pipeline.shuffle(
+            shuffle_buffer,
+            initial=resolve_shuffle_initial(shuffle_buffer, shuffle_initial),
+        )
 
     if use_sliding_window:
         pipeline = pipeline.map(materialize_sample_media)
@@ -541,7 +557,8 @@ def build_wds_pipeline(shard_urls, config=None,
 
 def build_blended_dataset(datasets_config, config=None,
                           load_image=True, load_depth=False, load_breast=False,
-                          preprocess_fn=None, shuffle_buffer=16384, mode='train',
+                          preprocess_fn=None, shuffle_buffer=16384, shuffle_initial=None,
+                          mode='train',
                           use_sliding_window=True,
                           keep_ratio: float = 1.0):
     """Build a blended dataset from multiple WebDataset sources.
@@ -556,6 +573,8 @@ def build_blended_dataset(datasets_config, config=None,
         load_image / load_depth / load_breast: see ``build_wds_pipeline``.
         preprocess_fn: optional final map(sample) -> sample.
         shuffle_buffer: sample-level buffer (train only).
+        shuffle_initial: number of kept samples to preload before yielding
+            from the train shuffle stage.
         mode: 'train' or 'val'.
         use_sliding_window: VLA=True, VLM=False.
         keep_ratio: forwarded per-subset; RandomMix weights are invariant
@@ -579,6 +598,7 @@ def build_blended_dataset(datasets_config, config=None,
             load_breast=load_breast,
             preprocess_fn=preprocess_fn if not is_train else None,
             shuffle_buffer=shuffle_buffer,
+            shuffle_initial=shuffle_initial,
             mode=mode,
             use_sliding_window=use_sliding_window,
             include_post_stages=not is_train,
@@ -601,7 +621,10 @@ def build_blended_dataset(datasets_config, config=None,
 
     stages = [mixed]
     if shuffle_buffer and shuffle_buffer > 0:
-        stages.append(wds.shuffle(shuffle_buffer, initial=shuffle_buffer))
+        stages.append(wds.shuffle(
+            shuffle_buffer,
+            initial=resolve_shuffle_initial(shuffle_buffer, shuffle_initial),
+        ))
 
     if use_sliding_window:
         stages.append(wds.map(materialize_sample_media))

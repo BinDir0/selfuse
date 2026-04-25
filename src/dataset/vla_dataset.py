@@ -55,6 +55,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         mode: str = "train",
         depth_clip_range=None,
         shuffle_buffer: int = 16384,
+        shuffle_initial: Optional[int] = None,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
         video_base_fps: float = 30.0,
@@ -77,6 +78,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.mode = mode
         self.depth_clip_range = depth_clip_range
         self.shuffle_buffer = shuffle_buffer
+        self.shuffle_initial = shuffle_initial
         self.wds_datasets = wds_datasets
         self.val_wds_datasets = val_wds_datasets
         self.return_dataset_info = return_dataset_info
@@ -410,6 +412,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             load_breast=self.load_breast,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=self.shuffle_buffer,
+            shuffle_initial=self.shuffle_initial,
             mode=self.mode,
             keep_ratio=self.keep_ratio,
         )

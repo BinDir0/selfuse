@@ -36,6 +36,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         seed: int = 42,
         mode: str = 'train',
         shuffle_buffer: int = 16384,
+        shuffle_initial: Optional[int] = None,
         return_dataset_info: bool = False,
         val_wds_datasets: Optional[List[Dict]] = None,
         mem_enabled: bool = False,
@@ -49,6 +50,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         self.seed = seed
         self.mode = mode
         self.shuffle_buffer = shuffle_buffer
+        self.shuffle_initial = shuffle_initial
         self.return_dataset_info = return_dataset_info
         self.val_wds_datasets = val_wds_datasets
         self.collator = None
@@ -241,6 +243,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             datasets_config=datasets_config,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=self.shuffle_buffer,
+            shuffle_initial=self.shuffle_initial,
             mode=self.mode,
             use_sliding_window=False,
             keep_ratio=self.keep_ratio,
