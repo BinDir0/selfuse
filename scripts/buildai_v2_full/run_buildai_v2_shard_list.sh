@@ -35,6 +35,17 @@ if (( ${#shard_names[@]} == 0 )); then
     exit 0
 fi
 
+mapfile -t source_shard_files < <(find "$source_shard_dir" -maxdepth 1 -name 'shard-*.tar' -printf '%f\n' | sort)
+if (( ${#source_shard_files[@]} == 0 )); then
+    echo "${machine_tag}: no source shards found under ${source_shard_dir}" >&2
+    exit 1
+fi
+
+declare -A shard_name_to_position=()
+for idx in "${!source_shard_files[@]}"; do
+    shard_name_to_position["${source_shard_files[$idx]}"]="$idx"
+done
+
 cd "$repo_root"
 
 echo "${machine_tag}: shard_count=${#shard_names[@]} slots=${#worker_gpus[@]} shard_list=${shard_list_file}"
@@ -48,21 +59,25 @@ run_worker() {
 
     (
         set -euo pipefail
-        local idx shard_name shard_idx
+        local idx shard_name shard_file shard_pos
         for ((idx=slot; idx<${#shard_names[@]}; idx+=${#worker_gpus[@]})); do
             shard_name="${shard_names[$idx]}"
-            shard_name="${shard_name%.tar}"
-            shard_idx="${shard_name#shard-}"
-            shard_idx=$((10#$shard_idx))
+            shard_file="${shard_name%.tar}.tar"
+            shard_name="${shard_file%.tar}"
+            shard_pos="${shard_name_to_position[$shard_file]:-}"
+            if [[ -z "${shard_pos}" ]]; then
+                echo "${machine_tag}: shard ${shard_file} not found under ${source_shard_dir}" >&2
+                exit 1
+            fi
 
-            echo "[$(date '+%F %T')] ${machine_tag} gpu=${gpu} shard=${shard_name}"
+            echo "[$(date '+%F %T')] ${machine_tag} gpu=${gpu} shard=${shard_name} position=${shard_pos}"
             sudo "$python_bin" -u scripts/rerun_and_rewrite_buildai_shards.py \
                 --source_shard_dir "$source_shard_dir" \
                 --buildai_processed_root "$processed_root" \
                 --output_dir "$output_root" \
                 --report_root "$report_root" \
-                --shard_start "$shard_idx" \
-                --shard_end "$((shard_idx + 1))" \
+                --shard_start "$shard_pos" \
+                --shard_end "$((shard_pos + 1))" \
                 --python_bin "$python_bin" \
                 --gpu "$gpu" \
                 --infiller_window_batch_size "$infiller_window_batch_size" \
