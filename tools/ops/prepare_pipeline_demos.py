@@ -48,6 +48,11 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Rank and export pipeline demo candidates from WebDataset shards")
     parser.add_argument("--input", required=True, help="Path to a .tar shard or directory containing .tar shards")
     parser.add_argument("--descriptor_manifest", default=None, help="Optional clip manifest; enables seq_folder lookup and depth demo checks")
+    parser.add_argument(
+        "--buildai_processed_root",
+        default=None,
+        help="Optional BuildAI processed root; used to auto-resolve seq_folder from clip_id when no manifest is provided",
+    )
     parser.add_argument("--sample-limit", type=int, default=None, help="Only index the first N matched samples")
     parser.add_argument("--episode-limit", type=int, default=None, help="Only evaluate the first N matched episodes")
     parser.add_argument("--filter-key", default="", help="Substring filter on key / clip_id / instruction")
@@ -105,6 +110,44 @@ def build_seq_folder_lookup(descriptor_manifest: str | None) -> dict[str, str]:
         return {}
     records = load_clip_manifest(descriptor_manifest)
     return {record.clip_id: record.descriptor.seq_folder for record in records}
+
+
+def _resolve_buildai_seq_folder(processed_root: Path, clip_id: str) -> Optional[Path]:
+    parts = clip_id.split("_")
+    if len(parts) < 2 or not parts[0].startswith("f") or not parts[1].startswith("w"):
+        return None
+    try:
+        factory_id = int(parts[0][1:])
+        worker_id = int(parts[1][1:])
+    except ValueError:
+        return None
+
+    candidates = [
+        processed_root / f"factory_{factory_id:03d}" / f"worker_{worker_id:03d}" / "processed" / clip_id,
+        processed_root / f"factory{factory_id:03d}" / "outputs" / clip_id,
+        processed_root / f"factory_{factory_id:03d}" / "outputs" / clip_id,
+    ]
+    for path in candidates:
+        if path.is_dir():
+            return path.resolve()
+    return None
+
+
+def resolve_seq_folder(
+    clip_id: Optional[str],
+    *,
+    seq_folder_lookup: dict[str, str],
+    buildai_processed_root: Optional[Path],
+) -> Optional[str]:
+    if not clip_id:
+        return None
+    seq_folder = seq_folder_lookup.get(clip_id)
+    if seq_folder:
+        return seq_folder
+    if buildai_processed_root is None:
+        return None
+    resolved = _resolve_buildai_seq_folder(buildai_processed_root, clip_id)
+    return None if resolved is None else str(resolved)
 
 
 def _visible_bbox_metrics(points_world: np.ndarray, c2w: np.ndarray, intrinsic: np.ndarray, image_shape) -> dict:
@@ -183,6 +226,7 @@ def compute_episode_demo_result(
     frames,
     *,
     seq_folder_lookup: dict[str, str],
+    buildai_processed_root: Optional[Path],
     min_frames: int,
 ) -> EpisodeDemoResult:
     clip_id = frames[0].summary.clip_id if frames else None
@@ -201,7 +245,11 @@ def compute_episode_demo_result(
     prev_left = None
     prev_right = None
 
-    seq_folder = seq_folder_lookup.get(clip_id or "", None)
+    seq_folder = resolve_seq_folder(
+        clip_id,
+        seq_folder_lookup=seq_folder_lookup,
+        buildai_processed_root=buildai_processed_root,
+    )
     depth_cache = _load_depth_cache(_find_depth_cache(seq_folder)) if seq_folder else None
     depth_index_set = set(depth_cache["frame_indices"].tolist()) if depth_cache is not None else set()
 
@@ -434,11 +482,16 @@ def export_depth_video(
     frames,
     *,
     seq_folder_lookup: dict[str, str],
+    buildai_processed_root: Optional[Path],
     output_path: Path,
     fps: int,
 ) -> None:
     clip_id = result.clip_id or ""
-    seq_folder = seq_folder_lookup.get(clip_id)
+    seq_folder = resolve_seq_folder(
+        clip_id,
+        seq_folder_lookup=seq_folder_lookup,
+        buildai_processed_root=buildai_processed_root,
+    )
     if not seq_folder:
         raise ValueError(f"No seq_folder mapping available for clip_id={clip_id}")
     depth_cache_path = _find_depth_cache(seq_folder)
@@ -494,6 +547,7 @@ def main():
     args = build_parser().parse_args()
     render_modes = parse_render_modes(args.render_modes)
     seq_folder_lookup = build_seq_folder_lookup(args.descriptor_manifest)
+    buildai_processed_root = None if not args.buildai_processed_root else Path(args.buildai_processed_root).expanduser().resolve()
     tar_paths = wv.resolve_tar_paths(args.input)
     summaries = scan_sample_summaries(
         tar_paths,
@@ -524,6 +578,7 @@ def main():
                 episode_key,
                 frames,
                 seq_folder_lookup=seq_folder_lookup,
+                buildai_processed_root=buildai_processed_root,
                 min_frames=args.min_frames,
             )
         except Exception as error:
@@ -539,6 +594,7 @@ def main():
     payload = {
         "input": str(Path(args.input).expanduser().resolve()),
         "descriptor_manifest": None if args.descriptor_manifest is None else str(Path(args.descriptor_manifest).expanduser().resolve()),
+        "buildai_processed_root": None if buildai_processed_root is None else str(buildai_processed_root),
         "render_modes": render_modes,
         "video_fps": int(args.video_fps),
         "episodes_scored": len(results),
@@ -575,6 +631,7 @@ def main():
                             result,
                             frames,
                             seq_folder_lookup=seq_folder_lookup,
+                            buildai_processed_root=buildai_processed_root,
                             output_path=output_path,
                             fps=args.video_fps,
                         )
