@@ -24,7 +24,7 @@ training:
   train_depth: False
   resume_checkpoint_path: 
   finetune_checkpoint_path:
-  normalizer_path: /efs-exp/zengfanlian/Projects/EgoVLA/outputs/normalizer/2026.04.04-relative-mixed-all/normalizer.pkl
+  normalizer_path: /efs-exp/chenzhang/Projects/LegendVLA-wm-torch/outputs/normalizer/2026.04.25-relative-4k-pretrain/normalizer.pkl
   max_train_steps: null
   max_eval_steps: null
   num_epochs: 2

@@ -34,7 +34,7 @@ world_model:
   teacher_patch_size: 16
   upsample_factor: 2
   action_conditioning: true
-  motion_conditioning: False
+  motion_conditioning: true
 
   # Dedicated WM action encoder (clean-action domain; no sharing with flow expert).
   wm_action_encoder:
