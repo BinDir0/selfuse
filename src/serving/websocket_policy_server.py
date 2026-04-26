@@ -116,13 +116,15 @@ class RuntimeEngine:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.policy, name)
 
-    def _build_dummy_obs(self, instruction: str) -> Dict[str, Any]:
+    def _build_dummy_obs(self, instruction: str, rtc: bool) -> Dict[str, Any]:
         shape_meta = self.shape_meta
         rgb_meta = shape_meta["obs"]["rgb"]
         state_meta = shape_meta["obs"]["state"]
+        action_meta = shape_meta["action"]
 
         image = np.zeros((rgb_meta["horizon"], *self.warmup_image_shape), dtype=np.uint8)
         states = np.zeros((state_meta["horizon"], state_meta["shape"][0]), dtype=np.float32)
+        prev_action_chunk = np.zeros((action_meta["horizon"], action_meta["shape"][0]), dtype=np.float32)
         intrinsic = self.warmup_intrinsic.copy()
 
         obs = {
@@ -130,6 +132,7 @@ class RuntimeEngine:
             "intrinsic": intrinsic,
             "instruction": instruction,
             "states": states,
+            "prev_action_chunk": prev_action_chunk if rtc else None,
         }
 
         depth_meta = shape_meta["obs"].get("depth")
@@ -142,11 +145,16 @@ class RuntimeEngine:
         if warmup_iters <= 0:
             return
 
-        dummy_obs = self._build_dummy_obs(instruction=instruction)
+        dummy_obs = self._build_dummy_obs(instruction=instruction, rtc=False)
+        dummy_obs_rtc = self._build_dummy_obs(instruction=instruction, rtc=True)
         logger.info("Running %d warmup inference iterations", warmup_iters)
         start_time = time.monotonic()
-        for _ in range(warmup_iters):
-            self.infer(dummy_obs)
+        # first observation does not contain RTC, subsequent ones contain RTC
+        for i in range(warmup_iters):
+            if i > 0:
+                self.infer(dummy_obs_rtc)
+            else:
+                self.infer(dummy_obs)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         logger.info("Warmup finished in %.3f ms", (time.monotonic() - start_time) * 1000.0)
