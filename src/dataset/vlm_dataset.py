@@ -151,14 +151,11 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             raw_images.append(np.array(img_pil, dtype=np.uint8))
         images_arr = np.stack(raw_images, dtype=np.uint8)
 
-        # Unified with VLA: process_image handles resize (when target_size is
-        # set) and, in train mode, random_resized_crop + augment_color.
-        # target_size is only applied when mem_enabled so VLM shares the
-        # VLA spatial grid; otherwise images keep their native size.
+        # Always resize: dynamic aspect ratios cause vision-tower recompiles.
         images_processed, _, _ = process_image(
             images_arr,
             aug_transform=(self.mode == 'train'),
-            target_size=self.target_image_size if self.mem_enabled else None,
+            target_size=self.target_image_size,
         )
         self.checker.check(
             image=images_processed,

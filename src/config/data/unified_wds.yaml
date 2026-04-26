@@ -1,11 +1,13 @@
 # @package _global_
 
 data:
-  # Target image size [H, W] for resizing all VLA RGB images before HF processor.
+  # Target image size [H, W] for resizing all RGB images (VLA + VLM) before HF processor.
   # When world model (future frame prediction) is enabled, this MUST be set
   # to ensure temporal attention patches align across frames.
   # Set to null to skip resizing (original resolution preserved).
   target_image_size: [384, 384]
+  # H * W; used as min_pixels / max_pixels below as a smart_resize fail-safe.
+  target_pixels: ${eval:'${data.target_image_size}[0] * ${data.target_image_size}[1]'}
   ignore_index: -100
   max_vlm_tokens: 768
   tokenizer_padding: max_length
@@ -106,8 +108,9 @@ data_collator:
     processor_init_kwargs:
       trust_remote_code: ${pretrained.trust_remote_code}
     processor_call_kwargs:
-      min_pixels: 147456
-      max_pixels: 147456
+      # Fail-safe cap: smart_resize is a no-op on already-resized images.
+      min_pixels: ${data.target_pixels}
+      max_pixels: ${data.target_pixels}
       text_kwargs:
         padding: ${data.tokenizer_padding}
         max_length: ${data.max_vlm_tokens}
