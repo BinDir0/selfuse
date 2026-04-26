@@ -13,6 +13,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLTextAttention,
     Qwen3VLTextDecoderLayer,
     Qwen3VLTextModel,
+    apply_rotary_pos_emb,
     create_causal_mask,
     eager_attention_forward,
 )
@@ -60,7 +61,7 @@ class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
-        query_states, key_states = base_attention.rotary_fn(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
