@@ -130,30 +130,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     def is_vlm_freeze_active(self) -> bool:
         return bool(self.vlm_group_indices) and self.update_step < self.vlm_freeze_updates
 
-    def maybe_unfreeze_vlm(self, rank) -> None:
-        """Flip VLM params to requires_grad=True at the freeze->rewarmup boundary.
-
-        Freeze is implemented via ``requires_grad=False`` (not lr=0), so AdamW
-        skips momentum/variance updates naturally while grads are None. At
-        the boundary, all ranks must flip in lockstep — hence the barrier.
-        """
-        if (
-            self.vlm_unfreeze_done
-            or not self.vlm_param_refs
-            or self.vlm_freeze_updates <= 0
-            or self.update_step < self.vlm_freeze_updates
-        ):
-            return
-        for param in self.vlm_param_refs:
-            param.requires_grad = True
-        self.vlm_unfreeze_done = True
-        dist.barrier()
-        if rank == 0:
-            print(
-                f"Unfroze {len(self.vlm_param_refs)} VLM parameters at "
-                f"update_step={self.update_step} before VLM re-warmup."
-            )
-
     def get_param_group_lrs(self) -> tuple[list[float], list[int]]:
         optimizer = self.unwrap_optimizer(self.optimizer)
         current_lrs = [float(group["lr"]) for group in optimizer.param_groups]
@@ -407,7 +383,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             objective_func=self.objective_func,
             train_vlm=cfg.training.train_vlm,
         )
-        self.vlm_unfreeze_done = self.vlm_freeze_updates <= 0 or not self.vlm_param_refs
 
         self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
         self.lr_scheduler = build_lr_scheduler(
@@ -433,24 +408,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             self.update_step = self.training_state.update_step
             self.global_step = self.training_state.global_step
             self.epoch = self.training_state.epoch
-            if self.vlm_param_refs and self.vlm_freeze_updates > 0:
-                self.vlm_unfreeze_done = self.update_step >= self.vlm_freeze_updates
             if rank == 0:
                 print(
                     f"[ckpt] resume: restored update_step={self.update_step} "
                     f"global_step={self.global_step} epoch={self.epoch}"
-                )
-
-        # Apply staged VLM freeze before compile. AdamW skips params whose
-        # grad is None, so momentum stays clean during freeze.
-        if self.vlm_param_refs and not self.vlm_unfreeze_done:
-            for param in self.vlm_param_refs:
-                param.requires_grad = False
-            if rank == 0:
-                print(
-                    f"VLM staged freeze: set requires_grad=False on "
-                    f"{len(self.vlm_param_refs)} parameters until "
-                    f"update_step={self.vlm_freeze_updates}."
                 )
 
         self.maybe_compile_model(rank)
@@ -469,8 +430,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         Returns (sync_gradients, step_skipped, raw_loss, part_grad_norms).
         """
-        self.maybe_unfreeze_vlm(rank)
-
         if batch_idx == 10 and rank == 0 and cfg.training.profile:
             self.tracker.track()
 
@@ -488,6 +447,15 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if grad_accum_steps > 1:
             loss = loss / grad_accum_steps
         loss.backward()
+
+        # Staged VLM freeze: VLM params keep requires_grad=True throughout
+        # so FSDP2's per-param grad-dtype tracking is initialized from step 1
+        # (avoids a bf16/fp32 mismatch at the freeze->rewarmup boundary).
+        # Drop the freshly reduced VLM grads here so AdamW skips momentum/
+        # variance updates on these params during the freeze window.
+        if sync_gradients and self.vlm_param_refs and self.is_vlm_freeze_active():
+            for param in self.vlm_param_refs:
+                param.grad = None
 
         if batch_idx == 10 and rank == 0 and cfg.training.profile:
             torch.cuda.empty_cache()

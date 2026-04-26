@@ -172,10 +172,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             aug_transform=(self.mode == 'train'),
             target_size=self.target_image_size,
         )
-        self.checker.check(
-            image=images_processed,
-            finite={'images_processed': images_processed},
-        )
+        self.checker.check(finite={'images_processed': images_processed})
 
         if self.mem_enabled:
             # Repeat along the temporal axis to match VLA T frames.

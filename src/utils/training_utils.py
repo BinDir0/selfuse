@@ -334,9 +334,9 @@ def build_param_groups(
         vlm_group_indices:  indices of VLM groups inside ``groups`` — used
                             by the lr scheduler to apply a separate
                             freeze/rewarmup curve.
-        vlm_param_refs:     flat list of VLM Parameter objects, captured
-                            while requires_grad is still True, so the
-                            caller can flip them for staged freeze.
+        vlm_param_refs:     flat list of VLM Parameter objects, used by
+                            the train loop to drop ``.grad`` during the
+                            staged-freeze window so AdamW skips updates.
 
     Must be called AFTER ``fully_shard()`` so that the references point at
     the post-shard DTensor-wrapped Parameters (pre-shard refs get orphaned
