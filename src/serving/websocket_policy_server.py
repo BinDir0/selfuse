@@ -38,6 +38,8 @@ class RuntimeEngine:
         warmup_image_shape: tuple[int, int, int],
         warmup_depth_shape: tuple[int, int, int],
         warmup_intrinsic: np.ndarray,
+        warmup_camera_setup_mode: str = "single",
+        warmup_image_mode: str = "rgb",
     ) -> None:
         self.policy = policy
         self.device = device
@@ -45,6 +47,18 @@ class RuntimeEngine:
         self.warmup_image_shape = tuple(int(x) for x in warmup_image_shape)
         self.warmup_depth_shape = tuple(int(x) for x in warmup_depth_shape)
         self.warmup_intrinsic = np.asarray(warmup_intrinsic, dtype=np.float64)
+        self.warmup_camera_setup_mode = str(warmup_camera_setup_mode).lower()
+        self.warmup_image_mode = str(warmup_image_mode).lower()
+        if self.warmup_camera_setup_mode not in {"single", "both"}:
+            raise ValueError(
+                "warmup_camera_setup_mode must be 'single' or 'both', "
+                f"got {warmup_camera_setup_mode!r}"
+            )
+        if self.warmup_image_mode not in {"rgb", "rgbd"}:
+            raise ValueError(
+                "warmup_image_mode must be 'rgb' or 'rgbd', "
+                f"got {warmup_image_mode!r}"
+            )
         self._profiler = None
         self._profile_steps = 0
         self._profile_max_steps = 0
@@ -135,9 +149,18 @@ class RuntimeEngine:
             "prev_action_chunk": prev_action_chunk if rtc else None,
         }
 
+        if self.warmup_camera_setup_mode == "both":
+            # Warmup should exercise the same multimodal path as production dual-camera requests.
+            obs["chest_image"] = np.zeros((rgb_meta["horizon"], *self.warmup_image_shape), dtype=np.uint8)
+            obs["chest_intrinsic"] = self.warmup_intrinsic.copy()
+
         depth_meta = shape_meta["obs"].get("depth")
-        if depth_meta is not None:
+        if depth_meta is not None and self.warmup_image_mode == "rgbd":
             obs["depth"] = np.zeros((depth_meta["horizon"], *self.warmup_depth_shape), dtype=np.uint16)
+            if self.warmup_camera_setup_mode == "both":
+                obs["chest_depth"] = np.zeros(
+                    (depth_meta["horizon"], *self.warmup_depth_shape), dtype=np.uint16
+                )
 
         return obs
 
@@ -269,6 +292,8 @@ def create_engine(policy_cfg: Any, serving_cfg: Any) -> Any:
         warmup_image_shape=tuple(serving_cfg.warmup_image_shape),
         warmup_depth_shape=tuple(serving_cfg.warmup_depth_shape),
         warmup_intrinsic=np.asarray(serving_cfg.warmup_intrinsic, dtype=np.float64),
+        warmup_camera_setup_mode=getattr(serving_cfg, "warmup_camera_setup_mode", "single"),
+        warmup_image_mode=getattr(serving_cfg, "warmup_image_mode", "rgb"),
     )
 
 
