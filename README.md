@@ -419,7 +419,8 @@ python -m src.utils.convert_fsdp_checkpoint \
 | `optimizer.world_model.lr` | `training/default.yaml` | 世界模型专家学习率（默认 3e-4） |
 | `flow.num_inference_steps` | `training/default.yaml` | flow 推理步数（默认 10） |
 | `flow.num_parallel_t` | `training/default.yaml` | 每 step 并行采样的 flow 时间点数 |
-| `runtime.knowledge_insulation` | `model/qwen3_vl_2b.yaml` | 知识隔离（True/False/int N） |
+| `policy.flow_expert.detach_prefix_kv` | `model/qwen3_vl_2b.yaml` | flow expert 是否切断 prefix KV 反向链路（True 阻断 backbone 梯度回传） |
+| `policy.world_model_expert.detach_prefix_kv` | `world_model/frozen_regression.yaml` | world model expert 同上（仅启用世界模型时生效） |
 | `pretrained.text_attn_implementation` | `model/qwen3_vl_2b.yaml` | text/专家 attention backend（默认 `flex_attention`） |
 | `policy.backbone.mem_temporal_attention.enabled` | `model/qwen3_vl_2b.yaml` | MEM 时序注意力开关 |
 | `policy.backbone.mem_temporal_attention.every_n_layers` | `model/qwen3_vl_2b.yaml` | MEM 插入频率（默认每 4 层） |

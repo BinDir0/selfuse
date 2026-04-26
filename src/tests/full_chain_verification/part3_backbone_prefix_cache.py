@@ -292,33 +292,6 @@ def test_prefix_cache_kv_meaningful(report: PhaseReport, model, batch: dict) -> 
         ))
 
 
-def test_knowledge_insulation_full(report: PhaseReport, model, batch: dict) -> None:
-    """With knowledge_insulation=True, prefix cache KV should be detached (no grad_fn)."""
-    original_ki = model.knowledge_insulation
-    model.knowledge_insulation = True
-
-    try:
-        slot_embeds = model.build_slot_embeddings(batch, add_action_noise=False)
-        output = model.forward_backbone_stream(batch, slot_embeds)
-        cache = output.prefix_cache
-
-        if cache is None:
-            report.add(assert_check(False, "3.3d knowledge insulation", "no prefix cache"))
-            return
-
-        # Detached tensors should have no grad_fn and requires_grad=False
-        keys_detached = not cache.keys.requires_grad and cache.keys.grad_fn is None
-        values_detached = not cache.values.requires_grad and cache.values.grad_fn is None
-
-        report.add(assert_check(
-            keys_detached and values_detached,
-            "3.3d knowledge_insulation=True: prefix KV fully detached",
-            f"keys_detached={keys_detached}, values_detached={values_detached}",
-        ))
-    finally:
-        model.knowledge_insulation = original_ki
-
-
 # ── 3.4 Visual encoding ────────────────────────────────────────────────────
 
 def test_visual_embed_not_zero(report: PhaseReport, model, batch: dict) -> None:
@@ -370,7 +343,6 @@ def run_all(config_path: str, skip_visual: bool = False) -> PhaseReport:
     test_prefix_cache_shape(report, model, batch)
     test_prefix_mask_content(report, model, batch)
     test_prefix_cache_kv_meaningful(report, model, batch)
-    test_knowledge_insulation_full(report, model, batch)
 
     # 3.4 Visual encoding
     test_visual_embed_not_zero(report, model, batch)

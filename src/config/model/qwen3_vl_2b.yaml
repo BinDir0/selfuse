@@ -24,7 +24,6 @@ camera_intrinsic_mode: text
 runtime:
   use_lora: False
   use_quantization: False
-  knowledge_insulation: False  # True = full, False = off, int N = insulate first N layers
 
 dims:
   vlm_hidden_size: 2048
@@ -192,7 +191,6 @@ policy:
     flow_loss_weight: 1.0
     reg_loss_weight: 1.0
     wm_loss_weight: 1.0
-  knowledge_insulation: ${runtime.knowledge_insulation}
   # World model (conditionally instantiated from world_model config group)
   world_model_expert: ${world_model.world_model_expert}
   frozen_teacher: ${world_model.frozen_teacher}

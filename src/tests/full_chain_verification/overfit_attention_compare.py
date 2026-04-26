@@ -1,5 +1,5 @@
 """
-Quick overfit experiment: knowledge_insulation ON vs OFF.
+Quick overfit experiment: detach_prefix_kv ON vs OFF.
 
 Overfits a single batch for N steps, then compares:
   1. Loss convergence (total, flow, diffusion)
@@ -106,23 +106,26 @@ def overfit_one_config(
     visual_mask,
     state_mask,
     text_mask,
-    knowledge_insulation,
+    detach_prefix_kv,
     steps: int,
     lr: float = 3e-4,
     label: str = "",
 ):
-    """Overfit a single batch with given knowledge_insulation setting."""
+    """Overfit a single batch with given detach_prefix_kv setting."""
     device = batch["input_ids"].device
 
     from src.tests.full_chain_verification.part3_backbone_prefix_cache import (
         build_model_and_collator, load_hydra_config,
     )
     model, _ = build_model_and_collator(config_path, device)
-    model.knowledge_insulation = knowledge_insulation
+    # Detach prefix KV in all experts to prevent backbone gradient flow.
+    model.flow_expert.detach_prefix_kv = detach_prefix_kv
+    if getattr(model, "world_model_expert", None) is not None:
+        model.world_model_expert.detach_prefix_kv = detach_prefix_kv
     model.train()
 
     print(f"\n{'='*60}")
-    print(f"  {label}: knowledge_insulation={knowledge_insulation}")
+    print(f"  {label}: detach_prefix_kv={detach_prefix_kv}")
     print(f"  Steps={steps}, lr={lr}")
     print(f"{'='*60}")
 
@@ -167,7 +170,7 @@ def overfit_one_config(
 
     return {
         "label": label,
-        "knowledge_insulation": knowledge_insulation,
+        "detach_prefix_kv": detach_prefix_kv,
         "losses": losses_history,
         "attention_snapshots": attn_snapshots,
         "gate_stats": gate_stats,
@@ -282,20 +285,20 @@ def main():
     # Run experiments
     results = []
 
-    # Experiment 1: knowledge_insulation=True (current config)
+    # Experiment 1: detach_prefix_kv=True (current config)
     r1 = overfit_one_config(
         args.config_path, batch, prefix_len, visual_mask, state_mask, text_mask,
-        knowledge_insulation=True, steps=args.steps, lr=args.lr,
-        label="insulation=True",
+        detach_prefix_kv=True, steps=args.steps, lr=args.lr,
+        label="detach=True",
     )
     results.append(r1)
     torch.cuda.empty_cache()
 
-    # Experiment 2: knowledge_insulation=False
+    # Experiment 2: detach_prefix_kv=False
     r2 = overfit_one_config(
         args.config_path, batch, prefix_len, visual_mask, state_mask, text_mask,
-        knowledge_insulation=False, steps=args.steps, lr=args.lr,
-        label="insulation=False",
+        detach_prefix_kv=False, steps=args.steps, lr=args.lr,
+        label="detach=False",
     )
     results.append(r2)
     torch.cuda.empty_cache()

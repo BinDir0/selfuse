@@ -123,7 +123,6 @@ class LegendVLA(nn.Module):
         rtc_config: RTCConfig = RTCConfig(),
         loss_config: LossConfig = LossConfig(),
         ar_action_train_config: ARActionTrainConfig = ARActionTrainConfig(),
-        knowledge_insulation: bool | int = True,
         # Camera intrinsic as token embedding (optional)
         camera_intrinsic_mode: str = "text",
         camera_encoder: nn.Module | None = None,
@@ -166,7 +165,6 @@ class LegendVLA(nn.Module):
             raise ValueError(f"Unsupported flow sampling strategy: {self.flow_config.sampling}")
         # Mutable: overridden at inference time by legendvla_inference_wrapper.
         self.num_inference_steps = self.flow_config.num_inference_steps
-        self.knowledge_insulation = knowledge_insulation
 
         # Shape meta derived
         self.action_dim = int(shape_meta["action"]["shape"][0])

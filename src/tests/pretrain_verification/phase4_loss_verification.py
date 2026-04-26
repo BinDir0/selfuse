@@ -415,8 +415,8 @@ def check_gradient_flow(report: PhaseReport) -> None:
         f"DiffLoss parameters have non-zero gradients: {has_diffloss_grad}",
     ))
 
-    # 4.5d: Knowledge insulation in train_flow mode - backbone should have ZERO gradients
-    model_insulated = build_model(with_diffloss=False, knowledge_insulation=True)
+    # 4.5d: detach_prefix_kv in train_flow mode - backbone should have ZERO gradients
+    model_insulated = build_model(with_diffloss=False, detach_prefix_kv=True)
     batch_insulated = build_batch(batch_size=1)
     output_insulated = model_insulated("train_flow", batch_insulated)
     output_insulated["total_loss"].backward()

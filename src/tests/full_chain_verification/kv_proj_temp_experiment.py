@@ -2,7 +2,7 @@
 Test KV projection and per-head learnable temperature for attention alignment.
 
 Experiments:
-  A. Baseline (knowledge_insulation=True, as-is)
+  A. Baseline (detach_prefix_kv=True, as-is)
   B. use_kv_projection=True (identity-initialized linear projection on prefix K/V)
   C. Per-head learnable temperature on action expert attention
   D. KV projection + learnable temperature
@@ -92,7 +92,10 @@ def run_experiment(
         build_model_and_collator,
     )
     model, _ = build_model_and_collator(config_path, device)
-    model.knowledge_insulation = True
+    # Detach prefix KV in all experts to prevent backbone gradient flow.
+    model.flow_expert.detach_prefix_kv = True
+    if getattr(model, "world_model_expert", None) is not None:
+        model.world_model_expert.detach_prefix_kv = True
 
     # Enable KV projection if requested
     if use_kv_proj:
