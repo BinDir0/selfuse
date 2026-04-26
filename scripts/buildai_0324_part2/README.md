@@ -10,6 +10,7 @@ Default assumptions:
 - Each part writes to its own dataset output directory, e.g. `.../BuildAI-100k-part2/part0000`
 - Build exports depth directly with `build.export_depth: true`
 - Build uses the 30fps-to-30fps path with `interpolate_labels: false`
+- Generated commands always include `--descriptor_manifest`; if you skip it, the orchestrator will look for `run_dir/clip_manifest.jsonl` and fail.
 
 Example:
 
@@ -17,8 +18,15 @@ Example:
 python scripts/buildai_0324_part2/generate_partial_pipeline_configs.py \
   --manifest_prefix /share_data/guantianrui/dataset_pipeline_logs/partial/buildai_part2 \
   --config_dir configs/generated_buildai_0324_part2 \
-  --part_count 8
+  --part_count 8 \
+  --partial_manifest_level slam_completed
 ```
+
+Use `--partial_manifest_level motion_completed` only if the source partial manifests were cut from `detect_track,motion` completed clips and still need `slam`.
+
+Current default:
+- `slam_completed` => generated commands run `infiller,filter,build,validate`
+- `motion_completed` => generated commands run `slam,infiller,filter,build,validate`
 
 This will generate:
 - `configs/generated_buildai_0324_part2/dataset_pipeline_buildai_100k_0324_part2_part0000.yaml`

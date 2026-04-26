@@ -181,14 +181,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stages",
-        default="slam,infiller,filter,build,validate",
-        help="Stage list written into generated run commands",
+        default=None,
+        help="Optional explicit stage list written into generated run commands",
+    )
+    parser.add_argument(
+        "--partial_manifest_level",
+        choices=("motion_completed", "slam_completed"),
+        default="slam_completed",
+        help=(
+            "Completion level of the input partial manifests. "
+            "motion_completed => run slam,infiller,filter,build,validate. "
+            "slam_completed => run infiller,filter,build,validate."
+        ),
     )
     return parser
 
 
 def _bool_yaml(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _default_stages_for_manifest_level(level: str) -> str:
+    if level == "motion_completed":
+        return "slam,infiller,filter,build,validate"
+    if level == "slam_completed":
+        return "infiller,filter,build,validate"
+    raise ValueError(f"Unsupported partial manifest level: {level}")
 
 
 def main() -> None:
@@ -199,6 +217,7 @@ def main() -> None:
     config_dir = Path(args.config_dir).expanduser().resolve()
     config_dir.mkdir(parents=True, exist_ok=True)
     commands_out = Path(args.commands_out).expanduser().resolve() if args.commands_out else config_dir / "run_partial_pipeline.sh"
+    stages = args.stages or _default_stages_for_manifest_level(args.partial_manifest_level)
 
     commands = ["#!/usr/bin/env bash", "set -euo pipefail", ""]
     generated_configs = []
@@ -240,13 +259,15 @@ def main() -> None:
                 "scripts/run_dataset_pipeline.py "
                 f"--config {config_path} "
                 f"--descriptor_manifest {manifest_path} "
-                f"--stages {args.stages}",
+                f"--stages {stages}",
                 "",
             ]
         )
 
     commands_out.write_text("\n".join(commands) + "\n", encoding="utf-8")
 
+    print(f"Partial manifest level: {args.partial_manifest_level}")
+    print(f"Generated stages: {stages}")
     print("Generated configs:")
     for path_text in generated_configs:
         print(path_text)
