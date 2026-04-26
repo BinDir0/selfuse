@@ -78,3 +78,24 @@ def test_configure_batch_processor_text_kwargs_updates_nested_text_kwargs():
     assert text_kwargs["padding"] == "left"
     assert text_kwargs["max_length"] == 128
 
+
+def test_prepare_process_accepts_chest_fields_from_env_wrapper_path():
+    class _SpyCollator:
+        def __init__(self):
+            self.last_samples = None
+
+        def __call__(self, samples):
+            self.last_samples = samples
+            return {"dummy_float": torch.tensor([1.0], dtype=torch.float32)}
+
+    spy_collator = _SpyCollator()
+    wrapper = build_wrapper_stub(history_pad_mode="truncate", data_collator=spy_collator)
+    obs = make_obs([[1.0, 1.0]])
+    obs["chest_image"] = torch.zeros(1, 8, 8, 3, dtype=torch.uint8).numpy()
+    obs["chest_intrinsic"] = torch.tensor([2.0, 2.0, 0.5, 0.5], dtype=torch.float32).numpy()
+
+    prepared = wrapper.prepare_process(obs)
+    assert "breast_images" in spy_collator.last_samples[0]
+    assert "breast_intrinsic" in spy_collator.last_samples[0]
+    assert torch.is_tensor(prepared["dummy_float"])
+

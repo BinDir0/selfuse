@@ -54,6 +54,11 @@ def _camera_intrinsics(shape: Tuple[int, ...]) -> np.ndarray:
     return np.random.rand(*shape).astype(np.float64)
 
 
+def _camera_extrinsics() -> np.ndarray:
+    # Keep a simple identity world->cam transform for smoke tests.
+    return np.eye(4, dtype=np.float64)
+
+
 
 def _random_states(state_horizon: int, state_dim: int) -> np.ndarray:
     states = np.random.normal(loc=0.0, scale=0.35, size=(state_horizon, state_dim))
@@ -79,15 +84,55 @@ def _random_obs(
     state_horizon: int,
     state_dim: int,
     instruction: str,
+    camera_setup: str,
+    image_mode: str,
+    include_camera_extrinsics: bool,
 ) -> Tuple[Dict[str, Any], int]:
     sampled_state_horizon = int(np.random.choice(_state_horizon_candidates(state_horizon)))
-    return {
+
+    states = _random_states(sampled_state_horizon, state_dim)
+
+    if camera_setup == "both":
+        head_rgb = _random_rgb_image(image_shape)
+        chest_rgb = _random_rgb_image(image_shape)
+        obs: Dict[str, Any] = {
+            "image": {
+                "head": head_rgb,
+                "chest": chest_rgb,
+            },
+            "camera_intrinsics": {
+                "head": _camera_intrinsics(intrinsic_shape),
+                "chest": _camera_intrinsics(intrinsic_shape),
+            },
+            "instruction": instruction,
+            "states": states,
+            "action_rtc": None,
+        }
+        if image_mode == "rgbd":
+            obs["depth_image"] = {
+                "head": _random_depth_image(depth_shape),
+                "chest": _random_depth_image(depth_shape),
+            }
+        if include_camera_extrinsics:
+            obs["camera_extrinsics"] = {
+                "head": _camera_extrinsics(),
+                "chest": _camera_extrinsics(),
+            }
+        return obs, sampled_state_horizon
+
+    # single camera legacy payload
+    obs = {
         "image": _random_rgb_image(image_shape),
-        "depth_image": _random_depth_image(depth_shape),
         "camera_intrinsics": _camera_intrinsics(intrinsic_shape),
         "instruction": instruction,
-        "states": _random_states(sampled_state_horizon, state_dim),
-    }, sampled_state_horizon
+        "states": states,
+        "action_rtc": None,
+    }
+    if image_mode == "rgbd":
+        obs["depth_image"] = _random_depth_image(depth_shape)
+    if include_camera_extrinsics:
+        obs["camera_extrinsics"] = _camera_extrinsics()
+    return obs, sampled_state_horizon
 
 
 async def _run_client(args: argparse.Namespace) -> None:
@@ -109,6 +154,9 @@ async def _run_client(args: argparse.Namespace) -> None:
                 state_horizon=args.state_horizon,
                 state_dim=args.state_dim,
                 instruction=args.instruction,
+                camera_setup=args.camera_setup,
+                image_mode=args.image_mode,
+                include_camera_extrinsics=args.include_camera_extrinsics,
             )
             start_time = time.monotonic()
             await websocket.send(packer.pack(obs))
@@ -139,12 +187,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, required=True, help="Server port.")
     parser.add_argument("--num-requests", type=int, default=5, help="Number of requests to send.")
     parser.add_argument("--sleep-ms", type=int, default=200, help="Sleep between requests in ms.")
+    parser.add_argument("--camera-setup", choices=["single", "both"], default="single", help="single: one camera payload; both: head/chest dict payload.")
+    parser.add_argument("--image-mode", choices=["rgb", "rgbd"], default="rgb", help="rgb: no depth_image field; rgbd: include depth_image field.")
     parser.add_argument("--image-shape", default="1,480,640,3", help="Image shape, e.g. 1,480,640,3")
     parser.add_argument("--depth-shape", default="1,480,640,1", help="Depth shape, e.g. 1,480,640,1")
     parser.add_argument("--intrinsic-shape", default="3,3", help="Intrinsic shape, e.g. 3,3")
     parser.add_argument("--state-horizon", type=int, default=16, help="Maximum state horizon; each request samples a smaller horizon to simulate real traffic.")
     parser.add_argument("--state-dim", type=int, default=48, help="State vector dim.")
     parser.add_argument("--instruction", default="grasp the yellow toy", help="Instruction string.")
+    parser.add_argument("--include-camera-extrinsics", action="store_true", help="Include camera_extrinsics in payload for protocol parity tests.")
     return parser.parse_args()
 
 

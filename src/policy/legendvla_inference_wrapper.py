@@ -220,9 +220,11 @@ class LegendVLAInference(nn.Module):
         """Convert one runtime observation into the collated batch ready for model input.
 
         Input contract:
-        - `obs["image"]`: stacked visual history, used as one Qwen video sample.
+        - `obs["image"]`: stacked visual history, used as one Qwen video sample,
+          or dict with per-camera entries (e.g. head/chest).
         - `obs["states"]`: shaped `[T, D]` before padding/truncation.
-        - `obs["intrinsic"]`: flattened `[fx, fy, cx, cy]` or 3x3 matrix.
+        - `obs["intrinsic"]`: flattened `[fx, fy, cx, cy]` or 3x3 matrix,
+          or dict with per-camera entries.
         - `obs["instruction"]`: optional when `default_instruction` is configured.
         - `obs["prev_action_chunk"]`: optional RTC action prefix from previous step.
         """
@@ -230,10 +232,47 @@ class LegendVLAInference(nn.Module):
         if instruction is None:
             raise ValueError("Inference requires an instruction.")
 
-        images, _ = self.prepare_history(np.asarray(obs["image"]), self.image_horizon)
-        intrinsic = self.extract_intrinsic(obs["intrinsic"])
+        image_value = obs.get("image")
+        intrinsic_value = obs.get("intrinsic")
+        if isinstance(image_value, dict):
+            head_image = image_value.get("head")
+            chest_image = image_value.get("chest")
+        else:
+            head_image = image_value
+            chest_image = None
+
+        if isinstance(intrinsic_value, dict):
+            head_intrinsic_raw = intrinsic_value.get("head")
+            chest_intrinsic_raw = intrinsic_value.get("chest")
+        else:
+            head_intrinsic_raw = intrinsic_value
+            chest_intrinsic_raw = None
+
+        # Serving path canonicalizes second view as chest_* fields.
+        chest_image = obs.get("chest_image", chest_image)
+        chest_intrinsic_raw = obs.get("chest_intrinsic", chest_intrinsic_raw)
+
+        if head_image is None:
+            raise ValueError("Inference requires head camera image data.")
+        if head_intrinsic_raw is None:
+            raise ValueError("Inference requires head camera intrinsic data.")
+
+        images, _ = self.prepare_history(np.asarray(head_image), self.image_horizon)
+        intrinsic = self.extract_intrinsic(head_intrinsic_raw)
         if self.target_image_size is not None:
             images, _, intrinsic = process_image(images, intrinsic=intrinsic, target_size=self.target_image_size)
+
+        breast_images = None
+        breast_intrinsic = None
+        if chest_image is not None and chest_intrinsic_raw is not None:
+            breast_images, _ = self.prepare_history(np.asarray(chest_image), self.image_horizon)
+            breast_intrinsic = self.extract_intrinsic(chest_intrinsic_raw)
+            if self.target_image_size is not None:
+                breast_images, _, breast_intrinsic = process_image(
+                    breast_images,
+                    intrinsic=breast_intrinsic,
+                    target_size=self.target_image_size,
+                )
 
         states = np.asarray(obs["states"], dtype=np.float32)
         if self.normalizer is not None:
@@ -258,6 +297,10 @@ class LegendVLAInference(nn.Module):
             "n_actions": torch.tensor(self.action_horizon, dtype=torch.long),
             "is_vla_data": torch.tensor(True, dtype=torch.bool),
         }
+        if breast_images is not None and breast_intrinsic is not None:
+            sample["breast_images"] = torch.as_tensor(breast_images)
+            sample["breast_intrinsic"] = torch.from_numpy(breast_intrinsic)
+
         batch = self.data_collator([sample])
 
         # Drop labels — only used for VLM text supervision during training.

@@ -177,6 +177,10 @@ class EnvWrapper:
         instruction_key: str = "instruction",
         states_key: str = "states",
         prev_action_chunk_key: str = "action_rtc",
+        camera_setup_mode: str = "single",
+        image_mode: str = "rgb",
+        head_camera_name: str = "head",
+        chest_camera_name: str = "chest",
     ) -> None:
         self.policy = policy
         self.image_key = image_key
@@ -185,6 +189,20 @@ class EnvWrapper:
         self.instruction_key = instruction_key
         self.states_key = states_key
         self.prev_action_chunk_key = prev_action_chunk_key
+        self.camera_setup_mode = str(camera_setup_mode).lower()
+        self.image_mode = str(image_mode).lower()
+        self.head_camera_name = head_camera_name
+        self.chest_camera_name = chest_camera_name
+
+        if self.camera_setup_mode not in {"single", "both"}:
+            raise ValueError(f"camera_setup_mode must be 'single' or 'both', got {camera_setup_mode!r}")
+        if self.image_mode not in {"rgb", "rgbd"}:
+            raise ValueError(f"image_mode must be 'rgb' or 'rgbd', got {image_mode!r}")
+
+    def _pick_camera_value(self, value: Any, camera_name: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(camera_name)
+        return value
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.policy, name)
@@ -193,15 +211,39 @@ class EnvWrapper:
         return sorted(set(dir(self.policy)) | set(super().__dir__()))
 
     def infer(self, obs: dict) -> dict:
+        image_value = obs.get(self.image_key)
+        depth_value = obs.get(self.depth_key)
+        intrinsic_value = obs.get(self.intrinsic_key)
+
+        head_image = self._pick_camera_value(image_value, self.head_camera_name)
+        head_intrinsic = self._pick_camera_value(intrinsic_value, self.head_camera_name)
+
         mapped_obs = {
-            "image": obs.get(self.image_key),
-            "depth": obs.get(self.depth_key),
-            "intrinsic": obs.get(self.intrinsic_key),
+            "image": head_image,
+            "depth": (
+                self._pick_camera_value(depth_value, self.head_camera_name)
+                if self.image_mode == "rgbd" else None
+            ),
+            "intrinsic": head_intrinsic,
             "instruction": obs.get(self.instruction_key),
             "states": obs.get(self.states_key),
             # RTC condition: executed action prefix (None on first step)
             "prev_action_chunk": obs.get(self.prev_action_chunk_key),
         }
+
+        if self.camera_setup_mode == "both":
+            chest_image = self._pick_camera_value(image_value, self.chest_camera_name)
+            chest_intrinsic = self._pick_camera_value(intrinsic_value, self.chest_camera_name)
+            chest_depth = (
+                self._pick_camera_value(depth_value, self.chest_camera_name)
+                if self.image_mode == "rgbd" else None
+            )
+
+            # Canonical dual-view keys at serving boundary.
+            mapped_obs["chest_image"] = chest_image
+            mapped_obs["chest_intrinsic"] = chest_intrinsic
+            mapped_obs["chest_depth"] = chest_depth
+
         return self.policy.infer(mapped_obs)
 
 
@@ -231,6 +273,10 @@ def create_env_wrapper(policy: Any, wrapper_cfg: Any) -> Any:
         instruction_key=wrapper_cfg.instruction_key,
         states_key=wrapper_cfg.states_key,
         prev_action_chunk_key=wrapper_cfg.prev_action_chunk_key,
+        camera_setup_mode=getattr(wrapper_cfg, "camera_setup_mode", "single"),
+        image_mode=getattr(wrapper_cfg, "image_mode", "rgb"),
+        head_camera_name=getattr(wrapper_cfg, "head_camera_name", "head"),
+        chest_camera_name=getattr(wrapper_cfg, "chest_camera_name", "chest"),
     )
 
 

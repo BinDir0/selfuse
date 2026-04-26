@@ -437,6 +437,8 @@ python -m src.utils.convert_fsdp_checkpoint \
 
 推理入口配置见 `src/config/experiment/inference.yaml`，通过 `src.policy.legendvla_inference_wrapper.LegendVLAInference` 包装：给定训练 run 的 `.hydra/config.yaml` 与 DCP checkpoint 即可重建整网，并可覆盖 `pretrained_vlm_path` / `teacher_path` 走本地镜像。
 
+新增双相机推理兼容，需修改配置中的camera_setup_mode为both
+
 ### WebSocket Serving
 
 ```bash

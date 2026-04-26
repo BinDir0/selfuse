@@ -25,10 +25,10 @@ serving:
 # model_config_path: path to the training run's .hydra/config.yaml
 policy:
   _target_: src.policy.legendvla_inference_wrapper.LegendVLAInference
-  model_config_path: /home/descfly/checkpoints/real-world-only-0403/.hydra/config.yaml  # required: path to the training run's .hydra/config.yaml
-  checkpoint_path: /home/descfly/checkpoints/real-world-only-0403/update_step=85000    # required: path to trained model checkpoint
-  pretrained_vlm_path: /home/descfly/checkpoints/Qwen3-VL-2B-Instruct  # override pretrained.model_name_or_path in model config (for backbone, action expert, tokenizer)
-  teacher_path: /home/descfly/checkpoints/dinov3-vitl16-pretrain-lvd1689m  # override frozen_teacher.model_name_or_path (null = keep training config value)
+  model_config_path: /share_data/zengfanlian/Projects/EgoVLA/outputs/2026.04.24/22.34_legendvla_qwen3_vl_legendvla_qwen3_vl/.hydra/config.yaml  # required: path to the training run's .hydra/config.yaml
+  checkpoint_path: "/share_data/zengfanlian/Projects/EgoVLA/outputs/2026.04.24/22.34_legendvla_qwen3_vl_legendvla_qwen3_vl/checkpoints/update_step=90000/"    # required: path to trained model checkpoint
+  pretrained_vlm_path:   # override pretrained.model_name_or_path in model config (for backbone, action expert, tokenizer)
+  teacher_path:   # override frozen_teacher.model_name_or_path (null = keep training config value)
   mode: flow
   use_mixed_precision: True
   tokenizer_padding: max_length
@@ -38,7 +38,7 @@ policy:
   ar_max_new_tokens: null
   ar_temperature: 1.0
   ar_cfg: 1.0
-  normalizer_path: /home/descfly/normalizer/2026.03.16-relative-mixed/normalizer.pkl
+  normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.03.31-relative-mixed/normalizer.pkl
   use_relative_action: True
   attention_recording: False
   compile:
@@ -49,6 +49,14 @@ policy:
 
 env_wrapper:
   enabled: True
+  # single: legacy single-camera payload
+  # both: dual-camera payload, expects image/camera_intrinsics as dicts keyed by head/chest
+  camera_setup_mode: both
+  # rgb: ignore depth payload
+  # rgbd: read depth payload using depth_key
+  image_mode: rgb
+  head_camera_name: head
+  chest_camera_name: chest
   image_key: image
   depth_key: depth_image
   intrinsic_key: camera_intrinsics

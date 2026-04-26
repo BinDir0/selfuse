@@ -109,11 +109,22 @@ class ConnectionRecorder:
 
     def _last_frame_rgb(self, obs: dict[str, Any]) -> np.ndarray | None:
         """Extract the last RGB frame from obs as uint8 [H, W, 3]."""
-        image = obs.get(self._image_key)
+        image = self._extract_camera_view(obs.get(self._image_key), "head")
         if image is None:
             return None
         frame = np.asarray(image, dtype=np.float32)[-1]
         return self._normalize_rgb(frame)
+
+    @staticmethod
+    def _extract_camera_view(value: Any, camera_name: str) -> Any:
+        if isinstance(value, dict):
+            if camera_name in value:
+                return value[camera_name]
+            # Fallback for non-standard payloads.
+            if value:
+                return next(iter(value.values()))
+            return None
+        return value
 
     def _build_request_fields(self, obs: dict[str, Any]) -> dict[str, Any]:
         payload: dict[str, Any] = {}
@@ -128,13 +139,39 @@ class ConnectionRecorder:
         if image is None:
             return False
 
-        image_canvas = self._prepare_rgb_canvas(image)
-        depth = obs.get(self._depth_key)
-        if depth is not None:
-            depth_canvas = self._prepare_depth_canvas(depth)
-            canvas = np.concatenate([image_canvas, depth_canvas], axis=1)
+        if isinstance(image, dict):
+            head_canvas = self._prepare_rgb_canvas(self._extract_camera_view(image, "head"))
+            chest_view = self._extract_camera_view(image, "chest")
+            if chest_view is not None:
+                chest_canvas = self._prepare_rgb_canvas(chest_view)
+                image_canvas = np.concatenate([head_canvas, chest_canvas], axis=1)
+            else:
+                image_canvas = head_canvas
+
+            depth = obs.get(self._depth_key)
+            if isinstance(depth, dict):
+                head_depth = self._extract_camera_view(depth, "head")
+                chest_depth = self._extract_camera_view(depth, "chest")
+                depth_parts = []
+                if head_depth is not None:
+                    depth_parts.append(self._prepare_depth_canvas(head_depth))
+                if chest_depth is not None:
+                    depth_parts.append(self._prepare_depth_canvas(chest_depth))
+                if depth_parts:
+                    depth_canvas = np.concatenate(depth_parts, axis=1)
+                    canvas = np.concatenate([image_canvas, depth_canvas], axis=1)
+                else:
+                    canvas = image_canvas
+            else:
+                canvas = image_canvas
         else:
-            canvas = image_canvas
+            image_canvas = self._prepare_rgb_canvas(image)
+            depth = obs.get(self._depth_key)
+            if depth is not None:
+                depth_canvas = self._prepare_depth_canvas(depth)
+                canvas = np.concatenate([image_canvas, depth_canvas], axis=1)
+            else:
+                canvas = image_canvas
 
         return bool(cv2.imwrite(str(output_path), canvas))
 
