@@ -66,6 +66,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         load_depth: bool = False,
         load_breast: bool = False,
         keep_ratio: float = 1.0,
+        sanity_checks: Optional[Dict] = None,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -91,6 +92,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         self.load_breast = bool(load_breast)
         assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
         self.keep_ratio = float(keep_ratio)
+        self.sanity_checks = dict(sanity_checks or {})
         # (H, W) tuple or None. Resize all RGB frames to this resolution
         # before HF processor. Required when world model is enabled so that
         # temporal attention patches share identical spatial semantics.
@@ -129,7 +131,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # data_transforms.COLOR_AUG (albumentations-based).
         self.aug_transform = (self.mode == "train")
 
-        self.checker = DataChecker()
+        self.checker = DataChecker(sanity_cfg=self.sanity_checks)
 
     def set_collator(self, collator):
         """Set the batch collator used to build model inputs."""
@@ -206,6 +208,21 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         The returned mapping contains visual history, instruction text, intrinsic parameters, padded state/action
         tensors, action-valid masks, and bookkeeping fields such as `n_states`, `n_actions`, and `is_vla_data`.
         """
+        self.checker.check(sample_schema=(sample, {
+            "required_keys": (
+                "wrist_state", "hand_state", "wrist_action", "hand_action",
+                "extrinsic", "intrinsic", "instruction", "instruction_num", "image",
+            ),
+            "expected_last_dim": {
+                "wrist_state": 18,
+                "hand_state": 30,
+                "wrist_action": 18,
+                "hand_action": 30,
+                "extrinsic": 16,
+                "intrinsic": 4,
+            },
+        }))
+
         # Cheap structural checks first so bad samples skip JPEG decode + transforms.
         intrinsic_raw = sample["intrinsic"].astype(np.float32)
         extrinsic_raw = sample["extrinsic"].astype(np.float32).reshape(4, 4)
@@ -242,6 +259,10 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             "wrist_action": wrist_action,
             "hand_action": hand_action,
         })
+        self.checker.check(
+            rot6d={"wrist_state": wrist_state, "wrist_action": wrist_action},
+            state_action_delta=(wrist_state, hand_state, wrist_action, hand_action),
+        )
 
         state, action = process_state_action(
             wrist_state=wrist_state,
@@ -254,7 +275,10 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             motion_type=self.motion_type,
             use_relative_action=self.use_relative_action,
         )
-        self.checker.check(finite={"state": state, "action": action})
+        self.checker.check(
+            finite={"state": state, "action": action},
+            rot6d={"state": state, "action": action},
+        )
 
         image, depth_images, intrinsic = process_image(
             sample["image"],
@@ -462,6 +486,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             load_depth=self.load_depth,
             load_breast=self.load_breast,
             keep_ratio=1.0,
+            sanity_checks=self.sanity_checks,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -670,6 +695,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         max_total_shards: Optional[int] = None,
         min_shards_per_dataset: int = 8,
         seed: int = 0,
+        sanity_checks: Optional[Dict] = None,
     ):
         super().__init__()
         self.wds_datasets = wds_datasets
@@ -681,6 +707,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         self.max_total_shards = max_total_shards
         self.min_shards_per_dataset = min_shards_per_dataset
         self.seed = seed
+        self.sanity_checks = dict(sanity_checks or {})
 
         if self.mode != "val":
             warnings.warn(
@@ -704,10 +731,21 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             action_pad_mode=shape_meta["action"].get("pad_mode", "truncate"),
         )
 
-        self.checker = DataChecker()
+        self.checker = DataChecker(sanity_cfg=self.sanity_checks)
 
     def sample_to_data(self, sample):
         """Extract lowdim fields and compute state/action."""
+        self.checker.check(sample_schema=(sample, {
+            "required_keys": ("wrist_state", "hand_state", "wrist_action", "hand_action", "extrinsic"),
+            "expected_last_dim": {
+                "wrist_state": 18,
+                "hand_state": 30,
+                "wrist_action": 18,
+                "hand_action": 30,
+                "extrinsic": 16,
+            },
+        }))
+
         extrinsic = sample["extrinsic"].astype(np.float32).reshape(4, 4)
         self.checker.check(extrinsic=extrinsic)
 
@@ -723,6 +761,10 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             "wrist_action": wrist_action,
             "hand_action": hand_action,
         })
+        self.checker.check(
+            rot6d={"wrist_state": wrist_state, "wrist_action": wrist_action},
+            state_action_delta=(wrist_state, hand_state, wrist_action, hand_action),
+        )
 
         state, action = process_state_action(
             wrist_state=wrist_state,
@@ -735,7 +777,10 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             motion_type=self.motion_type,
             use_relative_action=self.use_relative_action,
         )
-        self.checker.check(finite={"state": state, "action": action})
+        self.checker.check(
+            finite={"state": state, "action": action},
+            rot6d={"state": state, "action": action},
+        )
 
         if not self.use_relative_action:
             return {

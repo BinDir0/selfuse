@@ -186,6 +186,12 @@ def main():
     wds_datasets = OmegaConf.to_container(vla_cfg.wds_datasets, resolve=True)
     shape_meta_cfg = cfg.data.shape_meta if "data" in cfg and "shape_meta" in cfg.data else cfg.shape_meta
     shape_meta = OmegaConf.to_container(shape_meta_cfg, resolve=True)
+    sanity_checks_cfg = (
+        cfg.data.sanity_checks
+        if "data" in cfg and "sanity_checks" in cfg.data
+        else vla_cfg.get("sanity_checks", {})
+    )
+    sanity_checks = OmegaConf.to_container(sanity_checks_cfg, resolve=True)
     use_relative_action = vla_cfg.get("use_relative_action", False)
     history_pad_mode = shape_meta.get("history_pad_mode", "repeat")
     action_pad_mode = shape_meta["action"].get("pad_mode", "truncate")
@@ -199,6 +205,7 @@ def main():
         max_total_shards=args.max_total_shards,
         min_shards_per_dataset=args.min_shards_per_dataset,
         seed=args.seed,
+        sanity_checks=sanity_checks,
     )
     selection_metadata = normalizer_dataset.describe_shard_selection()
     print("   Dataset created successfully")

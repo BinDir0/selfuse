@@ -9,7 +9,7 @@ import torch
 import numpy as np
 from src.utils.pytorch_util import dict_apply
 from src.dataset.data_transforms import process_image
-from src.dataset.sanity_checks import DataChecker
+from src.dataset.sanity_checks import DataChecker, MissingOrInvalidFilesError
 from src.dataset.wds_dataset import build_blended_dataset
 
 
@@ -43,6 +43,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         n_obs_image_steps: int = 1,
         target_image_size: Optional[Tuple[int, int]] = None,
         keep_ratio: float = 1.0,
+        sanity_checks: Optional[Dict] = None,
     ):
         super().__init__()
         self.wds_datasets = wds_datasets
@@ -54,7 +55,8 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         self.return_dataset_info = return_dataset_info
         self.val_wds_datasets = val_wds_datasets
         self.collator = None
-        self.checker = DataChecker()
+        self.sanity_checks = dict(sanity_checks or {})
+        self.checker = DataChecker(sanity_cfg=self.sanity_checks)
         self.mem_enabled = mem_enabled
         self.n_obs_image_steps = n_obs_image_steps
         self.target_image_size = (
@@ -105,6 +107,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
             n_obs_image_steps=self.n_obs_image_steps,
             target_image_size=self.target_image_size,
             keep_ratio=1.0,
+            sanity_checks=self.sanity_checks,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -112,12 +115,24 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
 
     def sample_to_data(self, sample):
         """Convert one WDS sample to model-ready fields."""
+        self.checker.check(sample_schema=(sample, {
+            "required_keys": ("meta.json",),
+            "required_meta_keys": (
+                "texts",
+                "formatting_ratings",
+                "visual_dependency_ratings",
+                "relevance_ratings",
+            ),
+        }))
+
         meta = sample['meta.json']
 
         image_keys = sorted([
             k for k in sample.keys()
             if k.startswith("image_") and k.endswith(".jpg")
         ])
+        if not image_keys:
+            raise MissingOrInvalidFilesError("missing required image_*.jpg fields")
         images = [sample[k] for k in image_keys]
 
         text = meta['texts']

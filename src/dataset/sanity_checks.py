@@ -51,6 +51,18 @@ class DepthQualityError(DataSkipError):
     """Raised when a depth map fails finite/valid-fraction sanity checks."""
 
 
+class Rot6DInvalidError(DataSkipError):
+    """Raised when rot6d vectors fail orthogonality/finite sanity."""
+
+
+class ExtremeStateActionDeltaError(DataSkipError):
+    """Raised when state/action delta is finite but physically implausible."""
+
+
+class MissingOrInvalidFilesError(DataSkipError):
+    """Raised when required sample fields or meta keys are missing/invalid."""
+
+
 def check_extrinsic_valid(
     ext: np.ndarray,
     *,
@@ -208,6 +220,217 @@ def check_depth_quality(
         raise DepthQualityError(
             f"valid_fraction={valid:.3f} < {min_valid_fraction}"
         )
+
+
+def _rot6d_to_rotation_matrix(rot6d: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    """Convert rot6d [c1(3), c2(3)] to 3x3 rotation matrices."""
+    arr = np.asarray(rot6d, dtype=np.float64).reshape(-1, 6)
+    col1 = arr[:, :3]
+    col2 = arr[:, 3:6]
+    col1_norm = col1 / (np.linalg.norm(col1, axis=1, keepdims=True) + eps)
+    col2_norm = col2 / (np.linalg.norm(col2, axis=1, keepdims=True) + eps)
+    col3 = np.cross(col1_norm, col2_norm)
+    col3_norm = col3 / (np.linalg.norm(col3, axis=1, keepdims=True) + eps)
+    return np.stack([col1_norm, col2_norm, col3_norm], axis=2)
+
+
+def _rotation_matrix_to_angle(R: np.ndarray) -> np.ndarray:
+    """Extract rotation angle (rad) from rotation matrices."""
+    arr = np.asarray(R, dtype=np.float64).reshape(-1, 3, 3)
+    traces = np.trace(arr, axis1=1, axis2=2)
+    cos_theta = np.clip((np.clip(traces, -1.0, 3.0) - 1.0) / 2.0, -1.0, 1.0)
+    angles = np.arccos(cos_theta)
+    return np.where(np.isfinite(angles), angles, 0.0)
+
+
+def _compute_rot6d_quality(rot6d: np.ndarray, eps: float = 1e-8) -> dict[str, np.ndarray]:
+    """Compute rot6d orthogonality quality metrics."""
+    arr = np.asarray(rot6d, dtype=np.float64).reshape(-1, 6)
+    finite_mask = np.all(np.isfinite(arr), axis=1)
+    col1 = arr[:, :3]
+    col2 = arr[:, 3:6]
+    col1_norm = col1 / (np.linalg.norm(col1, axis=1)[:, None] + eps)
+    col2_norm = col2 / (np.linalg.norm(col2, axis=1)[:, None] + eps)
+    orth_err = np.abs(np.sum(col1_norm * col2_norm, axis=1))
+    return {
+        "finite_mask": finite_mask,
+        "orthogonality_error": orth_err,
+    }
+
+
+def check_rot6d_quality(
+    values: Mapping[str, Any],
+    *,
+    orthogonality_threshold: float = 0.1,
+) -> None:
+    """Validate rot6d quality for wrist-like tensors with layout [..., >=18]."""
+    for name, value in values.items():
+        if value is None:
+            continue
+        arr = np.asarray(value)
+        if arr.size == 0 or arr.ndim == 0 or arr.shape[-1] < 18:
+            continue
+
+        left = arr[..., 6:12].reshape(-1, 6)
+        right = arr[..., 12:18].reshape(-1, 6)
+        lr = np.concatenate([left, right], axis=0)
+        quality = _compute_rot6d_quality(lr)
+        finite_mask = quality["finite_mask"]
+        orth_err = quality["orthogonality_error"]
+        invalid_mask = (~finite_mask) | (orth_err > orthogonality_threshold)
+        if not invalid_mask.any():
+            continue
+
+        invalid_count = int(invalid_mask.sum())
+        total_count = int(invalid_mask.size)
+        max_orth = float(orth_err[invalid_mask].max()) if invalid_count > 0 else 0.0
+        raise Rot6DInvalidError(
+            f"{name}: invalid_rot6d={invalid_count}/{total_count}, "
+            f"max_orth_err={max_orth:.4f} (thr={orthogonality_threshold})"
+        )
+
+
+def check_state_action_extreme_delta(
+    wrist_state: np.ndarray,
+    hand_state: np.ndarray,
+    wrist_action: np.ndarray,
+    hand_action: np.ndarray,
+    *,
+    wrist_translation_threshold: float = 2.0,
+    wrist_rotation_threshold: float = 10.0,
+    fingertips_displacement_threshold: float = 2.0,
+) -> None:
+    """Check physically implausible state/action deltas.
+
+    Performs three scopes with the same final thresholds:
+      1) pair check: current state ([-1]) vs first action ([0])
+      2) state internal diff: consecutive state steps
+      3) action internal diff: consecutive action steps
+    """
+    if wrist_state.size == 0 or wrist_action.size == 0 or hand_state.size == 0 or hand_action.size == 0:
+        return
+
+    ws_seq = np.asarray(wrist_state, dtype=np.float64).reshape(-1, wrist_state.shape[-1])
+    wa_seq = np.asarray(wrist_action, dtype=np.float64).reshape(-1, wrist_action.shape[-1])
+    hs_seq = np.asarray(hand_state, dtype=np.float64).reshape(-1, hand_state.shape[-1])
+    ha_seq = np.asarray(hand_action, dtype=np.float64).reshape(-1, hand_action.shape[-1])
+
+    def _pair_metrics(ws: np.ndarray, wa: np.ndarray, hs: np.ndarray, ha: np.ndarray) -> tuple[float, float, float]:
+        translation = float(np.linalg.norm(np.abs(wa[:6] - ws[:6])))
+
+        left_state = ws[6:12].reshape(1, 6)
+        left_action = wa[6:12].reshape(1, 6)
+        right_state = ws[12:18].reshape(1, 6)
+        right_action = wa[12:18].reshape(1, 6)
+        left_angle = _rotation_matrix_to_angle(
+            np.einsum(
+                "nij,njk->nik",
+                _rot6d_to_rotation_matrix(left_action),
+                np.transpose(_rot6d_to_rotation_matrix(left_state), (0, 2, 1)),
+            )
+        )[0]
+        right_angle = _rotation_matrix_to_angle(
+            np.einsum(
+                "nij,njk->nik",
+                _rot6d_to_rotation_matrix(right_action),
+                np.transpose(_rot6d_to_rotation_matrix(right_state), (0, 2, 1)),
+            )
+        )[0]
+        rotation = float(max(left_angle, right_angle))
+
+        hs3 = hs.reshape(10, 3)
+        ha3 = ha.reshape(10, 3)
+        fingertips = float(np.mean(np.linalg.norm(np.abs(ha3 - hs3), axis=1)))
+        return translation, rotation, fingertips
+
+    pair_translation, pair_rotation, pair_fingertips = _pair_metrics(
+        ws_seq[-1], wa_seq[0], hs_seq[-1], ha_seq[0]
+    )
+
+    state_max_translation = 0.0
+    state_max_rotation = 0.0
+    state_max_fingertips = 0.0
+    if ws_seq.shape[0] > 1 and hs_seq.shape[0] > 1:
+        for t in range(ws_seq.shape[0] - 1):
+            tr, rot, fing = _pair_metrics(ws_seq[t], ws_seq[t + 1], hs_seq[t], hs_seq[t + 1])
+            state_max_translation = max(state_max_translation, tr)
+            state_max_rotation = max(state_max_rotation, rot)
+            state_max_fingertips = max(state_max_fingertips, fing)
+
+    action_max_translation = 0.0
+    action_max_rotation = 0.0
+    action_max_fingertips = 0.0
+    if wa_seq.shape[0] > 1 and ha_seq.shape[0] > 1:
+        for t in range(wa_seq.shape[0] - 1):
+            tr, rot, fing = _pair_metrics(wa_seq[t], wa_seq[t + 1], ha_seq[t], ha_seq[t + 1])
+            action_max_translation = max(action_max_translation, tr)
+            action_max_rotation = max(action_max_rotation, rot)
+            action_max_fingertips = max(action_max_fingertips, fing)
+
+    pair_bad = (
+        pair_translation > wrist_translation_threshold
+        or pair_rotation > wrist_rotation_threshold
+        or pair_fingertips > fingertips_displacement_threshold
+    )
+    state_bad = (
+        state_max_translation > wrist_translation_threshold
+        or state_max_rotation > wrist_rotation_threshold
+        or state_max_fingertips > fingertips_displacement_threshold
+    )
+    action_bad = (
+        action_max_translation > wrist_translation_threshold
+        or action_max_rotation > wrist_rotation_threshold
+        or action_max_fingertips > fingertips_displacement_threshold
+    )
+
+    if pair_bad or state_bad or action_bad:
+        raise ExtremeStateActionDeltaError(
+            "state_action_delta_invalid: "
+            "pair=["
+            f"translation={pair_translation:.4f}, rotation={pair_rotation:.4f}, fingertips={pair_fingertips:.4f}"
+            "], "
+            "state_internal_max=["
+            f"translation={state_max_translation:.4f}, rotation={state_max_rotation:.4f}, fingertips={state_max_fingertips:.4f}"
+            "], "
+            "action_internal_max=["
+            f"translation={action_max_translation:.4f}, rotation={action_max_rotation:.4f}, fingertips={action_max_fingertips:.4f}"
+            "], "
+            "thresholds=["
+            f"translation={wrist_translation_threshold:.4f}, rotation={wrist_rotation_threshold:.4f}, fingertips={fingertips_displacement_threshold:.4f}"
+            "]"
+        )
+
+
+def check_sample_schema(
+    sample: Mapping[str, Any],
+    *,
+    required_keys: tuple[str, ...],
+    expected_last_dim: Mapping[str, int] | None = None,
+    required_meta_keys: tuple[str, ...] = (),
+) -> None:
+    """Check sample-level required fields, simple dimensions, and meta keys."""
+    for key in required_keys:
+        if key not in sample or sample.get(key) is None:
+            raise MissingOrInvalidFilesError(f"missing required field: {key}")
+
+    if expected_last_dim:
+        for key, dim in expected_last_dim.items():
+            value = sample.get(key)
+            if value is None:
+                continue
+            arr = np.asarray(value)
+            if arr.ndim == 0 or arr.shape[-1] != int(dim):
+                raise MissingOrInvalidFilesError(
+                    f"invalid {key} shape={tuple(arr.shape)} expected last_dim={int(dim)}"
+                )
+
+    if required_meta_keys:
+        meta = sample.get("meta.json")
+        if meta is None or not isinstance(meta, Mapping):
+            raise MissingOrInvalidFilesError("missing or invalid meta.json mapping")
+        for mk in required_meta_keys:
+            if mk not in meta or meta.get(mk) is None:
+                raise MissingOrInvalidFilesError(f"meta missing required key: {mk}")
 
 
 
@@ -424,12 +647,22 @@ class DataChecker:
         "depth": "_apply_depth",
         "finite": "_apply_finite",
         "post_normalize": "_apply_post_normalize",
+        "rot6d": "_apply_rot6d",
+        "state_action_delta": "_apply_state_action_delta",
+        "sample_schema": "_apply_sample_schema",
     }
 
-    def __init__(self) -> None:
+    def __init__(self, sanity_cfg: Mapping[str, Any] | None = None) -> None:
         self.seen = 0
         self.skipped = 0
         self._log = get_data_logger()
+        cfg = dict(sanity_cfg or {})
+        rot_cfg = dict(cfg.get("rot6d", {}) or {})
+        delta_cfg = dict(cfg.get("state_action_delta", {}) or {})
+        self.rot6d_orthogonality_threshold = float(rot_cfg.get("orthogonality_threshold", 0.1))
+        self.delta_wrist_translation_threshold = float(delta_cfg.get("wrist_translation_threshold", 2.0))
+        self.delta_wrist_rotation_threshold = float(delta_cfg.get("wrist_rotation_threshold", 10.0))
+        self.delta_fingertips_displacement_threshold = float(delta_cfg.get("fingertips_displacement_threshold", 2.0))
 
     def note_sample_seen(self) -> None:
         self.seen += 1
@@ -513,6 +746,34 @@ class DataChecker:
                 raise OutlierDataError(
                     f"post-normalize |{field}|={amax:.3e} > {cls.POST_NORMALIZE_OUTLIER_THRESHOLD}"
                 )
+
+    def _apply_rot6d(self, mapping) -> None:
+        check_rot6d_quality(
+            mapping,
+            orthogonality_threshold=self.rot6d_orthogonality_threshold,
+        )
+
+    def _apply_state_action_delta(self, delta_tuple) -> None:
+        wrist_state, hand_state, wrist_action, hand_action = delta_tuple
+        check_state_action_extreme_delta(
+            wrist_state=wrist_state,
+            hand_state=hand_state,
+            wrist_action=wrist_action,
+            hand_action=hand_action,
+            wrist_translation_threshold=self.delta_wrist_translation_threshold,
+            wrist_rotation_threshold=self.delta_wrist_rotation_threshold,
+            fingertips_displacement_threshold=self.delta_fingertips_displacement_threshold,
+        )
+
+    @staticmethod
+    def _apply_sample_schema(schema_tuple) -> None:
+        sample, cfg = schema_tuple
+        check_sample_schema(
+            sample=sample,
+            required_keys=tuple(cfg.get("required_keys", ())),
+            expected_last_dim=cfg.get("expected_last_dim", None),
+            required_meta_keys=tuple(cfg.get("required_meta_keys", ())),
+        )
 
 
 def current_worker_id() -> int:

@@ -13,6 +13,13 @@ data:
   tokenizer_padding: max_length
   depth_clip_range: [0.0, 5.0]
   video_base_fps: 30.0
+  sanity_checks:
+    rot6d:
+      orthogonality_threshold: 0.1
+    state_action_delta:
+      wrist_translation_threshold: 2.5
+      wrist_rotation_threshold: 10.0
+      fingertips_displacement_threshold: 2.5
   # Sampling contract: WindowConfig reads horizons/strides/pad_modes from here.
   # history_pad_mode covers obs; action + future_frame each carry their own pad_mode.
   shape_meta:
@@ -75,6 +82,7 @@ dataset:
     # Pre-shuffle Bernoulli keep rate (train only). Lower = more shard diversity,
     # higher IO. 1.0 disables. Ref: DreamZero shard_sampling_rate.
     keep_ratio: 1.0
+    sanity_checks: ${data.sanity_checks}
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
     wds_datasets: ${vlm_wds_datasets}
@@ -89,6 +97,7 @@ dataset:
     n_obs_image_steps: ${data.shape_meta.obs.rgb.horizon}
     target_image_size: ${data.target_image_size}
     keep_ratio: 1.0
+    sanity_checks: ${data.sanity_checks}
   vla_ratio: ${eval:'5/6'}
   batch_size: ${dataloader.loader.batch_size}
 
