@@ -470,6 +470,32 @@ bash scripts/run_eval.sh
 
 ### 调试脚本
 
+`launch.json`:
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug",
+            "type": "python",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5679
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "${workspaceFolder}"
+                }
+            ],
+            "justMyCode": true,
+            "showReturnValue": false
+        }
+    ]
+}
+```
+
 `scripts/debug_start.sh` 以少量步数、关闭持久 worker、开启 WandB disabled 的方式启动训练，方便 VS Code 挂 debugpy：
 
 ```bash
