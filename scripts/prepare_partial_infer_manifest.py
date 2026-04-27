@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,6 +87,15 @@ def parse_args() -> argparse.Namespace:
         "--full_check",
         action="store_true",
         help="Run full stage validation instead of done-marker/fast validation.",
+    )
+    parser.add_argument(
+        "--check_workers",
+        type=int,
+        default=max(1, min(64, (os.cpu_count() or 1) * 4)),
+        help=(
+            "Workers for per-clip stage checks. Fast-path checks are I/O-bound and usually benefit "
+            "from more threads on shared storage."
+        ),
     )
     return parser.parse_args()
 
@@ -190,6 +201,25 @@ def _stage_complete(stage: str, seq_folder: Path, *, full_check: bool) -> bool:
     return bool(is_stage_complete(stage, seq_folder, fast_check=False))
 
 
+def _check_record_completion(record, required_stages: list[str], *, full_check: bool):
+    seq_folder = Path(record.descriptor.seq_folder)
+    missing = []
+
+    if not seq_folder.exists():
+        return record, str(seq_folder), list(required_stages)
+
+    if not full_check:
+        for stage in required_stages:
+            if not _get_stage_done_marker(seq_folder, stage).exists():
+                missing.append(stage)
+        return record, str(seq_folder), missing
+
+    for stage in required_stages:
+        if not _stage_complete(stage, seq_folder, full_check=True):
+            missing.append(stage)
+    return record, str(seq_folder), missing
+
+
 def _assign_balanced(records: list, split_count: int) -> list[Partition]:
     partitions = [Partition(part_id=index, records=[]) for index in range(split_count)]
     ordered = sorted(records, key=_record_weight, reverse=True)
@@ -264,21 +294,44 @@ def main() -> None:
     dropped_count = 0
     stage_missing_counts = {stage: 0 for stage in required_stages}
 
-    check_iter = tqdm(records, desc="Check stage completion", unit="clip", dynamic_ncols=True)
-    for record in check_iter:
-        seq_folder = Path(record.descriptor.seq_folder)
-        missing = []
-        for stage in required_stages:
-            if not _stage_complete(stage, seq_folder, full_check=args.full_check):
-                stage_missing_counts[stage] += 1
-                missing.append(stage)
+    if args.check_workers < 1:
+        raise ValueError("--check_workers must be >= 1")
+
+    print(
+        f"Checking completion with workers={args.check_workers} full_check={bool(args.full_check)}...",
+        flush=True,
+    )
+
+    def _result_iterator():
+        if args.check_workers == 1:
+            for record in records:
+                yield _check_record_completion(record, required_stages, full_check=args.full_check)
+            return
+
+        with ThreadPoolExecutor(max_workers=args.check_workers) as executor:
+            yield from executor.map(
+                lambda record: _check_record_completion(record, required_stages, full_check=args.full_check),
+                records,
+                chunksize=64,
+            )
+
+    check_iter = tqdm(
+        _result_iterator(),
+        total=len(records),
+        desc="Check stage completion",
+        unit="clip",
+        dynamic_ncols=True,
+    )
+    for record, seq_folder_str, missing in check_iter:
         if missing:
+            for stage in missing:
+                stage_missing_counts[stage] += 1
             dropped_count += 1
             if len(dropped_examples) < 32:
                 dropped_examples.append(
                     {
                         "clip_id": record.clip_id,
-                        "seq_folder": str(seq_folder),
+                        "seq_folder": seq_folder_str,
                         "missing_stages": missing,
                         "frame_count": _record_weight(record),
                     }
