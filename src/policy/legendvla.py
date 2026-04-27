@@ -400,18 +400,179 @@ class LegendVLA(nn.Module):
         )
         return answer_start_idx.to(device=batch["input_ids"].device, dtype=torch.long)
 
-    def build_action_position_ids(self, batch: dict, action_ref: torch.Tensor) -> torch.Tensor:
-        """Build absolute position ids for action tokens.
+    def build_suffix_mrope_base(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """Return the Qwen3-VL MRoPE coordinate where expert suffix tokens start.
+
+        Qwen3-VL advances multimodal positions by the maximum THW coordinate,
+        not by raw token count. The expert suffix must therefore continue from
+        the maximum valid prefix MRoPE id instead of ``answer_start_idx``.
+        """
+        if device is None:
+            device = batch["input_ids"].device
+
+        fallback = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long)
+        position_ids = backbone_output.position_ids
+        if position_ids is None:
+            return fallback
+
+        position_ids = position_ids.to(device=device, dtype=torch.long)
+        if position_ids.ndim == 2:
+            rope_position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        elif position_ids.ndim == 3 and position_ids.shape[0] == 3:
+            rope_position_ids = position_ids
+        elif position_ids.ndim == 3 and position_ids.shape[0] == 4:
+            rope_position_ids = position_ids[1:]
+        else:
+            raise ValueError(
+                "Expected backbone position_ids to be [B,S], [3,B,S], or [4,B,S], "
+                f"got {tuple(position_ids.shape)}."
+            )
+
+        prefix_lengths = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long)
+        batch_size, seq_len = rope_position_ids.shape[1], rope_position_ids.shape[2]
+        if prefix_lengths.shape[0] != batch_size:
+            raise ValueError(
+                "Prefix length batch size does not match backbone position ids: "
+                f"{prefix_lengths.shape[0]} vs {batch_size}."
+            )
+        positions = torch.arange(seq_len, device=device).unsqueeze(0)
+        prefix_mask = positions < prefix_lengths.unsqueeze(1)
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device=device, dtype=torch.bool)
+            if attention_mask.shape != prefix_mask.shape:
+                raise ValueError(
+                    "attention_mask shape does not match backbone position ids: "
+                    f"{tuple(attention_mask.shape)} vs {tuple(prefix_mask.shape)}."
+                )
+            prefix_mask = prefix_mask & attention_mask
+
+        has_prefix = prefix_mask.any(dim=1)
+        masked_positions = rope_position_ids.masked_fill(~prefix_mask.unsqueeze(0), 0)
+        mrope_base = masked_positions.amax(dim=(0, 2)) + 1
+        return torch.where(has_prefix, mrope_base, fallback)
+
+    @staticmethod
+    def _build_text_mrope_position_ids(
+        text_start: int,
+        rope_start: int,
+        length: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, int, int]:
+        """Build [text, temporal, height, width] ids for text-style tokens."""
+        text_pos = torch.arange(text_start, text_start + length, device=device, dtype=torch.long)
+        rope_pos = torch.arange(rope_start, rope_start + length, device=device, dtype=torch.long)
+        position_ids = torch.stack([text_pos, rope_pos, rope_pos, rope_pos], dim=0)
+        return position_ids, text_start + length, rope_start + length
+
+    @staticmethod
+    def _build_vision_mrope_position_ids(
+        text_start: int,
+        rope_start: int,
+        num_frames: int,
+        grid_h: int,
+        grid_w: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, int, int]:
+        """Build Qwen3-VL-style [text, temporal, height, width] ids for frame grids.
+
+        Each future frame is treated like one Qwen3-VL visual block with
+        THW order [temporal, height, width]. The MRoPE cursor advances by
+        ``max(grid_h, grid_w)`` per frame, matching Qwen3-VL's visual span
+        rule, while text ids remain monotonic over the flattened suffix tokens.
+        """
+        if num_frames < 0 or grid_h <= 0 or grid_w <= 0:
+            raise ValueError(
+                f"Invalid vision MRoPE shape: num_frames={num_frames}, grid_h={grid_h}, grid_w={grid_w}."
+            )
+        frame_len = grid_h * grid_w
+        h_offsets = torch.arange(grid_h, device=device, dtype=torch.long).repeat_interleave(grid_w)
+        w_offsets = torch.arange(grid_w, device=device, dtype=torch.long).repeat(grid_h)
+
+        segments: list[torch.Tensor] = []
+        text_pos = text_start
+        rope_pos = rope_start
+        frame_span = max(grid_h, grid_w)
+        for _ in range(num_frames):
+            text_ids = torch.arange(text_pos, text_pos + frame_len, device=device, dtype=torch.long)
+            temporal_ids = torch.full((frame_len,), rope_pos, device=device, dtype=torch.long)
+            height_ids = rope_pos + h_offsets
+            width_ids = rope_pos + w_offsets
+            segments.append(torch.stack([text_ids, temporal_ids, height_ids, width_ids], dim=0))
+            text_pos += frame_len
+            rope_pos += frame_span
+
+        if segments:
+            position_ids = torch.cat(segments, dim=1)
+        else:
+            position_ids = torch.empty(4, 0, device=device, dtype=torch.long)
+        return position_ids, text_pos, rope_pos
+
+    def build_suffix_position_ids_from_relative(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+        rel_position_ids: torch.Tensor,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """Convert relative [text,T,H,W] ids to absolute Qwen3-VL suffix ids.
+
+        The text dimension follows the token sequence and therefore starts at
+        ``answer_start_idx``. The THW dimensions follow Qwen3-VL MRoPE
+        coordinates and therefore continue from the maximum valid prefix MRoPE
+        coordinate.
+        """
+        if device is None:
+            device = rel_position_ids.device
+        if rel_position_ids.ndim != 2 or rel_position_ids.shape[0] != 4:
+            raise ValueError(
+                "Expected rel_position_ids with shape [4, suffix_len], "
+                f"got {tuple(rel_position_ids.shape)}."
+            )
+
+        rel_position_ids = rel_position_ids.to(device=device, dtype=torch.long)
+        batch_size = batch["input_ids"].shape[0]
+        text_base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).view(1, batch_size, 1)
+        rope_base = self.build_suffix_mrope_base(batch, backbone_output, device=device).view(1, batch_size, 1)
+
+        position_ids = rel_position_ids.unsqueeze(1).expand(-1, batch_size, -1).clone()
+        position_ids[:1] = position_ids[:1] + text_base
+        position_ids[1:] = position_ids[1:] + rope_base
+        return position_ids
+
+    def build_action_position_ids(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+        action_ref: torch.Tensor,
+    ) -> torch.Tensor:
+        """Build prefix-continuous [text, temporal, height, width] ids for action tokens.
 
         Args:
-            batch: Collated batch (used by build_prefix_lengths for prefix info).
+            batch: Collated batch (used for prefix masks).
+            backbone_output: Backbone output carrying Qwen3-VL prefix position ids.
             action_ref: Any tensor with shape [B, action_len, ...] to derive dimensions from
                 (e.g. action_embeds in flow stream, or raw actions in training).
         """
         action_len = action_ref.shape[1]
         device = action_ref.device
-        base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
-        return base + torch.arange(action_len, device=device).unsqueeze(0)
+        rel_pos, _, _ = self._build_text_mrope_position_ids(
+            text_start=0,
+            rope_start=0,
+            length=action_len,
+            device=device,
+        )
+        return self.build_suffix_position_ids_from_relative(
+            batch,
+            backbone_output,
+            rel_pos,
+            device=device,
+        )
 
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
         slot_embeds: dict[str, torch.Tensor | None] = {
@@ -512,17 +673,21 @@ class LegendVLA(nn.Module):
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
         # actions_valid_mask is always single-chunk [B, H, D]; position ids are
         # built per-chunk then repeated, matching the expanded action_embeds.
-        action_position_ids = self.build_action_position_ids(batch, batch["actions_valid_mask"])
+        action_position_ids = self.build_action_position_ids(
+            batch,
+            backbone_output,
+            batch["actions_valid_mask"],
+        )
         action_mask = action_mask.repeat(1, num_parallel_chunks)
-        action_position_ids = action_position_ids.repeat(1, num_parallel_chunks)
+        action_position_ids = action_position_ids.repeat(1, 1, num_parallel_chunks)
         if action_embeds.shape[1] != action_mask.shape[1]:
             raise ValueError(
                 f"Action mask length {action_mask.shape[1]} does not match action embeddings length {action_embeds.shape[1]}."
             )
-        if action_embeds.shape[1] != action_position_ids.shape[1]:
+        if action_embeds.shape[1] != action_position_ids.shape[-1]:
             raise ValueError(
                 "Action position ids length "
-                f"{action_position_ids.shape[1]} does not match action embeddings length {action_embeds.shape[1]}."
+                f"{action_position_ids.shape[-1]} does not match action embeddings length {action_embeds.shape[1]}."
             )
         prefix_cache = backbone_output.prefix_cache
         expert_output = self.flow_expert(
@@ -578,48 +743,83 @@ class LegendVLA(nn.Module):
         # per-step validity across that block then flatten to [B, K*gh*gw].
         query_mask = frame_valid.unsqueeze(-1).expand(-1, -1, gh * gw).reshape(B, -1)
 
-        # Build suffix with per-segment RoPE positions. Views share the same
-        # temporal positions for both motion-cond and query tokens: they
-        # describe the same K future steps, just from different cameras.
-        # view_embed (zero-init) is the sole channel that differentiates
-        # which view each shared-position token belongs to.
+        # Build suffix with per-segment Qwen3-VL position ids. Text-like
+        # conditioning tokens use T=H=W; future-frame query blocks use visual
+        # [temporal, height, width] grids and advance in sequence for each view.
         segments: list[torch.Tensor] = []
         seg_masks: list[torch.Tensor] = []
-        seg_positions: list[torch.Tensor] = []
-        cur_pos = 0
+        seg_position_ids: list[torch.Tensor] = []
+        text_cur_pos = 0
+        rope_cur_pos = 0
 
         if cfg.action_conditioning and "actions" in batch:
             action_cond = self.wm_action_encoder(batch["actions"])
             action_len = action_cond.shape[1]
             segments.append(action_cond)
             seg_masks.append(batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool))
-            seg_positions.append(torch.arange(cur_pos, cur_pos + action_len, device=device))
-            cur_pos += action_len
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                length=action_len,
+                device=device,
+            )
+            seg_position_ids.append(pos_ids)
 
         if cfg.motion_conditioning:
-            motion_pos = torch.arange(cur_pos, cur_pos + K, device=device)
             segments.append(self.wm_motion_encoder(batch["future_head_motion"]))
             seg_masks.append(frame_valid)
-            seg_positions.append(motion_pos)
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                length=K,
+                device=device,
+            )
+            seg_position_ids.append(pos_ids)
             if has_breast:
                 segments.append(self.wm_motion_encoder(batch["future_breast_motion"]))
                 seg_masks.append(frame_valid)
-                seg_positions.append(motion_pos)  # shared with head_motion
-            cur_pos += K
+                pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
+                    text_start=text_cur_pos,
+                    rope_start=rope_cur_pos,
+                    length=K,
+                    device=device,
+                )
+                seg_position_ids.append(pos_ids)
 
         base_queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
         query_len = base_queries.shape[1]
-        query_pos = torch.arange(cur_pos, cur_pos + query_len, device=device)
         for v in range(V):
             segments.append(base_queries + self.wm_head.view_embed[v])
             seg_masks.append(query_mask)
-            seg_positions.append(query_pos)  # shared across views
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_vision_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                num_frames=K,
+                grid_h=gh,
+                grid_w=gw,
+                device=device,
+            )
+            if pos_ids.shape[1] != query_len:
+                raise ValueError(
+                    f"World-model query position length {pos_ids.shape[1]} "
+                    f"does not match query length {query_len}."
+                )
+            seg_position_ids.append(pos_ids)
 
         suffix = torch.cat(segments, dim=1)
         suffix_mask = torch.cat(seg_masks, dim=1)
-        rel_pos = torch.cat(seg_positions, dim=0).unsqueeze(0)  # [1, suffix_len]
-        base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
-        position_ids = base + rel_pos
+        rel_position_ids = torch.cat(seg_position_ids, dim=1)  # [4, suffix_len]
+        position_ids = self.build_suffix_position_ids_from_relative(
+            batch,
+            backbone_output,
+            rel_position_ids,
+            device=device,
+        )
+        if position_ids.shape[-1] != suffix.shape[1]:
+            raise ValueError(
+                f"World-model position ids length {position_ids.shape[-1]} "
+                f"does not match suffix length {suffix.shape[1]}."
+            )
 
         hidden = self.world_model_expert(
             suffix_embeds=suffix,

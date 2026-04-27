@@ -300,6 +300,54 @@ class Qwen3Expert(nn.Module):
         return torch.where(bool_mask, torch.zeros((), dtype=dtype, device=device),
                            torch.full((), min_val, dtype=dtype, device=device))
 
+    @staticmethod
+    def _prepare_suffix_position_ids(
+        suffix_position_ids: torch.Tensor,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """Split expert suffix ids into text ids and Qwen3-VL THW RoPE ids.
+
+        Accepted shapes:
+        - [B, L]: legacy text-style positions, expanded to [T,H,W]=same.
+        - [3, B, L]: Qwen3-VL MRoPE ids in [temporal, height, width] order.
+        - [4, B, L]: [text_pos, temporal, height, width].
+        """
+        suffix_position_ids = suffix_position_ids.to(device=device, dtype=torch.long)
+        expected_2d = (batch_size, seq_len)
+
+        if suffix_position_ids.ndim == 2:
+            if tuple(suffix_position_ids.shape) != expected_2d:
+                raise ValueError(
+                    "Expected 2D suffix_position_ids with shape "
+                    f"{expected_2d}, got {tuple(suffix_position_ids.shape)}."
+                )
+            text_position_ids = suffix_position_ids
+            rope_position_ids = suffix_position_ids.unsqueeze(0).expand(3, -1, -1)
+            return text_position_ids, rope_position_ids
+
+        if suffix_position_ids.ndim != 3:
+            raise ValueError(
+                "Expected suffix_position_ids to be 2D [B,L], 3D [3,B,L], "
+                f"or 3D [4,B,L], got {tuple(suffix_position_ids.shape)}."
+            )
+        if tuple(suffix_position_ids.shape[1:]) != expected_2d:
+            raise ValueError(
+                "Expected suffix_position_ids trailing shape "
+                f"{expected_2d}, got {tuple(suffix_position_ids.shape[1:])}."
+            )
+
+        if suffix_position_ids.shape[0] == 3:
+            return None, suffix_position_ids
+        if suffix_position_ids.shape[0] == 4:
+            return suffix_position_ids[0], suffix_position_ids[1:]
+        raise ValueError(
+            "Expected first suffix_position_ids dimension to be 3 "
+            f"([temporal,height,width]) or 4 ([text,temporal,height,width]), "
+            f"got {suffix_position_ids.shape[0]}."
+        )
+
     def forward(
         self,
         suffix_embeds: torch.Tensor,
@@ -326,6 +374,7 @@ class Qwen3Expert(nn.Module):
             prefix_cache = prefix_cache.detach()
 
         hidden_states = suffix_embeds
+        batch_size = hidden_states.shape[0]
         seq_len = hidden_states.shape[1]
 
         # Build full attention mask: [prefix_mask | suffix_mask]
@@ -337,20 +386,13 @@ class Qwen3Expert(nn.Module):
             dim=-1,
         )
 
-        if suffix_position_ids.ndim == 3:
-            suffix_position_ids = suffix_position_ids[0]
-        if suffix_position_ids.ndim != 2:
-            raise ValueError(f"Expected suffix_position_ids to be 2D after squeeze, got {suffix_position_ids.shape}.")
-        if suffix_position_ids.shape[1] != seq_len:
-            raise ValueError(
-                f"Suffix position ids length "
-                f"{suffix_position_ids.shape[1]} does not match hidden sequence length {seq_len}."
-            )
-        # Qwen3-VL position_ids: 4 dims = [text_pos, height, width, temporal]
-        suffix_position_ids = suffix_position_ids.unsqueeze(0).expand(4, -1, -1)
-
-        text_position_ids = suffix_position_ids[0]
-        position_embeddings = self.rotary_emb(hidden_states, suffix_position_ids[1:])
+        text_position_ids, rope_position_ids = self._prepare_suffix_position_ids(
+            suffix_position_ids,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            device=hidden_states.device,
+        )
+        position_embeddings = self.rotary_emb(hidden_states, rope_position_ids)
 
         prefix_len = prefix_cache.kv_seq_len
         suffix_len = seq_len
@@ -359,7 +401,6 @@ class Qwen3Expert(nn.Module):
                 f"Suffix length {suffix_len} must be divisible by num_parallel_chunks={num_parallel_chunks}."
             )
 
-        batch_size = hidden_states.shape[0]
         chunk_size = suffix_len // num_parallel_chunks
         full_attention_mask_bool = full_attention_mask.to(device=hidden_states.device)
 
