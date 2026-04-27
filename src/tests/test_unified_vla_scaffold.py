@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
-from src.model.action.action_head import FourierActionEncoder, MLPProjector
+from src.model.action.action_head import MLPEncoder, MLPDecoder
 from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput
 from src.tests.dummy_flow_expert import DummyFlowExpert
@@ -180,29 +180,29 @@ def make_model(diffloss=None):
         hidden_size=hidden_size, vocab_size=128,
         num_layers=8, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
     )
-    state_encoder = FourierActionEncoder(
+    state_encoder = MLPEncoder(
         action_dim=state_dim, width=hidden_size,
         time_cond=False, enable_fourier_embed=False, mlp_depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
-    ar_action_encoder = FourierActionEncoder(
+    ar_action_encoder = MLPEncoder(
         action_dim=action_dim, width=hidden_size,
         time_cond=False, enable_fourier_embed=False, mlp_depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
-    action_encoder = FourierActionEncoder(
+    action_encoder = MLPEncoder(
         action_dim=action_dim, width=action_hidden_size,
         time_cond=False, enable_fourier_embed=False, mlp_depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
     time_embedding = TimeEmbedding(time_hidden_size)
     flow_expert = DummyFlowExpert(hidden_size=action_hidden_size, time_hidden_size=time_hidden_size)
-    action_decoder = MLPProjector(
+    action_decoder = MLPDecoder(
         input_dim=action_hidden_size, output_dim=action_dim,
         width=action_hidden_size, depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
-    latent_condition_projector = MLPProjector(
+    latent_condition_projector = MLPDecoder(
         input_dim=hidden_size, output_dim=32,
         width=hidden_size, depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,

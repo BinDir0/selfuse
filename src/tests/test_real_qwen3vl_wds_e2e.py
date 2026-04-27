@@ -15,7 +15,7 @@ from src.dataset.qwen3_vl_batching import Qwen3VLBatchProcessor, Qwen3VLChatForm
 from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.dataset.vla_dataset import UnifiedWdsDataset, VLAWdsDataset
 from src.dataset.vlm_dataset import VLMWdsDataset
-from src.model.action.action_head import FourierActionEncoder, MLPProjector
+from src.model.action.action_head import MLPEncoder, MLPDecoder
 from src.model.common.diffloss import DiffLoss
 from src.model.common.modules import TimeEmbedding
 from src.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
@@ -268,7 +268,7 @@ def build_real_model(
 
     model = LegendVLA(
         backbone=backbone,
-        state_encoder=FourierActionEncoder(
+        state_encoder=MLPEncoder(
             action_dim=48,
             width=backbone.hidden_size,
             time_cond=False,
@@ -277,7 +277,7 @@ def build_real_model(
             final_layer_norm=False,
             use_mlp_layer_norm=False,
         ),
-        ar_action_encoder=FourierActionEncoder(
+        ar_action_encoder=MLPEncoder(
             action_dim=48,
             width=backbone.hidden_size,
             time_cond=False,
@@ -286,7 +286,7 @@ def build_real_model(
             final_layer_norm=False,
             use_mlp_layer_norm=False,
         ),
-        action_encoder=FourierActionEncoder(
+        action_encoder=MLPEncoder(
             action_dim=48,
             width=action_hidden_size,
             time_cond=False,
@@ -297,7 +297,7 @@ def build_real_model(
         ),
         time_embedding=TimeEmbedding(time_hidden_size),
         flow_expert=DummyFlowExpert(hidden_size=action_hidden_size, time_hidden_size=time_hidden_size),
-        action_decoder=MLPProjector(
+        action_decoder=MLPDecoder(
             input_dim=action_hidden_size,
             output_dim=48,
             width=action_hidden_size,
@@ -305,7 +305,7 @@ def build_real_model(
             final_layer_norm=False,
             use_mlp_layer_norm=False,
         ),
-        latent_condition_projector=MLPProjector(
+        latent_condition_projector=MLPDecoder(
             input_dim=backbone.hidden_size,
             output_dim=diffloss_z_channels,
             width=256,

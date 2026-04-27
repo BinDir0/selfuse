@@ -5,7 +5,7 @@ diffloss:
   enabled: true
   diffloss_repeat: 16
   ar_action_encoder:
-    _target_: src.model.action.action_head.FourierActionEncoder
+    _target_: src.model.action.action_head.MLPEncoder
     action_dim: ${dims.action_dim}
     width: ${dims.vlm_hidden_size}
     time_cond: False
@@ -14,7 +14,7 @@ diffloss:
     final_layer_norm: False
     use_mlp_layer_norm: False
   latent_condition_projector:
-    _target_: src.model.action.action_head.MLPProjector
+    _target_: src.model.action.action_head.MLPDecoder
     input_dim: ${dims.vlm_hidden_size}
     output_dim: ${dims.diffloss_z_channels}
     width: ${dims.vlm_hidden_size}

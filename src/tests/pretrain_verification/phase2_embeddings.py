@@ -22,7 +22,7 @@ import sys
 import numpy as np
 import torch
 
-from src.model.action.action_head import FourierActionEncoder, MLPProjector
+from src.model.action.action_head import MLPEncoder
 from src.model.common.modules import TimeEmbedding, GaussianFourierFeatureTransform
 
 from src.tests.pretrain_verification.utils import (
@@ -55,7 +55,7 @@ def check_2_1_encoder_distributions(skip_visual: bool, output_dir) -> CheckResul
 
     torch.manual_seed(42)
     for name, cfg in configs.items():
-        encoder = FourierActionEncoder(
+        encoder = MLPEncoder(
             action_dim=cfg["action_dim"], width=cfg["width"],
             time_cond=False, enable_fourier_embed=True,
             fourier_embed_dim=256, mlp_depth=cfg["mlp_depth"],
@@ -184,7 +184,7 @@ def check_2_2_time_embedding(skip_visual: bool, output_dir) -> CheckResult:
 def check_2_3_fourier_determinism() -> CheckResult:
     """Verify Fourier features are deterministic and buffer is frozen."""
     errors = []
-    encoder = FourierActionEncoder(
+    encoder = MLPEncoder(
         action_dim=48, width=1024, time_cond=False,
         enable_fourier_embed=True, fourier_embed_dim=256,
         mlp_depth=2, final_layer_norm=True, use_mlp_layer_norm=True,
