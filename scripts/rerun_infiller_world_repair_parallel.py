@@ -39,6 +39,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of subprocess workers to launch.",
     )
     parser.add_argument(
+        "--global_part_count",
+        type=int,
+        default=1,
+        help="Split the full seq list into this many disjoint global parts before launching local workers.",
+    )
+    parser.add_argument(
+        "--global_part_index",
+        type=int,
+        default=0,
+        help="0-based index of the global part assigned to this machine.",
+    )
+    parser.add_argument(
         "--gpus",
         default="0,1,2,3,4,5,6,7",
         help="Comma-separated GPU ids assigned round-robin across workers. Use empty string for CPU-only workers.",
@@ -183,6 +195,16 @@ def _bucketize_round_robin(seq_folders: list[Path], worker_count: int) -> list[l
     return buckets
 
 
+def _select_global_part(seq_folders: list[Path], part_count: int, part_index: int) -> list[Path]:
+    if part_count < 1:
+        raise SystemExit("--global_part_count must be >= 1")
+    if part_index < 0 or part_index >= part_count:
+        raise SystemExit("--global_part_index must satisfy 0 <= index < global_part_count")
+    if part_count == 1:
+        return seq_folders
+    return [seq_folder for idx, seq_folder in enumerate(seq_folders) if idx % part_count == part_index]
+
+
 def _write_seq_list(path: Path, seq_folders: list[Path]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(f"{seq_folder}\n" for seq_folder in seq_folders), encoding="utf-8")
@@ -212,6 +234,11 @@ def main() -> int:
         raise SystemExit("--worker_count must be >= 1")
 
     seq_folders = _collect_seq_folders(args)
+    seq_folders = _select_global_part(
+        seq_folders,
+        int(args.global_part_count),
+        int(args.global_part_index),
+    )
     progress_dir = Path(args.progress_dir).expanduser().resolve() if args.progress_dir else None
     report_out = Path(args.report_out).expanduser().resolve()
     worker_tmp_dir = (
@@ -255,6 +282,8 @@ def main() -> int:
             {
                 "workers_planned": len(worker_specs),
                 "worker_count_requested": int(args.worker_count),
+                "global_part_count": int(args.global_part_count),
+                "global_part_index": int(args.global_part_index),
                 "gpus": gpu_ids,
                 "seq_total_input": int(prefiltered_total),
                 "seq_skipped_prefilter": int(skipped_prefilter),
@@ -348,6 +377,8 @@ def main() -> int:
         "launcher": {
             "worker_count_requested": int(args.worker_count),
             "workers_started": int(len(worker_specs)),
+            "global_part_count": int(args.global_part_count),
+            "global_part_index": int(args.global_part_index),
             "gpus": gpu_ids,
             "python_bin": str(args.python_bin),
             "seq_total_input": int(prefiltered_total),
