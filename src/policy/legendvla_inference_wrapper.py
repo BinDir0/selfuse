@@ -74,6 +74,9 @@ class LegendVLAInference(nn.Module):
 
         self.model: nn.Module = hydra.utils.instantiate(model_cfg.policy)
         if checkpoint_path:
+            # TODO(ema-swap): silently uses raw training weights when ckpt has
+            #     EMA/SWA shadow. Root cause in FSDPModelOnlyAppState. Not
+            #     triggered today (ema/swa.enabled=False). See §C3.
             load_checkpoint(self.model, checkpoint_path)
         else:
             log.warning("No checkpoint_path provided — model uses initial pretrained weights only.")

@@ -74,7 +74,15 @@ class FSDPWorkspaceAppState(Stateful):
 
 
 class FSDPModelOnlyAppState(Stateful):
-    """DCP app state for loading only the model weights from a workspace checkpoint."""
+    """DCP app state for loading only the model weights from a workspace checkpoint.
+
+    TODO(ema-swap): only declares "model", so DCP load silently drops the
+        "model_averaging" entry written by FSDPWorkspaceAppState. Inference
+        therefore uses raw training weights instead of the EMA / SWA shadow.
+        Not triggered today (ema/swa.enabled=False). When enabling, add a
+        `prefer_ema` flag to route shadow into set_model_state_dict.
+        See PRETRAIN_LAUNCH_AUDIT.md §C3.
+    """
 
     def __init__(self, *, model) -> None:
         self.model = model
