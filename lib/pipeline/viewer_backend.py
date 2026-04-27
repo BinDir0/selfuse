@@ -333,6 +333,26 @@ class EpisodeViewerBackend:
             "anchor_source": "lowdim_wrist_world",
             "notes": notes,
         }
+        keypoint_frame["hands"] = [
+            {
+                "side": "left",
+                "wrist": np.asarray(keypoint_frame["left_wrist"], dtype=np.float32),
+                "tips": np.asarray(keypoint_frame["left_tips"], dtype=np.float32),
+                "rotmat": np.asarray(keypoint_frame["left_rotmat"], dtype=np.float32),
+                "color": (255, 0, 255),
+                "label": "L-lowdim",
+                "draw_axes": True,
+            },
+            {
+                "side": "right",
+                "wrist": np.asarray(keypoint_frame["right_wrist"], dtype=np.float32),
+                "tips": np.asarray(keypoint_frame["right_tips"], dtype=np.float32),
+                "rotmat": np.asarray(keypoint_frame["right_rotmat"], dtype=np.float32),
+                "color": (0, 255, 0),
+                "label": "R-lowdim",
+                "draw_axes": True,
+            },
+        ]
         notes.append("camera extrinsic is interpreted as fixed world-to-camera (w2c) and inverted for display.")
         return keypoint_frame
 
