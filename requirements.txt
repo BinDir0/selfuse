@@ -3,9 +3,7 @@ hydra-core
 wandb
 tqdm
 numpy
-accelerate==1.10.0
 diffusers==0.34.0
-deepspeed==0.17.5
 zarr  # legacy data build/conversion/visualization utilities
 tensorstore
 numba

@@ -495,12 +495,6 @@ class TestProcessorPromptBuilding:
         suffix = f"{ACTION_TOKEN * len(actions)}"
         assert suffix == "<action><action><action><action>"
 
-    def test_prompt_lowercase(self):
-        """VLA text should be lowercased by default."""
-        text = "Pick Up The CUP"
-        clean_text = text.replace(".", "").lower()
-        assert clean_text == "Pick Up The CUP".lower()
-
     def test_predict_future_frames_flag_changes_user_text(self):
         # Future frames are now passed as a separate tensor to the world-model
         # expert; the formatter's only observable change is the user prompt hint.

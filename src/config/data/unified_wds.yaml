@@ -109,7 +109,6 @@ data_collator:
     action_token: ${added_slot_tokens.action}
     camera_token: ${added_slot_tokens.camera}
     camera_intrinsic_mode: ${camera_intrinsic_mode}
-    lowercase_vla_text: True
     predict_future_frames: ${world_model.enabled}
   batch_processor:
     _target_: src.dataset.qwen3_vl_batching.Qwen3VLBatchProcessor

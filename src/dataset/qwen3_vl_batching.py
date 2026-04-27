@@ -77,14 +77,12 @@ class Qwen3VLChatFormatter:
         action_token: str = "<action>",
         camera_token: str = "<camera>",
         camera_intrinsic_mode: str = "text",
-        lowercase_vla_text: bool = True,
         predict_future_frames: bool = False,
     ):
         self.state_token = state_token
         self.action_token = action_token
         self.camera_token = camera_token
         self.camera_intrinsic_mode = camera_intrinsic_mode
-        self.lowercase_vla_text = lowercase_vla_text
         self.predict_future_frames = predict_future_frames
 
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
@@ -353,7 +351,10 @@ class Qwen3VLBatchProcessor:
         - Image samples use `vision_type="image"` and `images` shaped `[H, W, C]` or `[T, H, W, C]`.
         - Video samples use `vision_type="video"`, `images` shaped `[T, H, W, C]`, and `video_fps`.
         - Processor kwargs are passed directly from `processor_call_kwargs`.
-        - Do not set text truncation here because it can break multimodal token alignment.
+        - truncation=True is intentional: uniform seq len lets torch.compile reuse one
+          kernel cache. Tune `max_vlm_tokens` so truncation hits <1% of samples;
+          truncated samples drop the assistant header and silently get VLM loss=0
+          (see `find_answer_start_idx`).
         """
         self.processor.tokenizer.padding_side = self.padding_side
 
