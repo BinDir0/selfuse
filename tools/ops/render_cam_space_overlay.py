@@ -20,8 +20,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from hawor.utils.process import get_mano_cfg, run_mano, run_mano_left
 from hawor.utils.rotation import rotation_matrix_to_angle_axis
+from lib.pipeline.clip_manifest import load_clip_manifest
 from lib.models.mano_wrapper import MANO
 from lib.pipeline.exporters.webdataset_discovery import load_or_build_frame_index
+from lib.pipeline.frame_sources import build_frame_source_from_descriptor
 
 
 HAND_CHAINS = (
@@ -41,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Overlay motion-stage cam_space MANO joints directly on source RGB frames."
     )
     parser.add_argument("--seq-folder", required=True, help="Processed seq_folder, e.g. factory*/outputs/<clip_id>")
+    parser.add_argument(
+        "--descriptor-manifest",
+        default=None,
+        help="Optional clip manifest used to resolve tar-backed source frames for BuildAI shard layouts.",
+    )
     parser.add_argument("--output", required=True, help="Output mp4 path")
     parser.add_argument("--mano-device", default="cpu", help="Device for MANO forward pass, e.g. cpu or cuda:0")
     parser.add_argument("--fps", type=int, default=30, help="FPS for the output video")
@@ -83,6 +90,15 @@ def _infer_num_frames(seq_folder: Path, frame_index: dict[int, str]) -> int:
         pred_trans, *_ = joblib.load(world_path)
         return int(np.asarray(pred_trans).shape[1])
     return int(max(frame_index.keys()) + 1)
+
+
+def _load_descriptor(seq_folder: Path, manifest_path: Path):
+    clip_id = seq_folder.name
+    records = load_clip_manifest(manifest_path)
+    for record in records:
+        if record.clip_id == clip_id:
+            return record.descriptor
+    raise KeyError(f"clip_id {clip_id!r} not found in descriptor manifest {manifest_path}")
 
 
 def _load_intrinsic(seq_folder: Path, image_shape: tuple[int, int, int]) -> np.ndarray:
@@ -260,7 +276,7 @@ def _render_chunk_joints(
 
 
 def _select_frame_ids(
-    frame_index: dict[int, str],
+    available_frame_ids: list[int],
     *,
     num_frames: int,
     frame_start: int,
@@ -268,7 +284,7 @@ def _select_frame_ids(
     render_every: int,
     max_frames: int | None,
 ) -> list[int]:
-    frame_ids = sorted(frame_id for frame_id in frame_index.keys() if 0 <= frame_id < num_frames and frame_id >= frame_start)
+    frame_ids = sorted(frame_id for frame_id in available_frame_ids if 0 <= frame_id < num_frames and frame_id >= frame_start)
     if frame_end is not None:
         frame_ids = [frame_id for frame_id in frame_ids if frame_id < frame_end]
     if render_every > 1:
@@ -288,16 +304,32 @@ def main() -> None:
     if args.render_every < 1:
         raise ValueError("--render-every must be >= 1")
 
-    extracted_dir = seq_folder / "extracted_images"
-    frame_index = _load_frame_index(extracted_dir)
-    num_frames = _infer_num_frames(seq_folder, frame_index)
+    descriptor = None
+    frame_source = None
+    frame_index = None
+
+    if args.descriptor_manifest:
+        manifest_path = Path(args.descriptor_manifest).expanduser().resolve()
+        descriptor = _load_descriptor(seq_folder, manifest_path)
+        frame_source = build_frame_source_from_descriptor(descriptor)
+        num_frames = int(min(int(descriptor.frame_count), _infer_num_frames(seq_folder, {0: ""})))
+        available_frame_ids = list(range(int(descriptor.frame_count)))
+    else:
+        extracted_dir = seq_folder / "extracted_images"
+        frame_index = _load_frame_index(extracted_dir)
+        num_frames = _infer_num_frames(seq_folder, frame_index)
+        available_frame_ids = sorted(frame_index.keys())
+
     track_dir = _find_track_dir(seq_folder)
     frame_chunks_all = joblib.load(track_dir / "frame_chunks_all.npy")
 
-    first_frame_path = Path(frame_index[min(frame_index.keys())])
-    first_frame = cv2.imread(str(first_frame_path), cv2.IMREAD_COLOR)
-    if first_frame is None:
-        raise RuntimeError(f"Failed to read first frame: {first_frame_path}")
+    if frame_source is not None:
+        first_frame = frame_source.get_frame(0, rgb=False)
+    else:
+        first_frame_path = Path(frame_index[min(frame_index.keys())])
+        first_frame = cv2.imread(str(first_frame_path), cv2.IMREAD_COLOR)
+        if first_frame is None:
+            raise RuntimeError(f"Failed to read first frame: {first_frame_path}")
     intrinsic = _load_intrinsic(seq_folder, first_frame.shape)
 
     device = torch.device(args.mano_device)
@@ -334,7 +366,7 @@ def main() -> None:
             all_joints[hand_idx][valid_frames[valid_mask]] = joints[: len(valid_frames)][valid_mask]
 
     frame_ids = _select_frame_ids(
-        frame_index,
+        available_frame_ids,
         num_frames=num_frames,
         frame_start=int(args.frame_start),
         frame_end=None if args.frame_end is None else int(args.frame_end),
@@ -358,9 +390,12 @@ def main() -> None:
     try:
         total = len(frame_ids)
         for render_idx, frame_id in enumerate(frame_ids, start=1):
-            image = cv2.imread(frame_index[frame_id], cv2.IMREAD_COLOR)
-            if image is None:
-                continue
+            if frame_source is not None:
+                image = frame_source.get_frame(int(frame_id), rgb=False)
+            else:
+                image = cv2.imread(frame_index[frame_id], cv2.IMREAD_COLOR)
+                if image is None:
+                    continue
 
             left_joints = all_joints[0][frame_id]
             right_joints = all_joints[1][frame_id]
