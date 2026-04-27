@@ -19,6 +19,13 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 
 from src.model.vlm.prefix_cache import BackboneStreamOutput
+from src.model.vlm.qwen3_vl_compile_patch import apply_patch
+
+# Patch Qwen3VLVisionAttention.forward at backbone import time so every
+# entry point that touches the backbone (train / inference wrapper / serve)
+# gets the fix for transformers issue #44962. Idempotent: safe to call
+# multiple times; the function only rebinds Qwen3VLVisionAttention.forward.
+apply_patch()
 
 
 @dataclass
@@ -82,7 +89,10 @@ class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
             key_states,
             value_states,
             attention_mask,
-            dropout=0.0 if not base_attention.training else base_attention.attention_dropout,
+            # Use self.training because base_attention is registered via
+            # object.__setattr__ (line 37) and is not a real submodule, so
+            # wrapper.eval() / .train() does not propagate into it.
+            dropout=0.0 if not self.training else base_attention.attention_dropout,
             scaling=base_attention.scaling,
             **kwargs,
         )

@@ -111,9 +111,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         if not self.compile_cfg.get("enabled", False):
             return
 
-        from src.model.vlm.qwen3_vl_compile_patch import apply_patch
-        apply_patch()
-
+        # apply_patch() runs at qwen3_vl_backbone import time; no need to call here.
         compile_cfg = OmegaConf.to_container(self.compile_cfg, resolve=True)
         compile_kwargs = {
             key: value
