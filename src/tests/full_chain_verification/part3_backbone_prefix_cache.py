@@ -70,9 +70,15 @@ def build_model_and_collator(config_path: str, device: str = "cuda"):
 
 
 def make_mock_batch(collator, model, device: str = "cuda") -> dict[str, Any]:
-    """Build a mock VLA batch using the collator."""
+    """Build a mock VLA batch using the collator.
+
+    n_states must equal the model's state_horizon (yaml: 6) because the model
+    builds a [B, num_state_tokens] mask in train mode and broadcasts it against
+    state_encoder output `[B, n_states, hidden]`. n_actions must equal the
+    action_horizon (yaml: 32) for the same reason on the action side.
+    """
     from src.tests.full_chain_verification.part2_collator_tokenization import make_vla_sample
-    sample = make_vla_sample(n_states=18, n_actions=32, image_horizon=6)
+    sample = make_vla_sample(n_states=6, n_actions=32, image_horizon=6)
     batch = collator.collate_raw([sample])
     # Cast to model dtype and device
     for k, v in batch.items():
@@ -114,6 +120,18 @@ def test_state_embed_replacement_content(report: PhaseReport, model, batch: dict
 
 def test_action_noise_in_training(report: PhaseReport, model, batch: dict) -> None:
     """add_action_noise=True should produce different embeddings than False."""
+    # When the diffloss config group is `none` (current default in
+    # legendvla_qwen3_vl.yaml), `model.ar_action_encoder` is None and
+    # `build_slot_embeddings` returns slot_embeds["action"]=None — there is
+    # no AR-action embedding to compare. Skip cleanly in that case.
+    if model.ar_action_encoder is None:
+        report.add(assert_check(
+            True,
+            "3.1b action noise produces different embeddings",
+            "SKIPPED: ar_action_encoder is None (diffloss=none)",
+        ))
+        return
+
     with torch.no_grad():
         clean = model.build_slot_embeddings(batch, add_action_noise=False)["action"]
         # Multiple noisy samples to check distribution

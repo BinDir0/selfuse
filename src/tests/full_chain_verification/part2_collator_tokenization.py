@@ -34,7 +34,7 @@ OUTPUT_PART = "part2"
 # ── Mock sample builders ───────────────────────────────────────────────────
 
 def make_vla_sample(
-    n_states: int = 18,
+    n_states: int = 6,
     n_actions: int = 32,
     image_horizon: int = 6,
     state_dim: int = 48,
@@ -42,6 +42,13 @@ def make_vla_sample(
     instruction: str = "pick up the red cube from the table",
     image_size: tuple[int, int] = (224, 224),
 ) -> dict[str, Any]:
+    # Default n_states matches yaml `data.shape_meta.obs.state.horizon=6`. The
+    # state_encoder ingests `[B, n_states, state_dim]` and the chat template
+    # renders exactly `n_states` <state> token slots, so the model's
+    # num_state_tokens (also derived from horizon=6) must agree with this
+    # tensor's middle dim. Tests that explicitly want a different number of
+    # <state> slots (e.g. token-count fidelity in part 2) override n_states
+    # at the call site; those samples must NOT be forwarded into the model.
     H, W = image_size
     return {
         "images": torch.randint(0, 255, (image_horizon, H, W, 3), dtype=torch.uint8),
@@ -65,7 +72,7 @@ def make_vlm_sample(
     state_dim: int = 48,
     action_dim: int = 48,
     action_horizon: int = 32,
-    state_horizon: int = 18,
+    state_horizon: int = 6,
 ) -> dict[str, Any]:
     H, W = image_size
     return {
@@ -105,6 +112,11 @@ def build_collator(model_path: str, mode: str = "train"):
                 "return_tensors": "pt",
             },
         },
+        # Match yaml `policy.backbone.mem_temporal_attention.enabled=False`:
+        # MEM-off lets the chat template expand T*N video placeholders. The
+        # processor's class default is True, which would assert on any VLM
+        # image sample (image_grid_thw present is forbidden under MEM-on).
+        mem_enabled=False,
     )
     collator = UnifiedVLACollator(
         formatter=formatter,
