@@ -6,6 +6,8 @@ import sys
 import os
 from pathlib import Path
 
+_MANO_MODEL_CACHE = {}
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -41,6 +43,39 @@ def block_print():
 def enable_print():
     sys.stdout = sys.__stdout__
 
+
+def _get_cached_default_mano_model(*, is_right: bool, use_cuda: bool, fix_shapedirs: bool = True):
+    cache_key = (bool(is_right), bool(use_cuda), bool(fix_shapedirs))
+    cached = _MANO_MODEL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if is_right:
+        mano_cfg = {
+            'DATA_DIR': '_DATA/data/',
+            'MODEL_PATH': '_DATA/data/mano',
+            'GENDER': 'neutral',
+            'NUM_HAND_JOINTS': 15,
+            'CREATE_BODY_POSE': False,
+        }
+    else:
+        mano_cfg = {
+            'DATA_DIR': '_DATA/data_left/',
+            'MODEL_PATH': '_DATA/data_left/mano_left',
+            'GENDER': 'neutral',
+            'NUM_HAND_JOINTS': 15,
+            'CREATE_BODY_POSE': False,
+            'is_rhand': False,
+        }
+    mano = MANO(**{k.lower(): v for k, v in mano_cfg.items()})
+    if use_cuda:
+        mano = mano.cuda()
+    if not is_right and fix_shapedirs:
+        mano.shapedirs[:, 0, :] *= -1
+    mano.eval()
+    _MANO_MODEL_CACHE[cache_key] = mano
+    return mano
+
 def get_mano_faces():
     block_print()
     MANO_cfg = {
@@ -69,22 +104,9 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     """
     block_print()
 
-    if mano_model is None:
-        # Create new model if not provided (backward compatibility)
-        MANO_cfg = {
-            'DATA_DIR': '_DATA/data/',
-            'MODEL_PATH': '_DATA/data/mano',
-            'GENDER': 'neutral',
-            'NUM_HAND_JOINTS': 15,
-            'CREATE_BODY_POSE': False
-        }
-        mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
-        mano = MANO(**mano_cfg)
-        if use_cuda:
-            mano = mano.cuda()
-    else:
-        # Reuse provided model
-        mano = mano_model
+    mano = mano_model
+    if mano is None:
+        mano = _get_cached_default_mano_model(is_right=True, use_cuda=use_cuda)
 
     B, T, _ = root_orient.shape
     NUM_JOINTS = 15
@@ -98,10 +120,11 @@ def run_mano(trans, root_orient, hand_pose, is_right=None, betas=None, use_cuda=
     rotmat_mano_params['hand_pose'] = aa_to_rotmat(mano_params['hand_pose']).view(B*T, NUM_JOINTS, 3, 3)
     rotmat_mano_params['transl'] = trans.reshape(B*T, 3)
 
-    if use_cuda:
-        mano_output = mano(**{k: v.float().cuda() for k,v in rotmat_mano_params.items()}, pose2rot=False)
-    else:
-        mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
+    with torch.inference_mode():
+        if use_cuda:
+            mano_output = mano(**{k: v.float().cuda() for k,v in rotmat_mano_params.items()}, pose2rot=False)
+        else:
+            mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
 
     faces_right = mano.faces
     faces_new = np.array([[92, 38, 234],
@@ -154,27 +177,13 @@ def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_
     """
     block_print()
 
-    if mano_model is None:
-        # Create new model if not provided (backward compatibility)
-        MANO_cfg = {
-            'DATA_DIR': '_DATA/data_left/',
-            'MODEL_PATH': '_DATA/data_left/mano_left',
-            'GENDER': 'neutral',
-            'NUM_HAND_JOINTS': 15,
-            'CREATE_BODY_POSE': False,
-            'is_rhand': False
-        }
-        mano_cfg = {k.lower(): v for k,v in MANO_cfg.items()}
-        mano = MANO(**mano_cfg)
-        if use_cuda:
-            mano = mano.cuda()
-
-        # fix MANO shapedirs of the left hand bug (https://github.com/vchoutas/smplx/issues/48)
-        if fix_shapedirs:
-            mano.shapedirs[:, 0, :] *= -1
-    else:
-        # Reuse provided model
-        mano = mano_model
+    mano = mano_model
+    if mano is None:
+        mano = _get_cached_default_mano_model(
+            is_right=False,
+            use_cuda=use_cuda,
+            fix_shapedirs=fix_shapedirs,
+        )
 
     B, T, _ = root_orient.shape
     NUM_JOINTS = 15
@@ -188,10 +197,11 @@ def run_mano_left(trans, root_orient, hand_pose, is_right=None, betas=None, use_
     rotmat_mano_params['hand_pose'] = aa_to_rotmat(mano_params['hand_pose']).view(B*T, NUM_JOINTS, 3, 3)
     rotmat_mano_params['transl'] = trans.reshape(B*T, 3)
 
-    if use_cuda:
-        mano_output = mano(**{k: v.float().cuda() for k,v in rotmat_mano_params.items()}, pose2rot=False)
-    else:
-        mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
+    with torch.inference_mode():
+        if use_cuda:
+            mano_output = mano(**{k: v.float().cuda() for k,v in rotmat_mano_params.items()}, pose2rot=False)
+        else:
+            mano_output = mano(**{k: v.float() for k,v in rotmat_mano_params.items()}, pose2rot=False)
 
     faces_right = mano.faces
     faces_new = np.array([[92, 38, 234],
