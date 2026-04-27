@@ -334,17 +334,6 @@ class EpisodeViewerBackend:
             "notes": notes,
         }
         notes.append("camera extrinsic is interpreted as fixed world-to-camera (w2c) and inverted for display.")
-
-        if mano_array is None:
-            return keypoint_frame
-
-        mano_frame = self._get_mano_frame(summary, lowdim_array, mano_array)
-        keypoint_frame["left_wrist"] = np.asarray(mano_frame["left_joints"][wv.MANO_CENTER_IDX], dtype=np.float32)
-        keypoint_frame["right_wrist"] = np.asarray(mano_frame["right_joints"][wv.MANO_CENTER_IDX], dtype=np.float32)
-        keypoint_frame["left_tips"] = np.asarray(mano_frame["left_joints"][wv.FINGERTIP_INDICES], dtype=np.float32)
-        keypoint_frame["right_tips"] = np.asarray(mano_frame["right_joints"][wv.FINGERTIP_INDICES], dtype=np.float32)
-        keypoint_frame["anchor_source"] = "mano_joint_wrist"
-        notes.append("Keypoint mode is using MANO joint 0 as the wrist anchor and MANO fingertip joints.")
         return keypoint_frame
 
     def build_mano_frame(self, summary: wv.SampleSummary, lowdim_array: np.ndarray, mano_array: np.ndarray) -> dict:
