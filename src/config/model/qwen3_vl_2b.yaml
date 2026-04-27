@@ -179,9 +179,9 @@ policy:
     state_mask:
       _target_: src.policy.legendvla.SpanMaskConfig
       mask_ratio: 0.65
-      mean_span_len: 3.0
+      mean_span_len: 1.5
       start_bias_alpha: 2.0
-      p_no_mask: 0.1
+      p_no_mask: 0.05
       keep_last: True
       prefer_early: False
   loss_config:
