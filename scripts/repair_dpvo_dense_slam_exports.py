@@ -5,9 +5,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, **_kwargs):
+        return iterable
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--report_out",
         default=None,
         help="Optional JSON report path.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(64, (os.cpu_count() or 1) * 4)),
+        help="Thread workers for parallel seq_folder repair.",
     )
     return parser
 
@@ -124,18 +138,74 @@ def repair_seq_folder(seq_folder: Path, *, dry_run: bool) -> dict:
     }
 
 
+def _summarize_report(report: list[dict]) -> dict:
+    status_counts: dict[str, int] = {}
+    repaired_exports = 0
+    changed_exports = 0
+    skipped_exports = 0
+
+    for item in report:
+        status = str(item.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        repaired = item.get("repaired") or []
+        skipped = item.get("skipped") or []
+        repaired_exports += len(repaired)
+        changed_exports += sum(1 for entry in repaired if entry.get("changed"))
+        skipped_exports += len(skipped)
+
+    return {
+        "seq_folders_total": len(report),
+        "status_counts": status_counts,
+        "repaired_exports": int(repaired_exports),
+        "changed_exports": int(changed_exports),
+        "skipped_exports": int(skipped_exports),
+    }
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     seq_folders = _collect_seq_folders(args)
+    if args.workers < 1:
+        raise SystemExit("--workers must be >= 1")
 
-    report = [repair_seq_folder(seq_folder, dry_run=bool(args.dry_run)) for seq_folder in seq_folders]
+    print(
+        f"Repairing DPVO dense SLAM exports: seq_folders={len(seq_folders)} workers={int(args.workers)} "
+        f"dry_run={bool(args.dry_run)}",
+        flush=True,
+    )
+
+    def _iter_report():
+        if int(args.workers) == 1:
+            for seq_folder in seq_folders:
+                yield repair_seq_folder(seq_folder, dry_run=bool(args.dry_run))
+            return
+        with ThreadPoolExecutor(max_workers=int(args.workers)) as executor:
+            yield from executor.map(
+                lambda seq_folder: repair_seq_folder(seq_folder, dry_run=bool(args.dry_run)),
+                seq_folders,
+                chunksize=64,
+            )
+
+    report = list(
+        tqdm(
+            _iter_report(),
+            total=len(seq_folders),
+            desc="Repair DPVO exports",
+            unit="seq",
+            dynamic_ncols=True,
+        )
+    )
+    summary = _summarize_report(report)
     if args.report_out:
         report_path = Path(args.report_out)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_path.write_text(
+            json.dumps({"summary": summary, "items": report}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(json.dumps({"summary": summary, "items": report}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
