@@ -159,9 +159,10 @@ policy:
     num_inference_steps: ${flow.num_inference_steps}
   rtc_config:
     _target_: src.policy.legendvla.RTCConfig
-    enabled: True
-    delay_strategy: exp
-    max_delay: 8
+    # Keep off for pretraining. Enable for real-robot fine-tuning when using training-time RTC.
+    enabled: False
+    delay_strategy: uniform
+    max_delay: 6
   ar_action_train_config:
     _target_: src.policy.legendvla.ARActionTrainConfig
     noise_std: 0.02

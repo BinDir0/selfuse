@@ -26,9 +26,9 @@ class FlowConfig:
 
 @dataclass(frozen=True)
 class RTCConfig:
-    enabled: bool = True
-    delay_strategy: str = "exp"
-    max_delay: int = 16
+    enabled: bool = False
+    delay_strategy: str = "uniform"
+    max_delay: int = 6
 
 
 @dataclass(frozen=True)
