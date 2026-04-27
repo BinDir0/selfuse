@@ -560,7 +560,7 @@ src/
 │   │   ├── qwen3_expert.py               # Qwen3Expert (DiT for flow, plain for WM)
 │   │   └── temporal_attention.py         # MEM multi-frame temporal attention
 │   ├── action/
-│   │   └── action_head.py                # Fourier encoders + MLP projectors
+│   │   └── action_head.py                # MLP encoders + MLP decoders
 │   ├── common/
 │   │   ├── diffloss.py                   # DiffLoss (flow-matching default)
 │   │   ├── gaussian_diffusion.py         # DDPM / DDIM scheduler
