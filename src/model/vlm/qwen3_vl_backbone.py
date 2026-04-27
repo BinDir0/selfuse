@@ -414,14 +414,10 @@ class Qwen3VLBackboneWrapper(nn.Module):
 
     def freeze_non_lora_parameters(self) -> None:
         if self.use_lora:
-            base = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
-            for param in base.parameters():
-                param.requires_grad = False
-            for name, param in self.model.named_parameters():
-                if "lora_" in name:
-                    param.requires_grad = True
+            for name, param in self.named_parameters():
+                param.requires_grad = ("lora_" in name)
         else:
-            for param in self.model.parameters():
+            for param in self.parameters():
                 param.requires_grad = False
 
     @staticmethod

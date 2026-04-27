@@ -35,18 +35,25 @@ def get_action_accuracy(
     gt: torch.FloatTensor,  # [Batch_Size, Horizon, Action_Dim]
     pred: torch.FloatTensor,
     thresholds: List[float] = [0.1, 0.2],
+    valid_mask: Optional[torch.Tensor] = None,  # [B,H,D] or [B,H]; padding excluded from denom
 ) -> torch.FloatTensor:
     device = gt.device
     assert gt.shape == pred.shape, "GT and pred must have the same shape"
-    diff = torch.abs(gt - pred).reshape(-1, gt.shape[-1])
+    diff = torch.abs(gt - pred)  # [B, H, D]
 
-    # get the percentage of diff lower than threshold for all action dimensions
+    if valid_mask is not None:
+        valid_step = valid_mask.any(dim=-1) if valid_mask.dim() == 3 else valid_mask
+        denom = valid_step.sum().clamp(min=1).float()
+    else:
+        valid_step = None
+
     accuracies = torch.zeros(len(thresholds), device=device)
     for idx, threshold in enumerate(thresholds):
-        accuracy = torch.mean(
-            (torch.mean((diff < threshold).float(), dim=1) >= 1.0).float()
-        )
-        accuracies[idx] = accuracy
+        per_step_ok = (diff < threshold).all(dim=-1)  # [B, H]
+        if valid_step is not None:
+            accuracies[idx] = (per_step_ok & valid_step).sum().float() / denom
+        else:
+            accuracies[idx] = per_step_ok.float().mean()
     return accuracies
 
 

@@ -6,6 +6,7 @@ Extracted from train_legendvla_workspace.py for modularity.
 
 import gc
 import os
+import shutil
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -108,13 +109,42 @@ def save_topk_ckpt(workspace, rank, topk_manager, step_log):
         new_key = key.replace('/', '_')
         metric_dict[new_key] = value
 
-    # We can't copy the last checkpoint here
-    # since save_checkpoint uses threads.
-    # therefore at this point the file might have been empty!
-    topk_ckpt_path = topk_manager.get_ckpt_path(rank, metric_dict)
+    # Atomic top-k swap: propose -> save -> verify .metadata -> commit.
+    # The displaced ckpt is deleted only after the new save is verified durable,
+    # so any failure (exception, missing .metadata, partial write) leaves the
+    # existing top-k intact and path_value_map free of ghost entries.
+    new_path, delete_path, value = topk_manager.propose_ckpt_path(metric_dict)
+    if new_path is None:
+        return
 
-    if topk_ckpt_path is not None:
-        save_checkpoint_native(workspace, rank, path=topk_ckpt_path)
+    save_failed = False
+    try:
+        save_checkpoint_native(workspace, rank, path=new_path)
+    except Exception:
+        save_failed = True
+        raise
+    finally:
+        if save_failed and rank == 0 and os.path.exists(new_path):
+            if os.path.isdir(new_path):
+                shutil.rmtree(new_path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(new_path)
+                except OSError:
+                    pass
+
+    # Sync all ranks finished writing, then verify DCP's commit marker.
+    dist.barrier()
+    metadata_file = os.path.join(new_path, ".metadata")
+    if not os.path.exists(metadata_file):
+        if rank == 0 and os.path.isdir(new_path):
+            shutil.rmtree(new_path, ignore_errors=True)
+        raise RuntimeError(
+            f"DCP save returned without error but {metadata_file} is missing; "
+            f"top-k ckpt at {new_path} is incomplete. Existing top-k preserved."
+        )
+
+    topk_manager.commit(rank, new_path, value, delete_path)
 
 
 def save_interval_ckpt(workspace, rank):
@@ -160,7 +190,7 @@ def compute_batch_action_metrics(
     gt_actions = gt_actions * actions_valid_mask
     pred_actions = pred_actions * actions_valid_mask
 
-    accuracy = get_action_accuracy(gt_actions, pred_actions, eval_thresholds)
+    accuracy = get_action_accuracy(gt_actions, pred_actions, eval_thresholds, valid_mask=actions_valid_mask)
 
     abs_diff = torch.abs(pred_actions - gt_actions)
     per_sample_l1 = (

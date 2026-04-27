@@ -61,49 +61,52 @@ class TopKCheckpointManager:
         self.format_str = format_str
         self.path_value_map = dict()
     
-    def get_ckpt_path(self, rank: int, data: Dict[str, float]) -> Optional[str]:
+    def propose_ckpt_path(
+        self, data: Dict[str, float]
+    ) -> "tuple[Optional[str], Optional[str], Optional[float]]":
+        # Pure decision: no map mutation, no disk I/O. Caller must save
+        # successfully (and verify) before calling commit(); a failed save
+        # therefore cannot delete the displaced ckpt nor leave a ghost in
+        # path_value_map.
         if self.k == 0:
-            return None
+            return None, None, None
 
         value = data[self.monitor_key]
-        ckpt_path = os.path.join(
-            self.save_dir, self.format_str.format(**data))
-        
+        new_path = os.path.join(self.save_dir, self.format_str.format(**data))
+
         if len(self.path_value_map) < self.k:
-            # under-capacity
-            self.path_value_map[ckpt_path] = value
-            return ckpt_path
-        
-        # at capacity
+            return new_path, None, value
+
         sorted_map = sorted(self.path_value_map.items(), key=lambda x: x[1])
         min_path, min_value = sorted_map[0]
         max_path, max_value = sorted_map[-1]
 
-        delete_path = None
         if self.mode == 'max':
-            if value > min_value:
-                delete_path = min_path
+            delete_path = min_path if value > min_value else None
         else:
-            if value < max_value:
-                delete_path = max_path
+            delete_path = max_path if value < max_value else None
 
         if delete_path is None:
-            return None
-        else:
-            del self.path_value_map[delete_path]
-            self.path_value_map[ckpt_path] = value
+            return None, None, None
+        return new_path, delete_path, value
 
-            # only main process mkdir and delete the checkpoint
-            if rank == 0:
-                if not os.path.exists(self.save_dir):
-                    os.mkdir(self.save_dir)
+    def commit(
+        self,
+        rank: int,
+        new_path: str,
+        value: float,
+        delete_path: Optional[str],
+    ) -> None:
+        # Must be called only after the save to new_path is verified durable.
+        if delete_path is not None:
+            self.path_value_map.pop(delete_path, None)
+        self.path_value_map[new_path] = value
 
-                if os.path.exists(delete_path):
-                    if os.path.isfile(delete_path): 
-                        os.remove(delete_path)
-                    else:
-                        shutil.rmtree(delete_path)
-            return ckpt_path
+        if rank == 0 and delete_path is not None and os.path.exists(delete_path):
+            if os.path.isfile(delete_path):
+                os.remove(delete_path)
+            else:
+                shutil.rmtree(delete_path)
 
 
 def load_checkpoint(model: torch.nn.Module, path: str | pathlib.Path) -> None:
