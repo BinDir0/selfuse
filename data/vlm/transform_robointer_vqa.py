@@ -52,12 +52,12 @@ UNDERSTANDING_TASKS = {
     "traj_direction_choice": "classification"
 }
 
-# Task mapping for Task Planning
-PLANNING_TASKS = {
-    "task_planning": "planning",
-    "Scene_Understanding": "planning",
-    "Temporal_Understanding": "planning"
-}
+# # Task mapping for Task Planning
+# PLANNING_TASKS = {
+#     "task_planning": "planning",
+#     "Scene_Understanding": "planning",
+#     "Temporal_Understanding": "planning"
+# }
 
 # ================= Helper Functions =================
 
@@ -596,17 +596,17 @@ def main():
         ])
     all_tasks.append((und_paths, UNDERSTANDING_TASKS))
     
-    # 3. Task_planning
-    plan_paths = []
-    if "train" in splits:
-        plan_paths.extend([
-            os.path.join(ROBOINTER_ROOT, "Task_planning/meta/train/manipvqa/*.json")
-        ])
-    if "val" in splits:
-        plan_paths.extend([
-            os.path.join(ROBOINTER_ROOT, "Task_planning/meta/val/*/*.json")
-        ])
-    all_tasks.append((plan_paths, PLANNING_TASKS))
+    # # 3. Task_planning
+    # plan_paths = []
+    # if "train" in splits:
+    #     plan_paths.extend([
+    #         os.path.join(ROBOINTER_ROOT, "Task_planning/meta/train/manipvqa/*.json")
+    #     ])
+    # if "val" in splits:
+    #     plan_paths.extend([
+    #         os.path.join(ROBOINTER_ROOT, "Task_planning/meta/val/*/*.json")
+    #     ])
+    # all_tasks.append((plan_paths, PLANNING_TASKS))
 
     # Process each category sequentially to avoid mixing task mappings
     for search_paths, task_mapping in all_tasks:
