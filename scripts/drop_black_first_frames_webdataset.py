@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tarfile
 from io import BytesIO
@@ -305,10 +306,11 @@ def _find_shard_first_candidates(task: tuple[int, str]) -> dict:
     }
 
 
-def _build_global_first_sample_keys(shard_paths: list[str], workers: int) -> dict[str, str]:
+def _build_global_first_sample_keys(shard_paths: list[str], workers: int) -> tuple[dict[str, str], dict[str, dict]]:
     _progress(f"Building global first-frame index with {workers} worker(s)...")
     tasks = [(index, shard_path) for index, shard_path in enumerate(shard_paths, start=1)]
     first_by_clip = {}
+    shard_stats = {}
     completed = 0
     if workers <= 1:
         iterator = map(_find_shard_first_candidates, tasks)
@@ -322,6 +324,10 @@ def _build_global_first_sample_keys(shard_paths: list[str], workers: int) -> dic
     try:
         for result in iterator:
             completed += 1
+            shard_stats[result["shard_name"]] = {
+                "samples_total": int(result["samples_total"]),
+                "incomplete_samples": int(result["incomplete_samples"]),
+            }
             for clip_id, candidate in result["first_by_clip"].items():
                 previous = first_by_clip.get(clip_id)
                 if previous is None or candidate["sort_key"] < previous["sort_key"]:
@@ -336,24 +342,133 @@ def _build_global_first_sample_keys(shard_paths: list[str], workers: int) -> dic
             close_pool.close()
             close_pool.join()
 
-    return {clip_id: candidate["sample_key"] for clip_id, candidate in first_by_clip.items()}
+    return {clip_id: candidate["sample_key"] for clip_id, candidate in first_by_clip.items()}, shard_stats
 
 
 _WORKER_FIRST_SAMPLE_BY_CLIP = None
+_WORKER_FIRST_CLIP_BY_SAMPLE = None
+_WORKER_FIRST_SAMPLE_KEYS = None
 _WORKER_CONFIG = None
 
 
 def _init_process_shard_worker(first_sample_by_clip: dict[str, str], config: dict) -> None:
-    global _WORKER_FIRST_SAMPLE_BY_CLIP, _WORKER_CONFIG
+    global _WORKER_FIRST_SAMPLE_BY_CLIP, _WORKER_FIRST_CLIP_BY_SAMPLE, _WORKER_FIRST_SAMPLE_KEYS, _WORKER_CONFIG
     _WORKER_FIRST_SAMPLE_BY_CLIP = first_sample_by_clip
+    _WORKER_FIRST_CLIP_BY_SAMPLE = {sample_key: clip_id for clip_id, sample_key in first_sample_by_clip.items()}
+    _WORKER_FIRST_SAMPLE_KEYS = set(_WORKER_FIRST_CLIP_BY_SAMPLE)
     _WORKER_CONFIG = config
 
 
-def _process_shard_with_global_first(task: tuple[int, int, str]) -> dict:
-    if _WORKER_FIRST_SAMPLE_BY_CLIP is None or _WORKER_CONFIG is None:
+def _link_unchanged_shard(source_path: Path, output_dir: Path, shard_name: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = output_dir / ".tmp_drop_black_first_frames"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / shard_name
+    tmp_path = tmp_dir / f"{shard_name}.linktmp"
+    if tmp_path.exists():
+        tmp_path.unlink()
+    os.link(source_path, tmp_path)
+    os.replace(tmp_path, output_path)
+
+
+def _copy_unchanged_shard(source_path: Path, output_dir: Path, shard_name: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = output_dir / ".tmp_drop_black_first_frames"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / shard_name
+    tmp_path = tmp_dir / f"{shard_name}.copytmp"
+    if tmp_path.exists():
+        tmp_path.unlink()
+    shutil.copy2(source_path, tmp_path)
+    os.replace(tmp_path, output_path)
+
+
+def _scan_first_frame_images_for_drop_keys(
+    shard_path: Path,
+    first_sample_keys: set[str],
+    first_clip_by_sample: dict[str, str],
+    config: dict,
+) -> tuple[set[str], list[dict], int, int, int]:
+    drop_keys = set()
+    details = []
+    first_frames_checked = 0
+    black_first_frames_dropped = 0
+    decode_errors = 0
+    detail_limit = int(config["detail_limit"])
+
+    with tarfile.open(shard_path, "r") as tar_reader:
+        for member in tar_reader:
+            if not member.isfile():
+                continue
+            sample_key, _, field_name = split_sample_member_name(member.name)
+            if sample_key is None:
+                raise ValueError(f"Unsupported shard member: {member.name}")
+            if field_name != "image_bytes" or sample_key not in first_sample_keys:
+                continue
+
+            first_frames_checked += 1
+            member_file = tar_reader.extractfile(member)
+            if member_file is None:
+                decode_errors += 1
+                continue
+            try:
+                is_black, image_stats = is_black_image_bytes(
+                    member_file.read(),
+                    max_mean=float(config["max_mean"]),
+                    max_pixel=int(config["max_pixel"]),
+                    min_dark_ratio=float(config["min_dark_ratio"]),
+                )
+            except Exception as error:
+                decode_errors += 1
+                image_stats = {"error": f"{error.__class__.__name__}: {error}"}
+                is_black = False
+
+            if is_black:
+                drop_keys.add(sample_key)
+                black_first_frames_dropped += 1
+                if len(details) < detail_limit:
+                    details.append(
+                        {
+                            "clip_id": first_clip_by_sample.get(sample_key, sample_key.rsplit("_f", 1)[0]),
+                            "sample_key": sample_key,
+                            "shard_name": shard_path.name,
+                            **image_stats,
+                        }
+                    )
+
+    return drop_keys, details, first_frames_checked, black_first_frames_dropped, decode_errors
+
+
+def _rewrite_shard_dropping_keys(shard_path: Path, output_dir: Path, shard_name: str, drop_keys: set[str]) -> int:
+    tar_writer, output_path, tmp_path = _open_output_tar(output_dir, shard_name)
+    frames_written = 0
+    try:
+        for sample in iter_shard_samples(str(shard_path)):
+            if sample["key"] in drop_keys:
+                continue
+            validate_sample_record(sample)
+            _write_sample(tar_writer, sample)
+            frames_written += 1
+        tar_writer.close()
+        tar_writer = None
+        if frames_written > 0:
+            os.replace(tmp_path, output_path)
+        elif tmp_path.exists():
+            tmp_path.unlink()
+    except Exception:
+        if tar_writer is not None:
+            tar_writer.close()
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    return frames_written
+
+
+def _process_shard_with_global_first(task: tuple[int, int, str, dict]) -> dict:
+    if _WORKER_FIRST_SAMPLE_KEYS is None or _WORKER_FIRST_CLIP_BY_SAMPLE is None or _WORKER_CONFIG is None:
         raise RuntimeError("Parallel worker was not initialized")
 
-    shard_index, total_shards, shard_path_str = task
+    shard_index, total_shards, shard_path_str, prepass_stats = task
     shard_path = Path(shard_path_str)
     shard_name = shard_path.name
     config = _WORKER_CONFIG
@@ -361,91 +476,53 @@ def _process_shard_with_global_first(task: tuple[int, int, str]) -> dict:
     output_dir = Path(config["output_dir"]) if config.get("output_dir") else None
     detail_limit = int(config["detail_limit"])
     shard_stats = _new_shard_stats()
-    details = []
+    shard_stats["samples_total"] = int(prepass_stats.get("samples_total", 0))
+    shard_stats["incomplete_samples"] = int(prepass_stats.get("incomplete_samples", 0))
     summary = {
-        "samples_total": 0,
+        "samples_total": int(prepass_stats.get("samples_total", 0)),
         "frames_written": 0,
         "episodes_seen": 0,
         "first_frames_checked": 0,
         "black_first_frames_dropped": 0,
-        "incomplete_samples": 0,
+        "incomplete_samples": int(prepass_stats.get("incomplete_samples", 0)),
         "decode_errors": 0,
     }
 
-    tar_writer = None
-    output_path = None
-    tmp_path = None
     try:
-        if not dry_run and output_dir is not None:
-            tar_writer, output_path, tmp_path = _open_output_tar(output_dir, shard_name)
+        drop_keys, details, first_checked, dropped, decode_errors = _scan_first_frame_images_for_drop_keys(
+            shard_path,
+            _WORKER_FIRST_SAMPLE_KEYS,
+            _WORKER_FIRST_CLIP_BY_SAMPLE,
+            config,
+        )
+        summary["episodes_seen"] = int(first_checked)
+        summary["first_frames_checked"] = int(first_checked)
+        summary["black_first_frames_dropped"] = int(dropped)
+        summary["decode_errors"] = int(decode_errors)
+        shard_stats["episodes_started"] = int(first_checked)
+        shard_stats["black_first_frames_dropped"] = int(dropped)
+        shard_stats["decode_errors"] = int(decode_errors)
 
-        for sample in iter_shard_samples(str(shard_path)):
-            summary["samples_total"] += 1
-            shard_stats["samples_total"] += 1
-            try:
-                validate_sample_record(sample)
-            except ValueError:
-                summary["incomplete_samples"] += 1
-                shard_stats["incomplete_samples"] += 1
-                continue
-
-            meta = decode_meta(sample.get("meta_bytes"))
-            clip_id = sample_clip_id(sample, meta)
-            is_first_frame = _WORKER_FIRST_SAMPLE_BY_CLIP.get(clip_id) == sample["key"]
-            drop_sample = False
-
-            if is_first_frame:
-                summary["episodes_seen"] += 1
-                summary["first_frames_checked"] += 1
-                shard_stats["episodes_started"] += 1
-                try:
-                    is_black, image_stats = is_black_image_bytes(
-                        sample["image_bytes"],
-                        max_mean=float(config["max_mean"]),
-                        max_pixel=int(config["max_pixel"]),
-                        min_dark_ratio=float(config["min_dark_ratio"]),
-                    )
-                except Exception as error:
-                    summary["decode_errors"] += 1
-                    shard_stats["decode_errors"] += 1
-                    image_stats = {"error": f"{error.__class__.__name__}: {error}"}
-                    is_black = False
-
-                if is_black:
-                    drop_sample = True
-                    summary["black_first_frames_dropped"] += 1
-                    shard_stats["black_first_frames_dropped"] += 1
-                    if len(details) < detail_limit:
-                        details.append(
-                            {
-                                "clip_id": clip_id,
-                                "sample_key": sample["key"],
-                                "shard_name": shard_name,
-                                **image_stats,
-                            }
-                        )
-
-            if drop_sample:
-                continue
-
-            if not dry_run and tar_writer is not None:
-                _write_sample(tar_writer, sample)
-            summary["frames_written"] += 1
-            shard_stats["frames_written"] += 1
-
-        if tar_writer is not None:
-            tar_writer.close()
-            tar_writer = None
-            if shard_stats["frames_written"] > 0:
-                os.replace(tmp_path, output_path)
+        if dry_run:
+            summary["frames_written"] = max(0, shard_stats["samples_total"] - len(drop_keys))
+            shard_stats["frames_written"] = summary["frames_written"]
+        elif output_dir is not None:
+            if drop_keys:
+                frames_written = _rewrite_shard_dropping_keys(shard_path, output_dir, shard_name, drop_keys)
+                summary["frames_written"] = int(frames_written)
+                shard_stats["frames_written"] = int(frames_written)
                 shard_stats["shard_written"] = True
-            elif tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink()
+            else:
+                try:
+                    _link_unchanged_shard(shard_path, output_dir, shard_name)
+                    shard_stats["hardlinked"] = True
+                except OSError:
+                    _copy_unchanged_shard(shard_path, output_dir, shard_name)
+                    shard_stats["copied"] = True
+                summary["frames_written"] = int(shard_stats["samples_total"])
+                shard_stats["frames_written"] = int(shard_stats["samples_total"])
+                shard_stats["shard_written"] = True
     except Exception:
-        if tar_writer is not None:
-            tar_writer.close()
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink()
         raise
 
     return {
@@ -531,7 +608,7 @@ def _drop_black_first_frames_parallel(
         raise ValueError("--output_dir is required unless --dry_run is set")
 
     report = _new_report(source_dir, output_dir, dry_run, len(shard_paths), max_mean, max_pixel, min_dark_ratio)
-    first_sample_by_clip = _build_global_first_sample_keys(shard_paths, workers)
+    first_sample_by_clip, prepass_stats_by_shard = _build_global_first_sample_keys(shard_paths, workers)
     report["summary"]["episodes_seen"] = 0
     report["summary"]["first_frames_checked"] = 0
 
@@ -549,7 +626,10 @@ def _drop_black_first_frames_parallel(
         "min_dark_ratio": float(min_dark_ratio),
         "detail_limit": int(detail_limit),
     }
-    tasks = [(index, len(shard_paths), shard_path) for index, shard_path in enumerate(shard_paths, start=1)]
+    tasks = [
+        (index, len(shard_paths), shard_path, prepass_stats_by_shard.get(Path(shard_path).name, {}))
+        for index, shard_path in enumerate(shard_paths, start=1)
+    ]
     context = get_context("fork")
     completed = 0
     with context.Pool(
