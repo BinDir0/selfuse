@@ -96,9 +96,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         self.epoch = 0
         self.update_step = 0
         self.global_step = 0
-        # Tracks the last sync_gradients state passed to FSDP2 so we only
-        # walk the module tree on transitions, not every microbatch.
-        self._last_sync_state: bool | None = None
         # Per-cycle accumulator for raw_loss components, used to log the
         # cycle mean to wandb instead of just the sync-step microbatch.
         # Only populated when grad_accum_steps > 1.
@@ -269,12 +266,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         dataset.vla_dataset.set_normalizer(normalizer)
         self.normalizer = normalizer
 
-        # Two dataloader paths:
-        # - use_webloader=True: WebLoader + .shuffle().batched() for Level-2
-        #   cross-worker shuffle. Dataset yields single samples, .batched()
-        #   runs the custom collator after shuffle.
-        #   Ref: https://aistore.nvidia.com/blog/2023/06/09/aisio-transforms-with-webdataset-pt-3
-        # - use_webloader=False (default): plain DataLoader, no cross-worker shuffle.
         webloader_cfg = cfg.dataloader.get("webloader", {}) or {}
         use_webloader = bool(webloader_cfg.get("use_webloader", False))
         if use_webloader:
@@ -316,14 +307,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         # LR schedule — no accelerate wrapping, so scheduler steps map 1:1 to update steps.
         grad_accum_steps = int(cfg.training.get("gradient_accumulation_steps", 1))
-        # Truncate steps_per_epoch to a clean grad-accum boundary so every epoch
-        # ends on a sync step. Prevents two issues with grad_accum > 1:
-        #   1. Cross-epoch grad leakage — leftover accumulated grads from the
-        #      tail of epoch N would otherwise carry into the first cycle of
-        #      epoch N+1, producing one over-magnitude optimizer.step.
-        #   2. Scheduler/update-count mismatch — ceil() inflates
-        #      num_update_steps_per_epoch above the actual update count.
-        # No-op when grad_accum_steps == 1 (every step is a sync step).
+
         if grad_accum_steps > 1:
             steps_per_epoch = (steps_per_epoch // grad_accum_steps) * grad_accum_steps
         num_update_steps_per_epoch = steps_per_epoch // grad_accum_steps
@@ -446,18 +430,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         is_accumulating = (batch_idx + 1) % grad_accum_steps != 0
         sync_gradients = not is_accumulating
-        # Only toggle when grad accumulation is actually in use, and only
-        # when the state actually changes — each call walks the whole FSDP
-        # module tree, so caching saves ~half the walks per accumulation
-        # cycle (one True→False, one False→True per cycle).
-        # set_reshard_after_backward(False) on accumulation steps keeps
-        # unsharded params resident across the cycle so the next microbatch
-        # skips its all-gather, at the cost of holding unsharded params in
-        # memory until the sync step.
-        if grad_accum_steps > 1 and sync_gradients != self._last_sync_state:
-            self.model.set_requires_gradient_sync(sync_gradients)
-            self.model.set_reshard_after_backward(sync_gradients)
-            self._last_sync_state = sync_gradients
 
         # FSDP MixedPrecisionPolicy handles bf16 cast of floating-point
         # inputs (cast_forward_inputs=True); int/bool/uint8 pass through.
@@ -467,12 +439,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             loss = loss / grad_accum_steps
         loss.backward()
 
-        # When grad accumulating, average raw_loss components across the
-        # cycle so the value handed to wandb on the sync step is the cycle
-        # mean (uses all microbatches' loss data, not just the last one).
-        # detach() drops the autograd graph; division by grad_accum_steps
-        # gives the running mean. On sync, swap raw_loss for the accumulator
-        # and reset it for the next cycle. No-op when grad_accum_steps == 1.
         if grad_accum_steps > 1:
             for k, v in raw_loss.items():
                 if isinstance(v, torch.Tensor):
@@ -483,12 +449,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 raw_loss = self._cycle_loss_accum
                 self._cycle_loss_accum = {}
 
-        # Staged VLM freeze: VLM params keep requires_grad=True throughout
-        # so FSDP2's per-param grad-dtype tracking is initialized from step 1
-        # (avoids a bf16/fp32 mismatch at the freeze->rewarmup boundary).
-        # Drop VLM grads after every microbatch — otherwise non-sync steps
-        # locally accumulate unsharded grads we'll throw away, wasting memory
-        # and forcing an unneeded reduce-scatter / all-reduce on the sync step.
+
         if self.vlm_param_refs and self.is_vlm_freeze_active():
             for param in self.vlm_param_refs:
                 param.grad = None
@@ -528,12 +489,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
     ):
         """Bump counters and run eval / ckpt / wandb.log on update-step boundaries."""
         rank, device = ctx.rank, ctx.device
-        # should_record uses the pre-increment update_step to match the old
-        # logging cadence (log the 1st / 51st / 101st / ... committed step
-        # when log_interval=50). Eval and checkpoint checks below use the
-        # post-increment value.
-        # global_step is bumped per-microbatch in train_loop; here we only
-        # bump update_step (one per successful optimizer step).
+
         should_record = self.update_step % log_interval == 0
         self.update_step += 1
         self.model_averaging.maybe_initialize(self.update_step)
@@ -602,10 +558,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                         batch, batch_idx, grad_accum_steps, cfg, rank,
                     )
 
-                    # step_skipped is only True on sync steps (clip/check runs
-                    # only there); skipping bypasses the optimizer.step, so we
-                    # don't count it as progress — matches the prior behavior
-                    # where global_step advanced inside maybe_log_and_ckpt.
                     if step_skipped:
                         step_perf_end = time.perf_counter()
                         continue
@@ -650,13 +602,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
                 # Epoch-end defense: drop any residual grads accumulated past
                 # the last sync step (e.g., if the dataloader exhausted before
-                # steps_per_epoch). Also reset _last_sync_state so the first
-                # microbatch of the next epoch re-toggles FSDP if needed, and
-                # clear the cycle loss accumulator to avoid leaking a partial
-                # cycle's loss values into the first sync step of next epoch.
                 if grad_accum_steps > 1:
                     self.optimizer.zero_grad(set_to_none=True)
-                    self._last_sync_state = None
                     self._cycle_loss_accum = {}
 
                 if cfg.training.max_train_steps and self.update_step >= cfg.training.max_train_steps:
