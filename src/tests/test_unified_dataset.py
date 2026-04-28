@@ -246,26 +246,6 @@ def test_pad_vlm_sample():
     assert bool(vlm["is_vla_data"]) is False
 
 
-def test_distribute_delegates_to_vlm():
-    """distribute(rank, world_size) is forwarded to vlm_dataset."""
-    vla_ds = MockVlaDataset([make_vla_sample(0)])
-    vlm_ds = MockIterableDataset([make_vlm_sample(0)])
-    vlm_ds.distribute = lambda rank, world_size: None
-    called = {}
-
-    def mock_distribute(rank, world_size):
-        called["rank"] = rank
-        called["world_size"] = world_size
-
-    vlm_ds.distribute = mock_distribute
-    unified = UnifiedWdsDataset(
-        vla_dataset=vla_ds, vlm_dataset=vlm_ds,
-        mode="train",
-    )
-    unified.distribute(rank=2, world_size=8)
-    assert called == {"rank": 2, "world_size": 8}
-
-
 def test_return_dataset_info_passthrough():
     """VLA samples with dataset_info fields pass through interleaving intact."""
     vla_samples = []
@@ -314,15 +294,6 @@ def test_return_dataset_info_vlm_padded_keeps_info():
     assert vlm["dataset_name"] == "my_vlm"
     assert vlm["episode_index"].item() == 42
     assert vlm["states"].shape == (16, 48)
-
-
-def test_distribute_no_vlm():
-    """distribute with vlm_dataset=None does not raise."""
-    unified = build_unified(
-        [make_vla_sample(0)],
-        vlm_samples=None,
-    )
-    unified.distribute(rank=0, world_size=4)  # should not raise
 
 
 # ---------------------------------------------------------------------------

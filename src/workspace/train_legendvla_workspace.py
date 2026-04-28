@@ -160,7 +160,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
     def setup_runtime(self, cfg):
         """Distributed init, profiler, wandb, output-dir broadcast, seed reset."""
-        ctx = init_distributed(backend="nccl", timeout_sec=3600)
+        ctx = init_distributed(backend="nccl")
         rank, world_size, device = ctx.rank, ctx.world_size, ctx.device
 
         if rank == 0:
@@ -268,8 +268,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             normalizer = pickle.load(f)
         dataset.vla_dataset.set_normalizer(normalizer)
         self.normalizer = normalizer
-
-        dataset.distribute(rank=rank, world_size=world_size)
 
         # Two dataloader paths:
         # - use_webloader=True: WebLoader + .shuffle().batched() for Level-2

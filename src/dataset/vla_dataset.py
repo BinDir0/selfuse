@@ -545,14 +545,6 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
             "has_depth_values": 1,
         }
 
-    def distribute(self, rank: int, world_size: int):
-        """Apply distributed shard splitting to sub-datasets.
-
-        VLA uses wds.split_by_node internally, so only VLM needs explicit splitting.
-        """
-        if self.vlm_dataset is not None and hasattr(self.vlm_dataset, 'distribute'):
-            self.vlm_dataset.distribute(rank, world_size)
-
     def get_collator(self):
         return self.vla_dataset.get_collator()
 

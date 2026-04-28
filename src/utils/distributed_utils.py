@@ -25,8 +25,7 @@ class DistributedContext:
 
 
 def init_distributed(
-    backend: str = "nccl",
-    timeout_sec: int = 3600,
+    backend: str = "nccl"
 ) -> DistributedContext:
     """Initialize the distributed process group and optionally create an HSDP mesh.
 
@@ -37,9 +36,10 @@ def init_distributed(
 
     On a single node the mesh is left as None for plain 1D FSDP sharding.
 
-    Environment variables read (all set by torchrun):
-      LOCAL_RANK, LOCAL_WORLD_SIZE
-    Reference: torch/distributed/elastic/agent/server/local_elastic_agent.py:305-326
+    Environment variables read:
+        - LOCAL_RANK, LOCAL_WORLD_SIZE
+            Reference: torch/distributed/elastic/agent/server/local_elastic_agent.py:305-326
+        - NCCL_TIMEOUT (seconds, default 3600)        
 
     HSDP mesh dim convention (dim0=replicate, dim1=shard):
     Reference: torch/distributed/fsdp/_fully_shard/_fsdp_init.py:60-69
@@ -47,7 +47,9 @@ def init_distributed(
     Returns:
         DistributedContext with rank, device, and optional HSDP mesh.
     """
-    dist.init_process_group(backend=backend, timeout=timedelta(seconds=timeout_sec))
+    nccl_timeout = int(os.environ.get("NCCL_TIMEOUT", 3600))
+    dist.init_process_group(backend=backend, timeout=timedelta(seconds=nccl_timeout))
+
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
