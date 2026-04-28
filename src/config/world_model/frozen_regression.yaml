@@ -48,10 +48,11 @@ world_model:
     use_mlp_layer_norm: False
   # 4x4 relative extrinsic flattened to 16D per future step.
   wm_motion_encoder:
-    _target_: src.model.action.action_head.MLPDecoder
-    input_dim: 16
-    output_dim: ${world_model.world_model_expert.hidden_size}
+    _target_: src.model.action.action_head.MLPEncoder
+    action_dim: 16
     width: ${world_model.world_model_expert.hidden_size}
-    depth: 2
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
     final_layer_norm: False
     use_mlp_layer_norm: False

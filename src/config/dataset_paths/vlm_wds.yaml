@@ -8,50 +8,43 @@ vlm_wds_base_dir: /efs-exp/guantianrui/datasets/VLM/FineVision_Webdataset
 vlm_wds_datasets:
   - name: FineVision
     shard_urls: /efs-exp/guantianrui/datasets/VLM/Webdataset/FineVision/train/shard-*.tar
-    weight: 10
+    weight: 60
   - name: refspatial
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/refspatial/train/shard-*.tar
-    weight: 1
+    weight: 50
   - name: robo2vlm
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/robo2vlm/train/shard-*.tar
-    weight: 1
+    weight: 26
   - name: robopoint
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/robopoint/train/shard-*.tar
-    weight: 2
+    weight: 36
   - name: roborefit
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/roborefit/train/shard-*.tar
-    weight: 0.1
+    weight: 2
   - name: roboafford
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/roboafford/train/shard-*.tar
-    weight: 1
-  # - name: sharerobot
-  #   shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/sharerobot/train/shard-*.tar
-  #   weight: 0.5
-  # - name: RoboInter-VQA
-  #   shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/train/shard_*.tar
-  #   weight: 1
+    weight: 27
+  - name: sharerobot
+    shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/sharerobot/train/shard-*.tar
+    weight: 3
+  - name: RoboInter-VQA
+    shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/train/shard_*.tar
+    weight: 12
 
 val_vlm_wds_datasets:
   - name: FineVision
     shard_urls: /efs-exp/guantianrui/datasets/VLM/Webdataset/FineVision/test/shard-*.tar
   - name: refspatial
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/refspatial/test/shard-*.tar
-    weight: 1
   - name: robo2vlm
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/robo2vlm/test/shard-*.tar
-    weight: 1
   - name: robopoint
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/robopoint/test/shard-*.tar
-    weight: 2
   - name: roborefit
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/roborefit/test/shard-*.tar
-    weight: 0.1
   - name: roboafford
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/roboafford/test/shard-*.tar
-    weight: 1
-  # - name: sharerobot
-  #   shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/sharerobot/test/shard-*.tar
-  #   weight: 0.5
-  # - name: RoboInter-VQA
-  #   shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/test/shard_*.tar
-  #   weight: 1
+  - name: sharerobot
+    shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/sharerobot/test/shard-*.tar
+  - name: RoboInter-VQA
+    shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/test/shard_*.tar

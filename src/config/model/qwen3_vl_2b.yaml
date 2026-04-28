@@ -188,7 +188,7 @@ policy:
       prefer_early: False
   loss_config:
     _target_: src.policy.legendvla.LossConfig
-    ce_loss_weight: 0.1
+    ce_loss_weight: 0.05
     diffusion_loss_weight: 2.0
     flow_loss_weight: 1.0
     reg_loss_weight: 1.0
