@@ -129,7 +129,6 @@ def _load_native_descriptor_episode_features(ep: dict) -> dict | None:
 
     requested_frame_count = int(ep.get("num_valid_frames") or descriptor.frame_count)
     frame_names = list(descriptor.frame_names[:requested_frame_count])
-    frame_names = frame_names[:export_frame_count_with_action(len(frame_names))]
     if not frame_names:
         return None
 
@@ -202,15 +201,15 @@ def load_descriptor_episode_features(
 ):
     seq_folder = ep["seq_folder"]
     descriptor = ep.get("descriptor")
-    requested_frame_count = ep.get("num_valid_frames")
-    if requested_frame_count is None and "frame_end" in ep:
-        requested_frame_count = int(ep["frame_end"] - ep.get("frame_start", 0))
-    if requested_frame_count is not None:
-        requested_frame_count = int(requested_frame_count)
+    requested_export_frame_count = ep.get("num_valid_frames")
+    if requested_export_frame_count is None and "frame_end" in ep:
+        requested_export_frame_count = int(ep["frame_end"] - ep.get("frame_start", 0))
+    if requested_export_frame_count is not None:
+        requested_export_frame_count = int(requested_export_frame_count)
         cached = (
             load_cached_features(
                 seq_folder,
-                requested_frame_count,
+                requested_export_frame_count,
                 feature_cache_dir,
                 source_fps=source_fps,
                 target_fps=target_fps,
@@ -263,19 +262,33 @@ def load_descriptor_episode_features(
     pred_betas = prediction["pred_betas"]
     pred_valid = prediction["pred_valid"]
     source_frame_count = int(pred_trans.shape[1])
-    if requested_frame_count is None:
+    if requested_export_frame_count is None:
         if interpolate_labels and source_fps > 0 and target_fps > 0 and source_frame_count > 1:
             duration = float(source_frame_count - 1) / float(source_fps)
-            requested_frame_count = int(round(duration * float(target_fps))) + 1
+            requested_source_frame_count = int(round(duration * float(target_fps))) + 1
         else:
-            requested_frame_count = source_frame_count
-
-    frame_count = int(
-        requested_frame_count if interpolate_labels else min(int(requested_frame_count), source_frame_count)
-    )
-    export_frame_count = export_frame_count_with_action(frame_count)
-    if export_frame_count <= 0:
-        return None
+            requested_source_frame_count = source_frame_count
+        frame_count = int(
+            requested_source_frame_count if interpolate_labels else min(int(requested_source_frame_count), source_frame_count)
+        )
+        export_frame_count = export_frame_count_with_action(frame_count)
+        if export_frame_count <= 0:
+            return None
+    else:
+        # `num_valid_frames` / `frame_end - frame_start` already represent the
+        # final exportable frame count after dropping the last frame that lacks
+        # next-frame action. Reconstruct one extra source frame here so lowdim
+        # action targets can be formed without silently dropping another frame.
+        export_frame_count = int(requested_export_frame_count)
+        if export_frame_count <= 0:
+            return None
+        frame_count = int(export_frame_count + 1)
+        if not interpolate_labels and source_frame_count < frame_count:
+            print(
+                f"  Skip {ep['episode_id']}: source prediction shorter than requested export span: "
+                f"source={source_frame_count} requested_export={export_frame_count}"
+            )
+            return None
 
     cached = (
         load_cached_features(
