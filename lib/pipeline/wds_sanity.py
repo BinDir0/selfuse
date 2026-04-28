@@ -12,7 +12,13 @@ from typing import Optional
 import numpy as np
 
 from lib.pipeline.exporters.webdataset_rewriter import iter_shard_paths, iter_shard_samples
-from lib.pipeline.quality_metrics import LOWDIM_SIZE, decode_lowdim, parse_frame_index, parse_instruction_metadata
+from lib.pipeline.quality_metrics import (
+    LOWDIM_SIZE,
+    decode_lowdim,
+    parse_frame_index,
+    parse_instruction_metadata,
+    validate_lowdim_numeric_sanity,
+)
 
 LOWDIM_STATE_SLICE = slice(0, 48)
 LOWDIM_ACTION_SLICE = slice(48, 96)
@@ -27,6 +33,7 @@ HARD_FILTER_ISSUES = {
     "missing_meta_keys",
     "lowdim_decode_failure",
     "nonfinite_lowdim",
+    "invalid_rot6d",
     "invalid_state",
     "invalid_action",
     "invalid_extrinsic",
@@ -244,6 +251,7 @@ def init_sanity_report(
             "image_decode_failures": 0,
             "lowdim_decode_failures": 0,
             "nonfinite_lowdim_frames": 0,
+            "invalid_rot6d_frames": 0,
             "invalid_state_frames": 0,
             "invalid_action_frames": 0,
             "invalid_extrinsic_frames": 0,
@@ -582,6 +590,22 @@ def analyze_webdataset(
                     report["checks"]["invalid_intrinsic_frames"] += 1
                     current_episode.mark_issue("invalid_intrinsic")
                     append_issue("invalid_intrinsic", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
+                    continue
+
+                numeric_sanity = validate_lowdim_numeric_sanity(lowdim)
+                if not numeric_sanity["valid"]:
+                    if numeric_sanity["invalid_rot6d"]:
+                        report["checks"]["invalid_rot6d_frames"] += 1
+                        current_episode.mark_issue("invalid_rot6d")
+                        append_issue("invalid_rot6d", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
+                    if numeric_sanity["invalid_extrinsic"]:
+                        report["checks"]["invalid_extrinsic_frames"] += 1
+                        current_episode.mark_issue("invalid_extrinsic")
+                        append_issue("invalid_extrinsic", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
+                    if numeric_sanity["invalid_intrinsic"]:
+                        report["checks"]["invalid_intrinsic_frames"] += 1
+                        current_episode.mark_issue("invalid_intrinsic")
+                        append_issue("invalid_intrinsic", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
                     continue
 
                 lowdim_stats.add(lowdim)
