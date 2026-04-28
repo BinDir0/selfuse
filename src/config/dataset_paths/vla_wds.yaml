@@ -16,7 +16,7 @@ vla_wds_datasets:
       - /efs-exp/guantianrui/datasets/H2O/shard-*.tar
     weight: 32
   - name: egoverse  # 690h
-    shard_urls: /efs_exp/guantianrui/datasets/egoverse/shard-*.tar
+    shard_urls: /efs-exp/guantianrui/datasets/egoverse/*.tar
     weight: 263
   - name: holoassist  # 11.5h
     shard_urls: /efs-exp/guantianrui/datasets/Webdataset/holoassist_filtered_v2_rechunked/shard-*.tar
@@ -33,7 +33,7 @@ vla_wds_datasets:
   - name: buildai  # 288h + 5000h + 3000h
     shard_urls: 
       - /efs-exp/yeyuyao/Webdataset/BuildAI-10K-0328-camera-corrected/shard-*.tar
-      - /efs_exp/guantianrui/datasets/BuildAI-100K-part2-0427/shard-*.tar
+      - /efs-exp/guantianrui/datasets/BuildAI-100K-part2-0427/shard-*.tar
       - /efs-exp/guantianrui/datasets/BuildAI-100K-part1-fully-rewritten-0425/shard-*.tar
     weight: 428
 
