@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tarfile
 from io import BytesIO
 from pathlib import Path
@@ -14,7 +15,6 @@ import numpy as np
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-import sys
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -71,6 +71,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1000,
         help="Maximum number of dropped-frame details to keep in the JSON report",
+    )
+    parser.add_argument(
+        "--progress_every_samples",
+        type=int,
+        default=100000,
+        help="Print an in-shard progress line every N samples; 0 disables sample-level progress",
+    )
+    parser.add_argument(
+        "--progress_every_shards",
+        type=int,
+        default=1,
+        help="Print a completion line every N shards; 0 disables shard completion lines",
     )
     return parser
 
@@ -155,6 +167,10 @@ def _write_sample(tar_writer: tarfile.TarFile, sample: dict) -> None:
     )
 
 
+def _progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 def drop_black_first_frames(
     source_dir: Path,
     output_dir: Path | None,
@@ -164,6 +180,8 @@ def drop_black_first_frames(
     max_pixel: int,
     min_dark_ratio: float,
     detail_limit: int,
+    progress_every_samples: int = 0,
+    progress_every_shards: int = 0,
 ) -> dict:
     shard_paths = list(iter_shard_paths(str(source_dir)))
     if not shard_paths:
@@ -197,7 +215,12 @@ def drop_black_first_frames(
         "dropped_first_frames": [],
     }
 
-    for shard_path_str in tqdm(shard_paths, desc="Scan shards"):
+    _progress(
+        f"Found {len(shard_paths)} shard(s) under {source_dir}. "
+        f"Mode={'dry-run' if dry_run else 'rewrite'}."
+    )
+
+    for shard_index, shard_path_str in enumerate(tqdm(shard_paths, desc="Scan shards"), start=1):
         shard_path = Path(shard_path_str)
         shard_name = shard_path.name
         shard_stats = {
@@ -215,12 +238,23 @@ def drop_black_first_frames(
         output_path = None
         tmp_path = None
         try:
+            _progress(f"[{shard_index}/{len(shard_paths)}] start {shard_name}")
             if not dry_run and output_dir is not None:
                 tar_writer, output_path, tmp_path = _open_output_tar(output_dir, shard_name)
 
             for sample in iter_shard_samples(str(shard_path)):
                 report["summary"]["samples_total"] += 1
                 shard_stats["samples_total"] += 1
+                if (
+                    progress_every_samples > 0
+                    and shard_stats["samples_total"] % progress_every_samples == 0
+                ):
+                    _progress(
+                        f"[{shard_index}/{len(shard_paths)}] {shard_name}: "
+                        f"samples={shard_stats['samples_total']} "
+                        f"episodes={shard_stats['episodes_started']} "
+                        f"dropped_first_frames={shard_stats['black_first_frames_dropped']}"
+                    )
 
                 try:
                     validate_sample_record(sample)
@@ -283,6 +317,15 @@ def drop_black_first_frames(
                     report["summary"]["shards_written"] += 1
                 elif tmp_path is not None and tmp_path.exists():
                     tmp_path.unlink()
+
+            if progress_every_shards > 0 and shard_index % progress_every_shards == 0:
+                _progress(
+                    f"[{shard_index}/{len(shard_paths)}] done {shard_name}: "
+                    f"samples={shard_stats['samples_total']} "
+                    f"episodes={shard_stats['episodes_started']} "
+                    f"dropped_first_frames={shard_stats['black_first_frames_dropped']} "
+                    f"written={shard_stats['frames_written']}"
+                )
         except Exception:
             if tar_writer is not None:
                 tar_writer.close()
@@ -316,6 +359,8 @@ def main() -> None:
         max_pixel=int(args.max_pixel),
         min_dark_ratio=float(args.min_dark_ratio),
         detail_limit=max(0, int(args.detail_limit)),
+        progress_every_samples=max(0, int(args.progress_every_samples)),
+        progress_every_shards=max(0, int(args.progress_every_shards)),
     )
 
     if args.report_out:
