@@ -269,8 +269,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         dataset.vla_dataset.set_normalizer(normalizer)
         self.normalizer = normalizer
 
-        dataset.distribute(rank=rank, world_size=world_size)
-
         # Two dataloader paths:
         # - use_webloader=True: WebLoader + .shuffle().batched() for Level-2
         #   cross-worker shuffle. Dataset yields single samples, .batched()

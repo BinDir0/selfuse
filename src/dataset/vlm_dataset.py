@@ -71,10 +71,6 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
         # Image augmentation is handled by data_transforms.process_image
         # (shared with VLA). No separate transform object is needed here.
 
-    def distribute(self, rank: int, world_size: int):
-        """WebDataset splitting is handled in build_wds_pipeline."""
-        return
-
     def set_collator(self, collator):
         """Set the batch collator used to build model inputs."""
         self.collator = collator
