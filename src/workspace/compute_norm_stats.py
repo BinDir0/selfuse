@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import pickle
+import sys
 from datetime import datetime
 
 import hydra
@@ -240,7 +241,7 @@ def main():
         print(f"   Error computing normalizer: {exc}")
         import traceback
         traceback.print_exc()
-        return
+        sys.exit(1)
 
     print(f"\n3. Saving normalizer to {output_path}...")
     try:
@@ -270,7 +271,7 @@ def main():
         print(f"   Error saving normalizer: {exc}")
         import traceback
         traceback.print_exc()
-        return
+        sys.exit(1)
 
     print("\n" + "=" * 80)
     print("Normalizer Statistics Summary")

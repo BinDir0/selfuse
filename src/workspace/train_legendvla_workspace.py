@@ -360,11 +360,10 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         from src.model.vlm.temporal_attention import MEMVisionBlock
         try:
             from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionBlock
-            from transformers.models.dinov3_vit.modeling_dinov3_vit import DINOv3ViTLayer
         except ImportError as e:
             raise ImportError(
-                "FSDP wrap requires transformers shipping both Qwen3VLVisionBlock "
-                "and DINOv3ViTLayer; please upgrade transformers."
+                "FSDP wrap requires transformers shipping Qwen3VLVisionBlock; "
+                "please upgrade transformers."
             ) from e
         # MEMVisionBlock wraps every visual block uniformly (real temporal_attn
         # at every_n positions, None elsewhere) so it's the FSDP wrap target.
@@ -377,7 +376,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             DiffLoss,
             MEMVisionBlock,
             Qwen3VLVisionBlock,
-            DINOv3ViTLayer,
         )
         # Master params stay fp32 before wrapping; MixedPrecisionPolicy
         # casts to bf16 only for compute.
