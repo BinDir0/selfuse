@@ -29,7 +29,7 @@ vlm_wds_datasets:
     weight: 3
   - name: RoboInter-VQA
     shard_urls: /efs-exp/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA/train/shard_*.tar
-    weight: 12
+    weight: 27
 
 val_vlm_wds_datasets:
   - name: FineVision
