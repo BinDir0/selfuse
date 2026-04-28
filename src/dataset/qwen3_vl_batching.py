@@ -98,10 +98,10 @@ class Qwen3VLChatFormatter:
 
     def format_intrinsic_part(self, label: str, intrinsic: torch.Tensor) -> str:
         if self.camera_intrinsic_mode == "token":
-            return f"{label} camera intrinsic: {self.camera_token}."
+            return f"{label} camera intrinsics: {self.camera_token}."
         values = intrinsic.tolist()
         return (
-            f"{label} camera intrinsic: fx:{values[0]:.2f} fy:{values[1]:.2f} "
+            f"{label} camera intrinsics: fx:{values[0]:.2f} fy:{values[1]:.2f} "
             f"cx:{values[2]:.2f} cy:{values[3]:.2f}."
         )
 
