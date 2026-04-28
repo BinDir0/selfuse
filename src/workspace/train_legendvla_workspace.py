@@ -160,7 +160,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
     def setup_runtime(self, cfg):
         """Distributed init, profiler, wandb, output-dir broadcast, seed reset."""
-        ctx = init_distributed(backend="nccl", timeout_sec=3600)
+        ctx = init_distributed(backend="nccl")
         rank, world_size, device = ctx.rank, ctx.world_size, ctx.device
 
         if rank == 0:
