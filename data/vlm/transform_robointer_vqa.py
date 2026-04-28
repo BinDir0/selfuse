@@ -28,7 +28,11 @@ os.environ["TRANSFORMERS_CACHE"] = os.path.join(HF_CACHE_DIR, "transformers")
 os.makedirs(HF_CACHE_DIR, exist_ok=True)
 
 # ================= Configuration =================
-ROBOINTER_ROOT = "/share_data/guantianrui/datasets/VLM/RoboInter-VQA"
+# Override with: export ROBOINTER_ROOT=/path/to/RoboInter-VQA
+ROBOINTER_ROOT = os.environ.get(
+    "ROBOINTER_ROOT",
+    "/share_data/guantianrui/datasets/VLM/RoboInter-VQA",
+)
 OUTPUT_ROOT = "/share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA"
 
 # Task mapping for Generation
@@ -178,19 +182,30 @@ def trajectory_to_text(points):
     return f"[{items}]"
 
 def load_image_safe(image_path):
-    """Safely load an image."""
-    candidates = [os.path.join(ROBOINTER_ROOT, image_path)]
-    # Train planning JPEGs may be extracted under task_planning_full/ (merged zip) instead of task_planning/.
-    alt = image_path.replace(
+    """Safely load an image; tries absolute path, then ROBOINTER_ROOT, then planning_full layout."""
+    if not image_path or not str(image_path).strip():
+        return None
+    path = str(image_path).strip()
+    root = ROBOINTER_ROOT
+    candidates = []
+    if os.path.isabs(path):
+        candidates.append(path)
+    candidates.append(os.path.join(root, path))
+    alt = path.replace(
         "Task_planning/image/train/manipvqa/task_planning/",
+        "Task_planning/image/train/manipvqa/task_planning_full/",
     )
-    if alt != image_path:
-        candidates.append(os.path.join(ROBOINTER_ROOT, alt))
+    if alt != path:
+        candidates.append(os.path.join(root, alt))
 
+    seen = set()
     for full_path in candidates:
+        if full_path in seen:
+            continue
+        seen.add(full_path)
         if os.path.exists(full_path):
             try:
-                return Image.open(full_path).convert('RGB')
+                return Image.open(full_path).convert("RGB")
             except Exception:
                 continue
     return None
@@ -538,7 +553,7 @@ def process_split(files, output_dir, args, task_mapping, shard_prefix="shard"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_workers", type=int, default=64)
+    parser.add_argument("--num_workers", type=int, default=32)
     
     # Standard arguments matching user's request
     parser.add_argument("--split", type=str, default="both", help="Split directory to convert (train/val/both)")
