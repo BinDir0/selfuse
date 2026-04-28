@@ -75,8 +75,41 @@ class AnnotationProtocolTests(unittest.TestCase):
             [
                 "/tmp/annotations/f011_w016_v00162_i001_qwen-annotation.json",
                 "/tmp/annotations/factory011/f011_w016_v00162_i001_qwen-annotation.json",
+                "/tmp/annotations/factory011/factory_011_worker_016_0162_cut001_qwen-annotation.json",
+                "/tmp/annotations/factory_011_worker_016_0162_cut001_qwen-annotation.json",
             ],
         )
+
+    def test_load_clip_annotation_supports_buildai_qwen_factory_layout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            clip_id = "f026_w001_v00054_i000"
+            ann_path = root / "factory026" / "factory_026_worker_001_0054_cut000_qwen-annotation.json"
+            ann_path.parent.mkdir(parents=True, exist_ok=True)
+            ann_path.write_text(
+                json.dumps(
+                    {
+                        "status": "Valid",
+                        "global_analysis": {
+                            "level1": "pick part",
+                            "level2": "place part",
+                        },
+                        "language": "en",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            annotation, error_code, source_path = load_clip_annotation(
+                root,
+                clip_id,
+                annotation_suffix="_qwen-annotation.json",
+            )
+
+            self.assertIsNone(error_code)
+            self.assertIsNotNone(annotation)
+            self.assertEqual(annotation.instruction, ["pick part", "place part"])
+            self.assertEqual(source_path, str(ann_path))
 
 
 if __name__ == "__main__":

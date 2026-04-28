@@ -12,6 +12,7 @@ from typing import Optional
 ANNOTATION_SUFFIX = ".annotation.json"
 HIERARCHY_KEYS = ("level1", "level2", "level3", "level4", "level5")
 _FACTORY_CLIP_ID_PATTERN = re.compile(r"^f(\d{3})_")
+_BUILDAI_CLIP_ID_PATTERN = re.compile(r"^f(\d{3})_w(\d{3})_v(\d{5})_i(\d{3})$")
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,17 @@ def annotation_path(annotation_root: str | Path, clip_id: str, *, annotation_suf
     return Path(annotation_root) / f"{clip_id}{annotation_suffix}"
 
 
+def _build_buildai_qwen_annotation_name(clip_id: str, annotation_suffix: str) -> str | None:
+    match = _BUILDAI_CLIP_ID_PATTERN.match(str(clip_id))
+    if not match:
+        return None
+    factory_id, worker_id, video_id, cut_id = match.groups()
+    return (
+        f"factory_{int(factory_id):03d}_worker_{int(worker_id):03d}_"
+        f"{int(video_id):04d}_cut{int(cut_id):03d}{annotation_suffix}"
+    )
+
+
 def annotation_path_candidates(
     annotation_root: str | Path,
     clip_id: str,
@@ -44,6 +56,17 @@ def annotation_path_candidates(
         nested = factory_dir / f"{clip_id}{annotation_suffix}"
         if nested not in candidates:
             candidates.append(nested)
+        buildai_qwen_name = _build_buildai_qwen_annotation_name(str(clip_id), annotation_suffix)
+        if buildai_qwen_name:
+            nested_buildai_qwen = factory_dir / buildai_qwen_name
+            if nested_buildai_qwen not in candidates:
+                candidates.append(nested_buildai_qwen)
+
+    buildai_qwen_name = _build_buildai_qwen_annotation_name(str(clip_id), annotation_suffix)
+    if buildai_qwen_name:
+        root_buildai_qwen = root / buildai_qwen_name
+        if root_buildai_qwen not in candidates:
+            candidates.append(root_buildai_qwen)
 
     return candidates
 
