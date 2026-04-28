@@ -37,7 +37,7 @@ export NCCL_IB_DISABLE=0
 export NCCL_P2P_DISABLE=0
 export NCCL_BLOCKING_WAIT=1
 export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_TIMEOUT=3600000
+export NCCL_TIMEOUT=3600
 export NCCL_SOCKET_IFNAME=eth0
 export NCCL_IB_GID_INDEX=3
 # 注意：如果调试机器的网卡名字不同，可以注释掉下面几行

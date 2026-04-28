@@ -530,7 +530,7 @@ training:
 - 设置 NCCL 超时避免其他 rank 提前退出：
 
 ```bash
-export NCCL_TIMEOUT=3600000
+export NCCL_TIMEOUT=3600 # in seconds
 export NCCL_ASYNC_ERROR_HANDLING=1
 ```
 
