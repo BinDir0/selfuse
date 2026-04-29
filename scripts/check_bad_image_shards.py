@@ -22,7 +22,7 @@ import numpy as np
 
 TAR_BLOCK = 512
 ZERO_BLOCK = b"\x00" * TAR_BLOCK
-IMAGE_SUFFIXES = (".image.jpg", ".image.jpeg", ".image.png", ".jpg", ".jpeg", ".png")
+IMAGE_SUFFIXES = (".image.jpg", ".image.jpeg", ".image.png", ".jpg", ".jpeg", ".png", ".bmp", ".webp")
 JPEG_SUFFIXES = (".image.jpg", ".image.jpeg", ".jpg", ".jpeg")
 PNG_SUFFIXES = (".image.png", ".png")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -104,13 +104,14 @@ def _strict_image_issue(name: str, payload) -> str | None:
     return None
 
 
-def _decode_image(payload: bytes):
+def _decode_image(payload: bytes, decode_mode: str = "color"):
     if not payload:
         return None
     array = np.frombuffer(payload, dtype=np.uint8)
     if array.size == 0:
         return None
-    return cv2.imdecode(array, cv2.IMREAD_UNCHANGED)
+    flag = cv2.IMREAD_UNCHANGED if decode_mode == "unchanged" else cv2.IMREAD_COLOR
+    return cv2.imdecode(array, flag)
 
 
 def _image_decode_shape(image) -> str:
@@ -119,7 +120,7 @@ def _image_decode_shape(image) -> str:
     return "x".join(str(dim) for dim in image.shape)
 
 
-def _decode_image_capturing_stderr(payload: bytes):
+def _decode_image_capturing_stderr(payload: bytes, decode_mode: str = "color"):
     if not payload:
         return None, ""
     array = np.frombuffer(payload, dtype=np.uint8)
@@ -133,7 +134,8 @@ def _decode_image_capturing_stderr(payload: bytes):
             with tempfile.TemporaryFile(mode="w+b") as captured:
                 os.dup2(captured.fileno(), 2)
                 try:
-                    image = cv2.imdecode(array, cv2.IMREAD_UNCHANGED)
+                    flag = cv2.IMREAD_UNCHANGED if decode_mode == "unchanged" else cv2.IMREAD_COLOR
+                    image = cv2.imdecode(array, flag)
                     sys.stderr.flush()
                 finally:
                     os.dup2(original_stderr_fd, 2)
@@ -160,6 +162,7 @@ def check_one_sequential(
     strict: bool = False,
     match_member: str | None = None,
     list_matches: bool = False,
+    decode_mode: str = "color",
 ) -> tuple[str, list[tuple[str, str]], int]:
     bad: list[tuple[str, str]] = []
     images_checked = 0
@@ -218,12 +221,12 @@ def check_one_sequential(
                                 strict_issue = _strict_image_issue(effective_name, payload)
                                 if strict_issue is not None:
                                     bad.append((effective_name, strict_issue))
-                                image, stderr_text = _decode_image_capturing_stderr(payload)
+                                image, stderr_text = _decode_image_capturing_stderr(payload, decode_mode)
                                 stderr_issue = _decoder_stderr_issue(stderr_text)
                                 if stderr_issue is not None:
                                     bad.append((effective_name, stderr_issue))
                             else:
-                                image = _decode_image(payload)
+                                image = _decode_image(payload, decode_mode)
                             if image is None:
                                 bad.append((effective_name, "cv2_imdecode_none"))
                             if list_matches:
@@ -258,6 +261,7 @@ def check_one_mmap(
     strict: bool = False,
     match_member: str | None = None,
     list_matches: bool = False,
+    decode_mode: str = "color",
 ) -> tuple[str, list[tuple[str, str]], int]:
     bad: list[tuple[str, str]] = []
     images_checked = 0
@@ -327,12 +331,12 @@ def check_one_mmap(
                                         strict_issue = _strict_image_issue(effective_name, payload_view)
                                         if strict_issue is not None:
                                             bad.append((effective_name, strict_issue))
-                                        image, stderr_text = _decode_image_capturing_stderr(payload_view)
+                                        image, stderr_text = _decode_image_capturing_stderr(payload_view, decode_mode)
                                         stderr_issue = _decoder_stderr_issue(stderr_text)
                                         if stderr_issue is not None:
                                             bad.append((effective_name, stderr_issue))
                                     else:
-                                        image = _decode_image(payload_view)
+                                        image = _decode_image(payload_view, decode_mode)
                                     if image is None:
                                         bad.append((effective_name, "cv2_imdecode_none"))
                                     if list_matches:
@@ -376,11 +380,13 @@ def check_one_tarfile(
     strict: bool = False,
     match_member: str | None = None,
     list_matches: bool = False,
+    decode_mode: str = "color",
+    tar_mode: str = "r:*",
 ) -> tuple[str, list[tuple[str, str]], int]:
     bad: list[tuple[str, str]] = []
     images_checked = 0
     try:
-        with tarfile.open(tar_path, "r:*") as tar_reader:
+        with tarfile.open(tar_path, tar_mode) as tar_reader:
             for member in tar_reader:
                 if not member.isfile() or not _is_image_member(member.name):
                     continue
@@ -398,12 +404,12 @@ def check_one_tarfile(
                             strict_issue = _strict_image_issue(member.name, payload)
                             if strict_issue is not None:
                                 bad.append((member.name, strict_issue))
-                            image, stderr_text = _decode_image_capturing_stderr(payload)
+                            image, stderr_text = _decode_image_capturing_stderr(payload, decode_mode)
                             stderr_issue = _decoder_stderr_issue(stderr_text)
                             if stderr_issue is not None:
                                 bad.append((member.name, stderr_issue))
                         else:
-                            image = _decode_image(payload)
+                            image = _decode_image(payload, decode_mode)
                         if image is None:
                             bad.append((member.name, "cv2_imdecode_none"))
                         if list_matches:
@@ -423,6 +429,27 @@ def check_one_tarfile(
     except Exception as error:  # noqa: BLE001
         return tar_path, [("__tar__", str(error))], images_checked
     return tar_path, bad, images_checked
+
+
+def check_one_tarstream(
+    tar_path: str,
+    limit_images: int | None = None,
+    stop_after_first_bad: bool = True,
+    strict: bool = False,
+    match_member: str | None = None,
+    list_matches: bool = False,
+    decode_mode: str = "color",
+) -> tuple[str, list[tuple[str, str]], int]:
+    return check_one_tarfile(
+        tar_path,
+        limit_images=limit_images,
+        stop_after_first_bad=stop_after_first_bad,
+        strict=strict,
+        match_member=match_member,
+        list_matches=list_matches,
+        decode_mode=decode_mode,
+        tar_mode="r|*",
+    )
 
 
 def _default_jobs(executor: str) -> int:
@@ -446,9 +473,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--engine",
-        choices=("mmap", "sequential", "tarfile"),
+        choices=("mmap", "sequential", "tarfile", "tarstream"),
         default="mmap",
-        help="mmap avoids per-image payload read copies; sequential is the seek-based fallback",
+        help="mmap is fastest; tarstream matches tarfile.open(..., 'r|*') and handles PAX paths",
+    )
+    parser.add_argument(
+        "--decode-mode",
+        choices=("color", "unchanged"),
+        default="color",
+        help="cv2.imdecode mode; color matches common training code using cv2.IMREAD_COLOR",
     )
     parser.add_argument(
         "--limit-images-per-shard",
@@ -604,8 +637,10 @@ def main() -> None:
         checker = check_one_mmap
     elif args.engine == "sequential":
         checker = check_one_sequential
-    else:
+    elif args.engine == "tarfile":
         checker = check_one_tarfile
+    else:
+        checker = check_one_tarstream
     executor_cls = ThreadPoolExecutor if args.executor == "thread" else ProcessPoolExecutor
 
     limit_text = f" limit_images/shard={args.limit_images_per_shard}" if args.limit_images_per_shard else ""
@@ -615,7 +650,8 @@ def main() -> None:
     print(
         f"glob={total_glob} slice=[{start},{end}) checking={len(shards)} "
         f"executor={args.executor} jobs={args.jobs} engine={args.engine} "
-        f"opencv_threads={args.opencv_threads} {detail_text}{strict_text}{limit_text}{match_text}",
+        f"decode_mode={args.decode_mode} opencv_threads={args.opencv_threads} "
+        f"{detail_text}{strict_text}{limit_text}{match_text}",
         flush=True,
     )
 
@@ -631,6 +667,7 @@ def main() -> None:
     strict_iter = itertools.repeat(bool(args.strict))
     match_iter = itertools.repeat(args.match_member)
     list_iter = itertools.repeat(bool(args.list_matches))
+    decode_mode_iter = itertools.repeat(args.decode_mode)
     with executor_cls(max_workers=args.jobs) as executor:
         result_iter = executor.map(
             checker,
@@ -640,6 +677,7 @@ def main() -> None:
             strict_iter,
             match_iter,
             list_iter,
+            decode_mode_iter,
             chunksize=max(1, int(args.chunksize)),
         )
         for path, issues, images_checked in result_iter:
