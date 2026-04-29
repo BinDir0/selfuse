@@ -157,7 +157,7 @@ def compute_kv_layer_indices(num_expert_layers: int, num_backbone_layers: int) -
     if num_expert_layers >= num_backbone_layers:
         return list(range(num_backbone_layers))
     step = num_backbone_layers / num_expert_layers
-    return [int(step * i + step - 1) for i in range(num_expert_layers)]
+    return [int(step * i) for i in range(num_expert_layers)]
 
 
 class Qwen3Expert(nn.Module):
