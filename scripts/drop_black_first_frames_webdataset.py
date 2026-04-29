@@ -54,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only report black first frames; do not write output shards",
     )
     parser.add_argument(
+        "--audit_zero_intrinsic",
+        action="store_true",
+        help="Only count frames whose lowdim intrinsic slice has zero values; do not write output shards",
+    )
+    parser.add_argument(
         "--max_mean",
         type=float,
         default=2.0,
@@ -158,6 +163,184 @@ def lowdim_has_zero_intrinsic(lowdim_bytes: bytes) -> tuple[bool, dict]:
     return has_zero, {
         "intrinsic": [float(value) for value in intrinsic.tolist()],
     }
+
+
+def _new_zero_intrinsic_counts() -> dict:
+    return {
+        "lowdim_frames_total": 0,
+        "any_zero_intrinsic_frames": 0,
+        "all_zero_intrinsic_frames": 0,
+        "zero_fx_frames": 0,
+        "zero_fy_frames": 0,
+        "zero_cx_frames": 0,
+        "zero_cy_frames": 0,
+        "nonfinite_intrinsic_frames": 0,
+        "decode_errors": 0,
+    }
+
+
+def _audit_zero_intrinsic_for_shard(task: tuple[int, str, int]) -> dict:
+    shard_index, shard_path_str, detail_limit = task
+    shard_path = Path(shard_path_str)
+    counts = _new_zero_intrinsic_counts()
+    details = []
+
+    with tarfile.open(shard_path, "r|") as tar_reader:
+        for member in tar_reader:
+            if not member.isfile():
+                continue
+            sample_key, _, field_name = split_sample_member_name(member.name)
+            if sample_key is None:
+                raise ValueError(f"Unsupported shard member: {member.name}")
+            if field_name != "lowdim_bytes":
+                continue
+
+            counts["lowdim_frames_total"] += 1
+            member_file = tar_reader.extractfile(member)
+            if member_file is None:
+                counts["decode_errors"] += 1
+                if len(details) < detail_limit:
+                    details.append(
+                        {
+                            "shard_name": shard_path.name,
+                            "sample_key": sample_key,
+                            "frame_idx": _frame_index_from_key(sample_key),
+                            "error": "extractfile_none",
+                        }
+                    )
+                continue
+
+            try:
+                array = np.load(BytesIO(member_file.read()), allow_pickle=False)
+                flat = np.asarray(array, dtype=np.float32).reshape(-1)
+                if flat.shape[0] < LOWDIM_INTRINSIC_SLICE.stop:
+                    raise ValueError(f"lowdim too short for intrinsic slice: shape={array.shape}")
+                intrinsic = flat[LOWDIM_INTRINSIC_SLICE]
+            except Exception as error:  # noqa: BLE001
+                counts["decode_errors"] += 1
+                if len(details) < detail_limit:
+                    details.append(
+                        {
+                            "shard_name": shard_path.name,
+                            "sample_key": sample_key,
+                            "frame_idx": _frame_index_from_key(sample_key),
+                            "error": f"{error.__class__.__name__}: {error}",
+                        }
+                    )
+                continue
+
+            zero_mask = intrinsic == 0.0
+            any_zero = bool(np.any(zero_mask))
+            all_zero = bool(np.all(zero_mask))
+            nonfinite = bool(not np.isfinite(intrinsic).all())
+
+            counts["any_zero_intrinsic_frames"] += int(any_zero)
+            counts["all_zero_intrinsic_frames"] += int(all_zero)
+            counts["zero_fx_frames"] += int(bool(zero_mask[0]))
+            counts["zero_fy_frames"] += int(bool(zero_mask[1]))
+            counts["zero_cx_frames"] += int(bool(zero_mask[2]))
+            counts["zero_cy_frames"] += int(bool(zero_mask[3]))
+            counts["nonfinite_intrinsic_frames"] += int(nonfinite)
+
+            if (any_zero or nonfinite) and len(details) < detail_limit:
+                details.append(
+                    {
+                        "shard_name": shard_path.name,
+                        "sample_key": sample_key,
+                        "frame_idx": _frame_index_from_key(sample_key),
+                        "intrinsic": [float(value) for value in intrinsic.tolist()],
+                        "zero_mask": [bool(value) for value in zero_mask.tolist()],
+                        "all_zero": all_zero,
+                        "nonfinite": nonfinite,
+                    }
+                )
+
+    return {
+        "shard_index": int(shard_index),
+        "shard_name": shard_path.name,
+        "summary": counts,
+        "details": details,
+    }
+
+
+def _merge_zero_intrinsic_audit_result(report: dict, result: dict, detail_limit: int) -> None:
+    shard_name = result["shard_name"]
+    report["shards"][shard_name] = dict(result["summary"])
+    for key, value in result["summary"].items():
+        report["summary"][key] += int(value)
+    remaining_details = max(0, detail_limit - len(report["details"]))
+    if remaining_details > 0:
+        report["details"].extend(result["details"][:remaining_details])
+
+
+def audit_zero_intrinsic_frames(
+    source_dir: Path,
+    *,
+    workers: int = 1,
+    detail_limit: int = 1000,
+    progress_every_shards: int = 1,
+) -> dict:
+    shard_paths = list(iter_shard_paths(str(source_dir)))
+    if not shard_paths:
+        raise RuntimeError(f"No shard tar files found in {source_dir}")
+
+    detail_limit = max(0, int(detail_limit))
+    per_shard_detail_limit = min(detail_limit, 100) if detail_limit > 0 else 0
+    summary = _new_zero_intrinsic_counts()
+    summary["source_shards"] = len(shard_paths)
+    report = {
+        "source_shard_dir": str(source_dir.resolve()),
+        "mode": "audit_zero_intrinsic",
+        "thresholds": {
+            "intrinsic_slice": [LOWDIM_INTRINSIC_SLICE.start, LOWDIM_INTRINSIC_SLICE.stop],
+            "zero_criterion": "any intrinsic value equals 0.0",
+        },
+        "summary": summary,
+        "shards": {},
+        "details": [],
+        "progress": {
+            "completed_shards": 0,
+            "current_shard_index": None,
+            "current_shard_name": None,
+        },
+    }
+
+    workers = max(1, int(workers))
+    tasks = [(index, shard_path, per_shard_detail_limit) for index, shard_path in enumerate(shard_paths, start=1)]
+    completed = 0
+    _progress(f"Auditing zero lowdim intrinsics with {workers} worker(s)...")
+    if workers <= 1:
+        iterator = map(_audit_zero_intrinsic_for_shard, tasks)
+        close_pool = None
+    else:
+        context = get_context("fork")
+        pool = context.Pool(processes=workers)
+        iterator = pool.imap_unordered(_audit_zero_intrinsic_for_shard, tasks, chunksize=1)
+        close_pool = pool
+
+    try:
+        for result in iterator:
+            completed += 1
+            _merge_zero_intrinsic_audit_result(report, result, detail_limit)
+            report["progress"]["completed_shards"] = int(completed)
+            report["progress"]["current_shard_index"] = int(result["shard_index"])
+            report["progress"]["current_shard_name"] = result["shard_name"]
+            if progress_every_shards > 0 and completed % progress_every_shards == 0:
+                shard_summary = result["summary"]
+                _progress(
+                    f"[audit {completed}/{len(shard_paths)}] {result['shard_name']}: "
+                    f"frames={shard_summary['lowdim_frames_total']} "
+                    f"any_zero={shard_summary['any_zero_intrinsic_frames']} "
+                    f"all_zero={shard_summary['all_zero_intrinsic_frames']} "
+                    f"total_any_zero={report['summary']['any_zero_intrinsic_frames']}"
+                )
+    finally:
+        if close_pool is not None:
+            close_pool.close()
+            close_pool.join()
+
+    report["shards"] = {key: report["shards"][key] for key in sorted(report["shards"])}
+    return report
 
 
 def _open_output_tar(output_dir: Path, shard_name: str):
@@ -769,6 +952,19 @@ def main() -> None:
     source_dir = Path(args.source_shard_dir)
     if not source_dir.is_dir():
         raise FileNotFoundError(f"Source shard dir not found: {source_dir}")
+
+    if args.audit_zero_intrinsic:
+        report = audit_zero_intrinsic_frames(
+            source_dir,
+            workers=max(1, int(args.workers)),
+            detail_limit=max(0, int(args.detail_limit)),
+            progress_every_shards=max(0, int(args.progress_every_shards)),
+        )
+        if args.report_out:
+            report_path = Path(args.report_out).expanduser()
+            _write_json_atomic(report_path, report)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
 
     output_dir = Path(args.output_dir) if args.output_dir is not None else None
     if not args.dry_run and output_dir is not None:
