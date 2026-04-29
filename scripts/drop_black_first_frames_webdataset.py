@@ -154,8 +154,8 @@ def lowdim_has_zero_intrinsic(lowdim_bytes: bytes) -> tuple[bool, dict]:
     if flat.shape[0] < LOWDIM_INTRINSIC_SLICE.stop:
         raise ValueError(f"lowdim too short for intrinsic slice: shape={array.shape}")
     intrinsic = flat[LOWDIM_INTRINSIC_SLICE]
-    is_zero = bool(np.all(intrinsic == 0.0))
-    return is_zero, {
+    has_zero = bool(np.any(intrinsic == 0.0))
+    return has_zero, {
         "intrinsic": [float(value) for value in intrinsic.tolist()],
     }
 
@@ -597,7 +597,7 @@ def _new_report(
         "output_dir": str(output_dir.resolve()) if output_dir is not None else None,
         "dry_run": bool(dry_run),
         "thresholds": {
-            "drop_criterion": "first_frame_lowdim_intrinsic_all_zero",
+            "drop_criterion": "first_frame_lowdim_intrinsic_any_zero",
             "intrinsic_slice": [LOWDIM_INTRINSIC_SLICE.start, LOWDIM_INTRINSIC_SLICE.stop],
         },
         "summary": {
