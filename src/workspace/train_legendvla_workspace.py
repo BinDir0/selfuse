@@ -100,10 +100,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # cycle mean to wandb instead of just the sync-step microbatch.
         # Only populated when grad_accum_steps > 1.
         self._cycle_loss_accum: dict = {}
-        # Cached requires_grad state for VLM params; flipped only at the
-        # freeze->rewarmup boundary so apply_vlm_freeze_state stays a no-op
-        # on the common path. None = uninitialized.
-        self._vlm_grad_state: bool | None = None
         self.objective_func = "train" if cfg.training.objective is None else f"train_{cfg.training.objective}"
         self.compile_cfg = cfg.training.get("compile", {})
         print(f"Training with objective function: {self.objective_func}")
@@ -135,18 +131,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
     def is_vlm_freeze_active(self) -> bool:
         return bool(self.vlm_group_indices) and self.update_step < self.vlm_freeze_updates
-
-    def apply_vlm_freeze_state(self) -> None:
-        """Toggle VLM params requires_grad based on the staged-freeze schedule.
-        """
-        if not self.vlm_param_refs:
-            return
-        desired = not self.is_vlm_freeze_active()
-        if desired == self._vlm_grad_state:
-            return
-        for param in self.vlm_param_refs:
-            param.requires_grad_(desired)
-        self._vlm_grad_state = desired
 
     def get_param_group_lrs(self) -> tuple[list[float], list[int]]:
         optimizer = self.unwrap_optimizer(self.optimizer)
@@ -425,10 +409,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                     f"global_step={self.global_step} epoch={self.epoch}"
                 )
 
-        # Apply initial freeze state after resume so update_step reflects the
-        # restored value. Also runs on fresh starts (update_step == 0).
-        self.apply_vlm_freeze_state()
-
         self.maybe_compile_model(rank)
 
         if cfg.training.debug:
@@ -451,8 +431,6 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         is_accumulating = (batch_idx + 1) % grad_accum_steps != 0
         sync_gradients = not is_accumulating
 
-        self.apply_vlm_freeze_state()
-
         # FSDP MixedPrecisionPolicy handles bf16 cast of floating-point
         # inputs (cast_forward_inputs=True); int/bool/uint8 pass through.
         raw_loss = self.model(self.objective_func, batch)
@@ -470,6 +448,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             if sync_gradients:
                 raw_loss = self._cycle_loss_accum
                 self._cycle_loss_accum = {}
+
+
+        if self.vlm_param_refs and self.is_vlm_freeze_active():
+            for param in self.vlm_param_refs:
+                param.grad = None
 
         if batch_idx == 10 and rank == 0 and cfg.training.profile:
             torch.cuda.empty_cache()
