@@ -14,7 +14,6 @@ from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,6 +28,8 @@ from lib.pipeline.exporters.webdataset_rewriter import (  # noqa: E402
     validate_sample_record,
     write_sample_to_tar,
 )
+
+LOWDIM_INTRINSIC_SLICE = slice(112, 116)
 
 try:
     from tqdm import tqdm
@@ -56,19 +57,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--max_mean",
         type=float,
         default=2.0,
-        help="Maximum decoded RGB mean for a first frame to be considered black",
+        help="Deprecated compatibility option; black-head detection now uses lowdim intrinsic == 0",
     )
     parser.add_argument(
         "--max_pixel",
         type=int,
         default=10,
-        help="Per-channel pixel threshold used for the dark-pixel ratio check",
+        help="Deprecated compatibility option; black-head detection now uses lowdim intrinsic == 0",
     )
     parser.add_argument(
         "--min_dark_ratio",
         type=float,
         default=0.999,
-        help="Minimum fraction of pixels whose RGB channels are all <= --max_pixel",
+        help="Deprecated compatibility option; black-head detection now uses lowdim intrinsic == 0",
     )
     parser.add_argument(
         "--detail_limit",
@@ -80,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--progress_every_samples",
         type=int,
         default=100000,
-        help="Print an in-shard progress line every N samples; 0 disables sample-level progress",
+        help="Deprecated compatibility option; current fast path reports by prepass/detect/rewrite shard",
     )
     parser.add_argument(
         "--progress_every_shards",
@@ -93,8 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "When --report_out is set, also refresh the in-progress report every N samples "
-            "inside a shard; 0 only writes it after each shard"
+            "Deprecated compatibility option; when --report_out is set, the in-progress report "
+            "is refreshed after each shard result"
         ),
     )
     parser.add_argument(
@@ -147,26 +148,15 @@ def decode_meta(meta_bytes: bytes | None) -> dict | None:
         return None
 
 
-def is_black_image_bytes(
-    image_bytes: bytes,
-    *,
-    max_mean: float,
-    max_pixel: int,
-    min_dark_ratio: float,
-) -> tuple[bool, dict]:
-    with Image.open(BytesIO(image_bytes)) as image:
-        rgb = image.convert("RGB")
-        array = np.asarray(rgb, dtype=np.uint8)
-
-    mean_value = float(array.mean())
-    dark_pixels = np.all(array <= int(max_pixel), axis=2)
-    dark_ratio = float(dark_pixels.mean())
-    is_black = mean_value <= float(max_mean) and dark_ratio >= float(min_dark_ratio)
-    return is_black, {
-        "mean": mean_value,
-        "dark_ratio": dark_ratio,
-        "height": int(array.shape[0]),
-        "width": int(array.shape[1]),
+def lowdim_has_zero_intrinsic(lowdim_bytes: bytes) -> tuple[bool, dict]:
+    array = np.load(BytesIO(lowdim_bytes), allow_pickle=False)
+    flat = np.asarray(array, dtype=np.float32).reshape(-1)
+    if flat.shape[0] < LOWDIM_INTRINSIC_SLICE.stop:
+        raise ValueError(f"lowdim too short for intrinsic slice: shape={array.shape}")
+    intrinsic = flat[LOWDIM_INTRINSIC_SLICE]
+    is_zero = bool(np.all(intrinsic == 0.0))
+    return is_zero, {
+        "intrinsic": [float(value) for value in intrinsic.tolist()],
     }
 
 
@@ -179,10 +169,10 @@ def _open_output_tar(output_dir: Path, shard_name: str):
     return tarfile.open(tmp_path, "w"), output_path, tmp_path
 
 
-def _write_sample(tar_writer: tarfile.TarFile, sample: dict) -> None:
+def _write_sample(tar_writer: tarfile.TarFile, sample: dict, sample_key: str | None = None) -> None:
     write_sample_to_tar(
         tar_writer,
-        sample["key"],
+        sample["key"] if sample_key is None else sample_key,
         sample["image_bytes"],
         sample["lowdim_bytes"],
         sample["meta_bytes"],
@@ -281,6 +271,7 @@ def _iter_shard_sample_light(shard_path: str):
 def _find_shard_first_candidates(task: tuple[int, str]) -> dict:
     shard_index, shard_path = task
     first_by_clip = {}
+    clip_ids = set()
     samples_total = 0
     incomplete_samples = 0
     for sample_order, (sample_key, meta_bytes, fields) in enumerate(_iter_shard_sample_light(shard_path)):
@@ -290,6 +281,7 @@ def _find_shard_first_candidates(task: tuple[int, str]) -> dict:
             continue
         meta = decode_meta(meta_bytes)
         clip_id = sample_clip_id({"key": sample_key}, meta)
+        clip_ids.add(clip_id)
         sort_key = _candidate_sort_key(sample_key, shard_index, sample_order)
         previous = first_by_clip.get(clip_id)
         if previous is None or sort_key < previous["sort_key"]:
@@ -302,6 +294,7 @@ def _find_shard_first_candidates(task: tuple[int, str]) -> dict:
         "shard_name": Path(shard_path).name,
         "samples_total": int(samples_total),
         "incomplete_samples": int(incomplete_samples),
+        "clip_ids": sorted(clip_ids),
         "first_by_clip": first_by_clip,
     }
 
@@ -327,6 +320,7 @@ def _build_global_first_sample_keys(shard_paths: list[str], workers: int) -> tup
             shard_stats[result["shard_name"]] = {
                 "samples_total": int(result["samples_total"]),
                 "incomplete_samples": int(result["incomplete_samples"]),
+                "clip_ids": list(result["clip_ids"]),
             }
             for clip_id, candidate in result["first_by_clip"].items():
                 previous = first_by_clip.get(clip_id)
@@ -383,13 +377,13 @@ def _copy_unchanged_shard(source_path: Path, output_dir: Path, shard_name: str) 
     os.replace(tmp_path, output_path)
 
 
-def _scan_first_frame_images_for_drop_keys(
+def _scan_first_frame_lowdims_for_drop_clips(
     shard_path: Path,
     first_sample_keys: set[str],
     first_clip_by_sample: dict[str, str],
     config: dict,
-) -> tuple[set[str], list[dict], int, int, int]:
-    drop_keys = set()
+) -> tuple[dict[str, dict], list[dict], int, int, int]:
+    drop_by_clip = {}
     details = []
     first_frames_checked = 0
     black_first_frames_dropped = 0
@@ -403,7 +397,7 @@ def _scan_first_frame_images_for_drop_keys(
             sample_key, _, field_name = split_sample_member_name(member.name)
             if sample_key is None:
                 raise ValueError(f"Unsupported shard member: {member.name}")
-            if field_name != "image_bytes" or sample_key not in first_sample_keys:
+            if field_name != "lowdim_bytes" or sample_key not in first_sample_keys:
                 continue
 
             first_frames_checked += 1
@@ -412,42 +406,90 @@ def _scan_first_frame_images_for_drop_keys(
                 decode_errors += 1
                 continue
             try:
-                is_black, image_stats = is_black_image_bytes(
-                    member_file.read(),
-                    max_mean=float(config["max_mean"]),
-                    max_pixel=int(config["max_pixel"]),
-                    min_dark_ratio=float(config["min_dark_ratio"]),
-                )
+                should_drop, lowdim_stats = lowdim_has_zero_intrinsic(member_file.read())
             except Exception as error:
                 decode_errors += 1
-                image_stats = {"error": f"{error.__class__.__name__}: {error}"}
-                is_black = False
+                lowdim_stats = {"error": f"{error.__class__.__name__}: {error}"}
+                should_drop = False
 
-            if is_black:
-                drop_keys.add(sample_key)
+            if should_drop:
+                clip_id = first_clip_by_sample.get(sample_key, sample_key.rsplit("_f", 1)[0])
+                drop_frame_idx = _frame_index_from_key(sample_key)
+                if drop_frame_idx is None:
+                    drop_frame_idx = 0
+                drop_by_clip[clip_id] = {
+                    "sample_key": sample_key,
+                    "drop_frame_idx": int(drop_frame_idx),
+                }
                 black_first_frames_dropped += 1
                 if len(details) < detail_limit:
                     details.append(
                         {
-                            "clip_id": first_clip_by_sample.get(sample_key, sample_key.rsplit("_f", 1)[0]),
+                            "clip_id": clip_id,
                             "sample_key": sample_key,
+                            "drop_frame_idx": int(drop_frame_idx),
                             "shard_name": shard_path.name,
-                            **image_stats,
+                            **lowdim_stats,
                         }
                     )
 
-    return drop_keys, details, first_frames_checked, black_first_frames_dropped, decode_errors
+    return drop_by_clip, details, first_frames_checked, black_first_frames_dropped, decode_errors
 
 
-def _rewrite_shard_dropping_keys(shard_path: Path, output_dir: Path, shard_name: str, drop_keys: set[str]) -> int:
+def _detect_drop_clips_for_shard(task: tuple[int, str]) -> dict:
+    if _WORKER_FIRST_SAMPLE_KEYS is None or _WORKER_FIRST_CLIP_BY_SAMPLE is None or _WORKER_CONFIG is None:
+        raise RuntimeError("Parallel worker was not initialized")
+    shard_index, shard_path_str = task
+    shard_path = Path(shard_path_str)
+    drop_by_clip, details, first_checked, dropped, decode_errors = _scan_first_frame_lowdims_for_drop_clips(
+        shard_path,
+        _WORKER_FIRST_SAMPLE_KEYS,
+        _WORKER_FIRST_CLIP_BY_SAMPLE,
+        _WORKER_CONFIG,
+    )
+    return {
+        "shard_index": int(shard_index),
+        "shard_name": shard_path.name,
+        "drop_by_clip": drop_by_clip,
+        "details": details,
+        "first_frames_checked": int(first_checked),
+        "black_first_frames_dropped": int(dropped),
+        "decode_errors": int(decode_errors),
+    }
+
+
+def _renumber_sample_key_after_drop(sample_key: str, drop_frame_idx: int) -> str | None:
+    frame_idx = _frame_index_from_key(sample_key)
+    if frame_idx is None:
+        return sample_key
+    if frame_idx == drop_frame_idx:
+        return None
+    if frame_idx < drop_frame_idx:
+        return sample_key
+    prefix, frame_text = sample_key.rsplit("_f", 1)
+    return f"{prefix}_f{frame_idx - 1:0{len(frame_text)}d}"
+
+
+def _rewrite_shard_for_dropped_clips(
+    shard_path: Path,
+    output_dir: Path,
+    shard_name: str,
+    drop_by_clip: dict[str, dict],
+) -> int:
     tar_writer, output_path, tmp_path = _open_output_tar(output_dir, shard_name)
     frames_written = 0
     try:
         for sample in iter_shard_samples(str(shard_path)):
-            if sample["key"] in drop_keys:
-                continue
             validate_sample_record(sample)
-            _write_sample(tar_writer, sample)
+            meta = decode_meta(sample.get("meta_bytes"))
+            clip_id = sample_clip_id(sample, meta)
+            drop_info = drop_by_clip.get(clip_id)
+            sample_key = sample["key"]
+            if drop_info is not None:
+                sample_key = _renumber_sample_key_after_drop(sample_key, int(drop_info["drop_frame_idx"]))
+                if sample_key is None:
+                    continue
+            _write_sample(tar_writer, sample, sample_key=sample_key)
             frames_written += 1
         tar_writer.close()
         tar_writer = None
@@ -465,7 +507,7 @@ def _rewrite_shard_dropping_keys(shard_path: Path, output_dir: Path, shard_name:
 
 
 def _process_shard_with_global_first(task: tuple[int, int, str, dict]) -> dict:
-    if _WORKER_FIRST_SAMPLE_KEYS is None or _WORKER_FIRST_CLIP_BY_SAMPLE is None or _WORKER_CONFIG is None:
+    if _WORKER_CONFIG is None:
         raise RuntimeError("Parallel worker was not initialized")
 
     shard_index, total_shards, shard_path_str, prepass_stats = task
@@ -474,44 +516,37 @@ def _process_shard_with_global_first(task: tuple[int, int, str, dict]) -> dict:
     config = _WORKER_CONFIG
     dry_run = bool(config["dry_run"])
     output_dir = Path(config["output_dir"]) if config.get("output_dir") else None
-    detail_limit = int(config["detail_limit"])
+    drop_by_clip = config.get("drop_by_clip", {})
     shard_stats = _new_shard_stats()
     shard_stats["samples_total"] = int(prepass_stats.get("samples_total", 0))
     shard_stats["incomplete_samples"] = int(prepass_stats.get("incomplete_samples", 0))
+    shard_clip_ids = set(prepass_stats.get("clip_ids", []))
+    affected_clip_ids = shard_clip_ids.intersection(drop_by_clip)
     summary = {
         "samples_total": int(prepass_stats.get("samples_total", 0)),
         "frames_written": 0,
-        "episodes_seen": 0,
-        "first_frames_checked": 0,
-        "black_first_frames_dropped": 0,
+        "episodes_seen": int(prepass_stats.get("first_frames_checked", 0)),
+        "first_frames_checked": int(prepass_stats.get("first_frames_checked", 0)),
+        "black_first_frames_dropped": int(prepass_stats.get("black_first_frames_dropped", 0)),
         "incomplete_samples": int(prepass_stats.get("incomplete_samples", 0)),
-        "decode_errors": 0,
+        "decode_errors": int(prepass_stats.get("decode_errors", 0)),
     }
+    details = list(prepass_stats.get("details", []))
+    shard_stats["episodes_started"] = int(prepass_stats.get("first_frames_checked", 0))
+    shard_stats["black_first_frames_dropped"] = int(prepass_stats.get("black_first_frames_dropped", 0))
+    shard_stats["decode_errors"] = int(prepass_stats.get("decode_errors", 0))
 
     try:
-        drop_keys, details, first_checked, dropped, decode_errors = _scan_first_frame_images_for_drop_keys(
-            shard_path,
-            _WORKER_FIRST_SAMPLE_KEYS,
-            _WORKER_FIRST_CLIP_BY_SAMPLE,
-            config,
-        )
-        summary["episodes_seen"] = int(first_checked)
-        summary["first_frames_checked"] = int(first_checked)
-        summary["black_first_frames_dropped"] = int(dropped)
-        summary["decode_errors"] = int(decode_errors)
-        shard_stats["episodes_started"] = int(first_checked)
-        shard_stats["black_first_frames_dropped"] = int(dropped)
-        shard_stats["decode_errors"] = int(decode_errors)
-
         if dry_run:
-            summary["frames_written"] = max(0, shard_stats["samples_total"] - len(drop_keys))
+            summary["frames_written"] = max(0, shard_stats["samples_total"] - summary["black_first_frames_dropped"])
             shard_stats["frames_written"] = summary["frames_written"]
         elif output_dir is not None:
-            if drop_keys:
-                frames_written = _rewrite_shard_dropping_keys(shard_path, output_dir, shard_name, drop_keys)
+            if affected_clip_ids:
+                frames_written = _rewrite_shard_for_dropped_clips(shard_path, output_dir, shard_name, drop_by_clip)
                 summary["frames_written"] = int(frames_written)
                 shard_stats["frames_written"] = int(frames_written)
                 shard_stats["shard_written"] = True
+                shard_stats["renumbered_clips"] = len(affected_clip_ids)
             else:
                 try:
                     _link_unchanged_shard(shard_path, output_dir, shard_name)
@@ -562,9 +597,8 @@ def _new_report(
         "output_dir": str(output_dir.resolve()) if output_dir is not None else None,
         "dry_run": bool(dry_run),
         "thresholds": {
-            "max_mean": float(max_mean),
-            "max_pixel": int(max_pixel),
-            "min_dark_ratio": float(min_dark_ratio),
+            "drop_criterion": "first_frame_lowdim_intrinsic_all_zero",
+            "intrinsic_slice": [LOWDIM_INTRINSIC_SLICE.start, LOWDIM_INTRINSIC_SLICE.stop],
         },
         "summary": {
             "source_shards": int(shard_count),
@@ -612,10 +646,40 @@ def _drop_black_first_frames_parallel(
     report["summary"]["episodes_seen"] = 0
     report["summary"]["first_frames_checked"] = 0
 
+    detection_config = {
+        "max_mean": float(max_mean),
+        "max_pixel": int(max_pixel),
+        "min_dark_ratio": float(min_dark_ratio),
+        "detail_limit": int(detail_limit),
+    }
+    drop_by_clip = {}
+    detect_tasks = [(index, shard_path) for index, shard_path in enumerate(shard_paths, start=1)]
+    context = get_context("fork")
+    _progress(f"Scanning global first-frame lowdim intrinsics with {workers} worker(s)...")
+    with context.Pool(
+        processes=workers,
+        initializer=_init_process_shard_worker,
+        initargs=(first_sample_by_clip, detection_config),
+    ) as pool:
+        for result in pool.imap_unordered(_detect_drop_clips_for_shard, detect_tasks, chunksize=1):
+            drop_by_clip.update(result["drop_by_clip"])
+            shard_stats = prepass_stats_by_shard.setdefault(result["shard_name"], {})
+            shard_stats["first_frames_checked"] = int(result["first_frames_checked"])
+            shard_stats["black_first_frames_dropped"] = int(result["black_first_frames_dropped"])
+            shard_stats["decode_errors"] = int(result["decode_errors"])
+            shard_stats["details"] = list(result["details"])
+            _progress(
+                f"[detect {len([s for s in prepass_stats_by_shard.values() if 'first_frames_checked' in s])}/"
+                f"{len(shard_paths)}] {result['shard_name']}: "
+                f"first_frames={result['first_frames_checked']} "
+                f"dropped={result['black_first_frames_dropped']} "
+                f"total_dropped={len(drop_by_clip)}"
+            )
+
     _progress(
         f"Found {len(shard_paths)} shard(s) under {source_dir}. "
         f"Mode={'dry-run' if dry_run else 'rewrite'}; workers={workers}; "
-        f"indexed_clips={len(first_sample_by_clip)}."
+        f"indexed_clips={len(first_sample_by_clip)}; drop_clips={len(drop_by_clip)}."
     )
 
     config = {
@@ -625,6 +689,7 @@ def _drop_black_first_frames_parallel(
         "max_pixel": int(max_pixel),
         "min_dark_ratio": float(min_dark_ratio),
         "detail_limit": int(detail_limit),
+        "drop_by_clip": drop_by_clip,
     }
     tasks = [
         (index, len(shard_paths), shard_path, prepass_stats_by_shard.get(Path(shard_path).name, {}))
@@ -681,187 +746,18 @@ def drop_black_first_frames(
     if not dry_run and output_dir is None:
         raise ValueError("--output_dir is required unless --dry_run is set")
 
-    workers = int(workers)
-    if workers > 1:
-        return _drop_black_first_frames_parallel(
-            source_dir,
-            output_dir,
-            dry_run=dry_run,
-            max_mean=max_mean,
-            max_pixel=max_pixel,
-            min_dark_ratio=min_dark_ratio,
-            detail_limit=detail_limit,
-            progress_every_shards=progress_every_shards,
-            checkpoint_path=checkpoint_path,
-            workers=workers,
-        )
-
-    seen_clip_ids: set[str] = set()
-    report = {
-        "source_shard_dir": str(source_dir.resolve()),
-        "output_dir": str(output_dir.resolve()) if output_dir is not None else None,
-        "dry_run": bool(dry_run),
-        "thresholds": {
-            "max_mean": float(max_mean),
-            "max_pixel": int(max_pixel),
-            "min_dark_ratio": float(min_dark_ratio),
-        },
-        "summary": {
-            "source_shards": len(shard_paths),
-            "shards_written": 0,
-            "samples_total": 0,
-            "frames_written": 0,
-            "episodes_seen": 0,
-            "first_frames_checked": 0,
-            "black_first_frames_dropped": 0,
-            "incomplete_samples": 0,
-            "decode_errors": 0,
-        },
-        "shards": {},
-        "dropped_first_frames": [],
-        "progress": {
-            "completed_shards": 0,
-            "current_shard_index": None,
-            "current_shard_name": None,
-        },
-    }
-
-    _progress(
-        f"Found {len(shard_paths)} shard(s) under {source_dir}. "
-        f"Mode={'dry-run' if dry_run else 'rewrite'}."
+    return _drop_black_first_frames_parallel(
+        source_dir,
+        output_dir,
+        dry_run=dry_run,
+        max_mean=max_mean,
+        max_pixel=max_pixel,
+        min_dark_ratio=min_dark_ratio,
+        detail_limit=detail_limit,
+        progress_every_shards=progress_every_shards,
+        checkpoint_path=checkpoint_path,
+        workers=max(1, int(workers)),
     )
-
-    for shard_index, shard_path_str in enumerate(tqdm(shard_paths, desc="Scan shards"), start=1):
-        shard_path = Path(shard_path_str)
-        shard_name = shard_path.name
-        shard_stats = {
-            "samples_total": 0,
-            "frames_written": 0,
-            "episodes_started": 0,
-            "black_first_frames_dropped": 0,
-            "incomplete_samples": 0,
-            "decode_errors": 0,
-            "shard_written": False,
-        }
-        report["shards"][shard_name] = shard_stats
-
-        tar_writer = None
-        output_path = None
-        tmp_path = None
-        try:
-            report["progress"]["current_shard_index"] = int(shard_index)
-            report["progress"]["current_shard_name"] = shard_name
-            _progress(f"[{shard_index}/{len(shard_paths)}] start {shard_name}")
-            if not dry_run and output_dir is not None:
-                tar_writer, output_path, tmp_path = _open_output_tar(output_dir, shard_name)
-
-            for sample in iter_shard_samples(str(shard_path)):
-                report["summary"]["samples_total"] += 1
-                shard_stats["samples_total"] += 1
-                if (
-                    progress_every_samples > 0
-                    and shard_stats["samples_total"] % progress_every_samples == 0
-                ):
-                    _progress(
-                        f"[{shard_index}/{len(shard_paths)}] {shard_name}: "
-                        f"samples={shard_stats['samples_total']} "
-                        f"episodes={shard_stats['episodes_started']} "
-                        f"dropped_first_frames={shard_stats['black_first_frames_dropped']} "
-                        f"total_episodes={report['summary']['episodes_seen']} "
-                        f"total_dropped={report['summary']['black_first_frames_dropped']}"
-                    )
-                if (
-                    checkpoint_path is not None
-                    and checkpoint_every_samples > 0
-                    and report["summary"]["samples_total"] % checkpoint_every_samples == 0
-                ):
-                    _write_json_atomic(checkpoint_path, report)
-
-                try:
-                    validate_sample_record(sample)
-                except ValueError:
-                    report["summary"]["incomplete_samples"] += 1
-                    shard_stats["incomplete_samples"] += 1
-                    continue
-
-                meta = decode_meta(sample.get("meta_bytes"))
-                clip_id = sample_clip_id(sample, meta)
-                is_first_frame = clip_id not in seen_clip_ids
-                drop_sample = False
-
-                if is_first_frame:
-                    seen_clip_ids.add(clip_id)
-                    report["summary"]["episodes_seen"] += 1
-                    report["summary"]["first_frames_checked"] += 1
-                    shard_stats["episodes_started"] += 1
-                    try:
-                        is_black, image_stats = is_black_image_bytes(
-                            sample["image_bytes"],
-                            max_mean=max_mean,
-                            max_pixel=max_pixel,
-                            min_dark_ratio=min_dark_ratio,
-                        )
-                    except Exception as error:
-                        report["summary"]["decode_errors"] += 1
-                        shard_stats["decode_errors"] += 1
-                        image_stats = {"error": f"{error.__class__.__name__}: {error}"}
-                        is_black = False
-
-                    if is_black:
-                        drop_sample = True
-                        report["summary"]["black_first_frames_dropped"] += 1
-                        shard_stats["black_first_frames_dropped"] += 1
-                        if len(report["dropped_first_frames"]) < detail_limit:
-                            report["dropped_first_frames"].append(
-                                {
-                                    "clip_id": clip_id,
-                                    "sample_key": sample["key"],
-                                    "shard_name": shard_name,
-                                    **image_stats,
-                                }
-                            )
-
-                if drop_sample:
-                    continue
-
-                if not dry_run and tar_writer is not None:
-                    _write_sample(tar_writer, sample)
-                report["summary"]["frames_written"] += 1
-                shard_stats["frames_written"] += 1
-
-            if tar_writer is not None:
-                tar_writer.close()
-                tar_writer = None
-                if shard_stats["frames_written"] > 0:
-                    os.replace(tmp_path, output_path)
-                    shard_stats["shard_written"] = True
-                    report["summary"]["shards_written"] += 1
-                elif tmp_path is not None and tmp_path.exists():
-                    tmp_path.unlink()
-
-            report["progress"]["completed_shards"] = int(shard_index)
-            if checkpoint_path is not None:
-                _write_json_atomic(checkpoint_path, report)
-
-            if progress_every_shards > 0 and shard_index % progress_every_shards == 0:
-                _progress(
-                    f"[{shard_index}/{len(shard_paths)}] done {shard_name}: "
-                    f"samples={shard_stats['samples_total']} "
-                    f"episodes={shard_stats['episodes_started']} "
-                    f"dropped_first_frames={shard_stats['black_first_frames_dropped']} "
-                    f"written={shard_stats['frames_written']} "
-                    f"total_episodes={report['summary']['episodes_seen']} "
-                    f"total_dropped={report['summary']['black_first_frames_dropped']}"
-                )
-        except Exception:
-            if tar_writer is not None:
-                tar_writer.close()
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink()
-            raise
-
-    return report
-
 
 def main() -> None:
     args = build_parser().parse_args()
