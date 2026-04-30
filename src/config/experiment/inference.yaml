@@ -13,6 +13,10 @@ serving:
   warmup_image_shape: [384, 384, 3]
   warmup_depth_shape: [384, 384, 3]
   warmup_intrinsic: [500.0, 500.0, 320.0, 240.0]
+  # Warmup payload modality/camera setup for RuntimeEngine._build_dummy_obs.
+  # Keep these aligned with env_wrapper settings to avoid first-request recompilation.
+  warmup_camera_setup_mode: both
+  warmup_image_mode: rgb
   log_obs_details: True
   record_enabled: True
   record_root_dir: outputs/serving_records
