@@ -6,7 +6,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from src.dataset.data_transforms import compute_relative_motion_padded
-from src.dataset.vla_dataset import VLAWdsDataset
+from src.dataset.vla_dataset import ViewDropoutConfig, VLAWdsDataset
 from src.dataset.wds_dataset import build_wds_pipeline
 
 
@@ -276,7 +276,7 @@ def test_view_dropout_keep_both_marks_both_views_active():
         shape_meta=_shape_meta(),
         mode="train",
         load_breast=True,
-        view_dropout={"keep_both": 1.0, "drop_head": 0.0, "drop_breast": 0.0},
+        view_dropout=ViewDropoutConfig(keep_both=1.0, drop_head=0.0, drop_breast=0.0),
         target_image_size=(4, 4),
     )
 
@@ -295,7 +295,7 @@ def test_view_dropout_drop_breast_keeps_only_head_active():
         shape_meta=_shape_meta(),
         mode="train",
         load_breast=True,
-        view_dropout={"keep_both": 0.0, "drop_head": 0.0, "drop_breast": 1.0},
+        view_dropout=ViewDropoutConfig(keep_both=0.0, drop_head=0.0, drop_breast=1.0),
         target_image_size=(4, 4),
     )
 
@@ -313,7 +313,7 @@ def test_view_dropout_drop_head_keeps_only_breast_active():
         shape_meta=_shape_meta(),
         mode="train",
         load_breast=True,
-        view_dropout={"keep_both": 0.0, "drop_head": 1.0, "drop_breast": 0.0},
+        view_dropout=ViewDropoutConfig(keep_both=0.0, drop_head=1.0, drop_breast=0.0),
         target_image_size=(4, 4),
     )
 
@@ -332,7 +332,7 @@ def test_view_dropout_disabled_in_validation():
         shape_meta=_shape_meta(),
         mode="val",
         load_breast=True,
-        view_dropout={"keep_both": 0.0, "drop_head": 1.0, "drop_breast": 0.0},
+        view_dropout=ViewDropoutConfig(keep_both=0.0, drop_head=1.0, drop_breast=0.0),
         target_image_size=(4, 4),
     )
 

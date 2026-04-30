@@ -7,6 +7,7 @@ import warnings
 import time
 from collections import Counter
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -27,6 +28,21 @@ from .wds_dataset import (
     build_blended_dataset, build_wds_pipeline, WindowConfig,
     expand_shard_patterns,
 )
+
+
+@dataclass(frozen=True)
+class ViewDropoutConfig:
+    keep_both: float = 1.0
+    drop_head: float = 0.0
+    drop_breast: float = 0.0
+
+    def __post_init__(self) -> None:
+        probs = (self.keep_both, self.drop_head, self.drop_breast)
+        if any(prob < 0.0 for prob in probs):
+            raise ValueError(f"view_dropout probabilities must be non-negative, got {probs}")
+        total = sum(probs)
+        if not np.isclose(total, 1.0):
+            raise ValueError(f"view_dropout probabilities must sum to 1.0, got {total:.6f}: {probs}")
 
 
 class VLAWdsDataset(torch.utils.data.IterableDataset):
@@ -65,7 +81,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         debug_profile_timing: bool = False,
         load_depth: bool = False,
         load_breast: bool = False,
-        view_dropout: Optional[Dict[str, float]] = None,
+        view_dropout: ViewDropoutConfig = ViewDropoutConfig(),
         keep_ratio: float = 1.0,
         sanity_checks: Optional[Dict] = None,
     ):
@@ -91,7 +107,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # augmentation is the single biggest CPU cost).
         self.load_depth = bool(load_depth)
         self.load_breast = bool(load_breast)
-        self.view_dropout = self.normalize_view_dropout_config(view_dropout)
+        self.view_dropout = view_dropout
         assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
         self.keep_ratio = float(keep_ratio)
         self.sanity_checks = dict(sanity_checks or {})
@@ -135,20 +151,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
 
         self.checker = DataChecker(sanity_cfg=self.sanity_checks)
 
-    def normalize_view_dropout_config(self, config: Optional[Dict[str, float]]) -> dict[str, float]:
-        probs = {"keep_both": 1.0, "drop_head": 0.0, "drop_breast": 0.0}
-        if config is not None:
-            unknown = set(config) - set(probs)
-            if unknown:
-                raise ValueError(f"Unsupported view_dropout keys: {sorted(unknown)}")
-            probs.update({key: float(value) for key, value in config.items()})
-        if any(value < 0.0 for value in probs.values()):
-            raise ValueError(f"view_dropout probabilities must be non-negative, got {probs}")
-        total = sum(probs.values())
-        if not np.isclose(total, 1.0):
-            raise ValueError(f"view_dropout probabilities must sum to 1.0, got {total:.6f}: {probs}")
-        return probs
-
     def sample_active_views(self, *, has_breast: bool) -> tuple[list[str], np.ndarray]:
         """Return active views and visible masks for head and breast views."""
         if not has_breast:
@@ -157,7 +159,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             return ["head", "breast"], np.array([True, True], dtype=bool)
 
         choices = ("keep_both", "drop_head", "drop_breast")
-        probs = [self.view_dropout[name] for name in choices]
+        probs = [
+            self.view_dropout.keep_both,
+            self.view_dropout.drop_head,
+            self.view_dropout.drop_breast,
+        ]
         choice = np.random.choice(choices, p=probs)
         if choice == "drop_head":
             return ["breast"], np.array([False, True], dtype=bool)
@@ -533,7 +539,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             debug_profile_timing=self.debug_profile_timing,
             load_depth=self.load_depth,
             load_breast=self.load_breast,
-            view_dropout={"keep_both": 1.0, "drop_head": 0.0, "drop_breast": 0.0},
             keep_ratio=1.0,
             sanity_checks=self.sanity_checks,
         )
