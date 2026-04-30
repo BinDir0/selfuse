@@ -18,6 +18,7 @@ class DummyBatchProcessor:
         self.padding_side = "right"
         self.state_token = "<state>"
         self.action_token = "<action>"
+        self.camera_token = "<camera>"
         self.action_token_id = 102
         self.processor_call_kwargs = {"text_kwargs": {"padding": "max_length", "max_length": 32}}
 
@@ -174,6 +175,8 @@ def make_expected_vla_sample(
         "images": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
         "instruction": instruction,
         "intrinsic": torch.tensor([1.0, 1.0, 0.5, 0.5], dtype=torch.float32),
+        "active_views": ["head"],
+        "view_mask": torch.tensor([True, False], dtype=torch.bool),
         "vision_type": "video",
         "video_fps": torch.tensor(30.0, dtype=torch.float32),
         "states": states,
@@ -200,4 +203,3 @@ def make_debug_args(**kwargs: Any) -> SimpleNamespace:
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
-

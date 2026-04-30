@@ -414,8 +414,10 @@ def compute_wm_loss(
 ) -> torch.Tensor:
     """Masked MSE between world model predictions and frozen teacher features.
 
-    Both pred and target are ``[B, V, K, spatial, D]`` (V=1 head-only, V=2
-    head+breast). Views are averaged with equal weight.
+    Both pred and target are ``[B, 2, K, spatial, D]`` in canonical
+    head/breast order. By default ``view_mask`` controls which views contribute
+    loss; ``world_model_config.mask_loss_by_view_mask=False`` supervises all
+    views.
     """
     if not model.use_world_model or "future_frames" not in batch:
         return zero_loss(backbone_output.last_hidden_states)
@@ -423,19 +425,27 @@ def compute_wm_loss(
     wm_output = model.forward_world_model_stream(batch, backbone_output)
     pred = wm_output["pred"]
     target = wm_output["target"].to(pred.dtype)
-    n_future = wm_output["n_future_frames"]
+    n_future = wm_output["n_future_frames"].to(device=pred.device)
     V, K = pred.shape[1], pred.shape[2]
+
+    if model.world_model_config.mask_loss_by_view_mask:
+        view_mask = wm_output["view_mask"].to(device=pred.device, dtype=torch.bool)
+        if view_mask.shape != (pred.shape[0], V):
+            raise ValueError(f"view_mask must have shape [B, V], got {tuple(view_mask.shape)}")
+    else:
+        # force to calculate loss on all views
+        view_mask = torch.ones(pred.shape[0], V, device=pred.device, dtype=torch.bool)
 
     # frame_valid[b, k] == (k < n_future[b]); broadcast over V/spatial/D for
     # element-wise mask against pred [B, V, K, spatial, D].
-    # [B, K] → [B, 1, K, 1, 1]
+    # [B, K] + [B, V] -> [B, V, K, 1, 1]
     frame_valid = torch.arange(K, device=n_future.device) < n_future.unsqueeze(1)
-    mask_float = frame_valid[:, None, :, None, None].to(dtype=pred.dtype)
+    view_frame_valid = frame_valid[:, None, :] & view_mask[:, :, None]
+    mask_float = view_frame_valid[:, :, :, None, None].to(dtype=pred.dtype)
 
     squared_error = (pred - target) ** 2
     n_elements = pred.shape[-2] * pred.shape[-1]
-    # × V in the denominator keeps the loss scale view-count-invariant.
-    denom = (mask_float.sum() * V).clamp(min=1)
+    denom = mask_float.sum().clamp(min=1)
     return (squared_error * mask_float).sum() / denom / n_elements
 
 

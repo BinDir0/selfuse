@@ -431,6 +431,8 @@ def test_real_shard_forward_loss(report: PhaseReport, model, collator, normalize
             "images": torch.tensor(img, dtype=torch.uint8).unsqueeze(0),
             "instruction": "pick up the object",
             "intrinsic": torch.tensor(ld[LOWDIM_SLICES["intrinsic"][0]:LOWDIM_SLICES["intrinsic"][1]], dtype=torch.float32),
+            "active_views": ["head"],
+            "view_mask": torch.tensor([True, False], dtype=torch.bool),
             "vision_type": "video",
             "video_fps": torch.tensor(5.0),
             "states": state,

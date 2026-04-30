@@ -35,6 +35,10 @@ world_model:
   upsample_factor: 2
   action_conditioning: true
   motion_conditioning: true
+  # When true, video dropout also masks WM loss for dropped views.
+  # Set false to supervise WM on both head and breast future frames regardless
+  # of which input views were dropped.
+  mask_loss_by_view_mask: true
 
   # Dedicated WM action encoder (clean-action domain; no sharing with flow expert).
   wm_action_encoder:

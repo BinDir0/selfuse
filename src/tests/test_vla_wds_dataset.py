@@ -6,7 +6,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from src.dataset.data_transforms import compute_relative_motion_padded
-from src.dataset.vla_dataset import VLAWdsDataset
+from src.dataset.vla_dataset import ViewDropoutConfig, VLAWdsDataset
 from src.dataset.wds_dataset import build_wds_pipeline
 
 
@@ -37,6 +37,37 @@ def _shape_meta(
         },
         "future_frame": {"horizon": 3, "stride": 1, "pad_mode": future_frame_pad_mode},
     }
+
+
+def _dual_view_raw_sample():
+    return {
+        "wrist_state": np.zeros((2, 18), dtype=np.float32),
+        "hand_state": np.zeros((2, 30), dtype=np.float32),
+        "wrist_action": np.zeros((2, 18), dtype=np.float32),
+        "hand_action": np.zeros((2, 30), dtype=np.float32),
+        "extrinsic": np.eye(4, dtype=np.float32).reshape(-1),
+        "intrinsic": np.ones(4, dtype=np.float32),
+        "breast_extrinsic": np.eye(4, dtype=np.float32).reshape(-1),
+        "breast_intrinsic": np.full(4, 2.0, dtype=np.float32),
+        "instruction": ["pick up object"],
+        "instruction_num": 1,
+        "image": np.zeros((1, 4, 4, 3), dtype=np.uint8),
+        "breast_image": np.full((1, 4, 4, 3), 99, dtype=np.uint8),
+        "future_frames": np.full((2, 4, 4, 3), 7, dtype=np.uint8),
+        "breast_future_frames": np.full((2, 4, 4, 3), 8, dtype=np.uint8),
+    }
+
+
+def _sample_to_data_with_mocked_transforms(dataset, sample):
+    mocked_state = np.zeros((2, 48), dtype=np.float32)
+    mocked_action = np.ones((2, 48), dtype=np.float32)
+
+    def fake_process_image(img, _depth, intr, *_args, **_kwargs):
+        return img.copy(), None, intr
+
+    with patch("src.dataset.vla_dataset.process_state_action", return_value=(mocked_state, mocked_action)):
+        with patch("src.dataset.vla_dataset.process_image", side_effect=fake_process_image):
+            return dataset.sample_to_data(sample)
 
 
 def test_window_config_reads_split_pad_modes_from_shape_meta():
@@ -77,10 +108,13 @@ def test_video_fps_follows_image_stride():
         instruction="pick up object",
         image=np.zeros((1, 4, 4, 3), dtype=np.uint8),
         intrinsic=np.ones(4, dtype=np.float32),
+        active_views=["head"],
     )
 
     assert data["vision_type"] == "video"
     assert data["video_fps"] == np.array(15.0, dtype=np.float32)
+    assert data["active_views"] == ["head"]
+    assert data["view_mask"].tolist() == [True, False]
 
 
 def test_sample_to_data_keeps_truncated_action_shape_metadata():
@@ -235,8 +269,80 @@ def test_sample_to_data_surfaces_breast_fields_when_breast_image_present():
     assert np.all(data["breast_future_frames"][2] == 0)
 
 
-def test_sample_to_data_omits_breast_keys_when_absent():
-    """Head-only sample should not produce any breast_* keys."""
+def test_view_dropout_keep_both_marks_both_views_active():
+    dataset = VLAWdsDataset(
+        wds_datasets=[{"name": "demo", "shard_urls": "/tmp/unused/shard-*.tar"}],
+        shape_meta=_shape_meta(),
+        mode="train",
+        load_breast=True,
+        view_dropout=ViewDropoutConfig(drop_head=0.0, drop_breast=0.0),
+        target_image_size=(4, 4),
+    )
+
+    data = _sample_to_data_with_mocked_transforms(dataset, _dual_view_raw_sample())
+
+    assert data["active_views"] == ["head", "breast"]
+    assert data["view_mask"].tolist() == [True, True]
+    assert "breast_images" in data
+    assert "breast_future_frames" in data
+    assert "future_breast_motion" in data
+
+
+def test_view_dropout_drop_breast_keeps_only_head_active():
+    dataset = VLAWdsDataset(
+        wds_datasets=[{"name": "demo", "shard_urls": "/tmp/unused/shard-*.tar"}],
+        shape_meta=_shape_meta(),
+        mode="train",
+        load_breast=True,
+        view_dropout=ViewDropoutConfig(drop_head=0.0, drop_breast=1.0),
+        target_image_size=(4, 4),
+    )
+
+    data = _sample_to_data_with_mocked_transforms(dataset, _dual_view_raw_sample())
+
+    assert data["active_views"] == ["head"]
+    assert data["view_mask"].tolist() == [True, False]
+    assert "breast_images" in data
+    assert "breast_future_frames" in data
+
+
+def test_view_dropout_drop_head_keeps_only_breast_active():
+    dataset = VLAWdsDataset(
+        wds_datasets=[{"name": "demo", "shard_urls": "/tmp/unused/shard-*.tar"}],
+        shape_meta=_shape_meta(),
+        mode="train",
+        load_breast=True,
+        view_dropout=ViewDropoutConfig(drop_head=1.0, drop_breast=0.0),
+        target_image_size=(4, 4),
+    )
+
+    data = _sample_to_data_with_mocked_transforms(dataset, _dual_view_raw_sample())
+
+    assert data["active_views"] == ["breast"]
+    assert data["view_mask"].tolist() == [False, True]
+    assert "breast_images" in data
+    assert np.allclose(data["breast_intrinsic"], 2.0)
+    assert "breast_future_frames" in data
+
+
+def test_view_dropout_disabled_in_validation():
+    dataset = VLAWdsDataset(
+        wds_datasets=[{"name": "demo", "shard_urls": "/tmp/unused/shard-*.tar"}],
+        shape_meta=_shape_meta(),
+        mode="val",
+        load_breast=True,
+        view_dropout=ViewDropoutConfig(drop_head=1.0, drop_breast=0.0),
+        target_image_size=(4, 4),
+    )
+
+    data = _sample_to_data_with_mocked_transforms(dataset, _dual_view_raw_sample())
+
+    assert data["active_views"] == ["head", "breast"]
+    assert data["view_mask"].tolist() == [True, True]
+
+
+def test_sample_to_data_marks_head_only_when_breast_absent():
+    """Head-only samples still carry view metadata and zero WM breast targets."""
     dataset = VLAWdsDataset(
         wds_datasets=[{"name": "demo", "shard_urls": "/tmp/unused/shard-*.tar"}],
         shape_meta=_shape_meta(),
@@ -265,7 +371,11 @@ def test_sample_to_data_omits_breast_keys_when_absent():
 
     assert "breast_images" not in data
     assert "breast_intrinsic" not in data
-    assert "breast_future_frames" not in data
+    assert data["active_views"] == ["head"]
+    assert data["view_mask"].tolist() == [True, False]
+    assert "breast_future_frames" in data
+    assert np.all(data["breast_future_frames"] == 0)
+    assert np.all(data["future_breast_motion"] == 0)
 
 
 def _make_world_to_cam(axis_angle_deg: float, position_world: np.ndarray) -> np.ndarray:

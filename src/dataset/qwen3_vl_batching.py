@@ -68,6 +68,20 @@ def build_video_metadata(video: torch.Tensor, video_fps: float) -> dict[str, Any
     }
 
 
+def resolve_active_views(sample: dict[str, Any]) -> list[str]:
+    """Return active video views in prompt/input order."""
+    if "active_views" not in sample:
+        raise KeyError("Video samples must provide active_views.")
+    views = [str(view) for view in sample["active_views"]]
+    valid = {"head", "breast"}
+    invalid = [view for view in views if view not in valid]
+    if invalid:
+        raise ValueError(f"Unsupported active_views entries: {invalid}")
+    if not views:
+        raise ValueError("active_views must contain at least one view.")
+    return views
+
+
 class Qwen3VLChatFormatter:
     """Convert one project sample into the HF chat message structure expected by Qwen3-VL."""
 
@@ -88,10 +102,7 @@ class Qwen3VLChatFormatter:
     def build_visual_content(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
         vision_type = sample["vision_type"]
         if vision_type == "video":
-            blocks = [{"type": "video"}]
-            if sample.get("breast_images") is not None:
-                blocks.append({"type": "video"})
-            return blocks
+            return [{"type": "video"} for _ in resolve_active_views(sample)]
         if vision_type == "image":
             return [{"type": "image"} for _ in range(count_images(sample["images"]))]
         raise ValueError(f"Unsupported vision_type: {vision_type}")
@@ -105,19 +116,38 @@ class Qwen3VLChatFormatter:
             f"cx:{values[2]:.2f} cy:{values[3]:.2f}."
         )
 
+    def format_video_order_part(self, active_views: list[str]) -> str:
+        labels = {"head": "head camera", "breast": "breast camera"}
+        ordinals = ["first", "second"]
+        parts = [
+            f"{ordinals[idx]} video is {labels[view]}"
+            for idx, view in enumerate(active_views)
+        ]
+        return f"Videos: {'; '.join(parts)}."
+
     def build_vla_user_text(
         self,
         instruction: str,
         head_intrinsic: torch.Tensor,
         n_states: torch.Tensor,
+        active_views: list[str],
         breast_intrinsic: torch.Tensor | None = None,
     ) -> str:
         state_slots = self.state_token * int(n_states.item())
-        camera_part = self.format_intrinsic_part("Head", head_intrinsic)
-        if breast_intrinsic is not None:
-            camera_part += " " + self.format_intrinsic_part("Breast", breast_intrinsic)
+        camera_parts = []
+        for view in active_views:
+            if view == "head":
+                camera_parts.append(self.format_intrinsic_part("Head", head_intrinsic))
+            elif view == "breast":
+                if breast_intrinsic is None:
+                    raise ValueError("breast view is active but breast_intrinsic is missing.")
+                camera_parts.append(self.format_intrinsic_part("Breast", breast_intrinsic))
+            else:
+                raise ValueError(f"Unsupported active view: {view}")
+        camera_part = " ".join(camera_parts)
+        video_order_part = self.format_video_order_part(active_views)
         return (
-            f"Task: {instruction}. {camera_part} "
+            f"Task: {instruction}. {video_order_part} {camera_part} "
             f"States: {state_slots}."
         )
 
@@ -134,10 +164,12 @@ class Qwen3VLChatFormatter:
         is_vla = bool(sample["is_vla_data"].item())
 
         if is_vla:
+            active_views = resolve_active_views(sample)
             user_text = self.build_vla_user_text(
                 instruction=sample["instruction"],
                 head_intrinsic=sample["intrinsic"],
                 n_states=sample["n_states"],
+                active_views=active_views,
                 breast_intrinsic=sample.get("breast_intrinsic"),
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
@@ -185,6 +217,7 @@ class Qwen3VLBatchProcessor:
         padding_side: str = "right",
         state_token: str = "<state>",
         action_token: str = "<action>",
+        camera_token: str = "",
         processor: Any = None,
         mem_enabled: bool = True,
     ):
@@ -195,6 +228,7 @@ class Qwen3VLBatchProcessor:
         self.padding_side = padding_side
         self.state_token = state_token
         self.action_token = action_token
+        self.camera_token = camera_token
         # mem_enabled toggles the VLA dummy-swap path:
         # - True  (MEM on): send 1-frame dummy so chat template only allocates
         #         N placeholders; backbone slices ViT output to last frame.
@@ -204,6 +238,8 @@ class Qwen3VLBatchProcessor:
         self.processor = processor if processor is not None else self.init_processor()
         self.tokenizer = self.processor.tokenizer
         special_tokens = [self.state_token, self.action_token]
+        if self.camera_token:
+            special_tokens.append(self.camera_token)
         self.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         self.action_token_id = int(self.tokenizer.convert_tokens_to_ids(self.action_token))
 
@@ -282,14 +318,18 @@ class Qwen3VLBatchProcessor:
                 images.append(build_sample_images(sample["images"]))
             elif vision_type == "video":
                 fps = float(sample["video_fps"].item())
-                self.append_video_entry(
-                    videos, video_metadata, video_entries,
-                    build_sample_video(sample["images"]), fps,
-                )
-                if sample.get("breast_images") is not None:
+                for view in resolve_active_views(sample):
+                    if view == "head":
+                        video = sample["images"]
+                    elif view == "breast":
+                        if sample.get("breast_images") is None:
+                            raise ValueError("breast view is active but breast_images is missing.")
+                        video = sample["breast_images"]
+                    else:
+                        raise ValueError(f"Unsupported active view: {view}")
                     self.append_video_entry(
                         videos, video_metadata, video_entries,
-                        build_sample_video(sample["breast_images"]), fps,
+                        build_sample_video(video), fps,
                     )
             else:
                 raise ValueError(f"Unsupported vision_type: {vision_type}")
@@ -442,4 +482,3 @@ class Qwen3VLBatchProcessor:
         # argmax on all-False rows returns 0; remap those to L.
         pos = matches.long().argmax(dim=1) + H
         return torch.where(match_counts == 1, pos, torch.full_like(pos, L))
-

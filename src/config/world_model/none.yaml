@@ -11,5 +11,6 @@ world_model:
   upsample_factor: 2
   action_conditioning: false
   motion_conditioning: false
+  mask_loss_by_view_mask: true
   wm_action_encoder: null
   wm_motion_encoder: null

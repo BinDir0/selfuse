@@ -206,3 +206,4 @@ policy:
     upsample_factor: ${world_model.upsample_factor}
     action_conditioning: ${world_model.action_conditioning}
     motion_conditioning: ${world_model.motion_conditioning}
+    mask_loss_by_view_mask: ${world_model.mask_loss_by_view_mask}

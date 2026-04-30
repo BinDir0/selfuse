@@ -675,6 +675,8 @@ def test_collator_roundtrip(
                 "images": torch.tensor(img, dtype=torch.uint8).unsqueeze(0),
                 "instruction": "test instruction",
                 "intrinsic": torch.tensor(fields["intrinsic"], dtype=torch.float32),
+                "active_views": ["head"],
+                "view_mask": torch.tensor([True, False], dtype=torch.bool),
                 "vision_type": "video",
                 "video_fps": torch.tensor(5.0),
                 "states": torch.tensor(fields["wrist_state"], dtype=torch.float32).unsqueeze(0),
