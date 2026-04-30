@@ -128,6 +128,7 @@ data_collator:
     padding_side: right
     state_token: ${added_slot_tokens.state}
     action_token: ${added_slot_tokens.action}
+    camera_token: ${added_slot_tokens.camera}
     # Skip VLA dummy-swap when MEM is off so chat template expands T frames
     # of placeholders and the LM sees the full temporal sequence.
     mem_enabled: ${policy.backbone.mem_temporal_attention.enabled}

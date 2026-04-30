@@ -185,6 +185,7 @@ class Qwen3VLBatchProcessor:
         padding_side: str = "right",
         state_token: str = "<state>",
         action_token: str = "<action>",
+        camera_token: str = "",
         processor: Any = None,
         mem_enabled: bool = True,
     ):
@@ -195,6 +196,7 @@ class Qwen3VLBatchProcessor:
         self.padding_side = padding_side
         self.state_token = state_token
         self.action_token = action_token
+        self.camera_token = camera_token
         # mem_enabled toggles the VLA dummy-swap path:
         # - True  (MEM on): send 1-frame dummy so chat template only allocates
         #         N placeholders; backbone slices ViT output to last frame.
@@ -204,6 +206,8 @@ class Qwen3VLBatchProcessor:
         self.processor = processor if processor is not None else self.init_processor()
         self.tokenizer = self.processor.tokenizer
         special_tokens = [self.state_token, self.action_token]
+        if self.camera_token:
+            special_tokens.append(self.camera_token)
         self.tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         self.action_token_id = int(self.tokenizer.convert_tokens_to_ids(self.action_token))
 
