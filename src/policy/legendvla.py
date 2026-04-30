@@ -719,14 +719,9 @@ class LegendVLA(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Run world model expert and frozen teacher on future frames.
 
-        Single bidirectional forward over both views. Suffix layout:
-        ``[action_cond, head_motion, breast_motion?, head_queries, breast_queries?]``
-        with suffix-internal non-causal attention. Each per-view motion /
-        query segment is only appended when the batch carries the matching
-        keys (``breast_future_frames`` presence is the batch-level switch).
-        Teacher is called once on head/breast future frames stacked along the
-        batch dim. Returns ``pred`` / ``target`` with a leading view dim
-        (V=1 head-only, V=2 head+breast).
+        ``view_mask`` is the sample-level switch and the canonical view order
+        is fixed to head, breast. Inactive view motion and query segments are
+        present but masked out, and only active views contribute to loss.
         """
         cfg = self.world_model_config
         B = backbone_output.last_hidden_states.shape[0]
@@ -734,8 +729,10 @@ class LegendVLA(nn.Module):
         K = self.wm_num_future_frames
         gh, gw, uf = self.wm_grid_h, self.wm_grid_w, self.wm_upsample_factor
         D = self.world_model_expert.hidden_size
-        has_breast = "breast_future_frames" in batch
-        V = 2 if has_breast else 1
+        view_mask = batch["view_mask"].to(device=device, dtype=torch.bool)
+        if view_mask.ndim != 2 or view_mask.shape != (B, 2):
+            raise ValueError(f"view_mask must have shape [B, 2], got {tuple(view_mask.shape)}")
+        V = 2
 
         n_future = batch["n_future_frames"].to(device=device)
         frame_valid = torch.arange(K, device=device).unsqueeze(0) < n_future.unsqueeze(1)
@@ -767,7 +764,7 @@ class LegendVLA(nn.Module):
 
         if cfg.motion_conditioning:
             segments.append(self.wm_motion_encoder(batch["future_head_motion"]))
-            seg_masks.append(frame_valid)
+            seg_masks.append(frame_valid & view_mask[:, 0:1])
             pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
                 text_start=text_cur_pos,
                 rope_start=rope_cur_pos,
@@ -775,22 +772,21 @@ class LegendVLA(nn.Module):
                 device=device,
             )
             seg_position_ids.append(pos_ids)
-            if has_breast:
-                segments.append(self.wm_motion_encoder(batch["future_breast_motion"]))
-                seg_masks.append(frame_valid)
-                pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
-                    text_start=text_cur_pos,
-                    rope_start=rope_cur_pos,
-                    length=K,
-                    device=device,
-                )
-                seg_position_ids.append(pos_ids)
+            segments.append(self.wm_motion_encoder(batch["future_breast_motion"]))
+            seg_masks.append(frame_valid & view_mask[:, 1:2])
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                length=K,
+                device=device,
+            )
+            seg_position_ids.append(pos_ids)
 
         base_queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
         query_len = base_queries.shape[1]
         for v in range(V):
             segments.append(base_queries + self.wm_head.view_embed[v])
-            seg_masks.append(query_mask)
+            seg_masks.append(query_mask & view_mask[:, v:v + 1])
             pos_ids, text_cur_pos, rope_cur_pos = self._build_vision_mrope_position_ids(
                 text_start=text_cur_pos,
                 rope_start=rope_cur_pos,
@@ -835,17 +831,15 @@ class LegendVLA(nn.Module):
         pred = x.flatten(1, 2).reshape(B, V, K, -1, D)
 
         # Batch the teacher along B so DINOv3 only runs once.
-        if has_breast:
-            stacked = torch.cat([batch["future_frames"], batch["breast_future_frames"]], dim=0)
-            head_t, breast_t = self.frozen_teacher(stacked).chunk(2, dim=0)
-            target = torch.stack([head_t, breast_t], dim=1)
-        else:
-            target = self.frozen_teacher(batch["future_frames"]).unsqueeze(1)
+        stacked = torch.cat([batch["future_frames"], batch["breast_future_frames"]], dim=0)
+        head_t, breast_t = self.frozen_teacher(stacked).chunk(2, dim=0)
+        target = torch.stack([head_t, breast_t], dim=1)
 
         return {
             "pred": pred,
             "target": target,
             "n_future_frames": batch["n_future_frames"],
+            "view_mask": view_mask,
         }
 
     def compute_loss(self, batch: dict, **kwargs) -> dict[str, torch.Tensor]:

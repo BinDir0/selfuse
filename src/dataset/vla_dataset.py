@@ -65,6 +65,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         debug_profile_timing: bool = False,
         load_depth: bool = False,
         load_breast: bool = False,
+        view_dropout: Optional[Dict[str, float]] = None,
         keep_ratio: float = 1.0,
         sanity_checks: Optional[Dict] = None,
     ):
@@ -90,6 +91,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # augmentation is the single biggest CPU cost).
         self.load_depth = bool(load_depth)
         self.load_breast = bool(load_breast)
+        self.view_dropout = self.normalize_view_dropout_config(view_dropout)
         assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
         self.keep_ratio = float(keep_ratio)
         self.sanity_checks = dict(sanity_checks or {})
@@ -133,6 +135,36 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
 
         self.checker = DataChecker(sanity_cfg=self.sanity_checks)
 
+    def normalize_view_dropout_config(self, config: Optional[Dict[str, float]]) -> dict[str, float]:
+        probs = {"keep_both": 1.0, "drop_head": 0.0, "drop_breast": 0.0}
+        if config is not None:
+            unknown = set(config) - set(probs)
+            if unknown:
+                raise ValueError(f"Unsupported view_dropout keys: {sorted(unknown)}")
+            probs.update({key: float(value) for key, value in config.items()})
+        if any(value < 0.0 for value in probs.values()):
+            raise ValueError(f"view_dropout probabilities must be non-negative, got {probs}")
+        total = sum(probs.values())
+        if not np.isclose(total, 1.0):
+            raise ValueError(f"view_dropout probabilities must sum to 1.0, got {total:.6f}: {probs}")
+        return probs
+
+    def sample_active_views(self, *, has_breast: bool) -> tuple[list[str], np.ndarray]:
+        """Return active views and visible masks for head and breast views."""
+        if not has_breast:
+            return ["head"], np.array([True, False], dtype=bool)
+        if self.mode != "train":
+            return ["head", "breast"], np.array([True, True], dtype=bool)
+
+        choices = ("keep_both", "drop_head", "drop_breast")
+        probs = [self.view_dropout[name] for name in choices]
+        choice = np.random.choice(choices, p=probs)
+        if choice == "drop_head":
+            return ["breast"], np.array([False, True], dtype=bool)
+        if choice == "drop_breast":
+            return ["head"], np.array([True, False], dtype=bool)
+        return ["head", "breast"], np.array([True, True], dtype=bool)
+
     def set_collator(self, collator):
         """Set the batch collator used to build model inputs."""
         self.collator = collator
@@ -141,12 +173,22 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         """Set the normalizer for state/action."""
         self.normalizer = normalizer
 
-    def build_raw_model_inputs(self, instruction, image, intrinsic,
-                               breast_image=None, breast_intrinsic=None):
+    def build_raw_model_inputs(
+        self,
+        instruction,
+        image,
+        intrinsic,
+        active_views,
+        view_mask,
+        breast_image=None,
+        breast_intrinsic=None,
+    ):
         data = {
             "images": image,
             "instruction": instruction,
             "intrinsic": intrinsic,
+            "active_views": active_views,
+            "view_mask": view_mask,
             "vision_type": "video",
             "video_fps": np.array(
                 self.video_base_fps / self.window_config.image_stride,
@@ -307,6 +349,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
                 target_size=self.target_image_size,
             )
             self.checker.check(image=breast_image, finite={"breast_image": breast_image})
+        # Sample dropout perspective
+        active_views, view_mask = self.sample_active_views(has_breast=breast_image is not None)
         instruction = sample["instruction"]
         instruction_num = sample["instruction_num"]
 
@@ -333,6 +377,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             instruction=instruction,
             image=image,
             intrinsic=intrinsic,
+            active_views=active_views,
+            view_mask=view_mask,
             breast_image=breast_image,
             breast_intrinsic=breast_intrinsic,
         )
@@ -383,15 +429,17 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             )
             data["future_head_motion"] = head_motion
 
+            breast_ff, _ = pad_future(sample.get("breast_future_frames")) # will be filled with dummy value if load_brease=False
+            data["breast_future_frames"] = breast_ff
             if "breast_future_frames" in sample:
-                breast_ff, _ = pad_future(sample.get("breast_future_frames"))
-                data["breast_future_frames"] = breast_ff
                 breast_motion = compute_relative_motion_padded(
                     current_flat16=sample.get("breast_extrinsic"),
                     future_flat=sample.get("future_breast_extrinsic"),
                     n_valid=n_valid, K=K,
                 )
                 data["future_breast_motion"] = breast_motion
+            else:
+                data["future_breast_motion"] = np.zeros((K, 16), dtype=np.float32)
         else:
             data["n_future_frames"] = np.array(0, dtype=np.int32)
         if self.return_dataset_info:
@@ -485,6 +533,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             debug_profile_timing=self.debug_profile_timing,
             load_depth=self.load_depth,
             load_breast=self.load_breast,
+            view_dropout={"keep_both": 1.0, "drop_head": 0.0, "drop_breast": 0.0},
             keep_ratio=1.0,
             sanity_checks=self.sanity_checks,
         )
@@ -625,6 +674,9 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
         vlm_sample["has_depth_values"] = torch.tensor(False, dtype=torch.bool)
         if "intrinsic" not in vlm_sample:
             vlm_sample["intrinsic"] = torch.zeros(4, dtype=torch.float32)
+        if vlm_sample.get("vision_type") == "video":
+            vlm_sample["active_views"] = ["head"]
+        vlm_sample["view_mask"] = torch.tensor([False, False], dtype=torch.bool)
         vlm_sample["n_future_frames"] = torch.tensor(0, dtype=torch.int32)
         ff_horizon = self.vla_dataset.future_frame_horizon
         if ff_horizon > 0:
@@ -637,14 +689,10 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
             tH, tW = tgt
             vlm_sample["future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
             vlm_sample["future_head_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
-        # Dummies so breast keys survive collate_raw's "all samples carry key"
-        # filter when VLA side runs with breast enabled.
+            vlm_sample["breast_future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
+            vlm_sample["future_breast_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
         if self.vla_dataset.load_breast:
             vlm_sample["breast_intrinsic"] = torch.zeros(4, dtype=torch.float32)
-            if ff_horizon > 0:
-                tH, tW = self.vla_dataset.target_image_size
-                vlm_sample["breast_future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
-                vlm_sample["future_breast_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
         if getattr(self.vla_dataset, "debug_capture_raw_sample", False):
             vlm_sample["debug_raw_sample"] = None
         if getattr(self.vla_dataset, "debug_capture_processed_sample", False):

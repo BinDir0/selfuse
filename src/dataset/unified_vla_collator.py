@@ -6,7 +6,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from src.dataset.qwen3_vl_batching import Qwen3VLBatchProcessor, Qwen3VLChatFormatter
+from src.dataset.qwen3_vl_batching import (
+    Qwen3VLBatchProcessor,
+    Qwen3VLChatFormatter,
+    resolve_active_views,
+)
 
 
 class UnifiedVLACollator:
@@ -16,8 +20,8 @@ class UnifiedVLACollator:
 
     Input sample contract:
     - VLA samples provide `instruction`, `images`, `intrinsic`, `states`, `actions`, `n_states`, `n_actions`,
-      `vision_type`, `video_fps`, and `is_vla_data=True`.
-    - VLM samples provide `question`, `answer`, `images`, `vision_type`, and `is_vla_data=False`.
+      `active_views`, `view_mask`, `vision_type`, `video_fps`, and `is_vla_data=True`.
+    - VLM samples provide `question`, `answer`, `images`, `view_mask`, `vision_type`, and `is_vla_data=False`.
 
     Output contract:
     - The returned batch always includes HF multimodal fields such as `input_ids`, `attention_mask`,
@@ -47,6 +51,8 @@ class UnifiedVLACollator:
             raise ValueError("Formatter and batch processor must share the same state token.")
         if self.formatter.action_token != self.batch_processor.action_token:
             raise ValueError("Formatter and batch processor must share the same action token.")
+        if self.batch_processor.camera_token != self.formatter.camera_token:
+            raise ValueError("Formatter and batch processor must share the same camera token.")
 
     def collate_values(self, values: list[Any]) -> Any:
         if isinstance(values[0], torch.Tensor):
@@ -114,23 +120,28 @@ class UnifiedVLACollator:
             "intrinsic",
             "breast_intrinsic", "breast_future_frames",
             "future_head_motion", "future_breast_motion",
+            "view_mask",
         ]
         for key in collatable_keys:
             if all(key in s for s in samples):
                 batch[key] = self.collate_values([s[key] for s in samples])
+        if "view_mask" not in batch:
+            raise KeyError("All samples must provide view_mask.")
 
-        # Token mode: emit one intrinsic per <camera> slot actually rendered in
-        # text (VLM samples have none; VLA samples have head, plus breast when
-        # breast_images is present). Flat [total_slots, 4] aligns with the
-        # batch-major order of <camera> tokens for backbone masked_scatter.
+        # Token mode: emit one intrinsic per rendered <camera> slot in
+        # sample-major active-view order. VLM samples contribute no rows.
         if self.formatter.camera_intrinsic_mode == "token":
             cam_list = []
             for s in samples:
                 if not bool(s["is_vla_data"].item()):
                     continue
-                cam_list.append(s["intrinsic"])
-                if s.get("breast_images") is not None:
-                    cam_list.append(s["breast_intrinsic"])
+                for view in resolve_active_views(s):
+                    if view == "head":
+                        cam_list.append(s["intrinsic"])
+                    elif view == "breast":
+                        cam_list.append(s["breast_intrinsic"])
+                    else:
+                        raise ValueError(f"Unsupported active view: {view}")
             if cam_list:
                 batch["camera_intrinsic"] = torch.stack(cam_list)
 

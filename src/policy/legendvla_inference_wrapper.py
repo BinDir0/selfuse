@@ -293,6 +293,8 @@ class LegendVLAInference(nn.Module):
             "images": torch.as_tensor(images),
             "instruction": instruction,
             "intrinsic": torch.from_numpy(intrinsic),
+            "active_views": ["head", "breast"] if breast_images is not None else ["head"],
+            "view_mask": torch.tensor([True, breast_images is not None], dtype=torch.bool),
             "vision_type": "video",
             "video_fps": torch.tensor(self.video_base_fps / self.image_stride, dtype=torch.float32),
             "states": torch.from_numpy(states),

@@ -190,6 +190,8 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
                 'vision_type': 'video',
                 'video_fps': np.float32(1.0),
                 'is_vla_data': np.array(False, dtype=bool),
+                'active_views': ['head'],
+                'view_mask': np.array([False, False], dtype=bool),
             }
         else:
             data = {
@@ -198,6 +200,7 @@ class VLMWdsDataset(torch.utils.data.IterableDataset):
                 'answer': answer,
                 'vision_type': 'image',
                 'is_vla_data': np.array(False, dtype=bool),
+                'view_mask': np.array([False, False], dtype=bool),
             }
 
         if self.return_dataset_info:

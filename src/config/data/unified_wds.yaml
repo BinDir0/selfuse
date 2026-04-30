@@ -79,6 +79,12 @@ dataset:
     # Decode breast (chest) camera when real-robot shards declare it.
     # Model side still ignores these keys; set true only once downstream is ready.
     load_breast: false
+    # Per-sample training-time view dropout for dual-camera samples.
+    # Validation and samples without breast video always keep the available views.
+    view_dropout:
+      keep_both: 1.0
+      drop_head: 0.0
+      drop_breast: 0.0
     # Pre-shuffle Bernoulli keep rate (train only). Lower = more shard diversity,
     # higher IO. 1.0 disables. Ref: DreamZero shard_sampling_rate.
     keep_ratio: 0.2

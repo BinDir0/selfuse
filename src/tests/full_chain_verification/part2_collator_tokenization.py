@@ -54,6 +54,8 @@ def make_vla_sample(
         "images": torch.randint(0, 255, (image_horizon, H, W, 3), dtype=torch.uint8),
         "instruction": instruction,
         "intrinsic": torch.tensor([500.0, 500.0, 320.0, 240.0], dtype=torch.float32),
+        "active_views": ["head"],
+        "view_mask": torch.tensor([True, False], dtype=torch.bool),
         "vision_type": "video",
         "video_fps": torch.tensor(5.0, dtype=torch.float32),
         "states": torch.randn(n_states, state_dim),
@@ -88,6 +90,7 @@ def make_vlm_sample(
         "n_actions": torch.tensor(0, dtype=torch.long),
         "actions_valid_mask": torch.zeros(action_horizon, action_dim, dtype=torch.bool),
         "intrinsic": torch.zeros(4, dtype=torch.float32),
+        "view_mask": torch.tensor([False, False], dtype=torch.bool),
         "video_fps": torch.tensor(5.0, dtype=torch.float32),
     }
 
