@@ -629,8 +629,8 @@ class TestBreastCameraFormatting:
             active_views=["head", "breast"],
             breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
-        assert "Head camera intrinsic: fx:500.00" in text
-        assert "Breast camera intrinsic: fx:600.00" in text
+        assert "Head camera intrinsics: fx:500.00" in text
+        assert "Breast camera intrinsics: fx:600.00" in text
         assert "Videos: first video is head camera; second video is breast camera." in text
 
     def test_build_vla_user_text_breast_only_prompt(self):
@@ -643,7 +643,7 @@ class TestBreastCameraFormatting:
             breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
         assert "Videos: first video is breast camera." in text
-        assert "Breast camera intrinsic: fx:600.00" in text
+        assert "Breast camera intrinsics: fx:600.00" in text
         assert "Head camera intrinsic" not in text
 
     def test_build_vla_user_text_head_only_omits_breast_segment(self):
@@ -669,8 +669,8 @@ class TestBreastCameraFormatting:
             breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
         assert text.count("<cam>") == 2
-        assert "Head camera intrinsic: <cam>" in text
-        assert "Breast camera intrinsic: <cam>" in text
+        assert "Head camera intrinsics: <cam>" in text
+        assert "Breast camera intrinsics: <cam>" in text
 
     def test_build_vla_user_text_token_mode_head_only_single_slot(self):
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="token", camera_token="<cam>")

@@ -109,7 +109,6 @@ def test_video_fps_follows_image_stride():
         image=np.zeros((1, 4, 4, 3), dtype=np.uint8),
         intrinsic=np.ones(4, dtype=np.float32),
         active_views=["head"],
-        view_mask=np.array([True, False], dtype=bool),
     )
 
     assert data["vision_type"] == "video"
@@ -276,7 +275,7 @@ def test_view_dropout_keep_both_marks_both_views_active():
         shape_meta=_shape_meta(),
         mode="train",
         load_breast=True,
-        view_dropout=ViewDropoutConfig(keep_both=1.0, drop_head=0.0, drop_breast=0.0),
+        view_dropout=ViewDropoutConfig(drop_head=0.0, drop_breast=0.0),
         target_image_size=(4, 4),
     )
 
@@ -295,7 +294,7 @@ def test_view_dropout_drop_breast_keeps_only_head_active():
         shape_meta=_shape_meta(),
         mode="train",
         load_breast=True,
-        view_dropout=ViewDropoutConfig(keep_both=0.0, drop_head=0.0, drop_breast=1.0),
+        view_dropout=ViewDropoutConfig(drop_head=0.0, drop_breast=1.0),
         target_image_size=(4, 4),
     )
 
@@ -313,7 +312,7 @@ def test_view_dropout_drop_head_keeps_only_breast_active():
         shape_meta=_shape_meta(),
         mode="train",
         load_breast=True,
-        view_dropout=ViewDropoutConfig(keep_both=0.0, drop_head=1.0, drop_breast=0.0),
+        view_dropout=ViewDropoutConfig(drop_head=1.0, drop_breast=0.0),
         target_image_size=(4, 4),
     )
 
@@ -332,7 +331,7 @@ def test_view_dropout_disabled_in_validation():
         shape_meta=_shape_meta(),
         mode="val",
         load_breast=True,
-        view_dropout=ViewDropoutConfig(keep_both=0.0, drop_head=1.0, drop_breast=0.0),
+        view_dropout=ViewDropoutConfig(drop_head=1.0, drop_breast=0.0),
         target_image_size=(4, 4),
     )
 

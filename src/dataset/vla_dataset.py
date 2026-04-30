@@ -32,17 +32,21 @@ from .wds_dataset import (
 
 @dataclass(frozen=True)
 class ViewDropoutConfig:
-    keep_both: float = 1.0
+    """Per-sample view dropout (train only). keep_both is the implicit residual."""
     drop_head: float = 0.0
     drop_breast: float = 0.0
 
     def __post_init__(self) -> None:
-        probs = (self.keep_both, self.drop_head, self.drop_breast)
-        if any(prob < 0.0 for prob in probs):
-            raise ValueError(f"view_dropout probabilities must be non-negative, got {probs}")
-        total = sum(probs)
-        if not np.isclose(total, 1.0):
-            raise ValueError(f"view_dropout probabilities must sum to 1.0, got {total:.6f}: {probs}")
+        if self.drop_head < 0.0 or self.drop_breast < 0.0:
+            raise ValueError(
+                f"view_dropout probabilities must be non-negative, "
+                f"got drop_head={self.drop_head}, drop_breast={self.drop_breast}"
+            )
+        if self.drop_head + self.drop_breast > 1.0 + 1e-6:
+            raise ValueError(
+                f"drop_head + drop_breast must be <= 1.0, "
+                f"got {self.drop_head + self.drop_breast:.6f}"
+            )
 
 
 class VLAWdsDataset(torch.utils.data.IterableDataset):
@@ -151,25 +155,28 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
 
         self.checker = DataChecker(sanity_cfg=self.sanity_checks)
 
-    def sample_active_views(self, *, has_breast: bool) -> tuple[list[str], np.ndarray]:
-        """Return active views and visible masks for head and breast views."""
-        if not has_breast:
-            return ["head"], np.array([True, False], dtype=bool)
-        if self.mode != "train":
-            return ["head", "breast"], np.array([True, True], dtype=bool)
+    def sample_active_views(self, *, has_breast: bool) -> list[str]:
+        """Sample which views are active for the current sample.
 
-        choices = ("keep_both", "drop_head", "drop_breast")
-        probs = [
-            self.view_dropout.keep_both,
-            self.view_dropout.drop_head,
-            self.view_dropout.drop_breast,
-        ]
-        choice = np.random.choice(choices, p=probs)
+        Train mode + has_breast: roll view_dropout to optionally drop one side.
+        Otherwise (val mode, or no breast available): keep all available views.
+        view_mask is derived from the result at the data-build site.
+        """
+        if not has_breast or self.mode != "train":
+            return ["head", "breast"] if has_breast else ["head"]
+
+        drop_head = self.view_dropout.drop_head
+        drop_breast = self.view_dropout.drop_breast
+        keep_both = 1.0 - drop_head - drop_breast
+        choice = np.random.choice(
+            ["keep_both", "drop_head", "drop_breast"],
+            p=[keep_both, drop_head, drop_breast],
+        )
         if choice == "drop_head":
-            return ["breast"], np.array([False, True], dtype=bool)
+            return ["breast"]
         if choice == "drop_breast":
-            return ["head"], np.array([True, False], dtype=bool)
-        return ["head", "breast"], np.array([True, True], dtype=bool)
+            return ["head"]
+        return ["head", "breast"]
 
     def set_collator(self, collator):
         """Set the batch collator used to build model inputs."""
@@ -185,10 +192,12 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         image,
         intrinsic,
         active_views,
-        view_mask,
         breast_image=None,
         breast_intrinsic=None,
     ):
+        view_mask = np.array(
+            ["head" in active_views, "breast" in active_views], dtype=bool
+        )
         data = {
             "images": image,
             "instruction": instruction,
@@ -356,7 +365,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             )
             self.checker.check(image=breast_image, finite={"breast_image": breast_image})
         # Sample dropout perspective
-        active_views, view_mask = self.sample_active_views(has_breast=breast_image is not None)
+        active_views = self.sample_active_views(has_breast=breast_image is not None)
         instruction = sample["instruction"]
         instruction_num = sample["instruction_num"]
 
@@ -384,7 +393,6 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             image=image,
             intrinsic=intrinsic,
             active_views=active_views,
-            view_mask=view_mask,
             breast_image=breast_image,
             breast_intrinsic=breast_intrinsic,
         )
