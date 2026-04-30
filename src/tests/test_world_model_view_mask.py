@@ -8,8 +8,9 @@ from src.policy.legendvla_loss import compute_wm_loss
 
 
 class FakeWorldModelLossModel:
-    def __init__(self, pred, target, view_mask):
+    def __init__(self, pred, target, view_mask, *, mask_loss_by_view_mask=True):
         self.use_world_model = True
+        self.world_model_config = SimpleNamespace(mask_loss_by_view_mask=mask_loss_by_view_mask)
         self._pred = pred
         self._target = target
         self._view_mask = view_mask
@@ -40,6 +41,26 @@ def test_wm_loss_masks_inactive_breast_view():
     loss = compute_wm_loss(model, batch, _backbone_output(batch_size=1))
 
     torch.testing.assert_close(loss, torch.tensor(1.0))
+
+
+def test_wm_loss_can_ignore_view_mask_and_supervise_all_views():
+    pred = torch.zeros(1, 2, 2, 1, 1)
+    target = torch.tensor([[[[[1.0]], [[1.0]]], [[[3.0]], [[3.0]]]]])
+    view_mask = torch.tensor([[True, False]])
+    batch = {
+        "future_frames": torch.zeros(1, 2, 4, 4, 3, dtype=torch.uint8),
+        "n_future_frames": torch.tensor([2]),
+    }
+    model = FakeWorldModelLossModel(
+        pred,
+        target,
+        view_mask,
+        mask_loss_by_view_mask=False,
+    )
+
+    loss = compute_wm_loss(model, batch, _backbone_output(batch_size=1))
+
+    torch.testing.assert_close(loss, torch.tensor(5.0))
 
 
 def test_wm_loss_masks_inactive_head_view():

@@ -415,7 +415,9 @@ def compute_wm_loss(
     """Masked MSE between world model predictions and frozen teacher features.
 
     Both pred and target are ``[B, 2, K, spatial, D]`` in canonical
-    head/breast order. ``view_mask`` controls which views contribute loss.
+    head/breast order. By default ``view_mask`` controls which views contribute
+    loss; ``world_model_config.mask_loss_by_view_mask=False`` supervises all
+    views.
     """
     if not model.use_world_model or "future_frames" not in batch:
         return zero_loss(backbone_output.last_hidden_states)
@@ -425,9 +427,14 @@ def compute_wm_loss(
     target = wm_output["target"].to(pred.dtype)
     n_future = wm_output["n_future_frames"].to(device=pred.device)
     V, K = pred.shape[1], pred.shape[2]
-    view_mask = wm_output["view_mask"].to(device=pred.device, dtype=torch.bool)
-    if view_mask.shape != (pred.shape[0], V):
-        raise ValueError(f"view_mask must have shape [B, V], got {tuple(view_mask.shape)}")
+
+    if model.world_model_config.mask_loss_by_view_mask:
+        view_mask = wm_output["view_mask"].to(device=pred.device, dtype=torch.bool)
+        if view_mask.shape != (pred.shape[0], V):
+            raise ValueError(f"view_mask must have shape [B, V], got {tuple(view_mask.shape)}")
+    else:
+        # force to calculate loss on all views
+        view_mask = torch.ones(pred.shape[0], V, device=pred.device, dtype=torch.bool)
 
     # frame_valid[b, k] == (k < n_future[b]); broadcast over V/spatial/D for
     # element-wise mask against pred [B, V, K, spatial, D].

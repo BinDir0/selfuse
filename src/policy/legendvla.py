@@ -73,6 +73,7 @@ class WorldModelConfig:
     upsample_factor: int = 2
     action_conditioning: bool = False
     motion_conditioning: bool = False
+    mask_loss_by_view_mask: bool = True
 
 
 @dataclass(frozen=True)
