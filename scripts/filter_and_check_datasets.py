@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified dataset filtering and checking utility for EgoVLA.
+"""Unified dataset filtering and checking utility.
 
 This script consolidates the repository's existing dataset gates into one
 standalone CLI:
@@ -8,8 +8,8 @@ standalone CLI:
   - zarr-list: validate/filter zarr list files by episode count
   - hf-list:   validate/filter HF arrow/parquet dataset directories
 
-The WebDataset checker intentionally reuses ``src.dataset.sanity_checks`` so
-the thresholds match training-time data skips.
+The WebDataset checker is self-contained so it can run inside this repository
+without depending on the original training package layout.
 """
 
 from __future__ import annotations
@@ -26,6 +26,34 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    class _NullProgress:
+        def __init__(self, iterable=None, *args, **kwargs):
+            self.iterable = iterable
+
+        def __iter__(self):
+            return iter(self.iterable or ())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, n=1):
+            return None
+
+        def set_postfix(self, *args, **kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    def tqdm(iterable=None, *args, **kwargs):
+        return _NullProgress(iterable, *args, **kwargs)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -715,66 +743,72 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
     good_file = open(args.good_keys_output, "w", encoding="utf-8") if args.good_keys_output else None
     bad_file = open(args.bad_keys_output, "w", encoding="utf-8") if args.bad_keys_output else None
     try:
-        for shard_path in shard_paths:
-            if args.max_samples and total >= args.max_samples:
-                break
-            dataset = wds.WebDataset(str(shard_path), shardshuffle=False, empty_check=False)
-            for sample in dataset:
+        sample_total = args.max_samples if args.max_samples and args.max_samples > 0 else None
+        with tqdm(total=sample_total, desc="Samples", unit="sample") as sample_bar:
+            for shard_path in tqdm(shard_paths, desc="Shards", unit="shard"):
                 if args.max_samples and total >= args.max_samples:
                     break
+                dataset = wds.WebDataset(str(shard_path), shardshuffle=False, empty_check=False)
+                for sample in dataset:
+                    if args.max_samples and total >= args.max_samples:
+                        break
 
-                total += 1
-                checker.note_sample_seen()
-                stat = shard_stats[str(shard_path)]
-                stat["samples"] += 1
-                meta: dict[str, Any] | None = None
-                try:
-                    meta = json_load_maybe(sample.get("meta.json"))
-                    kind = args.kind if args.kind != "auto" else infer_wds_kind(sample)
-                    if kind == "vla":
-                        check_vla_wds_sample(
-                            sample,
-                            checker,
-                            check_media=args.check_media,
-                            check_depth=args.check_depth,
-                        )
-                    elif kind == "vlm":
-                        check_vlm_wds_sample(
-                            sample,
-                            checker,
-                            check_media=args.check_media,
-                            check_image_quality=args.check_image_quality,
-                            target_image_size=target_size,
-                        )
+                    total += 1
+                    sample_bar.update(1)
+                    checker.note_sample_seen()
+                    stat = shard_stats[str(shard_path)]
+                    stat["samples"] += 1
+                    meta: dict[str, Any] | None = None
+                    try:
+                        meta = json_load_maybe(sample.get("meta.json"))
+                        kind = args.kind if args.kind != "auto" else infer_wds_kind(sample)
+                        if kind == "vla":
+                            check_vla_wds_sample(
+                                sample,
+                                checker,
+                                check_media=args.check_media,
+                                check_depth=args.check_depth,
+                            )
+                        elif kind == "vlm":
+                            check_vlm_wds_sample(
+                                sample,
+                                checker,
+                                check_media=args.check_media,
+                                check_image_quality=args.check_image_quality,
+                                target_image_size=target_size,
+                            )
+                        else:
+                            raise MissingOrInvalidFilesError(f"unknown kind: {kind}")
+                    except DataSkipError as exc:
+                        failed += 1
+                        stat["failed"] += 1
+                        reason = type(exc).__name__
+                        reason_counts[reason] += 1
+                        stat["reasons"][reason] += 1
+                        if bad_file is not None:
+                            record = sample_locator(sample, meta)
+                            record.update({"reason": reason, "message": str(exc)})
+                            bad_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    except Exception as exc:
+                        failed += 1
+                        stat["failed"] += 1
+                        reason = f"Unexpected{type(exc).__name__}"
+                        reason_counts[reason] += 1
+                        stat["reasons"][reason] += 1
+                        if bad_file is not None:
+                            record = sample_locator(sample, meta)
+                            record.update({"reason": reason, "message": str(exc)})
+                            bad_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                     else:
-                        raise MissingOrInvalidFilesError(f"unknown kind: {kind}")
-                except DataSkipError as exc:
-                    failed += 1
-                    stat["failed"] += 1
-                    reason = type(exc).__name__
-                    reason_counts[reason] += 1
-                    stat["reasons"][reason] += 1
-                    if bad_file is not None:
-                        record = sample_locator(sample, meta)
-                        record.update({"reason": reason, "message": str(exc)})
-                        bad_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                except Exception as exc:
-                    failed += 1
-                    stat["failed"] += 1
-                    reason = f"Unexpected{type(exc).__name__}"
-                    reason_counts[reason] += 1
-                    stat["reasons"][reason] += 1
-                    if bad_file is not None:
-                        record = sample_locator(sample, meta)
-                        record.update({"reason": reason, "message": str(exc)})
-                        bad_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                else:
-                    passed += 1
-                    stat["passed"] += 1
-                    if good_file is not None:
-                        good_file.write(
-                            json.dumps(sample_locator(sample, meta), ensure_ascii=False) + "\n"
-                        )
+                        passed += 1
+                        stat["passed"] += 1
+                        if good_file is not None:
+                            good_file.write(
+                                json.dumps(sample_locator(sample, meta), ensure_ascii=False) + "\n"
+                            )
+                    if total % 1000 == 0:
+                        sample_bar.set_postfix(passed=passed, failed=failed)
+            sample_bar.set_postfix(passed=passed, failed=failed)
     finally:
         if good_file is not None:
             good_file.close()
@@ -872,7 +906,12 @@ def scan_zarr_list(args: argparse.Namespace) -> dict[str, Any]:
     kept_lines: list[str] = []
     reason_counts: Counter[str] = Counter()
 
-    for line_no, raw_line in enumerate(input_path.read_text(encoding="utf-8").splitlines(), 1):
+    lines = input_path.read_text(encoding="utf-8").splitlines()
+    for line_no, raw_line in tqdm(
+        list(enumerate(lines, 1)),
+        desc="Zarr entries",
+        unit="line",
+    ):
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -967,7 +1006,12 @@ def scan_hf_list(args: argparse.Namespace) -> dict[str, Any]:
     kept_lines = []
     reason_counts: Counter[str] = Counter()
 
-    for dataset_path, dataset_name, raw in load_hf_list(input_path):
+    entries = load_hf_list(input_path)
+    for dataset_path, dataset_name, raw in tqdm(
+        entries,
+        desc="HF entries",
+        unit="dataset",
+    ):
         split_info = {}
         total_files = 0
         total_empty = 0
