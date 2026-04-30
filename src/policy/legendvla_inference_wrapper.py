@@ -340,54 +340,55 @@ class LegendVLAInference(nn.Module):
     def extract_attention_grid(
         self, batch: Dict[str, torch.Tensor], expert_attn: list,
     ) -> np.ndarray:
-        """Aggregate expert attention into a spatial grid [T_g, tH, tW].
+        """Aggregate expert attention into [T_total, tH, tW].
 
-        Uses the stack -> reshape -> aggregate -> renormalize pipeline from
-        src.utils.visual_attention. Returns a numpy float32 array.
+        Multi-video inputs (head+breast) are concatenated along T, head first.
         """
+        from src.utils.visual_attention import MERGE_SIZE
+
         input_ids = batch["input_ids"][0]
         visual_indices = (input_ids == self.model.backbone.video_token_id).nonzero(as_tuple=True)[0].cpu()
-        T_g, H_g, W_g = (int(v) for v in batch["video_grid_thw"][0])
+        n_visual_tokens = int(visual_indices.numel())
 
         vis_flat = stack_visual_attention(expert_attn, visual_indices)
-        n_visual_tokens = int(vis_flat.shape[-1])
-        tried_dims = []
-        vis_grid = None
 
-        if self._mem_temporal_attention_enabled:
-            # MEM-on: force T=1 reshape for attention saving, because visual
-            # placeholder tokens can be single-frame even when video_grid_thw
-            # carries full-T metadata.
-            try:
-                vis_grid, _, _ = reshape_visual_to_grid(vis_flat, 1, H_g, W_g)
-                tried_dims.append((1, H_g, W_g, "ok"))
-            except ValueError as e:
-                tried_dims.append((1, H_g, W_g, f"failed: {e}"))
-        else:
-            # MEM-off: keep the original behavior.
-            try:
-                vis_grid, _, _ = reshape_visual_to_grid(vis_flat, T_g, H_g, W_g)
-                tried_dims.append((T_g, H_g, W_g, "ok"))
-            except ValueError as e:
-                tried_dims.append((T_g, H_g, W_g, f"failed: {e}"))
+        video_grid_thw = batch["video_grid_thw"]
+        if video_grid_thw.ndim == 1:
+            video_grid_thw = video_grid_thw.unsqueeze(0)
 
-        if vis_grid is None:
-            attempts = "; ".join(
-                f"(T={t},H={h},W={w}) -> {status}" for t, h, w, status in tried_dims
-            )
+        per_video_token_count, per_video_thw = [], []
+        for v in range(int(video_grid_thw.shape[0])):
+            T_g, H_g, W_g = (int(x) for x in video_grid_thw[v])
+            m = MERGE_SIZE if (H_g % MERGE_SIZE == 0 and W_g % MERGE_SIZE == 0) else 1
+            tH, tW = H_g // m, W_g // m
+            T_eff = 1 if self._mem_temporal_attention_enabled else T_g
+            per_video_token_count.append(T_eff * tH * tW)
+            per_video_thw.append((T_g, H_g, W_g, T_eff, tH, tW))
+
+        if sum(per_video_token_count) != n_visual_tokens:
             raise ValueError(
-                "Failed to reshape visual attention grid. "
-                f"mem_enabled={self._mem_temporal_attention_enabled}; "
-                f"n_visual_tokens={n_visual_tokens}; attempts: {attempts}"
+                f"Visual token count mismatch: input_ids={n_visual_tokens}, "
+                f"video_grid_thw expects {per_video_token_count} "
+                f"(mem_enabled={self._mem_temporal_attention_enabled}, grid={video_grid_thw.tolist()})"
             )
 
-        agg = aggregate_visual_attention(
-            vis_grid,
-            strategy="middle_layers_mean_heads",
-            ode_step=0,
-            layer_range=self._middle_layer_range,
-        )
-        return renormalize_visual_subset(agg).numpy()
+        per_video_aggregated = []
+        offset = 0
+        for v, (T_g, H_g, W_g, T_eff, tH, tW) in enumerate(per_video_thw):
+            n_v = per_video_token_count[v]
+            vis_flat_v = vis_flat[..., offset:offset + n_v]
+            offset += n_v
+            vis_grid_v, _, _ = reshape_visual_to_grid(vis_flat_v, T_eff, H_g, W_g)
+            agg_v = aggregate_visual_attention(
+                vis_grid_v,
+                strategy="middle_layers_mean_heads",
+                ode_step=0,
+                layer_range=self._middle_layer_range,
+            )
+            per_video_aggregated.append(agg_v)
+
+        grid_concat = torch.cat(per_video_aggregated, dim=0)
+        return renormalize_visual_subset(grid_concat).numpy()
 
     def post_process(self, actions: torch.Tensor) -> torch.Tensor:
         """Unnormalize predicted actions back to physical space."""

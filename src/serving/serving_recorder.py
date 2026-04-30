@@ -94,9 +94,9 @@ class ConnectionRecorder:
         response_payload.update(self._to_jsonable(response))
 
         if attention_grid is not None:
-            frame = self._last_frame_rgb(obs)
-            if frame is not None:
-                overlay = overlay_attention(frame, attention_grid[-1])
+            views = self._last_frame_rgb_per_view(obs)
+            if views:
+                overlay = self._build_attention_overlay(views, attention_grid)
                 cv2.imwrite(
                     str(request_dir / "attention_overlay.jpg"),
                     cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
@@ -114,6 +114,38 @@ class ConnectionRecorder:
             return None
         frame = np.asarray(image, dtype=np.float32)[-1]
         return self._normalize_rgb(frame)
+
+    def _last_frame_rgb_per_view(self, obs: dict[str, Any]) -> list[tuple[str, np.ndarray]]:
+        """Return [(camera_name, last_frame_uint8_rgb), ...] in head-first order."""
+        image = obs.get(self._image_key)
+        if image is None:
+            return []
+        if isinstance(image, dict):
+            views = []
+            for cam in ("head", "chest"):
+                v = image.get(cam)
+                if v is not None:
+                    views.append((cam, self._normalize_rgb(np.asarray(v, dtype=np.float32)[-1])))
+            return views
+        return [("head", self._normalize_rgb(np.asarray(image, dtype=np.float32)[-1]))]
+
+    def _build_attention_overlay(
+        self, views: list[tuple[str, np.ndarray]], attention_grid: np.ndarray,
+    ) -> np.ndarray:
+        """Overlay each view's last attention frame on its last RGB frame, side-by-side.
+
+        attention_grid is [T_total, tH, tW] with per-view T equal; views are head-first.
+        """
+        n = len(views)
+        T_total = int(attention_grid.shape[0])
+        if n == 0 or T_total % n != 0:
+            return overlay_attention(views[0][1], attention_grid[-1])
+        T_per_view = T_total // n
+        overlays = [
+            overlay_attention(frame, attention_grid[(i + 1) * T_per_view - 1])
+            for i, (_, frame) in enumerate(views)
+        ]
+        return np.concatenate(overlays, axis=1)
 
     @staticmethod
     def _extract_camera_view(value: Any, camera_name: str) -> Any:
