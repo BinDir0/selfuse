@@ -15,11 +15,13 @@ without depending on the original training package layout.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import glob
 import io
 import json
 import os
 import sys
+import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -376,6 +378,15 @@ def parse_args() -> argparse.Namespace:
         help="Stop after this many samples across all shards. 0 scans all.",
     )
     wds_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of shard-level worker processes for WDS scanning. "
+            "Use 4-8 for shared storage; values >1 require --max-samples 0."
+        ),
+    )
+    wds_parser.add_argument(
         "--check-media",
         action="store_true",
         help="Decode image/depth payloads and run media checks.",
@@ -718,9 +729,182 @@ def check_vlm_wds_sample(
         checker.check(image=processed)
 
 
-def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
+def scan_one_wds_shard_worker(params: dict[str, Any]) -> dict[str, Any]:
     import webdataset as wds
 
+    shard_path = params["shard_path"]
+    shard_index = int(params["shard_index"])
+    checker = DataChecker()
+    target_size = tuple(params["target_size"]) if params.get("target_size") else None
+    reason_counts: Counter[str] = Counter()
+    stat = {"samples": 0, "passed": 0, "failed": 0, "reasons": Counter()}
+
+    tmp_dir = params.get("tmp_dir")
+    good_path = None
+    bad_path = None
+    good_file = None
+    bad_file = None
+    if tmp_dir and params.get("write_good"):
+        good_path = str(Path(tmp_dir) / f"good-{shard_index:06d}.jsonl")
+        good_file = open(good_path, "w", encoding="utf-8")
+    if tmp_dir and params.get("write_bad"):
+        bad_path = str(Path(tmp_dir) / f"bad-{shard_index:06d}.jsonl")
+        bad_file = open(bad_path, "w", encoding="utf-8")
+
+    try:
+        dataset = wds.WebDataset(str(shard_path), shardshuffle=False, empty_check=False)
+        for sample in dataset:
+            stat["samples"] += 1
+            checker.note_sample_seen()
+            meta: dict[str, Any] | None = None
+            try:
+                meta = json_load_maybe(sample.get("meta.json"))
+                kind = params["kind"] if params["kind"] != "auto" else infer_wds_kind(sample)
+                if kind == "vla":
+                    check_vla_wds_sample(
+                        sample,
+                        checker,
+                        check_media=bool(params["check_media"]),
+                        check_depth=bool(params["check_depth"]),
+                    )
+                elif kind == "vlm":
+                    check_vlm_wds_sample(
+                        sample,
+                        checker,
+                        check_media=bool(params["check_media"]),
+                        check_image_quality=bool(params["check_image_quality"]),
+                        target_image_size=target_size,
+                    )
+                else:
+                    raise MissingOrInvalidFilesError(f"unknown kind: {kind}")
+            except DataSkipError as exc:
+                stat["failed"] += 1
+                reason = type(exc).__name__
+                reason_counts[reason] += 1
+                stat["reasons"][reason] += 1
+                if bad_file is not None:
+                    record = sample_locator(sample, meta)
+                    record.update({"reason": reason, "message": str(exc)})
+                    bad_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception as exc:
+                stat["failed"] += 1
+                reason = f"Unexpected{type(exc).__name__}"
+                reason_counts[reason] += 1
+                stat["reasons"][reason] += 1
+                if bad_file is not None:
+                    record = sample_locator(sample, meta)
+                    record.update({"reason": reason, "message": str(exc)})
+                    bad_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            else:
+                stat["passed"] += 1
+                if good_file is not None:
+                    good_file.write(
+                        json.dumps(sample_locator(sample, meta), ensure_ascii=False) + "\n"
+                    )
+    finally:
+        if good_file is not None:
+            good_file.close()
+        if bad_file is not None:
+            bad_file.close()
+
+    return {
+        "shard_index": shard_index,
+        "shard": str(shard_path),
+        "samples": int(stat["samples"]),
+        "passed": int(stat["passed"]),
+        "failed": int(stat["failed"]),
+        "reasons": dict(stat["reasons"]),
+        "reason_counts": dict(reason_counts),
+        "good_path": good_path,
+        "bad_path": bad_path,
+    }
+
+
+def append_jsonl_files(paths: list[str], output_path: str | None) -> None:
+    if not output_path:
+        return
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as dst:
+        for path in paths:
+            if not path:
+                continue
+            src_path = Path(path)
+            if not src_path.exists():
+                continue
+            with open(src_path, "r", encoding="utf-8") as src:
+                for line in src:
+                    dst.write(line)
+
+
+def build_wds_report(
+    *,
+    args: argparse.Namespace,
+    shard_paths: list[str],
+    shard_results: list[dict[str, Any]],
+    started: float,
+) -> dict[str, Any]:
+    total = sum(int(item["samples"]) for item in shard_results)
+    passed = sum(int(item["passed"]) for item in shard_results)
+    failed = sum(int(item["failed"]) for item in shard_results)
+    reason_counts: Counter[str] = Counter()
+    for item in shard_results:
+        reason_counts.update(item.get("reason_counts", {}))
+
+    result_by_shard = {item["shard"]: item for item in shard_results}
+    shard_reports = []
+    kept_shards = []
+    for shard_path in shard_paths:
+        item = result_by_shard.get(str(shard_path), {
+            "samples": 0,
+            "passed": 0,
+            "failed": 0,
+            "reasons": {},
+        })
+        samples = int(item["samples"])
+        failures = int(item["failed"])
+        fail_rate = failures / samples if samples else 0.0
+        if samples and fail_rate <= args.max_shard_fail_rate:
+            kept_shards.append(str(shard_path))
+        shard_reports.append(
+            {
+                "shard": str(shard_path),
+                "samples": samples,
+                "passed": int(item["passed"]),
+                "failed": failures,
+                "fail_rate": fail_rate,
+                "reasons": dict(item.get("reasons", {})),
+            }
+        )
+
+    if args.filtered_shards_output:
+        Path(args.filtered_shards_output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.filtered_shards_output).write_text(
+            "\n".join(kept_shards) + ("\n" if kept_shards else ""),
+            encoding="utf-8",
+        )
+
+    return {
+        "command": "wds",
+        "kind": args.kind,
+        "workers": int(args.workers),
+        "elapsed_sec": time.time() - started,
+        "shards_total": len(shard_paths),
+        "samples_total": total,
+        "passed": passed,
+        "failed": failed,
+        "fail_rate": failed / total if total else 0.0,
+        "reason_counts": dict(reason_counts),
+        "filtered_shards": {
+            "threshold": args.max_shard_fail_rate,
+            "kept": len(kept_shards),
+            "output": args.filtered_shards_output,
+        },
+        "shards": shard_reports,
+    }
+
+
+def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
     load_training_checkers()
     if DataChecker is None:
         raise RuntimeError("failed to load training data checker")
@@ -728,6 +912,81 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
     shard_paths = expand_paths(args.shards)
     if not shard_paths:
         raise SystemExit("No shards matched --shards")
+
+    if args.workers > 1 and args.max_samples and args.max_samples > 0:
+        print(
+            "Warning: --workers > 1 is ignored when --max-samples is set; "
+            "using single-process scan to preserve the global sample cap.",
+            file=sys.stderr,
+        )
+        args.workers = 1
+
+    if args.workers > 1:
+        started = time.time()
+        target_size = tuple(args.target_image_size) if args.target_image_size else None
+        shard_results: list[dict[str, Any]] = []
+        tmp_root = None
+        if args.good_keys_output or args.bad_keys_output:
+            tmp_root = tempfile.TemporaryDirectory(prefix="dataset-check-jsonl-")
+        try:
+            worker_params = []
+            for shard_index, shard_path in enumerate(shard_paths):
+                worker_params.append(
+                    {
+                        "shard_index": shard_index,
+                        "shard_path": str(shard_path),
+                        "kind": args.kind,
+                        "check_media": bool(args.check_media),
+                        "check_depth": bool(args.check_depth),
+                        "check_image_quality": bool(args.check_image_quality),
+                        "target_size": target_size,
+                        "write_good": bool(args.good_keys_output),
+                        "write_bad": bool(args.bad_keys_output),
+                        "tmp_dir": tmp_root.name if tmp_root is not None else None,
+                    }
+                )
+
+            max_workers = max(1, int(args.workers))
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(scan_one_wds_shard_worker, params)
+                    for params in worker_params
+                ]
+                with tqdm(total=len(futures), desc="Shards", unit="shard") as shard_bar:
+                    with tqdm(total=None, desc="Samples", unit="sample") as sample_bar:
+                        total_done = 0
+                        passed_done = 0
+                        failed_done = 0
+                        for future in concurrent.futures.as_completed(futures):
+                            result = future.result()
+                            shard_results.append(result)
+                            shard_bar.update(1)
+                            sample_bar.update(int(result["samples"]))
+                            total_done += int(result["samples"])
+                            passed_done += int(result["passed"])
+                            failed_done += int(result["failed"])
+                            sample_bar.set_postfix(passed=passed_done, failed=failed_done)
+
+            shard_results.sort(key=lambda item: int(item["shard_index"]))
+            append_jsonl_files(
+                [item.get("good_path") for item in shard_results if item.get("good_path")],
+                args.good_keys_output,
+            )
+            append_jsonl_files(
+                [item.get("bad_path") for item in shard_results if item.get("bad_path")],
+                args.bad_keys_output,
+            )
+            return build_wds_report(
+                args=args,
+                shard_paths=shard_paths,
+                shard_results=shard_results,
+                started=started,
+            )
+        finally:
+            if tmp_root is not None:
+                tmp_root.cleanup()
+
+    import webdataset as wds
 
     checker = DataChecker()
     target_size = tuple(args.target_image_size) if args.target_image_size else None
@@ -845,6 +1104,7 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "command": "wds",
         "kind": args.kind,
+        "workers": 1,
         "elapsed_sec": time.time() - started,
         "shards_total": len(shard_paths),
         "samples_total": total,
