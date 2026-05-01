@@ -110,6 +110,23 @@ def load_config(config_path: str | Path):
         cfg = hydra.compose(config_name=config_name)
     OmegaConf.set_struct(cfg, False)
     cfg.hydra = {"runtime": {"output_dir": "outputs", "choices": {}}, "job": {"num": 0, "name": "sample_check"}}
+
+    # Hydra registers its own ``hydra:`` resolver that reads HydraConfig,
+    # which is not populated when this utility composes configs outside
+    # @hydra.main. Replace it after compose so logging/default.yaml fields like
+    # ${hydra:runtime.choices.experiment} can resolve in this standalone script.
+    def hydra_resolver(path: str):
+        if path == "runtime.choices.experiment":
+            return config_path.stem
+        if path == "runtime.output_dir":
+            return "outputs"
+        if path == "job.num":
+            return 0
+        if path == "job.name":
+            return "sample_check"
+        return ""
+
+    OmegaConf.register_new_resolver("hydra", hydra_resolver, replace=True)
     OmegaConf.resolve(cfg)
     return cfg
 
