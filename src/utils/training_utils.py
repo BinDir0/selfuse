@@ -224,6 +224,10 @@ def data_worker_init(worker_id: int) -> None:
     """
     del worker_id
     gc.enable()
+    # Re-apply file_system sharing strategy in case workers were spawned
+    # (fresh interpreter) instead of forked from the rank process.
+    import torch.multiprocessing as _torch_mp
+    _torch_mp.set_sharing_strategy("file_system")
     from src.dataset.sanity_checks import configure_logger
     configure_logger()
 
