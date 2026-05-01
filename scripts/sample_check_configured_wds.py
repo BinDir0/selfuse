@@ -9,6 +9,7 @@ so checks are not biased toward the first files in a large dataset.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import glob
 import json
 import os
@@ -62,6 +63,24 @@ def parse_args() -> argparse.Namespace:
         help="Max samples scanned for each pattern. 0 scans sampled shards fully.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--pattern-workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of configured shard-pattern checks to run concurrently. "
+            "This is the outer parallelism level."
+        ),
+    )
+    parser.add_argument(
+        "--shard-workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of shard-level workers passed to filter_and_check_datasets.py. "
+            "This is the inner parallelism level."
+        ),
+    )
     parser.add_argument(
         "--check-media",
         action=argparse.BooleanOptionalAction,
@@ -193,6 +212,7 @@ def build_check_command(
     check_media: bool,
     vlm_check_image_quality: bool,
     target_image_size: list[int] | None,
+    shard_workers: int,
 ) -> list[str]:
     stem = sanitize_name(
         f"{spec['group']}__{spec['dataset_name']}__p{spec['pattern_index']}"
@@ -212,6 +232,8 @@ def build_check_command(
         "--good-keys-output",
         str(output_dir / f"{stem}.good_keys.jsonl"),
     ]
+    if shard_workers > 1:
+        cmd.extend(["--workers", str(shard_workers)])
     if max_samples > 0:
         cmd.extend(["--max-samples", str(max_samples)])
     if check_media:
@@ -223,12 +245,38 @@ def build_check_command(
     return cmd
 
 
+def run_check_item(item: dict[str, Any]) -> dict[str, Any]:
+    cmd = item.get("_cmd_list")
+    if not cmd:
+        item["returncode"] = None
+        return item
+
+    label = f"{item['group']} {item['dataset_name']} p{item['pattern_index']}"
+    started = time.time()
+    print(f"[RUN] {label}: {item['sampled_count']} shards", flush=True)
+    result = subprocess.run(cmd, cwd=REPO_ROOT)
+    item["returncode"] = result.returncode
+    item["elapsed_sec"] = time.time() - started
+    status = "OK" if result.returncode == 0 else f"FAIL({result.returncode})"
+    print(f"[DONE] {label}: {status} in {item['elapsed_sec']:.1f}s", flush=True)
+    return item
+
+
 def main() -> None:
     args = parse_args()
     if args.max_shards_per_pattern < 1:
         raise SystemExit("--max-shards-per-pattern must be >= 1")
     if args.max_samples_per_pattern < 0:
         raise SystemExit("--max-samples-per-pattern must be >= 0")
+    if args.pattern_workers < 1:
+        raise SystemExit("--pattern-workers must be >= 1")
+    if args.shard_workers < 1:
+        raise SystemExit("--shard-workers must be >= 1")
+    if args.shard_workers > 1 and args.max_samples_per_pattern > 0:
+        raise SystemExit(
+            "--shard-workers > 1 requires --max-samples-per-pattern 0 because "
+            "the underlying shard-level worker mode scans whole sampled shards."
+        )
 
     cfg = load_config(args.config)
     rng = random.Random(args.seed)
@@ -250,6 +298,8 @@ def main() -> None:
         "seed": args.seed,
         "max_shards_per_pattern": args.max_shards_per_pattern,
         "max_samples_per_pattern": args.max_samples_per_pattern,
+        "pattern_workers": args.pattern_workers,
+        "shard_workers": args.shard_workers,
         "check_media": bool(args.check_media),
         "vlm_check_image_quality": bool(args.vlm_check_image_quality),
         "run": bool(args.run),
@@ -262,6 +312,7 @@ def main() -> None:
         item = dict(spec)
         item["available_shards"] = len(matches)
         item["sampled_shards"] = sampled
+        item["sampled_count"] = len(sampled)
         if sampled:
             cmd = build_check_command(
                 spec=spec,
@@ -271,17 +322,35 @@ def main() -> None:
                 check_media=args.check_media,
                 vlm_check_image_quality=args.vlm_check_image_quality,
                 target_image_size=target_image_size,
+                shard_workers=args.shard_workers,
             )
+            item["_cmd_list"] = cmd
             item["command"] = " ".join(shlex.quote(part) for part in cmd)
-            if args.run:
-                print(f"[RUN] {spec['group']} {spec['dataset_name']} pattern={spec['pattern']}", flush=True)
-                result = subprocess.run(cmd, cwd=REPO_ROOT)
-                item["returncode"] = result.returncode
         else:
+            item["_cmd_list"] = None
             item["command"] = None
             item["returncode"] = None
             print(f"[WARN] no shards matched: {spec['pattern']}", flush=True)
         plan["items"].append(item)
+
+    if args.run:
+        runnable = [item for item in plan["items"] if item.get("_cmd_list")]
+        if args.pattern_workers == 1:
+            completed = [run_check_item(item) for item in runnable]
+        else:
+            completed = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.pattern_workers) as executor:
+                futures = [executor.submit(run_check_item, item) for item in runnable]
+                for future in concurrent.futures.as_completed(futures):
+                    completed.append(future.result())
+            completed_by_command = {item["command"]: item for item in completed}
+            for index, item in enumerate(plan["items"]):
+                command = item.get("command")
+                if command in completed_by_command:
+                    plan["items"][index] = completed_by_command[command]
+
+    for item in plan["items"]:
+        item.pop("_cmd_list", None)
 
     plan_path = output_dir / "sample_plan.json"
     plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
