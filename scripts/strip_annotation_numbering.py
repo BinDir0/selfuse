@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strip leading list numbering from annotation JSON or WDS shard meta in place."""
+"""Strip leading list numbering from annotation JSON or WDS shard meta."""
 
 from __future__ import annotations
 
@@ -8,19 +8,24 @@ import copy
 import io
 import json
 import os
-import re
+import sys
 import tarfile
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from lib.pipeline.annotation_protocol import strip_leading_instruction_numbering  # noqa: E402
 
 
 ANNOTATION_PATTERNS = ("*.annotation.json", "*_qwen-annotation.json")
 SHARD_PATTERN = "*.tar"
 HIERARCHY_KEYS = ("level1", "level2", "level3", "level4", "level5")
-NUMBERING_PREFIX_RE = re.compile(r"^\s*\d+\.\s+")
 
 
 def strip_numbering(text: str) -> str:
-    return NUMBERING_PREFIX_RE.sub("", text).strip()
+    return strip_leading_instruction_numbering(text)
 
 
 def normalize_instruction(value) -> tuple[object, bool]:
@@ -58,6 +63,33 @@ def normalize_hierarchy(container) -> tuple[object, bool]:
     return updated, changed
 
 
+def iter_payload_updates(payload: dict):
+    instruction = payload.get("instruction")
+    if isinstance(instruction, str):
+        updated = strip_numbering(instruction)
+        if updated != instruction:
+            yield "instruction", instruction, updated
+    elif isinstance(instruction, list):
+        for idx, item in enumerate(instruction):
+            if not isinstance(item, str):
+                continue
+            updated = strip_numbering(item)
+            if updated != item:
+                yield f"instruction[{idx}]", item, updated
+
+    for container_key in ("hierarchy", "global_analysis"):
+        container = payload.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for key in HIERARCHY_KEYS:
+            value = container.get(key)
+            if not isinstance(value, str):
+                continue
+            updated = strip_numbering(value)
+            if updated != value:
+                yield f"{container_key}.{key}", value, updated
+
+
 def normalize_payload(payload: dict) -> tuple[dict, bool]:
     changed = False
     updated = dict(payload)
@@ -80,43 +112,120 @@ def normalize_payload(payload: dict) -> tuple[dict, bool]:
     return updated, changed
 
 
-def clean_annotation_file(path: Path) -> bool:
+def dataset_name_from_meta(meta: dict, fallback: str) -> str:
+    for key in ("dataset_name", "source_id", "dataset", "source"):
+        value = meta.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return fallback
+
+
+def new_summary() -> dict:
+    return {
+        "files": set(),
+        "entries": 0,
+        "fields": 0,
+        "clips": set(),
+        "examples": [],
+    }
+
+
+def add_summary(
+    summary: dict,
+    dataset_name: str,
+    path: Path,
+    payload: dict,
+    updates: list[tuple[str, str, str]],
+    max_examples: int,
+) -> None:
+    dataset_summary = summary.setdefault(dataset_name, new_summary())
+    dataset_summary["files"].add(str(path))
+    dataset_summary["entries"] += 1
+    dataset_summary["fields"] += len(updates)
+    clip_id = payload.get("clip_id") or payload.get("episode_id")
+    if clip_id is not None and str(clip_id).strip():
+        dataset_summary["clips"].add(str(clip_id))
+    if len(dataset_summary["examples"]) < max_examples:
+        dataset_summary["examples"].append(
+            {
+                "path": str(path),
+                "clip_id": None if clip_id is None else str(clip_id),
+                "updates": [
+                    {
+                        "field": field,
+                        "before": before,
+                        "after": after,
+                    }
+                    for field, before, after in updates[:5]
+                ],
+            }
+        )
+
+
+def finalize_summary(summary: dict) -> dict:
+    finalized = {}
+    for dataset_name, item in sorted(summary.items()):
+        finalized[dataset_name] = {
+            "files": len(item["files"]),
+            "entries": int(item["entries"]),
+            "fields": int(item["fields"]),
+            "clips": len(item["clips"]),
+            "examples": list(item["examples"]),
+        }
+    return finalized
+
+
+def clean_annotation_file(path: Path, *, dry_run: bool, summary: dict, max_examples: int) -> bool:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    updates = list(iter_payload_updates(payload))
+    if updates:
+        add_summary(summary, "annotation_json", path, payload, updates, max_examples)
     updated, changed = normalize_payload(payload)
-    if changed:
+    if changed and not dry_run:
         path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return changed
 
 
-def rewrite_shard_file(path: Path) -> tuple[bool, int]:
+def rewrite_shard_file(path: Path, *, dry_run: bool, summary: dict, max_examples: int) -> tuple[bool, int]:
     tmp_path = path.with_name(path.name + ".tmp")
     changed = False
     updated_meta_members = 0
+    tar_writer = None if dry_run else tarfile.open(tmp_path, "w")
 
-    with tarfile.open(path, "r|") as tar_reader, tarfile.open(tmp_path, "w") as tar_writer:
-        for member in tar_reader:
-            member_copy = copy.copy(member)
-            extracted = tar_reader.extractfile(member) if member.isfile() else None
+    try:
+        with tarfile.open(path, "r|") as tar_reader:
+            for member in tar_reader:
+                member_copy = copy.copy(member)
+                extracted = tar_reader.extractfile(member) if member.isfile() else None
 
-            if extracted is None:
-                tar_writer.addfile(member_copy)
-                continue
+                if extracted is None:
+                    if tar_writer is not None:
+                        tar_writer.addfile(member_copy)
+                    continue
 
-            payload = extracted.read()
-            if member.name.endswith(".meta.json"):
-                meta = json.loads(payload.decode("utf-8"))
-                updated_meta, meta_changed = normalize_payload(meta)
-                if meta_changed:
-                    payload = json.dumps(updated_meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                    member_copy.size = len(payload)
-                    changed = True
-                    updated_meta_members += 1
+                payload = extracted.read()
+                if member.name.endswith(".meta.json"):
+                    meta = json.loads(payload.decode("utf-8"))
+                    updates = list(iter_payload_updates(meta))
+                    updated_meta, meta_changed = normalize_payload(meta)
+                    if meta_changed:
+                        dataset_name = dataset_name_from_meta(meta, path.parent.name or "unknown")
+                        add_summary(summary, dataset_name, path, meta, updates, max_examples)
+                        changed = True
+                        updated_meta_members += 1
+                        if tar_writer is not None:
+                            payload = json.dumps(updated_meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                            member_copy.size = len(payload)
 
-            tar_writer.addfile(member_copy, io.BytesIO(payload))
+                if tar_writer is not None:
+                    tar_writer.addfile(member_copy, io.BytesIO(payload))
+    finally:
+        if tar_writer is not None:
+            tar_writer.close()
 
-    if changed:
+    if changed and not dry_run:
         os.replace(tmp_path, path)
-    else:
+    elif not dry_run:
         tmp_path.unlink(missing_ok=True)
     return changed, updated_meta_members
 
@@ -144,50 +253,91 @@ def iter_shard_files(target: Path):
         yield path
 
 
-def process_target(path: Path) -> tuple[str, bool, int]:
+def process_target(path: Path, *, dry_run: bool, summary: dict, max_examples: int) -> tuple[str, bool, int]:
     suffixes = set(path.suffixes)
     if path.name.endswith(".tar"):
-        changed, updated_members = rewrite_shard_file(path)
+        changed, updated_members = rewrite_shard_file(path, dry_run=dry_run, summary=summary, max_examples=max_examples)
         return "shard", changed, updated_members
     if ".json" in suffixes:
-        changed = clean_annotation_file(path)
+        changed = clean_annotation_file(path, dry_run=dry_run, summary=summary, max_examples=max_examples)
         return "annotation", changed, 1 if changed else 0
     raise ValueError(f"Unsupported file type: {path}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Strip leading '1. ' style numbering from annotation JSON or WDS shard meta in place."
+        description="Strip leading '1. ' style numbering from annotation JSON or WDS shard meta."
     )
-    parser.add_argument("target", help="Annotation JSON file/dir or WDS shard file/dir to edit in place")
+    parser.add_argument("target", nargs="+", help="Annotation JSON file/dir or WDS shard file/dir")
+    parser.add_argument("--dry-run", action="store_true", help="Only scan and report matches; do not edit files")
+    parser.add_argument("--report-out", default=None, help="Optional JSON report path")
+    parser.add_argument("--max-examples", type=int, default=20, help="Maximum examples to keep per dataset in the report")
     args = parser.parse_args()
 
-    target = Path(args.target)
-    if not target.exists():
-        raise SystemExit(f"Target not found: {target}")
+    targets = []
+    seen = set()
+    for raw_target in args.target:
+        target = Path(raw_target)
+        if not target.exists():
+            raise SystemExit(f"Target not found: {target}")
 
-    if target.is_file():
-        targets = [target]
-    else:
-        annotation_paths = list(iter_annotation_files(target))
-        shard_paths = list(iter_shard_files(target))
-        targets = annotation_paths + [path for path in shard_paths if path not in annotation_paths]
+        if target.is_file():
+            selected = [target]
+        else:
+            annotation_paths = list(iter_annotation_files(target))
+            shard_paths = list(iter_shard_files(target))
+            selected = annotation_paths + [path for path in shard_paths if path not in annotation_paths]
+
+        for path in selected:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            targets.append(path)
 
     if not targets:
-        raise SystemExit(f"No supported annotation JSON or shard tar files found under: {target}")
+        raise SystemExit("No supported annotation JSON or shard tar files found")
 
     total = 0
     changed = 0
     updated_entries = 0
+    summary = {}
     for path in targets:
         total += 1
-        file_kind, file_changed, file_updates = process_target(path)
+        file_kind, file_changed, file_updates = process_target(
+            path,
+            dry_run=args.dry_run,
+            summary=summary,
+            max_examples=max(0, args.max_examples),
+        )
         updated_entries += int(file_updates)
         if file_changed:
             changed += 1
-            print(f"updated {file_kind} {path}")
+            verb = "would update" if args.dry_run else "updated"
+            print(f"{verb} {file_kind} {path} entries={file_updates}")
 
-    print(f"done total={total} changed={changed} updated_entries={updated_entries}")
+    dataset_summary = finalize_summary(summary)
+    for dataset_name, item in dataset_summary.items():
+        print(
+            f"dataset={dataset_name} files={item['files']} "
+            f"entries={item['entries']} fields={item['fields']} clips={item['clips']}"
+        )
+
+    report = {
+        "dry_run": bool(args.dry_run),
+        "total_files": total,
+        "changed_files": changed,
+        "updated_entries": updated_entries,
+        "datasets": dataset_summary,
+    }
+    if args.report_out:
+        report_path = Path(args.report_out)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"report={report_path}")
+
+    mode = "scan" if args.dry_run else "rewrite"
+    print(f"done mode={mode} total={total} changed={changed} updated_entries={updated_entries}")
 
 
 if __name__ == "__main__":

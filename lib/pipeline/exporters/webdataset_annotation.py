@@ -6,6 +6,8 @@ from multiprocessing import get_context
 
 from tqdm import tqdm
 
+from lib.pipeline.annotation_protocol import strip_leading_instruction_numbering
+
 ANNOTATION_LEVEL_KEYS = ("level1", "level2", "level3", "level4", "level5")
 DEFAULT_ANNOTATION_SUFFIX = "_qwen-annotation.json"
 
@@ -28,7 +30,7 @@ def normalize_instruction(global_analysis):
             continue
         if not isinstance(value, str):
             value = str(value)
-        value = value.strip()
+        value = strip_leading_instruction_numbering(value)
         if value:
             instruction.append(value)
     return instruction

@@ -111,6 +111,32 @@ class AnnotationProtocolTests(unittest.TestCase):
             self.assertEqual(annotation.instruction, ["pick part", "place part"])
             self.assertEqual(source_path, str(ann_path))
 
+    def test_load_clip_annotation_strips_leading_instruction_numbering(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            clip_id = "clip_numbered"
+            ann_path = root / f"{clip_id}.annotation.json"
+            ann_path.write_text(
+                json.dumps(
+                    {
+                        "status": "Valid",
+                        "instruction": ["1. pick part", "2. place part"],
+                        "global_analysis": {
+                            "level1": "1. pick part",
+                            "level2": "2. place part",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            annotation, error_code, _source_path = load_clip_annotation(root, clip_id)
+
+            self.assertIsNone(error_code)
+            self.assertIsNotNone(annotation)
+            self.assertEqual(annotation.instruction, ["pick part", "place part"])
+            self.assertEqual(annotation.hierarchy, {"level1": "pick part", "level2": "place part"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ ANNOTATION_SUFFIX = ".annotation.json"
 HIERARCHY_KEYS = ("level1", "level2", "level3", "level4", "level5")
 _FACTORY_CLIP_ID_PATTERN = re.compile(r"^f(\d{3})_")
 _BUILDAI_CLIP_ID_PATTERN = re.compile(r"^f(\d{3})_w(\d{3})_v(\d{5})_i(\d{3})$")
+_LEADING_NUMBERING_PATTERN = re.compile(r"^\s*\d+\.\s+")
 
 
 @dataclass(frozen=True)
@@ -166,7 +167,7 @@ def _normalize_string_list(values) -> list[str]:
             continue
         if not isinstance(value, str):
             value = str(value)
-        value = value.strip()
+        value = strip_leading_instruction_numbering(value)
         if value:
             normalized.append(value)
     return normalized
@@ -186,10 +187,15 @@ def _normalize_hierarchy(payload: dict) -> dict:
             continue
         if not isinstance(value, str):
             value = str(value)
-        value = value.strip()
+        value = strip_leading_instruction_numbering(value)
         if value:
             normalized[key] = value
     return normalized
+
+
+def strip_leading_instruction_numbering(text: str) -> str:
+    """Remove a leading enumerated-list marker such as ``1. `` from annotation text."""
+    return _LEADING_NUMBERING_PATTERN.sub("", str(text)).strip()
 
 
 def _normalize_instruction(payload: dict, hierarchy: dict) -> list[str]:
