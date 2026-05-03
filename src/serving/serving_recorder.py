@@ -132,7 +132,11 @@ class ConnectionRecorder:
     def _build_attention_overlay(
         self, views: list[tuple[str, np.ndarray]], attention_grid: np.ndarray,
     ) -> np.ndarray:
-        """Overlay each view's last attention frame on its last RGB frame, side-by-side.
+        """Overlay each view's last attention frame on its last RGB frame, stacked
+        in a 2×2 grid:
+
+          top row:    per-view independent normalization (existing behavior)
+          bottom row: joint normalization across all views
 
         attention_grid is [T_total, tH, tW] with per-view T equal; views are head-first.
         """
@@ -141,11 +145,34 @@ class ConnectionRecorder:
         if n == 0 or T_total % n != 0:
             return overlay_attention(views[0][1], attention_grid[-1])
         T_per_view = T_total // n
-        overlays = [
+
+        # Top row: per-view independent normalization
+        top_overlays = [
             overlay_attention(frame, attention_grid[(i + 1) * T_per_view - 1])
             for i, (_, frame) in enumerate(views)
         ]
-        return np.concatenate(overlays, axis=1)
+        top_row = np.concatenate(top_overlays, axis=1)
+
+        # Bottom row: joint normalization across all views
+        # Upsample all attention maps and compute shared percentiles
+        attn_up_parts = []
+        for i, (_, frame) in enumerate(views):
+            attn = attention_grid[(i + 1) * T_per_view - 1]
+            attn_np = np.asarray(attn, dtype=np.float32)
+            H, W = frame.shape[:2]
+            attn_up_parts.append(cv2.resize(attn_np, (W, H), interpolation=cv2.INTER_LINEAR))
+        all_attn = np.concatenate([a.ravel() for a in attn_up_parts])
+        lo, hi = np.percentile(all_attn, (2.0, 98.0))
+
+        bottom_overlays = [
+            overlay_attention(
+                frame, attention_grid[(i + 1) * T_per_view - 1], vmin=lo, vmax=hi,
+            )
+            for i, (_, frame) in enumerate(views)
+        ]
+        bottom_row = np.concatenate(bottom_overlays, axis=1)
+
+        return np.concatenate([top_row, bottom_row], axis=0)
 
     @staticmethod
     def _extract_camera_view(value: Any, camera_name: str) -> Any:

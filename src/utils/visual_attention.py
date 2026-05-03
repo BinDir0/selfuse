@@ -336,6 +336,8 @@ def overlay_attention(
     upsample: str = "bilinear",
     percentile: tuple[float, float] = (2.0, 98.0),
     cmap_name: str = "jet",
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> np.ndarray:
     """Overlay a low-resolution attention map on an RGB frame.
 
@@ -349,8 +351,12 @@ def overlay_attention(
         alpha: blending weight for the heatmap (0..1).
         upsample: "bilinear" or "nearest" — cv2 interpolation mode.
         percentile: `(low, high)` percentiles used for contrast stretching
-            before applying the colormap.
+            before applying the colormap. Ignored when both `vmin` and `vmax`
+            are provided.
         cmap_name: matplotlib colormap name.
+        vmin: explicit lower bound for normalization. When both `vmin` and
+            `vmax` are not None, they override `percentile`.
+        vmax: explicit upper bound for normalization.
 
     Returns:
         uint8 RGB `[H, W, 3]`.
@@ -365,7 +371,10 @@ def overlay_attention(
     H, W = frame_rgb.shape[:2]
     interp = cv2.INTER_LINEAR if upsample == "bilinear" else cv2.INTER_NEAREST
     attn_up = cv2.resize(attn_np, (W, H), interpolation=interp)
-    lo, hi = np.percentile(attn_up, percentile)
+    if vmin is not None and vmax is not None:
+        lo, hi = vmin, vmax
+    else:
+        lo, hi = np.percentile(attn_up, percentile)
     if hi <= lo:
         hi = lo + 1e-8
     attn_norm = np.clip((attn_up - lo) / (hi - lo), 0.0, 1.0)
