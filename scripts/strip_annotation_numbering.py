@@ -204,6 +204,8 @@ def rewrite_shard_file(
     max_examples: int,
 ) -> tuple[bool, int]:
     dest = output_path if output_path is not None else path
+    if not dry_run:
+        dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest.with_name(dest.name + ".tmp")
     changed = False
     updated_meta_members = 0
@@ -241,7 +243,6 @@ def rewrite_shard_file(
             tar_writer.close()
 
     if not dry_run:
-        dest.parent.mkdir(parents=True, exist_ok=True)
         os.replace(tmp_path, dest)
     return changed, updated_meta_members
 
