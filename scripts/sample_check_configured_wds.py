@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Sample-check WebDataset shards declared by a Hydra experiment config.
+"""Sample-check WebDataset shards.
 
 This is a lightweight wrapper around ``data/filter_and_check_datasets.py wds``.
 It samples a small number of shards from every configured VLA/VLM shard pattern
 so checks are not biased toward the first files in a large dataset.
+
+Two modes:
+  --config  (default)  – read shard patterns from a Hydra experiment config.
+  --shard-url          – check arbitrary shard glob patterns, no config needed.
 """
 
 from __future__ import annotations
@@ -35,8 +39,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="src/config/experiment/legendvla_qwen3_vl.yaml",
-        help="Hydra experiment config path.",
+        default=None,
+        help="Hydra experiment config path. Required unless --shard-url is given.",
+    )
+    parser.add_argument(
+        "--shard-url",
+        nargs="+",
+        default=None,
+        help="Arbitrary shard glob patterns or paths to check (bypasses --config).",
+    )
+    parser.add_argument(
+        "--kind",
+        choices=("vla", "vlm"),
+        default="vla",
+        help="Dataset kind for --shard-url mode (default: vla).",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        default="manual",
+        help="Label used in output filenames for --shard-url mode (default: manual).",
     )
     parser.add_argument(
         "--output-dir",
@@ -277,8 +298,29 @@ def main() -> None:
             "--shard-workers > 1 requires --max-samples-per-pattern 0 because "
             "the underlying shard-level worker mode scans whole sampled shards."
         )
+    if not args.shard_url and not args.config:
+        raise SystemExit("Either --config or --shard-url is required.")
 
-    cfg = load_config(args.config)
+    cfg = None
+    target_image_size = None
+    if args.shard_url:
+        # Direct mode: build specs from --shard-url, no config needed.
+        specs = [
+            {
+                "group": "manual",
+                "kind": args.kind,
+                "dataset_name": args.dataset_name,
+                "pattern_index": idx,
+                "pattern": pattern,
+            }
+            for idx, pattern in enumerate(args.shard_url)
+        ]
+    else:
+        cfg = load_config(args.config)
+        if cfg.get("data") is not None and cfg.data.get("target_image_size") is not None:
+            target_image_size = [int(x) for x in cfg.data.target_image_size]
+        specs = group_specs(cfg, set(args.groups))
+
     rng = random.Random(args.seed)
     output_dir = (
         Path(args.output_dir)
@@ -287,13 +329,8 @@ def main() -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    target_image_size = None
-    if cfg.get("data") is not None and cfg.data.get("target_image_size") is not None:
-        target_image_size = [int(x) for x in cfg.data.target_image_size]
-
-    specs = group_specs(cfg, set(args.groups))
     plan: dict[str, Any] = {
-        "config": str(args.config),
+        "config": str(args.config) if args.config else None,
         "output_dir": str(output_dir),
         "seed": args.seed,
         "max_shards_per_pattern": args.max_shards_per_pattern,
