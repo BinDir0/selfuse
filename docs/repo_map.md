@@ -48,12 +48,15 @@ Use these as the maintained public scripts:
 - `scripts/batch_infer.py`
 - `scripts/validate_pipeline_run.py`
 
-The following compatibility scripts are still callable but are wrappers around `tools/`:
+The following compatibility wrappers have been moved to `deprecated/scripts_wrappers/` (use `tools/` directly instead):
 
-- `scripts/analyze_run.py`
-- `scripts/create_done_markers.py`
-- `scripts/generate_video_list.py`
-- `scripts/validate_setup.sh`
+- `analyze_run.py` -> `tools/ops/analyze_run.py`
+- `create_done_markers.py` -> `tools/ops/create_done_markers.py`
+- `generate_video_list.py` -> `tools/dataset/generate_video_list.py`
+
+The following compatibility script is still in place:
+
+- `scripts/validate_setup.sh` -> `tools/ops/validate_setup.sh`
 
 ## Internal Boundaries
 

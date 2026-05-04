@@ -15,8 +15,7 @@ try:
 except ImportError:
     TURBOJPEG_AVAILABLE = False
 
-# Check if we should suppress verbose output
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
+from hawor.utils.logging import QUIET_MODE  # noqa: F401
 SHARD_MEMBER_INDEX_CACHE_SIZE = max(1, int(os.environ.get("HAWOR_SHARD_MEMBER_INDEX_CACHE_SIZE", "8")))
 _SHARD_MEMBER_INDEX_LOCK = threading.Lock()
 _SHARD_MEMBER_INDEX_CACHE = OrderedDict()

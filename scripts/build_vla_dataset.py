@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Legacy CLI wrapper for the old BuildAI-oriented WebDataset exporter."""
+"""Legacy CLI wrapper for the old BuildAI-oriented WebDataset exporter.
+
+DEPRECATED: Use ``scripts/run_dataset_pipeline.py`` or
+``scripts/build_vla_from_manifest.py`` instead.
+"""
 
 import sys
 from pathlib import Path

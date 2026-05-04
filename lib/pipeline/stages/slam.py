@@ -29,9 +29,8 @@ from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
 from lib.pipeline.slam_geom_utils import est_calib, get_dimention
+from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
 
-
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
 CORRUPT_STAGE_ERROR_TOKENS = (
     "bad crc-32",
     "invalid block type",
@@ -45,11 +44,6 @@ CORRUPT_STAGE_ERROR_TOKENS = (
     "cannot identify image file",
     "failed to write stage3 frame cache file",
 )
-
-
-def vprint(*args, **kwargs):
-    if not QUIET_MODE:
-        print(*args, **kwargs)
 
 
 def _resolve_seq_folder(video_path: str, seq_folder: str = None) -> str:

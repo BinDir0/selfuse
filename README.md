@@ -29,6 +29,7 @@ python scripts/batch_infer.py \
 See:
 
 - [docs/dataset_pipeline.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/docs/dataset_pipeline.md)
+- [docs/buildai_6000h_infill_build_runbook.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/docs/buildai_6000h_infill_build_runbook.md)
 - [docs/repo_map.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/docs/repo_map.md)
 - [docs/legacy_tools.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/docs/legacy_tools.md)
 - [configs/README.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/configs/README.md)

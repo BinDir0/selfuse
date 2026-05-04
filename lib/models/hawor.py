@@ -1,6 +1,5 @@
 import einops
 import numpy as np
-import os
 import torch
 import pytorch_lightning as pl
 from typing import Dict
@@ -16,6 +15,7 @@ from hawor.utils.render_openpose import render_openpose
 from lib.utils.geometry import rot6d_to_rotmat_hmr2 as rot6d_to_rotmat
 from lib.utils.geometry import perspective_projection
 from hawor.utils.rotation import angle_axis_to_rotation_matrix
+from hawor.utils.logging import QUIET_MODE  # noqa: F401
 from torch.utils.data import default_collate
 
 from .backbones import create_backbone
@@ -24,9 +24,6 @@ from .mano_wrapper import MANO
 
 log = get_pylogger(__name__)
 idx = 0
-
-# Check if we should suppress verbose output
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
 
 class HAWOR(pl.LightningModule):
 

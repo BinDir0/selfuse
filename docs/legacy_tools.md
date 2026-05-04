@@ -32,14 +32,12 @@ python scripts/sanity_check_webdataset.py ...
 
 ## Compatibility Wrappers
 
-Several old script paths are now thin wrappers around canonical tools:
+The former compatibility wrappers in `scripts/` have been moved to `deprecated/scripts_wrappers/`. Use the canonical `tools/` paths directly:
 
-- `scripts/analyze_run.py` -> `tools/ops/analyze_run.py`
-- `scripts/create_done_markers.py` -> `tools/ops/create_done_markers.py`
-- `scripts/generate_video_list.py` -> `tools/dataset/generate_video_list.py`
-- `scripts/validate_setup.sh` -> `tools/ops/validate_setup.sh`
-
-This preserves old command lines while keeping maintained implementations in one place.
+- `tools/ops/analyze_run.py`
+- `tools/ops/create_done_markers.py`
+- `tools/dataset/generate_video_list.py`
+- `tools/ops/validate_setup.sh`
 
 ## Deprecated Area
 

@@ -1,6 +1,5 @@
 import argparse
 import numpy as np
-import os
 import sys
 from pathlib import Path
 
@@ -10,14 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.frame_source import build_frame_source
 from lib.pipeline.tools import detect_track
-
-# Check if we should suppress verbose output
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
-
-def vprint(*args, **kwargs):
-    """Print only if not in quiet mode."""
-    if not QUIET_MODE:
-        print(*args, **kwargs)
+from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
 
 
 def detect_track_video(args, detector_runner=None, force=False, detect_batch_size=128, num_io_workers=8, device='cuda:0', half_precision=True, frame_source=None, seq_folder=None):

@@ -1,3 +1,10 @@
+"""Standalone SLAM stage for a single video.
+
+Related pipeline stage: lib/pipeline/stages/slam.py
+This script is an independent executable with its own argument parsing,
+sys.path setup, and direct function calls. It has diverged from the
+pipeline stage version; changes should be made carefully.
+"""
 import math
 import sys
 import os
@@ -17,17 +24,10 @@ from lib.pipeline.est_scale import *
 from lib.pipeline.frame_source import build_frame_source
 from lib.pipeline.slam_geom_utils import est_calib, get_dimention
 from hawor.utils.process import block_print, enable_print
+from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(__file__) + '/../../thirdparty/Metric3D')
 from metric import Metric3D
-
-# Check if we should suppress verbose output
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
-
-def vprint(*args, **kwargs):
-    """Print only if not in quiet mode."""
-    if not QUIET_MODE:
-        print(*args, **kwargs)
 
 
 def get_all_mp4_files(folder_path):

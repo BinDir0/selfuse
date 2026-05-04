@@ -1,3 +1,9 @@
+"""Geometry utilities for rotation conversions.
+
+This module is retained for backward compatibility. The primary export used by
+hawor.utils.process and pipeline exporters is ``aa_to_rotmat``. For new code,
+prefer importing from ``lib.utils.geometry`` which has a superset of functions.
+"""
 from typing import Optional
 import torch
 from torch.nn import functional as F

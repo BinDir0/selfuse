@@ -1,9 +1,6 @@
-import os
-
 import numpy as np
 
-
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
+from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
 
 MANO_FACE_EXTRA = np.array(
     [
@@ -24,9 +21,3 @@ MANO_FACE_EXTRA = np.array(
     ],
     dtype=np.int32,
 )
-
-
-def vprint(*args, **kwargs):
-    """Print only when quiet mode is disabled."""
-    if not QUIET_MODE:
-        print(*args, **kwargs)

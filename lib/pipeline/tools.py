@@ -6,9 +6,7 @@ import os
 
 from ultralytics import YOLO
 import supervision as sv
-
-# Check if we should suppress verbose output
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
+from hawor.utils.logging import QUIET_MODE  # noqa: F401
 
 
 def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: int):

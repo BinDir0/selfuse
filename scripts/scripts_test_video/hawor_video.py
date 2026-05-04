@@ -1,3 +1,11 @@
+"""Standalone motion estimation and infiller for a single video.
+
+Related pipeline stages: lib/pipeline/stages/hawor_motion_stage.py,
+lib/pipeline/stages/hawor_infiller_stage.py
+This script is an independent executable that combines motion and infiller
+logic. It has diverged from the pipeline stage versions; changes should be
+made carefully.
+"""
 from collections import defaultdict
 
 import json
@@ -21,15 +29,8 @@ from lib.eval_utils.filling_utils import filling_postprocess, filling_preprocess
 import cv2
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from hawor.utils.rotation import angle_axis_to_rotation_matrix, rotation_matrix_to_angle_axis
+from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
 from infiller.lib.model.network import TransformerModel
-
-# Check if we should suppress verbose output
-QUIET_MODE = os.environ.get("HAWOR_QUIET", "0") == "1"
-
-def vprint(*args, **kwargs):
-    """Print only if not in quiet mode."""
-    if not QUIET_MODE:
-        print(*args, **kwargs)
 
 # Set HAWOR_INFILLER_NO_SANITIZE=1 to disable (debug / A-B).
 _INFILLER_SANITIZE = os.environ.get("HAWOR_INFILLER_NO_SANITIZE", "0").strip() != "1"

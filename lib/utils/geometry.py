@@ -410,3 +410,7 @@ def estimate_translation(S, joints_2d, focal_length=5000., img_size=224.):
     return torch.from_numpy(trans).to(device)
 
 
+# Alias: aa_to_rotmat is functionally identical to batch_rodrigues.
+# Used by hawor/utils/process.py and pipeline exporters.
+aa_to_rotmat = batch_rodrigues
+

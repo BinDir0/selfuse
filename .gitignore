@@ -2,6 +2,10 @@
 # RoWaH — 数据、权重、实验产物（勿提交大文件）
 # =============================================================================
 
+# deprecated code (archived locally, not uploaded)
+/deprecated/
+.codex
+
 # batch_infer 默认运行目录与临时目录（可用 HAWOR_BATCH_TMPDIR 改 .tmp 位置）
 /batch_runs/
 /.tmp/
