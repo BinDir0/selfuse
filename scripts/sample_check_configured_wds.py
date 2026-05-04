@@ -180,6 +180,8 @@ def as_list(value: Any) -> list[str]:
 
 
 def expand_pattern(pattern: str) -> list[str]:
+    if os.path.isdir(pattern):
+        return sorted(glob.glob(os.path.join(pattern, "*.tar")))
     matches = sorted(glob.glob(pattern))
     if matches:
         return matches
