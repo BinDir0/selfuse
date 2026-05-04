@@ -335,7 +335,7 @@ def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
         depth_image = depth_image.astype(np.float32) / 1000.0
 
     if aug_transform:
-        image, depth_image, intrinsic = random_resized_crop(image, depth_image, intrinsic)
+        # image, depth_image, intrinsic = random_resized_crop(image, depth_image, intrinsic)
         image = augment_color(image)
         if depth_image is not None:
             depth_image = augment_depth(depth_image)
