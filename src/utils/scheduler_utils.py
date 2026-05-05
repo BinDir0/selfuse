@@ -28,6 +28,16 @@ _SCHEDULE_FN = {
     "linear": _get_linear_schedule_with_warmup_lr_lambda,
 }
 
+def _zero_lr(step: int) -> float:
+    del step
+    return 0.0
+
+
+def _vlm_freeze_lr(step: int, *, vlm_freeze_steps: int, vlm_base_lambda) -> float:
+    if step < vlm_freeze_steps:
+        return 0.0
+    return vlm_base_lambda(step - vlm_freeze_steps)
+
 
 def build_lr_scheduler(
     optimizer: Optimizer,
@@ -77,7 +87,7 @@ def build_lr_scheduler(
             return base_lambda
 
         if vlm_freeze_steps >= num_training_steps:
-            return lambda step: 0.0
+            return partial(_zero_lr)
 
         vlm_total = max(1, num_training_steps - vlm_freeze_steps)
         vlm_warmup = min(max(0, vlm_rewarmup_steps), vlm_total)
@@ -87,14 +97,11 @@ def build_lr_scheduler(
             num_training_steps=vlm_total,
             **extra_kwargs,
         )
-
-        def vlm_lambda(step: int) -> float:
-            if step < vlm_freeze_steps:
-                return 0.0
-            shifted_step = step - vlm_freeze_steps
-            return vlm_base_lambda(shifted_step)
-
-        return vlm_lambda
+        return partial(
+            _vlm_freeze_lr,
+            vlm_freeze_steps=vlm_freeze_steps,
+            vlm_base_lambda=vlm_base_lambda,
+        )
 
     num_groups = len(optimizer.param_groups)
     lr_lambdas = [make_lambda(i) for i in range(num_groups)]
