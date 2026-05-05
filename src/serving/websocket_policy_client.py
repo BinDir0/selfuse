@@ -19,6 +19,43 @@ DEFAULT_CAMERA_INTRINSICS = np.array(
 )
 
 
+# Built-in presets so a single flag flips all defaults at once. Add new entries
+# here when a recurring server config (resolution / horizon / camera setup)
+# emerges; CLI users only need to remember --preset NAME.
+PRESETS: Dict[str, Dict[str, Any]] = {
+    "prod-480x640-dual": {
+        # Matches the production inference config:
+        #   target_image_size = [480, 640], image_horizon = 6,
+        #   camera_setup_mode = "both", state_horizon = 6, state_dim = 48,
+        #   action_horizon = 32, action_dim = 48, RTC enabled.
+        "image_shape": "6,480,640,3",
+        "depth_shape": "6,480,640,1",
+        "intrinsic_shape": "3,3",
+        "camera_setup": "both",
+        "image_mode": "rgb",
+        "state_horizon": 6,
+        "state_dim": 48,
+        "action_horizon": 32,
+        "action_dim": 48,
+        "rtc_delay": 32,
+        "fixed_state_horizon": True,
+    },
+    "prod-480x640-single": {
+        "image_shape": "6,480,640,3",
+        "depth_shape": "6,480,640,1",
+        "intrinsic_shape": "3,3",
+        "camera_setup": "single",
+        "image_mode": "rgb",
+        "state_horizon": 6,
+        "state_dim": 48,
+        "action_horizon": 32,
+        "action_dim": 48,
+        "rtc_delay": 32,
+        "fixed_state_horizon": True,
+    },
+}
+
+
 def _parse_shape(value: str) -> Tuple[int, ...]:
     parts = [p.strip() for p in value.split(",") if p.strip()]
     if not parts:
@@ -76,6 +113,21 @@ def _state_horizon_candidates(state_horizon: int) -> Tuple[int, ...]:
     return tuple(sorted(candidates))
 
 
+def _build_action_rtc(rtc_delay: int, action_dim: int, action_horizon: int) -> np.ndarray:
+    """Construct an action_rtc payload of shape [delay, action_dim].
+
+    Server treats len(action_rtc) as inference_delay and pads to action_horizon
+    internally, so any 1 <= delay <= action_horizon is a valid value to test
+    the RTC code path.
+    """
+    if rtc_delay < 1:
+        raise ValueError(f"rtc_delay must be >= 1, got {rtc_delay}")
+    if rtc_delay > action_horizon:
+        raise ValueError(
+            f"rtc_delay={rtc_delay} > action_horizon={action_horizon}; server cannot accept this."
+        )
+    return np.zeros((rtc_delay, action_dim), dtype=np.float32)
+
 
 def _random_obs(
     image_shape: Tuple[int, ...],
@@ -87,10 +139,22 @@ def _random_obs(
     camera_setup: str,
     image_mode: str,
     include_camera_extrinsics: bool,
+    rtc_delay: int | None,
+    action_dim: int,
+    action_horizon: int,
+    fixed_state_horizon: bool,
 ) -> Tuple[Dict[str, Any], int]:
-    sampled_state_horizon = int(np.random.choice(_state_horizon_candidates(state_horizon)))
+    if fixed_state_horizon:
+        sampled_state_horizon = state_horizon
+    else:
+        sampled_state_horizon = int(np.random.choice(_state_horizon_candidates(state_horizon)))
 
     states = _random_states(sampled_state_horizon, state_dim)
+    action_rtc = (
+        _build_action_rtc(rtc_delay, action_dim, action_horizon)
+        if rtc_delay is not None
+        else None
+    )
 
     if camera_setup == "both":
         head_rgb = _random_rgb_image(image_shape)
@@ -106,7 +170,7 @@ def _random_obs(
             },
             "instruction": instruction,
             "states": states,
-            "action_rtc": None,
+            "action_rtc": action_rtc,
         }
         if image_mode == "rgbd":
             obs["depth_image"] = {
@@ -126,7 +190,7 @@ def _random_obs(
         "camera_intrinsics": _camera_intrinsics(intrinsic_shape),
         "instruction": instruction,
         "states": states,
-        "action_rtc": None,
+        "action_rtc": action_rtc,
     }
     if image_mode == "rgbd":
         obs["depth_image"] = _random_depth_image(depth_shape)
@@ -141,6 +205,15 @@ async def _run_client(args: argparse.Namespace) -> None:
     image_shape = _parse_shape(args.image_shape)
     depth_shape = _parse_shape(args.depth_shape)
     intrinsic_shape = _parse_shape(args.intrinsic_shape)
+    rtc_delay: int | None = None if args.rtc_delay <= 0 else int(args.rtc_delay)
+
+    print(
+        f"[client] preset={args.preset or 'none'} camera_setup={args.camera_setup} "
+        f"image_mode={args.image_mode} image_shape={image_shape} "
+        f"state_horizon={args.state_horizon}({'fixed' if args.fixed_state_horizon else 'sampled'}) "
+        f"state_dim={args.state_dim} rtc_delay={rtc_delay} "
+        f"action_horizon={args.action_horizon} action_dim={args.action_dim}"
+    )
 
     async with _client.connect(uri, max_size=None, compression=None) as websocket:
         metadata = msgpack_numpy.unpackb(await websocket.recv())
@@ -157,6 +230,10 @@ async def _run_client(args: argparse.Namespace) -> None:
                 camera_setup=args.camera_setup,
                 image_mode=args.image_mode,
                 include_camera_extrinsics=args.include_camera_extrinsics,
+                rtc_delay=rtc_delay,
+                action_dim=args.action_dim,
+                action_horizon=args.action_horizon,
+                fixed_state_horizon=args.fixed_state_horizon,
             )
             start_time = time.monotonic()
             await websocket.send(packer.pack(obs))
@@ -181,22 +258,61 @@ async def _run_client(args: argparse.Namespace) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="WebSocket client that sends representative observations and prints inference time."
+        description="WebSocket client that sends representative observations and prints inference time.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--host", default="127.0.0.1", help="Server host.")
     parser.add_argument("--port", type=int, required=True, help="Server port.")
     parser.add_argument("--num-requests", type=int, default=5, help="Number of requests to send.")
     parser.add_argument("--sleep-ms", type=int, default=200, help="Sleep between requests in ms.")
-    parser.add_argument("--camera-setup", choices=["single", "both"], default="single", help="single: one camera payload; both: head/chest dict payload.")
-    parser.add_argument("--image-mode", choices=["rgb", "rgbd"], default="rgb", help="rgb: no depth_image field; rgbd: include depth_image field.")
-    parser.add_argument("--image-shape", default="1,480,640,3", help="Image shape, e.g. 1,480,640,3")
-    parser.add_argument("--depth-shape", default="1,480,640,1", help="Depth shape, e.g. 1,480,640,1")
-    parser.add_argument("--intrinsic-shape", default="3,3", help="Intrinsic shape, e.g. 3,3")
-    parser.add_argument("--state-horizon", type=int, default=16, help="Maximum state horizon; each request samples a smaller horizon to simulate real traffic.")
+    parser.add_argument(
+        "--preset",
+        choices=sorted(PRESETS.keys()),
+        default=None,
+        help="One-shot defaults bundle. CLI flags below override preset values.",
+    )
+    parser.add_argument("--camera-setup", choices=["single", "both"], default="both",
+                        help="single: one camera payload; both: head/chest dict payload.")
+    parser.add_argument("--image-mode", choices=["rgb", "rgbd"], default="rgb",
+                        help="rgb: no depth_image field; rgbd: include depth_image field.")
+    parser.add_argument("--image-shape", default="6,480,640,3",
+                        help="RGB image shape per camera, e.g. '6,480,640,3' (T=horizon, H, W, C).")
+    parser.add_argument("--depth-shape", default="6,480,640,1",
+                        help="Depth image shape per camera, e.g. '6,480,640,1'.")
+    parser.add_argument("--intrinsic-shape", default="3,3",
+                        help="Camera intrinsic shape; '3,3' uses the built-in default fx/fy/cx/cy.")
+    parser.add_argument("--state-horizon", type=int, default=6,
+                        help="State history length; sent as states.shape[0] when --fixed-state-horizon, "
+                             "otherwise the upper bound for random sampling.")
     parser.add_argument("--state-dim", type=int, default=48, help="State vector dim.")
+    parser.add_argument("--fixed-state-horizon", action=argparse.BooleanOptionalAction, default=True,
+                        help="When set (default), every request uses the configured --state-horizon. "
+                             "When --no-fixed-state-horizon, randomly sample 1/horizon//4/horizon//2/horizon "
+                             "to mimic real client traffic with growing history.")
+    parser.add_argument("--action-horizon", type=int, default=32,
+                        help="Action chunk horizon, used only when --rtc-delay > 0.")
+    parser.add_argument("--action-dim", type=int, default=48,
+                        help="Action vector dim, used only when --rtc-delay > 0.")
+    parser.add_argument("--rtc-delay", type=int, default=0,
+                        help="If > 0, send action_rtc payload of length rtc_delay (zeros). "
+                             "0 disables RTC (sends action_rtc=None).")
     parser.add_argument("--instruction", default="grasp the yellow toy", help="Instruction string.")
-    parser.add_argument("--include-camera-extrinsics", action="store_true", help="Include camera_extrinsics in payload for protocol parity tests.")
-    return parser.parse_args()
+    parser.add_argument("--include-camera-extrinsics", action="store_true",
+                        help="Include camera_extrinsics in payload for protocol parity tests.")
+
+    args = parser.parse_args()
+
+    # Apply preset by patching args. Only override values left at their argparse defaults
+    # so explicit CLI flags continue to win.
+    if args.preset:
+        preset = PRESETS[args.preset]
+        for key, value in preset.items():
+            if not hasattr(args, key):
+                continue
+            if getattr(args, key) == parser.get_default(key):
+                setattr(args, key, value)
+
+    return args
 
 
 
