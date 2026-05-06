@@ -18,6 +18,7 @@ import websockets.asyncio.server as _server
 import websockets.frames
 
 from . import msgpack_numpy
+from .image_codec import decode_image_fields_in_obs
 from .serving_recorder import ConnectionRecorder, ServingRecorder
 
 
@@ -440,6 +441,12 @@ class WebsocketPolicyServer:
                 recv_wait_time = time.monotonic() - recv_start
                 obs = msgpack_numpy.unpackb(raw_obs)
 
+                # JPEG -> ndarray. Pass-through when client sent raw images so
+                # downstream EnvWrapper / RuntimeEngine never see encoded dicts.
+                decode_start = time.monotonic()
+                obs = decode_image_fields_in_obs(obs)
+                decode_image_ms = (time.monotonic() - decode_start) * 1000.0
+
                 if self._log_obs_details:
                     logger.info("Received observation from %s%s", websocket.remote_address, self._format_obs_details(obs))
 
@@ -449,6 +456,7 @@ class WebsocketPolicyServer:
 
                 action["server_timing"] = {
                     "recv_wait_ms": recv_wait_time * 1000,
+                    "decode_image_ms": decode_image_ms,
                     "infer_ms": infer_time * 1000,
                 }
                 if prev_send_time is not None:
