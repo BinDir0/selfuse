@@ -4,15 +4,27 @@ Wire format matches LegendVLA-Inference's production client
 (websocket_client.py @ commit 8a2f630): each camera's RGB sequence becomes
 a self-describing dict with `__image_encoding__: "jpeg_sequence"`, plus a
 top-level ``obs["image_compression"]`` metadata key.
+
+Decode is parallelized across frames with a module-level thread pool
+(cv2.imdecode releases the GIL). Tune with ``LEGENDVLA_JPEG_DECODE_WORKERS``;
+set to ``1`` to fall back to single-threaded decode.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import cv2
 import numpy as np
 
 _TAG = "jpeg_sequence"
+_DECODE_WORKERS = max(1, int(os.environ.get("LEGENDVLA_JPEG_DECODE_WORKERS", "4")))
+_DECODE_POOL: ThreadPoolExecutor | None = (
+    ThreadPoolExecutor(max_workers=_DECODE_WORKERS, thread_name_prefix="jpeg-decode")
+    if _DECODE_WORKERS > 1
+    else None
+)
 
 
 def encode_image_field(field: Any, quality: int = 80) -> Any:
@@ -54,18 +66,23 @@ def encode_image_field(field: Any, quality: int = 80) -> Any:
     }
 
 
+def _decode_one_frame(buf: bytes) -> np.ndarray:
+    bgr = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise RuntimeError("cv2.imdecode returned None")
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
 def decode_image_field(field: Any) -> Any:
     """Inverse of :func:`encode_image_field`. Pass-through for raw ndarrays."""
     if isinstance(field, np.ndarray):
         return field
     if isinstance(field, dict) and field.get("__image_encoding__") == _TAG:
-        decoded = [
-            cv2.cvtColor(
-                cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR),
-                cv2.COLOR_BGR2RGB,
-            )
-            for buf in field["frames"]
-        ]
+        frames_bytes = field["frames"]
+        if _DECODE_POOL is not None and len(frames_bytes) > 1:
+            decoded = list(_DECODE_POOL.map(_decode_one_frame, frames_bytes))
+        else:
+            decoded = [_decode_one_frame(b) for b in frames_bytes]
         arr = np.stack(decoded, axis=0)
         # Encoder added a leading T dim for 3D inputs; squeeze it back so the
         # round-trip preserves ndim.
