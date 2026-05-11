@@ -86,7 +86,7 @@ log "Step 1: scan ${SRC} for bad keys"
   --workers "${WORKERS}" \
   --check-media \
   --bad-keys-output "${BAD_KEYS}" \
-  --summary "${FILTER_SUMMARY}"
+  --report "${FILTER_SUMMARY}"
 
 log "Step 2: split bad keys by reason"
 "${PY}" "${SCRIPT_DIR}/split_bad_keys_by_reason.py" \
@@ -159,7 +159,7 @@ xargs -r -a "${SANITY_SHARDS_FILE}" "${PY}" "${SCRIPT_DIR}/filter_and_check_data
   --workers "${WORKERS}" \
   --check-media \
   --bad-keys-output "${POST_BAD_KEYS}" \
-  --summary "${POST_SUMMARY}" \
+  --report "${POST_SUMMARY}" \
   --shards
 
 POST_SPLIT_REPORT="${WORK}/bad_keys_split_report.post_check.json"
