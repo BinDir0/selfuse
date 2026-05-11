@@ -82,7 +82,7 @@ log() { printf '[%(%H:%M:%S)T] %s\n' -1 "$*"; }
 
 log "Step 1: scan ${SRC} for bad keys"
 "${PY}" "${SCRIPT_DIR}/filter_and_check_datasets.py" wds \
-  --shards "${SRC}"/shard-*.tar \
+  --shards "${SRC}/shard-*.tar" \
   --workers "${WORKERS}" \
   --check-media \
   --bad-keys-output "${BAD_KEYS}" \
