@@ -4,7 +4,8 @@
 
 ### Issue tracker
 
-Issues live in GitHub at `BinDir0/RoWaH` (private). Use the `gh` CLI.
+Issues live in GitHub at `BinDir0/RoWaH` (private). Use the `gh` CLI with
+`-R BinDir0/RoWaH`.
 See `docs/agents/issue-tracker.md`.
 
 ### Triage labels

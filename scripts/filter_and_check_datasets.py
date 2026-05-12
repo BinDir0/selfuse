@@ -23,6 +23,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -434,6 +435,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional text file listing shards whose fail rate is within threshold.",
     )
+    wds_parser.add_argument(
+        "--shard-progress-output",
+        default=None,
+        help=(
+            "Optional JSONL file for shard-level worker heartbeats. Useful when "
+            "diagnosing a scan that appears stuck."
+        ),
+    )
+    wds_parser.add_argument(
+        "--shard-progress-interval",
+        type=int,
+        default=1000,
+        help=(
+            "Sample interval for --shard-progress-output heartbeats. "
+            "Default: 1000 samples."
+        ),
+    )
 
     zarr_parser = subparsers.add_parser(
         "zarr-list", help="Validate/filter zarr list entries."
@@ -734,10 +752,35 @@ def scan_one_wds_shard_worker(params: dict[str, Any]) -> dict[str, Any]:
 
     shard_path = params["shard_path"]
     shard_index = int(params["shard_index"])
+    heartbeat_path = params.get("heartbeat_path")
+    heartbeat_interval = max(1, int(params.get("heartbeat_interval") or 1000))
+    heartbeat_run_id = params.get("heartbeat_run_id")
     checker = DataChecker()
     target_size = tuple(params["target_size"]) if params.get("target_size") else None
     reason_counts: Counter[str] = Counter()
     stat = {"samples": 0, "passed": 0, "failed": 0, "reasons": Counter()}
+    last_key = ""
+    last_stage = "initializing"
+
+    def write_heartbeat(event: str, *, stage: str | None = None, force: bool = False) -> None:
+        if not heartbeat_path:
+            return
+        if event == "sample" and not force and stat["samples"] % heartbeat_interval != 0:
+            return
+        record = {
+            "time": time.time(),
+            "run_id": heartbeat_run_id,
+            "event": event,
+            "stage": stage or last_stage,
+            "shard_index": shard_index,
+            "shard": str(shard_path),
+            "samples": int(stat["samples"]),
+            "passed": int(stat["passed"]),
+            "failed": int(stat["failed"]),
+            "last_key": last_key,
+        }
+        with open(heartbeat_path, "a", encoding="utf-8") as heartbeat_file:
+            heartbeat_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     tmp_dir = params.get("tmp_dir")
     good_path = None
@@ -752,15 +795,23 @@ def scan_one_wds_shard_worker(params: dict[str, Any]) -> dict[str, Any]:
         bad_file = open(bad_path, "w", encoding="utf-8")
 
     try:
+        write_heartbeat("start", stage="opening")
         dataset = wds.WebDataset(str(shard_path), shardshuffle=False, empty_check=False)
+        write_heartbeat("opened", stage="iterating")
         for sample in dataset:
             stat["samples"] += 1
+            last_key = str(sample.get("__key__", ""))
+            last_stage = "checking"
+            write_heartbeat("sample")
             checker.note_sample_seen()
             meta: dict[str, Any] | None = None
             try:
+                last_stage = "load_meta"
                 meta = json_load_maybe(sample.get("meta.json"))
+                last_stage = "infer_kind"
                 kind = params["kind"] if params["kind"] != "auto" else infer_wds_kind(sample)
                 if kind == "vla":
+                    last_stage = "check_vla"
                     check_vla_wds_sample(
                         sample,
                         checker,
@@ -768,6 +819,7 @@ def scan_one_wds_shard_worker(params: dict[str, Any]) -> dict[str, Any]:
                         check_depth=bool(params["check_depth"]),
                     )
                 elif kind == "vlm":
+                    last_stage = "check_vlm"
                     check_vlm_wds_sample(
                         sample,
                         checker,
@@ -801,11 +853,13 @@ def scan_one_wds_shard_worker(params: dict[str, Any]) -> dict[str, Any]:
                     good_file.write(
                         json.dumps(sample_locator(sample, meta), ensure_ascii=False) + "\n"
                     )
+            last_stage = "iterating"
     finally:
         if good_file is not None:
             good_file.close()
         if bad_file is not None:
             bad_file.close()
+        write_heartbeat("finish", stage="finished", force=True)
 
     return {
         "shard_index": shard_index,
@@ -929,6 +983,11 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
         if args.good_keys_output or args.bad_keys_output:
             tmp_root = tempfile.TemporaryDirectory(prefix="dataset-check-jsonl-")
         try:
+            heartbeat_run_id = uuid.uuid4().hex if args.shard_progress_output else None
+            if args.shard_progress_output:
+                progress_path = Path(args.shard_progress_output)
+                progress_path.parent.mkdir(parents=True, exist_ok=True)
+                progress_path.write_text("", encoding="utf-8")
             worker_params = []
             for shard_index, shard_path in enumerate(shard_paths):
                 worker_params.append(
@@ -943,6 +1002,9 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
                         "write_good": bool(args.good_keys_output),
                         "write_bad": bool(args.bad_keys_output),
                         "tmp_dir": tmp_root.name if tmp_root is not None else None,
+                        "heartbeat_path": args.shard_progress_output,
+                        "heartbeat_interval": args.shard_progress_interval,
+                        "heartbeat_run_id": heartbeat_run_id,
                     }
                 )
 
