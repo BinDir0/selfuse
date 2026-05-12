@@ -22,6 +22,12 @@ import json
 from collections import Counter
 from pathlib import Path
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, **kwargs):
+        return iterable if iterable is not None else ()
+
 
 ERROR_REASONS = frozenset({"MissingOrInvalidFilesError"})
 ERROR_REASON_PREFIXES = ("Unexpected",)
@@ -79,7 +85,8 @@ def main() -> None:
         error_path.open("w", encoding="utf-8") as error_file,
         dirty_path.open("w", encoding="utf-8") as dirty_file,
     ):
-        for line_no, line in enumerate(src_file, 1):
+        iterator = tqdm(src_file, desc="Splitting bad keys", unit=" rec")
+        for line in iterator:
             stripped = line.strip()
             if not stripped:
                 continue
@@ -95,9 +102,6 @@ def main() -> None:
             else:
                 dirty_file.write(stripped + "\n")
                 counts_dirty[reason] += 1
-
-            if line_no % 100000 == 0:
-                print(f"  processed {line_no} records", flush=True)
 
     total = sum(counts_total.values())
     total_error = sum(counts_error.values())

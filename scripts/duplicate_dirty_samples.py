@@ -26,6 +26,12 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, **kwargs):
+        return iterable if iterable is not None else ()
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from drop_bad_wds_frames import load_bad_keys
 
@@ -187,15 +193,19 @@ def main() -> None:
         current_tar = tarfile.open(current_path, "w")
 
     open_next()
-    for recorded_shard in sorted(keys_by_shard.keys()):
+    shard_iter = tqdm(
+        sorted(keys_by_shard.keys()),
+        desc="Duplicating dirty",
+        unit="shard",
+    )
+    for recorded_shard in shard_iter:
         wanted_keys = keys_by_shard[recorded_shard]
         src_shard = resolve_source_shard(recorded_shard, dst_dir)
         members = collect_dirty_members(src_shard, wanted_keys)
         if not members:
-            print(
+            tqdm.write(
                 f"WARN: no dirty members found in {src_shard} "
                 f"(expected {len(wanted_keys)} keys)",
-                file=sys.stderr,
             )
             continue
         members_by_key: dict[str, list[tuple[tarfile.TarInfo, bytes]]] = defaultdict(list)
@@ -214,11 +224,11 @@ def main() -> None:
                     total_members_written += 1
                 current_samples += 1
                 total_samples_written += 1
-        print(
-            f"  {src_shard.name}: {len(members_by_key)} dirty keys -> "
-            f"{(multiplier - 1) * len(members_by_key)} duplicated samples",
-            flush=True,
-        )
+        if hasattr(shard_iter, "set_postfix"):
+            shard_iter.set_postfix(
+                samples=total_samples_written,
+                dup_shards=len(produced_shards) + (1 if current_tar is not None else 0),
+            )
 
     close_current()
 
