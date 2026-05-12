@@ -19,6 +19,7 @@ import websockets.frames
 
 from . import msgpack_numpy
 from .image_codec import decode_image_fields_in_obs
+from .inference_profiler import InferenceProfiler
 from .serving_recorder import ConnectionRecorder, ServingRecorder
 
 
@@ -60,10 +61,7 @@ class RuntimeEngine:
                 "warmup_image_mode must be 'rgb' or 'rgbd', "
                 f"got {warmup_image_mode!r}"
             )
-        self._profiler = None
-        self._profile_steps = 0
-        self._profile_max_steps = 0
-        self._profile_output_dir: pathlib.Path | None = None
+        self._profiler: InferenceProfiler | None = None
 
         self.policy.to(device)
 
@@ -80,53 +78,27 @@ class RuntimeEngine:
     def enable_profiling(self, output_dir: str | pathlib.Path, steps: int, skip_first: int) -> None:
         if steps <= 0:
             return
-        output_dir = pathlib.Path(output_dir).expanduser()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        activities = [torch.profiler.ProfilerActivity.CPU]
-        if self.device.type == "cuda":
-            activities.append(torch.profiler.ProfilerActivity.CUDA)
-        self._profiler = torch.profiler.profile(
-            activities=activities,
-            schedule=torch.profiler.schedule(wait=0, warmup=0, active=steps, repeat=1, skip_first=skip_first),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=False,
+        self._profiler = InferenceProfiler(
+            output_dir=output_dir,
+            steps=steps,
+            skip_first=skip_first,
+            device=self.device,
+            compile_active=self._compile_is_active(),
         )
-        self._profiler.__enter__()
-        self._profile_steps = 0
-        self._profile_max_steps = skip_first + steps
-        self._profile_output_dir = output_dir
-        logger.info(
-            "Enabled inference profiler for %d requests after skipping %d requests. Output dir: %s",
-            steps,
-            skip_first,
-            output_dir,
-        )
+        self._profiler.start()
+
+    def _compile_is_active(self) -> bool:
+        try:
+            return hasattr(self.policy.model, "_orig_mod")
+        except Exception:
+            return False
 
     def _step_profiler(self) -> None:
         if self._profiler is None:
             return
         self._profiler.step()
-        self._profile_steps += 1
-        if self._profile_steps >= self._profile_max_steps:
-            self._finalize_profiler()
-
-    def _finalize_profiler(self) -> None:
-        if self._profiler is None or self._profile_output_dir is None:
-            return
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-        sort_by = "self_cuda_time_total" if self.device.type == "cuda" else "self_cpu_time_total"
-        summary = self._profiler.key_averages().table(sort_by=sort_by, row_limit=30)
-        summary_path = self._profile_output_dir / "summary.txt"
-        trace_path = self._profile_output_dir / "trace.json"
-        summary_path.write_text(summary, encoding="utf-8")
-        self._profiler.export_chrome_trace(str(trace_path))
-        self._profiler.__exit__(None, None, None)
-        logger.info("Saved inference profiler summary to %s", summary_path)
-        logger.info("Saved inference profiler trace to %s", trace_path)
-        self._profiler = None
-        self._profile_output_dir = None
+        if self._profiler.done:
+            self._profiler = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.policy, name)

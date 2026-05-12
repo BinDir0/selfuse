@@ -22,7 +22,7 @@ serving:
   record_root_dir: outputs/serving_records
   profile_enabled: False
   profile_dir: outputs/serving_profile
-  profile_steps: 20
+  profile_steps: 5
   profile_skip_first: 5
 
 # Inference policy wrapper
