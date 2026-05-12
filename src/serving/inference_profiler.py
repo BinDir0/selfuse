@@ -10,13 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class InferenceProfiler:
-    """Wraps torch.profiler + FlopCounterMode for a fixed-length request window.
-
-    Counts FLOPs via the aten dispatcher, so the number is accurate only when
-    torch.compile is disabled and attention runs through sdpa (flash_attn
-    bypasses the dispatcher).
-    """
-
     def __init__(
         self,
         output_dir: str | pathlib.Path,
@@ -24,6 +17,7 @@ class InferenceProfiler:
         skip_first: int,
         device: torch.device,
         compile_active: bool = False,
+        count_flops: bool = False,
     ) -> None:
         self.output_dir = pathlib.Path(output_dir).expanduser()
         self.steps = int(steps)
@@ -31,6 +25,7 @@ class InferenceProfiler:
         self.max_steps = self.steps + self.skip_first
         self.device = device
         self.compile_active = compile_active
+        self.count_flops = count_flops
         self.profiler = None
         self.flop_counter = None
         self.step_count = 0
@@ -50,20 +45,20 @@ class InferenceProfiler:
             ),
             record_shapes=True,
             profile_memory=True,
-            with_stack=False,
         )
         self.profiler.__enter__()
-        try:
-            from torch.utils.flop_counter import FlopCounterMode
-            self.flop_counter = FlopCounterMode(display=False, depth=4)
-            self.flop_counter.__enter__()
-        except Exception as exc:
-            logger.warning("FlopCounterMode unavailable: %s", exc)
-            self.flop_counter = None
-        msg = f"InferenceProfiler started: window={self.steps}, skip_first={self.skip_first}, dir={self.output_dir}"
-        if self.compile_active and self.flop_counter is not None:
-            msg += " | NOTE: torch.compile active -> FLOPs will under-count"
-        logger.info(msg)
+        if self.count_flops:
+            try:
+                from torch.utils.flop_counter import FlopCounterMode
+                self.flop_counter = FlopCounterMode(display=False, depth=4)
+                self.flop_counter.__enter__()
+            except Exception as exc:
+                logger.warning("FlopCounterMode unavailable: %s", exc)
+                self.flop_counter = None
+        logger.info(
+            "InferenceProfiler started: window=%d, skip_first=%d, dir=%s",
+            self.steps, self.skip_first, self.output_dir,
+        )
 
     def step(self) -> None:
         if self.profiler is None or self.done:
@@ -85,10 +80,7 @@ class InferenceProfiler:
         self.profiler.__exit__(None, None, None)
         self.profiler = None
         if self.flop_counter is not None:
-            try:
-                self.flop_counter.__exit__(None, None, None)
-            except Exception as exc:
-                logger.warning("FlopCounterMode exit raised: %s", exc)
+            self.flop_counter.__exit__(None, None, None)
         logger.info("Profile saved: %s", self.output_dir)
 
     def _render_summary(self) -> str:
@@ -130,6 +122,4 @@ class InferenceProfiler:
         for op, fl in sorted(ops.items(), key=lambda x: -x[1])[:15]:
             pct = 100.0 * fl / total if total else 0.0
             lines.append(f"  {op:<60s} {fl/1e9:>10.2f} GFLOPs ({pct:>6.2f}%)")
-        if self.compile_active:
-            lines += ["", "torch.compile is active -> FLOPs under-counted (compiled regions bypass aten dispatcher)."]
         return "\n".join(lines)

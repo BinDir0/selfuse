@@ -126,6 +126,7 @@ class LegendVLAInference(nn.Module):
             if attention_recording else None
         )
         self._last_attention_grid = None
+        self._processor_device_wired = False
         self.compile_cfg = None
         if compile is not None:
             self.compile_cfg = (
@@ -219,6 +220,22 @@ class LegendVLAInference(nn.Module):
         # truncate: return as-is, valid count is actual length
         return data, current
 
+    def _ensure_processor_device(self) -> None:
+        """Run Qwen3-VL image/video preprocessing on whichever accelerator the model lives on."""
+        if self._processor_device_wired:
+            return
+        device = next(self.model.parameters()).device
+        if device.type == "cpu":
+            return
+
+        processor_kwargs = self.data_collator.batch_processor.processor_call_kwargs
+        for sub_kwargs_name in ("videos_kwargs", "images_kwargs"):
+            sub_kwargs = dict(processor_kwargs.get(sub_kwargs_name) or {})
+            sub_kwargs["device"] = str(device)
+            processor_kwargs[sub_kwargs_name] = sub_kwargs
+
+        self._processor_device_wired = True
+
     def prepare_process(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """Convert one runtime observation into the collated batch ready for model input.
 
@@ -234,6 +251,8 @@ class LegendVLAInference(nn.Module):
         instruction = obs.get("instruction") or self.default_instruction
         if instruction is None:
             raise ValueError("Inference requires an instruction.")
+
+        self._ensure_processor_device()
 
         image_value = obs.get("image")
         intrinsic_value = obs.get("intrinsic")

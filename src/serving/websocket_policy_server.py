@@ -75,7 +75,13 @@ class RuntimeEngine:
             return nullcontext()
         return torch.autocast(device_type=self.device.type, dtype=self.dtype)
 
-    def enable_profiling(self, output_dir: str | pathlib.Path, steps: int, skip_first: int) -> None:
+    def enable_profiling(
+        self,
+        output_dir: str | pathlib.Path,
+        steps: int,
+        skip_first: int,
+        count_flops: bool = False,
+    ) -> None:
         if steps <= 0:
             return
         self._profiler = InferenceProfiler(
@@ -84,6 +90,7 @@ class RuntimeEngine:
             skip_first=skip_first,
             device=self.device,
             compile_active=self._compile_is_active(),
+            count_flops=count_flops,
         )
         self._profiler.start()
 

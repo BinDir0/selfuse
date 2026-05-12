@@ -24,6 +24,7 @@ serving:
   profile_dir: outputs/serving_profile
   profile_steps: 5
   profile_skip_first: 5
+  flops_count_enabled: False
 
 # Inference policy wrapper
 # model_config_path: path to the training run's .hydra/config.yaml
