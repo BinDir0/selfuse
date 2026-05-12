@@ -221,18 +221,18 @@ class LegendVLAInference(nn.Module):
         return data, current
 
     def _ensure_processor_device(self) -> None:
-        """Run Qwen3-VL image/video preprocessing on whichever accelerator the model lives on."""
+        # Set device on the sub-processor instances so transformers' preprocess
+        # picks it up via getattr; passing a nested videos_kwargs at call time
+        # would drop flat video_metadata/do_sample_frames in _merge_kwargs.
         if self._processor_device_wired:
             return
         device = next(self.model.parameters()).device
         if device.type == "cpu":
             return
 
-        processor_kwargs = self.data_collator.batch_processor.processor_call_kwargs
-        for sub_kwargs_name in ("videos_kwargs", "images_kwargs"):
-            sub_kwargs = dict(processor_kwargs.get(sub_kwargs_name) or {})
-            sub_kwargs["device"] = str(device)
-            processor_kwargs[sub_kwargs_name] = sub_kwargs
+        processor = self.data_collator.batch_processor.processor
+        processor.video_processor.device = str(device)
+        processor.image_processor.device = str(device)
 
         self._processor_device_wired = True
 
