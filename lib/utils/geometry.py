@@ -166,8 +166,7 @@ def rotmat_to_rot6d(rotmat):
     Output:
         (B,6) Batch of 6-D rotation representations
     """
-    # rot6d = rotmat[:, :, :2]
-    rot6d = rotmat[...,:2]
+    rot6d = rotmat[..., :2].transpose(-1, -2).contiguous()
     rot6d = rot6d.reshape(rot6d.size(0), -1)
     return rot6d
 
@@ -413,4 +412,3 @@ def estimate_translation(S, joints_2d, focal_length=5000., img_size=224.):
 # Alias: aa_to_rotmat is functionally identical to batch_rodrigues.
 # Used by hawor/utils/process.py and pipeline exporters.
 aa_to_rotmat = batch_rodrigues
-
