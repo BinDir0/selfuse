@@ -98,6 +98,35 @@ def build_eval_inputs(batch, device, dtype):
     return inputs
 
 
+def build_head_video_indices(batch, video_grid_thw):
+    """Map batch sample index -> head video entry index in video_grid_thw.
+
+    Collator flattens per-sample videos in sample order. For dual-view VLA
+    samples the order is [head, breast] per sample, so head indices are 0,2,4...
+    For single-view samples the head index matches sample index.
+    """
+    if video_grid_thw is None:
+        return None
+
+    batch_size = int(batch["input_ids"].shape[0])
+    num_video_entries = int(video_grid_thw.shape[0])
+
+    if num_video_entries == batch_size:
+        return list(range(batch_size))
+
+    if num_video_entries == batch_size * 2:
+        return [i * 2 for i in range(batch_size)]
+
+    # Fallback for mixed/irregular batches: best-effort alignment for first B entries.
+    # This keeps report generation alive while making ambiguity explicit in logs.
+    print(
+        "WARNING: Ambiguous video entry layout for visualization "
+        f"(batch_size={batch_size}, num_video_entries={num_video_entries}). "
+        "Falling back to first B video entries."
+    )
+    return list(range(min(batch_size, num_video_entries)))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -168,6 +197,8 @@ def main(eval_cfg):
     vla_ds_cfg = train_cfg.dataset.vla_dataset
     shape_meta = OmegaConf.to_container(train_cfg.data.shape_meta, resolve=True)
     target_image_size = train_cfg.data.get("target_image_size")
+    load_depth = bool(vla_ds_cfg.get("load_depth", False))
+    load_breast = bool(vla_ds_cfg.get("load_breast", False))
 
     dataset = VLAWdsDataset(
         wds_datasets=[{"shard_urls": selected_shards, "weight": 1.0, "name": "eval"}],
@@ -176,10 +207,10 @@ def main(eval_cfg):
         mode="val",
         shuffle_buffer=0,
         depth_clip_range=depth_clip_range,
-        history_pad_mode=vla_ds_cfg.history_pad_mode,
-        future_pad_mode=vla_ds_cfg.future_pad_mode,
         video_base_fps=float(train_cfg.data.video_base_fps),
         target_image_size=list(target_image_size) if target_image_size else None,
+        load_depth=load_depth,
+        load_breast=load_breast,
     )
     dataset.set_collator(collator)
     dataset.set_normalizer(normalizer)
@@ -233,10 +264,11 @@ def main(eval_cfg):
         # Collect visualization data for all samples
         if generate_report:
             B = pred_unnorm.shape[0]
+            head_video_indices = build_head_video_indices(batch, batch.get("video_grid_thw"))
             frames = recover_frames_from_pixel_values_videos(
                 batch.get("pixel_values_videos"),
                 batch.get("video_grid_thw"),
-                list(range(B)),
+                head_video_indices if head_video_indices is not None else list(range(B)),
             )
             for j in range(B):
                 vis_sample = prepare_vis_sample(

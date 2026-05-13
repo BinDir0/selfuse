@@ -396,7 +396,7 @@ def check_gradient_flow(report: PhaseReport) -> None:
     )
     has_diffloss_grad = any(
         p.grad is not None and p.grad.abs().sum() > 0
-        for p in model.diffloss_parameters
+        for p in model.ar_action_heads_parameters
     )
 
     report.add(assert_check(
@@ -415,8 +415,8 @@ def check_gradient_flow(report: PhaseReport) -> None:
         f"DiffLoss parameters have non-zero gradients: {has_diffloss_grad}",
     ))
 
-    # 4.5d: Knowledge insulation in train_flow mode - backbone should have ZERO gradients
-    model_insulated = build_model(with_diffloss=False, knowledge_insulation=True)
+    # 4.5d: detach_prefix_kv in train_flow mode - backbone should have ZERO gradients
+    model_insulated = build_model(with_diffloss=False, detach_prefix_kv=True)
     batch_insulated = build_batch(batch_size=1)
     output_insulated = model_insulated("train_flow", batch_insulated)
     output_insulated["total_loss"].backward()
@@ -448,7 +448,7 @@ def check_gradient_flow(report: PhaseReport) -> None:
     model_groups = build_model(with_diffloss=True)
     vlm_ids = {id(p) for p in model_groups.trainable_vlm_parameters}
     expert_ids = {id(p) for p in model_groups.action_expert_parameters}
-    diffloss_ids = {id(p) for p in model_groups.diffloss_parameters}
+    diffloss_ids = {id(p) for p in model_groups.ar_action_heads_parameters}
 
     vlm_expert_overlap = vlm_ids & expert_ids
     vlm_diff_overlap = vlm_ids & diffloss_ids

@@ -80,8 +80,6 @@ def build_vla_dataset(cfg, normalizer_path: str, shard_pattern: str):
         mode="val",
         depth_clip_range=depth_clip,
         shuffle_buffer=0,
-        history_pad_mode=cfg.dataset.vla_dataset.get("history_pad_mode", "repeat"),
-        future_pad_mode=cfg.dataset.vla_dataset.get("future_pad_mode", "truncate"),
         target_image_size=target_size,
         video_base_fps=float(cfg.data.get("video_base_fps", 30.0)),
     )
@@ -180,11 +178,11 @@ def test_visual_ablation_inference(report: PhaseReport, model, batch, baseline_a
         ablated = (result["generated_actions"] if isinstance(result, dict) else result)
 
     mse = action_mse(baseline_actions, ablated)
-    insulated = getattr(model, "knowledge_insulation", False)
+    insulated = getattr(model.flow_expert, "detach_prefix_kv", False)
     if insulated:
         report.add(assert_check(
             True,
-            "9.1a visual ablation inference (knowledge_insulation=True)",
+            "9.1a visual ablation inference (flow_expert.detach_prefix_kv=True)",
             f"action_mse={mse:.6f} — expected minimal effect (detached prefix cache)",
         ))
     else:
@@ -203,11 +201,11 @@ def test_visual_ablation_loss(report: PhaseReport, model, batch, baseline_loss) 
     abl_flow = ablated_loss["flow_loss"]
     rel = abs(abl_flow - base_flow) / max(abs(base_flow), 1e-8)
 
-    insulated = getattr(model, "knowledge_insulation", False)
+    insulated = getattr(model.flow_expert, "detach_prefix_kv", False)
     if insulated:
         report.add(assert_check(
             True,
-            "9.1b visual ablation loss (knowledge_insulation=True)",
+            "9.1b visual ablation loss (flow_expert.detach_prefix_kv=True)",
             f"base={base_flow:.6f}, ablated={abl_flow:.6f}, rel={rel:.4%}",
         ))
     else:
@@ -229,8 +227,9 @@ def test_state_ablation_inference(report: PhaseReport, model, batch, baseline_ac
         result = infer_flow_action(model, ablated)
     ablated_act = (result["generated_actions"] if isinstance(result, dict) else result)
     mse = action_mse(baseline_actions, ablated_act)
-    # With knowledge_insulation, state flows through detached prefix cache,
-    # so the effect is inherently muted.  Use connectivity threshold (1e-4).
+    # With flow_expert.detach_prefix_kv=True, state flows through detached
+    # prefix cache, so the effect is inherently muted. Use connectivity
+    # threshold (1e-4).
     report.add(assert_check(
         mse > 1e-4,
         "9.2a state ablation changes inference output",
@@ -245,7 +244,7 @@ def test_state_ablation_loss(report: PhaseReport, model, batch, baseline_loss) -
     base_flow = baseline_loss["flow_loss"]
     abl_flow = ablated_loss["flow_loss"]
     rel = abs(abl_flow - base_flow) / max(abs(base_flow), 1e-8)
-    # With knowledge_insulation, state effect on loss is muted.
+    # With flow_expert.detach_prefix_kv=True, state effect on loss is muted.
     # Use a lower threshold (0.1%) to prove connectivity.
     report.add(assert_check(
         rel > 0.001,
@@ -480,8 +479,9 @@ def test_action_leakage_loss(report: PhaseReport, model, batch, baseline_loss) -
 
     Architecture guarantee: with causal attention, prefix positions (before
     answer_start_idx) cannot attend to action positions (after answer_start_idx).
-    Combined with knowledge_insulation (detached prefix cache), the action expert
-    receives identical prefix KV regardless of what actions the backbone sees.
+    Combined with flow_expert.detach_prefix_kv=True (detached prefix cache),
+    the action expert receives identical prefix KV regardless of what actions
+    the backbone sees.
 
     Hooking ar_action_encoder to output zero embeddings changes what backbone
     sees for action positions, but batch["actions"] (the flow matching target)
@@ -977,7 +977,7 @@ def run_all(
         print(f"  Saved statistical_ablation.json")
 
         # Generate report checks from statistics
-        insulated = getattr(model, "knowledge_insulation", False)
+        insulated = getattr(model.flow_expert, "detach_prefix_kv", False)
         for name, s in stats.items():
             if name in ("zero_time_embedding", "zero_prefix_cache"):
                 # These should always show large MSE (core flow components)
@@ -990,7 +990,7 @@ def run_all(
                 if insulated:
                     report.add(assert_check(
                         True,
-                        f"stat: {name} (knowledge_insulation=True)",
+                        f"stat: {name} (flow_expert.detach_prefix_kv=True)",
                         f"mean={s['mean']:.6f}, median={s['median']:.6f}, "
                         f"pct>1e-3={s['pct_above_1e-3']:.1f}%, n={s['n']:.0f}",
                     ))

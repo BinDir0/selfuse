@@ -13,11 +13,19 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLTextAttention,
     Qwen3VLTextDecoderLayer,
     Qwen3VLTextModel,
+    apply_rotary_pos_emb,
     create_causal_mask,
     eager_attention_forward,
 )
 
 from src.model.vlm.prefix_cache import BackboneStreamOutput
+from src.model.vlm.qwen3_vl_compile_patch import apply_patch
+
+# Patch Qwen3VLVisionAttention.forward at backbone import time so every
+# entry point that touches the backbone (train / inference wrapper / serve)
+# gets the fix for transformers issue #44962. Idempotent: safe to call
+# multiple times; the function only rebinds Qwen3VLVisionAttention.forward.
+apply_patch()
 
 
 @dataclass
@@ -60,7 +68,7 @@ class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
-        query_states, key_states = base_attention.rotary_fn(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -81,7 +89,10 @@ class Qwen3VLTextAttentionWithKV(Qwen3VLTextAttention):
             key_states,
             value_states,
             attention_mask,
-            dropout=0.0 if not base_attention.training else base_attention.attention_dropout,
+            # Use self.training because base_attention is registered via
+            # object.__setattr__ (line 37) and is not a real submodule, so
+            # wrapper.eval() / .train() does not propagate into it.
+            dropout=0.0 if not self.training else base_attention.attention_dropout,
             scaling=base_attention.scaling,
             **kwargs,
         )
@@ -297,6 +308,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         low_cpu_mem_usage: bool = True,
         text_attn_implementation: str = "sdpa",
         vision_attn_implementation: str = "flash_attention_2",
+        mem_temporal_attention: dict[str, Any] | None = None,
     ):
         super().__init__()
         try:
@@ -311,9 +323,10 @@ class Qwen3VLBackboneWrapper(nn.Module):
             trust_remote_code=trust_remote_code,
         )
         tokenizer = processor.tokenizer
-        tokenizer.add_special_tokens({"additional_special_tokens": [state_token, action_token]})
+        special_tokens = [state_token, action_token]
         if camera_token:
-            tokenizer.add_special_tokens({"additional_special_tokens": [camera_token]})
+            special_tokens.append(camera_token)
+        tokenizer.add_special_tokens({"additional_special_tokens": special_tokens})
         resolved_dtype = self._resolve_torch_dtype(torch_dtype)
         quantization_config = None
         if use_quantization:
@@ -381,6 +394,10 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if freeze_backbone:
             self.freeze_non_lora_parameters()
 
+        self.has_mem_blocks = False
+        if mem_temporal_attention and mem_temporal_attention.get("enabled", False):
+            self.inject_mem_temporal_attention(mem_temporal_attention)
+
     def _apply_lora(self, lora_cfg: dict, use_quantization: bool) -> None:
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
@@ -397,14 +414,10 @@ class Qwen3VLBackboneWrapper(nn.Module):
 
     def freeze_non_lora_parameters(self) -> None:
         if self.use_lora:
-            base = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
-            for param in base.parameters():
-                param.requires_grad = False
-            for name, param in self.model.named_parameters():
-                if "lora_" in name:
-                    param.requires_grad = True
+            for name, param in self.named_parameters():
+                param.requires_grad = ("lora_" in name)
         else:
-            for param in self.model.parameters():
+            for param in self.parameters():
                 param.requires_grad = False
 
     @staticmethod
@@ -450,11 +463,15 @@ class Qwen3VLBackboneWrapper(nn.Module):
                         "preserve_rng_state": False,
                     },
                 )
-            # Selective every-N: disable checkpointing on non-selected blocks.
+            # Selective every-N: disable on non-selected blocks.
+            # MEMVisionBlock wraps the actual GradientCheckpointingLayer in
+            # spatial_block; unwrap to flip the flag where it matters.
             if vision_every_n > 1 and hasattr(visual_model, "blocks"):
+                from src.model.vlm.temporal_attention import MEMVisionBlock
                 for i, blk in enumerate(visual_model.blocks):
                     if i % vision_every_n != 0:
-                        blk.gradient_checkpointing = False
+                        target = blk.spatial_block if isinstance(blk, MEMVisionBlock) else blk
+                        target.gradient_checkpointing = False
 
     def disable_gradient_checkpointing(self) -> None:
         """Disable checkpointing on the vision tower and the training text wrapper."""
@@ -468,6 +485,89 @@ class Qwen3VLBackboneWrapper(nn.Module):
         if callable(disable_method):
             disable_method()
 
+    def inject_mem_temporal_attention(self, mem_cfg: dict[str, Any]) -> None:
+        """Wrap every Nth ViT block with MEMVisionBlock (factorized temporal-spatial attention).
+
+        Reference: MEM (Torne et al., 2025), arxiv 2603.03596.
+        Caller (dataset/collator) must pad VLM to n_obs_image_steps so all entries
+        share (T, N). Conv3d temporal_patch_size groups raw frames into T tokens.
+        """
+        from src.model.vlm.temporal_attention import MEMVisionBlock, TemporalCausalAttention
+
+        visual = self.base_model.model.visual
+        every_n = mem_cfg["every_n_layers"]
+        n_raw_frames = mem_cfg["num_frames"]
+        tps = visual.config.temporal_patch_size
+        assert n_raw_frames % tps == 0, (
+            f"n_obs_image_steps={n_raw_frames} must be divisible by temporal_patch_size={tps}"
+        )
+        T = n_raw_frames // tps
+        mask_non_vla = bool(mem_cfg.get("mask_non_vla", False))
+
+        # Wrap EVERY block in MEMVisionBlock so the FSDP wrap unit is uniform
+        # across visual.blocks. Only every_n positions get a real temporal_attn;
+        # the rest pass through. Uniform wrapping lets apply_fsdp2 use only
+        # MEMVisionBlock as the wrap target — the inner spatial_block is then
+        # always unsharded as part of the outer MEM unit, so MEM forward can
+        # read spatial_block.norm1 / .attn.qkv / .attn.proj as full tensors.
+        for i in range(len(visual.blocks)):
+            spatial_block = visual.blocks[i]
+            if (i + 1) % every_n == 0:
+                ta = TemporalCausalAttention(
+                    num_heads=spatial_block.attn.num_heads,
+                    hidden_size=visual.config.hidden_size,
+                    num_frames=T,
+                    mask_non_vla=mask_non_vla,
+                    max_temporal_len=mem_cfg.get("max_temporal_len", 32),
+                    base=mem_cfg.get("sinusoidal_pe_base", 10000.0),
+                )
+            else:
+                ta = None
+            visual.blocks[i] = MEMVisionBlock(spatial_block, ta)
+        self.has_mem_blocks = True
+        self.mem_mask_non_vla = mask_non_vla
+        self.mem_num_frames = T
+
+    def _video_features_for_lm(
+        self,
+        video_outputs: Any,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """ViT video output -> LM-shaped features. Slice to last frame when MEM is on
+        (LM placeholders are 1 frame per video); else hand all T frames through.
+
+        HF returns pooler_output as a per-entry tuple of (T*N, D) tensors and
+        deepstack_features as flat (B*T*N, D) per layer. Assumes uniform (T, N)
+        per entry (dataset's contract).
+        """
+        pooler = video_outputs.pooler_output
+        deepstack = video_outputs.deepstack_features
+
+        if not self.has_mem_blocks:
+            return torch.cat(list(pooler), dim=0), deepstack
+
+        T = self.mem_num_frames
+        B = len(pooler)
+        D = pooler[0].shape[-1]
+        # per entry: (T*N, D) -> (T, N, D) -> last frame (N, D), then cat across B
+        video_embeds = torch.cat([e.view(T, -1, D)[-1] for e in pooler], dim=0)
+        # deepstack stays flat: (B*T*N, D) -> (B, T, N, D) -> last frame -> (B*N, D)
+        deepstack_sliced = [
+            f.view(B, T, -1, D)[:, -1].reshape(-1, D) for f in deepstack
+        ]
+        return video_embeds, deepstack_sliced
+
+    def _mem_kwargs(self, grid_thw: torch.Tensor, is_vla_mask: torch.Tensor | None) -> dict:
+        """kwargs to inject into get_image/video_features so MEM blocks receive
+        grid_thw / is_vla_mask via HF's **kwargs forwarding chain. Empty when MEM off.
+        Spatial Qwen3VLVisionBlock silently ignores unrelated kwargs."""
+        if not self.has_mem_blocks:
+            return {}
+        kwargs: dict[str, Any] = {"mem_grid_thw": grid_thw}
+        if getattr(self, "mem_mask_non_vla", False):
+            assert is_vla_mask, "is_vla_mask should be provided when mem_mask_non_vla is True"
+            kwargs["is_vla_mask"] = is_vla_mask
+        return kwargs
+
     def encode_visual_features(
         self,
         input_ids: torch.LongTensor,
@@ -476,15 +576,14 @@ class Qwen3VLBackboneWrapper(nn.Module):
         image_grid_thw: torch.Tensor | None,
         pixel_values_videos: torch.Tensor | None,
         video_grid_thw: torch.Tensor | None,
+        is_vla_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor] | None]:
         base_model = self.base_model
         has_images = pixel_values is not None
         has_videos = pixel_values_videos is not None
 
-        # When both modalities are present, merge into a single ViT forward pass.
-        # get_video_features delegates to get_image_features (same ViT), and
-        # cu_seqlens computed from grid_thw guarantees per-entry attention isolation,
-        # so a merged call is mathematically equivalent to two separate calls.
+        # Mixed batch: one merged ViT call. Typically only fires at inference;
+        # the MEM-on training path routes VLM through the video branch.
         if has_images and has_videos:
             n_image_entries = image_grid_thw.shape[0]
             combined_pv = torch.cat([pixel_values, pixel_values_videos], dim=0)
@@ -494,31 +593,34 @@ class Qwen3VLBackboneWrapper(nn.Module):
                 pixel_values=combined_pv,
                 image_grid_thw=combined_grid,
                 return_dict=True,
+                **self._mem_kwargs(combined_grid, is_vla_mask),
             )
 
-            # pooler_output is a per-entry tuple (already split by get_image_features).
             image_embeds = torch.cat(combined_out.pooler_output[:n_image_entries], dim=0)
-            video_embeds = torch.cat(combined_out.pooler_output[n_image_entries:], dim=0)
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
-            # deepstack_features are flat (total_tokens, hidden) per layer; split by token count.
+            # Split deepstack along the image/video token boundary.
             sms = base_model.model.visual.spatial_merge_size
             img_tokens = (image_grid_thw.prod(dim=-1) // (sms * sms)).sum().item()
             deepstack_image = [f[:img_tokens] for f in combined_out.deepstack_features]
-            deepstack_video = [f[img_tokens:] for f in combined_out.deepstack_features]
+            deepstack_video_flat = [f[img_tokens:] for f in combined_out.deepstack_features]
+
+            video_outputs_like = type("VideoOutputs", (), {})()
+            video_outputs_like.pooler_output = combined_out.pooler_output[n_image_entries:]
+            video_outputs_like.deepstack_features = deepstack_video_flat
+            video_embeds, deepstack_video = self._video_features_for_lm(video_outputs_like)
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
 
             image_mask, _ = base_model.model.get_placeholder_mask(
                 input_ids=input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds,
             )
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-
             _, video_mask = base_model.model.get_placeholder_mask(
                 input_ids=input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds,
             )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-            # Merge deepstack features into text-sequence positional order.
+            # Merge deepstack features in text-sequence positional order.
             image_mask = image_mask[..., 0]
             video_mask = video_mask[..., 0]
             visual_pos_masks = image_mask | video_mask
@@ -533,7 +635,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
 
             return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
 
-        # Single-modality paths: only one ViT call needed.
+        # Image-only: pure VLM / inference path; MEM bypassed (no temporal context).
         if has_images:
             image_outputs = base_model.get_image_features(
                 pixel_values=pixel_values,
@@ -552,13 +654,15 @@ class Qwen3VLBackboneWrapper(nn.Module):
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
                 return_dict=True,
+                **self._mem_kwargs(video_grid_thw, is_vla_mask),
             )
-            video_embeds = torch.cat(video_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            video_embeds, deepstack_features = self._video_features_for_lm(video_outputs)
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             _, video_mask = base_model.model.get_placeholder_mask(
                 input_ids=input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds,
             )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-            return inputs_embeds, video_mask[..., 0], video_outputs.deepstack_features
+            return inputs_embeds, video_mask[..., 0], deepstack_features
 
         return inputs_embeds, None, None
 
@@ -602,6 +706,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         camera_slot_embeds: torch.Tensor | None = None,
         state_token_id: int | None = None,
         action_token_id: int | None = None,
+        is_vla_mask: torch.Tensor | None = None,
     ) -> BackboneEmbedOutput:
         """Construct final language-model embeddings from project batch tensors."""
         del mm_token_type_ids
@@ -613,6 +718,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             image_grid_thw=image_grid_thw,
             pixel_values_videos=pixel_values_videos,
             video_grid_thw=video_grid_thw,
+            is_vla_mask=is_vla_mask,
         )
         inputs_embeds = self.replace_slot_embeddings(
             input_ids=input_ids,
@@ -647,6 +753,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
         output_hidden_states: bool = True,
         output_attentions: bool = False,
         past_key_values: Any = None,
+        is_vla_mask: torch.Tensor | None = None,
     ) -> BackboneStreamOutput:
         del output_hidden_states
         embed_output = self.build_inputs_embeds(
@@ -661,6 +768,7 @@ class Qwen3VLBackboneWrapper(nn.Module):
             camera_slot_embeds=camera_slot_embeds,
             state_token_id=state_token_id,
             action_token_id=action_token_id,
+            is_vla_mask=is_vla_mask,
         )
         position_ids = self.base_model.model.compute_3d_position_ids(
             input_ids=input_ids,

@@ -28,7 +28,11 @@ os.environ["TRANSFORMERS_CACHE"] = os.path.join(HF_CACHE_DIR, "transformers")
 os.makedirs(HF_CACHE_DIR, exist_ok=True)
 
 # ================= Configuration =================
-ROBOINTER_ROOT = "/share_data/guantianrui/datasets/VLM/RoboInter-VQA"
+# Override with: export ROBOINTER_ROOT=/path/to/RoboInter-VQA
+ROBOINTER_ROOT = os.environ.get(
+    "ROBOINTER_ROOT",
+    "/share_data/guantianrui/datasets/VLM/RoboInter-VQA",
+)
 OUTPUT_ROOT = "/share_data/zengfanlian/datasets/VLM/Webdataset/RoboInter-VQA"
 
 # Task mapping for Generation
@@ -52,12 +56,12 @@ UNDERSTANDING_TASKS = {
     "traj_direction_choice": "classification"
 }
 
-# Task mapping for Task Planning
-PLANNING_TASKS = {
-    "task_planning": "planning",
-    "Scene_Understanding": "planning",
-    "Temporal_Understanding": "planning"
-}
+# # Task mapping for Task Planning
+# PLANNING_TASKS = {
+#     "task_planning": "planning",
+#     "Scene_Understanding": "planning",
+#     "Temporal_Understanding": "planning"
+# }
 
 # ================= Helper Functions =================
 
@@ -178,19 +182,30 @@ def trajectory_to_text(points):
     return f"[{items}]"
 
 def load_image_safe(image_path):
-    """Safely load an image."""
-    candidates = [os.path.join(ROBOINTER_ROOT, image_path)]
-    # Train planning JPEGs may be extracted under task_planning_full/ (merged zip) instead of task_planning/.
-    alt = image_path.replace(
+    """Safely load an image; tries absolute path, then ROBOINTER_ROOT, then planning_full layout."""
+    if not image_path or not str(image_path).strip():
+        return None
+    path = str(image_path).strip()
+    root = ROBOINTER_ROOT
+    candidates = []
+    if os.path.isabs(path):
+        candidates.append(path)
+    candidates.append(os.path.join(root, path))
+    alt = path.replace(
         "Task_planning/image/train/manipvqa/task_planning/",
+        "Task_planning/image/train/manipvqa/task_planning_full/",
     )
-    if alt != image_path:
-        candidates.append(os.path.join(ROBOINTER_ROOT, alt))
+    if alt != path:
+        candidates.append(os.path.join(root, alt))
 
+    seen = set()
     for full_path in candidates:
+        if full_path in seen:
+            continue
+        seen.add(full_path)
         if os.path.exists(full_path):
             try:
-                return Image.open(full_path).convert('RGB')
+                return Image.open(full_path).convert("RGB")
             except Exception:
                 continue
     return None
@@ -538,7 +553,7 @@ def process_split(files, output_dir, args, task_mapping, shard_prefix="shard"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_workers", type=int, default=64)
+    parser.add_argument("--num_workers", type=int, default=32)
     
     # Standard arguments matching user's request
     parser.add_argument("--split", type=str, default="both", help="Split directory to convert (train/val/both)")
@@ -596,17 +611,17 @@ def main():
         ])
     all_tasks.append((und_paths, UNDERSTANDING_TASKS))
     
-    # 3. Task_planning
-    plan_paths = []
-    if "train" in splits:
-        plan_paths.extend([
-            os.path.join(ROBOINTER_ROOT, "Task_planning/meta/train/manipvqa/*.json")
-        ])
-    if "val" in splits:
-        plan_paths.extend([
-            os.path.join(ROBOINTER_ROOT, "Task_planning/meta/val/*/*.json")
-        ])
-    all_tasks.append((plan_paths, PLANNING_TASKS))
+    # # 3. Task_planning
+    # plan_paths = []
+    # if "train" in splits:
+    #     plan_paths.extend([
+    #         os.path.join(ROBOINTER_ROOT, "Task_planning/meta/train/manipvqa/*.json")
+    #     ])
+    # if "val" in splits:
+    #     plan_paths.extend([
+    #         os.path.join(ROBOINTER_ROOT, "Task_planning/meta/val/*/*.json")
+    #     ])
+    # all_tasks.append((plan_paths, PLANNING_TASKS))
 
     # Process each category sequentially to avoid mixing task mappings
     for search_paths, task_mapping in all_tasks:

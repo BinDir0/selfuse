@@ -13,13 +13,18 @@ serving:
   warmup_image_shape: [384, 384, 3]
   warmup_depth_shape: [384, 384, 3]
   warmup_intrinsic: [500.0, 500.0, 320.0, 240.0]
+  # Warmup payload modality/camera setup for RuntimeEngine._build_dummy_obs.
+  # Keep these aligned with env_wrapper settings to avoid first-request recompilation.
+  warmup_camera_setup_mode: both
+  warmup_image_mode: rgb
   log_obs_details: True
   record_enabled: True
   record_root_dir: outputs/serving_records
   profile_enabled: False
   profile_dir: outputs/serving_profile
-  profile_steps: 20
+  profile_steps: 5
   profile_skip_first: 5
+  flops_count_enabled: False
 
 # Inference policy wrapper
 # model_config_path: path to the training run's .hydra/config.yaml
@@ -28,6 +33,7 @@ policy:
   model_config_path: /home/descfly/checkpoints/real-world-only-0403/.hydra/config.yaml  # required: path to the training run's .hydra/config.yaml
   checkpoint_path: /home/descfly/checkpoints/real-world-only-0403/update_step=85000    # required: path to trained model checkpoint
   pretrained_vlm_path: /home/descfly/checkpoints/Qwen3-VL-2B-Instruct  # override pretrained.model_name_or_path in model config (for backbone, action expert, tokenizer)
+  teacher_path: /home/descfly/checkpoints/dinov3-vitl16-pretrain-lvd1689m  # override frozen_teacher.model_name_or_path (null = keep training config value)
   mode: flow
   use_mixed_precision: True
   tokenizer_padding: max_length
@@ -39,6 +45,7 @@ policy:
   ar_cfg: 1.0
   normalizer_path: /home/descfly/normalizer/2026.03.16-relative-mixed/normalizer.pkl
   use_relative_action: True
+  attention_recording: False
   compile:
     enabled: True
     fullgraph: False       # allow graph breaks in backbone multimodal processing
@@ -47,6 +54,14 @@ policy:
 
 env_wrapper:
   enabled: True
+  # single: legacy single-camera payload
+  # both: dual-camera payload, expects image/camera_intrinsics as dicts keyed by head/chest
+  camera_setup_mode: both
+  # rgb: ignore depth payload
+  # rgbd: read depth payload using depth_key
+  image_mode: rgb
+  head_camera_name: head
+  chest_camera_name: chest
   image_key: image
   depth_key: depth_image
   intrinsic_key: camera_intrinsics

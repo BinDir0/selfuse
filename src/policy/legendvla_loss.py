@@ -407,6 +407,48 @@ def compute_flow_stream_loss(
     return flow_loss, flow_output
 
 
+def compute_wm_loss(
+    model,
+    batch: dict[str, torch.Tensor],
+    backbone_output,
+) -> torch.Tensor:
+    """Masked MSE between world model predictions and frozen teacher features.
+
+    Both pred and target are ``[B, 2, K, spatial, D]`` in canonical
+    head/breast order. By default ``view_mask`` controls which views contribute
+    loss; ``world_model_config.mask_loss_by_view_mask=False`` supervises all
+    views.
+    """
+    if not model.use_world_model or "future_frames" not in batch:
+        return zero_loss(backbone_output.last_hidden_states)
+
+    wm_output = model.forward_world_model_stream(batch, backbone_output)
+    pred = wm_output["pred"]
+    target = wm_output["target"].to(pred.dtype)
+    n_future = wm_output["n_future_frames"].to(device=pred.device)
+    V, K = pred.shape[1], pred.shape[2]
+
+    if model.world_model_config.mask_loss_by_view_mask:
+        view_mask = wm_output["view_mask"].to(device=pred.device, dtype=torch.bool)
+        if view_mask.shape != (pred.shape[0], V):
+            raise ValueError(f"view_mask must have shape [B, V], got {tuple(view_mask.shape)}")
+    else:
+        # force to calculate loss on all views
+        view_mask = torch.ones(pred.shape[0], V, device=pred.device, dtype=torch.bool)
+
+    # frame_valid[b, k] == (k < n_future[b]); broadcast over V/spatial/D for
+    # element-wise mask against pred [B, V, K, spatial, D].
+    # [B, K] + [B, V] -> [B, V, K, 1, 1]
+    frame_valid = torch.arange(K, device=n_future.device) < n_future.unsqueeze(1)
+    view_frame_valid = frame_valid[:, None, :] & view_mask[:, :, None]
+    mask_float = view_frame_valid[:, :, :, None, None].to(dtype=pred.dtype)
+
+    squared_error = (pred - target) ** 2
+    n_elements = pred.shape[-2] * pred.shape[-1]
+    denom = mask_float.sum().clamp(min=1)
+    return (squared_error * mask_float).sum() / denom / n_elements
+
+
 def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     slot_embeds = model.build_slot_embeddings(batch)
     backbone_output = model.forward_backbone_stream(batch, slot_embeds)
@@ -415,8 +457,11 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
 
     ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
 
+    # dense_inputs is shared by diffloss and reg_action_head. Skip the gather
+    # work entirely when neither head is active.
+    needs_dense = model.use_diffloss or model.reg_action_head is not None
     dense_inputs = None
-    if torch.any(is_vla_data):
+    if needs_dense and torch.any(is_vla_data):
         dense_inputs = build_dense_diffloss_inputs(
             model, hidden_states, batch["actions"],
             batch["answer_start_idx"], batch["n_actions"], is_vla_data,
@@ -425,11 +470,14 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
     reg_loss = compute_reg_action_loss(model, hidden_states, dense_inputs)
     flow_loss, _ = compute_flow_stream_loss(model, batch, backbone_output)
 
+    wm_loss = compute_wm_loss(model, batch, backbone_output)
+
     total_loss = (
         model.loss_config.ce_loss_weight * ce_loss
         + model.loss_config.diffusion_loss_weight * diff_loss
         + model.loss_config.reg_loss_weight * reg_loss
         + model.loss_config.flow_loss_weight * flow_loss
+        + model.loss_config.wm_loss_weight * wm_loss
     )
     return {
         "total_loss": total_loss,
@@ -437,6 +485,7 @@ def compute_total_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, torch
         "diffusion_loss": diff_loss,
         "reg_loss": reg_loss,
         "flow_loss": flow_loss,
+        "wm_loss": wm_loss,
     }
 
 
@@ -447,8 +496,9 @@ def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, tor
     is_vla_data = batch["is_vla_data"].to(dtype=torch.bool)
     ce_loss = compute_ce_loss(model, hidden_states, batch["labels"], is_vla_data)
 
+    needs_dense = model.use_diffloss or model.reg_action_head is not None
     dense_inputs = None
-    if torch.any(is_vla_data):
+    if needs_dense and torch.any(is_vla_data):
         dense_inputs = build_dense_diffloss_inputs(
             model, hidden_states, batch["actions"],
             batch["answer_start_idx"], batch["n_actions"], is_vla_data,
@@ -466,6 +516,7 @@ def compute_ar_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, tor
         "diffusion_loss": diff_loss,
         "reg_loss": reg_loss,
         "flow_loss": zero_loss(hidden_states),
+        "wm_loss": zero_loss(hidden_states),
     }
 
 
@@ -480,6 +531,7 @@ def compute_flow_only_loss(model, batch: dict[str, torch.Tensor]) -> dict[str, t
         "diffusion_loss": zero_loss(ref),
         "reg_loss": zero_loss(ref),
         "flow_loss": flow_loss,
+        "wm_loss": zero_loss(ref),
     }
 
 

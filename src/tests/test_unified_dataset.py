@@ -24,6 +24,7 @@ def make_vla_sample(idx):
         "actions_valid_mask": torch.ones(32, 48, dtype=torch.bool),
         "n_states": torch.tensor(16, dtype=torch.int32),
         "n_actions": torch.tensor(32, dtype=torch.int32),
+        "n_future_frames": torch.tensor(0, dtype=torch.int32),
         "answer_start_idx": torch.tensor(1),
         "is_vla_data": torch.tensor(True),
         "has_depth_values": torch.tensor(False),
@@ -45,7 +46,7 @@ def make_vlm_sample(idx):
 VLA_KEYS = {
     "input_ids", "labels", "attention_mask", "pixel_values",
     "states", "actions", "actions_valid_mask",
-    "n_states", "n_actions", "answer_start_idx",
+    "n_states", "n_actions", "n_future_frames", "answer_start_idx",
     "is_vla_data",
 }
 
@@ -70,6 +71,13 @@ class MockVlaDataset(torch.utils.data.IterableDataset):
         self.window_config = DummyWindowConfig()
         self.action_ndim = 48
         self.depth_image_shape = (4, 4)
+        # future_frame_horizon=0 disables future-frame padding in UnifiedWdsDataset.pad_vlm_sample.
+        self.future_frame_horizon = 0
+        # load_breast=False keeps pad_vlm_sample on the head-only branch.
+        self.load_breast = False
+        self.debug_capture_raw_sample = False
+        self.debug_capture_processed_sample = False
+        self.debug_profile_timing = False
 
     def __iter__(self):
         return iter(self.samples)
@@ -238,26 +246,6 @@ def test_pad_vlm_sample():
     assert bool(vlm["is_vla_data"]) is False
 
 
-def test_distribute_delegates_to_vlm():
-    """distribute(rank, world_size) is forwarded to vlm_dataset."""
-    vla_ds = MockVlaDataset([make_vla_sample(0)])
-    vlm_ds = MockIterableDataset([make_vlm_sample(0)])
-    vlm_ds.distribute = lambda rank, world_size: None
-    called = {}
-
-    def mock_distribute(rank, world_size):
-        called["rank"] = rank
-        called["world_size"] = world_size
-
-    vlm_ds.distribute = mock_distribute
-    unified = UnifiedWdsDataset(
-        vla_dataset=vla_ds, vlm_dataset=vlm_ds,
-        mode="train",
-    )
-    unified.distribute(rank=2, world_size=8)
-    assert called == {"rank": 2, "world_size": 8}
-
-
 def test_return_dataset_info_passthrough():
     """VLA samples with dataset_info fields pass through interleaving intact."""
     vla_samples = []
@@ -306,15 +294,6 @@ def test_return_dataset_info_vlm_padded_keeps_info():
     assert vlm["dataset_name"] == "my_vlm"
     assert vlm["episode_index"].item() == 42
     assert vlm["states"].shape == (16, 48)
-
-
-def test_distribute_no_vlm():
-    """distribute with vlm_dataset=None does not raise."""
-    unified = build_unified(
-        [make_vla_sample(0)],
-        vlm_samples=None,
-    )
-    unified.distribute(rank=0, world_size=4)  # should not raise
 
 
 # ---------------------------------------------------------------------------

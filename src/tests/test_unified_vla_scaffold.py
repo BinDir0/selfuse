@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from src.policy.legendvla import LegendVLA, FlowConfig, RTCConfig, LossConfig, ARActionTrainConfig
-from src.model.action.action_head import FourierActionEncoder, MLPProjector
+from src.model.action.action_head import MLPEncoder, MLPDecoder
 from src.model.common.modules import TimeEmbedding
 from src.model.vlm.prefix_cache import BackboneStreamOutput
 from src.tests.dummy_flow_expert import DummyFlowExpert
@@ -18,6 +18,7 @@ class DummyBackbone(nn.Module):
         self.image_token_id = 100
         self.state_token_id = 101
         self.action_token_id = 102
+
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -26,6 +27,8 @@ class DummyBackbone(nn.Module):
         self.base_model.model = nn.Module()
         self.base_model.model.visual = nn.Module()
         self.base_model.model.visual.blocks = nn.ModuleList([nn.Identity(), nn.Identity()])
+        self.base_model.model.visual.spatial_merge_size = 1
+        self.base_model.model.visual.temporal_patch_size = 1
         self.language_model = nn.Module()
         self.language_model.layers = nn.ModuleList(
             [nn.Linear(hidden_size, hidden_size), nn.Linear(hidden_size, hidden_size)]
@@ -45,14 +48,19 @@ class DummyBackbone(nn.Module):
         mm_token_type_ids,
         state_slot_embeds,
         action_slot_embeds,
+        camera_slot_embeds=None,
+        output_attentions=False,
         state_token_id=None,
         action_token_id=None,
         use_cache=True,
         output_hidden_states=True,
         past_key_values=None,
+        is_vla_mask=None,
     ):
         del pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw, mm_token_type_ids
+        del camera_slot_embeds, output_attentions
         del state_token_id, action_token_id, use_cache, output_hidden_states, past_key_values
+        del is_vla_mask
 
         embeds = self.embed(input_ids)
         if state_slot_embeds is not None:
@@ -67,7 +75,6 @@ class DummyBackbone(nn.Module):
             gather_index = action_slot.clamp(min=0, max=action_slot_embeds.shape[1] - 1).unsqueeze(-1).expand(-1, -1, embeds.shape[-1])
             action_values = torch.gather(action_slot_embeds, dim=1, index=gather_index)
             embeds = torch.where(action_mask.unsqueeze(-1), action_values, embeds)
-
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids = position_ids.masked_fill(attention_mask == 0, 0)
         position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
@@ -173,29 +180,29 @@ def make_model(diffloss=None):
         hidden_size=hidden_size, vocab_size=128,
         num_layers=8, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
     )
-    state_encoder = FourierActionEncoder(
+    state_encoder = MLPEncoder(
         action_dim=state_dim, width=hidden_size,
         time_cond=False, enable_fourier_embed=False, mlp_depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
-    ar_action_encoder = FourierActionEncoder(
+    ar_action_encoder = MLPEncoder(
         action_dim=action_dim, width=hidden_size,
         time_cond=False, enable_fourier_embed=False, mlp_depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
-    action_encoder = FourierActionEncoder(
+    action_encoder = MLPEncoder(
         action_dim=action_dim, width=action_hidden_size,
         time_cond=False, enable_fourier_embed=False, mlp_depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
     time_embedding = TimeEmbedding(time_hidden_size)
     flow_expert = DummyFlowExpert(hidden_size=action_hidden_size, time_hidden_size=time_hidden_size)
-    action_decoder = MLPProjector(
+    action_decoder = MLPDecoder(
         input_dim=action_hidden_size, output_dim=action_dim,
         width=action_hidden_size, depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
     )
-    latent_condition_projector = MLPProjector(
+    latent_condition_projector = MLPDecoder(
         input_dim=hidden_size, output_dim=32,
         width=hidden_size, depth=2,
         final_layer_norm=False, use_mlp_layer_norm=False,
@@ -228,7 +235,7 @@ def test_legendvla_scaffold_forward():
     model = make_model(diffloss=None)
     batch = make_vla_batch()
     output = model("train", batch)
-    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
+    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss", "wm_loss"}
     assert output["total_loss"].ndim == 0
 
 
@@ -262,7 +269,7 @@ def test_legendvla_compile_blocks_smoke():
     batch = make_vla_batch(batch_size=1)
     output = model("train", batch)
 
-    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss"}
+    assert set(output.keys()) == {"total_loss", "ce_loss", "diffusion_loss", "reg_loss", "flow_loss", "wm_loss"}
     assert output["total_loss"].ndim == 0
 
 

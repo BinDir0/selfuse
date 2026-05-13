@@ -18,6 +18,8 @@ import websockets.asyncio.server as _server
 import websockets.frames
 
 from . import msgpack_numpy
+from .image_codec import decode_image_fields_in_obs
+from .inference_profiler import InferenceProfiler
 from .serving_recorder import ConnectionRecorder, ServingRecorder
 
 
@@ -38,22 +40,30 @@ class RuntimeEngine:
         warmup_image_shape: tuple[int, int, int],
         warmup_depth_shape: tuple[int, int, int],
         warmup_intrinsic: np.ndarray,
+        warmup_camera_setup_mode: str = "single",
+        warmup_image_mode: str = "rgb",
     ) -> None:
         self.policy = policy
         self.device = device
         self.use_autocast = use_autocast
-        self.metadata = policy.metadata
         self.warmup_image_shape = tuple(int(x) for x in warmup_image_shape)
         self.warmup_depth_shape = tuple(int(x) for x in warmup_depth_shape)
         self.warmup_intrinsic = np.asarray(warmup_intrinsic, dtype=np.float64)
-        self._profiler = None
-        self._profile_steps = 0
-        self._profile_max_steps = 0
-        self._profile_output_dir: pathlib.Path | None = None
+        self.warmup_camera_setup_mode = str(warmup_camera_setup_mode).lower()
+        self.warmup_image_mode = str(warmup_image_mode).lower()
+        if self.warmup_camera_setup_mode not in {"single", "both"}:
+            raise ValueError(
+                "warmup_camera_setup_mode must be 'single' or 'both', "
+                f"got {warmup_camera_setup_mode!r}"
+            )
+        if self.warmup_image_mode not in {"rgb", "rgbd"}:
+            raise ValueError(
+                "warmup_image_mode must be 'rgb' or 'rgbd', "
+                f"got {warmup_image_mode!r}"
+            )
+        self._profiler: InferenceProfiler | None = None
 
         self.policy.to(device)
-        if hasattr(self.policy, "maybe_compile_model"):
-            self.policy.maybe_compile_model()
 
     def _move_to_device(self, data: Any) -> Any:
         if isinstance(data, dict):
@@ -63,73 +73,52 @@ class RuntimeEngine:
     def _autocast_context(self):
         if not self.use_autocast:
             return nullcontext()
-        return torch.autocast(device_type=self.device.type, dtype=self.policy.dtype)
+        return torch.autocast(device_type=self.device.type, dtype=self.dtype)
 
-    def enable_profiling(self, output_dir: str | pathlib.Path, steps: int, skip_first: int) -> None:
+    def enable_profiling(
+        self,
+        output_dir: str | pathlib.Path,
+        steps: int,
+        skip_first: int,
+        count_flops: bool = False,
+    ) -> None:
         if steps <= 0:
             return
-        output_dir = pathlib.Path(output_dir).expanduser()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        activities = [torch.profiler.ProfilerActivity.CPU]
-        if self.device.type == "cuda":
-            activities.append(torch.profiler.ProfilerActivity.CUDA)
-        self._profiler = torch.profiler.profile(
-            activities=activities,
-            schedule=torch.profiler.schedule(wait=0, warmup=0, active=steps, repeat=1, skip_first=skip_first),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=False,
+        self._profiler = InferenceProfiler(
+            output_dir=output_dir,
+            steps=steps,
+            skip_first=skip_first,
+            device=self.device,
+            compile_active=self._compile_is_active(),
+            count_flops=count_flops,
         )
-        self._profiler.__enter__()
-        self._profile_steps = 0
-        self._profile_max_steps = skip_first + steps
-        self._profile_output_dir = output_dir
-        logger.info(
-            "Enabled inference profiler for %d requests after skipping %d requests. Output dir: %s",
-            steps,
-            skip_first,
-            output_dir,
-        )
+        self._profiler.start()
+
+    def _compile_is_active(self) -> bool:
+        try:
+            return hasattr(self.policy.model, "_orig_mod")
+        except Exception:
+            return False
 
     def _step_profiler(self) -> None:
         if self._profiler is None:
             return
         self._profiler.step()
-        self._profile_steps += 1
-        if self._profile_steps >= self._profile_max_steps:
-            self._finalize_profiler()
+        if self._profiler.done:
+            self._profiler = None
 
-    def _finalize_profiler(self) -> None:
-        if self._profiler is None or self._profile_output_dir is None:
-            return
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-        sort_by = "self_cuda_time_total" if self.device.type == "cuda" else "self_cpu_time_total"
-        summary = self._profiler.key_averages().table(sort_by=sort_by, row_limit=30)
-        summary_path = self._profile_output_dir / "summary.txt"
-        trace_path = self._profile_output_dir / "trace.json"
-        summary_path.write_text(summary, encoding="utf-8")
-        self._profiler.export_chrome_trace(str(trace_path))
-        self._profiler.__exit__(None, None, None)
-        logger.info("Saved inference profiler summary to %s", summary_path)
-        logger.info("Saved inference profiler trace to %s", trace_path)
-        self._profiler = None
-        self._profile_output_dir = None
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.policy, name)
 
-    def _get_shape_meta(self) -> Dict[str, Any]:
-        if hasattr(self.policy, "shape_meta"):
-            return self.policy.shape_meta
-        if hasattr(self.policy, "model") and hasattr(self.policy.model, "shape_meta"):
-            return self.policy.model.shape_meta
-        raise AttributeError("Policy does not expose model.shape_meta for warmup")
-
-    def _build_dummy_obs(self, instruction: str) -> Dict[str, Any]:
-        shape_meta = self._get_shape_meta()
+    def _build_dummy_obs(self, instruction: str, rtc: bool) -> Dict[str, Any]:
+        shape_meta = self.shape_meta
         rgb_meta = shape_meta["obs"]["rgb"]
         state_meta = shape_meta["obs"]["state"]
+        action_meta = shape_meta["action"]
 
         image = np.zeros((rgb_meta["horizon"], *self.warmup_image_shape), dtype=np.uint8)
         states = np.zeros((state_meta["horizon"], state_meta["shape"][0]), dtype=np.float32)
+        prev_action_chunk = np.zeros((action_meta["horizon"], action_meta["shape"][0]), dtype=np.float32)
         intrinsic = self.warmup_intrinsic.copy()
 
         obs = {
@@ -137,11 +126,21 @@ class RuntimeEngine:
             "intrinsic": intrinsic,
             "instruction": instruction,
             "states": states,
+            "prev_action_chunk": prev_action_chunk if rtc else None,
         }
 
+        if self.warmup_camera_setup_mode == "both":
+            # Warmup should exercise the same multimodal path as production dual-camera requests.
+            obs["chest_image"] = np.zeros((rgb_meta["horizon"], *self.warmup_image_shape), dtype=np.uint8)
+            obs["chest_intrinsic"] = self.warmup_intrinsic.copy()
+
         depth_meta = shape_meta["obs"].get("depth")
-        if depth_meta is not None:
+        if depth_meta is not None and self.warmup_image_mode == "rgbd":
             obs["depth"] = np.zeros((depth_meta["horizon"], *self.warmup_depth_shape), dtype=np.uint16)
+            if self.warmup_camera_setup_mode == "both":
+                obs["chest_depth"] = np.zeros(
+                    (depth_meta["horizon"], *self.warmup_depth_shape), dtype=np.uint16
+                )
 
         return obs
 
@@ -149,24 +148,32 @@ class RuntimeEngine:
         if warmup_iters <= 0:
             return
 
-        dummy_obs = self._build_dummy_obs(instruction=instruction)
+        dummy_obs = self._build_dummy_obs(instruction=instruction, rtc=False)
+        dummy_obs_rtc = self._build_dummy_obs(instruction=instruction, rtc=True)
         logger.info("Running %d warmup inference iterations", warmup_iters)
         start_time = time.monotonic()
-        for _ in range(warmup_iters):
-            self.infer(dummy_obs)
+        # first observation does not contain RTC, subsequent ones contain RTC
+        for i in range(warmup_iters):
+            if i > 0:
+                self.infer(dummy_obs_rtc)
+            else:
+                self.infer(dummy_obs)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         logger.info("Warmup finished in %.3f ms", (time.monotonic() - start_time) * 1000.0)
 
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """The high-level entry point for inference."""
-        inputs = self.policy.prepare_process(obs)
+        inputs = self.prepare_process(obs)
         inputs = self._move_to_device(inputs)
 
         with self._autocast_context(), torch.inference_mode():
             pred_actions = self.policy(inputs)
-        pred_actions = self.policy.post_process(pred_actions.cpu())
+        pred_actions = self.post_process(pred_actions.cpu())
         output = {"pred_actions": pred_actions.cpu().float().numpy()[0]}
+        attn_grid = self._last_attention_grid
+        if attn_grid is not None:
+            output["attention_grid"] = attn_grid
         self._step_profiler()
         return output
 
@@ -181,6 +188,10 @@ class EnvWrapper:
         instruction_key: str = "instruction",
         states_key: str = "states",
         prev_action_chunk_key: str = "action_rtc",
+        camera_setup_mode: str = "single",
+        image_mode: str = "rgb",
+        head_camera_name: str = "head",
+        chest_camera_name: str = "chest",
     ) -> None:
         self.policy = policy
         self.image_key = image_key
@@ -189,7 +200,20 @@ class EnvWrapper:
         self.instruction_key = instruction_key
         self.states_key = states_key
         self.prev_action_chunk_key = prev_action_chunk_key
-        self.metadata = getattr(policy, "metadata", {})
+        self.camera_setup_mode = str(camera_setup_mode).lower()
+        self.image_mode = str(image_mode).lower()
+        self.head_camera_name = head_camera_name
+        self.chest_camera_name = chest_camera_name
+
+        if self.camera_setup_mode not in {"single", "both"}:
+            raise ValueError(f"camera_setup_mode must be 'single' or 'both', got {camera_setup_mode!r}")
+        if self.image_mode not in {"rgb", "rgbd"}:
+            raise ValueError(f"image_mode must be 'rgb' or 'rgbd', got {image_mode!r}")
+
+    def _pick_camera_value(self, value: Any, camera_name: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(camera_name)
+        return value
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.policy, name)
@@ -198,15 +222,39 @@ class EnvWrapper:
         return sorted(set(dir(self.policy)) | set(super().__dir__()))
 
     def infer(self, obs: dict) -> dict:
+        image_value = obs.get(self.image_key)
+        depth_value = obs.get(self.depth_key)
+        intrinsic_value = obs.get(self.intrinsic_key)
+
+        head_image = self._pick_camera_value(image_value, self.head_camera_name)
+        head_intrinsic = self._pick_camera_value(intrinsic_value, self.head_camera_name)
+
         mapped_obs = {
-            "image": obs.get(self.image_key),
-            "depth": obs.get(self.depth_key),
-            "intrinsic": obs.get(self.intrinsic_key),
+            "image": head_image,
+            "depth": (
+                self._pick_camera_value(depth_value, self.head_camera_name)
+                if self.image_mode == "rgbd" else None
+            ),
+            "intrinsic": head_intrinsic,
             "instruction": obs.get(self.instruction_key),
             "states": obs.get(self.states_key),
             # RTC condition: executed action prefix (None on first step)
             "prev_action_chunk": obs.get(self.prev_action_chunk_key),
         }
+
+        if self.camera_setup_mode == "both":
+            chest_image = self._pick_camera_value(image_value, self.chest_camera_name)
+            chest_intrinsic = self._pick_camera_value(intrinsic_value, self.chest_camera_name)
+            chest_depth = (
+                self._pick_camera_value(depth_value, self.chest_camera_name)
+                if self.image_mode == "rgbd" else None
+            )
+
+            # Canonical dual-view keys at serving boundary.
+            mapped_obs["chest_image"] = chest_image
+            mapped_obs["chest_intrinsic"] = chest_intrinsic
+            mapped_obs["chest_depth"] = chest_depth
+
         return self.policy.infer(mapped_obs)
 
 
@@ -224,6 +272,8 @@ def create_engine(policy_cfg: Any, serving_cfg: Any) -> Any:
         warmup_image_shape=tuple(serving_cfg.warmup_image_shape),
         warmup_depth_shape=tuple(serving_cfg.warmup_depth_shape),
         warmup_intrinsic=np.asarray(serving_cfg.warmup_intrinsic, dtype=np.float64),
+        warmup_camera_setup_mode=getattr(serving_cfg, "warmup_camera_setup_mode", "single"),
+        warmup_image_mode=getattr(serving_cfg, "warmup_image_mode", "rgb"),
     )
 
 
@@ -236,6 +286,10 @@ def create_env_wrapper(policy: Any, wrapper_cfg: Any) -> Any:
         instruction_key=wrapper_cfg.instruction_key,
         states_key=wrapper_cfg.states_key,
         prev_action_chunk_key=wrapper_cfg.prev_action_chunk_key,
+        camera_setup_mode=getattr(wrapper_cfg, "camera_setup_mode", "single"),
+        image_mode=getattr(wrapper_cfg, "image_mode", "rgb"),
+        head_camera_name=getattr(wrapper_cfg, "head_camera_name", "head"),
+        chest_camera_name=getattr(wrapper_cfg, "chest_camera_name", "chest"),
     )
 
 
@@ -366,6 +420,12 @@ class WebsocketPolicyServer:
                 recv_wait_time = time.monotonic() - recv_start
                 obs = msgpack_numpy.unpackb(raw_obs)
 
+                # JPEG -> ndarray. Pass-through when client sent raw images so
+                # downstream EnvWrapper / RuntimeEngine never see encoded dicts.
+                decode_start = time.monotonic()
+                obs = decode_image_fields_in_obs(obs)
+                decode_image_ms = (time.monotonic() - decode_start) * 1000.0
+
                 if self._log_obs_details:
                     logger.info("Received observation from %s%s", websocket.remote_address, self._format_obs_details(obs))
 
@@ -375,12 +435,17 @@ class WebsocketPolicyServer:
 
                 action["server_timing"] = {
                     "recv_wait_ms": recv_wait_time * 1000,
+                    "decode_image_ms": decode_image_ms,
                     "infer_ms": infer_time * 1000,
                 }
                 if prev_send_time is not None:
                     action["server_timing"]["prev_send_ms"] = prev_send_time * 1000
                 if prev_total_time is not None:
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                # Remove attention grid before packing (not serializable via
+                # msgpack and only used for local recording).
+                attention_grid = action.pop("attention_grid", None)
 
                 pack_start = time.monotonic()
                 packed_action = packer.pack(action)
@@ -392,7 +457,7 @@ class WebsocketPolicyServer:
                 if connection_recorder is not None:
                     try:
                         record_start = time.monotonic()
-                        connection_recorder.record(obs, action)
+                        connection_recorder.record(obs, action, attention_grid=attention_grid)
                         record_time = time.monotonic() - record_start
                     except Exception:
                         logger.exception("Failed to record request for %s", websocket.remote_address)

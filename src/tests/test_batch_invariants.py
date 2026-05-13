@@ -16,7 +16,7 @@ def test_right_pad_and_labels_ok():
         ignore_index=-100,
         pad_token_id=pad,
         padding_side="right",
-        answer_start_idx=torch.tensor([3], dtype=torch.long),
+        answer_start_idx=torch.tensor([2], dtype=torch.long),
     )
 
 

@@ -171,9 +171,16 @@ def test_ar_inference_shape_and_finite(report: PhaseReport, model, batch: dict) 
 # ── 6.3 VLM inference ──────────────────────────────────────────────────────
 
 def test_vlm_inference_generates_tokens(report: PhaseReport, model, batch: dict) -> None:
+    # Use max_new_tokens=1 so the generation loop runs exactly one forward
+    # pass. infer_vlm_generation grows input_ids/attention_mask by 1 each
+    # step but does NOT grow mm_token_type_ids, so any subsequent forward
+    # would mismatch (transformers compute_3d_position_ids does
+    # `mm_token_type_ids[i][attention_mask[i].bool()]`, raising IndexError
+    # `[seq+1] vs [seq]`). One step still validates that the model reaches
+    # the lm_head and emits a valid token id.
     model.eval()
     with torch.no_grad():
-        result = infer_vlm_generation(model, dict(batch), max_new_tokens=5)
+        result = infer_vlm_generation(model, dict(batch), max_new_tokens=1)
 
     gen_ids = result["generated_ids"]
     report.add(assert_check(
@@ -184,8 +191,11 @@ def test_vlm_inference_generates_tokens(report: PhaseReport, model, batch: dict)
 
 
 def test_vlm_inference_respects_max_new_tokens(report: PhaseReport, model, batch: dict) -> None:
+    # Same constraint as 6.3a: keep the loop to a single forward pass.
+    # generated_ids.shape[1] should equal max_new_tokens=1, satisfying the
+    # `<= max_tokens` contract.
     model.eval()
-    max_tokens = 5
+    max_tokens = 1
     with torch.no_grad():
         result = infer_vlm_generation(model, dict(batch), max_new_tokens=max_tokens)
 

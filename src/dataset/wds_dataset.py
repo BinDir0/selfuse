@@ -9,28 +9,56 @@ import collections
 import glob
 import json
 import os
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 import webdataset as wds
+from webdataset.tariterators import base_plus_ext
+
+from .sanity_checks import attach_sample_ctx, build_sample_context
 
 
-# lowdim.npy layout (116,) float32:
-#   [0:18]    state/wrist
-#   [18:48]   state/hand
-#   [48:66]   action/wrist
-#   [66:96]   action/hand
-#   [96:112]  extrinsic
-#   [112:116] intrinsic
-LOWDIM_SLICES = {
+# lowdim.npy layout: base 96D (wrist/hand state+action) + 20D per camera
+# (extrinsic 16 + intrinsic 4) appended in meta["cameras"] order.
+# cameras[0] is always "head"; legacy shards with no cameras field are head-only.
+BASE_LOWDIM_SLICES = {
     'wrist_state':  (0, 18),
     'hand_state':   (18, 48),
     'wrist_action': (48, 66),
     'hand_action':  (66, 96),
-    'extrinsic':    (96, 112),
-    'intrinsic':    (112, 116),
 }
+BASE_LOWDIM_LEN = 96
+CAMERA_BLOCK_SIZE = 20
+
+
+def build_lowdim_slices(cameras):
+    """Return {field: (start, end)} for the given camera declaration.
+    cameras[0] must be 'head'.
+    """
+    if not cameras or cameras[0] != "head":
+        raise ValueError(f"cameras[0] must be 'head', got {cameras!r}")
+    slices = dict(BASE_LOWDIM_SLICES)
+    offset = BASE_LOWDIM_LEN
+    for cam in cameras:
+        slices[f'{cam}_extrinsic'] = (offset, offset + 16)
+        slices[f'{cam}_intrinsic'] = (offset + 16, offset + 20)
+        offset += CAMERA_BLOCK_SIZE
+    return slices
+
+
+# Head-only default with unprefixed "extrinsic"/"intrinsic" aliases so
+# pre-multi-camera audit scripts keep working.
+def build_legacy_lowdim_slices():
+    slices = build_lowdim_slices(["head"])
+    slices["extrinsic"] = slices["head_extrinsic"]
+    slices["intrinsic"] = slices["head_intrinsic"]
+    return slices
+
+
+LOWDIM_SLICES = build_legacy_lowdim_slices()
 
 
 def _is_shard_sequence(shard_patterns):
@@ -86,14 +114,17 @@ class WindowConfig:
     image_horizon: int = 1
     image_stride: int = 30
     history_pad_mode: str = "repeat"
-    future_pad_mode: str = "repeat"
+    action_pad_mode: str = "truncate"
+    future_frame_horizon: int = 0
+    future_frame_stride: int = 30
+    future_frame_pad_mode: str = "repeat"
 
     def __post_init__(self):
         valid_modes = {"repeat", "truncate"}
-        if self.history_pad_mode not in valid_modes:
-            raise ValueError(f"Invalid history pad mode: {self.history_pad_mode}")
-        if self.future_pad_mode not in valid_modes:
-            raise ValueError(f"Invalid future pad mode: {self.future_pad_mode}")
+        for name in ("history_pad_mode", "action_pad_mode", "future_frame_pad_mode"):
+            value = getattr(self, name)
+            if value not in valid_modes:
+                raise ValueError(f"Invalid {name}: {value}")
 
     @property
     def past_size(self):
@@ -105,18 +136,15 @@ class WindowConfig:
     
     @property
     def future_size(self):
-        """Number of future frames(including current) needed for action chunk."""
-        return (self.action_horizon - 1) * self.action_stride + 1
+        """Number of future frames (including current) needed for action + future frame prediction."""
+        action_max = (self.action_horizon - 1) * self.action_stride
+        ff_max = self.future_frame_horizon * self.future_frame_stride
+        return max(action_max, ff_max) + 1
 
 
-def decode_sample_fields(sample, lowdim_only=False):
-    """Decode metadata fields from a raw WebDataset sample.
-
-    Always decodes meta.json and lowdim.npy.  When *lowdim_only* is True
-    every other key is dropped so the sample is as small as possible
-    (used by normalizer-fitting pipelines).  Otherwise image/depth fields
-    are kept as raw bytes for deferred decoding after the shuffle buffer.
-    """
+def decode_sample_fields(sample):
+    """Eagerly decode meta.json and lowdim.npy; leave image/depth as bytes
+    for post-shuffle decoding."""
     import io as _io
     meta = sample.get("meta.json")
     if isinstance(meta, bytes):
@@ -124,12 +152,6 @@ def decode_sample_fields(sample, lowdim_only=False):
     ld = sample.get("lowdim.npy")
     if isinstance(ld, bytes):
         sample["lowdim.npy"] = np.load(_io.BytesIO(ld))
-    if lowdim_only:
-        return {
-            "__key__": sample.get("__key__", ""),
-            "meta.json": sample["meta.json"],
-            "lowdim.npy": sample.get("lowdim.npy"),
-        }
     return sample
 
 
@@ -153,9 +175,10 @@ def decode_media_fields(sample):
     return sample
 
 
-def unpack_lowdim(lowdim):
-    """Unpack a (116,) float32 lowdim vector into named fields."""
-    return {k: lowdim[s:e] for k, (s, e) in LOWDIM_SLICES.items()}
+def unpack_lowdim(lowdim, cameras=None):
+    """Unpack a lowdim vector into named fields. cameras=None → head-only."""
+    slices = LOWDIM_SLICES if cameras is None else build_lowdim_slices(cameras)
+    return {k: lowdim[s:e] for k, (s, e) in slices.items()}
 
 
 def gather_history_frames(past, buf, horizon, stride, pad_mode):
@@ -191,103 +214,140 @@ def gather_history_frames(past, buf, horizon, stride, pad_mode):
     return frames
 
 
-def build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only=False):
+def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
+    """Gather future frame references from the sliding window buffer.
+
+    Unified helper for both action-chunk and future-frame gathering.
+    Action chunks use offset_base=0 (buf[0] is the first target),
+    future frames use offset_base=stride (skip current frame).
+
+    Pad-mode semantics (`valid_count` follows downstream supervision):
+    - ``repeat``: refs is always length ``horizon``; padded positions hold
+      copies of the last real frame and are treated as VALID supervision.
+      ``valid_count == horizon`` whenever the buffer is non-empty.
+    - ``truncate``: refs has only the truly-available refs; ``valid_count``
+      equals the real number of in-bound offsets. Downstream masks skip
+      the invalid tail.
+
+    Returns:
+        (refs, valid_count): gathered references and count of positions
+        treated as valid supervision.
+    """
+    refs = []
+    valid_count = 0
+    for i in range(horizon):
+        offset = offset_base + i * stride
+        if offset < len(buf):
+            refs.append(buf[offset])
+            valid_count += 1
+        elif pad_mode == "repeat":
+            refs.append(buf[-1])
+            valid_count += 1
+    return refs, valid_count
+
+
+def build_sample_from_window(buf, past, config):
     """Build a training sample from the sliding window buffer.
 
-    Lowdim fields are materialized eagerly because they are small. RGB/depth
-    media stay as frame references so WebDataset shuffle buffers only retain
-    lightweight window descriptors; media arrays are copied later, after
-    shuffling, by ``materialize_sample_media``.
-
-    Args:
-        buf: deque of decoded samples, buf[0] is the current frame
-        past: deque of past frames (already yielded), past[-1] is most recent
-        config: WindowConfig with sampling parameters
-        lowdim_slices: dict mapping field names to (start, end) index pairs
-        lowdim_only: if True, only extract lowdim fields (skip image/depth)
+    RGB/depth stay as frame refs until ``materialize_sample_media`` runs
+    post-shuffle. breast_* calibration keys appear iff meta["cameras"]
+    declares breast; media decode is driven by key presence.
     """
     current = buf[0]
     meta = current["meta.json"]
+    cameras = meta.get("cameras", ["head"])
+    lowdim_slices = build_lowdim_slices(cameras)
 
-    # --- Action chunk: vectorized gather of future frames ---
-    n_avail = min(config.future_size, len(buf))
-    lowdims = np.stack([buf[i]["lowdim.npy"] for i in range(0, n_avail, config.action_stride)], axis=0)
-
-    len_lowdims = len(lowdims)
-    if config.future_pad_mode == "repeat":
+    # Action chunk: len(lowdims_full) is the valid count.
+    action_refs, _ = gather_future_refs(
+        buf, config.action_horizon, config.action_stride, config.action_pad_mode,
+        offset_base=0,
+    )
+    lowdims = np.stack([frame["lowdim.npy"] for frame in action_refs], axis=0)
+    len_lowdims = lowdims.shape[0]
+    if config.action_pad_mode == "repeat":
         if len_lowdims < config.action_horizon:
             pad = np.tile(lowdims[-1:], (config.action_horizon - len_lowdims, 1))
             lowdims_full = np.concatenate([lowdims, pad], axis=0)
         else:
             lowdims_full = lowdims
-    elif config.future_pad_mode == "truncate":
+    elif config.action_pad_mode == "truncate":
         lowdims_full = lowdims
     else:
-        raise ValueError(f"Invalid future pad mode: {config.future_pad_mode}")
+        raise ValueError(f"Invalid action_pad_mode: {config.action_pad_mode}")
 
-    ws, we = lowdim_slices['wrist_action']
-    hs, he = lowdim_slices['hand_action']
-    wrist_action = lowdims_full[:, ws:we]  # (H, 18)
-    hand_action = lowdims_full[:, hs:he]   # (H, 30)
-
-    # --- State: gather history frames and extract state slices ---
     state_frames = gather_history_frames(
         past, buf, config.state_horizon, config.state_stride, config.history_pad_mode)
     state_lds = np.stack([f["lowdim.npy"] for f in state_frames], axis=0)
 
-    wss, wse = lowdim_slices['wrist_state']
-    hss, hse = lowdim_slices['hand_state']
-    wrist_state = state_lds[:, wss:wse]  # (state_horizon, 18)
-    hand_state = state_lds[:, hss:hse]   # (state_horizon, 30)
+    image_frames = gather_history_frames(
+        past, buf, config.image_horizon, config.image_stride, config.history_pad_mode)
+    image_frame_refs = tuple(image_frames)
 
-    # --- Image/depth: keep frame references for post-shuffle materialization ---
-    image_frame_refs = None
-    if not lowdim_only:
-        image_frames = gather_history_frames(
-            past, buf, config.image_horizon, config.image_stride, config.history_pad_mode)
-        image_frame_refs = tuple(image_frames)
+    future_frame_refs = None
+    future_lowdims = None
+    if config.future_frame_horizon > 0:
+        ff_refs, _ = gather_future_refs(
+            buf, config.future_frame_horizon, config.future_frame_stride,
+            config.future_frame_pad_mode, offset_base=config.future_frame_stride,
+        )
+        if ff_refs:
+            future_frame_refs = tuple(ff_refs)
+            future_lowdims = np.stack(
+                [frame["lowdim.npy"] for frame in ff_refs], axis=0
+            )
 
-    # --- Extrinsic / Intrinsic: from current frame ---
+    # head_* map to canonical extrinsic/intrinsic; breast_* pass through.
     ld = current["lowdim.npy"]
-    es, ee = lowdim_slices['extrinsic']
-    ins, ine = lowdim_slices['intrinsic']
-    extrinsic = ld[es:ee]
-    intrinsic = ld[ins:ine]
+    result = {}
+    for field, (s, e) in lowdim_slices.items():
+        if field.endswith("_state"):
+            result[field] = state_lds[:, s:e].astype(np.float32)
+        elif field.endswith("_action"):
+            result[field] = lowdims_full[:, s:e].astype(np.float32)
+        elif field == "head_extrinsic":
+            result["extrinsic"] = ld[s:e].astype(np.float32)
+        elif field == "head_intrinsic":
+            result["intrinsic"] = ld[s:e].astype(np.float32)
+        elif field in ("breast_extrinsic", "breast_intrinsic"):
+            result[field] = ld[s:e].astype(np.float32)
 
-    # --- Instruction ---
-    instruction = meta["instruction"]
-    instruction_num = meta["instruction_num"]
-
-    # --- Presence: hand visibility flag (1=left, 2=right, 3=both) ---
-    presence = meta.get("presence", 3)
-
-    result = {
-        "valid_action_len": len_lowdims,
-        "wrist_state": wrist_state.astype(np.float32),
-        "hand_state": hand_state.astype(np.float32),
-        "wrist_action": wrist_action.astype(np.float32),
-        "hand_action": hand_action.astype(np.float32),
-        "extrinsic": extrinsic.astype(np.float32),
-        "intrinsic": intrinsic.astype(np.float32),
-        "instruction": instruction,
-        "instruction_num": instruction_num,
-        "presence": int(presence),
+    result.update({
+        "instruction": meta["instruction"],
+        "instruction_num": meta["instruction_num"],
+        # 1=left, 2=right, 3=both; human datasets only.
+        "presence": int(meta.get("presence", 3)),
         "dataset_name": meta.get("dataset_name", ""),
         "episode_index": meta.get("episode_index", 0),
-    }
-    if image_frame_refs is not None:
-        result["image_frame_refs"] = image_frame_refs
+        # Propagate webdataset locators so downstream skip logs can pinpoint
+        # the exact tar shard + current-frame key for offline triage.
+        "shard_url": current.get("__url__", ""),
+        "__key__": current.get("__key__", ""),
+    })
+
+    result["image_frame_refs"] = image_frame_refs
+    if future_frame_refs is not None:
+        result["future_frame_refs"] = future_frame_refs
+        # Per-camera future extrinsics [K_raw, 16] for WM motion conditioning.
+        if future_lowdims is not None:
+            hs, he = lowdim_slices["head_extrinsic"]
+            result["future_head_extrinsic"] = future_lowdims[:, hs:he].astype(np.float32)
+            if "breast_extrinsic" in lowdim_slices:
+                bs, be = lowdim_slices["breast_extrinsic"]
+                result["future_breast_extrinsic"] = future_lowdims[:, bs:be].astype(np.float32)
     return result
 
 
 def decode_image_bytes(raw):
-    """Decode a single image from raw bytes or PIL Image to numpy array."""
+    """Decode a single image from raw JPEG bytes (cv2.imdecode, ~2x faster
+    than PIL) or pass through an already-decoded array."""
     if isinstance(raw, bytes):
-        from PIL import Image
-        import io
-        image = np.array(Image.open(io.BytesIO(raw)).convert("RGB"), copy=False)
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("cv2.imdecode failed on image bytes")
+        cv2.cvtColor(image, cv2.COLOR_BGR2RGB, dst=image)
     else:
-        # Already decoded (PIL Image or numpy array)
         image = np.array(raw, copy=True)
     if image.ndim == 2:
         image = np.stack([image] * 3, axis=-1)
@@ -302,70 +362,88 @@ def decode_depth_bytes(raw):
     return np.array(raw, copy=True)
 
 
-def materialize_sample_media(sample):
-    """Materialize RGB/depth arrays from frame refs and drop the refs.
-
-    Supports both deferred-decode mode (raw bytes) and legacy mode
-    (already-decoded PIL Images / numpy arrays).  This runs after
-    shuffle so buffered samples share underlying frame objects.
+def stack_optional(sample, out_key, refs, src_key, decoder):
+    """Decode+stack `src_key` over `refs` into `sample[out_key]` if the
+    current frame carries it. All refs must carry it; otherwise raise.
     """
-    image_frame_refs = sample.pop("image_frame_refs", None)
-    if image_frame_refs is not None:
-        images = [decode_image_bytes(frame["image.jpg"]) for frame in image_frame_refs]
-        sample["image"] = np.stack(images, axis=0)
+    if refs[-1].get(src_key) is None:
+        return
+    arr = np.stack([decoder(f[src_key]) for f in refs], axis=0)
+    if arr.shape[0] != len(refs):
+        raise ValueError(f"{src_key}: got {arr.shape[0]} frames, expected {len(refs)}")
+    sample[out_key] = arr
 
-    if image_frame_refs and image_frame_refs[-1].get("depth.npy") is not None:
-        depth_list = [
-            decode_depth_bytes(frame["depth.npy"])
-            for frame in image_frame_refs
-            if frame.get("depth.npy") is not None
-        ]
-        if len(depth_list) != len(images):
-            raise ValueError(f"Depth list length {len(depth_list)} does not match image list length {len(images)}")
-        if depth_list:
-            sample["depth"] = np.stack(depth_list, axis=0)
+
+def materialize_sample_media(sample):
+    """Decode RGB/depth from frame refs; absent keys are skipped silently.
+    Which bytes arrive is gated upstream by ``select_files``."""
+    image_refs = sample.pop("image_frame_refs", None)
+    if image_refs is not None:
+        stack_optional(sample, "image", image_refs, "image.jpg", decode_image_bytes)
+        stack_optional(sample, "depth", image_refs, "depth.npy", decode_depth_bytes)
+        stack_optional(sample, "breast_image", image_refs, "breast_image.jpg", decode_image_bytes)
+        stack_optional(sample, "breast_depth", image_refs, "breast_depth.npy", decode_depth_bytes)
+
+    future_refs = sample.pop("future_frame_refs", None)
+    if future_refs is not None:
+        stack_optional(sample, "future_frames", future_refs, "image.jpg", decode_image_bytes)
+        stack_optional(sample, "breast_future_frames", future_refs, "breast_image.jpg", decode_image_bytes)
 
     return sample
 
 
-def sliding_window_compose(src, config, lowdim_slices, lowdim_only=False):
-    """Compose filter: sliding window over episode frames.
+def sliding_window_compose(src, config):
+    """Sliding window over episode frames (streaming, not per-episode
+    buffering).  Assumes shard order is contiguous within an episode;
+    yields as soon as ``future_size`` future frames are buffered and
+    clamps the tail at episode boundary.
 
-    Guarantees:
-    - Frames within an episode are contiguous and ordered in the shard
-    - Yields a sample as soon as action_horizon future frames are available
-    - At episode boundary, clamps action indices to the last frame (padding)
-    - Maintains a past deque for correct state/image history
-
-    Latency: only need to buffer action_horizon frames before first yield,
-    NOT the entire episode. This prevents worker stalls on long episodes.
+    Failures inside ``build_sample_from_window`` are re-raised with the
+    locator of ``buf[0]`` (the frame being windowed), and meta-access
+    failures with the locator of the just-fetched ``sample``, so the
+    error message points at the actual bad data rather than a buffered
+    neighbour.
     """
     buf = collections.deque()
     past = collections.deque(maxlen=config.past_size)
     cur_ep = None
 
+    def build_window():
+        # ``buf[0]`` is the current frame the window is centered on,
+        # captured before yielding so the closure stays cheap.
+        current = buf[0]
+        try:
+            return build_sample_from_window(buf, past, config)
+        except Exception as e:
+            raise RuntimeError(
+                f"data error on {build_sample_context(current)}"
+            ) from e
+
     for sample in src:
-        meta = sample["meta.json"]
-        ep_key = (meta.get("dataset_name", ""), meta["episode_index"])
+        try:
+            meta = sample["meta.json"]
+            ep_key = (meta.get("dataset_name", ""), meta["episode_index"])
+        except Exception as e:
+            raise RuntimeError(
+                f"data error on {build_sample_context(sample)}"
+            ) from e
 
         if ep_key != cur_ep:
-            # Episode boundary: flush remaining frames with clamped actions
+            # Episode boundary: flush with clamped actions.
             while buf:
-                yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
+                yield build_window()
                 past.append(buf.popleft())
             past.clear()
             cur_ep = ep_key
 
         buf.append(sample)
 
-        # Yield as soon as we have enough future context
         if len(buf) > config.future_size:
-            yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
+            yield build_window()
             past.append(buf.popleft())
 
-    # Final flush
     while buf:
-        yield build_sample_from_window(buf, past, config, lowdim_slices, lowdim_only)
+        yield build_window()
         past.append(buf.popleft())
 
 
@@ -374,121 +452,170 @@ def no_split(src):
     yield from src
 
 
-def select_lowdim_files(fname):
-    """Keep only lowdim metadata files for lowdim-only pipelines."""
-    return fname.endswith("meta.json") or fname.endswith("lowdim.npy")
+def resolve_shuffle_initial(shuffle_buffer: int | None, shuffle_initial: int | None) -> int:
+    """Cap WebDataset shuffle warmup so low keep_ratio does not stall startup."""
+    if not shuffle_buffer or shuffle_buffer <= 0:
+        return 0
+    if shuffle_initial is None:
+        return int(shuffle_buffer)
+    return max(1, min(int(shuffle_initial), int(shuffle_buffer)))
 
 
-def build_wds_pipeline(shard_urls, config=None, lowdim_slices=None,
-                       preprocess_fn=None, shuffle_buffer=16384, mode='train',
-                       use_sliding_window=True, lowdim_only=False,
-                       include_post_stages=True):
+def build_select_files(load_image: bool, load_depth: bool, load_breast: bool):
+    """Allow-list predicate for ``wds.WebDataset(select_files=...)``.
+    ``meta.json`` + ``lowdim.npy`` always pass; other VLA members gated
+    by the three flags.  Uses webdataset's own ``base_plus_ext`` so the
+    key/suffix split exactly matches how wds groups tar members.
+    """
+    allowed = {"meta.json", "lowdim.npy"}
+    if load_image:
+        allowed.add("image.jpg")
+    if load_depth:
+        allowed.add("depth.npy")
+    if load_breast:
+        allowed.add("breast_image.jpg")
+    if load_depth and load_breast:
+        allowed.add("breast_depth.npy")
+
+    def predicate(fname: str) -> bool:
+        _, suffix = base_plus_ext(fname)
+        # base_plus_ext returns (None, None) for unsplittable names;
+        # let wds handle those itself instead of dropping silently.
+        return suffix is None or suffix in allowed
+    return predicate
+
+
+def build_wds_pipeline(shard_urls, config=None,
+                       load_image=True, load_depth=False, load_breast=False,
+                       preprocess_fn=None, shuffle_buffer=16384, shuffle_initial=None,
+                       mode='train',
+                       use_sliding_window=True,
+                       include_post_stages=True,
+                       keep_ratio: float = 1.0,
+                       *, checker):
     """Build a WebDataset pipeline for a single dataset.
 
-    Training: resampled infinite stream with shard-level shuffle.
-    Validation: finite single-pass, deterministic order, no shuffle.
+    Train: resampled infinite stream with shard-level shuffle.
+    Val: finite single-pass, deterministic, no shuffle.
 
-    When *include_post_stages* is False the pipeline stops after
-    sliding-window compose (or decode), omitting shuffle / media
-    materialization / preprocess. This allows build_blended_dataset
-    to attach a single shared shuffle buffer after RandomMix.
+    ``include_post_stages=False`` stops after sliding-window compose so
+    ``build_blended_dataset`` can share one shuffle + materialize stack
+    across RandomMix.
 
     Args:
-        shard_urls: list of shard tar paths, a braceexpand pattern string,
-                    or a list of glob pattern strings (each expanded separately)
-        config: WindowConfig with sampling parameters (uses defaults if None)
-        lowdim_slices: dict mapping field names to (start, end) pairs
-        preprocess_fn: optional callable(sample_dict) -> sample_dict
-        shuffle_buffer: sample-level shuffle buffer size (train only)
-        mode: 'train' or 'val'
-        use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
-        lowdim_only: if True, only decode lowdim.npy and meta.json (skip image/depth)
-        include_post_stages: if False, skip shuffle / materialize / preprocess
+        shard_urls: tar path(s), braceexpand pattern, or list of globs.
+        config: WindowConfig (defaults if None).
+        load_image / load_depth / load_breast: tar-level modality gates.
+            load_breast=True pulls breast_image; combined with load_depth
+            also pulls breast_depth. Breast extrinsic/intrinsic slices
+            are meta-driven (independent of load_breast).
+        preprocess_fn: optional final map(sample) -> sample.
+        shuffle_buffer: sample-level buffer (train only).
+        shuffle_initial: number of kept samples to preload before yielding
+            from shuffle. Keep this much smaller than shuffle_buffer when
+            keep_ratio < 1.0 to avoid distributed startup stalls.
+        mode: 'train' or 'val'.
+        use_sliding_window: VLA=True, VLM=False. VLM path skips
+            ``select_files`` since image_N.jpg has variable N.
+        include_post_stages: if False, skip shuffle/materialize/preprocess.
+        keep_ratio: Bernoulli pre-shuffle keep probability (train only).
+            Lower = more shard diversity, higher IO.
+            Ref: DreamZero shard_sampling_rate.
+        checker: required ``DataChecker``. Every per-sample stage is
+            wrapped via ``attach_sample_ctx`` so DataSkipError is logged
+            and other failures carry sample locator info.
     """
+    assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
+
     if config is None:
         config = WindowConfig()
-    if lowdim_slices is None:
-        lowdim_slices = LOWDIM_SLICES
 
     shard_urls, shard_patterns_metadata = expand_shard_patterns(shard_urls)
     assert shard_urls, f"No shards found: {shard_patterns_metadata}"
 
     is_train = (mode == 'train')
-    select_files = select_lowdim_files if lowdim_only else None
+    # VLM uses image_N.jpg with variable N; skip tar-level filter.
+    select_files = (
+        build_select_files(load_image, load_depth, load_breast)
+        if use_sliding_window else None
+    )
 
-    # resampled=True uses ResampledShards (shardlists.py) whose seed mixes
-    # worker_seed/epoch with pid/time_ns/os.urandom, giving each worker/node
-    # an independent random shard sequence. Explicit node/worker splitters
-    # are therefore redundant and would only discard generated URLs.
-    # Ref: webdataset/shardlists.py ResampledShards.__iter__
-    pipeline = wds.WebDataset(
-        shard_urls,
-        shardshuffle=False,
-        nodesplitter=no_split if is_train else wds.split_by_node,
-        workersplitter=no_split if is_train else wds.shardlists.split_by_worker,
-        resampled=is_train,
-        empty_check=False,
-        select_files=select_files,
-    )
-    # Deferred decode: parse meta.json and lowdim.npy eagerly;
-    # image/depth stay as compressed bytes through the shuffle buffer.
-    pipeline = pipeline.map(
-        lambda s: decode_sample_fields(s, lowdim_only=lowdim_only)
-    )
+    # resampled=True's ResampledShards already gives per-worker/node
+    # independent shard sequences, so explicit splitters are redundant in
+    # train mode. Ref: webdataset/shardlists.py::ResampledShards.__iter__
+    stages = [
+        wds.WebDataset(
+            shard_urls,
+            shardshuffle=False,
+            nodesplitter=no_split if is_train else wds.split_by_node,
+            workersplitter=no_split if is_train else wds.shardlists.split_by_worker,
+            resampled=is_train,
+            empty_check=False,
+            select_files=select_files,
+        ),
+        # Eager meta/lowdim decode; media stays as bytes through shuffle.
+        attach_sample_ctx(decode_sample_fields, checker=checker),
+    ]
 
     if use_sliding_window:
-        pipeline = pipeline.compose(
-            lambda src: sliding_window_compose(src, config, lowdim_slices, lowdim_only)
-        )
+        stages.append(lambda src: sliding_window_compose(src, config))
 
-    if not include_post_stages:
-        return pipeline
+    # Drop pre-materialize so dropped windows skip JPEG decode.
+    if is_train and keep_ratio < 1.0:
+        keep_threshold = keep_ratio
+        stages.append(wds.select(lambda _s: random.random() < keep_threshold))
 
-    # Shuffle before media materialization so the buffer retains lightweight
-    # window descriptors with shared frame refs rather than copied image arrays.
-    if is_train and shuffle_buffer and shuffle_buffer > 0:
-        pipeline = pipeline.shuffle(shuffle_buffer, initial=shuffle_buffer)
+    if include_post_stages:
+        # Shuffle holds lightweight window descriptors (frame refs), not
+        # decoded images.
+        if is_train and shuffle_buffer and shuffle_buffer > 0:
+            stages.append(wds.shuffle(
+                shuffle_buffer, 
+                initial=resolve_shuffle_initial(shuffle_buffer, shuffle_initial), 
+            ))
 
-    # Materialize media after shuffle: VLA path decodes from frame refs,
-    # non-sliding-window path (VLM) decodes raw bytes in-place.
-    if not lowdim_only:
         if use_sliding_window:
-            pipeline = pipeline.map(materialize_sample_media)
+            stages.append(attach_sample_ctx(materialize_sample_media, checker=checker))
         else:
-            pipeline = pipeline.map(decode_media_fields)
+            stages.append(attach_sample_ctx(decode_media_fields, checker=checker))
 
-    if preprocess_fn is not None:
-        pipeline = pipeline.map(preprocess_fn)
+        if preprocess_fn is not None:
+            stages.append(attach_sample_ctx(preprocess_fn, checker=checker))
 
-    return pipeline
+    return wds.DataPipeline(*stages)
 
 
-def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
-                          preprocess_fn=None, shuffle_buffer=16384, mode='train',
-                          use_sliding_window=True, lowdim_only=False):
+def build_blended_dataset(datasets_config, config=None,
+                          load_image=True, load_depth=False, load_breast=False,
+                          preprocess_fn=None, shuffle_buffer=16384, shuffle_initial=None,
+                          mode='train',
+                          use_sliding_window=True,
+                          keep_ratio: float = 1.0,
+                          *, checker):
     """Build a blended dataset from multiple WebDataset sources.
 
-    Training: per-subset pipelines (no per-subset shuffle) mixed via
-    RandomMix, then a single shared shuffle buffer + media decode +
-    preprocess. This keeps memory independent of subset count N.
-    Validation: per-subset pipelines concatenated for single-pass evaluation.
+    Train: per-subset pipelines mixed via RandomMix, then one shared
+    shuffle + materialize + preprocess (memory independent of N subsets).
+    Val: per-subset pipelines concatenated for single-pass eval.
 
     Args:
-        datasets_config: list of dicts with keys:
-            - shard_urls: list of shard tar paths or glob pattern
-            - weight: sampling weight (train only)
-        config: WindowConfig with sampling parameters (uses defaults if None)
-        lowdim_slices: dict mapping field names to (start, end) pairs
-        preprocess_fn: optional preprocess function
-        shuffle_buffer: sample-level shuffle buffer size (train only)
-        mode: 'train' or 'val'
-        use_sliding_window: whether to compose sliding windows (VLA=True, VLM=False)
-        lowdim_only: if True, only decode lowdim.npy and meta.json (skip image/depth)
+        datasets_config: list of {"shard_urls": ..., "weight": ...}.
+        config: WindowConfig (defaults if None).
+        load_image / load_depth / load_breast: see ``build_wds_pipeline``.
+        preprocess_fn: optional final map(sample) -> sample.
+        shuffle_buffer: sample-level buffer (train only).
+        shuffle_initial: number of kept samples to preload before yielding
+            from the train shuffle stage.
+        mode: 'train' or 'val'.
+        use_sliding_window: VLA=True, VLM=False.
+        keep_ratio: forwarded per-subset; RandomMix weights are invariant
+            because every subset is thinned by the same factor.
+        checker: required ``DataChecker``; forwarded to per-subset
+            pipelines and used to wrap post-mix stages so failures carry
+            sample locator info.
     """
     if config is None:
         config = WindowConfig()
-    if lowdim_slices is None:
-        lowdim_slices = LOWDIM_SLICES
 
     is_train = (mode == 'train')
 
@@ -496,16 +623,21 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
     weights = []
     for c in datasets_config:
         urls = c["shard_urls"]
-        # Train: each subset produces raw samples (no shuffle / materialize /
-        # preprocess); these stages are applied once after RandomMix.
+        # Train: subsets emit raw samples; shuffle/materialize/preprocess
+        # run once after RandomMix.
         pipe = build_wds_pipeline(
-            urls, config, lowdim_slices,
+            urls, config,
+            load_image=load_image,
+            load_depth=load_depth,
+            load_breast=load_breast,
             preprocess_fn=preprocess_fn if not is_train else None,
             shuffle_buffer=shuffle_buffer,
+            shuffle_initial=shuffle_initial,
             mode=mode,
             use_sliding_window=use_sliding_window,
-            lowdim_only=lowdim_only,
             include_post_stages=not is_train,
+            keep_ratio=keep_ratio,
+            checker=checker,
         )
         subsets.append(pipe)
         weights.append(c.get("weight", 1.0))
@@ -518,22 +650,23 @@ def build_blended_dataset(datasets_config, config=None, lowdim_slices=None,
                 yield from pipe
         return chain_pipelines()
 
-    # Train: RandomMix → single shuffle → materialize → preprocess.
-    # RandomMix is an IterableDataset (not FluidInterface), so wrap
-    # with DataPipeline to append callable stages.
+    # RandomMix is an IterableDataset, not FluidInterface; wrap in
+    # DataPipeline to append post-mix stages.
     mixed = subsets[0] if len(subsets) == 1 else wds.RandomMix(subsets, weights, longest=False)
 
     stages = [mixed]
     if shuffle_buffer and shuffle_buffer > 0:
-        stages.append(wds.shuffle(shuffle_buffer, initial=shuffle_buffer))
+        stages.append(wds.shuffle(
+            shuffle_buffer,
+            initial=resolve_shuffle_initial(shuffle_buffer, shuffle_initial),
+        ))
 
-    if not lowdim_only:
-        if use_sliding_window:
-            stages.append(wds.map(materialize_sample_media))
-        else:
-            stages.append(wds.map(decode_media_fields))
+    if use_sliding_window:
+        stages.append(attach_sample_ctx(materialize_sample_media, checker=checker))
+    else:
+        stages.append(attach_sample_ctx(decode_media_fields, checker=checker))
 
     if preprocess_fn is not None:
-        stages.append(wds.map(preprocess_fn))
+        stages.append(attach_sample_ctx(preprocess_fn, checker=checker))
 
     return wds.DataPipeline(*stages)

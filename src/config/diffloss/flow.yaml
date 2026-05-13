@@ -1,0 +1,39 @@
+# @package _global_
+# DiffLoss enabled with flow matching. This preserves the original training
+# behavior before the diffloss config group was introduced.
+diffloss:
+  enabled: true
+  diffloss_repeat: 16
+  ar_action_encoder:
+    _target_: src.model.action.action_head.MLPEncoder
+    action_dim: ${dims.action_dim}
+    width: ${dims.vlm_hidden_size}
+    time_cond: False
+    enable_fourier_embed: False
+    mlp_depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  latent_condition_projector:
+    _target_: src.model.action.action_head.MLPDecoder
+    input_dim: ${dims.vlm_hidden_size}
+    output_dim: ${dims.diffloss_z_channels}
+    width: ${dims.vlm_hidden_size}
+    depth: 2
+    final_layer_norm: False
+    use_mlp_layer_norm: False
+  diffloss:
+    _target_: src.model.common.diffloss.DiffLoss
+    target_channels: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
+    z_channels: ${dims.diffloss_z_channels}
+    depth: 4
+    width: 1024
+    num_sampling_steps: "100"
+    grad_checkpointing: False
+    use_ddim_sampling: True
+    # DDPM LEARNED_RANGE mode triggers NaN ~20k steps: unbounded model_var_values
+    # cause exp() overflow in normal_kl (VB loss). Flow matching uses pure MSE,
+    # no exp(), no VB loss.
+    use_flow_matching: True
+    time_min_period: 0.004
+    time_max_period: 4.0
+    cond_dropout_prob: 0.0

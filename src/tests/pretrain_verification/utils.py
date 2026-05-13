@@ -311,7 +311,7 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "3.1": "Activation/Parameter 全局审计：NaN/Inf 检测 + AdaLNZero gate 监控 "
            "(已知 grad spike 风险)",
     "3.2": "Prefix KV Cache：shape=[num_layers,B,kv_heads,seq_len,head_dim], "
-           "knowledge_insulation 下 requires_grad=False",
+           "flow_expert.detach_prefix_kv=True 下 requires_grad=False",
     "3.3": "BFloat16 精度：bf16 vs fp32 loss 相对误差 < 10% (仅 CUDA)",
     # Phase 4: Loss
     "4.1": "CE Loss：纯 VLA batch → 0, 混合 batch > 0, 初始值 ≈ ln(151936) ≈ 11.9",
@@ -319,7 +319,7 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "4.3": "DiffLoss：chunk 构造 (unfold size=4), hidden state 采集位置",
     "4.4": "Total Loss 加权：total = 0.1·CE + 20.0·Diff + 1.0·Flow, 分量平衡检查",
     "4.5": "梯度流验证：3 组参数 (VLM/action_expert/diffloss) 均有非零梯度, "
-           "knowledge_insulation 阻断 backbone 梯度",
+           "flow_expert.detach_prefix_kv=True 阻断 backbone 梯度",
     # Phase 5: RTC
     "5.1": "RTC Delay 采样分布：exp 策略, 100k 次采样, P(delay=0) > 2×P(delay=7)",
     "5.2": "Prefix/Postfix Mask：forced_delay=3, 位置 0-2 为 prefix (t=1.0)",

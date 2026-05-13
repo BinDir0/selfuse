@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Volcengine MLP multi-node Accelerate FSDP2 launcher.
+# Volcengine MLP multi-node FSDP2 launcher using torchrun.
 # Usage: bash scripts/pretrain_legendvla_fsdp2_volc.sh
 #
 # Volcengine console example:
@@ -15,7 +15,7 @@
 #   MLP_WORKER_GPU: number of GPUs per worker
 #
 # This script assumes the container image already contains Python,
-# Accelerate, PyTorch, and all training dependencies in the root environment.
+# PyTorch, and all training dependencies in the root environment.
 # No Conda activation is required.
 #
 # Network assumptions validated on the training container:
@@ -29,7 +29,6 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 
 # ---------------- CONFIGURATION ----------------
-ACC_CONFIG="src/config/acc_config.yaml"
 SCRIPT="train.py"
 ARGS="experiment=legendvla_qwen3_vl"
 # -----------------------------------------------
@@ -40,13 +39,6 @@ MACHINE_RANK="$MLP_ROLE_INDEX"
 NNODES="$MLP_WORKER_NUM"
 GPUS_PER_NODE="$MLP_WORKER_GPU"
 
-if ! command -v accelerate >/dev/null 2>&1; then
-    echo "accelerate is not installed in the current environment."
-    exit 1
-fi
-
-TOTAL_PROCESSES=$((NNODES * GPUS_PER_NODE))
-
 cd "$PROJECT_DIR"
 
 RDMA_IFNAME="${RDMA_IFNAME:-eth1}"
@@ -56,7 +48,7 @@ export GLOO_SOCKET_IFNAME="$RDMA_IFNAME"
 export TP_SOCKET_IFNAME="$RDMA_IFNAME"
 export NCCL_SOCKET_IFNAME="$RDMA_IFNAME"
 export NCCL_DEBUG="INFO"
-export NCCL_TIMEOUT="3600000"
+export NCCL_TIMEOUT="3600"
 export NCCL_ASYNC_ERROR_HANDLING="1"
 export NCCL_IB_DISABLE="0"
 export NCCL_IB_HCA="=mlx5_1,=mlx5_2,=mlx5_3,=mlx5_4"
@@ -77,14 +69,14 @@ echo "Master Port: $MASTER_PORT"
 echo "Machine Rank: $MACHINE_RANK"
 echo "Num Machines: $NNODES"
 echo "GPUs Per Node: $GPUS_PER_NODE"
-echo "Total Processes: $TOTAL_PROCESSES"
 
-exec accelerate launch \
-    --config_file "$ACC_CONFIG" \
-    --num_machines "$NNODES" \
-    --machine_rank "$MACHINE_RANK" \
-    --main_process_ip "$MASTER_ADDR" \
-    --main_process_port "$MASTER_PORT" \
-    --num_processes "$TOTAL_PROCESSES" \
+exec torchrun \
+    --nnodes="$NNODES" \
+    --node_rank="$MACHINE_RANK" \
+    --master_addr="$MASTER_ADDR" \
+    --master_port="$MASTER_PORT" \
+    --nproc_per_node="$GPUS_PER_NODE" \
+    --no-python \
+    bash "$SCRIPT_DIR/numa_bind_wrapper.sh" \
     "$SCRIPT" \
     $ARGS

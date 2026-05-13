@@ -4,7 +4,7 @@ Quick experiments to fix visual token attention.
 Tests several interventions on a single-batch overfit to see which
 changes the attention distribution most:
 
-  A. Baseline (knowledge_insulation=True, as-is)
+  A. Baseline (detach_prefix_kv=True, as-is)
   B. Sink masking: mask position 0 in prefix cache
   C. Visual pooling: average-pool visual K/V from 432 → 27 tokens (4x4)
   D. Visual pooling + sink masking
@@ -194,7 +194,10 @@ def run_experiment(
         build_model_and_collator,
     )
     model, _ = build_model_and_collator(config_path, device)
-    model.knowledge_insulation = True
+    # Detach prefix KV in all experts to prevent backbone gradient flow.
+    model.flow_expert.detach_prefix_kv = True
+    if getattr(model, "world_model_expert", None) is not None:
+        model.world_model_expert.detach_prefix_kv = True
     model.train()
 
     print(f"\n{'='*60}")

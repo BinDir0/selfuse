@@ -21,7 +21,6 @@ SSH_USER=""
 GPUS_PER_NODE=8
 MASTER_PORT=18276
 
-ACC_CONFIG="src/config/acc_config.yaml"
 SCRIPT="train.py"
 ARGS="experiment=legendvla_qwen3_vl"
 # -----------------------------------------------
@@ -50,7 +49,7 @@ ssh_target_prefix() {
 remote_cleanup() {
     pdsh -S -R exec -w "$HOSTLIST" \
         ssh -o BatchMode=yes "$(ssh_target_prefix)%h" \
-        "pkill -f 'accelerate launch' || true; pkill -f 'train.py' || true" || true
+        "pkill -f 'torchrun' || true; pkill -f 'train.py' || true" || true
 }
 
 cleanup() {
@@ -73,9 +72,9 @@ echo "Master Port: $MASTER_PORT"
 echo "Total Processes: $TOTAL_PROCESSES"
 echo "Hostlist: $HOSTLIST"
 
-echo "Cleaning up previous runs on all nodes..."
-remote_cleanup
-echo "Cleanup complete."
+# echo "Cleaning up previous runs on all nodes..."
+# remote_cleanup
+# echo "Cleanup complete."
 
 read -r -d '' REMOTE_SCRIPT <<EOF || true
 cd "$PROJECT_DIR"
@@ -85,7 +84,7 @@ export NCCL_SOCKET_FAMILY=AF_INET
 export GLOO_SOCKET_IFNAME=eth0
 export TP_SOCKET_IFNAME=eth0
 export NCCL_DEBUG=INFO
-export NCCL_TIMEOUT=3600000
+export NCCL_TIMEOUT=3600
 export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_SOCKET_IFNAME=eth0
 export NCCL_IB_GID_INDEX=3
@@ -108,13 +107,14 @@ export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 export TORCH_LOGS="recompiles"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
-exec accelerate launch \\
-    --config_file "$ACC_CONFIG" \\
-    --num_machines "$NNODES" \\
-    --machine_rank __NODE_RANK__ \\
-    --main_process_ip "$MASTER_ADDR" \\
-    --main_process_port "$MASTER_PORT" \\
-    --num_processes "$TOTAL_PROCESSES" \\
+exec torchrun \\
+    --nnodes="$NNODES" \\
+    --node_rank=__NODE_RANK__ \\
+    --master_addr="$MASTER_ADDR" \\
+    --master_port="$MASTER_PORT" \\
+    --nproc_per_node="$GPUS_PER_NODE" \\
+    --no-python \\
+    bash "$PROJECT_DIR/scripts/numa_bind_wrapper.sh" \\
     "$SCRIPT" \\
     $ARGS
 EOF

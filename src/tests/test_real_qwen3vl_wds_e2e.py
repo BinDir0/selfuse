@@ -2,6 +2,7 @@ import io
 import json
 import os
 import tarfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,7 @@ from src.dataset.qwen3_vl_batching import Qwen3VLBatchProcessor, Qwen3VLChatForm
 from src.dataset.unified_vla_collator import UnifiedVLACollator
 from src.dataset.vla_dataset import UnifiedWdsDataset, VLAWdsDataset
 from src.dataset.vlm_dataset import VLMWdsDataset
-from src.model.action.action_head import FourierActionEncoder, MLPProjector
+from src.model.action.action_head import MLPEncoder, MLPDecoder
 from src.model.common.diffloss import DiffLoss
 from src.model.common.modules import TimeEmbedding
 from src.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
@@ -24,13 +25,93 @@ from src.tests.dummy_flow_expert import DummyFlowExpert
 
 
 MODEL_NAME = os.environ.get("LEGENDVLA_REAL_MODEL", "Qwen/Qwen3-VL-4B-Instruct")
+WM_MODEL_NAME = os.environ.get("LEGENDVLA_REAL_WM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 RUN_REAL_MODEL = os.environ.get("RUN_REAL_QWEN3VL_E2E") == "1"
+REAL_PROCESSOR_INIT_KWARGS = {
+    "trust_remote_code": False,
+    "local_files_only": True,
+    "size": {"shortest_edge": 50176, "longest_edge": 50176},
+}
+REAL_PROCESSOR_CALL_KWARGS = {
+    "padding": "longest",
+    "return_tensors": "pt",
+}
 
 
 pytestmark = pytest.mark.skipif(
     not RUN_REAL_MODEL,
     reason="Set RUN_REAL_QWEN3VL_E2E=1 to run the real Qwen3-VL integration test.",
 )
+
+
+@contextmanager
+def patched_hf_cache_env():
+    """Prefer local HF cache and neutralize unsupported proxy schemes in tests."""
+    env_keys = (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HF_HUB_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+    )
+    original = {key: os.environ.get(key) for key in env_keys}
+    try:
+        for key in ("ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+            os.environ[key] = ""
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        yield
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def resolve_attention_backends() -> tuple[str, str]:
+    from transformers.utils import is_flash_attn_2_available
+
+    text_impl = "sdpa"
+    vision_impl = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+    return text_impl, vision_impl
+
+
+
+def resolve_model_hidden_size(model_name: str) -> int:
+    from transformers import Qwen3VLConfig
+
+    config = Qwen3VLConfig.from_pretrained(
+        model_name,
+        trust_remote_code=False,
+        local_files_only=True,
+    )
+    return int(config.text_config.hidden_size)
+
+
+def has_local_model_weights(model_name: str) -> bool:
+    from transformers.utils.hub import cached_file
+
+    filenames = (
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+    )
+    for filename in filenames:
+        resolved = cached_file(
+            model_name,
+            filename,
+            local_files_only=True,
+            _raise_exceptions_for_gated_repo=False,
+            _raise_exceptions_for_missing_entries=False,
+        )
+        if resolved is not None:
+            return True
+    return False
 
 
 def add_bytes_to_tar(tar_obj: tarfile.TarFile, name: str, payload: bytes) -> None:
@@ -111,21 +192,26 @@ def write_vlm_shard(shard_path: Path) -> None:
         add_bytes_to_tar(tar, f"{key}.image_000.jpg", encode_jpeg(make_rgb_image(seed=2)))
 
 
-def make_shape_meta() -> dict:
+def make_shape_meta(
+    *,
+    image_horizon: int = 1,
+    state_horizon: int = 1,
+    action_horizon: int = 1,
+) -> dict:
     return {
         "obs": {
-            "rgb": {"shape": [64, 64, 3], "type": "rgb", "horizon": 1, "stride": 1},
+            "rgb": {"shape": [64, 64, 3], "type": "rgb", "horizon": image_horizon, "stride": 1},
             "depth": {"shape": [64, 64], "type": "depth", "horizon": 0, "stride": 1},
             "state": {
                 "wrist": {"shape": [18]},
                 "hand": {"shape": [30]},
                 "shape": [48],
                 "type": "fingertips",
-                "horizon": 1,
+                "horizon": state_horizon,
                 "stride": 1,
             },
         },
-        "action": {"shape": [48], "type": "fingertips", "horizon": 1, "stride": 1},
+        "action": {"shape": [48], "type": "fingertips", "horizon": action_horizon, "stride": 1},
     }
 
 
@@ -137,9 +223,17 @@ def make_identity_normalizer() -> LinearNormalizer:
     return normalizer
 
 
-def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
+def build_real_model(
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    model_name: str = MODEL_NAME,
+    shape_meta: dict | None = None,
+    loss_config: LossConfig | None = None,
+) -> LegendVLA:
+    text_attn_implementation, vision_attn_implementation = resolve_attention_backends()
     backbone = Qwen3VLBackboneWrapper(
-        model_name_or_path=MODEL_NAME,
+        model_name_or_path=model_name,
         trust_remote_code=False,
         freeze_backbone=False,
         torch_dtype="bfloat16",
@@ -163,15 +257,18 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
         },
         device_map={"": 0},
         low_cpu_mem_usage=True,
+        text_attn_implementation=text_attn_implementation,
+        vision_attn_implementation=vision_attn_implementation,
     )
 
     action_hidden_size = 128
     time_hidden_size = 128
     diffloss_z_channels = 128
+    resolved_shape_meta = shape_meta or make_shape_meta()
 
     model = LegendVLA(
         backbone=backbone,
-        state_encoder=FourierActionEncoder(
+        state_encoder=MLPEncoder(
             action_dim=48,
             width=backbone.hidden_size,
             time_cond=False,
@@ -180,7 +277,7 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
             final_layer_norm=False,
             use_mlp_layer_norm=False,
         ),
-        ar_action_encoder=FourierActionEncoder(
+        ar_action_encoder=MLPEncoder(
             action_dim=48,
             width=backbone.hidden_size,
             time_cond=False,
@@ -189,7 +286,7 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
             final_layer_norm=False,
             use_mlp_layer_norm=False,
         ),
-        action_encoder=FourierActionEncoder(
+        action_encoder=MLPEncoder(
             action_dim=48,
             width=action_hidden_size,
             time_cond=False,
@@ -200,7 +297,7 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
         ),
         time_embedding=TimeEmbedding(time_hidden_size),
         flow_expert=DummyFlowExpert(hidden_size=action_hidden_size, time_hidden_size=time_hidden_size),
-        action_decoder=MLPProjector(
+        action_decoder=MLPDecoder(
             input_dim=action_hidden_size,
             output_dim=48,
             width=action_hidden_size,
@@ -208,7 +305,7 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
             final_layer_norm=False,
             use_mlp_layer_norm=False,
         ),
-        latent_condition_projector=MLPProjector(
+        latent_condition_projector=MLPDecoder(
             input_dim=backbone.hidden_size,
             output_dim=diffloss_z_channels,
             width=256,
@@ -216,7 +313,7 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
             final_layer_norm=False,
             use_mlp_layer_norm=False,
         ),
-        shape_meta=make_shape_meta(),
+        shape_meta=resolved_shape_meta,
         diffloss=DiffLoss(
             target_channels=48,
             z_channels=diffloss_z_channels,
@@ -238,7 +335,7 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
         flow_config=FlowConfig(sampling="uniform", num_inference_steps=2),
         ar_action_train_config=ARActionTrainConfig(noise_std=0.0, chunk_size=1),
         rtc_config=RTCConfig(enabled=False),
-        loss_config=LossConfig(),
+        loss_config=loss_config or LossConfig(),
     )
 
     modules_to_move = [
@@ -252,7 +349,8 @@ def build_real_model(device: torch.device, dtype: torch.dtype) -> LegendVLA:
         model.diffloss,
     ]
     for module in modules_to_move:
-        module.to(device=device, dtype=dtype)
+        if module is not None:
+            module.to(device=device, dtype=dtype)
     return model
 
 
@@ -281,12 +379,17 @@ def preprocess_batch(batch: dict[str, torch.Tensor], dtype: torch.dtype, device:
     return inputs
 
 
-def build_real_dataloader(root: Path) -> DataLoader:
-    shape_meta = make_shape_meta()
+def build_real_dataloader(
+    root: Path,
+    *,
+    model_name: str = MODEL_NAME,
+    shape_meta: dict | None = None,
+    include_vlm: bool = True,
+    batch_size: int = 2,
+) -> DataLoader:
+    shape_meta = shape_meta or make_shape_meta()
     vla_shard = root / "vla" / "shard-000000.tar"
-    vlm_shard = root / "vlm" / "shard-000000.tar"
     write_vla_shard(vla_shard)
-    write_vlm_shard(vlm_shard)
 
     vla_dataset = VLAWdsDataset(
         wds_datasets=[{"name": "mini_vla", "shard_urls": str(vla_shard)}],
@@ -295,45 +398,42 @@ def build_real_dataloader(root: Path) -> DataLoader:
         use_relative_action=False,
         mode="val",
         shuffle_buffer=1,
-        history_pad_mode="repeat",
-        future_pad_mode="repeat",
     )
-    vlm_dataset = VLMWdsDataset(
-        wds_datasets=[{"name": "mini_vlm", "shard_urls": str(vlm_shard), "weight": 1.0}],
-        mode="val",
-        shuffle_buffer=1,
-    )
+    vlm_dataset = None
+    if include_vlm:
+        vlm_shard = root / "vlm" / "shard-000000.tar"
+        write_vlm_shard(vlm_shard)
+        vlm_dataset = VLMWdsDataset(
+            wds_datasets=[{"name": "mini_vlm", "shard_urls": str(vlm_shard), "weight": 1.0}],
+            mode="val",
+            shuffle_buffer=1,
+        )
 
     data_collator = UnifiedVLACollator(
         formatter=Qwen3VLChatFormatter(),
         batch_processor=Qwen3VLBatchProcessor(
-            model_name_or_path=MODEL_NAME,
-            processor_init_kwargs={
-                "trust_remote_code": False,
-                "size": {"shortest_edge": 50176, "longest_edge": 50176},
-            },
-            processor_call_kwargs={
-                "padding": "longest",
-                "return_tensors": "pt",
-            },
+            model_name_or_path=model_name,
+            processor_init_kwargs=REAL_PROCESSOR_INIT_KWARGS,
+            processor_call_kwargs=REAL_PROCESSOR_CALL_KWARGS,
             ignore_index=-100,
         ),
     )
     vla_dataset.set_collator(data_collator)
-    vlm_dataset.set_collator(data_collator)
+    if vlm_dataset is not None:
+        vlm_dataset.set_collator(data_collator)
     vla_dataset.set_normalizer(make_identity_normalizer())
 
     unified_dataset = UnifiedWdsDataset(
         vla_dataset=vla_dataset,
         vlm_dataset=vlm_dataset,
-        vla_ratio=0.5,
-        batch_size=2,
+        vla_ratio=1.0 if vlm_dataset is None else 0.5,
+        batch_size=batch_size,
         mode="val",
     )
 
     return DataLoader(
         dataset=unified_dataset,
-        batch_size=2,
+        batch_size=batch_size,
         num_workers=0,
         collate_fn=unified_dataset.get_collator(),
     )
@@ -349,42 +449,45 @@ def test_real_qwen3vl_wds_forward_backward(tmp_path: Path):
     np.random.seed(0)
     torch.cuda.empty_cache()
 
-    loader = build_real_dataloader(tmp_path)
-    batch = next(iter(loader))
+    with patched_hf_cache_env():
+        loader = build_real_dataloader(tmp_path)
+        batch = next(iter(loader))
 
-    assert batch["input_ids"].shape[0] == 2
-    assert int(batch["is_vla_data"].sum().item()) == 1
-    assert int((~batch["is_vla_data"].bool()).sum().item()) == 1
+        assert batch["input_ids"].shape[0] == 2
+        assert int(batch["is_vla_data"].sum().item()) == 1
+        assert int((~batch["is_vla_data"].bool()).sum().item()) == 1
 
-    device = torch.device("cuda")
-    dtype = torch.float32
-    model = build_real_model(device=device, dtype=dtype)
-    model.train()
+        device = torch.device("cuda")
+        dtype = torch.float32
+        model = build_real_model(device=device, dtype=dtype)
+        model.train()
 
-    inputs = preprocess_batch(batch, dtype=dtype, device=device)
-    output = model("train", inputs)
+        inputs = preprocess_batch(batch, dtype=dtype, device=device)
+        output = model("train", inputs)
 
-    assert output["total_loss"].requires_grad
-    assert torch.isfinite(output["total_loss"])
-    assert output["ce_loss"].item() > 0
-    assert output["diffusion_loss"].item() > 0
-    assert output["flow_loss"].item() > 0
+        assert output["total_loss"].requires_grad
+        assert torch.isfinite(output["total_loss"])
+        assert output["ce_loss"].item() > 0
+        assert output["diffusion_loss"].item() > 0
+        assert output["flow_loss"].item() > 0
 
-    output["total_loss"].backward()
+        output["total_loss"].backward()
 
-    has_backbone_grad = any(
-        param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
-        for param in model.trainable_vlm_parameters
-    )
-    has_expert_grad = any(
-        param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
-        for param in model.action_expert_parameters
-    )
-    has_diffloss_grad = any(
-        param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
-        for param in model.diffloss_parameters
-    )
+        has_backbone_grad = any(
+            param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
+            for param in model.trainable_vlm_parameters
+        )
+        has_expert_grad = any(
+            param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
+            for param in model.action_expert_parameters
+        )
+        has_diffloss_grad = any(
+            param.grad is not None and torch.isfinite(param.grad).all() and param.grad.abs().sum() > 0
+            for param in model.ar_action_heads_parameters
+        )
 
-    assert has_backbone_grad, "No gradient reached trainable real-backbone parameters"
-    assert has_expert_grad, "No gradient reached action expert parameters"
-    assert has_diffloss_grad, "No gradient reached diffloss parameters"
+        assert has_backbone_grad, "No gradient reached trainable real-backbone parameters"
+        assert has_expert_grad, "No gradient reached action expert parameters"
+        assert has_diffloss_grad, "No gradient reached diffloss parameters"
+
+

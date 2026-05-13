@@ -3,40 +3,13 @@ import torch.nn as nn
 from typing import Optional
 from src.model.common.modules import GaussianFourierFeatureTransform
 
-class ActionEncoder(nn.Module):
-    """Matching pi0 appendix"""
-
-    def __init__(self, action_dim: int, width: int, time_cond: bool = False):
-        super().__init__()
-        self.linear_1 = nn.Linear(action_dim, width)
-        if time_cond:
-            self.linear_2 = nn.Linear(2 * width, width)
-        else:
-            self.linear_2 = nn.Linear(width, width)
-        self.nonlinearity = nn.SiLU()  # swish
-        self.linear_3 = nn.Linear(width, width)
-        self.time_cond = time_cond
-
-    def forward(
-        self,
-        action: torch.FloatTensor,
-        time_emb: Optional[torch.FloatTensor] = None,
-    ) -> torch.FloatTensor:
-        # [Batch_Size, Seq_Len, Width]
-        emb = self.linear_1(action)
-        if self.time_cond:
-            # repeat time embedding for seq_len
-            # [Batch_Size, Seq_Len, Width]
-            time_emb_full = time_emb.unsqueeze(1).expand(-1, action.size(1), -1)
-            emb = torch.cat([time_emb_full, emb], dim=-1)
-        emb = self.nonlinearity(self.linear_2(emb))
-        emb = self.linear_3(emb)
-        return emb
-
-
-class FourierActionEncoder(nn.Module):
+class MLPEncoder(nn.Module):
     """
-    Action encoder with Gaussian Fourier feature embedding + MLP.
+    MLP encoder for continuous state/action inputs.
+
+    Optional Gaussian Fourier features can be enabled for high-frequency
+    coordinate-style inputs. With ``enable_fourier_embed=False`` this is a
+    plain MLP encoder.
     """
 
     def __init__(
@@ -127,9 +100,9 @@ class FourierActionEncoder(nn.Module):
         return emb
 
 
-class MLPProjector(nn.Module):
+class MLPDecoder(nn.Module):
     """
-    MLP projector with LayerNorm and SiLU.
+    MLP decoder/projector with optional final LayerNorm and SiLU hidden layers.
     """
 
     def __init__(
@@ -174,4 +147,3 @@ class MLPProjector(nn.Module):
             emb = self.final_layer_norm(emb)
         return emb
 
-        

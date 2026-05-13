@@ -553,18 +553,12 @@ def build_sample_export(
     save_json(sample_dir / "tokens.json", tokens)
     save_json(sample_dir / "labels_valid.json", valid_labels.tolist())
 
-    full_text = batch.get("debug_full_texts", [None] * len(batch["input_ids"]))[sample_index]
-    prompt_text = batch.get("debug_prompt_texts", [None] * len(batch["input_ids"]))[sample_index]
-    full_messages = batch.get("debug_full_messages", [None] * len(batch["input_ids"]))[sample_index]
-    prompt_messages = batch.get("debug_prompt_messages", [None] * len(batch["input_ids"]))[sample_index]
-    if full_text is not None:
-        save_text(sample_dir / "full_text.txt", full_text)
-    if prompt_text is not None:
-        save_text(sample_dir / "prompt_text.txt", prompt_text)
-    if full_messages is not None:
-        save_json(sample_dir / "full_messages.json", copy_for_save(full_messages))
-    if prompt_messages is not None:
-        save_json(sample_dir / "prompt_messages.json", copy_for_save(prompt_messages))
+    rendered_text = batch.get("debug_texts", [None] * len(batch["input_ids"]))[sample_index]
+    rendered_messages = batch.get("debug_messages", [None] * len(batch["input_ids"]))[sample_index]
+    if rendered_text is not None:
+        save_text(sample_dir / "rendered_text.txt", rendered_text)
+    if rendered_messages is not None:
+        save_json(sample_dir / "rendered_messages.json", copy_for_save(rendered_messages))
 
     n_states = int(batch["n_states"][sample_index].item())
     n_actions = int(batch["n_actions"][sample_index].item())

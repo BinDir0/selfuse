@@ -43,12 +43,12 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 def test_4d_mask_prefix_always_visible(report: PhaseReport) -> None:
     """Prefix positions should be visible (0) to all action queries."""
-    from src.model.action.qwen3_action_expert import Qwen3ActionExpert
+    from src.model.vlm.qwen3_expert import Qwen3Expert
 
     B, prefix_len, action_len, chunk_size = 2, 10, 32, 8
     kv_len = prefix_len + action_len
     full_mask_bool = torch.ones(B, kv_len, dtype=torch.bool)
-    mask = Qwen3ActionExpert.build_4d_attention_mask(
+    mask = Qwen3Expert.build_4d_attention_mask(
         full_mask_bool, prefix_len, action_len, chunk_size, torch.float32,
     )
     # mask shape: [B, 1, action_len, kv_len]
@@ -65,12 +65,12 @@ def test_4d_mask_prefix_always_visible(report: PhaseReport) -> None:
 
 def test_4d_mask_same_chunk_visible(report: PhaseReport) -> None:
     """Action tokens should only see same-chunk action tokens."""
-    from src.model.action.qwen3_action_expert import Qwen3ActionExpert
+    from src.model.vlm.qwen3_expert import Qwen3Expert
 
     B, prefix_len, action_len, chunk_size = 1, 10, 32, 8
     kv_len = prefix_len + action_len
     full_mask_bool = torch.ones(B, kv_len, dtype=torch.bool)
-    mask = Qwen3ActionExpert.build_4d_attention_mask(
+    mask = Qwen3Expert.build_4d_attention_mask(
         full_mask_bool, prefix_len, action_len, chunk_size, torch.float32,
     )
 
@@ -91,13 +91,13 @@ def test_4d_mask_same_chunk_visible(report: PhaseReport) -> None:
 
 def test_4d_mask_T1_fully_bidirectional(report: PhaseReport) -> None:
     """chunk_size == action_len: all actions should see all actions (single chunk)."""
-    from src.model.action.qwen3_action_expert import Qwen3ActionExpert
+    from src.model.vlm.qwen3_expert import Qwen3Expert
 
     B, prefix_len, action_len = 1, 10, 32
     chunk_size = action_len  # Single chunk
     kv_len = prefix_len + action_len
     full_mask_bool = torch.ones(B, kv_len, dtype=torch.bool)
-    mask = Qwen3ActionExpert.build_4d_attention_mask(
+    mask = Qwen3Expert.build_4d_attention_mask(
         full_mask_bool, prefix_len, action_len, chunk_size, torch.float32,
     )
 
@@ -113,14 +113,14 @@ def test_4d_mask_T1_fully_bidirectional(report: PhaseReport) -> None:
 
 def test_4d_mask_invalid_prefix_blocked(report: PhaseReport) -> None:
     """Padding positions in prefix (attention_mask=0) should be blocked."""
-    from src.model.action.qwen3_action_expert import Qwen3ActionExpert
+    from src.model.vlm.qwen3_expert import Qwen3Expert
 
     B, prefix_len, action_len, chunk_size = 1, 10, 16, 8
     kv_len = prefix_len + action_len
     full_mask_bool = torch.ones(B, kv_len, dtype=torch.bool)
     # Mark first 3 prefix positions as padding
     full_mask_bool[0, :3] = False
-    mask = Qwen3ActionExpert.build_4d_attention_mask(
+    mask = Qwen3Expert.build_4d_attention_mask(
         full_mask_bool, prefix_len, action_len, chunk_size, torch.float32,
     )
 

@@ -5,11 +5,17 @@ Data transformation functions for LegendVLA datasets.
 import random
 from typing import Optional
 
+# Source: https://albumentations.ai/docs/benchmarks/image-benchmarks/
+# ColorJitter on CPU: ~11-13x faster than torchvision (1199 vs 88 img/s).
+import albumentations as A
+import cv2
 import numpy as np
 import torch
-from PIL import Image
-from torchvision.transforms import ColorJitter
-from torchvision.transforms import functional as TF
+
+# cv2 defaults to using all cores for its internal thread pool. With multiple
+# dataloader workers each spawning that pool, they would trample each other.
+# Force single-threaded so each worker only uses its assigned affinity cores.
+cv2.setNumThreads(0)
 
 from src.utils.geometry import (
     transform_wrist_to_target_frame,
@@ -20,6 +26,17 @@ from src.utils.geometry import (
     transform_hand_points_from_wrist_to_camera_frame,
 )
 from src.model.common.normalizer import LinearNormalizer
+
+# Module-level color augmentation. Stateless: samples new params per __call__.
+# Hue intentionally dropped: it harmed color-sensitive VLA/VLM tasks.
+# Using albumentations for ~11x CPU speedup vs torchvision on ColorJitter.
+COLOR_AUG = A.ColorJitter(
+    brightness=(0.7, 1.3),
+    contrast=(0.7, 1.3),
+    saturation=(0.7, 1.3),
+    hue=0,
+    p=1.0,
+)
 
 
 def get_relative_action(state, action):
@@ -183,17 +200,11 @@ def process_state_action(
     if use_relative_action:
         processed_action = get_relative_action(processed_state[-1], processed_action)
 
-    if normalizer is not None:
-        if not use_relative_action: # Use unified normalizer for both state and action
-            state = normalizer['motions'](processed_state)
-            action = normalizer['motions'](processed_action)
-        else: # Use separate normalizers for state and action
-            state = normalizer['states'](processed_state)
-            action = normalizer['actions'](processed_action)
-    else: # No normalizer
-        state = processed_state
-        action = processed_action
-    return state, action
+    if normalizer is None:
+        return processed_state, processed_action
+    if use_relative_action:
+        return normalizer['states'](processed_state), normalizer['actions'](processed_action)
+    return normalizer['motions'](processed_state), normalizer['motions'](processed_action)
 
 def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0)):
     '''Random crop then resize back. Same crop for all frames (temporal consistency).'''
@@ -207,17 +218,14 @@ def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0))
     x0 = random.randint(0, W - crop_w)
     sx, sy = W / crop_w, H / crop_h
 
-    # Crop + resize RGB (bilinear)
-    images = np.stack([
-        np.array(Image.fromarray(f).crop((x0, y0, x0 + crop_w, y0 + crop_h)).resize((W, H), Image.BILINEAR), dtype=np.uint8)
-        for f in images
-    ])
+    # Crop = numpy slicing; resize = cv2 (SIMD-optimized, ~10x faster than PIL).
+    cropped = images[:, y0:y0 + crop_h, x0:x0 + crop_w]
+    images = np.stack([cv2.resize(f, (W, H), interpolation=cv2.INTER_LINEAR) for f in cropped])
 
-    # Crop + resize depth (nearest to avoid interpolation artifacts at edges)
     if depth_images is not None:
+        cropped_depth = depth_images[:, y0:y0 + crop_h, x0:x0 + crop_w]
         depth_images = np.stack([
-            np.array(Image.fromarray(f, mode='F').crop((x0, y0, x0 + crop_w, y0 + crop_h)).resize((W, H), Image.NEAREST), dtype=np.float32)
-            for f in depth_images
+            cv2.resize(f, (W, H), interpolation=cv2.INTER_NEAREST) for f in cropped_depth
         ])
 
     # Update intrinsic [fx, fy, cx, cy] for the crop-then-resize transform
@@ -232,29 +240,18 @@ def random_resized_crop(images, depth_images, intrinsic, scale_range=(0.9, 1.0))
 
 
 def augment_color(images):
-    '''Color jitter + Gaussian blur. Params sampled once for temporal consistency.'''
-    fn_idx, brightness, contrast, saturation, hue = ColorJitter.get_params(
-        brightness=(0.7, 1.3), contrast=(0.7, 1.3),
-        saturation=(0.7, 1.3), hue=(-0.1, 0.1),
-    )
-    sigma = random.uniform(0.1, 2.0)
+    '''Color jitter via albumentations on uint8 numpy array.
 
-    jitter = [
-        lambda img: TF.adjust_brightness(img, brightness),
-        lambda img: TF.adjust_contrast(img, contrast),
-        lambda img: TF.adjust_saturation(img, saturation),
-        lambda img: TF.adjust_hue(img, hue),
-    ]
-    ops = [jitter[i] for i in fn_idx]
-    ops.append(lambda img: TF.gaussian_blur(img, kernel_size=[5, 5], sigma=sigma))
-
-    def apply(frame):
-        pil = Image.fromarray(frame)
-        for op in ops:
-            pil = op(pil)
-        return np.array(pil, dtype=np.uint8)
-
-    return np.stack([apply(f) for f in images])
+    Stack N frames vertically into a single [N*H, W, 3] image so one call to
+    A.ColorJitter samples params once and applies them to all frames,
+    preserving temporal consistency. ColorJitter is pixel-wise so this is
+    strictly equivalent to per-frame apply with shared params, but avoids
+    N times the Python dispatch overhead.
+    '''
+    N, H, W, C = images.shape
+    stacked = np.ascontiguousarray(images.reshape(N * H, W, C))
+    jittered = COLOR_AUG(image=stacked)["image"]
+    return jittered.reshape(N, H, W, C)
 
 
 def augment_depth(depth_images, noise_scale=0.005, dropout_prob=0.5):
@@ -280,30 +277,22 @@ def augment_depth(depth_images, noise_scale=0.005, dropout_prob=0.5):
     return depth_images
 
 
-def resize_frames(frames, target_hw, interpolation=Image.BILINEAR):
-    '''Resize a batch of frames to target (H, W).
+def resize_frames(frames, target_hw, interpolation=cv2.INTER_LINEAR):
+    '''Resize a batch of frames to target (H, W) via cv2.resize.
 
     Args:
         frames: np.ndarray, shape [N, H, W, C] (uint8 RGB) or [N, H, W] (depth float32).
         target_hw: (target_H, target_W).
-        interpolation: PIL resampling filter. Use NEAREST for depth to avoid
-            interpolation artifacts at depth discontinuities.
+        interpolation: cv2 interpolation flag. Use cv2.INTER_NEAREST for depth
+            to avoid interpolation artifacts at depth discontinuities.
     Returns:
         np.ndarray with the same dtype, resized to target spatial dimensions.
     '''
     tH, tW = target_hw
     if frames.shape[1] == tH and frames.shape[2] == tW:
         return frames
-    is_depth = frames.ndim == 3
-    mode = 'F' if is_depth else None
-    resized = np.stack([
-        np.array(
-            Image.fromarray(f, mode=mode).resize((tW, tH), interpolation),
-            dtype=frames.dtype,
-        )
-        for f in frames
-    ])
-    return resized
+    # cv2.resize takes (W, H), not (H, W).
+    return np.stack([cv2.resize(f, (tW, tH), interpolation=interpolation) for f in frames])
 
 
 def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
@@ -330,9 +319,9 @@ def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
         _, H, W, _ = image.shape
         if H != tH or W != tW:
             sx, sy = tW / W, tH / H
-            image = resize_frames(image, target_size, interpolation=Image.BILINEAR)
+            image = resize_frames(image, target_size, interpolation=cv2.INTER_LINEAR)
             if depth_image is not None:
-                depth_image = resize_frames(depth_image, target_size, interpolation=Image.NEAREST)
+                depth_image = resize_frames(depth_image, target_size, interpolation=cv2.INTER_NEAREST)
             if intrinsic is not None:
                 intrinsic = intrinsic.copy()
                 intrinsic[0] *= sx  # fx
@@ -345,8 +334,8 @@ def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
     if depth_image is not None and depth_image.dtype == np.uint16:
         depth_image = depth_image.astype(np.float32) / 1000.0
 
-    if aug_transform is not None:
-        image, depth_image, intrinsic = random_resized_crop(image, depth_image, intrinsic)
+    if aug_transform:
+        # image, depth_image, intrinsic = random_resized_crop(image, depth_image, intrinsic)
         image = augment_color(image)
         if depth_image is not None:
             depth_image = augment_depth(depth_image)
@@ -355,3 +344,34 @@ def process_image(image, depth_image=None, intrinsic=None, aug_transform=None,
         depth_image = np.clip(depth_image, depth_clip_range[0], depth_clip_range[1])
 
     return image, depth_image, intrinsic
+
+
+def compute_relative_motion_padded(
+    current_flat16: Optional[np.ndarray],
+    future_flat: Optional[np.ndarray],
+    n_valid: int,
+    K: int,
+) -> np.ndarray:
+    """Future camera pose expressed in the current camera frame.
+
+    The dataset stores T_world→cam extrinsics, so the transform that takes
+    a point in future-cam coordinates back to current-cam coordinates is
+    ``T_cam_cur ← cam_fut = T_w2c_cur @ T_c2w_fut = T_w2c_cur @ inv(T_w2c_fut[k])``.
+
+    Invalid steps (k >= n_valid or source missing) are zero-filled;
+    downstream mask (frame_valid = arange(K) < n_future_frames) drops them.
+    Flattened to 16D (row-major) per future step for loader emission.
+    """
+    out = np.zeros((K, 16), dtype=np.float32)
+    if current_flat16 is None or future_flat is None or n_valid <= 0:
+        return out
+    n = min(int(n_valid), int(K), int(future_flat.shape[0]))
+    if n <= 0:
+        return out
+    T_cur = current_flat16.reshape(4, 4).astype(np.float32)
+    T_fut = future_flat[:n].reshape(n, 4, 4).astype(np.float32)
+    T_fut_inv = np.linalg.inv(T_fut)
+    # rel[k] = T_cur @ inv(T_fut[k])
+    rel = np.einsum("ij,kjl->kil", T_cur, T_fut_inv)
+    out[:n] = rel.reshape(n, 16)
+    return out

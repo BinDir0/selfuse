@@ -18,6 +18,7 @@ class DummyBatchProcessor:
         self.padding_side = "right"
         self.state_token = "<state>"
         self.action_token = "<action>"
+        self.camera_token = "<camera>"
         self.action_token_id = 102
         self.processor_call_kwargs = {"text_kwargs": {"padding": "max_length", "max_length": 32}}
 
@@ -79,6 +80,18 @@ class DummyBatchProcessor:
         labels = labels.masked_fill(positions < answer_start_idx.unsqueeze(1), self.ignore_index)
         return labels
 
+    def find_answer_start_idx(self, input_ids: torch.Tensor) -> torch.Tensor:
+        action_mask = input_ids == self.action_token_id
+        has_action = action_mask.any(dim=1)
+        first_action = action_mask.float().argmax(dim=1).to(dtype=torch.long)
+        default_idx = torch.full(
+            (input_ids.shape[0],),
+            input_ids.shape[1],
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+        return torch.where(has_action, first_action, default_idx)
+
 
 class DummyTokenizerForBatchProcessor:
     def add_special_tokens(self, _tokens):
@@ -106,7 +119,7 @@ def build_dummy_collator() -> UnifiedVLACollator:
 
 def build_wrapper_stub(
     *,
-    history_pad_mode: str = "truncate",
+    history_pad_mode: str = "repeat",
     mode: str = "flow",
     data_collator: Any | None = None,
 ) -> LegendVLAInference:
@@ -162,6 +175,8 @@ def make_expected_vla_sample(
         "images": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
         "instruction": instruction,
         "intrinsic": torch.tensor([1.0, 1.0, 0.5, 0.5], dtype=torch.float32),
+        "active_views": ["head"],
+        "view_mask": torch.tensor([True, False], dtype=torch.bool),
         "vision_type": "video",
         "video_fps": torch.tensor(30.0, dtype=torch.float32),
         "states": states,
@@ -188,4 +203,3 @@ def make_debug_args(**kwargs: Any) -> SimpleNamespace:
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
-

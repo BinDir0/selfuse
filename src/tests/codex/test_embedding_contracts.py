@@ -31,9 +31,9 @@ def test_backbone_stream_hidden_states_and_prefix_cache_are_finite():
     assert torch.isfinite(backbone_output.last_hidden_states).all()
     assert backbone_output.prefix_cache is not None
     assert torch.equal(backbone_output.prefix_cache.mask.sum(dim=1), prefix_lengths)
-    for layer in backbone_output.prefix_cache.layers:
-        assert torch.isfinite(layer.key).all()
-        assert torch.isfinite(layer.value).all()
+    assert backbone_output.prefix_cache.num_layers > 0
+    assert torch.isfinite(backbone_output.prefix_cache.keys).all()
+    assert torch.isfinite(backbone_output.prefix_cache.values).all()
 
 
 def test_hidden_state_distribution_summary_has_non_zero_variance():
@@ -47,4 +47,3 @@ def test_hidden_state_distribution_summary_has_non_zero_variance():
     summary = analyze_embedding_distribution(hidden_states, plot=False)
     assert summary["global_stats"]["std"] > 0
     assert summary["per_vector_stats"]["norms"]["mean"] > 0
-

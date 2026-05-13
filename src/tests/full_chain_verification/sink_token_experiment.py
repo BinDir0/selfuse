@@ -95,7 +95,10 @@ def run_experiment(
         build_model_and_collator,
     )
     model, _ = build_model_and_collator(config_path, device)
-    model.knowledge_insulation = True
+    # Detach prefix KV in all experts to prevent backbone gradient flow.
+    model.flow_expert.detach_prefix_kv = True
+    if getattr(model, "world_model_expert", None) is not None:
+        model.world_model_expert.detach_prefix_kv = True
     model.train()
 
     print(f"\n{'='*60}")

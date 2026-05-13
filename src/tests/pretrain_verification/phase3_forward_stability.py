@@ -43,7 +43,7 @@ from src.tests.pretrain_verification.utils import (
 
 def _build_dummy_model_and_batch():
     from src.tests.test_e2e_forward_backward import build_model, build_batch
-    model = build_model(with_diffloss=True, knowledge_insulation=True)
+    model = build_model(with_diffloss=True, detach_prefix_kv=True)
     batch = build_batch(batch_size=2)
     return model, batch
 
@@ -160,10 +160,10 @@ def check_3_2_prefix_cache(model, batch) -> CheckResult:
         if mask.shape[0] != B:
             errors.append(f"mask batch dim mismatch: {mask.shape[0]} != {B}")
 
-    # Knowledge insulation: check detach
-    if hasattr(model, "knowledge_insulation") and model.knowledge_insulation:
+    # detach_prefix_kv: prefix cache should have no grad when expert detaches
+    if getattr(model.flow_expert, "detach_prefix_kv", False):
         if keys.requires_grad:
-            errors.append("knowledge_insulation=True but prefix_cache.keys has requires_grad=True")
+            errors.append("flow_expert.detach_prefix_kv=True but prefix_cache.keys has requires_grad=True")
 
     passed = len(errors) == 0
     msg = f"Cache shape [{list(keys.shape)}]" if passed else f"{len(errors)} errors"
@@ -237,7 +237,7 @@ def main():
 
     print("Building model and batch...\n")
     from src.tests.test_e2e_forward_backward import build_model, build_batch
-    model = build_model(with_diffloss=True, knowledge_insulation=True)
+    model = build_model(with_diffloss=True, detach_prefix_kv=True)
     batch = build_batch(batch_size=2)
 
     # Check 3.1: Activation audit
@@ -248,7 +248,7 @@ def main():
 
     # Check 3.3: BF16 precision
     report.add(check_3_3_bf16_precision(
-        lambda: build_model(with_diffloss=True, knowledge_insulation=True),
+        lambda: build_model(with_diffloss=True, detach_prefix_kv=True),
         lambda: build_batch(batch_size=2),
     ))
 

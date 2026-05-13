@@ -9,7 +9,7 @@ flow:
   num_inference_steps: 10
 
 training:
-  steps_per_epoch: 100000
+  steps_per_epoch: 240000
   seed: 42
   dynamic_data_seed: True
   objective: ${objective}
@@ -17,19 +17,23 @@ training:
   profile: False 
   resume: False
   lr_scheduler: cosine
-  lr_warmup_steps: 2000
-  vlm_freeze_steps: 0              # update steps to train only random-init params before VLM joins optimization (0 = no staged freeze)
-  vlm_rewarmup_steps: 0            # VLM-only warmup steps after freeze ends (0 = instant restore to base VLM lr)
+  lr_warmup_steps: 5000
+  vlm_freeze_steps: 5000              # update steps to train only random-init params before VLM joins optimization (0 = no staged freeze)
+  vlm_rewarmup_steps: 2000            # VLM-only warmup steps after freeze ends (0 = instant restore to base VLM lr)
   train_vlm: True
   train_depth: False
   resume_checkpoint_path: 
   finetune_checkpoint_path:
-  normalizer_path: /share_data/chenzhang/projects/diffloss-ar/outputs/normalizer/2026.03.31-relative-mixed/normalizer.pkl
+  normalizer_path: /efs-exp/chenzhang/Projects/LegendVLA-wm-torch/outputs/normalizer/2026.04.28-relative-10k-pretrain/normalizer.pkl
   max_train_steps: null
   max_eval_steps: null
   num_epochs: 2
+  gradient_accumulation_steps: 2   # number of micro-batches to accumulate before each optimizer step (1 = disabled)
+  fsdp:
+    enable_prefetch: True
+    reshard_after_forward: False
   use_bf16: True
-  log_interval: 1
+  log_interval: 20
   eval_thresholds: [0.05, 0.1, 0.2, 0.3, 0.5]
   save_eval_attn_weights: False
   eval_every: 5000
@@ -60,6 +64,7 @@ training:
     text: True  # Keep text decoder blocks on by default.
     flow: True  # Keep action-expert blocks on by default.
     diffloss: True  # Keep diffloss blocks on by default.
+    world_model: True  # Compile world model expert + frozen DINOv3 teacher (no_grad) when use_world_model.
   # Per-component gradient checkpointing. Set to plain `False` to disable all,
   # or `True` to enable all with every_n=1 (backward compatible).
   gradient_checkpointing:
@@ -81,7 +86,11 @@ optimizer:
     lr: 1e-4
     betas: [0.9, 0.95]
     weight_decay: 5e-3
-  diffloss:
+  ar_action_heads:
     lr: 8e-4
+    betas: [0.9, 0.95]
+    weight_decay: 1e-2
+  world_model:
+    lr: 3e-4
     betas: [0.9, 0.95]
     weight_decay: 1e-2

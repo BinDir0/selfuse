@@ -3,9 +3,14 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import numpy as np
 import torch
 
-from src.dataset.qwen3_vl_batching import Qwen3VLBatchProcessor, Qwen3VLChatFormatter
+from src.dataset.qwen3_vl_batching import (
+    Qwen3VLBatchProcessor,
+    Qwen3VLChatFormatter,
+    resolve_active_views,
+)
 
 
 class UnifiedVLACollator:
@@ -15,8 +20,8 @@ class UnifiedVLACollator:
 
     Input sample contract:
     - VLA samples provide `instruction`, `images`, `intrinsic`, `states`, `actions`, `n_states`, `n_actions`,
-      `vision_type`, `video_fps`, and `is_vla_data=True`.
-    - VLM samples provide `question`, `answer`, `images`, `vision_type`, and `is_vla_data=False`.
+      `active_views`, `view_mask`, `vision_type`, `video_fps`, and `is_vla_data=True`.
+    - VLM samples provide `question`, `answer`, `images`, `view_mask`, `vision_type`, and `is_vla_data=False`.
 
     Output contract:
     - The returned batch always includes HF multimodal fields such as `input_ids`, `attention_mask`,
@@ -46,6 +51,8 @@ class UnifiedVLACollator:
             raise ValueError("Formatter and batch processor must share the same state token.")
         if self.formatter.action_token != self.batch_processor.action_token:
             raise ValueError("Formatter and batch processor must share the same action token.")
+        if self.batch_processor.camera_token != self.formatter.camera_token:
+            raise ValueError("Formatter and batch processor must share the same camera token.")
 
     def collate_values(self, values: list[Any]) -> Any:
         if isinstance(values[0], torch.Tensor):
@@ -55,38 +62,19 @@ class UnifiedVLACollator:
     def collate_raw(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         """Build one batch from raw dataset samples.
 
-        Two encoding strategies depending on ``prompt_only_input``:
-
-        - **Training** (``prompt_only_input=False``):
-          Full-conversation encode (with assistant content) for model inputs,
-          plus a prompt-only encode to locate ``answer_start_idx``.
-        - **Inference** (``prompt_only_input=True``):
-          Prompt-only encode with ``add_generation_prompt=True`` only.
-          No assistant content in ``input_ids``; downstream modules use
-          ``answer_start_idx`` to locate the generation boundary.
+        Single processor pass: full conversation in training, prompt-only +
+        add_generation_prompt in inference. Answer boundary recovered from
+        input_ids via find_answer_start_idx.
         """
         collate_start = time.perf_counter()
 
-        # Prompt-only encode: always needed for answer_start_idx.
-        prompt_messages = [self.formatter.build_messages(sample, prompt_only=True) for sample in samples]
-        prompt_batch = self.batch_processor.encode_messages(
-            messages_batch=prompt_messages,
+        messages = [self.formatter.build_messages(sample, prompt_only=self.prompt_only_input) for sample in samples]
+        main_batch = self.batch_processor.encode_messages(
+            messages_batch=messages,
             batch_samples=samples,
-            add_generation_prompt=True,
+            add_generation_prompt=self.prompt_only_input,
             return_rendered_texts=self.debug_capture_texts,
         )
-
-        if self.prompt_only_input:
-            main_batch = prompt_batch
-            full_messages = None
-        else:
-            full_messages = [self.formatter.build_messages(sample, prompt_only=False) for sample in samples]
-            main_batch = self.batch_processor.encode_messages(
-                messages_batch=full_messages,
-                batch_samples=samples,
-                add_generation_prompt=False,
-                return_rendered_texts=self.debug_capture_texts,
-            )
 
         input_ids = main_batch["input_ids"].to(dtype=torch.long)
         attention_mask = main_batch["attention_mask"].to(dtype=torch.long)
@@ -98,7 +86,9 @@ class UnifiedVLACollator:
             device=input_ids.device,
             dtype=torch.bool,
         )
-        answer_start_idx = prompt_batch["attention_mask"].sum(dim=1).to(device=input_ids.device, dtype=torch.long)
+        answer_start_idx = self.batch_processor.find_answer_start_idx(input_ids).to(
+            device=input_ids.device, dtype=torch.long,
+        )
         labels = torch.full_like(input_ids, self.ignore_index)
 
         if not self.prompt_only_input:
@@ -123,36 +113,41 @@ class UnifiedVLACollator:
             "answer_start_idx": answer_start_idx,
         }
 
-        reserved_keys = {
-            "images",
-            "instruction",
-            "question",
-            "answer",
+        collatable_keys = [
+            "is_vla_data", "states", "actions", "actions_valid_mask",
+            "n_states", "n_actions", "n_future_frames",
+            "depth_values", "has_depth_values", "future_frames",
             "intrinsic",
-            "vision_type",
-            "video_fps",
-        }
-        common_keys = set(samples[0])
-        for sample in samples[1:]:
-            common_keys &= set(sample)
+            "breast_intrinsic", "breast_future_frames",
+            "future_head_motion", "future_breast_motion",
+            "view_mask",
+        ]
+        for key in collatable_keys:
+            if all(key in s for s in samples):
+                batch[key] = self.collate_values([s[key] for s in samples])
+        if "view_mask" not in batch:
+            raise KeyError("All samples must provide view_mask.")
 
-        for key in sorted(common_keys - reserved_keys):
-            batch[key] = self.collate_values([sample[key] for sample in samples])
-
-        # When camera_intrinsic_mode=token, pass intrinsic tensor for camera_encoder.
-        # Shape: [B, 1, 4] — one <camera> token per sample, 4D intrinsic [fx, fy, cx, cy].
-        # VLM samples carry zero-filled intrinsic; their input_ids have no <camera> token
-        # so masked_scatter is a no-op for those rows.
+        # Token mode: emit one intrinsic per rendered <camera> slot in
+        # sample-major active-view order. VLM samples contribute no rows.
         if self.formatter.camera_intrinsic_mode == "token":
-            intrinsics = [s["intrinsic"] for s in samples]
-            batch["camera_intrinsic"] = torch.stack(intrinsics).unsqueeze(1)
+            cam_list = []
+            for s in samples:
+                if not bool(s["is_vla_data"].item()):
+                    continue
+                for view in resolve_active_views(s):
+                    if view == "head":
+                        cam_list.append(s["intrinsic"])
+                    elif view == "breast":
+                        cam_list.append(s["breast_intrinsic"])
+                    else:
+                        raise ValueError(f"Unsupported active view: {view}")
+            if cam_list:
+                batch["camera_intrinsic"] = torch.stack(cam_list)
 
         if self.debug_capture_texts:
-            batch["debug_prompt_messages"] = prompt_messages
-            batch["debug_prompt_texts"] = prompt_batch["rendered_texts"]
-            if full_messages is not None:
-                batch["debug_full_messages"] = full_messages
-                batch["debug_full_texts"] = main_batch["rendered_texts"]
+            batch["debug_messages"] = messages
+            batch["debug_texts"] = main_batch["rendered_texts"]
 
         if self.debug_profile_timing:
             sample_profiles = [
@@ -179,3 +174,23 @@ class UnifiedVLACollator:
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         return self.collate_raw(samples)
+
+
+class ConcatDataCollator:
+    """Collator that concatenates samples along the first dimension.
+
+    Used for normalizer fitting where streaming statistics are accumulated
+    from variable-length batches.
+    """
+
+    def __call__(self, data_list):
+        batch = {}
+        for key in data_list[0].keys():
+            if isinstance(data_list[0][key], torch.Tensor):
+                batch[key] = torch.cat([item[key] for item in data_list], dim=0)
+            elif isinstance(data_list[0][key], np.ndarray):
+                batch[key] = np.concatenate([item[key] for item in data_list], axis=0)
+            else:
+                batch[key] = [item[key] for item in data_list]
+        batch["_batch_num_samples"] = len(data_list)
+        return batch

@@ -223,7 +223,9 @@ def infer_ar_action(
         if next_action.ndim == 3:
             next_action = next_action[:, 0, :]
         elif next_action.shape[-1] == model.action_dim * model.ar_action_train_config.chunk_size:
-            next_action = next_action.view(next_action.shape[0], model.ar_action_train_config.chunk_size, model.action_dim)[:, 0, :]
+            next_action = next_action.view(
+                next_action.shape[0], model.action_dim, model.ar_action_train_config.chunk_size,
+            )[:, :, 0]
         elif next_action.shape[-1] != model.action_dim:
             raise ValueError(
                 "DiffLoss AR inference must return either action_dim or "
@@ -291,6 +293,13 @@ def infer_vlm_generation(
             [attention_mask, torch.ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=attention_mask.device)],
             dim=1,
         )
+
+        mm_ids = working_batch.get("mm_token_type_ids")
+        if mm_ids is not None:
+            working_batch["mm_token_type_ids"] = torch.cat(
+                [mm_ids, torch.zeros((mm_ids.shape[0], 1), dtype=mm_ids.dtype, device=mm_ids.device)],
+                dim=1,
+            )
 
         if eos_token_id is not None and bool(torch.all(next_ids == eos_token_id)):
             break

@@ -27,7 +27,7 @@ SHAREROBOT_ROOT = "/share_data/guantianrui/datasets/VLM/ShareRobot"
 OUTPUT_DIR = "/share_data/zengfanlian/datasets/VLM/Webdataset/sharerobot"
 
 # 3. Subdatasets to export (planning is multi-image; paths need prefix handling in load_image_safe)
-PROCESS_SUBDATASETS = ['affordance', 'trajectory', 'planning']
+PROCESS_SUBDATASETS = ['affordance', 'trajectory']
 
 # Planning JSONs use paths like rt_frames_success/... relative to planning/, but unpacked
 # releases may nest files under this extra prefix inside planning/images/.

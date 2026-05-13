@@ -3,32 +3,39 @@
 # WebDataset shard paths for VLA training.
 #
 
-wds_base_dir: /share_data/guantianrui/datasets/Webdataset
-val_wds_base_dir: /share_data/guantianrui/datasets/Webdataset_val
+wds_base_dir: /efs-exp/guantianrui/datasets/Webdataset
+val_wds_base_dir: /efs-exp/guantianrui/datasets/Webdataset_val
 
 # Shuffle buffer is shared after RandomMix, so subset count does not affect memory.
 vla_wds_datasets:
-  - name: taco_oakink_holoassist
+  - name: taco_oakink_hot3d_h2o  # 10h
     shard_urls:
       - ${wds_base_dir}/taco_train_filtered_v1/shard-*.tar
       - ${wds_base_dir}/oakink2_train_filtered_v1/shard-*.tar
-      - ${wds_base_dir}/holoassist_filtered_v2_rechunked/shard-*.tar
-    weight: 3
-  - name: egodex
-    shard_urls: ${wds_base_dir}/egodex_train_filtered_v2/shard-*.tar
-    weight: 20
-  - name: vitra
+      - /efs-exp/guantianrui/datasets/hot3d/shard-*.tar
+      - /efs-exp/guantianrui/datasets/H2O/shard-*.tar
+    weight: 32
+  - name: egoverse  # 690h
+    shard_urls: /efs-exp/guantianrui/datasets/egoverse/*.tar
+    weight: 263
+  - name: holoassist  # 11.5h
+    shard_urls: /efs-exp/guantianrui/datasets/Webdataset/holoassist_filtered_v2_rechunked/shard-*.tar
+    weight: 27
+  - name: egodex  # 370h
+    shard_urls: /efs-exp/guantianrui/datasets/Webdataset/egodex_train_filtered_v2/shard-*.tar
+    weight: 135
+  - name: vitra  # 187h
     shard_urls:
       - ${wds_base_dir}/epic_train_rechunked/shard-*.tar
       - ${wds_base_dir}/ego4d_cooking_and_cleaning_train_rechunked/shard-*.tar
       - ${wds_base_dir}/ego4d_other_train_rechunked/shard-*.tar
-    weight: 15
-  - name: buildai
-    shard_urls: /share_data/guantianrui/datasets/BuildAI-10K-0328-filtered-v2/shard-*.tar
-    weight: 25
-  - name: teleop_xiaozi
-    shard_urls: /share_data/zengfanlian/datasets/Webdataset/real_world/shard-*.tar
-    weight: 10
+    weight: 96
+  - name: buildai  # 288h + 5000h + 3000h
+    shard_urls: 
+      - /efs-exp/yeyuyao/Webdataset/BuildAI-10K-0328-camera-corrected/shard-*.tar
+      - /efs-exp/guantianrui/datasets/BuildAI-100K-part2-0427/shard-*.tar
+      - /efs-exp/guantianrui/datasets/BuildAI-100K-part1-fully-rewritten-0425/shard-*.tar
+    weight: 428
 
 val_vla_wds_datasets:
   - name: taco_test_seen

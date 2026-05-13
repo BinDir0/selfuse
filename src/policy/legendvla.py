@@ -26,9 +26,9 @@ class FlowConfig:
 
 @dataclass(frozen=True)
 class RTCConfig:
-    enabled: bool = True
-    delay_strategy: str = "exp"
-    max_delay: int = 16
+    enabled: bool = False
+    delay_strategy: str = "uniform"
+    max_delay: int = 6
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,7 @@ class LossConfig:
     diffusion_loss_weight: float = 1.0
     flow_loss_weight: float = 1.0
     reg_loss_weight: float = 0.0
+    wm_loss_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,32 @@ class SpanMaskConfig:
     p_no_mask: float = 0.1
     keep_last: bool = False
     prefer_early: bool = True
+
+
+class WorldModelHead(nn.Module):
+    """Query tokens + output projection. view_embed is added per view
+    (head/breast); zero-init keeps single-view output bit-identical.
+    """
+
+    def __init__(self, n_queries: int, hidden_size: int, upsample_factor: int,
+                 num_views: int = 2):
+        super().__init__()
+        self.query_embed = nn.Parameter(torch.randn(n_queries, hidden_size) * 0.02)
+        self.view_embed = nn.Parameter(torch.zeros(num_views, hidden_size))
+        self.output_proj = nn.Linear(hidden_size, hidden_size * upsample_factor ** 2)
+        nn.init.normal_(self.output_proj.weight, std=0.02)
+        nn.init.zeros_(self.output_proj.bias)
+
+
+@dataclass(frozen=True)
+class WorldModelConfig:
+    num_future_frames: int = 0
+    target_image_size: tuple[int, int] | None = None
+    teacher_patch_size: int = 16
+    upsample_factor: int = 2
+    action_conditioning: bool = False
+    motion_conditioning: bool = False
+    mask_loss_by_view_mask: bool = True
 
 
 @dataclass(frozen=True)
@@ -63,10 +90,18 @@ class ARActionTrainConfig:
 
 
 class InputMaskEmbeddings(nn.Module):
-    def __init__(self, hidden_size: int):
+    """Learnable vectors for span-masking state/action slot embeddings.
+
+    ``action`` is only registered when ``include_action`` is True, matching
+    ``build_slot_embeddings`` (action masking only runs under ``use_diffloss``).
+    """
+
+    def __init__(self, hidden_size: int, *, include_action: bool = True):
         super().__init__()
-        self.action = nn.Parameter(torch.randn(hidden_size) * 0.02)
         self.state = nn.Parameter(torch.randn(hidden_size) * 0.02)
+        if include_action:
+            self.action = nn.Parameter(torch.randn(hidden_size) * 0.02)
+
 
 
 class LegendVLA(nn.Module):
@@ -74,13 +109,13 @@ class LegendVLA(nn.Module):
         self,
         backbone: nn.Module,
         state_encoder: nn.Module,
-        ar_action_encoder: nn.Module,
         action_encoder: nn.Module,
         time_embedding: nn.Module,
         flow_expert: nn.Module,
         action_decoder: nn.Module,
-        latent_condition_projector: nn.Module,
         shape_meta: dict,
+        ar_action_encoder: nn.Module | None = None,
+        latent_condition_projector: nn.Module | None = None,
         diffloss: nn.Module | None = None,
         reg_action_head: nn.Module | None = None,
         ignore_index: int = -100,
@@ -89,10 +124,15 @@ class LegendVLA(nn.Module):
         rtc_config: RTCConfig = RTCConfig(),
         loss_config: LossConfig = LossConfig(),
         ar_action_train_config: ARActionTrainConfig = ARActionTrainConfig(),
-        knowledge_insulation: bool | int = True,
         # Camera intrinsic as token embedding (optional)
         camera_intrinsic_mode: str = "text",
-        camera_encoder: nn.Module | None = None,        
+        camera_encoder: nn.Module | None = None,
+        # World model (optional)
+        world_model_expert: nn.Module | None = None,
+        frozen_teacher: nn.Module | None = None,
+        world_model_config: WorldModelConfig = WorldModelConfig(),
+        wm_action_encoder: nn.Module | None = None,
+        wm_motion_encoder: nn.Module | None = None,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -126,7 +166,6 @@ class LegendVLA(nn.Module):
             raise ValueError(f"Unsupported flow sampling strategy: {self.flow_config.sampling}")
         # Mutable: overridden at inference time by legendvla_inference_wrapper.
         self.num_inference_steps = self.flow_config.num_inference_steps
-        self.knowledge_insulation = knowledge_insulation
 
         # Shape meta derived
         self.action_dim = int(shape_meta["action"]["shape"][0])
@@ -150,9 +189,61 @@ class LegendVLA(nn.Module):
         self.reg_action_head = reg_action_head
         self.latent_condition_projector = latent_condition_projector
 
-        # Mask embeddings only needed when input_mask_enabled is True.
+        # Unified DiffLoss switch: all three must be present together. Any
+        # missing piece disables the whole AR-action-via-diffloss path,
+        # including the action branch in build_slot_embeddings.
+        self.use_diffloss = (
+            self.diffloss is not None
+            and self.latent_condition_projector is not None
+            and self.ar_action_encoder is not None
+        )
+
+        # Mask embeddings only when input_mask_enabled. Action vector only when
+        # use_diffloss (same as build_slot_embeddings: action branch is gated there).
         if self.ar_action_train_config.input_mask_enabled:
-            self.input_mask_embeddings = InputMaskEmbeddings(self.vlm_hidden_size)
+            self.input_mask_embeddings = InputMaskEmbeddings(
+                self.vlm_hidden_size,
+                include_action=self.use_diffloss,
+            )
+
+        # World model components
+        self.world_model_expert = world_model_expert
+        self.frozen_teacher = frozen_teacher
+        self.world_model_config = world_model_config
+        self.wm_action_encoder = wm_action_encoder
+        self.wm_motion_encoder = wm_motion_encoder
+        self.use_world_model = world_model_expert is not None and frozen_teacher is not None
+        if self.use_world_model:
+            self._init_world_model(world_model_expert, world_model_config)
+            if world_model_config.action_conditioning and wm_action_encoder is None:
+                raise ValueError(
+                    "world_model.action_conditioning=True requires wm_action_encoder"
+                )
+            if world_model_config.motion_conditioning and wm_motion_encoder is None:
+                raise ValueError(
+                    "world_model.motion_conditioning=True requires wm_motion_encoder"
+                )
+            if wm_action_encoder is not None and not world_model_config.action_conditioning:
+                for param in wm_action_encoder.parameters():
+                    param.requires_grad = False
+            if wm_motion_encoder is not None and not world_model_config.motion_conditioning:
+                for param in wm_motion_encoder.parameters():
+                    param.requires_grad = False
+
+    def _init_world_model(self, expert: nn.Module, config: WorldModelConfig) -> None:
+        tH, tW = config.target_image_size
+        stride = config.teacher_patch_size * config.upsample_factor
+        assert tH % stride == 0 and tW % stride == 0, (
+            f"target ({tH},{tW}) must be divisible by patch*upsample={stride}"
+        )
+        self.wm_grid_h = tH // stride
+        self.wm_grid_w = tW // stride
+        self.wm_upsample_factor = config.upsample_factor
+        self.wm_num_future_frames = config.num_future_frames
+
+        D = expert.hidden_size
+        n_queries = config.num_future_frames * self.wm_grid_h * self.wm_grid_w
+        self.wm_head = WorldModelHead(n_queries, D, config.upsample_factor)
 
     def compile_blocks(
         self,
@@ -162,7 +253,7 @@ class LegendVLA(nn.Module):
         block_compile_kwargs = {
             key: value
             for key, value in compile_kwargs.items()
-            if key not in {"vision", "text", "flow", "diffloss"}
+            if key not in {"vision", "text", "flow", "diffloss", "world_model"}
         }
 
         if compile_flags["vision"]:
@@ -173,6 +264,10 @@ class LegendVLA(nn.Module):
             compile_module_list(self.flow_expert.layers, block_compile_kwargs)
         if compile_flags["diffloss"] and self.diffloss is not None:
             self.diffloss.net = torch.compile(self.diffloss.net, **block_compile_kwargs)
+        if compile_flags["world_model"] and self.use_world_model:
+            compile_module_list(self.world_model_expert.layers, block_compile_kwargs)
+            # DINOv3 ViT layer list lives at `model.model.layer`.
+            compile_module_list(self.frozen_teacher.model.model.layer, block_compile_kwargs)
 
     def resolve_compile_block_flags(
         self,
@@ -183,21 +278,25 @@ class LegendVLA(nn.Module):
             "text": bool(compile_kwargs.get("text", True)),
             "flow": bool(compile_kwargs.get("flow", True)),
             "diffloss": bool(compile_kwargs.get("diffloss", True)),
+            "world_model": bool(compile_kwargs.get("world_model", True)),
         }
 
-    def enable_gradient_checkpointing(self, config: dict | None = None) -> None:
+    def enable_gradient_checkpointing(self, config: bool | dict | None = None) -> None:
         """Enable checkpointing on modules that support it.
 
         Args:
-            config: per-component checkpointing config. Keys:
-                text:           {enabled: bool, every_n: int}
-                vision:         {enabled: bool, every_n: int}
-                action_expert:  {enabled: bool, every_n: int}
-                When *config* is None every component is fully checkpointed
-                (backward compatible with the old parameterless call).
+            config: per-component checkpointing config. Accepted forms:
+                - True / None: fully checkpoint every component (every_n=1).
+                - False: no-op.
+                - dict with optional keys ``text``, ``vision``, ``action_expert``;
+                  each value is ``{enabled: bool, every_n: int}``. A dict
+                  whose components are all disabled / missing is a no-op.
         """
-        if config is None:
+        if config is False:
+            return
+        if config is None or config is True:
             config = {}
+
         text_cfg = config.get("text", {})
         vision_cfg = config.get("vision", {})
         expert_cfg = config.get("action_expert", {})
@@ -210,6 +309,9 @@ class LegendVLA(nn.Module):
         vision_every_n = vision_cfg.get("every_n", 1) if vision_enabled else 0
         expert_enabled = expert_cfg.get("enabled", True)
         expert_every_n = expert_cfg.get("every_n", 1) if expert_enabled else 0
+
+        if text_every_n == 0 and vision_every_n == 0 and expert_every_n == 0:
+            return
 
         self.backbone.enable_gradient_checkpointing(
             text_every_n=text_every_n,
@@ -230,6 +332,19 @@ class LegendVLA(nn.Module):
         return [param for param in self.backbone.parameters() if param.requires_grad]
 
     @property
+    def trainable_vision_parameters(self):
+        visual = getattr(self.backbone.base_model.model, "visual", None)
+        if visual is None:
+            return []
+        return [param for param in visual.parameters() if param.requires_grad]
+
+    @property
+    def trainable_text_parameters(self):
+        # Language model + lm_head + embedding; exclude vision tower
+        vision_ids = {id(p) for p in (getattr(self.backbone.base_model.model, "visual", None) or nn.Module()).parameters()}
+        return [param for param in self.backbone.parameters() if param.requires_grad and id(param) not in vision_ids]
+
+    @property
     def lora_trainable_vlm_parameters(self):
         return self.trainable_vlm_parameters
 
@@ -247,19 +362,36 @@ class LegendVLA(nn.Module):
         return [param for module in modules for param in module.parameters() if param.requires_grad]
 
     @property
-    def diffloss_parameters(self):
-        modules = [
-            self.state_encoder,
-            self.ar_action_encoder,
-            self.latent_condition_projector,
-        ]
-        if self.diffloss is not None:
+    def ar_action_heads_parameters(self):
+        # Heads attached to the VLM backbone. state_encoder is always here
+        # (backbone always consumes state). The ar_action/latent/diffloss
+        # trio enters and leaves together, driven by use_diffloss.
+        modules = [self.state_encoder]
+        if self.use_diffloss:
+            modules.append(self.ar_action_encoder)
+            modules.append(self.latent_condition_projector)
             modules.append(self.diffloss)
         if self.reg_action_head is not None:
             modules.append(self.reg_action_head)
         if hasattr(self, "input_mask_embeddings"):
             modules.append(self.input_mask_embeddings)
         return [param for module in modules for param in module.parameters() if param.requires_grad]
+
+    @property
+    def world_model_parameters(self):
+        params = []
+        if self.use_world_model:
+            params.extend(p for p in self.world_model_expert.parameters() if p.requires_grad)
+            params.extend(p for p in self.wm_head.parameters() if p.requires_grad)
+            # Gate by the conditioning flags: if the forward path won't call
+            # the encoder, don't put its params in the optimizer — otherwise
+            # fused AdamW never sees a gradient, never creates `step` state,
+            # and checkpoint load fails on the missing key.
+            if self.wm_action_encoder is not None and self.world_model_config.action_conditioning:
+                params.extend(p for p in self.wm_action_encoder.parameters() if p.requires_grad)
+            if self.wm_motion_encoder is not None and self.world_model_config.motion_conditioning:
+                params.extend(p for p in self.wm_motion_encoder.parameters() if p.requires_grad)
+        return params
 
     def build_prefix_lengths(self, batch: dict) -> torch.Tensor:
         answer_start_idx = batch.get("answer_start_idx")
@@ -269,21 +401,184 @@ class LegendVLA(nn.Module):
         )
         return answer_start_idx.to(device=batch["input_ids"].device, dtype=torch.long)
 
-    def build_action_position_ids(self, batch: dict, action_ref: torch.Tensor) -> torch.Tensor:
-        """Build absolute position ids for action tokens.
+    def build_suffix_mrope_base(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """Return the Qwen3-VL MRoPE coordinate where expert suffix tokens start.
+
+        Qwen3-VL advances multimodal positions by the maximum THW coordinate,
+        not by raw token count. The expert suffix must therefore continue from
+        the maximum valid prefix MRoPE id instead of ``answer_start_idx``.
+        """
+        if device is None:
+            device = batch["input_ids"].device
+
+        fallback = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long)
+        position_ids = backbone_output.position_ids
+        if position_ids is None:
+            return fallback
+
+        position_ids = position_ids.to(device=device, dtype=torch.long)
+        if position_ids.ndim == 2:
+            rope_position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        elif position_ids.ndim == 3 and position_ids.shape[0] == 3:
+            rope_position_ids = position_ids
+        elif position_ids.ndim == 3 and position_ids.shape[0] == 4:
+            rope_position_ids = position_ids[1:]
+        else:
+            raise ValueError(
+                "Expected backbone position_ids to be [B,S], [3,B,S], or [4,B,S], "
+                f"got {tuple(position_ids.shape)}."
+            )
+
+        prefix_lengths = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long)
+        batch_size, seq_len = rope_position_ids.shape[1], rope_position_ids.shape[2]
+        if prefix_lengths.shape[0] != batch_size:
+            raise ValueError(
+                "Prefix length batch size does not match backbone position ids: "
+                f"{prefix_lengths.shape[0]} vs {batch_size}."
+            )
+        positions = torch.arange(seq_len, device=device).unsqueeze(0)
+        prefix_mask = positions < prefix_lengths.unsqueeze(1)
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device=device, dtype=torch.bool)
+            if attention_mask.shape != prefix_mask.shape:
+                raise ValueError(
+                    "attention_mask shape does not match backbone position ids: "
+                    f"{tuple(attention_mask.shape)} vs {tuple(prefix_mask.shape)}."
+                )
+            prefix_mask = prefix_mask & attention_mask
+
+        has_prefix = prefix_mask.any(dim=1)
+        masked_positions = rope_position_ids.masked_fill(~prefix_mask.unsqueeze(0), 0)
+        mrope_base = masked_positions.amax(dim=(0, 2)) + 1
+        return torch.where(has_prefix, mrope_base, fallback)
+
+    @staticmethod
+    def _build_text_mrope_position_ids(
+        text_start: int,
+        rope_start: int,
+        length: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, int, int]:
+        """Build [text, temporal, height, width] ids for text-style tokens."""
+        text_pos = torch.arange(text_start, text_start + length, device=device, dtype=torch.long)
+        rope_pos = torch.arange(rope_start, rope_start + length, device=device, dtype=torch.long)
+        position_ids = torch.stack([text_pos, rope_pos, rope_pos, rope_pos], dim=0)
+        return position_ids, text_start + length, rope_start + length
+
+    @staticmethod
+    def _build_vision_mrope_position_ids(
+        text_start: int,
+        rope_start: int,
+        num_frames: int,
+        grid_h: int,
+        grid_w: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, int, int]:
+        """Build Qwen3-VL-style [text, temporal, height, width] ids for frame grids.
+
+        Each future frame is treated like one Qwen3-VL visual block with
+        THW order [temporal, height, width]. The MRoPE cursor advances by
+        ``max(grid_h, grid_w)`` per frame, matching Qwen3-VL's visual span
+        rule, while text ids remain monotonic over the flattened suffix tokens.
+        """
+        if num_frames < 0 or grid_h <= 0 or grid_w <= 0:
+            raise ValueError(
+                f"Invalid vision MRoPE shape: num_frames={num_frames}, grid_h={grid_h}, grid_w={grid_w}."
+            )
+        frame_len = grid_h * grid_w
+        h_offsets = torch.arange(grid_h, device=device, dtype=torch.long).repeat_interleave(grid_w)
+        w_offsets = torch.arange(grid_w, device=device, dtype=torch.long).repeat(grid_h)
+
+        segments: list[torch.Tensor] = []
+        text_pos = text_start
+        rope_pos = rope_start
+        frame_span = max(grid_h, grid_w)
+        for _ in range(num_frames):
+            text_ids = torch.arange(text_pos, text_pos + frame_len, device=device, dtype=torch.long)
+            temporal_ids = torch.full((frame_len,), rope_pos, device=device, dtype=torch.long)
+            height_ids = rope_pos + h_offsets
+            width_ids = rope_pos + w_offsets
+            segments.append(torch.stack([text_ids, temporal_ids, height_ids, width_ids], dim=0))
+            text_pos += frame_len
+            rope_pos += frame_span
+
+        if segments:
+            position_ids = torch.cat(segments, dim=1)
+        else:
+            position_ids = torch.empty(4, 0, device=device, dtype=torch.long)
+        return position_ids, text_pos, rope_pos
+
+    def build_suffix_position_ids_from_relative(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+        rel_position_ids: torch.Tensor,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """Convert relative [text,T,H,W] ids to absolute Qwen3-VL suffix ids.
+
+        The text dimension follows the token sequence and therefore starts at
+        ``answer_start_idx``. The THW dimensions follow Qwen3-VL MRoPE
+        coordinates and therefore continue from the maximum valid prefix MRoPE
+        coordinate.
+        """
+        if device is None:
+            device = rel_position_ids.device
+        if rel_position_ids.ndim != 2 or rel_position_ids.shape[0] != 4:
+            raise ValueError(
+                "Expected rel_position_ids with shape [4, suffix_len], "
+                f"got {tuple(rel_position_ids.shape)}."
+            )
+
+        rel_position_ids = rel_position_ids.to(device=device, dtype=torch.long)
+        batch_size = batch["input_ids"].shape[0]
+        text_base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).view(1, batch_size, 1)
+        rope_base = self.build_suffix_mrope_base(batch, backbone_output, device=device).view(1, batch_size, 1)
+
+        position_ids = rel_position_ids.unsqueeze(1).expand(-1, batch_size, -1).clone()
+        position_ids[:1] = position_ids[:1] + text_base
+        position_ids[1:] = position_ids[1:] + rope_base
+        return position_ids
+
+    def build_action_position_ids(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+        action_ref: torch.Tensor,
+    ) -> torch.Tensor:
+        """Build prefix-continuous [text, temporal, height, width] ids for action tokens.
 
         Args:
-            batch: Collated batch (used by build_prefix_lengths for prefix info).
+            batch: Collated batch (used for prefix masks).
+            backbone_output: Backbone output carrying Qwen3-VL prefix position ids.
             action_ref: Any tensor with shape [B, action_len, ...] to derive dimensions from
                 (e.g. action_embeds in flow stream, or raw actions in training).
         """
         action_len = action_ref.shape[1]
         device = action_ref.device
-        base = self.build_prefix_lengths(batch).to(device=device, dtype=torch.long).unsqueeze(1)
-        return base + torch.arange(action_len, device=device).unsqueeze(0)
+        rel_pos, _, _ = self._build_text_mrope_position_ids(
+            text_start=0,
+            rope_start=0,
+            length=action_len,
+            device=device,
+        )
+        return self.build_suffix_position_ids_from_relative(
+            batch,
+            backbone_output,
+            rel_pos,
+            device=device,
+        )
 
     def build_slot_embeddings(self, batch: dict, add_action_noise: bool = True) -> dict[str, torch.Tensor | None]:
-        slot_embeds: dict[str, torch.Tensor | None] = {"state": None, "action": None, "camera": None}
+        slot_embeds: dict[str, torch.Tensor | None] = {
+            "state": None, "action": None, "camera": None,
+        }
 
         if self.camera_intrinsic_mode == "token" and self.camera_encoder is not None and "camera_intrinsic" in batch:
             camera_embeds = self.camera_encoder(batch["camera_intrinsic"])
@@ -306,7 +601,7 @@ class LegendVLA(nn.Module):
                 )
             slot_embeds["state"] = state_embeds
 
-        if "actions" in batch:
+        if self.use_diffloss and "actions" in batch:
             action_input = batch["actions"]
             if add_action_noise:
                 action_input = action_input + torch.randn_like(batch["actions"]) * mask_cfg.noise_std
@@ -328,6 +623,10 @@ class LegendVLA(nn.Module):
     def forward_backbone_stream(
         self, batch: dict, slot_embeds: dict, output_attentions: bool = False,
     ) -> BackboneStreamOutput:
+        # is_vla_mask is consumed by the MEM temporal attention path when
+        # mask_non_vla=True; backbone ignores it otherwise.
+        is_vla_data = batch.get("is_vla_data")
+        is_vla_mask = is_vla_data.to(dtype=torch.bool) if is_vla_data is not None else None
         output = self.backbone(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
@@ -340,18 +639,14 @@ class LegendVLA(nn.Module):
             action_slot_embeds=slot_embeds.get("action"),
             camera_slot_embeds=slot_embeds.get("camera"),
             output_attentions=output_attentions,
+            is_vla_mask=is_vla_mask,
         )
         output.prefix_cache = slice_prefix_cache_from_full_kv(
             output.past_key_values_hf,
             self.build_prefix_lengths(batch),
         )
-        if output.prefix_cache is not None:
-            if self.knowledge_insulation is True:
-                output.prefix_cache = output.prefix_cache.detach()
-            elif isinstance(self.knowledge_insulation, int) and self.knowledge_insulation > 0:
-                output.prefix_cache = output.prefix_cache.partial_detach(
-                    self.knowledge_insulation
-                )
+        # KV cache is never detached at the backbone level.
+        # Each expert controls its own detach via detach_prefix_kv.
         output.past_key_values_hf = None
         return output
 
@@ -379,25 +674,29 @@ class LegendVLA(nn.Module):
         action_mask = batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool)
         # actions_valid_mask is always single-chunk [B, H, D]; position ids are
         # built per-chunk then repeated, matching the expanded action_embeds.
-        action_position_ids = self.build_action_position_ids(batch, batch["actions_valid_mask"])
+        action_position_ids = self.build_action_position_ids(
+            batch,
+            backbone_output,
+            batch["actions_valid_mask"],
+        )
         action_mask = action_mask.repeat(1, num_parallel_chunks)
-        action_position_ids = action_position_ids.repeat(1, num_parallel_chunks)
+        action_position_ids = action_position_ids.repeat(1, 1, num_parallel_chunks)
         if action_embeds.shape[1] != action_mask.shape[1]:
             raise ValueError(
                 f"Action mask length {action_mask.shape[1]} does not match action embeddings length {action_embeds.shape[1]}."
             )
-        if action_embeds.shape[1] != action_position_ids.shape[1]:
+        if action_embeds.shape[1] != action_position_ids.shape[-1]:
             raise ValueError(
                 "Action position ids length "
-                f"{action_position_ids.shape[1]} does not match action embeddings length {action_embeds.shape[1]}."
+                f"{action_position_ids.shape[-1]} does not match action embeddings length {action_embeds.shape[1]}."
             )
         prefix_cache = backbone_output.prefix_cache
         expert_output = self.flow_expert(
-            action_embeds=action_embeds,
+            suffix_embeds=action_embeds,
             prefix_cache=prefix_cache,
-            action_position_ids=action_position_ids,
-            time_cond=time_cond,
-            action_mask=action_mask,
+            suffix_position_ids=action_position_ids,
+            cond=time_cond,
+            suffix_mask=action_mask,
             num_parallel_chunks=num_parallel_chunks,
             output_attentions=output_attentions,
         )
@@ -412,6 +711,136 @@ class LegendVLA(nn.Module):
             "action_hidden_states": expert_hidden,
             "pred_v": pred_v,
             "expert_attention_weights": expert_attn_weights,
+        }
+
+    def forward_world_model_stream(
+        self,
+        batch: dict,
+        backbone_output: BackboneStreamOutput,
+    ) -> dict[str, torch.Tensor]:
+        """Run world model expert and frozen teacher on future frames.
+
+        ``view_mask`` is the sample-level switch and the canonical view order
+        is fixed to head, breast. Inactive view motion and query segments are
+        present but masked out, and only active views contribute to loss.
+        """
+        cfg = self.world_model_config
+        B = backbone_output.last_hidden_states.shape[0]
+        device = backbone_output.last_hidden_states.device
+        K = self.wm_num_future_frames
+        gh, gw, uf = self.wm_grid_h, self.wm_grid_w, self.wm_upsample_factor
+        D = self.world_model_expert.hidden_size
+        view_mask = batch["view_mask"].to(device=device, dtype=torch.bool)
+        if view_mask.ndim != 2 or view_mask.shape != (B, 2):
+            raise ValueError(f"view_mask must have shape [B, 2], got {tuple(view_mask.shape)}")
+        V = 2
+
+        n_future = batch["n_future_frames"].to(device=device)
+        frame_valid = torch.arange(K, device=device).unsqueeze(0) < n_future.unsqueeze(1)
+        # Each of the K future steps owns gh*gw query tokens; replicate the
+        # per-step validity across that block then flatten to [B, K*gh*gw].
+        query_mask = frame_valid.unsqueeze(-1).expand(-1, -1, gh * gw).reshape(B, -1)
+
+        # Build suffix with per-segment Qwen3-VL position ids. Text-like
+        # conditioning tokens use T=H=W; future-frame query blocks use visual
+        # [temporal, height, width] grids and advance in sequence for each view.
+        segments: list[torch.Tensor] = []
+        seg_masks: list[torch.Tensor] = []
+        seg_position_ids: list[torch.Tensor] = []
+        text_cur_pos = 0
+        rope_cur_pos = 0
+
+        if cfg.action_conditioning and "actions" in batch:
+            action_cond = self.wm_action_encoder(batch["actions"])
+            action_len = action_cond.shape[1]
+            segments.append(action_cond)
+            seg_masks.append(batch["actions_valid_mask"].any(dim=-1).to(dtype=torch.bool))
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                length=action_len,
+                device=device,
+            )
+            seg_position_ids.append(pos_ids)
+
+        if cfg.motion_conditioning:
+            segments.append(self.wm_motion_encoder(batch["future_head_motion"]))
+            seg_masks.append(frame_valid & view_mask[:, 0:1])
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                length=K,
+                device=device,
+            )
+            seg_position_ids.append(pos_ids)
+            segments.append(self.wm_motion_encoder(batch["future_breast_motion"]))
+            seg_masks.append(frame_valid & view_mask[:, 1:2])
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                length=K,
+                device=device,
+            )
+            seg_position_ids.append(pos_ids)
+
+        base_queries = self.wm_head.query_embed.unsqueeze(0).expand(B, -1, -1)
+        query_len = base_queries.shape[1]
+        for v in range(V):
+            segments.append(base_queries + self.wm_head.view_embed[v])
+            seg_masks.append(query_mask & view_mask[:, v:v + 1])
+            pos_ids, text_cur_pos, rope_cur_pos = self._build_vision_mrope_position_ids(
+                text_start=text_cur_pos,
+                rope_start=rope_cur_pos,
+                num_frames=K,
+                grid_h=gh,
+                grid_w=gw,
+                device=device,
+            )
+            if pos_ids.shape[1] != query_len:
+                raise ValueError(
+                    f"World-model query position length {pos_ids.shape[1]} "
+                    f"does not match query length {query_len}."
+                )
+            seg_position_ids.append(pos_ids)
+
+        suffix = torch.cat(segments, dim=1)
+        suffix_mask = torch.cat(seg_masks, dim=1)
+        rel_position_ids = torch.cat(seg_position_ids, dim=1)  # [4, suffix_len]
+        position_ids = self.build_suffix_position_ids_from_relative(
+            batch,
+            backbone_output,
+            rel_position_ids,
+            device=device,
+        )
+        if position_ids.shape[-1] != suffix.shape[1]:
+            raise ValueError(
+                f"World-model position ids length {position_ids.shape[-1]} "
+                f"does not match suffix length {suffix.shape[1]}."
+            )
+
+        hidden = self.world_model_expert(
+            suffix_embeds=suffix,
+            prefix_cache=backbone_output.prefix_cache,
+            suffix_position_ids=position_ids,
+            suffix_mask=suffix_mask,
+        )
+
+        # Query block sits at the suffix tail; V views packed contiguously.
+        query_hidden = hidden[:, -V * query_len:, :].reshape(B, V, query_len, D)
+        x = self.wm_head.output_proj(query_hidden).reshape(B * V * K, gh, gw, uf, uf, D)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B * V * K, gh * uf, gw * uf, D)
+        pred = x.flatten(1, 2).reshape(B, V, K, -1, D)
+
+        # Batch the teacher along B so DINOv3 only runs once.
+        stacked = torch.cat([batch["future_frames"], batch["breast_future_frames"]], dim=0)
+        head_t, breast_t = self.frozen_teacher(stacked).chunk(2, dim=0)
+        target = torch.stack([head_t, breast_t], dim=1)
+
+        return {
+            "pred": pred,
+            "target": target,
+            "n_future_frames": batch["n_future_frames"],
+            "view_mask": view_mask,
         }
 
     def compute_loss(self, batch: dict, **kwargs) -> dict[str, torch.Tensor]:
@@ -443,7 +872,6 @@ class LegendVLA(nn.Module):
     def freeze_non_lora_weights_in_ae(self):
         modules = [
             self.state_encoder,
-            self.ar_action_encoder,
             self.action_encoder,
             self.time_embedding,
             self.flow_expert,
@@ -459,6 +887,14 @@ class LegendVLA(nn.Module):
     def freeze_all_weights(self):
         for param in self.parameters():
             param.requires_grad = False
+
+    def freeze_final_lm_norm(self) -> None:
+        # final RMSNorm only participates in last_hidden_states (CE / diffloss /
+        # reg_action_head). Without VLM data and without heads consuming
+        # last_hidden_states, it never sees a grad, Adam skips state allocation,
+        # and DCP metadata drops `exp_avg`/`exp_avg_sq`/`step` for it — which
+        # then blocks resume.
+        self.backbone.hf_language_model.norm.weight.requires_grad_(False)
 
     def infer_action(self, input: dict, **kwargs):
         from src.policy.legendvla_inference import infer_flow_action

@@ -1,30 +1,41 @@
 #!/usr/bin/env python3
-"""Convert an FSDP2 sharded checkpoint into a single .pt file.
+"""Convert an FSDP2 DCP checkpoint into a single .pt file (model weights only).
+
+Supports two checkpoint layouts:
+  1. Native DCP dir (contains .metadata + __*_*.distcp files)
+  2. Accelerate FSDP dir (contains pytorch_model_fsdp_0/ subdir)
 
 Typical usage:
 
-    python scripts/convert_fsdp_checkpoint.py \
-        --checkpoint /efs-exp/.../step_checkpoints/update_step_130000
+    python src/utils/convert_fsdp_checkpoint.py \
+        --checkpoint /efs-exp/.../step_checkpoints/update_step_65000
+
+    python src/utils/convert_fsdp_checkpoint.py \
+        --checkpoint /efs-exp/.../update_step_130000 \
+        --output /tmp/model.pt
 """
 import argparse
 import pathlib
 
+import tempfile
+
+import torch
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert an FSDP2 sharded checkpoint into a single .pt file."
+        description="Convert an FSDP2 DCP checkpoint into a single .pt file (model weights only)."
     )
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="Path to the checkpoint root (e.g. update_step_130000) or directly to pytorch_model_fsdp_0.",
+        help="Path to the checkpoint root directory.",
     )
     parser.add_argument(
         "--output",
         default=None,
-        help="Output .pt path. Defaults to <checkpoint_root>/converted_model.pt.",
+        help="Output .pt path. Defaults to <checkpoint>/model.pt.",
     )
     args = parser.parse_args()
 
@@ -32,16 +43,50 @@ def main():
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint path not found: {ckpt}")
 
-    fsdp_dir = ckpt / "pytorch_model_fsdp_0" if ckpt.name != "pytorch_model_fsdp_0" else ckpt
-    if not fsdp_dir.exists():
-        raise FileNotFoundError(f"FSDP shard directory not found: {fsdp_dir}")
-
-    output = pathlib.Path(args.output).expanduser().resolve() if args.output else fsdp_dir.parent / "converted_model.pt"
+    output = (
+        pathlib.Path(args.output).expanduser().resolve()
+        if args.output
+        else ckpt / "model.pt"
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Converting {fsdp_dir} ...")
-    dcp_to_torch_save(str(fsdp_dir), str(output))
-    print(f"Saved to {output}")
+    # Detect layout
+    fsdp_subdir = ckpt / "pytorch_model_fsdp_0"
+    if fsdp_subdir.exists():
+        dcp_dir = fsdp_subdir
+    elif (ckpt / ".metadata").exists():
+        dcp_dir = ckpt
+    else:
+        raise FileNotFoundError(
+            f"Neither .metadata nor pytorch_model_fsdp_0/ found in {ckpt}. "
+            "Is this a valid FSDP checkpoint?"
+        )
+
+    print(f"Loading DCP checkpoint from {dcp_dir} ...")
+
+    # dcp.load requires a pre-populated state_dict with the right structure,
+    # which we don't have without instantiating the model. Use dcp_to_torch_save
+    # to convert the full DCP dir into a single .pt, then extract model weights.
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    dcp_to_torch_save(str(dcp_dir), tmp_path)
+    full_state = torch.load(tmp_path, map_location="cpu", weights_only=False)
+    pathlib.Path(tmp_path).unlink()
+
+    # Extract model weights only (skip optimizer, scheduler, etc.)
+    # Native DCP layout: {"app": {"model": ..., "optimizer": ..., ...}}
+    if "app" in full_state and "model" in full_state["app"]:
+        model_state = full_state["app"]["model"]
+    elif "model" in full_state:
+        model_state = full_state["model"]
+    else:
+        print("[WARN] Could not find 'model' key; saving full state_dict.")
+        model_state = full_state
+
+    print(f"Saving {len(model_state)} parameters to {output} ...")
+    torch.save(model_state, str(output))
+    print(f"Done. File size: {output.stat().st_size / 1e9:.2f} GB")
 
 
 if __name__ == "__main__":

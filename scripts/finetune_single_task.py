@@ -69,7 +69,7 @@ def get_training_command(dataset):
     # Environment variables aligned with pretrain_legendvla_fsdp2.sh
     env_vars = [
         "export NCCL_DEBUG=INFO",
-        "export NCCL_TIMEOUT=3600000",
+        "export NCCL_TIMEOUT=3600",
         "export NCCL_ASYNC_ERROR_HANDLING=1",
         "export NCCL_SOCKET_IFNAME=eth0",
         "export NCCL_IB_GID_INDEX=3",

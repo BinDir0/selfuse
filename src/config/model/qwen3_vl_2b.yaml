@@ -1,7 +1,7 @@
 # @package _global_
 
 pretrained:
-  model_name_or_path: /share_data/chenzhang/checkpoints/Qwen3-VL-2B-Instruct
+  model_name_or_path: /efs-exp/chenzhang/checkpoints/Qwen3-VL-2B-Instruct
   trust_remote_code: False
   torch_dtype: bfloat16
   # Attention backend used by the Qwen3-VL text tower and the Qwen3 action expert.
@@ -24,7 +24,6 @@ camera_intrinsic_mode: text
 runtime:
   use_lora: False
   use_quantization: False
-  knowledge_insulation: False  # True = full, False = off, int N = insulate first N layers
 
 dims:
   vlm_hidden_size: 2048
@@ -55,6 +54,19 @@ policy:
     use_quantization: ${runtime.use_quantization}
     text_attn_implementation: ${pretrained.text_attn_implementation}
     vision_attn_implementation: ${pretrained.vision_attn_implementation}
+    mem_temporal_attention:
+      enabled: False
+      every_n_layers: 4
+      max_temporal_len: 32
+      sinusoidal_pe_base: 10000.0
+      # T frames per entry. Dataset / collator pad VLM samples to this T so
+      # MEM can do uniform-shape view + SDPA without per-entry mask.
+      num_frames: ${data.shape_meta.obs.rgb.horizon}
+      # Whether to zero out non-VLA entries' MEM residual to preserve pretrained
+      # VLM behavior. False = simplest code, VLM gets a small extra transform
+      # from MEM (training adapts). True = strict semantic preservation but
+      # requires is_vla_mask routing through backbone.
+      mask_non_vla: False
     quantization:
       load_in_4bit: True
       load_in_8bit: False
@@ -67,15 +79,16 @@ policy:
   # This follows the VITRA-style continuous-parameter token idea, but keeps
   # intrinsic directly instead of converting it to FOV first.
   camera_encoder: null
-    # _target_: src.model.action.action_head.MLPProjector
-    # input_dim: 4
-    # output_dim: ${dims.vlm_hidden_size}
+    # _target_: src.model.action.action_head.MLPEncoder
+    # action_dim: 4
     # width: ${dims.vlm_hidden_size}
-    # depth: 2
+    # time_cond: False
+    # enable_fourier_embed: False
+    # mlp_depth: 2
     # final_layer_norm: False
     # use_mlp_layer_norm: False
   state_encoder:
-    _target_: src.model.action.action_head.FourierActionEncoder
+    _target_: src.model.action.action_head.MLPEncoder
     action_dim: ${dims.state_dim}
     width: ${dims.vlm_hidden_size}
     time_cond: False
@@ -83,17 +96,10 @@ policy:
     mlp_depth: 2
     final_layer_norm: False
     use_mlp_layer_norm: False
-  ar_action_encoder:
-    _target_: src.model.action.action_head.FourierActionEncoder
-    action_dim: ${dims.action_dim}
-    width: ${dims.vlm_hidden_size}
-    time_cond: False
-    enable_fourier_embed: False
-    mlp_depth: 2
-    final_layer_norm: False
-    use_mlp_layer_norm: False
+  # ar_action_encoder is gated by the diffloss config group (null when off).
+  ar_action_encoder: ${diffloss.ar_action_encoder}
   action_encoder:
-    _target_: src.model.action.action_head.FourierActionEncoder
+    _target_: src.model.action.action_head.MLPEncoder
     action_dim: ${dims.action_dim}
     width: ${dims.action_hidden_size}
     time_cond: False
@@ -107,51 +113,34 @@ policy:
     min_period: 0.004
     max_period: 4.0
   flow_expert:
-    _target_: src.model.action.qwen3_action_expert.Qwen3ActionExpert
+    _target_: src.model.vlm.qwen3_expert.Qwen3Expert
     model_name_or_path: ${pretrained.model_name_or_path}
-    time_hidden_size: ${dims.time_hidden_size}
+    use_adaln: True
+    cond_hidden_size: ${dims.time_hidden_size}
     hidden_size: ${dims.action_hidden_size}
-    intermediate_size: 4096
+    intermediate_size: 2816
     num_heads: 8
+    num_layers: 14
+    detach_prefix_kv: False
     attn_implementation: ${pretrained.text_attn_implementation}
     trust_remote_code: ${pretrained.trust_remote_code}
     use_kv_projection: True
   action_decoder:
-    _target_: src.model.action.action_head.MLPProjector
+    _target_: src.model.action.action_head.MLPDecoder
     input_dim: ${dims.action_hidden_size}
     output_dim: ${dims.action_dim}
     width: ${dims.action_hidden_size}
     depth: 2
     final_layer_norm: False
     use_mlp_layer_norm: False
-  latent_condition_projector:
-    _target_: src.model.action.action_head.MLPProjector
-    input_dim: ${dims.vlm_hidden_size}
-    output_dim: ${dims.diffloss_z_channels}
-    width: ${dims.vlm_hidden_size}
-    depth: 2
-    final_layer_norm: False
-    use_mlp_layer_norm: False
-  diffloss:
-    _target_: src.model.common.diffloss.DiffLoss
-    target_channels: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
-    z_channels: ${dims.diffloss_z_channels}
-    depth: 4
-    width: 1024
-    num_sampling_steps: "100"
-    grad_checkpointing: False
-    use_ddim_sampling: True
-    # DDPM LEARNED_RANGE mode triggers NaN ~20k steps: unbounded model_var_values
-    # cause exp() overflow in normal_kl (VB loss). Flow matching uses pure MSE,
-    # no exp(), no VB loss.
-    use_flow_matching: True
-    time_min_period: 0.004
-    time_max_period: 4.0
-    cond_dropout_prob: 0.0
+  # latent_condition_projector and diffloss are gated by the diffloss config
+  # group (null when off). See src/config/diffloss/{none,flow}.yaml.
+  latent_condition_projector: ${diffloss.latent_condition_projector}
+  diffloss: ${diffloss.diffloss}
   reg_action_head: null
   # Direct MSE regression head for backbone action supervision.
   # Can be used alone or alongside diffloss. To enable:
-    # _target_: src.model.action.action_head.MLPProjector
+    # _target_: src.model.action.action_head.MLPDecoder
     # input_dim: ${dims.vlm_hidden_size}
     # output_dim: ${eval:'${dims.action_dim}*${policy.ar_action_train_config.chunk_size}'}
     # width: ${dims.vlm_hidden_size}
@@ -171,14 +160,15 @@ policy:
     num_inference_steps: ${flow.num_inference_steps}
   rtc_config:
     _target_: src.policy.legendvla.RTCConfig
-    enabled: True
-    delay_strategy: exp
-    max_delay: 8
+    # Keep off for pretraining. Enable for real-robot fine-tuning when using training-time RTC.
+    enabled: False
+    delay_strategy: uniform
+    max_delay: 6
   ar_action_train_config:
     _target_: src.policy.legendvla.ARActionTrainConfig
     noise_std: 0.02
     chunk_size: 4
-    diffloss_repeat: 16
+    diffloss_repeat: ${diffloss.diffloss_repeat}
     input_mask_enabled: True
     action_mask:
       _target_: src.policy.legendvla.SpanMaskConfig
@@ -191,15 +181,29 @@ policy:
     state_mask:
       _target_: src.policy.legendvla.SpanMaskConfig
       mask_ratio: 0.65
-      mean_span_len: 3.0
+      mean_span_len: 1.5
       start_bias_alpha: 2.0
-      p_no_mask: 0.1
+      p_no_mask: 0.05
       keep_last: True
       prefer_early: False
   loss_config:
     _target_: src.policy.legendvla.LossConfig
-    ce_loss_weight: 0.1
+    ce_loss_weight: 0.05
     diffusion_loss_weight: 2.0
     flow_loss_weight: 1.0
     reg_loss_weight: 1.0
-  knowledge_insulation: ${runtime.knowledge_insulation}
+    wm_loss_weight: 1.0
+  # World model (conditionally instantiated from world_model config group)
+  world_model_expert: ${world_model.world_model_expert}
+  frozen_teacher: ${world_model.frozen_teacher}
+  wm_action_encoder: ${world_model.wm_action_encoder}
+  wm_motion_encoder: ${world_model.wm_motion_encoder}
+  world_model_config:
+    _target_: src.policy.legendvla.WorldModelConfig
+    num_future_frames: ${world_model.future_frame.horizon}
+    target_image_size: ${world_model.teacher_image_size}
+    teacher_patch_size: ${world_model.teacher_patch_size}
+    upsample_factor: ${world_model.upsample_factor}
+    action_conditioning: ${world_model.action_conditioning}
+    motion_conditioning: ${world_model.motion_conditioning}
+    mask_loss_by_view_mask: ${world_model.mask_loss_by_view_mask}

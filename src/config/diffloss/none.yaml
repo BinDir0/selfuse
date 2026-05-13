@@ -1,0 +1,11 @@
+# @package _global_
+# Turn off DiffLoss entirely: no ar_action_encoder, no latent_condition_projector,
+# no diffloss module. build_slot_embeddings will skip the action branch and the
+# loss pipeline will short-circuit to zero_loss. The "ar_action_heads" optimizer
+# group still exists because state_encoder remains needed for backbone input.
+diffloss:
+  enabled: false
+  ar_action_encoder: null
+  latent_condition_projector: null
+  diffloss: null
+  diffloss_repeat: 1

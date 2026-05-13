@@ -132,6 +132,79 @@ def recover_frames_from_pixel_values_videos(
     return frames
 
 
+def recover_all_frames(
+    pixel_values_videos,
+    video_grid_thw,
+    sample_idx: int,
+    target_size=(384, 384),
+):
+    """Recover ALL frames (not just the last) for one sample's video.
+
+    Mirrors :func:`recover_frames_from_pixel_values_videos` but iterates over
+    every ``(temporal_group, frame_in_group)`` pair instead of extracting only
+    the most-recent frame. Useful for attention-visualization workflows that
+    need every frame in the observation history, not just the last one.
+
+    See also :func:`recover_frames_from_pixel_values_videos`, which returns
+    only the last frame per sample (more efficient when that is all you need).
+
+    Args:
+        pixel_values_videos: Tensor [total_patches, channel_dim].
+        video_grid_thw: Tensor [num_videos, 3] with (T_grid, H_grid, W_grid).
+        sample_idx: Which sample in the batch to recover.
+        target_size: (H, W) output size.
+
+    Returns:
+        (frames, grid) where `frames` is a list of uint8 RGB arrays of length
+        ``T_g * TEMPORAL_PATCH_SIZE``, and `grid` is ``(T_g, H_g, W_g)``.
+    """
+    pvv = pixel_values_videos.float().cpu()
+    grid = video_grid_thw.long().cpu()
+    channel_dim = pvv.shape[1]
+
+    expected_channel_dim = TEMPORAL_PATCH_SIZE * 3 * PATCH_SIZE * PATCH_SIZE
+    assert channel_dim == expected_channel_dim, (
+        f"Unexpected channel_dim {channel_dim}, expected {expected_channel_dim}"
+    )
+
+    # Per-sample offsets into the packed patch sequence.
+    patch_counts = (grid[:, 0] * grid[:, 1] * grid[:, 2]).tolist()
+    offsets = [0]
+    for cnt in patch_counts:
+        offsets.append(offsets[-1] + cnt)
+
+    T_g, H_g, W_g = grid[sample_idx].tolist()
+    start, end = offsets[sample_idx], offsets[sample_idx + 1]
+    video_patches = pvv[start:end]  # [T_g * H_g * W_g, channel_dim]
+
+    m = MERGE_SIZE if (H_g % MERGE_SIZE == 0 and W_g % MERGE_SIZE == 0) else 1
+    video_patches = video_patches.reshape(
+        T_g, H_g // m, W_g // m, m, m, 3, TEMPORAL_PATCH_SIZE, PATCH_SIZE, PATCH_SIZE,
+    )
+    video_patches = video_patches.permute(0, 1, 3, 2, 4, 5, 6, 7, 8).reshape(
+        T_g, H_g, W_g, 3, TEMPORAL_PATCH_SIZE, PATCH_SIZE, PATCH_SIZE,
+    )
+    # video_patches: [T_g, H_g, W_g, 3, tp, ph, pw]
+
+    H_target, W_target = target_size
+    frames = []
+    for t_idx in range(T_g):
+        for tp_idx in range(TEMPORAL_PATCH_SIZE):
+            fp = video_patches[t_idx, :, :, :, tp_idx, :, :]  # [H_g, W_g, 3, ph, pw]
+            frame = fp.permute(2, 0, 3, 1, 4).reshape(
+                3, H_g * PATCH_SIZE, W_g * PATCH_SIZE,
+            )
+            frame = frame.permute(1, 2, 0).numpy()
+            frame = frame * CLIP_STD + CLIP_MEAN
+            frame = np.clip(frame * 255.0, 0, 255).astype(np.uint8)
+            h, w = frame.shape[:2]
+            if (h, w) != (H_target, W_target):
+                frame = cv2.resize(frame, (W_target, H_target), interpolation=cv2.INTER_LINEAR)
+            frames.append(frame)
+
+    return frames, (T_g, H_g, W_g)
+
+
 # ---------------------------------------------------------------------------
 # Function B: Prepare visualization sample
 # ---------------------------------------------------------------------------
@@ -189,11 +262,12 @@ def prepare_vis_sample(
         gt_wrist.numpy().astype(np.float32),
     )
 
-    # Camera intrinsic: [fx, fy, cx, cy]
-    if "camera_intrinsic" in batch:
-        intrinsic = batch["camera_intrinsic"][sample_idx, 0, :].float().cpu().numpy()
-    else:
-        intrinsic = np.array([384.0, 384.0, 192.0, 192.0], dtype=np.float32)
+    # Head intrinsic [fx, fy, cx, cy]. camera_intrinsic is flat [total_slots, 4]
+    # keyed to rendered <camera> tokens in token mode, so it no longer admits
+    # a per-sample index; use the raw per-sample intrinsic here.
+    if "intrinsic" not in batch:
+        raise ValueError("'intrinsic' missing from batch; ensure it is in collatable_keys.")
+    intrinsic = batch["intrinsic"][sample_idx].float().cpu().numpy()
 
     # Per-step valid mask: True for non-padded timesteps.
     # actions_valid_mask shape: [H_action, 48] — check first dim of any column.
@@ -275,18 +349,18 @@ def render_overlay_image(vis_sample, action_stride=4):
     if not valid_steps:
         return _append_colorbar(
             canvas, total_steps,
-            (180, 255, 180), (0, 128, 0), (200, 210, 255), (0, 100, 255),
+            GT_COLOR_START, GT_COLOR_END, PRED_COLOR_START, PRED_COLOR_END,
         )
     timesteps = valid_steps[::action_stride]
     if valid_steps[-1] not in timesteps:
         timesteps.append(valid_steps[-1])
     num_valid = len(valid_steps)
 
-    # Color gradients (BGR)
-    GT_COLOR_START = (180, 255, 180)    # light green
-    GT_COLOR_END = (0, 128, 0)          # dark green
-    PRED_COLOR_START = (200, 210, 255)  # light orange
-    PRED_COLOR_END = (0, 100, 255)      # dark orange
+    # Color gradients (BGR): cross-hue for maximum contrast between t=0 and t=T
+    GT_COLOR_START = (255, 100, 0)      # bright blue
+    GT_COLOR_END = (200, 255, 0)        # cyan
+    PRED_COLOR_START = (50, 50, 255)    # bright red
+    PRED_COLOR_END = (0, 220, 255)      # yellow
 
     # Draw trajectory lines first (thinner, behind points)
     max_valid_t = valid_steps[-1]
@@ -303,7 +377,7 @@ def render_overlay_image(vis_sample, action_stride=4):
             gt_2d_0 = project_3d_to_2d(gt_pos0, fx, fy, cx, cy)[0]
             gt_2d_1 = project_3d_to_2d(gt_pos1, fx, fy, cx, cy)[0]
             gt_color = lerp_color(GT_COLOR_START, GT_COLOR_END, (ratio0 + ratio1) / 2)
-            cv2.line(canvas, _pt(gt_2d_0), _pt(gt_2d_1), gt_color, 1, cv2.LINE_AA)
+            cv2.line(canvas, _pt(gt_2d_0), _pt(gt_2d_1), gt_color, 2, cv2.LINE_AA)
 
             # Pred wrist trajectory
             pred_pos0 = pred_wrist[t0, hand_idx * 3: hand_idx * 3 + 3].reshape(1, 3)
@@ -311,7 +385,7 @@ def render_overlay_image(vis_sample, action_stride=4):
             pred_2d_0 = project_3d_to_2d(pred_pos0, fx, fy, cx, cy)[0]
             pred_2d_1 = project_3d_to_2d(pred_pos1, fx, fy, cx, cy)[0]
             pred_color = lerp_color(PRED_COLOR_START, PRED_COLOR_END, (ratio0 + ratio1) / 2)
-            cv2.line(canvas, _pt(pred_2d_0), _pt(pred_2d_1), pred_color, 1, cv2.LINE_AA)
+            cv2.line(canvas, _pt(pred_2d_0), _pt(pred_2d_1), pred_color, 2, cv2.LINE_AA)
 
     # Draw keypoints at each selected timestep
     for t in timesteps:
@@ -369,12 +443,15 @@ def _draw_hand(canvas, wrist_2d, fingers_2d, color, radius=3):
         return
 
     wp = _pt(wrist_2d)
+    # Black outline then filled color for visibility when overlapping
+    cv2.circle(canvas, wp, radius + 2, (0, 0, 0), -1, cv2.LINE_AA)
     cv2.circle(canvas, wp, radius + 1, color, -1, cv2.LINE_AA)
 
     for i in range(fingers_2d.shape[0]):
         fp = _pt(fingers_2d[i])
         if -margin <= fp[0] <= W + margin and -margin <= fp[1] <= H + margin:
             cv2.line(canvas, wp, fp, color, 1, cv2.LINE_AA)
+            cv2.circle(canvas, fp, radius + 1, (0, 0, 0), -1, cv2.LINE_AA)
             cv2.circle(canvas, fp, radius, color, -1, cv2.LINE_AA)
 
 
