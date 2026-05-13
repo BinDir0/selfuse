@@ -24,7 +24,7 @@
 #     --src   /data/<mixed_source_wds> \
 #     --dst   /data/<mixed_trainable_wds> \
 #     --work  /data/<mixed_trainable_wds>.work \
-#     [--workers 8] [--skip-sanity] [--no-check-media]
+#     [--workers 8] [--skip-sanity] [--check-media]
 
 set -euo pipefail
 
@@ -35,7 +35,7 @@ SRC=""
 DST=""
 WORK=""
 WORKERS=4
-CHECK_MEDIA=1
+CHECK_MEDIA=0
 SKIP_SANITY=0
 FULL_SANITY=0
 SCAN_PROGRESS_INTERVAL=1000
