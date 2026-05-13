@@ -980,6 +980,7 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
         target_size = tuple(args.target_image_size) if args.target_image_size else None
         shard_results: list[dict[str, Any]] = []
         tmp_root = None
+        executor = None
         if args.good_keys_output or args.bad_keys_output:
             tmp_root = tempfile.TemporaryDirectory(prefix="dataset-check-jsonl-")
         try:
@@ -1009,25 +1010,25 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
                 )
 
             max_workers = max(1, int(args.workers))
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(scan_one_wds_shard_worker, params)
-                    for params in worker_params
-                ]
-                with tqdm(total=len(futures), desc="Shards", unit="shard") as shard_bar:
-                    with tqdm(total=None, desc="Samples", unit="sample") as sample_bar:
-                        total_done = 0
-                        passed_done = 0
-                        failed_done = 0
-                        for future in concurrent.futures.as_completed(futures):
-                            result = future.result()
-                            shard_results.append(result)
-                            shard_bar.update(1)
-                            sample_bar.update(int(result["samples"]))
-                            total_done += int(result["samples"])
-                            passed_done += int(result["passed"])
-                            failed_done += int(result["failed"])
-                            sample_bar.set_postfix(passed=passed_done, failed=failed_done)
+            executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
+            futures = [
+                executor.submit(scan_one_wds_shard_worker, params)
+                for params in worker_params
+            ]
+            with tqdm(total=len(futures), desc="Shards", unit="shard") as shard_bar:
+                with tqdm(total=None, desc="Samples", unit="sample") as sample_bar:
+                    total_done = 0
+                    passed_done = 0
+                    failed_done = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        result = future.result()
+                        shard_results.append(result)
+                        shard_bar.update(1)
+                        sample_bar.update(int(result["samples"]))
+                        total_done += int(result["samples"])
+                        passed_done += int(result["passed"])
+                        failed_done += int(result["failed"])
+                        sample_bar.set_postfix(passed=passed_done, failed=failed_done)
 
             shard_results.sort(key=lambda item: int(item["shard_index"]))
             append_jsonl_files(
@@ -1045,6 +1046,8 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
                 started=started,
             )
         finally:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
             if tmp_root is not None:
                 tmp_root.cleanup()
 
