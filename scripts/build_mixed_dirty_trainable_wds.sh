@@ -24,7 +24,7 @@
 #     --src   /data/<mixed_source_wds> \
 #     --dst   /data/<mixed_trainable_wds> \
 #     --work  /data/<mixed_trainable_wds>.work \
-#     [--workers 8] [--skip-sanity] [--check-media]
+#     [--workers 8] [--shard-start 0] [--shard-end 1000] [--skip-sanity] [--check-media]
 
 set -euo pipefail
 
@@ -39,6 +39,8 @@ CHECK_MEDIA=0
 SKIP_SANITY=0
 FULL_SANITY=0
 SCAN_PROGRESS_INTERVAL=1000
+SHARD_START=0
+SHARD_END=""
 
 usage() {
   tail -n +2 "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
@@ -52,6 +54,8 @@ while (( "$#" )); do
     --work) WORK="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --scan-progress-interval) SCAN_PROGRESS_INTERVAL="$2"; shift 2 ;;
+    --shard-start) SHARD_START="$2"; shift 2 ;;
+    --shard-end) SHARD_END="$2"; shift 2 ;;
     --check-media) CHECK_MEDIA=1; shift ;;
     --no-check-media) CHECK_MEDIA=0; shift ;;
     --skip-sanity) SKIP_SANITY=1; shift ;;
@@ -74,11 +78,12 @@ DIRTY_KEYS="${WORK}/bad_keys.dirty_only.jsonl"
 FILTER_SUMMARY="${WORK}/filter_summary.json"
 SPLIT_REPORT="${WORK}/bad_keys_split_report.json"
 SCAN_PROGRESS="${WORK}/scan_progress.jsonl"
-DROP_REPORT="${DST}/drop_bad_wds_frames_report.json"
+DROP_REPORT="${WORK}/drop_bad_wds_frames_report.json"
 POST_BAD_KEYS="${WORK}/bad_keys.post_check.jsonl"
 POST_SUMMARY="${WORK}/filter_summary.post_check.json"
 POST_SPLIT_REPORT="${WORK}/bad_keys_split_report.post_check.json"
 POST_SCAN_PROGRESS="${WORK}/scan_progress.post_check.jsonl"
+SELECTED_SHARDS="${WORK}/selected_shards.txt"
 
 log() { printf '[%(%H:%M:%S)T] %s\n' -1 "$*"; }
 
@@ -87,9 +92,27 @@ if (( CHECK_MEDIA == 1 )); then
   FILTER_EXTRA+=(--check-media)
 fi
 
+FILTER_RANGE=(--shard-start "${SHARD_START}")
+if [[ -n "${SHARD_END}" ]]; then
+  FILTER_RANGE+=(--shard-end "${SHARD_END}")
+fi
+
+find "${SRC}" -maxdepth 1 -name 'shard-*.tar' \
+  | sort \
+  | awk -v start="${SHARD_START}" -v end="${SHARD_END}" 'NR > start && (end == "" || NR <= end)' \
+  > "${SELECTED_SHARDS}"
+
+if [[ ! -s "${SELECTED_SHARDS}" ]]; then
+  echo "No shards selected by --shard-start ${SHARD_START} --shard-end ${SHARD_END:-<end>}" >&2
+  exit 1
+fi
+
+log "Selected $(wc -l <"${SELECTED_SHARDS}") shard(s) from ${SRC} [${SHARD_START}, ${SHARD_END:-end})"
+
 log "Step 1: scan ${SRC} for error and dirty keys"
 "${PY}" "${SCRIPT_DIR}/filter_and_check_datasets.py" wds \
   --shards "${SRC}/shard-*.tar" \
+  "${FILTER_RANGE[@]}" \
   --workers "${WORKERS}" \
   --bad-keys-output "${BAD_KEYS}" \
   --report "${FILTER_SUMMARY}" \
@@ -106,8 +129,10 @@ log "Step 2: split bad keys into error_only and dirty_only"
 
 log "  dirty analysis is kept in ${DIRTY_KEYS} and ${SPLIT_REPORT}"
 
-log "Step 3: hardlink mixed-source shards into ${DST}"
-find "${SRC}" -maxdepth 1 -name 'shard-*.tar' -exec ln -f {} "${DST}"/ \;
+log "Step 3: hardlink selected mixed-source shards into ${DST}"
+while IFS= read -r shard; do
+  ln -f "${shard}" "${DST}/"
+done < "${SELECTED_SHARDS}"
 
 log "Step 4: drop error-only samples from ${DST}"
 if [[ -s "${ERR_KEYS}" ]]; then
@@ -128,8 +153,10 @@ fi
 
 SANITY_SHARDS_FILE="${WORK}/sanity_shards.txt"
 if (( FULL_SANITY == 1 )); then
-  log "Step 5: FULL sanity re-scan of ${DST}"
-  find "${DST}" -maxdepth 1 -name 'shard-*.tar' | sort > "${SANITY_SHARDS_FILE}"
+  log "Step 5: FULL sanity re-scan of selected shards in ${DST}"
+  while IFS= read -r shard; do
+    printf '%s/%s\n' "${DST}" "$(basename "${shard}")"
+  done < "${SELECTED_SHARDS}" > "${SANITY_SHARDS_FILE}"
 else
   log "Step 5: incremental sanity re-scan of rewritten shards"
   : > "${SANITY_SHARDS_FILE}"

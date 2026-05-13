@@ -373,6 +373,18 @@ def parse_args() -> argparse.Namespace:
         help="Shard paths or glob patterns.",
     )
     wds_parser.add_argument(
+        "--shard-start",
+        type=int,
+        default=0,
+        help="Inclusive shard index in sorted expanded --shards. Default: 0.",
+    )
+    wds_parser.add_argument(
+        "--shard-end",
+        type=int,
+        default=None,
+        help="Exclusive shard index in sorted expanded --shards. Default: scan to the end.",
+    )
+    wds_parser.add_argument(
         "--max-samples",
         type=int,
         default=0,
@@ -507,6 +519,22 @@ def expand_paths(patterns: Iterable[str]) -> list[str]:
         elif not any(ch in pattern for ch in "*?["):
             out.append(pattern)
     return out
+
+
+def select_shard_range(shard_paths: list[str], shard_start: int, shard_end: int | None) -> list[str]:
+    start = int(shard_start)
+    if start < 0:
+        raise SystemExit(f"--shard-start must be >= 0, got {shard_start}")
+    end = None if shard_end is None else int(shard_end)
+    if end is not None and end < start:
+        raise SystemExit(f"--shard-end must be >= --shard-start, got {shard_end} < {shard_start}")
+    selected = shard_paths[start:end]
+    if not selected:
+        raise SystemExit(
+            f"No shards selected by --shard-start {start} --shard-end {end}; "
+            f"expanded shard count={len(shard_paths)}"
+        )
+    return selected
 
 
 def write_report(report: dict[str, Any], path: str | None) -> None:
@@ -963,7 +991,11 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
     if DataChecker is None:
         raise RuntimeError("failed to load training data checker")
 
-    shard_paths = expand_paths(args.shards)
+    shard_paths = select_shard_range(
+        expand_paths(args.shards),
+        getattr(args, "shard_start", 0),
+        getattr(args, "shard_end", None),
+    )
     if not shard_paths:
         raise SystemExit("No shards matched --shards")
 

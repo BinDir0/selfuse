@@ -21,6 +21,23 @@ def _npy_bytes(array):
 
 
 class FilterAndCheckDatasetsProgressTests(unittest.TestCase):
+    def test_select_shard_range_uses_zero_based_half_open_bounds(self):
+        shards = [
+            "/data/shard-000000.tar",
+            "/data/shard-000001.tar",
+            "/data/shard-000002.tar",
+            "/data/shard-000003.tar",
+        ]
+
+        self.assertEqual(
+            mod.select_shard_range(shards, 1, 3),
+            ["/data/shard-000001.tar", "/data/shard-000002.tar"],
+        )
+        self.assertEqual(
+            mod.select_shard_range(shards, 2, None),
+            ["/data/shard-000002.tar", "/data/shard-000003.tar"],
+        )
+
     def test_worker_writes_shard_progress_heartbeats(self):
         lowdim = np.zeros((116,), dtype=np.float32)
         lowdim[96:112] = np.eye(4, dtype=np.float32).reshape(-1)
