@@ -10,6 +10,7 @@ from lib.pipeline.exporters.webdataset_rewriter import iter_shard_samples, write
 from scripts.repair_legacy_rot6d_wds import (
     REPAIR_MARKER_KEY,
     REPAIR_MARKER_VALUE,
+    dirty_state_action_scale_lowdim,
     encode_npy,
     mark_meta_repaired,
     repair_shard,
@@ -39,6 +40,23 @@ class RepairLegacyRot6DWdsTests(unittest.TestCase):
         for start in (6, 12, 54, 60):
             untouched[start:start + 6] = False
         np.testing.assert_array_equal(repaired[untouched], lowdim[untouched])
+
+    def test_dirty_state_action_scale_updates_hand_and_wrist_translation_only(self):
+        lowdim = np.arange(1, 117, dtype=np.float32)
+        scaled = dirty_state_action_scale_lowdim(
+            lowdim,
+            seed="test-seed",
+            sample_key="sample-000000",
+            scale_min=2.0,
+            scale_max=2.0,
+        )
+
+        expected = lowdim.copy()
+        for start, end in ((0, 6), (18, 48), (48, 54), (66, 96)):
+            expected[start:end] *= 2.0
+        np.testing.assert_array_equal(scaled, expected)
+        for start, end in ((6, 18), (54, 66)):
+            np.testing.assert_array_equal(scaled[start:end], lowdim[start:end])
 
     def test_mark_meta_repaired_records_layout_and_prevents_double_repair(self):
         repaired = mark_meta_repaired(json.dumps({"clip_id": "clip"}).encode("utf-8"))
@@ -141,6 +159,53 @@ class RepairLegacyRot6DWdsTests(unittest.TestCase):
             self.assertEqual(output_meta["instruction_num"], 1)
             self.assertIn("legacy_rot6d", output_meta["dirty_ablation_flags"])
             self.assertIn("generic_instruction", output_meta["dirty_ablation_flags"])
+
+    def test_repair_shard_can_scale_hand_and_wrist_translation_dirty(self):
+        lowdim = np.arange(1, 117, dtype=np.float32)
+        for start in (6, 12, 54, 60):
+            lowdim[start:start + 6] = np.array([1, 2, 3, 4, 5, 6], dtype=np.float32)
+        meta_bytes = json.dumps({"clip_id": "clip", "instruction": ["pick"], "instruction_num": 1}).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src_dir = root / "src"
+            out_dir = root / "out"
+            src_dir.mkdir()
+            shard_path = src_dir / "shard-000000.tar"
+            with tarfile.open(shard_path, "w") as tar_writer:
+                write_sample_to_tar(
+                    tar_writer,
+                    "sample-000000",
+                    b"jpg",
+                    encode_npy(lowdim),
+                    meta_bytes,
+                )
+
+            result = repair_shard(
+                str(shard_path),
+                str(out_dir),
+                resume=True,
+                dry_run=False,
+                dirty_state_action_scale_episode_fraction=1.0,
+                dirty_state_action_scale_min=2.0,
+                dirty_state_action_scale_max=2.0,
+            )
+
+            self.assertEqual(result["dirty_state_action_scale_samples"], 1)
+            sample = next(iter_shard_samples(str(out_dir / shard_path.name)))
+            output_lowdim = np.load(__import__("io").BytesIO(sample["lowdim_bytes"]), allow_pickle=False)
+
+            repaired_without_scale = repair_lowdim(lowdim)
+            expected = repaired_without_scale.copy()
+            for start, end in ((0, 6), (18, 48), (48, 54), (66, 96)):
+                expected[start:end] *= 2.0
+            np.testing.assert_array_equal(output_lowdim, expected)
+            for start, end in ((6, 18), (54, 66)):
+                np.testing.assert_array_equal(output_lowdim[start:end], repaired_without_scale[start:end])
+
+            output_meta = json.loads(sample["meta_bytes"].decode("utf-8"))
+            self.assertIn("state_action_scale", output_meta["dirty_ablation_flags"])
+            self.assertEqual(output_meta["dirty_state_action_scale_range"], [2.0, 2.0])
 
 
 if __name__ == "__main__":

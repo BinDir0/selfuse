@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a tiny measurable legacy-rot6d WDS repair lab.")
     parser.add_argument(
         "--case",
-        choices=("all", "clean", "all-legacy", "all-empty", "all-generic", "mixed"),
+        choices=("all", "clean", "all-legacy", "all-empty", "all-generic", "all-state-action-scale", "mixed"),
         default="all",
         help="Which lab case to run.",
     )
@@ -122,6 +122,15 @@ def case_args(case_name: str) -> list[str]:
             "--generic-instruction",
             "do something useful",
         ]
+    if case_name == "all-state-action-scale":
+        return [
+            "--dirty-state-action-scale-episode-fraction",
+            "1.0",
+            "--dirty-state-action-scale-min",
+            "0.9",
+            "--dirty-state-action-scale-max",
+            "1.1",
+        ]
     if case_name == "mixed":
         return [
             "--dirty-seed",
@@ -134,6 +143,8 @@ def case_args(case_name: str) -> list[str]:
             "generic",
             "--generic-instruction",
             "do something useful",
+            "--dirty-state-action-scale-episode-fraction",
+            "0.35",
         ]
     raise ValueError(f"unknown case: {case_name}")
 
@@ -258,17 +269,24 @@ def assert_case(summary: dict[str, Any]) -> None:
             raise AssertionError(f"all-generic should remain checker-clean, got {dict(reasons)}")
         if meta.get("dirty_flag:generic_instruction", 0) != samples:
             raise AssertionError(f"all-generic should mark all samples generic, got {dict(meta)}")
+    elif case_name == "all-state-action-scale":
+        if reasons != Counter({"OK": samples}):
+            raise AssertionError(f"all-state-action-scale should remain checker-clean, got {dict(reasons)}")
+        if meta.get("dirty_flag:state_action_scale", 0) != samples:
+            raise AssertionError(f"all-state-action-scale should mark all samples scaled, got {dict(meta)}")
     elif case_name == "mixed":
         if not (0 < meta.get("dirty_flag:legacy_rot6d", 0) < samples):
             raise AssertionError(f"mixed should mark some but not all legacy rot6d samples, got {dict(meta)}")
         if not (0 < meta.get("dirty_flag:generic_instruction", 0) < samples):
             raise AssertionError(f"mixed should mark some but not all generic instruction samples, got {dict(meta)}")
+        if not (0 < meta.get("dirty_flag:state_action_scale", 0) < samples):
+            raise AssertionError(f"mixed should mark some but not all state/action scale samples, got {dict(meta)}")
 
 
 def main() -> None:
     args = build_parser().parse_args()
     requested_cases = (
-        ["clean", "all-legacy", "all-empty", "all-generic", "mixed"]
+        ["clean", "all-legacy", "all-empty", "all-generic", "all-state-action-scale", "mixed"]
         if args.case == "all"
         else [args.case]
     )

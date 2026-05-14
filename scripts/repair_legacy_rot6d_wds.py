@@ -60,6 +60,15 @@ ROT6D_SLICES = (
     (54, 60),
     (60, 66),
 )
+WRIST_TRANSLATION_SCALE_SLICES = (
+    (0, 6),
+    (48, 54),
+)
+HAND_STATE_ACTION_SCALE_SLICES = (
+    (18, 48),
+    (66, 96),
+)
+STATE_ACTION_SCALE_SLICES = WRIST_TRANSLATION_SCALE_SLICES + HAND_STATE_ACTION_SCALE_SLICES
 REPAIR_MARKER_KEY = "lowdim_rot6d_repair"
 REPAIR_MARKER_VALUE = "legacy_3x2_row_major_to_2x3_column_major"
 
@@ -131,6 +140,27 @@ def build_parser() -> argparse.ArgumentParser:
         default="do something useful",
         help="Replacement instruction for --dirty-instruction-mode generic.",
     )
+    parser.add_argument(
+        "--dirty-state-action-scale-episode-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of episodes whose hand state/action dims and wrist translation dims "
+            "should be randomly scaled. Wrist rot6d dims are not scaled."
+        ),
+    )
+    parser.add_argument(
+        "--dirty-state-action-scale-min",
+        type=float,
+        default=0.9,
+        help="Minimum per-sample, per-dimension state/action scale factor.",
+    )
+    parser.add_argument(
+        "--dirty-state-action-scale-max",
+        type=float,
+        default=1.1,
+        help="Maximum per-sample, per-dimension state/action scale factor.",
+    )
     return parser
 
 
@@ -181,6 +211,29 @@ def repair_lowdim(lowdim: np.ndarray) -> np.ndarray:
     return repaired
 
 
+def stable_u64(seed: str, namespace: str, key: str) -> int:
+    digest = hashlib.sha256(f"{seed}:{namespace}:{key}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def dirty_state_action_scale_lowdim(
+    lowdim: np.ndarray,
+    *,
+    seed: str,
+    sample_key: str,
+    scale_min: float,
+    scale_max: float,
+) -> np.ndarray:
+    scaled = np.asarray(lowdim, dtype=np.float32).copy()
+    if scaled.ndim != 1 or scaled.shape[0] < 96:
+        raise ValueError(f"Expected lowdim with at least 96 dims, got {scaled.shape}")
+    rng = np.random.default_rng(stable_u64(seed, "dirty_state_action_scale_values", sample_key))
+    for start, end in STATE_ACTION_SCALE_SLICES:
+        factors = rng.uniform(float(scale_min), float(scale_max), size=end - start).astype(np.float32)
+        scaled[start:end] *= factors
+    return scaled
+
+
 def episode_id_for_sample(sample_key: str, meta: dict[str, Any]) -> str:
     for key in ("clip_id", "episode_id"):
         value = meta.get(key)
@@ -196,8 +249,7 @@ def stable_episode_selected(seed: str, namespace: str, episode_id: str, fraction
         return False
     if fraction >= 1.0:
         return True
-    digest = hashlib.sha256(f"{seed}:{namespace}:{episode_id}".encode("utf-8")).digest()
-    value = int.from_bytes(digest[:8], "big") / float(1 << 64)
+    value = stable_u64(seed, namespace, episode_id) / float(1 << 64)
     return value < fraction
 
 
@@ -206,12 +258,24 @@ def validate_fraction(name: str, value: float) -> None:
         raise SystemExit(f"{name} must be in [0, 1], got {value}")
 
 
+def validate_scale_range(scale_min: float, scale_max: float) -> None:
+    if not np.isfinite(scale_min) or not np.isfinite(scale_max):
+        raise SystemExit("--dirty-state-action-scale-min/max must be finite")
+    if scale_min <= 0.0 or scale_max <= 0.0:
+        raise SystemExit("--dirty-state-action-scale-min/max must be positive")
+    if scale_min > scale_max:
+        raise SystemExit("--dirty-state-action-scale-min must be <= --dirty-state-action-scale-max")
+
+
 def update_meta_for_repair(
     meta: dict[str, Any],
     *,
     rot6d_repaired: bool,
     dirty_instruction_mode: str | None,
     generic_instruction: str,
+    dirty_state_action_scale: bool = False,
+    dirty_state_action_scale_min: float = 0.9,
+    dirty_state_action_scale_max: float = 1.1,
 ) -> bytes:
     meta = dict(meta)
     existing_marker = meta.get(REPAIR_MARKER_KEY)
@@ -236,6 +300,19 @@ def update_meta_for_repair(
         meta["instruction_num"] = 1
         meta["language"] = generic_instruction
         dirty_flags.append("generic_instruction")
+
+    if dirty_state_action_scale:
+        meta["dirty_state_action_scale_range"] = [
+            float(dirty_state_action_scale_min),
+            float(dirty_state_action_scale_max),
+        ]
+        meta["dirty_state_action_scale_fields"] = [
+            "wrist_state.translation",
+            "wrist_action.translation",
+            "hand_state",
+            "hand_action",
+        ]
+        dirty_flags.append("state_action_scale")
 
     if dirty_flags:
         meta["dirty_ablation_flags"] = sorted(set(meta.get("dirty_ablation_flags", []) + dirty_flags))
@@ -295,6 +372,9 @@ def repair_shard(
     dirty_instruction_episode_fraction: float = 0.0,
     dirty_instruction_mode: str = "empty",
     generic_instruction: str = "do something useful",
+    dirty_state_action_scale_episode_fraction: float = 0.0,
+    dirty_state_action_scale_min: float = 0.9,
+    dirty_state_action_scale_max: float = 1.1,
 ) -> dict[str, Any]:
     source_path = Path(source_shard)
     output_path = Path(output_dir) / source_path.name
@@ -324,8 +404,10 @@ def repair_shard(
     lowdim_repaired = 0
     legacy_rot6d_samples = 0
     dirty_instruction_samples = 0
+    dirty_state_action_scale_samples = 0
     legacy_rot6d_episodes: set[str] = set()
     dirty_instruction_episodes: set[str] = set()
+    dirty_state_action_scale_episodes: set[str] = set()
     progress_interval = max(1, int(progress_interval))
     _write_progress(
         progress_out,
@@ -355,6 +437,12 @@ def repair_shard(
                 episode_id,
                 dirty_instruction_episode_fraction,
             )
+            dirty_state_action_scale = stable_episode_selected(
+                dirty_seed,
+                "dirty_state_action_scale",
+                episode_id,
+                dirty_state_action_scale_episode_fraction,
+            )
             if keep_legacy_rot6d:
                 legacy_rot6d_samples += 1
                 legacy_rot6d_episodes.add(episode_id)
@@ -364,6 +452,9 @@ def repair_shard(
             if dirty_instruction:
                 dirty_instruction_samples += 1
                 dirty_instruction_episodes.add(episode_id)
+            if dirty_state_action_scale:
+                dirty_state_action_scale_samples += 1
+                dirty_state_action_scale_episodes.add(episode_id)
             samples += 1
             if samples % progress_interval == 0:
                 _write_progress(
@@ -397,8 +488,10 @@ def repair_shard(
             "lowdim_repaired": lowdim_repaired,
             "legacy_rot6d_samples": legacy_rot6d_samples,
             "dirty_instruction_samples": dirty_instruction_samples,
+            "dirty_state_action_scale_samples": dirty_state_action_scale_samples,
             "legacy_rot6d_episodes": len(legacy_rot6d_episodes),
             "dirty_instruction_episodes": len(dirty_instruction_episodes),
+            "dirty_state_action_scale_episodes": len(dirty_state_action_scale_episodes),
         }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -425,6 +518,12 @@ def repair_shard(
                 episode_id,
                 dirty_instruction_episode_fraction,
             )
+            dirty_state_action_scale = stable_episode_selected(
+                dirty_seed,
+                "dirty_state_action_scale",
+                episode_id,
+                dirty_state_action_scale_episode_fraction,
+            )
             if keep_legacy_rot6d:
                 repaired_lowdim = decode_npy(sample["lowdim_bytes"]).astype(np.float32, copy=False)
                 legacy_rot6d_samples += 1
@@ -435,6 +534,16 @@ def repair_shard(
             if dirty_instruction:
                 dirty_instruction_samples += 1
                 dirty_instruction_episodes.add(episode_id)
+            if dirty_state_action_scale:
+                repaired_lowdim = dirty_state_action_scale_lowdim(
+                    repaired_lowdim,
+                    seed=dirty_seed,
+                    sample_key=sample["key"],
+                    scale_min=dirty_state_action_scale_min,
+                    scale_max=dirty_state_action_scale_max,
+                )
+                dirty_state_action_scale_samples += 1
+                dirty_state_action_scale_episodes.add(episode_id)
             write_sample_to_tar(
                 tar_writer,
                 sample["key"],
@@ -445,6 +554,9 @@ def repair_shard(
                     rot6d_repaired=not keep_legacy_rot6d,
                     dirty_instruction_mode=dirty_instruction_mode if dirty_instruction else None,
                     generic_instruction=generic_instruction,
+                    dirty_state_action_scale=dirty_state_action_scale,
+                    dirty_state_action_scale_min=dirty_state_action_scale_min,
+                    dirty_state_action_scale_max=dirty_state_action_scale_max,
                 ),
                 mano_bytes=sample.get("mano_bytes"),
                 depth_bytes=sample.get("depth_bytes"),
@@ -483,8 +595,10 @@ def repair_shard(
         "lowdim_repaired": lowdim_repaired,
         "legacy_rot6d_samples": legacy_rot6d_samples,
         "dirty_instruction_samples": dirty_instruction_samples,
+        "dirty_state_action_scale_samples": dirty_state_action_scale_samples,
         "legacy_rot6d_episodes": len(legacy_rot6d_episodes),
         "dirty_instruction_episodes": len(dirty_instruction_episodes),
+        "dirty_state_action_scale_episodes": len(dirty_state_action_scale_episodes),
     }
 
 
@@ -500,8 +614,10 @@ def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
         "lowdim_repaired": int(sum(int(item.get("lowdim_repaired", 0)) for item in items)),
         "legacy_rot6d_samples": int(sum(int(item.get("legacy_rot6d_samples", 0)) for item in items)),
         "dirty_instruction_samples": int(sum(int(item.get("dirty_instruction_samples", 0)) for item in items)),
+        "dirty_state_action_scale_samples": int(sum(int(item.get("dirty_state_action_scale_samples", 0)) for item in items)),
         "legacy_rot6d_episodes_shard_local": int(sum(int(item.get("legacy_rot6d_episodes", 0)) for item in items)),
         "dirty_instruction_episodes_shard_local": int(sum(int(item.get("dirty_instruction_episodes", 0)) for item in items)),
+        "dirty_state_action_scale_episodes_shard_local": int(sum(int(item.get("dirty_state_action_scale_episodes", 0)) for item in items)),
     }
 
 
@@ -517,6 +633,11 @@ def main() -> None:
     workers = max(1, int(args.workers))
     validate_fraction("--keep-legacy-rot6d-episode-fraction", float(args.keep_legacy_rot6d_episode_fraction))
     validate_fraction("--dirty-instruction-episode-fraction", float(args.dirty_instruction_episode_fraction))
+    validate_fraction(
+        "--dirty-state-action-scale-episode-fraction",
+        float(args.dirty_state_action_scale_episode_fraction),
+    )
+    validate_scale_range(float(args.dirty_state_action_scale_min), float(args.dirty_state_action_scale_max))
     executor_cls = ProcessPoolExecutor if args.executor == "process" else ThreadPoolExecutor
     progress_run_id = uuid.uuid4().hex if args.progress_out else None
     if args.progress_out:
@@ -546,6 +667,9 @@ def main() -> None:
                 dirty_instruction_episode_fraction=float(args.dirty_instruction_episode_fraction),
                 dirty_instruction_mode=str(args.dirty_instruction_mode),
                 generic_instruction=str(args.generic_instruction),
+                dirty_state_action_scale_episode_fraction=float(args.dirty_state_action_scale_episode_fraction),
+                dirty_state_action_scale_min=float(args.dirty_state_action_scale_min),
+                dirty_state_action_scale_max=float(args.dirty_state_action_scale_max),
             )
             for path in selected
         )
@@ -567,6 +691,9 @@ def main() -> None:
                     dirty_instruction_episode_fraction=float(args.dirty_instruction_episode_fraction),
                     dirty_instruction_mode=str(args.dirty_instruction_mode),
                     generic_instruction=str(args.generic_instruction),
+                    dirty_state_action_scale_episode_fraction=float(args.dirty_state_action_scale_episode_fraction),
+                    dirty_state_action_scale_min=float(args.dirty_state_action_scale_min),
+                    dirty_state_action_scale_max=float(args.dirty_state_action_scale_max),
                 )
                 for path in selected
             ]
