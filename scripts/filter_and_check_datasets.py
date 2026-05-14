@@ -1043,24 +1043,41 @@ def scan_wds(args: argparse.Namespace) -> dict[str, Any]:
 
             max_workers = max(1, int(args.workers))
             executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
-            futures = [
-                executor.submit(scan_one_wds_shard_worker, params)
-                for params in worker_params
-            ]
-            with tqdm(total=len(futures), desc="Shards", unit="shard") as shard_bar:
+            pending_params = iter(worker_params)
+            futures: dict[concurrent.futures.Future, dict[str, Any]] = {}
+
+            def submit_next() -> bool:
+                try:
+                    params = next(pending_params)
+                except StopIteration:
+                    return False
+                futures[executor.submit(scan_one_wds_shard_worker, params)] = params
+                return True
+
+            for _ in range(min(max_workers, len(worker_params))):
+                submit_next()
+
+            with tqdm(total=len(worker_params), desc="Shards", unit="shard") as shard_bar:
                 with tqdm(total=None, desc="Samples", unit="sample") as sample_bar:
                     total_done = 0
                     passed_done = 0
                     failed_done = 0
-                    for future in concurrent.futures.as_completed(futures):
-                        result = future.result()
-                        shard_results.append(result)
-                        shard_bar.update(1)
-                        sample_bar.update(int(result["samples"]))
-                        total_done += int(result["samples"])
-                        passed_done += int(result["passed"])
-                        failed_done += int(result["failed"])
-                        sample_bar.set_postfix(passed=passed_done, failed=failed_done)
+                    while futures:
+                        done, _ = concurrent.futures.wait(
+                            futures,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        for future in done:
+                            futures.pop(future)
+                            result = future.result()
+                            shard_results.append(result)
+                            shard_bar.update(1)
+                            sample_bar.update(int(result["samples"]))
+                            total_done += int(result["samples"])
+                            passed_done += int(result["passed"])
+                            failed_done += int(result["failed"])
+                            sample_bar.set_postfix(passed=passed_done, failed=failed_done)
+                            submit_next()
 
             shard_results.sort(key=lambda item: int(item["shard_index"]))
             append_jsonl_files(

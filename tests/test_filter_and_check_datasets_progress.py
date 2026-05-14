@@ -124,10 +124,16 @@ class FilterAndCheckDatasetsProgressTests(unittest.TestCase):
 
         fake_executor = _FakeExecutor()
         append_calls = []
+        wait_calls = []
 
         args = argparse.Namespace(
             kind="auto",
-            shards=["/data/shard-000000.tar", "/data/shard-000001.tar"],
+            shards=[
+                "/data/shard-000000.tar",
+                "/data/shard-000001.tar",
+                "/data/shard-000002.tar",
+                "/data/shard-000003.tar",
+            ],
             max_samples=0,
             workers=2,
             check_media=False,
@@ -147,7 +153,13 @@ class FilterAndCheckDatasetsProgressTests(unittest.TestCase):
             mock.patch.object(mod, "load_training_checkers"),
             mock.patch.object(mod, "expand_paths", return_value=args.shards),
             mock.patch.object(mod.concurrent.futures, "ProcessPoolExecutor", return_value=fake_executor),
-            mock.patch.object(mod.concurrent.futures, "as_completed", side_effect=lambda futures: list(futures)),
+            mock.patch.object(
+                mod.concurrent.futures,
+                "wait",
+                side_effect=lambda futures, return_when: (
+                    wait_calls.append(len(futures)) or ({next(iter(futures))}, set(futures) - {next(iter(futures))})
+                ),
+            ),
             mock.patch.object(mod, "append_jsonl_files", side_effect=lambda paths, output: append_calls.append(output)),
             mock.patch.object(mod, "build_wds_report", return_value={"ok": True}),
         ):
@@ -156,6 +168,8 @@ class FilterAndCheckDatasetsProgressTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(append_calls, ["/tmp/good.jsonl", "/tmp/bad.jsonl"])
         self.assertEqual(fake_executor.shutdown_calls, [(False, True)])
+        self.assertEqual(wait_calls[0], 2)
+        self.assertTrue(all(count <= 2 for count in wait_calls))
 
 
 if __name__ == "__main__":
