@@ -127,6 +127,15 @@ def update_meta(meta_payload: bytes, *, values_replaced: int, replacement_min: f
     return json.dumps(meta, ensure_ascii=False).encode("utf-8")
 
 
+def existing_repair_count(meta_payload: bytes) -> int:
+    meta = json.loads(meta_payload.decode("utf-8"))
+    flags = set(meta.get("dirty_ablation_flags", []))
+    repair = meta.get("nonfinite_lowdim_repair")
+    if REPAIR_FLAG not in flags or not isinstance(repair, dict):
+        return 0
+    return max(0, int(repair.get("values_replaced", 0)))
+
+
 def load_nonfinite_keys(path: str | Path) -> dict[str, set[str]]:
     keys_by_shard: dict[str, set[str]] = defaultdict(set)
     with open(path, "r", encoding="utf-8") as file_obj:
@@ -181,12 +190,15 @@ def rewrite_shard(
         "destination": str(dst_path),
         "sample_keys_requested": len(sample_keys),
         "sample_keys_repaired": [],
+        "sample_keys_already_repaired": [],
         "sample_keys_without_nonfinite": [],
         "values_replaced": 0,
+        "values_already_repaired": 0,
         "members_total": 0,
         "dry_run": bool(dry_run),
     }
     repaired_counts_by_key: dict[str, int] = {}
+    already_repaired_counts_by_key: dict[str, int] = {}
     tmp_path = dst_path.with_name(dst_path.name + ".tmp")
     if tmp_path.exists() and not dry_run:
         tmp_path.unlink()
@@ -229,6 +241,10 @@ def rewrite_shard(
                             replacement_min=replacement_min,
                             replacement_max=replacement_max,
                         )
+                    elif sample_key in repaired_counts_by_key:
+                        existing_count = existing_repair_count(payload)
+                        if existing_count:
+                            already_repaired_counts_by_key[sample_key] = existing_count
 
                 if dst is not None:
                     add_payload(dst, member, payload)
@@ -237,11 +253,18 @@ def rewrite_shard(
                 dst.close()
 
     repaired = sorted(key for key, count in repaired_counts_by_key.items() if count > 0)
-    without = sorted(key for key, count in repaired_counts_by_key.items() if count == 0)
+    already = sorted(already_repaired_counts_by_key)
+    without = sorted(
+        key
+        for key, count in repaired_counts_by_key.items()
+        if count == 0 and key not in already_repaired_counts_by_key
+    )
     missing = sorted(set(sample_keys) - set(repaired_counts_by_key))
     stats["sample_keys_repaired"] = repaired
+    stats["sample_keys_already_repaired"] = already
     stats["sample_keys_without_nonfinite"] = without
     stats["sample_keys_missing_in_shard"] = missing
+    stats["values_already_repaired"] = sum(already_repaired_counts_by_key.values())
     stats["elapsed_sec"] = time.time() - started
 
     if not dry_run:
@@ -362,9 +385,11 @@ def main() -> None:
 
     report["sample_keys_requested"] = sum(item["sample_keys_requested"] for item in report["shards"])
     report["sample_keys_repaired"] = sum(len(item["sample_keys_repaired"]) for item in report["shards"])
+    report["sample_keys_already_repaired"] = sum(len(item["sample_keys_already_repaired"]) for item in report["shards"])
     report["sample_keys_without_nonfinite"] = sum(len(item["sample_keys_without_nonfinite"]) for item in report["shards"])
     report["sample_keys_missing_in_shard"] = sum(len(item["sample_keys_missing_in_shard"]) for item in report["shards"])
     report["values_replaced"] = sum(int(item["values_replaced"]) for item in report["shards"])
+    report["values_already_repaired"] = sum(int(item["values_already_repaired"]) for item in report["shards"])
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -374,7 +399,9 @@ def main() -> None:
             {
                 "shards_to_rewrite": report["shards_to_rewrite"],
                 "sample_keys_repaired": report["sample_keys_repaired"],
+                "sample_keys_already_repaired": report["sample_keys_already_repaired"],
                 "values_replaced": report["values_replaced"],
+                "values_already_repaired": report["values_already_repaired"],
                 "missing": report["sample_keys_missing_in_shard"],
             },
             ensure_ascii=False,

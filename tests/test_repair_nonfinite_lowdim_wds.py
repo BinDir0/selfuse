@@ -62,6 +62,23 @@ class RepairNonfiniteLowdimWdsTests(unittest.TestCase):
             self.assertIn(REPAIR_FLAG, meta["dirty_ablation_flags"])
             self.assertEqual(meta["nonfinite_lowdim_repair"]["values_replaced"], 3)
 
+            stats = rewrite_shard(
+                src_shard=str(root / "src" / shard_path.name),
+                dst_dir=dst_dir,
+                sample_keys={"sample-000000"},
+                seed="test-seed",
+                replacement_min=0.5,
+                replacement_max=0.5,
+                dry_run=False,
+                overwrite=True,
+            )
+
+            self.assertEqual(stats["values_replaced"], 0)
+            self.assertEqual(stats["values_already_repaired"], 3)
+            self.assertEqual(stats["sample_keys_repaired"], [])
+            self.assertEqual(stats["sample_keys_already_repaired"], ["sample-000000"])
+            self.assertEqual(stats["sample_keys_without_nonfinite"], [])
+
     def test_rewrite_shards_can_repair_multiple_shards_in_parallel(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
