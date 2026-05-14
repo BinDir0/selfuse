@@ -6,8 +6,9 @@ filter_and_check_datasets.py emits one JSONL record per failing sample with a
 records into:
 
   - error_only: samples that are unloadable (would crash training). These are
-    ``MissingOrInvalidFilesError`` plus any ``Unexpected*`` reason produced
-    when filter_and_check_datasets.py catches a non-DataSkipError exception.
+    ``MissingOrInvalidFilesError``, ``NonFiniteDataError``, plus any
+    ``Unexpected*`` reason produced when filter_and_check_datasets.py catches
+    a non-DataSkipError exception.
   - dirty_only: samples that passed loading but failed quality thresholds.
 
 The two output files feed the dirty-data ablation pipeline:
@@ -29,7 +30,7 @@ except ImportError:
         return iterable if iterable is not None else ()
 
 
-ERROR_REASONS = frozenset({"MissingOrInvalidFilesError"})
+ERROR_REASONS = frozenset({"MissingOrInvalidFilesError", "NonFiniteDataError"})
 ERROR_REASON_PREFIXES = ("Unexpected",)
 
 
@@ -51,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--error-output",
         required=True,
-        help="Output JSONL for unloadable samples (MissingOrInvalidFilesError, Unexpected*).",
+        help="Output JSONL for training-unsafe samples (MissingOrInvalidFilesError, NonFiniteDataError, Unexpected*).",
     )
     parser.add_argument(
         "--dirty-output",
