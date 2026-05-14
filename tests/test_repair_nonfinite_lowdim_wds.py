@@ -2,6 +2,7 @@ import json
 import tempfile
 import tarfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ from scripts.repair_nonfinite_lowdim_wds import (
     REPAIR_FLAG,
     encode_npy,
     rewrite_shard,
+    rewrite_shards,
 )
 
 
@@ -59,6 +61,45 @@ class RepairNonfiniteLowdimWdsTests(unittest.TestCase):
             meta = json.loads(sample["meta_bytes"].decode("utf-8"))
             self.assertIn(REPAIR_FLAG, meta["dirty_ablation_flags"])
             self.assertEqual(meta["nonfinite_lowdim_repair"]["values_replaced"], 3)
+
+    def test_rewrite_shards_can_repair_multiple_shards_in_parallel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dst_dir = root / "dst"
+            dst_dir.mkdir()
+            keys_by_shard = {}
+            for shard_index in range(2):
+                key = f"sample-{shard_index:06d}"
+                lowdim = np.arange(116, dtype=np.float32)
+                lowdim[shard_index] = np.inf
+                shard_path = dst_dir / f"shard-{shard_index:06d}.tar"
+                with tarfile.open(shard_path, "w") as tar_writer:
+                    write_sample_to_tar(
+                        tar_writer,
+                        key,
+                        b"jpg",
+                        encode_npy(lowdim),
+                        json.dumps({"clip_id": key}).encode("utf-8"),
+                    )
+                keys_by_shard[str(root / "src" / shard_path.name)] = {key}
+
+            args = SimpleNamespace(
+                seed="test-seed",
+                replacement_min=0.25,
+                replacement_max=0.25,
+                dry_run=False,
+                overwrite=True,
+                workers=2,
+                executor="thread",
+            )
+            stats = rewrite_shards(keys_by_shard=keys_by_shard, dst_dir=dst_dir, args=args)
+
+            self.assertEqual(sum(item["values_replaced"] for item in stats), 2)
+            self.assertEqual(len(stats), 2)
+            for shard_path in sorted(dst_dir.glob("shard-*.tar")):
+                sample = next(iter_shard_samples(str(shard_path)))
+                repaired = np.load(__import__("io").BytesIO(sample["lowdim_bytes"]), allow_pickle=False)
+                self.assertTrue(np.isfinite(repaired).all())
 
 
 if __name__ == "__main__":

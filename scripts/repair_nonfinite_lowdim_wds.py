@@ -10,6 +10,7 @@ shards already present in --dst-dir, replacing NaN/+Inf/-Inf entries in
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import copy
 import hashlib
 import io
@@ -26,8 +27,24 @@ import numpy as np
 try:
     from tqdm import tqdm
 except ImportError:
+    class _NoOpTqdm:
+        def __init__(self, iterable=None, **_kwargs):
+            self.iterable = iterable
+
+        def __iter__(self):
+            return iter(self.iterable if self.iterable is not None else ())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def update(self, _n=1):
+            return None
+
     def tqdm(iterable=None, **_kwargs):
-        return iterable if iterable is not None else ()
+        return _NoOpTqdm(iterable)
 
 
 REPAIR_REASON = "NonFiniteDataError"
@@ -54,6 +71,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replacement-max", type=float, default=1.0, help="Maximum random replacement value.")
     parser.add_argument("--dry-run", action="store_true", help="Report planned rewrites without writing shards.")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing existing destination shards.")
+    parser.add_argument("--workers", type=int, default=1, help="Number of shards to rewrite in parallel.")
+    parser.add_argument(
+        "--executor",
+        choices=("process", "thread"),
+        default="process",
+        help="Parallel executor to use when --workers > 1.",
+    )
     return parser.parse_args()
 
 
@@ -230,6 +254,87 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--replacement-min/max must be finite")
     if float(args.replacement_min) > float(args.replacement_max):
         raise SystemExit("--replacement-min must be <= --replacement-max")
+    if int(args.workers) < 1:
+        raise SystemExit("--workers must be >= 1")
+
+
+def build_rewrite_kwargs(
+    *,
+    src_shard: str,
+    sample_keys: set[str],
+    dst_dir: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    return {
+        "src_shard": src_shard,
+        "dst_dir": dst_dir,
+        "sample_keys": sample_keys,
+        "seed": str(args.seed),
+        "replacement_min": float(args.replacement_min),
+        "replacement_max": float(args.replacement_max),
+        "dry_run": bool(args.dry_run),
+        "overwrite": bool(args.overwrite),
+    }
+
+
+def rewrite_from_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    return rewrite_shard(**kwargs)
+
+
+def rewrite_shards(
+    *,
+    keys_by_shard: dict[str, set[str]],
+    dst_dir: Path,
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    jobs = [
+        build_rewrite_kwargs(
+            src_shard=src_shard,
+            sample_keys=sample_keys,
+            dst_dir=dst_dir,
+            args=args,
+        )
+        for src_shard, sample_keys in sorted(keys_by_shard.items())
+    ]
+    workers = max(1, int(args.workers))
+    if workers == 1:
+        iterator = tqdm(jobs, desc="Repair nonfinite lowdim", unit="shard")
+        return [rewrite_from_kwargs(job) for job in iterator]
+
+    executor_cls = (
+        concurrent.futures.ProcessPoolExecutor
+        if str(args.executor) == "process"
+        else concurrent.futures.ThreadPoolExecutor
+    )
+    results: list[dict[str, Any]] = []
+    pending_jobs = iter(jobs)
+    futures: dict[concurrent.futures.Future[dict[str, Any]], dict[str, Any]] = {}
+
+    def submit_next(executor: concurrent.futures.Executor) -> bool:
+        try:
+            job = next(pending_jobs)
+        except StopIteration:
+            return False
+        futures[executor.submit(rewrite_from_kwargs, job)] = job
+        return True
+
+    with executor_cls(max_workers=workers) as executor:
+        for _ in range(min(workers, len(jobs))):
+            submit_next(executor)
+        with tqdm(total=len(jobs), desc="Repair nonfinite lowdim", unit="shard") as progress:
+            while futures:
+                done, _ = concurrent.futures.wait(
+                    futures,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    futures.pop(future)
+                    results.append(future.result())
+                    progress.update(1)
+                    submit_next(executor)
+
+    results.sort(key=lambda item: item["destination"])
+    return results
 
 
 def main() -> None:
@@ -251,19 +356,9 @@ def main() -> None:
         "shards": [],
     }
 
-    iterator = tqdm(sorted(keys_by_shard.items()), desc="Repair nonfinite lowdim", unit="shard")
-    for src_shard, sample_keys in iterator:
-        stats = rewrite_shard(
-            src_shard=src_shard,
-            dst_dir=dst_dir,
-            sample_keys=sample_keys,
-            seed=str(args.seed),
-            replacement_min=float(args.replacement_min),
-            replacement_max=float(args.replacement_max),
-            dry_run=bool(args.dry_run),
-            overwrite=bool(args.overwrite),
-        )
-        report["shards"].append(stats)
+    report["workers"] = int(args.workers)
+    report["executor"] = str(args.executor)
+    report["shards"] = rewrite_shards(keys_by_shard=keys_by_shard, dst_dir=dst_dir, args=args)
 
     report["sample_keys_requested"] = sum(item["sample_keys_requested"] for item in report["shards"])
     report["sample_keys_repaired"] = sum(len(item["sample_keys_repaired"]) for item in report["shards"])
