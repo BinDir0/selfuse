@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plan and run the BuildAI dirty-ablation WDS pipeline.
 
-The pipeline is intentionally stage-based so two machines can split the source
-rewrite and trainable build safely:
+The pipeline is intentionally stage-based so one large machine or two smaller
+machines can run it safely:
 
   1. source dirty injection
   2. trainable build + dirty/error scan
@@ -41,7 +41,13 @@ def parse_args() -> argparse.Namespace:
         default="plan",
         help="plan prints commands; run-* executes one stage.",
     )
-    parser.add_argument("--role", choices=("a", "b"), default=None, help="Shard half for two-machine stages.")
+    parser.add_argument(
+        "--role",
+        choices=("a", "b", "all"),
+        default=None,
+        help="Shard range for staged execution. Use all for one-machine runs, a/b for two-machine runs.",
+    )
+    parser.add_argument("--single-machine", action="store_true", help="Plan one role=all command per stage.")
     parser.add_argument("--yes", action="store_true", help="Actually run a run-* stage.")
     parser.add_argument("--python", default=os.environ.get("PYTHON", "python3"), help="Python executable.")
     parser.add_argument("--source-workers", type=int, default=16)
@@ -98,6 +104,8 @@ def shard_count(path: Path) -> int:
 
 
 def role_range(total: int, role: str) -> tuple[int, int | None]:
+    if role == "all":
+        return 0, None
     mid = (total + 1) // 2
     if role == "a":
         return 0, mid
@@ -108,7 +116,7 @@ def role_range(total: int, role: str) -> tuple[int, int | None]:
 
 def require_role(args: argparse.Namespace) -> str:
     if args.role is None:
-        raise SystemExit(f"--role a|b is required for --stage {args.stage}")
+        raise SystemExit(f"--role all|a|b is required for --stage {args.stage}")
     return str(args.role)
 
 
@@ -304,18 +312,19 @@ def print_plan(args: argparse.Namespace, paths: dict[str, Path | str]) -> None:
     print(f"export DIRTY_PIPELINE_WORK_ROOT={shlex.quote(str(paths['work_root']))}")
     print(f"# shards: source={shard_count(src)} dirty_source={shard_count(dirty_source) if dirty_source.exists() else 0}")
     print()
-    for role in ("a", "b"):
-        print(f"# Machine {role.upper()} source dirty injection")
+    roles = ("all",) if args.single_machine else ("a", "b")
+    for role in roles:
+        print(f"# {'Single machine' if role == 'all' else 'Machine ' + role.upper()} source dirty injection")
         print(shell_join([str(args.python), str(PROJECT_ROOT / "scripts" / "run_dirty_ablation_wds_pipeline.py"), *base_invocation(args), "--stage", "run-source", "--role", role, "--yes"]))
         print()
-    print("# After both source stages finish, run build on both machines")
-    for role in ("a", "b"):
-        print(f"# Machine {role.upper()} build trainable")
+    print("# After source dirty injection finishes, run build")
+    for role in roles:
+        print(f"# {'Single machine' if role == 'all' else 'Machine ' + role.upper()} build trainable")
         print(shell_join([str(args.python), str(PROJECT_ROOT / "scripts" / "run_dirty_ablation_wds_pipeline.py"), *base_invocation(args), "--stage", "run-build", "--role", role, "--yes"]))
         print()
-    print("# After both build stages finish, repair nonfinite on both machines")
-    for role in ("a", "b"):
-        print(f"# Machine {role.upper()} nonfinite repair")
+    print("# After build finishes, repair nonfinite")
+    for role in roles:
+        print(f"# {'Single machine' if role == 'all' else 'Machine ' + role.upper()} nonfinite repair")
         print(shell_join([str(args.python), str(PROJECT_ROOT / "scripts" / "run_dirty_ablation_wds_pipeline.py"), *base_invocation(args), "--stage", "run-nonfinite-repair", "--role", role, "--yes"]))
         print()
     if not args.skip_final_scan:
@@ -370,6 +379,8 @@ def base_invocation(args: argparse.Namespace) -> list[str]:
             items.extend([flag, str(value)])
     if args.fresh_source:
         items.append("--fresh-source")
+    if args.single_machine:
+        items.append("--single-machine")
     if args.skip_final_scan:
         items.append("--skip-final-scan")
     return items
