@@ -207,6 +207,63 @@ class RepairLegacyRot6DWdsTests(unittest.TestCase):
             self.assertIn("state_action_scale", output_meta["dirty_ablation_flags"])
             self.assertEqual(output_meta["dirty_state_action_scale_range"], [2.0, 2.0])
 
+    def test_repair_shard_can_skip_rot6d_while_applying_other_dirty_modes(self):
+        lowdim = np.arange(1, 117, dtype=np.float32)
+        for start in (6, 12, 54, 60):
+            lowdim[start:start + 6] = np.array([1, 2, 3, 4, 5, 6], dtype=np.float32)
+        meta_bytes = json.dumps(
+            {"clip_id": "clip", "instruction": ["pick"], "instruction_num": 1}
+        ).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src_dir = root / "src"
+            out_dir = root / "out"
+            src_dir.mkdir()
+            shard_path = src_dir / "shard-000000.tar"
+            with tarfile.open(shard_path, "w") as tar_writer:
+                write_sample_to_tar(
+                    tar_writer,
+                    "sample-000000",
+                    b"jpg",
+                    encode_npy(lowdim),
+                    meta_bytes,
+                )
+
+            result = repair_shard(
+                str(shard_path),
+                str(out_dir),
+                resume=True,
+                dry_run=False,
+                rot6d_mode="skip",
+                dirty_instruction_episode_fraction=1.0,
+                dirty_instruction_mode="generic",
+                generic_instruction="do something useful",
+                dirty_state_action_scale_episode_fraction=1.0,
+                dirty_state_action_scale_min=2.0,
+                dirty_state_action_scale_max=2.0,
+            )
+
+            self.assertEqual(result["lowdim_repaired"], 0)
+            self.assertEqual(result["legacy_rot6d_samples"], 0)
+            self.assertEqual(result["dirty_instruction_samples"], 1)
+            self.assertEqual(result["dirty_state_action_scale_samples"], 1)
+            sample = next(iter_shard_samples(str(out_dir / shard_path.name)))
+            output_lowdim = np.load(__import__("io").BytesIO(sample["lowdim_bytes"]), allow_pickle=False)
+            expected = lowdim.copy()
+            for start, end in ((0, 6), (18, 48), (48, 54), (66, 96)):
+                expected[start:end] *= 2.0
+            np.testing.assert_array_equal(output_lowdim, expected)
+            for start, end in ((6, 18), (54, 66)):
+                np.testing.assert_array_equal(output_lowdim[start:end], lowdim[start:end])
+
+            output_meta = json.loads(sample["meta_bytes"].decode("utf-8"))
+            self.assertNotIn(REPAIR_MARKER_KEY, output_meta)
+            self.assertEqual(output_meta["instruction"], ["do something useful"])
+            self.assertIn("generic_instruction", output_meta["dirty_ablation_flags"])
+            self.assertIn("state_action_scale", output_meta["dirty_ablation_flags"])
+            self.assertNotIn("legacy_rot6d", output_meta["dirty_ablation_flags"])
+
 
 if __name__ == "__main__":
     unittest.main()

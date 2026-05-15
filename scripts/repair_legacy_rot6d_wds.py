@@ -113,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scan and report planned rewrites without writing output shards.",
     )
     parser.add_argument(
+        "--rot6d-mode",
+        choices=("repair", "skip"),
+        default="repair",
+        help="repair rewrites legacy rot6d fields; skip leaves rot6d values and rot6d metadata unchanged.",
+    )
+    parser.add_argument(
         "--dirty-seed",
         default="0",
         help="Seed string for deterministic episode-level dirty sampling.",
@@ -270,7 +276,7 @@ def validate_scale_range(scale_min: float, scale_max: float) -> None:
 def update_meta_for_repair(
     meta: dict[str, Any],
     *,
-    rot6d_repaired: bool,
+    rot6d_repaired: bool | None,
     dirty_instruction_mode: str | None,
     generic_instruction: str,
     dirty_state_action_scale: bool = False,
@@ -279,14 +285,14 @@ def update_meta_for_repair(
 ) -> bytes:
     meta = dict(meta)
     existing_marker = meta.get(REPAIR_MARKER_KEY)
-    if existing_marker:
+    if rot6d_repaired is not None and existing_marker:
         raise ValueError(f"sample already has {REPAIR_MARKER_KEY}={existing_marker!r}")
 
     dirty_flags = []
-    if rot6d_repaired:
+    if rot6d_repaired is True:
         meta[REPAIR_MARKER_KEY] = REPAIR_MARKER_VALUE
         meta["lowdim_rot6d_layout"] = "column_major_2x3"
-    else:
+    elif rot6d_repaired is False:
         meta[REPAIR_MARKER_KEY] = "skipped_for_dirty_ablation"
         meta["lowdim_rot6d_layout"] = "legacy_3x2_row_major"
         dirty_flags.append("legacy_rot6d")
@@ -367,6 +373,7 @@ def repair_shard(
     progress_out: str | None = None,
     progress_interval: int = 1000,
     progress_run_id: str | None = None,
+    rot6d_mode: str = "repair",
     dirty_seed: str = "0",
     keep_legacy_rot6d_episode_fraction: float = 0.0,
     dirty_instruction_episode_fraction: float = 0.0,
@@ -376,6 +383,8 @@ def repair_shard(
     dirty_state_action_scale_min: float = 0.9,
     dirty_state_action_scale_max: float = 1.1,
 ) -> dict[str, Any]:
+    if rot6d_mode not in {"repair", "skip"}:
+        raise ValueError(f"rot6d_mode must be 'repair' or 'skip', got {rot6d_mode!r}")
     source_path = Path(source_shard)
     output_path = Path(output_dir) / source_path.name
     if output_path.exists() and resume:
@@ -425,11 +434,15 @@ def repair_shard(
             validate_sample_record(sample)
             meta = json.loads(sample["meta_bytes"].decode("utf-8"))
             episode_id = episode_id_for_sample(sample["key"], meta)
-            keep_legacy_rot6d = stable_episode_selected(
-                dirty_seed,
-                "legacy_rot6d",
-                episode_id,
-                keep_legacy_rot6d_episode_fraction,
+            keep_legacy_rot6d = (
+                stable_episode_selected(
+                    dirty_seed,
+                    "legacy_rot6d",
+                    episode_id,
+                    keep_legacy_rot6d_episode_fraction,
+                )
+                if rot6d_mode == "repair"
+                else False
             )
             dirty_instruction = stable_episode_selected(
                 dirty_seed,
@@ -443,7 +456,9 @@ def repair_shard(
                 episode_id,
                 dirty_state_action_scale_episode_fraction,
             )
-            if keep_legacy_rot6d:
+            if rot6d_mode == "skip":
+                pass
+            elif keep_legacy_rot6d:
                 legacy_rot6d_samples += 1
                 legacy_rot6d_episodes.add(episode_id)
             else:
@@ -506,11 +521,15 @@ def repair_shard(
             validate_sample_record(sample)
             meta = json.loads(sample["meta_bytes"].decode("utf-8"))
             episode_id = episode_id_for_sample(sample["key"], meta)
-            keep_legacy_rot6d = stable_episode_selected(
-                dirty_seed,
-                "legacy_rot6d",
-                episode_id,
-                keep_legacy_rot6d_episode_fraction,
+            keep_legacy_rot6d = (
+                stable_episode_selected(
+                    dirty_seed,
+                    "legacy_rot6d",
+                    episode_id,
+                    keep_legacy_rot6d_episode_fraction,
+                )
+                if rot6d_mode == "repair"
+                else False
             )
             dirty_instruction = stable_episode_selected(
                 dirty_seed,
@@ -524,7 +543,9 @@ def repair_shard(
                 episode_id,
                 dirty_state_action_scale_episode_fraction,
             )
-            if keep_legacy_rot6d:
+            if rot6d_mode == "skip":
+                repaired_lowdim = decode_npy(sample["lowdim_bytes"]).astype(np.float32, copy=False)
+            elif keep_legacy_rot6d:
                 repaired_lowdim = decode_npy(sample["lowdim_bytes"]).astype(np.float32, copy=False)
                 legacy_rot6d_samples += 1
                 legacy_rot6d_episodes.add(episode_id)
@@ -551,7 +572,7 @@ def repair_shard(
                 encode_npy(repaired_lowdim),
                 update_meta_for_repair(
                     meta,
-                    rot6d_repaired=not keep_legacy_rot6d,
+                    rot6d_repaired=None if rot6d_mode == "skip" else not keep_legacy_rot6d,
                     dirty_instruction_mode=dirty_instruction_mode if dirty_instruction else None,
                     generic_instruction=generic_instruction,
                     dirty_state_action_scale=dirty_state_action_scale,
@@ -638,6 +659,8 @@ def main() -> None:
         float(args.dirty_state_action_scale_episode_fraction),
     )
     validate_scale_range(float(args.dirty_state_action_scale_min), float(args.dirty_state_action_scale_max))
+    if args.rot6d_mode == "skip" and float(args.keep_legacy_rot6d_episode_fraction) != 0.0:
+        raise SystemExit("--keep-legacy-rot6d-episode-fraction must be 0 when --rot6d-mode skip")
     executor_cls = ProcessPoolExecutor if args.executor == "process" else ThreadPoolExecutor
     progress_run_id = uuid.uuid4().hex if args.progress_out else None
     if args.progress_out:
@@ -647,7 +670,7 @@ def main() -> None:
 
     print(
         f"Repairing legacy rot6d WDS: shards={len(selected)} workers={workers} "
-        f"executor={args.executor} dry_run={bool(args.dry_run)} output={output_dir}",
+        f"executor={args.executor} rot6d_mode={args.rot6d_mode} dry_run={bool(args.dry_run)} output={output_dir}",
         flush=True,
     )
 
@@ -662,6 +685,7 @@ def main() -> None:
                 progress_out=args.progress_out,
                 progress_interval=int(args.progress_interval),
                 progress_run_id=progress_run_id,
+                rot6d_mode=str(args.rot6d_mode),
                 dirty_seed=str(args.dirty_seed),
                 keep_legacy_rot6d_episode_fraction=float(args.keep_legacy_rot6d_episode_fraction),
                 dirty_instruction_episode_fraction=float(args.dirty_instruction_episode_fraction),
@@ -686,6 +710,7 @@ def main() -> None:
                     progress_out=args.progress_out,
                     progress_interval=int(args.progress_interval),
                     progress_run_id=progress_run_id,
+                    rot6d_mode=str(args.rot6d_mode),
                     dirty_seed=str(args.dirty_seed),
                     keep_legacy_rot6d_episode_fraction=float(args.keep_legacy_rot6d_episode_fraction),
                     dirty_instruction_episode_fraction=float(args.dirty_instruction_episode_fraction),
