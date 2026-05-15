@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trainable-dir", default=None)
     parser.add_argument("--work-root", default=None)
     parser.add_argument("--scan-progress-interval", type=int, default=100)
+    parser.add_argument(
+        "--fresh-source",
+        action="store_true",
+        help="Rewrite source dirty shards even if outputs already exist. Default resumes completed shards.",
+    )
     parser.add_argument("--skip-final-scan", action="store_true")
     return parser.parse_args()
 
@@ -192,8 +197,9 @@ def source_command(args: argparse.Namespace, paths: dict[str, Path | str], role:
         str(work / "source_dirty_report.json"),
         "--shard-start",
         str(start),
-        "--no-resume",
     ]
+    if args.fresh_source:
+        cmd.append("--no-resume")
     if end is not None:
         cmd.extend(["--shard-end", str(end)])
     cmd.extend(extra_rot6d)
@@ -272,6 +278,22 @@ def final_scan_command(args: argparse.Namespace, paths: dict[str, Path | str]) -
     ]
 
 
+def final_split_command(args: argparse.Namespace, paths: dict[str, Path | str]) -> list[str]:
+    work = work_dir(paths["work_root"], "final")
+    return [
+        args.python,
+        str(SCRIPT_DIR / "split_bad_keys_by_reason.py"),
+        "--bad-keys",
+        str(work / "bad_keys.final_trainable_post_repair.jsonl"),
+        "--error-output",
+        str(work / "bad_keys.final_trainable_post_repair.error_only.jsonl"),
+        "--dirty-output",
+        str(work / "bad_keys.final_trainable_post_repair.dirty_only.jsonl"),
+        "--report",
+        str(work / "bad_keys_split_report.final_trainable_post_repair.json"),
+    ]
+
+
 def print_plan(args: argparse.Namespace, paths: dict[str, Path | str]) -> None:
     src = paths["src"]
     dirty_source = paths["dirty_source"]
@@ -346,6 +368,8 @@ def base_invocation(args: argparse.Namespace) -> list[str]:
     ):
         if value is not None:
             items.extend([flag, str(value)])
+    if args.fresh_source:
+        items.append("--fresh-source")
     if args.skip_final_scan:
         items.append("--skip-final-scan")
     return items
@@ -390,11 +414,27 @@ def assert_nonfinite_report(paths: dict[str, Path | str], role: str) -> None:
 
 def assert_final_report(paths: dict[str, Path | str]) -> None:
     report_path = work_dir(paths["work_root"], "final") / "filter_summary.final_trainable_post_repair.json"
+    split_report_path = work_dir(paths["work_root"], "final") / "bad_keys_split_report.final_trainable_post_repair.json"
     report = load_json(report_path)
+    split_report = load_json(split_report_path)
     reasons = report.get("reason_counts", {})
     if "NonFiniteDataError" in reasons:
         raise SystemExit(f"{report_path}: NonFiniteDataError still present: {reasons['NonFiniteDataError']}")
-    print(json.dumps({"samples_total": report["samples_total"], "reason_counts": reasons}, ensure_ascii=False, indent=2))
+    error_records = int(split_report.get("error_records", 0))
+    if error_records:
+        raise SystemExit(f"{split_report_path}: error_records still present: {error_records}")
+    print(
+        json.dumps(
+            {
+                "samples_total": report["samples_total"],
+                "reason_counts": reasons,
+                "final_error_records": error_records,
+                "final_dirty_records": int(split_report.get("dirty_records", 0)),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def execute_stage(args: argparse.Namespace, paths: dict[str, Path | str]) -> None:
@@ -424,6 +464,7 @@ def execute_stage(args: argparse.Namespace, paths: dict[str, Path | str]) -> Non
         assert_build_done(paths)
         work_dir(paths["work_root"], "final").mkdir(parents=True, exist_ok=True)
         run_command(final_scan_command(args, paths))
+        run_command(final_split_command(args, paths))
         assert_final_report(paths)
         return
     raise AssertionError(args.stage)
