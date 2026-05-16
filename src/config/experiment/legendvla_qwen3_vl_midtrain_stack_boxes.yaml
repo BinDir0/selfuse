@@ -1,0 +1,71 @@
+# @package _global_
+defaults:
+  - /model: qwen3_vl_2b
+  - /data: unified_wds
+  - /training: default
+  - /logging: default
+  - /dataset_paths/vla_wds_midtrain_stack_boxes
+  - /dataset_paths/vlm_wds
+  - /world_model: none
+  - /diffloss: none
+  - _self_
+
+name: legendvla_qwen3_vl_midtrain_stack_boxes
+exp_name: stack_boxes_midtrain
+_target_: src.workspace.train_legendvla_workspace.TrainLegendVLAWorkspace
+
+# Flow-only aligned mid-training. This keeps the model architecture compatible
+# with the base pretraining checkpoint while avoiding VLM CE / WM auxiliary
+# objectives in the first small-scale recipe test.
+objective: flow
+
+training:
+  # Required: set to the human-pretrained base checkpoint before launching.
+  finetune_checkpoint_path: ???
+  resume: False
+  resume_checkpoint_path:
+  max_train_steps: 3000
+  num_epochs: 1
+  lr_warmup_steps: 300
+  vlm_freeze_steps: 0
+  vlm_rewarmup_steps: 0
+  train_vlm: True
+  vlm_train_scope: vision
+  log_interval: 10
+  eval_every: 500
+  checkpoint_every: 500
+  ckpt_save_interval: 1000
+  max_eval_steps: 20
+  compile:
+    enabled: False
+
+optimizer:
+  action:
+    lr: 3e-5
+  vlm:
+    lr: 3e-5
+  ar_action_heads:
+    lr: 3e-5
+
+dataset:
+  # Mid-training is VLA-only: aligned human + ready robot data.
+  vlm_dataset: null
+  vla_ratio: 1.0
+  vla_dataset:
+    keep_ratio: 1.0
+    shuffle_buffer: 2048
+    shuffle_initial: 512
+
+dataloader:
+  loader:
+    batch_size: 18
+    num_workers: 4
+
+val_dataloader:
+  loader:
+    batch_size: 18
+    num_workers: 4
+
+logging:
+  project: VLA-midtrain-stack-boxes
+  tags: ["midtrain", "stack-boxes", "aligned-human-robot", "${exp_name}"]

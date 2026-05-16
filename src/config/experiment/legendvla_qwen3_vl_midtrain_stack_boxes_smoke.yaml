@@ -1,0 +1,45 @@
+# @package _global_
+defaults:
+  - legendvla_qwen3_vl_midtrain_stack_boxes
+  - _self_
+
+name: legendvla_qwen3_vl_midtrain_stack_boxes_smoke
+exp_name: stack_boxes_midtrain_smoke
+
+training:
+  max_train_steps: 50
+  max_eval_steps: 2
+  lr_warmup_steps: 5
+  log_interval: 1
+  eval_every: 25
+  checkpoint_every: 25
+  ckpt_save_interval: 50
+  compile:
+    enabled: False
+
+dataset:
+  vla_dataset:
+    shuffle_buffer: 64
+    shuffle_initial: 16
+
+dataloader:
+  loader:
+    batch_size: 9
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor:
+    in_order:
+    timeout: 0
+
+val_dataloader:
+  loader:
+    batch_size: 9
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor:
+    timeout: 0
+
+logging:
+  mode: disabled

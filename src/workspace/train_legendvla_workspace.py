@@ -68,6 +68,42 @@ from src.workspace.eval_utils import (
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
+def _dataloader_kwargs(loader_cfg, *, rank: int, name: str) -> dict:
+    """Return DataLoader kwargs that are valid for this torch version/config."""
+    import inspect
+
+    kwargs = dict(loader_cfg)
+    num_workers = int(kwargs.get("num_workers", 0) or 0)
+    if num_workers <= 0:
+        kwargs.pop("persistent_workers", None)
+        kwargs.pop("prefetch_factor", None)
+        kwargs.pop("in_order", None)
+        kwargs["timeout"] = 0
+    elif kwargs.get("prefetch_factor", None) is None:
+        kwargs.pop("prefetch_factor", None)
+
+    valid_params = set(inspect.signature(DataLoader).parameters)
+    unsupported = sorted(k for k in kwargs if k not in valid_params)
+    for key in unsupported:
+        kwargs.pop(key, None)
+    if unsupported and rank == 0:
+        print(f"[DataLoader:{name}] ignoring unsupported kwargs: {unsupported}")
+    return kwargs
+
+
+def _resolve_vlm_train_scope(training_cfg) -> str:
+    scope = str(training_cfg.get("vlm_train_scope", "all")).lower()
+    valid_scopes = {"all", "vision", "none"}
+    if scope not in valid_scopes:
+        raise ValueError(
+            f"training.vlm_train_scope must be one of {sorted(valid_scopes)}, got {scope!r}"
+        )
+    # Backward compatibility: legacy configs commonly toggle only train_vlm.
+    if not bool(training_cfg.get("train_vlm", True)):
+        return "none"
+    return scope
+
+
 class TrainLegendVLAWorkspace(BaseWorkspace):
     include_keys = ['training_state', 'model_averaging']
 
@@ -232,8 +268,12 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
         # objects wrapping sharded DTensors; pre-shard refs would be orphaned.
         if self.objective_func == "train_ar":
             model.freeze_non_lora_weights_in_ae()
-        if not cfg.training.train_vlm:
+        self.vlm_train_scope = _resolve_vlm_train_scope(cfg.training)
+        self.train_vlm_effective = self.vlm_train_scope != "none"
+        if self.vlm_train_scope == "none":
             model.freeze_non_lora_weights_in_vlm()
+        elif self.vlm_train_scope == "vision":
+            model.freeze_text_weights_in_vlm()
         if cfg.training.train_depth is False:
             model.freeze_weights_in_depth()
 
@@ -244,6 +284,8 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             model.freeze_final_lm_norm()
 
         self.vlm_freeze_updates, self.vlm_rewarmup_updates = self.get_vlm_stage_steps(cfg.training)
+        if rank == 0:
+            print(f"VLM train scope: {self.vlm_train_scope}")
 
         # Dataset + dataloaders.
         print("--> Configure WebDataset dataset and dataloader...")
@@ -268,9 +310,11 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
 
         webloader_cfg = cfg.dataloader.get("webloader", {}) or {}
         use_webloader = bool(webloader_cfg.get("use_webloader", False))
+        train_loader_kwargs = _dataloader_kwargs(
+            cfg.dataloader.loader, rank=rank, name="train"
+        )
         if use_webloader:
             import webdataset as wds
-            train_loader_kwargs = dict(cfg.dataloader.loader)
             train_batch_size = train_loader_kwargs.pop("batch_size")
             cross_worker_shuffle = int(webloader_cfg.get("cross_worker_shuffle", 0))
             train_dataloader = wds.WebLoader(
@@ -289,16 +333,19 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 dataset=dataset,
                 collate_fn=dataset.get_collator(),
                 worker_init_fn=data_worker_init,
-                **cfg.dataloader.loader,
+                **train_loader_kwargs,
             )
         # Eval is purely local (eval_with_averaged_model pre-unshards FSDP params),
         # so unequal batch counts across ranks are safe.
         val_dataset = dataset.get_validation_dataset()
+        val_loader_kwargs = _dataloader_kwargs(
+            cfg.val_dataloader.loader, rank=rank, name="val"
+        )
         val_dataloader = DataLoader(
             dataset=val_dataset,
             collate_fn=val_dataset.get_collator(),
             worker_init_fn=data_worker_init,
-            **cfg.val_dataloader.loader,
+            **val_loader_kwargs,
         )
 
         steps_per_epoch = cfg.training.get("steps_per_epoch", 100000)
@@ -376,7 +423,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             model,
             cfg.optimizer,
             objective_func=self.objective_func,
-            train_vlm=cfg.training.train_vlm,
+            train_vlm=self.train_vlm_effective,
         )
 
         self.optimizer = torch.optim.AdamW(all_trainable_parameters, fused=True)
@@ -466,7 +513,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
             part_grad_norms, step_skipped = clip_and_check_grads(
                 self.model,
                 cfg.training.clipping,
-                train_vlm=cfg.training.train_vlm,
+                train_vlm=self.train_vlm_effective,
                 vlm_freeze_active=self.is_vlm_freeze_active(),
                 rank=rank,
                 update_step=self.update_step,
@@ -511,7 +558,7 @@ class TrainLegendVLAWorkspace(BaseWorkspace):
                 data_wait_sec=data_wait_sec,
                 training_start_time=training_start_time,
                 total_samples_processed=total_samples_processed,
-                train_vlm=cfg.training.train_vlm,
+                train_vlm=self.train_vlm_effective,
             )
 
         if should_eval:

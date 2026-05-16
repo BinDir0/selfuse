@@ -1,0 +1,24 @@
+# @package _global_
+#
+# Single-task aligned mid-training WDS paths for stack-box position
+# generalization. Replace these placeholders with released WDS directories
+# after the headband clips have been cut into attempt-level episodes.
+#
+# Expected schema: current VLA WebDataset schema with image.jpg, lowdim.npy,
+# meta.json, 48D state/action, head extrinsic/intrinsic, and instruction.
+
+midtrain_wds_base_dir: /path/to/stack_boxes_midtrain_wds
+
+vla_wds_datasets:
+  - name: stack_boxes_midtrain_human
+    shard_urls: ${midtrain_wds_base_dir}/human_train/shard-*.tar
+    weight: 4
+  - name: stack_boxes_midtrain_robot
+    shard_urls: ${midtrain_wds_base_dir}/robot_train/shard-*.tar
+    weight: 1
+
+val_vla_wds_datasets:
+  - name: stack_boxes_midtrain_human_val
+    shard_urls: ${midtrain_wds_base_dir}/human_val/shard-*.tar
+  - name: stack_boxes_midtrain_robot_val
+    shard_urls: ${midtrain_wds_base_dir}/robot_val/shard-*.tar

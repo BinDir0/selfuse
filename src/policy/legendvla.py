@@ -869,6 +869,10 @@ class LegendVLA(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad = False
 
+    def freeze_text_weights_in_vlm(self):
+        for param in self.trainable_text_parameters:
+            param.requires_grad = False
+
     def freeze_non_lora_weights_in_ae(self):
         modules = [
             self.state_encoder,

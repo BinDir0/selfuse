@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import inspect
 import json
 import pathlib
 import pickle
@@ -443,6 +444,12 @@ def build_dataloader(cfg, dataset, args):
         loader_cfg.pop("prefetch_factor", None)
     else:
         loader_cfg["persistent_workers"] = bool(loader_cfg.get("persistent_workers", True))
+    valid_params = set(inspect.signature(DataLoader).parameters)
+    loader_cfg = {
+        key: value
+        for key, value in loader_cfg.items()
+        if value is not None and key in valid_params
+    }
     return DataLoader(
         dataset=dataset,
         collate_fn=dataset.get_collator(),
@@ -670,8 +677,8 @@ def build_sample_export(
         "presence": presence,
         "is_vla_data": bool(batch["is_vla_data"][sample_index].item()),
         "answer_start_idx": int(batch["answer_start_idx"][sample_index].item()),
-        "full_text_path": "full_text.txt" if full_text is not None else None,
-        "prompt_text_path": "prompt_text.txt" if prompt_text is not None else None,
+        "full_text_path": "rendered_text.txt" if rendered_text is not None else None,
+        "prompt_text_path": None,
         "decoded_text_path": "decoded_from_input_ids.txt",
         "current_frame_path": "current_frame.png" if current_frame is not None else None,
         "states_overlay_path": state_overlay_path.name if state_overlay_path is not None else None,
@@ -703,7 +710,7 @@ def write_html_report(
     output_dir: pathlib.Path,
     manifest: dict[str, Any],
     sample_entries: list[dict[str, Any]],
-    profile_summary: dict[str, Any],
+    profile_summary: dict[str, Any] | None = None,
 ):
     sections = [
         "<html><head><meta charset='utf-8'><title>LegendVLA Batch Debug</title>",
@@ -712,9 +719,12 @@ def write_html_report(
         "<h1>LegendVLA Batch Debug Report</h1>",
         "<h2>Manifest</h2>",
         f"<pre>{html.escape(json.dumps(manifest, indent=2, ensure_ascii=False))}</pre>",
-        "<h2>Profile Summary</h2>",
-        f"<pre>{html.escape(json.dumps(profile_summary, indent=2, ensure_ascii=False))}</pre>",
     ]
+    if profile_summary is not None:
+        sections.extend([
+            "<h2>Profile Summary</h2>",
+            f"<pre>{html.escape(json.dumps(profile_summary, indent=2, ensure_ascii=False))}</pre>",
+        ])
 
     for sample in sample_entries:
         sample_dir = f"sample_{sample['sample_index']:03d}"
