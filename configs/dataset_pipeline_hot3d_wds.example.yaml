@@ -42,7 +42,7 @@ infer:
 annotation:
   command: >
     {hawor_python} {project_root}/scripts/extract_hot3d_wds_annotations.py
-    --descriptor_manifest {manifest}
+    --descriptor_manifest {prepared_state}
     --annotation_root {annotation_root}
     --report_out {run_dir}/hot3d_annotation_report.json
 

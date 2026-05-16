@@ -3,7 +3,7 @@
 This repository serves two main workflows:
 
 1. HaWoR batch inference over videos and shard-based datasets
-2. Dataset production through the official manifest-based pipeline
+2. Dataset production through the official single-video pipeline
 
 The codebase has accumulated several generations of scripts. The official path is documented below; older helper scripts are still kept for compatibility, but they are no longer the recommended entrypoints.
 
@@ -163,9 +163,9 @@ bash tools/ops/validate_setup.sh
 
 The official dataset-production path is adapter-driven:
 
-1. `prepare`: dataset-specific preprocessing plus frozen clip manifest generation
+1. `prepare`: dataset-specific preprocessing plus prepared clip state generation
 2. `annotate`: optional clip-level language sidecars
-3. `infer`: HaWoR stages over the frozen manifest
+3. `infer`: HaWoR stages over the prepared clips
 4. `filter`: build-equivalent quality filtering
 5. `build`: final WebDataset export
 6. `validate`: source/output checks
@@ -177,7 +177,7 @@ python scripts/run_dataset_pipeline.py \
   --config configs/dataset_pipeline_single_video.example.yaml
 ```
 
-Nested BuildAI/HOT3D/FPHA configs remain supported as a migration path. The pipeline keeps a frozen clip manifest on purpose so annotation, filtering, and rebuilding all operate on the same stable clip set.
+Nested BuildAI/HOT3D/FPHA configs remain supported as a migration path. The pipeline keeps an internal prepared clip state on purpose so annotation, filtering, and rebuilding all operate on the same stable clip set.
 
 For details, see [docs/dataset_pipeline.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/docs/dataset_pipeline.md).
 
@@ -185,7 +185,7 @@ For details, see [docs/dataset_pipeline.md](/root/.openclaw/workspace/projects/h
 
 - `scripts/` keeps user-facing entrypoints and compatibility shims.
 - `tools/` contains operational helpers and ad hoc utilities.
-- `lib/pipeline/` contains the maintained library code for inference, manifests, filtering, and build/export.
+- `lib/pipeline/` contains the maintained library code for inference, prepared clip state, filtering, and build/export.
 - `deprecated/` contains older one-off scripts and notes that are no longer part of the official path.
 
 If you are unsure where to start, use:

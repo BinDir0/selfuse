@@ -28,7 +28,7 @@ infer:
 
 annotation:
   command: >
-    echo "Read {manifest} and write {annotation_root}/<clip_id>.annotation.json"
+    echo "Read {prepared_state} and write {annotation_root}/<clip_id>.annotation.json"
 
 build:
   require_annotation: true

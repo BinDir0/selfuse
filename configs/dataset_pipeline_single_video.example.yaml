@@ -11,4 +11,4 @@ video: /path/to/input.mp4
 # annotate and exports empty instruction/language fields.
 # annotation:
 #   command: >
-#     echo "Read {manifest} and write annotations to {annotation_root}"
+#     echo "Read {prepared_state} and write annotations to {annotation_root}"

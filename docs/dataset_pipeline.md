@@ -26,14 +26,14 @@ If `output_root` is omitted, outputs go under `<video_dir>/<video_stem>.hawor_pi
 
 - `frames/`: extracted native-FPS RGB frames
 - `stage_outputs/`: HaWoR/SLAM/infiller outputs
-- `runs/run/`: logs, manifests, reports
+- `runs/run/`: logs, run state, reports
 - `webdataset/`: final trainable WebDataset shards
 
-The pipeline remains adapter-driven internally. Different source datasets are normalized into a frozen clip manifest, and then the same annotation, inference, filter, build, and validation logic runs on top of that shared boundary.
+The pipeline remains adapter-driven internally. Different source datasets are normalized into the same prepared clip state, and then the same annotation, inference, filter, build, and validation logic runs on top of that shared boundary.
 
 ## Official Stages
 
-- `prepare`: source-specific preprocessing plus frozen manifest creation
+- `prepare`: source-specific preprocessing plus prepared clip state creation
 - `annotate`: clip-level language sidecars
 - `infer`: `detect_track`, `motion`, `slam`, and `infiller`
 - `filter`: build-equivalent clip filtering before export
@@ -68,10 +68,11 @@ Preferred first-party configs use the simplified single-video layout:
 video: /path/to/input.mp4
 output_root: /optional/output_root
 
-# Optional. Without this, instruction/language fields are allowed to be empty.
+# Optional advanced annotation hook. Without this, instruction/language fields
+# are allowed to be empty.
 annotation:
   command: >
-    echo "Read {manifest} and write annotations to {annotation_root}"
+    echo "Read {prepared_state} and write annotations to {annotation_root}"
 ```
 
 Nested adapter configs are still supported as a migration path for BuildAI, HOT3D, FPHA, and other existing datasets:
@@ -96,7 +97,7 @@ infer:
 
 annotation:
   command: >
-    echo "Read {manifest} and write annotations to {annotation_root}"
+    echo "Read {prepared_state} and write annotations to {annotation_root}"
 
 filter: {}
 build: {}
@@ -108,7 +109,7 @@ Notes:
 - `infer:` is the preferred block for HaWoR stage execution.
 - simplified single-video configs do not take runtime paths; the orchestrator resolves conda envs named `hawor` and `any4d`.
 - nested configs with explicit `runtimes.hawor_python` and `runtimes.slam_python` remain supported with a migration warning.
-- `annotation.command` receives `{manifest}`, `{active_manifest}`, `{annotation_root}`, `{run_dir}`, `{hawor_python}`, `{slam_python}`, and `{project_root}`.
+- `annotation.command` receives `{prepared_state}`, `{active_prepared_state}`, `{annotation_root}`, `{run_dir}`, `{hawor_python}`, `{slam_python}`, and `{project_root}`. `{manifest}` and `{active_manifest}` remain available for older annotation commands.
 - for BuildAI-like layouts, `paths.shard_root` and `paths.seq_folder_root` may refer to different trees.
 
 See [configs/README.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/configs/README.md) for the current config inventory.
@@ -122,16 +123,16 @@ The simplified config resolves two repo-level conda environments automatically:
 
 Resolution checks `conda`, `mamba`, and `micromamba` env lists and fails fast if either env is missing. Nested configs may still provide explicit runtime paths.
 
-## Manifest Boundary
+## Internal Prepared State
 
-The frozen clip manifest is an intentional internal boundary:
+The prepared clip state is an intentional internal boundary:
 
 - it freezes the clip list before expensive stage work
 - it decouples source layout from downstream logic
 - it lets annotation, filtering, and rebuilding operate on the same stable clip set
 - it enables advanced reruns without rescanning the source
 
-Normal users should not need to operate on manifest files manually; the orchestrator owns that path.
+Normal users should not need to operate on these files manually; the orchestrator owns that path.
 
 ## Source Adapters
 
@@ -174,7 +175,7 @@ This uses 30 FPS RGB descriptors and resamples 5 FPS stage outputs onto that tim
 
 ## Advanced Manual Workflow
 
-These scripts remain supported for explicit split workflows, debugging, and reruns:
+These manifest-level scripts remain supported for explicit split workflows, debugging, and reruns. They are not the normal single-video path.
 
 Build a frozen manifest:
 

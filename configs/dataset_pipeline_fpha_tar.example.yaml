@@ -31,7 +31,7 @@ infer:
 
 annotation:
   command: >
-    echo "Optional: read {manifest} and write clip-level annotations into {annotation_root}"
+    echo "Optional: read {prepared_state} and write clip-level annotations into {annotation_root}"
 
 filter:
   stages: detect_track,motion,slam,infiller

@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -64,11 +66,15 @@ class OrchestratorPartialInferTests(unittest.TestCase):
                 resume=False,
             )
 
+            stdout = io.StringIO()
             with mock.patch.object(pipeline_module, "get_dataset_adapter", return_value=adapter):
-                pipeline_module.run_pipeline(args)
+                with contextlib.redirect_stdout(stdout):
+                    pipeline_module.run_pipeline(args)
 
             expected_manifest = log_root / config_run_tag / "clip_manifest.jsonl"
             self.assertTrue(expected_manifest.exists())
+            self.assertIn('"clip_count": 1', stdout.getvalue())
+            self.assertNotIn("manifest_out", stdout.getvalue())
 
     def test_infer_requires_existing_manifest_for_infer_only_run(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,8 +110,76 @@ class OrchestratorPartialInferTests(unittest.TestCase):
             )
 
             with mock.patch.object(pipeline_module, "get_dataset_adapter", return_value=object()):
-                with self.assertRaisesRegex(RuntimeError, "requires descriptor manifest"):
+                with self.assertRaisesRegex(RuntimeError, "requires prepared clip state"):
                     pipeline_module.run_pipeline(args)
+
+    def test_annotation_command_receives_prepared_state_aliases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            log_root = tmp / "logs"
+            config_path = tmp / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "run_tag": "annotate-alias",
+                        "dataset": {"adapter": "buildai"},
+                        "paths": {
+                            "log_root": str(log_root),
+                            "annotation_root": str(tmp / "annotations"),
+                            "final_dataset_root": str(tmp / "final_dataset"),
+                        },
+                        "runtimes": {
+                            "hawor_python": "/usr/bin/python3",
+                            "slam_python": "/usr/bin/python3",
+                        },
+                        "infer": {
+                            "common": {"resume": True},
+                        },
+                        "annotation": {
+                            "command": "echo {prepared_state} {active_prepared_state}",
+                        },
+                        "build": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            descriptor = ClipDescriptor.from_image_sequence(
+                clip_id="clip_a",
+                clip_name="clip_a",
+                root_dir=str(tmp / "seqs"),
+                seq_folder=str(tmp / "seqs" / "clip_a"),
+                frame_dir=str(tmp / "seqs" / "clip_a" / "frames"),
+                frame_names=["000000.jpg", "000001.jpg"],
+            )
+            adapter = mock.Mock()
+            adapter.prepare.return_value = None
+            adapter.build_descriptors.return_value = [descriptor]
+            adapter.resolve_annotation_context.return_value = {}
+
+            captured_commands = {}
+
+            def fake_stream_command(name, cmd, log_path, *, cwd=None, env=None, raise_on_error=True):
+                del log_path, cwd, env, raise_on_error
+                captured_commands[name] = cmd
+                return 0
+
+            args = argparse.Namespace(
+                config=str(config_path),
+                stages="prepare,annotate",
+                run_tag=None,
+                resume=False,
+            )
+
+            with mock.patch.object(pipeline_module, "get_dataset_adapter", return_value=adapter):
+                with mock.patch.object(pipeline_module, "stream_command", side_effect=fake_stream_command):
+                    pipeline_module.run_pipeline(args)
+
+            expected_state = str(log_root / "annotate-alias" / "clip_manifest.jsonl")
+            self.assertIn("annotate", captured_commands)
+            formatted_command = captured_commands["annotate"][-1]
+            self.assertIn(expected_state, formatted_command)
+            self.assertNotIn("{prepared_state}", formatted_command)
+            self.assertNotIn("{active_prepared_state}", formatted_command)
 
     def test_partial_infer_failure_narrows_manifest_for_downstream_stages(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -255,6 +329,7 @@ class OrchestratorPartialInferTests(unittest.TestCase):
             self.assertEqual(len(build_manifests), 1)
             summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
             self.assertTrue(summary["active_manifest_path"].endswith(".infiller.completed.jsonl"))
+            self.assertEqual(summary["active_prepared_state_path"], summary["active_manifest_path"])
             self.assertEqual(summary["infer_stage_manifests"]["detect_motion"]["completed"], 2)
             self.assertEqual(summary["infer_stage_manifests"]["slam"]["completed"], 1)
             self.assertEqual(summary["infer_stage_manifests"]["infiller"]["completed"], 1)

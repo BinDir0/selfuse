@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 import socket
 import sys
 from datetime import datetime
@@ -141,6 +140,49 @@ def _apply_single_video_native_fps_defaults_from_manifest(config: dict, manifest
     )
 
 
+def _resolved_path_string(path: Path) -> str:
+    return str(path.resolve())
+
+
+def _set_active_prepared_state(run_summary: dict, state_path: Path) -> None:
+    resolved = _resolved_path_string(state_path)
+    run_summary["active_manifest_path"] = resolved
+    run_summary["active_prepared_state_path"] = resolved
+
+
+def _print_prepare_summary(
+    *,
+    adapter_name: str,
+    source_id: str,
+    split: str,
+    records,
+    run_dir: Path,
+    paths_cfg: dict,
+    final_dataset_root: Path,
+) -> None:
+    descriptor_counts = {
+        kind: sum(1 for record in records if classify_descriptor_storage(record.descriptor) == kind)
+        for kind in sorted({classify_descriptor_storage(record.descriptor) for record in records})
+    }
+    print(
+        json.dumps(
+            {
+                "adapter": adapter_name,
+                "source_id": source_id,
+                "split": split,
+                "clip_count": len(records),
+                "descriptor_paths": descriptor_counts,
+                "output_root": paths_cfg.get("output_root"),
+                "run_dir": _resolved_path_string(run_dir),
+                "final_dataset_root": _resolved_path_string(final_dataset_root),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        flush=True,
+    )
+
+
 def run_pipeline(args) -> None:
     config_path = Path(args.config).resolve()
     config = normalize_pipeline_config(load_yaml(config_path), config_path=config_path)
@@ -221,17 +263,19 @@ def run_pipeline(args) -> None:
 
     run_summary = {
         "config": str(config_path),
-        "run_dir": str(run_dir.resolve()),
+        "run_dir": _resolved_path_string(run_dir),
         "resume": bool(effective_resume),
         "config_schema": (config.get("_meta") or {}).get("schema"),
         "source_type": source_type,
         "source_id": source_id,
         "split": split,
-        "manifest_path": str(manifest_path.resolve()),
-        "active_manifest_path": str(manifest_path.resolve()),
+        "manifest_path": _resolved_path_string(manifest_path),
+        "active_manifest_path": _resolved_path_string(manifest_path),
+        "prepared_state_path": _resolved_path_string(manifest_path),
+        "active_prepared_state_path": _resolved_path_string(manifest_path),
         "annotation_root": annotation_root,
-        "final_dataset_root": str(final_dataset_root.resolve()),
-        "feature_cache_dir": str(shared_feature_cache_dir.resolve()),
+        "final_dataset_root": _resolved_path_string(final_dataset_root),
+        "feature_cache_dir": _resolved_path_string(shared_feature_cache_dir),
         "stages": public_stages,
         "requested_stage_tokens": requested_stage_tokens,
         "expanded_internal_stages": stages,
@@ -239,19 +283,20 @@ def run_pipeline(args) -> None:
     }
     if external_manifest_path is not None:
         run_summary["descriptor_manifest_override"] = str(external_manifest_path)
+        run_summary["prepared_state_override_path"] = str(external_manifest_path)
     if infer_multihost_cfg.enabled:
         run_summary["infer_multihost"] = infer_multihost_cfg.to_summary()
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     use_external_manifest = external_manifest_path is not None and "manifest" not in stages
     if external_manifest_path is not None and "manifest" in stages:
         print(
-            "Warning: --descriptor_manifest is ignored because the manifest stage is selected; "
-            "later stages will use the newly generated run_dir manifest.",
+            "Warning: --descriptor_manifest is ignored because prepare is selected; "
+            "later stages will use the newly prepared run state.",
             flush=True,
         )
     active_manifest_path = external_manifest_path if use_external_manifest else manifest_path
     annotation_manifest_path = external_manifest_path if use_external_manifest else manifest_path
-    run_summary["active_manifest_path"] = str(active_manifest_path.resolve())
+    _set_active_prepared_state(run_summary, active_manifest_path)
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if deprecated_stages:
@@ -268,15 +313,22 @@ def run_pipeline(args) -> None:
         cwd: str | Path | None = None,
         raise_on_error: bool = True,
     ) -> int:
-        print(f"\n[{name}] {shlex.join(cmd)}\n")
-        return stream_command(name, cmd, run_dir / f"{name}.log", cwd=cwd, raise_on_error=raise_on_error)
+        log_path = run_dir / f"{name}.log"
+        print(f"\n[{name}] running. Log: {log_path}\n", flush=True)
+        return stream_command(name, cmd, log_path, cwd=cwd, raise_on_error=raise_on_error)
 
     def ensure_manifest_exists(stage_label: str, manifest_to_check: Path) -> None:
         if manifest_to_check.exists():
             return
+        if external_manifest_path is not None and manifest_to_check.resolve() == external_manifest_path:
+            raise RuntimeError(
+                f"{stage_label} requires prepared clip state, but the supplied state path does not exist: "
+                f"{manifest_to_check}"
+            )
         raise RuntimeError(
-            f"{stage_label} requires descriptor manifest: {manifest_to_check}\n"
-            "Run the manifest stage first, or reuse the previous run directory via --run_tag."
+            f"{stage_label} requires prepared clip state.\n"
+            "Run `--stages prepare` first, or rerun with the same `output_root`/`--run_tag` used for preparation.\n"
+            f"Looked in run directory: {manifest_to_check.parent}"
         )
 
     def manifest_uses_only_native_features(manifest_to_check: Path) -> bool:
@@ -302,7 +354,7 @@ def run_pipeline(args) -> None:
             raise RuntimeError(f"Missing recoverable batch status after {stage_name}: {status_path}")
         if status_meta.get("source") != "status":
             print(
-                f"[{stage_name}] recovered completed-stage manifest state from {status_meta.get('source')}",
+                f"[{stage_name}] recovered completed-stage run state from {status_meta.get('source')}",
                 flush=True,
             )
         tasks = status_payload.get("tasks", {})
@@ -326,8 +378,10 @@ def run_pipeline(args) -> None:
         subset_path = run_dir / f"{source_manifest.stem}.{stage_name}.completed.jsonl"
         write_clip_manifest(completed_records, subset_path)
         summary = {
-            "source_manifest": str(source_manifest.resolve()),
-            "completed_manifest": str(subset_path.resolve()),
+            "source_manifest": _resolved_path_string(source_manifest),
+            "completed_manifest": _resolved_path_string(subset_path),
+            "source_prepared_state_path": _resolved_path_string(source_manifest),
+            "completed_prepared_state_path": _resolved_path_string(subset_path),
             "total": len(source_records),
             "completed": len(completed_records),
             "failed": len(failed_clip_ids),
@@ -352,7 +406,7 @@ def run_pipeline(args) -> None:
             )
         subset_manifest, subset_summary = build_completed_stage_manifest(completed_stage_name, source_manifest)
         run_summary.setdefault("infer_stage_manifests", {})[stage_label] = subset_summary
-        run_summary["active_manifest_path"] = str(subset_manifest.resolve())
+        _set_active_prepared_state(run_summary, subset_manifest)
         summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if subset_summary["completed"] <= 0:
@@ -389,15 +443,17 @@ def run_pipeline(args) -> None:
         subset_path = run_dir / f"{source_manifest.stem}.{stage_label}.completed.jsonl"
         write_clip_manifest(completed_records, subset_path)
         summary = {
-            "source_manifest": str(source_manifest.resolve()),
-            "completed_manifest": str(subset_path.resolve()),
+            "source_manifest": _resolved_path_string(source_manifest),
+            "completed_manifest": _resolved_path_string(subset_path),
+            "source_prepared_state_path": _resolved_path_string(source_manifest),
+            "completed_prepared_state_path": _resolved_path_string(subset_path),
             "total": len(source_records),
             "completed": len(completed_records),
             "incomplete": len(incomplete_clip_ids),
             "incomplete_clip_ids_preview": incomplete_clip_ids[:16],
         }
         run_summary.setdefault("infer_stage_manifests", {})[stage_label] = summary
-        run_summary["active_manifest_path"] = str(subset_path.resolve())
+        _set_active_prepared_state(run_summary, subset_path)
         summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if summary["completed"] <= 0:
@@ -444,7 +500,7 @@ def run_pipeline(args) -> None:
             split=split,
         )
         if not records:
-            raise RuntimeError(f"No clips found while building manifest for adapter={adapter_name}")
+            raise RuntimeError(f"No clips found during prepare for adapter={adapter_name}")
         write_clip_manifest(records, manifest_path)
 
         shard_root = paths_cfg.get("shard_root")
@@ -458,22 +514,14 @@ def run_pipeline(args) -> None:
                 include_dirs = adapter_cfg.get("include_dirs") or dataset_cfg.get("include_dirs")
             shard_dirs = discover_shard_dirs(shard_root, include_dirs=include_dirs)
             write_shard_dir_list(shard_dirs, shard_dirs_list_path)
-        print(
-            json.dumps(
-                {
-                    "adapter": adapter_name,
-                    "source_id": source_id,
-                    "split": split,
-                    "clip_count": len(records),
-                    "descriptor_paths": {
-                        kind: sum(1 for record in records if classify_descriptor_storage(record.descriptor) == kind)
-                        for kind in sorted({classify_descriptor_storage(record.descriptor) for record in records})
-                    },
-                    "manifest_out": str(manifest_path.resolve()),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+        _print_prepare_summary(
+            adapter_name=adapter_name,
+            source_id=source_id,
+            split=split,
+            records=records,
+            run_dir=run_dir,
+            paths_cfg=paths_cfg,
+            final_dataset_root=final_dataset_root,
         )
 
     if "annotate" in stages:
@@ -491,6 +539,8 @@ def run_pipeline(args) -> None:
         context = {
             "manifest": str(annotation_manifest_path),
             "active_manifest": str(active_manifest_path),
+            "prepared_state": str(annotation_manifest_path),
+            "active_prepared_state": str(active_manifest_path),
             "annotation_root": str(annotation_root or ""),
             "run_dir": str(run_dir),
             "hawor_python": hawor_python,
@@ -510,7 +560,7 @@ def run_pipeline(args) -> None:
         ensure_manifest_exists("infer", active_manifest_path)
         if manifest_uses_only_native_features(active_manifest_path):
             print(
-                "[infer] native-feature manifest detected; skipping ordinary "
+                "[infer] native feature source detected; skipping ordinary "
                 f"infer sub-stages {native_infer_stages}. "
                 "HOT3D final build reads lowdim/mano/cameras directly from raw WDS.",
                 flush=True,
@@ -882,8 +932,8 @@ def run_pipeline(args) -> None:
             ],
         )
         active_manifest_path = filtered_manifest_path
-        run_summary["active_manifest_path"] = str(active_manifest_path.resolve())
-        run_summary["filter_report_path"] = str(filter_report_path.resolve())
+        _set_active_prepared_state(run_summary, active_manifest_path)
+        run_summary["filter_report_path"] = _resolved_path_string(filter_report_path)
         summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if "build" in stages:

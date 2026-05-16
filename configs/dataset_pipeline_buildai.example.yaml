@@ -60,7 +60,7 @@ infer:
 
 annotation:
   command: >
-    echo "Provide an external annotation command here that reads {manifest}
+    echo "Provide an external annotation command here that reads {prepared_state}
     and writes sidecars into {annotation_root}"
 
 build:

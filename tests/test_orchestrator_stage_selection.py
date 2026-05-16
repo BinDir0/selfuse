@@ -1,6 +1,7 @@
 import unittest
 
 from lib.pipeline.batch.cli import build_batch_infer_parser, normalize_batch_infer_args
+from lib.pipeline.orchestrator.cli import get_parser as get_pipeline_parser
 from lib.pipeline.orchestrator.helpers import cli_args_from_mapping
 from lib.pipeline.orchestrator.stage_selection import selected_stages
 
@@ -33,6 +34,17 @@ class OrchestratorStageSelectionTests(unittest.TestCase):
             negative_bool_flags={"resume"},
         )
         self.assertEqual(args, ["--no-resume", "--foo", "--bar", "x", "y", "--baz", "3"])
+
+    def test_pipeline_cli_help_hides_internal_manifest_override(self):
+        parser = get_pipeline_parser()
+        help_text = parser.format_help()
+        self.assertNotIn("descriptor_manifest", help_text)
+        self.assertNotIn("manifest JSONL", help_text)
+
+        args = parser.parse_args(
+            ["--config", "/tmp/config.yaml", "--descriptor_manifest", "/tmp/prepared.jsonl"]
+        )
+        self.assertEqual(args.descriptor_manifest, "/tmp/prepared.jsonl")
 
     def test_throughput_profile_enables_safe_defaults(self):
         parser = build_batch_infer_parser()

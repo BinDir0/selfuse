@@ -30,6 +30,6 @@ def get_parser() -> argparse.ArgumentParser:
         "--descriptor_manifest",
         type=str,
         default=None,
-        help="Optional existing descriptor manifest JSONL to use when starting from infer/filter/build/validate without rerunning prepare/manifest.",
+        help=argparse.SUPPRESS,
     )
     return parser

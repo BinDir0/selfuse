@@ -20,7 +20,7 @@ output_root: /optional/output_root
 ```
 
 If `output_root` is omitted, it defaults to `<video_dir>/<video_stem>.hawor_pipeline/`.
-The orchestrator derives extracted frames, stage outputs, logs, manifests, reports, and final WebDataset shards from that root.
+The orchestrator derives extracted frames, stage outputs, logs, run state, reports, and final WebDataset shards from that root.
 
 `annotation.command` is optional. When omitted, default stages are `prepare,infer,filter,build,validate` and empty instruction/language fields are allowed.
 
