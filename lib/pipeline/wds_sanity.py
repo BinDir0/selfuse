@@ -29,6 +29,7 @@ HARD_FILTER_ISSUES = {
     "missing_image",
     "missing_lowdim",
     "missing_meta",
+    "missing_depth",
     "invalid_meta",
     "missing_meta_keys",
     "lowdim_decode_failure",
@@ -260,6 +261,7 @@ def init_sanity_report(
             "empty_instruction_frames": 0,
             "instruction_num_mismatch_frames": 0,
             "missing_mano_samples": 0,
+            "missing_depth_samples": 0,
         },
         "issue_examples": [],
         "hard_filter_reason_counts": {},
@@ -375,6 +377,8 @@ def analyze_webdataset(
     render_max_frames: int | None = None,
     render_fps: int = 15,
     decode_images: bool = True,
+    allow_empty_instruction: bool = False,
+    require_depth: bool = False,
     temp_dir: str | None = None,
     max_issue_examples: int = 32,
 ) -> dict:
@@ -515,6 +519,10 @@ def analyze_webdataset(
 
                 if sample.get("mano_bytes") is None:
                     report["checks"]["missing_mano_samples"] += 1
+                if require_depth and sample.get("depth_bytes") is None:
+                    report["checks"]["missing_depth_samples"] += 1
+                    current_episode.mark_issue("missing_depth")
+                    append_issue("missing_depth", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)
 
                 if isinstance(meta, dict):
                     missing_meta_keys = [key for key in REQUIRED_META_KEYS if key not in meta]
@@ -534,7 +542,11 @@ def analyze_webdataset(
                     instructions = list(parsed_instruction["instructions"])
                     if not current_episode.instruction_preview and instructions:
                         current_episode.instruction_preview = instructions[0][:160]
-                    if parsed_instruction["missing_instruction"]:
+                    if allow_empty_instruction and (
+                        parsed_instruction["missing_instruction"] or parsed_instruction["empty_instruction"]
+                    ):
+                        pass
+                    elif parsed_instruction["missing_instruction"]:
                         report["checks"]["missing_instruction_frames"] += 1
                         current_episode.mark_issue("missing_instruction")
                         append_issue("missing_instruction", clip_id=clip_id, sample_key=sample_key, shard_name=shard_name)

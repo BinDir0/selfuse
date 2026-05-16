@@ -1,0 +1,14 @@
+# Minimal official pipeline config.
+# `output_root` is optional; if omitted it defaults to:
+# <video_dir>/<video_stem>.hawor_pipeline/
+
+video: /path/to/input.mp4
+
+# Optional:
+# output_root: /path/to/input.hawor_pipeline
+
+# Optional annotation stage. If this block has no command, the default run skips
+# annotate and exports empty instruction/language fields.
+# annotation:
+#   command: >
+#     echo "Read {manifest} and write annotations to {annotation_root}"

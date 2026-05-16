@@ -13,8 +13,7 @@ Dataset pipeline:
 
 ```bash
 python scripts/run_dataset_pipeline.py \
-  --config configs/dataset_pipeline_buildai.example.yaml \
-  --stages prepare,annotate,infer,filter,build,validate
+  --config configs/dataset_pipeline_single_video.example.yaml
 ```
 
 Batch inference only:
@@ -36,11 +35,11 @@ See:
 
 ## Environment Setup
 
-Base environment:
+Base environment for the main HaWoR stages should be named `hawor`:
 
 ```bash
-conda create -n rowah python=3.10 -y
-conda activate rowah
+conda create -n hawor python=3.10 -y
+conda activate hawor
 pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -U xformers --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
@@ -59,7 +58,7 @@ pip install --no-build-isolation git+https://github.com/mattloper/chumpy
 Third-party packages:
 
 - DPVO: `cd thirdparty/DPVO && pip install . --no-build-isolation`
-- Any4D: `pip install -e thirdparty/Any4D --no-deps`
+- Any4D: install into a separate conda env named `any4d`
 - DROID-SLAM: `cd thirdparty/DROID-SLAM && python setup.py install`
 
 Recommended runtime exports:
@@ -100,6 +99,20 @@ MANO assets must be downloaded separately from the official MANO site and placed
 - `_DATA/data_left/mano_left/MANO_LEFT.pkl`
 
 ## Common Usage
+
+Run the official single-video-to-WebDataset path:
+
+```yaml
+# configs/my_video.yaml
+video: /path/to/input.mp4
+# output_root is optional; defaults to /path/to/input.hawor_pipeline
+```
+
+```bash
+python scripts/run_dataset_pipeline.py --config configs/my_video.yaml
+```
+
+The default run extracts frames, runs HaWoR/Any4D stages, filters, builds a trainable WebDataset, and validates image/lowdim/MANO/meta/depth outputs. Annotation is skipped unless `annotation.command` is configured, so empty instruction/language fields are valid for this first single-video path.
 
 Extract frames from a single video:
 
@@ -161,11 +174,10 @@ Recommended full run:
 
 ```bash
 python scripts/run_dataset_pipeline.py \
-  --config configs/dataset_pipeline_buildai.example.yaml \
-  --stages prepare,annotate,infer,filter,build,validate
+  --config configs/dataset_pipeline_single_video.example.yaml
 ```
 
-The pipeline keeps a frozen clip manifest on purpose so annotation, filtering, and rebuilding all operate on the same stable clip set.
+Nested BuildAI/HOT3D/FPHA configs remain supported as a migration path. The pipeline keeps a frozen clip manifest on purpose so annotation, filtering, and rebuilding all operate on the same stable clip set.
 
 For details, see [docs/dataset_pipeline.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/docs/dataset_pipeline.md).
 

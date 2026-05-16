@@ -44,8 +44,16 @@ class WebdatasetSanityTests(unittest.TestCase):
             root = Path(tmpdir)
             shard_path = root / "shard-000000.tar"
 
-            valid_lowdim = np.arange(116, dtype=np.float32)
+            valid_lowdim = np.zeros(116, dtype=np.float32)
+            valid_rot6d = np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+            valid_lowdim[6:12] = valid_rot6d
+            valid_lowdim[12:18] = valid_rot6d
+            valid_lowdim[54:60] = valid_rot6d
+            valid_lowdim[60:66] = valid_rot6d
+            valid_lowdim[96:112] = np.eye(4, dtype=np.float32).reshape(-1)
             valid_lowdim[112:116] = np.asarray([100.0, 100.0, 192.0, 192.0], dtype=np.float32)
+            valid_lowdim_b = valid_lowdim.copy()
+            valid_lowdim_b[0] = 1.0
             nonfinite_lowdim = valid_lowdim.copy()
             nonfinite_lowdim[5] = np.nan
 
@@ -68,7 +76,7 @@ class WebdatasetSanityTests(unittest.TestCase):
                 _add_tar_member(tar_writer, "clip_a_ep000000_f000000.meta.json", json.dumps(meta_ok).encode("utf-8"))
 
                 _add_tar_member(tar_writer, "clip_b_ep000001_f000000.image.jpg", b"not-a-real-image")
-                _add_tar_member(tar_writer, "clip_b_ep000001_f000000.lowdim.npy", _encode_npy(valid_lowdim + 1.0))
+                _add_tar_member(tar_writer, "clip_b_ep000001_f000000.lowdim.npy", _encode_npy(valid_lowdim_b))
                 _add_tar_member(
                     tar_writer,
                     "clip_b_ep000001_f000000.meta.json",

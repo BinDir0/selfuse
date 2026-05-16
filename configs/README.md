@@ -10,9 +10,23 @@ Recommended interpretation:
 - recipe-like files such as `dataset_pipeline_buildai_v9_30fps_part1.yaml`: concrete configs used for specific datasets or launches
 - `legacy_*`: configs for legacy dataset adapters, still expressed in the official nested pipeline schema
 
-## Official Config Shape
+## Preferred Config Shape
 
-All configs consumed by `scripts/run_dataset_pipeline.py` must use the nested shape below:
+New first-party runs should use the simplified single-video shape:
+
+```yaml
+video: /path/to/input.mp4
+output_root: /optional/output_root
+```
+
+If `output_root` is omitted, it defaults to `<video_dir>/<video_stem>.hawor_pipeline/`.
+The orchestrator derives extracted frames, stage outputs, logs, manifests, reports, and final WebDataset shards from that root.
+
+`annotation.command` is optional. When omitted, default stages are `prepare,infer,filter,build,validate` and empty instruction/language fields are allowed.
+
+## Nested Compatibility Shape
+
+Existing multi-source configs may still use the nested adapter shape below. This path remains supported but now emits a migration warning:
 
 ```yaml
 dataset:
@@ -23,10 +37,6 @@ paths:
   annotation_root: /path/to/annotations
   final_dataset_root: /path/to/output_dataset
   log_root: /path/to/pipeline_runs
-
-runtimes:
-  hawor_python: /path/to/hawor/bin/python
-  slam_python: /path/to/slam/bin/python
 
 infer:
   common: {}
@@ -41,6 +51,7 @@ validation: {}
 
 ## Current Examples
 
+- `dataset_pipeline_single_video.example.yaml`: minimal single-video config
 - `dataset_pipeline_buildai.example.yaml`: standard BuildAI-style config
 - `dataset_pipeline_fpha.yaml`: ready-to-run FPHA config
 - `dataset_pipeline_flat_shard.example.yaml`: flat shard adapter example
@@ -51,7 +62,7 @@ validation: {}
 
 ## Stability
 
-Compact top-level pipeline configs are no longer supported. Breaking changes to the pipeline schema should be made by updating the official nested shape and the first-party callers together.
+Compact legacy top-level pipeline configs are still rejected. Breaking changes to the pipeline schema should be made by updating the simplified single-video shape, nested compatibility shape, and first-party callers together.
 
 ## Throughput Knobs
 

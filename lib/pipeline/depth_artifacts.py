@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 
 from lib.pipeline.native_depth import get_native_depth_output_path
-from lib.pipeline.stage_api import get_track_range
 
 
 DEPTH_EXPORT_ENCODING = "uint16_mm"
@@ -23,6 +22,40 @@ def _dense_depth_cache_candidates(seq_folder: str | Path, start_idx: int, end_id
         root / f"dense_depth_any4d_all_{start_idx}_{end_idx}.npz",
         root / f"dense_depth_any4d_keyframes_{start_idx}_{end_idx}.npz",
     ]
+
+
+def _read_cached_track_range(seq_folder: str | Path) -> tuple[int, int] | None:
+    cache_file = Path(seq_folder) / ".track_range"
+    if not cache_file.is_file():
+        return None
+    try:
+        raw = cache_file.read_text(encoding="utf-8").strip()
+        start_idx, end_idx = raw.split(",", 1)
+        return int(start_idx), int(end_idx)
+    except Exception:
+        return None
+
+
+def _discover_track_range(seq_folder: str | Path) -> tuple[int, int] | None:
+    cached = _read_cached_track_range(seq_folder)
+    if cached is not None:
+        return cached
+    root = Path(seq_folder)
+    candidates = []
+    for track_dir in root.glob("tracks_*_*"):
+        if not track_dir.is_dir():
+            continue
+        parts = track_dir.name.split("_")
+        if len(parts) != 3:
+            continue
+        try:
+            candidates.append((int(parts[1]), int(parts[2])))
+        except ValueError:
+            continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[1], item[0]))
+    return candidates[-1]
 
 
 def _load_depth_npz(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
@@ -62,10 +95,8 @@ def load_export_depths(seq_folder: str | Path, expected_frame_count: int) -> np.
     candidate_artifacts = []
     if native_path.is_file():
         candidate_artifacts.append(native_path)
-    try:
-        start_idx, end_idx = get_track_range(seq_folder, fast=True)
-    except Exception:
-        start_idx = end_idx = None
+    track_range = _discover_track_range(seq_folder)
+    start_idx, end_idx = track_range if track_range is not None else (None, None)
     if start_idx is not None and end_idx is not None:
         candidate_artifacts.extend(_dense_depth_cache_candidates(seq_folder, int(start_idx), int(end_idx)))
 

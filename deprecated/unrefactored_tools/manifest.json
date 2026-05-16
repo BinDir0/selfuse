@@ -1,0 +1,46 @@
+{
+  "status": "not_aligned_with_single_video_pipeline_refactor",
+  "recommended_entrypoint": "scripts/run_dataset_pipeline.py",
+  "paths": [
+    {
+      "original": "scripts/reinject_webdataset_instructions.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/reinject_webdataset_instructions.py"
+    },
+    {
+      "original": "scripts/repair_dpvo_dense_slam_exports.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/repair_dpvo_dense_slam_exports.py"
+    },
+    {
+      "original": "scripts/rerun_infiller_world_repair.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/rerun_infiller_world_repair.py"
+    },
+    {
+      "original": "scripts/rerun_infiller_world_repair_parallel.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/rerun_infiller_world_repair_parallel.py"
+    },
+    {
+      "original": "scripts/rerun_and_rewrite_buildai_shards.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/rerun_and_rewrite_buildai_shards.py"
+    },
+    {
+      "original": "scripts/buildai_v2_full/",
+      "deprecated": "deprecated/unrefactored_tools/scripts/buildai_v2_full/"
+    },
+    {
+      "original": "scripts/check_bad_npy_shards.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/check_bad_npy_shards.py"
+    },
+    {
+      "original": "scripts/fill_mixed_wds_reserved_source.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/fill_mixed_wds_reserved_source.py"
+    },
+    {
+      "original": "scripts/mix_anonymize_webdataset.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/mix_anonymize_webdataset.py"
+    },
+    {
+      "original": "scripts/prepare_delayed_shard_transfer.py",
+      "deprecated": "deprecated/unrefactored_tools/scripts/prepare_delayed_shard_transfer.py"
+    }
+  ]
+}

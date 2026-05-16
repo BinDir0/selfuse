@@ -19,6 +19,7 @@ _BUILTIN_ADAPTER_MODULES = {
     "image_sequence": "lib.pipeline.datasets.image_sequence",
     "hot3d_wds": "lib.pipeline.datasets.hot3d_wds",
     "legacy_buildai": "lib.pipeline.datasets.legacy_buildai",
+    "single_video": "lib.pipeline.datasets.single_video",
     "video_folder": "lib.pipeline.datasets.video_folder",
 }
 

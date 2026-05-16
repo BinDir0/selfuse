@@ -11,7 +11,12 @@ import gzip
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, *args, **kwargs):
+        del args, kwargs
+        return iterable if iterable is not None else []
 
 from lib.pipeline.datasets.descriptors import ClipDescriptor as VideoDescriptor
 

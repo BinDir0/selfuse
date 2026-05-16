@@ -50,6 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=max(1, min(64, (os.cpu_count() or 1) * 4)),
         help="Thread workers for parallel seq_folder repair.",
     )
+    parser.add_argument(
+        "--skip_content_compare",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Skip expensive elementwise traj comparison. When enabled, the script decides whether to rewrite "
+            "primarily from traj length mismatch, which is the common sparse->dense repair case."
+        ),
+    )
     return parser
 
 
@@ -86,7 +95,7 @@ def _rewrite_npz(export_path: Path, payload: dict[str, np.ndarray | float]) -> N
     tmp_path.replace(export_path)
 
 
-def repair_seq_folder(seq_folder: Path, *, dry_run: bool) -> dict:
+def repair_seq_folder(seq_folder: Path, *, dry_run: bool, skip_content_compare: bool) -> dict:
     slam_dir = seq_folder / "SLAM"
     if not slam_dir.is_dir():
         return {"seq_folder": str(seq_folder), "status": "missing_slam_dir"}
@@ -113,7 +122,10 @@ def repair_seq_folder(seq_folder: Path, *, dry_run: bool) -> dict:
             payload = {key: export_data[key] for key in export_data.files if key != "traj"}
             old_traj = np.asarray(export_data["traj"], dtype=np.float32)
 
-        changed = bool(old_traj.shape != dense_traj.shape or not np.array_equal(old_traj, dense_traj))
+        if skip_content_compare:
+            changed = bool(old_traj.shape != dense_traj.shape)
+        else:
+            changed = bool(old_traj.shape != dense_traj.shape or not np.array_equal(old_traj, dense_traj))
         payload["traj"] = dense_traj
         if changed and not dry_run:
             _rewrite_npz(export_path, payload)
@@ -178,11 +190,19 @@ def main() -> None:
     def _iter_report():
         if int(args.workers) == 1:
             for seq_folder in seq_folders:
-                yield repair_seq_folder(seq_folder, dry_run=bool(args.dry_run))
+                yield repair_seq_folder(
+                    seq_folder,
+                    dry_run=bool(args.dry_run),
+                    skip_content_compare=bool(args.skip_content_compare),
+                )
             return
         with ThreadPoolExecutor(max_workers=int(args.workers)) as executor:
             yield from executor.map(
-                lambda seq_folder: repair_seq_folder(seq_folder, dry_run=bool(args.dry_run)),
+                lambda seq_folder: repair_seq_folder(
+                    seq_folder,
+                    dry_run=bool(args.dry_run),
+                    skip_content_compare=bool(args.skip_content_compare),
+                ),
                 seq_folders,
                 chunksize=64,
             )

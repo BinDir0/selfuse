@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import joblib
 import numpy as np
 
 from lib.pipeline.datasets.descriptors import ClipDescriptor
@@ -290,6 +289,8 @@ def _validate_slam_output(seq_folder: Path, start_idx: int, end_idx: int):
 
 
 def _validate_infiller_output(seq_folder: Path, _start_idx: int, _end_idx: int):
+    import joblib
+
     world_file = seq_folder / "world_space_res.pth"
     assert world_file.exists(), "world_space_res.pth missing"
     pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_file)
@@ -483,6 +484,8 @@ def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, 
 
 
 def _run_infiller_stage(task, stage_args, runtime, frame_source, prefetched_data, start_idx, end_idx):
+    import joblib
+
     from lib.pipeline.stages.hawor_video import run_infiller_for_video
 
     tracks_dir = get_tracks_dir(task.seq_folder, start_idx, end_idx)

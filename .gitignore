@@ -3,7 +3,9 @@
 # =============================================================================
 
 # deprecated code (archived locally, not uploaded)
-/deprecated/
+/deprecated/*
+!/deprecated/unrefactored_tools/
+!/deprecated/unrefactored_tools/**
 .codex
 
 # batch_infer 默认运行目录与临时目录（可用 HAWOR_BATCH_TMPDIR 改 .tmp 位置）

@@ -5,9 +5,61 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
+
+
+def _extract_raw_cli_value(flag: str) -> str | None:
+    argv = sys.argv[1:]
+    prefix = f"{flag}="
+    for idx, item in enumerate(argv):
+        if item == flag:
+            if idx + 1 < len(argv):
+                return argv[idx + 1]
+            return None
+        if item.startswith(prefix):
+            return item[len(prefix) :]
+    return None
+
+
+def _parse_optional_positive_int(raw: str | None) -> int | None:
+    if raw is None:
+        return None
+    value = int(raw)
+    if value < 1:
+        raise SystemExit(f"{raw!r} is invalid; expected a positive integer.")
+    return value
+
+
+def _maybe_reexec_with_thread_limits() -> None:
+    if os.environ.get("HAWOR_THREAD_CAPS_APPLIED") == "1":
+        return
+
+    cpu_threads = _parse_optional_positive_int(_extract_raw_cli_value("--cpu_threads"))
+    interop_threads = _parse_optional_positive_int(_extract_raw_cli_value("--interop_threads"))
+    if cpu_threads is None and interop_threads is None:
+        return
+
+    env = os.environ.copy()
+    if cpu_threads is not None:
+        thread_value = str(cpu_threads)
+        for key in (
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        ):
+            env[key] = thread_value
+    if interop_threads is not None:
+        env["TORCH_NUM_INTEROP_THREADS"] = str(interop_threads)
+    env["HAWOR_THREAD_CAPS_APPLIED"] = "1"
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+_maybe_reexec_with_thread_limits()
 
 import joblib
 import numpy as np
@@ -19,6 +71,27 @@ if str(PROJECT_ROOT) not in sys.path:
 from lib.pipeline.datasets.descriptors import ClipDescriptor
 from lib.pipeline.runtime import WorkerRuntime
 from lib.pipeline.stage_api import PipelineVideoTask, run_pipeline_stage
+
+
+def _configure_torch_threads(cpu_threads: int | None, interop_threads: int | None) -> None:
+    if cpu_threads is None and interop_threads is None:
+        return
+    try:
+        import torch
+    except Exception as exc:
+        print(f"[thread-cap] skip torch thread configuration: {exc}", flush=True)
+        return
+
+    if cpu_threads is not None:
+        torch.set_num_threads(int(cpu_threads))
+    if interop_threads is not None:
+        torch.set_num_interop_threads(int(interop_threads))
+
+    configured = {
+        "cpu_threads": torch.get_num_threads(),
+        "interop_threads": torch.get_num_interop_threads(),
+    }
+    print(f"[thread-cap] configured {configured}", flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +129,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=64,
         help="Batch size for infiller windows.",
+    )
+    parser.add_argument(
+        "--cpu_threads",
+        type=int,
+        default=None,
+        help="Optional cap for CPU math threads (OMP/MKL/OpenBLAS/Torch). Requires process restart at launch.",
+    )
+    parser.add_argument(
+        "--interop_threads",
+        type=int,
+        default=None,
+        help="Optional cap for Torch inter-op CPU threads.",
     )
     parser.add_argument(
         "--rebuild_cam_space_cache",
@@ -257,6 +342,7 @@ def rerun_seq_folder(
 
 def main() -> None:
     args = build_parser().parse_args()
+    _configure_torch_threads(args.cpu_threads, args.interop_threads)
     seq_folders = _collect_seq_folders(args)
     backup_dir = Path(args.backup_dir).expanduser().resolve() if args.backup_dir else None
     progress_dir = Path(args.progress_dir).expanduser().resolve() if args.progress_dir else None

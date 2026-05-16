@@ -30,6 +30,7 @@ from lib.pipeline.multihost import (
     sanitize_infer_args_for_multihost,
 )
 from lib.pipeline.pipeline_config import normalize_pipeline_config
+from lib.pipeline.runtime_resolver import resolve_pipeline_runtimes
 from lib.pipeline.stage_api import get_stage_done_marker
 
 from .cli import get_parser
@@ -41,28 +42,6 @@ from .validation import (
     validate_multihost_infer_alignment,
     validate_pipeline_cli_alignment,
 )
-
-
-def _resolve_runtime_python_path(raw_path: str | None, *, runtime_name: str) -> str | None:
-    if raw_path is None:
-        return None
-    path_text = str(raw_path)
-    candidate = Path(path_text)
-    if candidate.exists():
-        return path_text
-
-    # Backward-compatibility shim for the old Any4D env typo: `any4` -> `any4d`.
-    fixed_text = path_text.replace("/envs/any4/", "/envs/any4d/")
-    if fixed_text != path_text:
-        fixed_candidate = Path(fixed_text)
-        if fixed_candidate.exists():
-            print(
-                f"[runtime] {runtime_name} python not found at {path_text}; "
-                f"using compatible fallback {fixed_text}",
-                flush=True,
-            )
-            return fixed_text
-    return path_text
 
 
 def _hostname_slug() -> str:
@@ -88,10 +67,87 @@ def _resolve_run_tag(*, cli_run_tag: str | None, config_run_tag: str | None) -> 
     )
 
 
+def _default_stage_string(config: dict) -> str:
+    meta_default = (config.get("_meta") or {}).get("default_stages")
+    if meta_default:
+        return str(meta_default)
+    if (config.get("annotation") or {}).get("command"):
+        return "prepare,annotate,infer,filter,build,validate"
+    return "prepare,infer,filter,build,validate"
+
+
+def _runtime_requirements_for_stages(stages: list[str]) -> tuple[bool, bool]:
+    require_hawor = any(
+        stage in stages
+        for stage in (
+            "annotate",
+            "detect_motion",
+            "infiller",
+            "filter",
+            "build",
+            "validate",
+        )
+    )
+    require_slam = any(stage in stages for stage in ("slam", "native_depth"))
+    return require_hawor, require_slam
+
+
+def _apply_single_video_native_fps_defaults(config: dict, prepared) -> None:
+    meta = config.get("_meta") or {}
+    if not meta.get("default_build_fps_from_video") or prepared is None:
+        return
+    fps = prepared.payload.get("fps")
+    if fps is None:
+        descriptor = prepared.payload.get("descriptor")
+        fps = getattr(descriptor, "fps", None)
+    if fps is None or float(fps) <= 0.0:
+        return
+    build_cfg = config.get("build") or {}
+    if build_cfg.get("source_fps") is None:
+        build_cfg["source_fps"] = float(fps)
+    if build_cfg.get("target_fps") is None:
+        build_cfg["target_fps"] = float(fps)
+
+
+def _apply_single_video_native_fps_defaults_from_descriptors(config: dict, descriptors) -> None:
+    meta = config.get("_meta") or {}
+    if not meta.get("default_build_fps_from_video"):
+        return
+    for descriptor in descriptors or []:
+        fps = getattr(descriptor, "fps", None)
+        if fps is None or float(fps) <= 0.0:
+            continue
+        build_cfg = config.get("build") or {}
+        if build_cfg.get("source_fps") is None:
+            build_cfg["source_fps"] = float(fps)
+        if build_cfg.get("target_fps") is None:
+            build_cfg["target_fps"] = float(fps)
+        return
+
+
+def _apply_single_video_native_fps_defaults_from_manifest(config: dict, manifest_path: Path) -> None:
+    meta = config.get("_meta") or {}
+    build_cfg = config.get("build") or {}
+    if (
+        not meta.get("default_build_fps_from_video")
+        or (build_cfg.get("source_fps") is not None and build_cfg.get("target_fps") is not None)
+        or not manifest_path.exists()
+    ):
+        return
+    records = load_clip_manifest(manifest_path)
+    _apply_single_video_native_fps_defaults_from_descriptors(
+        config,
+        [record.descriptor for record in records],
+    )
+
+
 def run_pipeline(args) -> None:
     config_path = Path(args.config).resolve()
-    config = normalize_pipeline_config(load_yaml(config_path))
-    stage_selection = selected_stages(args.stages)
+    config = normalize_pipeline_config(load_yaml(config_path), config_path=config_path)
+    for warning in (config.get("_meta") or {}).get("migration_warnings", []):
+        print(f"Warning: {warning}", flush=True)
+    raw_stages = args.stages or _default_stage_string(config)
+    stage_selection = selected_stages(raw_stages)
     requested_stage_tokens = stage_selection["requested_tokens"]
     stages = stage_selection["internal"]
     public_stages = stage_selection["requested_public"]
@@ -106,6 +162,11 @@ def run_pipeline(args) -> None:
     adapter_cfg = config.get("adapter_config", {})
     annotation_cfg = config.get("annotation", {})
     validation_cfg = config.get("validation", {})
+    cli_resume = getattr(args, "resume", None)
+    effective_resume = bool(config.get("resume", True) if cli_resume is None else cli_resume)
+    adapter_cfg.setdefault("resume", effective_resume)
+    if cli_resume is not None:
+        infer_cfg.setdefault("common", {})["resume"] = effective_resume
 
     validate_pipeline_cli_alignment(
         stages=stages,
@@ -116,7 +177,7 @@ def run_pipeline(args) -> None:
     )
 
     run_root = Path(paths_cfg.get("log_root", PROJECT_ROOT / "pipeline_runs"))
-    run_tag = _resolve_run_tag(cli_run_tag=args.run_tag, config_run_tag=config.get("run_tag"))
+    run_tag = _resolve_run_tag(cli_run_tag=getattr(args, "run_tag", None), config_run_tag=config.get("run_tag"))
     run_dir = run_root / run_tag
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,8 +195,14 @@ def run_pipeline(args) -> None:
     split = dataset_cfg.get("split", "train")
     annotation_root = paths_cfg.get("annotation_root")
     final_dataset_root = Path(paths_cfg["final_dataset_root"])
-    hawor_python = _resolve_runtime_python_path(runtimes_cfg["hawor_python"], runtime_name="hawor")
-    slam_python = _resolve_runtime_python_path(runtimes_cfg.get("slam_python", hawor_python), runtime_name="slam")
+    require_hawor, require_slam = _runtime_requirements_for_stages(stages)
+    resolved_runtimes = resolve_pipeline_runtimes(
+        runtimes_cfg,
+        require_hawor=require_hawor,
+        require_slam=require_slam,
+    )
+    hawor_python = resolved_runtimes.hawor_python or sys.executable
+    slam_python = resolved_runtimes.slam_python or hawor_python
     infer_multihost_cfg = parse_multihost_config(
         infer_cfg.get("multihost"),
         default_project_root=PROJECT_ROOT,
@@ -155,7 +222,8 @@ def run_pipeline(args) -> None:
     run_summary = {
         "config": str(config_path),
         "run_dir": str(run_dir.resolve()),
-        "resume": bool(args.resume),
+        "resume": bool(effective_resume),
+        "config_schema": (config.get("_meta") or {}).get("schema"),
         "source_type": source_type,
         "source_id": source_id,
         "split": split,
@@ -167,6 +235,7 @@ def run_pipeline(args) -> None:
         "stages": public_stages,
         "requested_stage_tokens": requested_stage_tokens,
         "expanded_internal_stages": stages,
+        "runtime_source": resolved_runtimes.source,
     }
     if external_manifest_path is not None:
         run_summary["descriptor_manifest_override"] = str(external_manifest_path)
@@ -211,10 +280,11 @@ def run_pipeline(args) -> None:
         )
 
     def manifest_uses_only_native_features(manifest_to_check: Path) -> bool:
-        from lib.pipeline.exporters.manifest_vla import descriptor_uses_native_features
-
         records = load_clip_manifest(manifest_to_check)
-        return bool(records) and all(descriptor_uses_native_features(record.descriptor) for record in records)
+        return bool(records) and all(
+            (record.descriptor.extra or {}).get("native_feature_source") == "wds_lowdim_mano_v1"
+            for record in records
+        )
 
     def build_completed_stage_manifest(stage_name: str, source_manifest: Path) -> tuple[Path, dict]:
         status_path = run_dir / "status.json"
@@ -351,6 +421,9 @@ def run_pipeline(args) -> None:
             context=adapter_context,
             run_logged=run_logged,
         )
+        _apply_single_video_native_fps_defaults(config, prepared)
+        build_cfg = config.get("build", build_cfg)
+        filter_cfg = config.get("filter", filter_cfg)
 
     if "manifest" in stages:
         descriptors = list(
@@ -362,6 +435,9 @@ def run_pipeline(args) -> None:
                 prepared=prepared,
             )
         )
+        _apply_single_video_native_fps_defaults_from_descriptors(config, descriptors)
+        build_cfg = config.get("build", build_cfg)
+        filter_cfg = config.get("filter", filter_cfg)
         records = build_manifest_records_from_descriptors(
             descriptors,
             source_id=source_id,
@@ -628,7 +704,7 @@ def run_pipeline(args) -> None:
             str(gpus),
             *native_depth_args,
         ]
-        if bool(common_infer_cfg.get("resume", False)):
+        if bool(common_infer_cfg.get("resume", effective_resume)):
             native_depth_cmd.append("--resume")
         native_depth_return_code = run_logged(
             "native_depth",
@@ -693,7 +769,7 @@ def run_pipeline(args) -> None:
                 fpha_cmd.extend(["--chunk_size", str(int(fpha_skeleton_cfg["chunk_size"]))])
             if fpha_skeleton_cfg.get("skeleton_root"):
                 fpha_cmd.extend(["--skeleton_root", str(fpha_skeleton_cfg["skeleton_root"])])
-            if bool(common_infer_cfg.get("resume", False)):
+            if bool(common_infer_cfg.get("resume", effective_resume)):
                 fpha_cmd.append("--resume")
             if not bool(fpha_skeleton_cfg.get("preserve_existing_left", True)):
                 fpha_cmd.append("--no-preserve_existing_left")
@@ -776,6 +852,8 @@ def run_pipeline(args) -> None:
 
     if "filter" in stages:
         ensure_manifest_exists("filter", active_manifest_path)
+        _apply_single_video_native_fps_defaults_from_manifest(config, active_manifest_path)
+        build_cfg = config.get("build", build_cfg)
         filter_runtime_cfg = dict(filter_cfg)
         filter_runtime_cfg.setdefault("annotation_root", annotation_root)
         filter_runtime_cfg.setdefault("annotation_suffix", build_cfg.get("annotation_suffix"))
@@ -810,6 +888,8 @@ def run_pipeline(args) -> None:
 
     if "build" in stages:
         ensure_manifest_exists("build", active_manifest_path)
+        _apply_single_video_native_fps_defaults_from_manifest(config, active_manifest_path)
+        build_cfg = config.get("build", build_cfg)
         build_runtime_cfg = dict(build_cfg)
         build_runtime_cfg.setdefault("feature_cache_dir", str(shared_feature_cache_dir))
         build_cmd = [
@@ -821,7 +901,7 @@ def run_pipeline(args) -> None:
             str(final_dataset_root),
             *cli_args_from_mapping(build_runtime_cfg),
         ]
-        if args.resume:
+        if effective_resume:
             build_cmd.append("--resume")
         if annotation_root:
             build_cmd.extend(["--annotation_root", str(annotation_root)])
@@ -853,6 +933,8 @@ def run_pipeline(args) -> None:
             validate_cmd.extend(["--annotation_root", str(annotation_root)])
             if build_cfg.get("annotation_suffix"):
                 validate_cmd.extend(["--annotation_suffix", str(build_cfg["annotation_suffix"])])
+        if bool(validation_cfg.get("depth_action_consistency", False)) and not validation_cfg.get("depth_action_report_out"):
+            validate_cmd.extend(["--depth_action_report_out", str(run_dir / "depth_action_consistency.json")])
         run_logged("validate", validate_cmd)
 
     print(f"\nRun complete: {run_dir}")

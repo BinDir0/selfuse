@@ -41,6 +41,30 @@ def get_parser():
         default=False,
         help="Decode JPEGs during dataset sanity checks",
     )
+    parser.add_argument(
+        "--allow_empty_instruction",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Do not fail dataset sanity when instruction/language fields are empty.",
+    )
+    parser.add_argument(
+        "--require_depth",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fail dataset sanity when built samples are missing depth payloads.",
+    )
+    parser.add_argument(
+        "--depth_action_consistency",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Summarize projected hand-depth versus exported depth maps when depth payloads exist.",
+    )
+    parser.add_argument(
+        "--depth_action_report_out",
+        type=str,
+        default=None,
+        help="Optional JSON path for the depth/action consistency summary.",
+    )
     return parser
 
 
@@ -192,7 +216,7 @@ def validate_annotations(records, annotation_root, annotation_suffix):
     return stats
 
 
-def validate_dataset(dataset_dir, sample_checks, *, decode_images: bool):
+def validate_dataset(dataset_dir, sample_checks, *, decode_images: bool, allow_empty_instruction: bool, require_depth: bool):
     from lib.pipeline.wds_sanity import analyze_webdataset
 
     if not dataset_dir:
@@ -203,9 +227,30 @@ def validate_dataset(dataset_dir, sample_checks, *, decode_images: bool):
         source_shard_dir=str(Path(dataset_dir)),
         sample_limit=limit,
         decode_images=bool(decode_images),
+        allow_empty_instruction=bool(allow_empty_instruction),
+        require_depth=bool(require_depth),
         max_issue_examples=64,
     )
     report["full_dataset_scan"] = limit is None
+    return report
+
+
+def validate_depth_action_consistency(dataset_dir, sample_checks, *, enabled: bool, report_out: str | None):
+    if not dataset_dir or not enabled:
+        return None
+    from lib.pipeline.depth_action_consistency import (
+        analyze_depth_action_consistency,
+        write_depth_action_consistency_report,
+    )
+
+    limit = None if sample_checks is None or int(sample_checks) <= 0 else int(sample_checks)
+    report = analyze_depth_action_consistency(
+        dataset_dir=str(Path(dataset_dir)),
+        sample_limit=limit,
+        max_examples=64,
+    )
+    if report_out:
+        report["report_path"] = write_depth_action_consistency_report(report, report_out)
     return report
 
 
@@ -255,6 +300,14 @@ def main():
             args.dataset_dir,
             args.dataset_sample_checks,
             decode_images=bool(args.decode_images),
+            allow_empty_instruction=bool(args.allow_empty_instruction),
+            require_depth=bool(args.require_depth),
+        ),
+        "depth_action_consistency": validate_depth_action_consistency(
+            args.dataset_dir,
+            args.dataset_sample_checks,
+            enabled=bool(args.depth_action_consistency),
+            report_out=args.depth_action_report_out,
         ),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))

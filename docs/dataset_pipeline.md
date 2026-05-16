@@ -4,11 +4,32 @@ This repository has one official dataset-production entrypoint:
 
 ```bash
 python scripts/run_dataset_pipeline.py \
-  --config <config.yaml> \
-  --stages prepare,annotate,infer,filter,build,validate
+  --config <config.yaml>
 ```
 
-The pipeline is adapter-driven. Different source datasets are normalized into a frozen clip manifest, and then the same annotation, inference, filter, build, and validation logic runs on top of that shared boundary.
+The preferred config is now a single-video config. The first release treats one input video as one clip, keeps the native FPS, skips language annotation unless `annotation.command` is configured, and exports trainable WebDataset samples with image, lowdim, MANO, meta, and depth payloads.
+
+Minimal config:
+
+```yaml
+video: /path/to/input.mp4
+```
+
+Optional output root:
+
+```yaml
+video: /path/to/input.mp4
+output_root: /path/to/input.hawor_pipeline
+```
+
+If `output_root` is omitted, outputs go under `<video_dir>/<video_stem>.hawor_pipeline/`:
+
+- `frames/`: extracted native-FPS RGB frames
+- `stage_outputs/`: HaWoR/SLAM/infiller outputs
+- `runs/run/`: logs, manifests, reports
+- `webdataset/`: final trainable WebDataset shards
+
+The pipeline remains adapter-driven internally. Different source datasets are normalized into a frozen clip manifest, and then the same annotation, inference, filter, build, and validation logic runs on top of that shared boundary.
 
 ## Official Stages
 
@@ -23,9 +44,10 @@ Recommended full run:
 
 ```bash
 python scripts/run_dataset_pipeline.py \
-  --config configs/dataset_pipeline_buildai.example.yaml \
-  --stages prepare,annotate,infer,filter,build,validate
+  --config configs/dataset_pipeline_single_video.example.yaml
 ```
+
+Default stages are `prepare,infer,filter,build,validate`. `annotate` is inserted automatically only when `annotation.command` is configured. `--stages` can still be used for debugging or resume runs.
 
 Useful partial runs:
 
@@ -40,7 +62,19 @@ Legacy stage names such as `preprocess`, `manifest`, `detect_motion`, `slam`, an
 
 ## Config Shape
 
-New configs should use the normalized nested layout:
+Preferred first-party configs use the simplified single-video layout:
+
+```yaml
+video: /path/to/input.mp4
+output_root: /optional/output_root
+
+# Optional. Without this, instruction/language fields are allowed to be empty.
+annotation:
+  command: >
+    echo "Read {manifest} and write annotations to {annotation_root}"
+```
+
+Nested adapter configs are still supported as a migration path for BuildAI, HOT3D, FPHA, and other existing datasets:
 
 ```yaml
 dataset:
@@ -53,10 +87,6 @@ paths:
   annotation_root: /path/to/annotations
   final_dataset_root: /path/to/final_dataset
   log_root: /path/to/pipeline_runs
-
-runtimes:
-  hawor_python: /path/to/hawor/bin/python
-  slam_python: /path/to/slam/bin/python
 
 infer:
   common: {}
@@ -76,7 +106,8 @@ validation: {}
 Notes:
 
 - `infer:` is the preferred block for HaWoR stage execution.
-- older `batch_infer:` and compact shorthand forms are still normalized for compatibility.
+- simplified single-video configs do not take runtime paths; the orchestrator resolves conda envs named `hawor` and `any4d`.
+- nested configs with explicit `runtimes.hawor_python` and `runtimes.slam_python` remain supported with a migration warning.
 - `annotation.command` receives `{manifest}`, `{active_manifest}`, `{annotation_root}`, `{run_dir}`, `{hawor_python}`, `{slam_python}`, and `{project_root}`.
 - for BuildAI-like layouts, `paths.shard_root` and `paths.seq_folder_root` may refer to different trees.
 
@@ -84,12 +115,12 @@ See [configs/README.md](/root/.openclaw/workspace/projects/hawor_original/HaWoR/
 
 ## Runtime Separation
 
-The pipeline assumes two Python runtimes:
+The simplified config resolves two repo-level conda environments automatically:
 
-- `hawor_python` for `detect_track`, `motion`, `infiller`, filter, build, and validation
-- `slam_python` for `slam`
+- `hawor`: `detect_track`, `motion`, `infiller`, filter, build, and validation
+- `any4d`: `slam`
 
-Do not merge them unless you have already unified the environments yourself.
+Resolution checks `conda`, `mamba`, and `micromamba` env lists and fails fast if either env is missing. Nested configs may still provide explicit runtime paths.
 
 ## Manifest Boundary
 
@@ -111,6 +142,7 @@ Built-in adapters:
 - `fpha_tar`
 - `image_sequence`
 - `legacy_buildai`
+- `single_video`
 - `video_folder`
 
 For a new dataset:
@@ -201,7 +233,8 @@ python scripts/build_vla_from_manifest.py \
   --frames_per_shard 10000 \
   --source_fps 5.0 \
   --target_fps 30.0 \
-  --interpolate_labels
+  --interpolate_labels \
+  --export_depth
 ```
 
 ## Final Dataset Schema
@@ -212,6 +245,7 @@ Each final WebDataset sample contains:
 - `*.lowdim.npy`: `float32[116]`
 - `*.mano.npy`: MANO pose/shape payload used by the viewer
 - `*.meta.json`: frame metadata such as `clip_id`, `instruction`, `instruction_num`, `language`, and `presence`
+- `*.depth.npy`: optional metric depth payload, exported by default in the single-video pipeline
 
 `lowdim[116]` layout:
 
@@ -266,7 +300,7 @@ Recommended smoke pass before a large production launch:
 1. Run a small representative subset.
 2. Complete `prepare` through `validate`.
 3. Inspect multiple output samples across different shards.
-4. Confirm image, lowdim, MANO, and language stay aligned.
+4. Confirm image, lowdim, MANO, camera, and depth stay aligned.
 
 ## Inspecting Built Samples
 

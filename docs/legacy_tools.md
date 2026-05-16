@@ -15,6 +15,12 @@ These remain available because some older BuildAI layouts and debugging workflow
 python scripts/run_dataset_pipeline.py --config <config.yaml> --stages prepare,annotate,infer,filter,build,validate
 ```
 
+For the current single-video path, the shorter default is preferred:
+
+```bash
+python scripts/run_dataset_pipeline.py --config configs/dataset_pipeline_single_video.example.yaml
+```
+
 or, for advanced manual runs:
 
 ```bash
@@ -47,5 +53,6 @@ Everything under `deprecated/` should be treated as reference material only unle
 - old smoke/perf scripts
 - implementation notes from previous iterations
 - scripts tied to superseded workflows
+- unrefactored one-off tools preserved under `deprecated/unrefactored_tools/`
 
 Do not build new production paths on top of `deprecated/`.
