@@ -604,6 +604,338 @@ def test_sliding_window_compose_handles_mixed_cameras():
 
 
 # ---------------------------------------------------------------------------
+# DAgger / human-in-the-loop quality filtering
+# ---------------------------------------------------------------------------
+
+def make_frame_with_quality(frame_idx, high_quality=1, commander="model",
+                            episode_index=0, dataset_name="dagger"):
+    """make_frame variant that stamps high_quality / commander into meta.json."""
+    frame = make_frame(frame_idx, episode_index=episode_index, dataset_name=dataset_name)
+    frame["meta.json"]["high_quality"] = high_quality
+    frame["meta.json"]["commander"] = commander
+    return frame
+
+
+def make_episode_with_qualities(qualities, episode_index=0, dataset_name="dagger"):
+    """Build an episode whose per-frame high_quality follows the given list."""
+    return [
+        make_frame_with_quality(
+            i,
+            high_quality=q,
+            commander="model" if q == 1 else "human",
+            episode_index=episode_index,
+            dataset_name=dataset_name,
+        )
+        for i, q in enumerate(qualities)
+    ]
+
+
+# --- A. Rule 1: anchor filtering ----------------------------------------------
+
+def test_dagger_anchor_high_quality_emits_window():
+    """A1: every anchor with high_quality=1 emits a window."""
+    config = WindowConfig(
+        action_horizon=2, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    frames = make_episode_with_qualities([1, 1, 1])
+    samples = list(sliding_window_compose(iter(frames), config))
+    assert len(samples) == 3
+
+
+def test_dagger_anchor_low_quality_skipped_but_past_advances():
+    """A2: high_quality=0 anchors are dropped but still advance ``past``."""
+    config = WindowConfig(
+        action_horizon=2, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    frames = make_episode_with_qualities([1, 0, 1, 1])
+    samples = list(sliding_window_compose(iter(frames), config))
+    # anchors: frame 0 (hq=1) emit, frame 1 (hq=0) skip,
+    #          frame 2 (hq=1) emit, frame 3 (hq=1) emit
+    assert len(samples) == 3
+    # state_horizon=1 → wrist_state[-1] carries the anchor frame's lowdim index.
+    anchors = [sample["wrist_state"][-1, 0] for sample in samples]
+    assert anchors == [0.0, 2.0, 3.0]
+
+
+def test_dagger_legacy_meta_no_high_quality_key_defaults_to_emit():
+    """A3: legacy teleop frames (no high_quality key) default to 1 → all emit."""
+    config = WindowConfig(
+        action_horizon=2, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    frames = make_episode(4)  # plain make_frame does not set high_quality
+    samples = list(sliding_window_compose(iter(frames), config))
+    assert len(samples) == 4
+
+
+def test_dagger_filter_disabled_low_quality_anchor_still_emits():
+    """A4: dagger_quality_filter=False → switch is a no-op even with hq=0 anchors."""
+    config = WindowConfig(
+        action_horizon=2, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=False,
+    )
+    frames = make_episode_with_qualities([1, 0, 1, 0])
+    samples = list(sliding_window_compose(iter(frames), config))
+    assert len(samples) == 4
+
+
+# --- B. Rule 2: action-chunk suffix truncate ----------------------------------
+
+def test_dagger_action_truncate_mode_suffix_cut():
+    """B1: truncate mode + hq=0 inside action chunk → length cut at the cut point."""
+    config = WindowConfig(
+        action_horizon=5, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1, 0, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    # gather hits buf[0..4]; quality break at i=3 (buf[3]=hq=0) → refs len 3.
+    assert sample["wrist_action"].shape[0] == 3
+
+
+def test_dagger_action_repeat_mode_quality_cut_not_repadded():
+    """B2 (regression-critical): repeat mode + quality cut must not pad back to horizon."""
+    config = WindowConfig(
+        action_horizon=5, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="repeat",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1, 0, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["wrist_action"].shape[0] == 3
+
+
+def test_dagger_action_repeat_mode_natural_short_still_pads():
+    """B3: repeat + all hq=1 + episode tail short → gather still pads to horizon."""
+    config = WindowConfig(
+        action_horizon=5, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="repeat",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["wrist_action"].shape[0] == 5
+    # Last two rows are copies of buf[-1] (frame index 2).
+    assert sample["wrist_action"][-1, 0] == 2.0
+    assert sample["wrist_action"][-2, 0] == 2.0
+
+
+def test_dagger_action_truncate_mode_natural_short():
+    """B4: truncate mode + all hq=1 + episode runs out → real length only."""
+    config = WindowConfig(
+        action_horizon=5, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["wrist_action"].shape[0] == 3
+
+
+def test_dagger_action_stride_skips_low_quality_outside_grid():
+    """B5: stride=2 hops over an hq=0 frame between grid points → no cut."""
+    config = WindowConfig(
+        action_horizon=3, action_stride=2,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    # gather offsets at stride=2: buf[0], buf[2], buf[4] → all hq=1; buf[1] skipped.
+    buf = collections.deque(make_episode_with_qualities([1, 0, 1, 1, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["wrist_action"].shape[0] == 3
+
+
+def test_dagger_action_stride_cuts_when_grid_hits_low_quality():
+    """B6: stride=2 grid lands on an hq=0 frame → cut at that grid position."""
+    config = WindowConfig(
+        action_horizon=3, action_stride=2,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    # gather offsets: buf[0]=hq=1, buf[2]=hq=0 (break), buf[4] never reached.
+    buf = collections.deque(make_episode_with_qualities([1, 1, 0, 1, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["wrist_action"].shape[0] == 1
+
+
+# --- C. Rule 2: WM future-frame suffix truncate -------------------------------
+
+def test_dagger_wm_truncate_mode_suffix_cut():
+    """C1: future_frame_pad_mode=truncate + hq=0 in future segment → ff_refs cut."""
+    config = WindowConfig(
+        action_horizon=1, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        future_frame_horizon=4, future_frame_stride=1,
+        future_frame_pad_mode="truncate",
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    # WM future uses offset_base=stride=1 → positions buf[1], buf[2], buf[3], buf[4].
+    # quality break at i=2 because buf[3]=hq=0 → refs length 2.
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1, 0, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["future_head_extrinsic"].shape[0] == 2
+
+
+def test_dagger_wm_repeat_mode_quality_cut_not_repadded():
+    """C2: future_frame_pad_mode=repeat + hq=0 in future → break, not re-padded."""
+    config = WindowConfig(
+        action_horizon=1, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        future_frame_horizon=4, future_frame_stride=1,
+        future_frame_pad_mode="repeat",
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1, 0, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["future_head_extrinsic"].shape[0] == 2
+
+
+def test_dagger_wm_repeat_mode_natural_short_pads_to_K():
+    """C3: repeat + all hq=1 + episode runs out → gather pads ff_refs to K."""
+    config = WindowConfig(
+        action_horizon=1, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        future_frame_horizon=4, future_frame_stride=1,
+        future_frame_pad_mode="repeat",
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    # buf has 3 frames; offsets 1, 2, 3(missing), 4(missing) → repeat with buf[-1].
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["future_head_extrinsic"].shape[0] == 4
+
+
+def test_dagger_wm_disabled_no_path_no_error():
+    """C4: future_frame_horizon=0 + filter on → WM path absent, no error."""
+    config = WindowConfig(
+        action_horizon=2, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        future_frame_horizon=0,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert "future_head_extrinsic" not in sample
+    assert sample["wrist_action"].shape[0] == 2
+
+
+# --- D. Boundary / combined cases ---------------------------------------------
+
+def test_dagger_episode_boundary_with_low_quality_new_anchor():
+    """D2: boundary flush + the next episode starts with hq=0 anchors that skip."""
+    config = WindowConfig(
+        action_horizon=2, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    ep_a = make_episode_with_qualities([1, 1, 1], episode_index=0, dataset_name="A")
+    ep_b = make_episode_with_qualities([0, 0, 1], episode_index=1, dataset_name="B")
+    samples = list(sliding_window_compose(iter(ep_a + ep_b), config))
+    # ep_a: 3 emits; ep_b: anchors hq=[0,0,1] → 1 emit. Total = 4.
+    assert len(samples) == 4
+
+
+def test_dagger_action_and_wm_truncate_together():
+    """D3: hq=1 anchor emits, and action + WM both suffix-cut at the same hq=0 boundary."""
+    config = WindowConfig(
+        action_horizon=4, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        future_frame_horizon=3, future_frame_stride=1,
+        future_frame_pad_mode="truncate",
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    # Action gather hits buf[0..3]: hq=[1,1,1,0] → cut at i=3, length 3.
+    # WM gather (offset_base=1) hits buf[1..3]: hq=[1,1,0] → cut at i=2, length 2.
+    buf = collections.deque(make_episode_with_qualities([1, 1, 1, 0, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["wrist_action"].shape[0] == 3
+    assert sample["future_head_extrinsic"].shape[0] == 2
+
+
+def test_dagger_all_low_quality_episode_emits_nothing():
+    """D4: an entire hq=0 episode produces zero windows."""
+    config = WindowConfig(
+        action_horizon=2, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="truncate",
+        dagger_quality_filter=True,
+    )
+    frames = make_episode_with_qualities([0, 0, 0, 0])
+    samples = list(sliding_window_compose(iter(frames), config))
+    assert len(samples) == 0
+
+
+# --- E. Backward compatibility ------------------------------------------------
+
+def test_dagger_filter_disabled_with_quality_fields_is_no_op():
+    """E1: filter off + frames carrying high_quality → behavior identical to legacy."""
+    config = WindowConfig(
+        action_horizon=3, action_stride=1,
+        state_horizon=1, state_stride=1,
+        image_horizon=1, image_stride=1,
+        action_pad_mode="repeat",
+        dagger_quality_filter=False,
+    )
+    past = collections.deque(maxlen=config.past_size)
+    # Were the filter on, action would cut at i=1; with it off the full
+    # repeat-padded chunk is materialised.
+    buf = collections.deque(make_episode_with_qualities([1, 0, 1, 1]))
+    sample = build_sample_from_window(buf, past, config)
+    assert sample["wrist_action"].shape[0] == 3
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 

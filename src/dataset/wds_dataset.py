@@ -118,6 +118,9 @@ class WindowConfig:
     future_frame_horizon: int = 0
     future_frame_stride: int = 30
     future_frame_pad_mode: str = "repeat"
+    # DAgger: drop hq=0 anchor windows; suffix-truncate action/WM at first hq=0.
+    # Missing key defaults to 1 (no-op on legacy data).
+    dagger_quality_filter: bool = True
 
     def __post_init__(self):
         valid_modes = {"repeat", "truncate"}
@@ -214,7 +217,8 @@ def gather_history_frames(past, buf, horizon, stride, pad_mode):
     return frames
 
 
-def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
+def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0,
+                       *, quality_truncate=False):
     """Gather future frame references from the sliding window buffer.
 
     Unified helper for both action-chunk and future-frame gathering.
@@ -229,6 +233,9 @@ def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
       equals the real number of in-bound offsets. Downstream masks skip
       the invalid tail.
 
+    ``quality_truncate`` (DAgger): break at first high_quality=0 (missing key
+    defaults to 1). Hard cut; episode-tail shortness still uses pad_mode.
+
     Returns:
         (refs, valid_count): gathered references and count of positions
         treated as valid supervision.
@@ -238,7 +245,10 @@ def gather_future_refs(buf, horizon, stride, pad_mode, offset_base=0):
     for i in range(horizon):
         offset = offset_base + i * stride
         if offset < len(buf):
-            refs.append(buf[offset])
+            cand = buf[offset]
+            if quality_truncate and int(cand["meta.json"].get("high_quality", 1)) == 0:
+                break
+            refs.append(cand)
             valid_count += 1
         elif pad_mode == "repeat":
             refs.append(buf[-1])
@@ -262,19 +272,9 @@ def build_sample_from_window(buf, past, config):
     action_refs, _ = gather_future_refs(
         buf, config.action_horizon, config.action_stride, config.action_pad_mode,
         offset_base=0,
+        quality_truncate=config.dagger_quality_filter,
     )
-    lowdims = np.stack([frame["lowdim.npy"] for frame in action_refs], axis=0)
-    len_lowdims = lowdims.shape[0]
-    if config.action_pad_mode == "repeat":
-        if len_lowdims < config.action_horizon:
-            pad = np.tile(lowdims[-1:], (config.action_horizon - len_lowdims, 1))
-            lowdims_full = np.concatenate([lowdims, pad], axis=0)
-        else:
-            lowdims_full = lowdims
-    elif config.action_pad_mode == "truncate":
-        lowdims_full = lowdims
-    else:
-        raise ValueError(f"Invalid action_pad_mode: {config.action_pad_mode}")
+    lowdims_full = np.stack([frame["lowdim.npy"] for frame in action_refs], axis=0)
 
     state_frames = gather_history_frames(
         past, buf, config.state_horizon, config.state_stride, config.history_pad_mode)
@@ -290,6 +290,7 @@ def build_sample_from_window(buf, past, config):
         ff_refs, _ = gather_future_refs(
             buf, config.future_frame_horizon, config.future_frame_stride,
             config.future_frame_pad_mode, offset_base=config.future_frame_stride,
+            quality_truncate=config.dagger_quality_filter,
         )
         if ff_refs:
             future_frame_refs = tuple(ff_refs)
@@ -392,6 +393,13 @@ def materialize_sample_media(sample):
     return sample
 
 
+def should_emit_window(frame, config):
+    """DAgger Rule 1: False iff frame's high_quality=0 (missing key → 1)."""
+    if not config.dagger_quality_filter:
+        return True
+    return int(frame["meta.json"].get("high_quality", 1)) == 1
+
+
 def sliding_window_compose(src, config):
     """Sliding window over episode frames (streaming, not per-episode
     buffering).  Assumes shard order is contiguous within an episode;
@@ -431,7 +439,8 @@ def sliding_window_compose(src, config):
         if ep_key != cur_ep:
             # Episode boundary: flush with clamped actions.
             while buf:
-                yield build_window()
+                if should_emit_window(buf[0], config):
+                    yield build_window()
                 past.append(buf.popleft())
             past.clear()
             cur_ep = ep_key
@@ -439,11 +448,13 @@ def sliding_window_compose(src, config):
         buf.append(sample)
 
         if len(buf) > config.future_size:
-            yield build_window()
+            if should_emit_window(buf[0], config):
+                yield build_window()
             past.append(buf.popleft())
 
     while buf:
-        yield build_window()
+        if should_emit_window(buf[0], config):
+            yield build_window()
         past.append(buf.popleft())
 
 

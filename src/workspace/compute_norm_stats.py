@@ -46,6 +46,7 @@ def build_metadata(
     history_pad_mode,
     action_pad_mode,
     future_frame_pad_mode,
+    dagger_quality_filter,
     selection_metadata,
     fit_metadata,
 ):
@@ -65,6 +66,7 @@ def build_metadata(
             "history_pad_mode": history_pad_mode,
             "action_pad_mode": action_pad_mode,
             "future_frame_pad_mode": future_frame_pad_mode,
+            "dagger_quality_filter": bool(dagger_quality_filter),
             "max_total_shards": args.max_total_shards,
             "min_shards_per_dataset": args.min_shards_per_dataset,
             "seed": args.seed,
@@ -197,6 +199,11 @@ def main():
     history_pad_mode = shape_meta.get("history_pad_mode", "repeat")
     action_pad_mode = shape_meta["action"].get("pad_mode", "truncate")
     future_frame_pad_mode = shape_meta.get("future_frame", {}).get("pad_mode", "repeat")
+    dagger_quality_filter = bool(
+        cfg.data.get("dagger_quality_filter", True)
+        if "data" in cfg
+        else vla_cfg.get("dagger_quality_filter", True)
+    )
 
     normalizer_dataset = VLALowLevelWdsDataset(
         wds_datasets=wds_datasets,
@@ -207,6 +214,7 @@ def main():
         min_shards_per_dataset=args.min_shards_per_dataset,
         seed=args.seed,
         sanity_checks=sanity_checks,
+        dagger_quality_filter=dagger_quality_filter,
     )
     selection_metadata = normalizer_dataset.describe_shard_selection()
     print("   Dataset created successfully")
@@ -256,6 +264,7 @@ def main():
             history_pad_mode=history_pad_mode,
             action_pad_mode=action_pad_mode,
             future_frame_pad_mode=future_frame_pad_mode,
+            dagger_quality_filter=dagger_quality_filter,
             selection_metadata=selection_metadata,
             fit_metadata=fit_metadata,
         )

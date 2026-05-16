@@ -13,6 +13,9 @@ data:
   tokenizer_padding: max_length
   depth_clip_range: [0.0, 5.0]
   video_base_fps: 30.0
+  # DAgger: drop hq=0 anchor windows; suffix-truncate action/WM at first hq=0.
+  # Missing high_quality key defaults to 1 (no-op on legacy data).
+  dagger_quality_filter: true
   sanity_checks:
     rot6d:
       orthogonality_threshold: 0.1
@@ -89,6 +92,7 @@ dataset:
     # higher IO. 1.0 disables. Ref: DreamZero shard_sampling_rate.
     keep_ratio: 0.2
     sanity_checks: ${data.sanity_checks}
+    dagger_quality_filter: ${data.dagger_quality_filter}
   vlm_dataset:
     _target_: src.dataset.vlm_dataset.VLMWdsDataset
     wds_datasets: ${vlm_wds_datasets}
