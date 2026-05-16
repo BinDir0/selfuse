@@ -121,7 +121,15 @@ The simplified config resolves two repo-level conda environments automatically:
 - `hawor`: `detect_track`, `motion`, `infiller`, filter, build, and validation
 - `any4d`: `slam`
 
-Resolution checks `conda`, `mamba`, and `micromamba` env lists and fails fast if either env is missing. Nested configs may still provide explicit runtime paths.
+Resolution checks `conda`, `mamba`, and `micromamba` env lists and fails fast if either env is missing. The simplified `video:` config intentionally has no runtime path fields; environment names are the stable contract. Nested configs may still provide explicit `runtimes.hawor_python` and `runtimes.slam_python` paths as a migration/debug path.
+
+Validate the expected setup from the repo root:
+
+```bash
+bash tools/ops/validate_setup.sh
+```
+
+See the README Environment Setup section for the full two-env install commands.
 
 ## Internal Prepared State
 
