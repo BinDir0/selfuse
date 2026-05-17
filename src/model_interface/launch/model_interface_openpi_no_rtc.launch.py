@@ -13,6 +13,7 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_name', default_value='head'),
         DeclareLaunchArgument('breast_camera_name', default_value='breast'),
         DeclareLaunchArgument('use_breast', default_value='true'),
+        DeclareLaunchArgument('use_mock_calibration', default_value='false'),
         DeclareLaunchArgument('ui_service_host', default_value='localhost'),
         DeclareLaunchArgument('ui_service_port', default_value='8080'),
         DeclareLaunchArgument('action_execution_len', default_value='6'),
@@ -33,6 +34,8 @@ def generate_launch_description():
                 'breast_camera_name': LaunchConfiguration('breast_camera_name'),
                 # pi0.5 EgoHands was trained with include_breast=True; serve must match.
                 'use_breast': ParameterValue(LaunchConfiguration('use_breast'), value_type=bool),
+                # L2 mock stage: identity-ish calibration so no result.npz needed.
+                'use_mock_calibration': ParameterValue(LaunchConfiguration('use_mock_calibration'), value_type=bool),
                 'ui_service_host': LaunchConfiguration('ui_service_host'),
                 'ui_service_port': ParameterValue(LaunchConfiguration('ui_service_port'), value_type=int),
                 'data_frequency': 30.0,
