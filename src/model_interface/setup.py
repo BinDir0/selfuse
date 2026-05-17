@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'model_interface_node = model_interface.model_interface_node:main',
+            'virtual_smoke_test_node = model_interface.virtual_smoke_test_node:main',
         ],
     },
 )

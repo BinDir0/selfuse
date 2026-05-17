@@ -15,7 +15,10 @@ import bisect
 import cv2
 from enum import Enum
 from collections import deque
-from pynput import keyboard
+try:
+    from pynput import keyboard
+except Exception:
+    keyboard = None
 from scipy.spatial.transform import Rotation as R
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
@@ -78,6 +81,7 @@ class ModelInterfaceNode(Node):
 
         # --- 1. 锁和信号 ---
         self.rgb_cb_lock = threading.Lock()
+        self.breast_cb_lock = threading.Lock()
         self.depth_cb_lock = threading.Lock()
         self.l_pose_cb_lock = threading.Lock()
         self.r_pose_cb_lock = threading.Lock()
@@ -93,6 +97,8 @@ class ModelInterfaceNode(Node):
         self.declare_parameter('model_server_port', 8000)
         self.declare_parameter('calibration_path', '')
         self.declare_parameter('camera_name', 'head')
+        self.declare_parameter('breast_camera_name', 'breast')
+        self.declare_parameter('use_breast', True)
         self.declare_parameter('ui_service_host', 'localhost')
         self.declare_parameter('ui_service_port', 8080)
         self.declare_parameter('data_frequency', 30.0)
@@ -104,11 +110,18 @@ class ModelInterfaceNode(Node):
         self.declare_parameter('buffer_size', 300)
         self.declare_parameter('debug_code', False)
         self.declare_parameter('do_resize', False)
+        self.declare_parameter('require_depth', True)
+        self.declare_parameter('auto_start', False)
+        self.declare_parameter('auto_start_delay_sec', 1.0)
+        self.declare_parameter('enable_keyboard', True)
+        self.declare_parameter('use_mock_calibration', False)
 
         # 参数提取
         self.ctrl_freq = self.get_parameter('control_frequency').value
         self.calib_root = self.get_parameter('calibration_path').value
         self.cam_name = self.get_parameter('camera_name').value
+        self.breast_cam_name = self.get_parameter('breast_camera_name').value
+        self.use_breast = self.get_parameter('use_breast').value
         self.ui_host = self.get_parameter('ui_service_host').value
         self.ui_port = self.get_parameter('ui_service_port').value
         self.data_freq = self.get_parameter('data_frequency').value
@@ -120,9 +133,17 @@ class ModelInterfaceNode(Node):
         self.max_buf = self.get_parameter('buffer_size').value
         self.debug_code = self.get_parameter('debug_code').value
         self.do_resize = self.get_parameter('do_resize').value
+        self.require_depth = self.get_parameter('require_depth').value
+        self.auto_start = self.get_parameter('auto_start').value
+        self.auto_start_delay_sec = float(self.get_parameter('auto_start_delay_sec').value)
+        self.enable_keyboard = self.get_parameter('enable_keyboard').value
+        self.use_mock_calibration = self.get_parameter('use_mock_calibration').value
 
         self.get_logger().info(f"📋 参数配置: 控制频率={self.ctrl_freq}Hz, 数据频率={self.data_freq}Hz, "
-                              f"状态窗口={self.s_hor}, 图像窗口={self.i_hor}, 动作长度={self.act_len}, 缓冲区大小={self.max_buf}, do_resize={self.do_resize}")
+                              f"状态窗口={self.s_hor}, 图像窗口={self.i_hor}, 动作长度={self.act_len}, "
+                              f"缓冲区大小={self.max_buf}, do_resize={self.do_resize}, require_depth={self.require_depth}, "
+                              f"auto_start={self.auto_start}, enable_keyboard={self.enable_keyboard}, "
+                              f"use_mock_calibration={self.use_mock_calibration}")
 
         # --- 3. 虚拟时间轴 ---
         self.first_ts_ns = 0
@@ -177,6 +198,7 @@ class ModelInterfaceNode(Node):
         
         # 传感器缓冲区：deque 在 CPython 中 append 是原子操作，无需加锁
         self.buf_rgb = deque(maxlen=self.max_buf)
+        self.buf_breast = deque(maxlen=self.max_buf)
         self.buf_depth = deque(maxlen=self.max_buf)
         self.buf_l_wrist = deque(maxlen=self.max_buf)
         self.buf_r_wrist = deque(maxlen=self.max_buf)
@@ -199,12 +221,17 @@ class ModelInterfaceNode(Node):
         self.pub_action_hand_r = self.create_publisher(PoseArray, '/action/right_hand/keypoints', 1)
 
         self.create_subscription(Image, f'/camera/{self.cam_name}/rgb', self.rgb_cb, qos_profile_sensor_data, callback_group=MutuallyExclusiveCallbackGroup())
-        self.create_subscription(Image, f'/camera/{self.cam_name}/depth', self.depth_cb, qos_profile_sensor_data, callback_group=MutuallyExclusiveCallbackGroup())
+        if self.use_breast:
+            self.create_subscription(Image, f'/camera/{self.breast_cam_name}/rgb', self.breast_cb, qos_profile_sensor_data, callback_group=MutuallyExclusiveCallbackGroup())
+        if self.require_depth:
+            self.create_subscription(Image, f'/camera/{self.cam_name}/depth', self.depth_cb, qos_profile_sensor_data, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseStamped, '/state/left_arm/wrist_pose', self.l_pose_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseStamped, '/state/right_arm/wrist_pose', self.r_pose_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseArray, '/state/left_hand/keypoints', self.l_kp_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(PoseArray, '/state/right_hand/keypoints', self.r_kp_cb, 1, callback_group=MutuallyExclusiveCallbackGroup())
-        self.get_logger().info(f"📡 订阅话题: RGB={f'/camera/{self.cam_name}/rgb'}, Depth={f'/camera/{self.cam_name}/depth'}, "
+        depth_topic = f'/camera/{self.cam_name}/depth' if self.require_depth else 'disabled'
+        breast_topic = f'/camera/{self.breast_cam_name}/rgb' if self.use_breast else 'disabled'
+        self.get_logger().info(f"📡 订阅话题: RGB={f'/camera/{self.cam_name}/rgb'}, Breast={breast_topic}, Depth={depth_topic}, "
                               f"左腕={'/state/left_arm/wrist_pose'}, 右腕={'/state/right_arm/wrist_pose'}")
 
         # --- 7. 启动 ---
@@ -217,8 +244,14 @@ class ModelInterfaceNode(Node):
         except Exception as e:
             self.get_logger().error(f"❌ WebSocket 连接失败: {e}")
 
-        self.kbd_listener = keyboard.Listener(on_press=self.on_key_press)
-        self.kbd_listener.start()
+        self.kbd_listener = None
+        if self.enable_keyboard and keyboard is not None:
+            self.kbd_listener = keyboard.Listener(on_press=self.on_key_press)
+            self.kbd_listener.start()
+        elif self.enable_keyboard:
+            self.get_logger().warn("⌨️  键盘监听初始化失败，当前环境可能没有可用 X server")
+        else:
+            self.get_logger().info("⌨️  键盘监听已关闭，适用于虚拟/CI smoke test")
         
         threading.Thread(target=self.remote_input_loop, daemon=True).start()
         threading.Thread(target=self.inference_worker, daemon=True).start()
@@ -306,22 +339,23 @@ class ModelInterfaceNode(Node):
         if old_state == new_state: return
         if new_state == SystemState.INFERENCE:
             assert not self.action_queue, "推理状态时，动作队列应该没有数据"
-            with self.rgb_cb_lock, self.depth_cb_lock, self.l_pose_cb_lock, self.r_pose_cb_lock, self.l_kp_cb_lock, self.r_kp_cb_lock:
+            with self.rgb_cb_lock, self.breast_cb_lock, self.depth_cb_lock, self.l_pose_cb_lock, self.r_pose_cb_lock, self.l_kp_cb_lock, self.r_kp_cb_lock:
                 self._execute_switch_state(new_state)
         elif new_state == SystemState.RESETTING:
-            with self.rgb_cb_lock, self.depth_cb_lock, self.l_pose_cb_lock, self.r_pose_cb_lock, self.l_kp_cb_lock, self.r_kp_cb_lock, self.action_timer_lock, self.inference_lock:
+            with self.rgb_cb_lock, self.breast_cb_lock, self.depth_cb_lock, self.l_pose_cb_lock, self.r_pose_cb_lock, self.l_kp_cb_lock, self.r_kp_cb_lock, self.action_timer_lock, self.inference_lock:
                 self._execute_switch_state(new_state)
             queue_size = len(self.action_queue)
-            buf_sizes = [len(self.buf_rgb), len(self.buf_depth), len(self.buf_l_wrist), 
+            buf_sizes = [len(self.buf_rgb), len(self.buf_breast), len(self.buf_depth), len(self.buf_l_wrist),
                         len(self.buf_r_wrist), len(self.buf_l_kps), len(self.buf_r_kps)]
             self.action_queue.clear()
-            self.buf_rgb.clear(); self.buf_depth.clear(); self.buf_l_wrist.clear()
+            self.buf_rgb.clear(); self.buf_breast.clear(); self.buf_depth.clear(); self.buf_l_wrist.clear()
             self.buf_r_wrist.clear(); self.buf_l_kps.clear(); self.buf_r_kps.clear()
             self.first_inference = True
             self.get_logger().info(f"🧹 重置完成: 清空动作队列({queue_size}个动作), 清空缓冲区({buf_sizes})")
         elif new_state == SystemState.FIRST_OBS:
             assert not self.action_queue, "第一次观测状态时，动作队列应该没有数据"
             assert not self.buf_rgb, "第一次观测状态时，RGB缓冲区应该没有数据"
+            assert not (self.use_breast and self.buf_breast), "第一次观测状态时，胸部相机缓冲区应该没有数据"
             assert not self.buf_depth, "第一次观测状态时，深度缓冲区应该没有数据"
             assert not self.buf_l_wrist, "第一次观测状态时，左腕部缓冲区应该没有数据"
             assert not self.buf_r_wrist, "第一次观测状态时，右腕部缓冲区应该没有数据"
@@ -363,13 +397,19 @@ class ModelInterfaceNode(Node):
         # 检查是否所有缓冲区都有数据
         buf_sizes = {
             'RGB': len(self.buf_rgb),
-            'Depth': len(self.buf_depth),
             '左腕': len(self.buf_l_wrist),
             '右腕': len(self.buf_r_wrist),
             '左手关键点': len(self.buf_l_kps),
             '右手关键点': len(self.buf_r_kps)
         }
-        if all(len(b) > 5 for b in [self.buf_rgb, self.buf_depth, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]):
+        required_buffers = [self.buf_rgb, self.buf_l_wrist, self.buf_r_wrist, self.buf_l_kps, self.buf_r_kps]
+        if self.use_breast:
+            buf_sizes['Breast'] = len(self.buf_breast)
+            required_buffers.append(self.buf_breast)
+        if self.require_depth:
+            buf_sizes['Depth'] = len(self.buf_depth)
+            required_buffers.append(self.buf_depth)
+        if all(len(b) > 5 for b in required_buffers):
             self.get_logger().info(f"✅ 首次观测完成: 缓冲区大小={buf_sizes}")
             threading.Thread(target=self._do_switch_to_inference, daemon=True).start()
         else:
@@ -382,6 +422,20 @@ class ModelInterfaceNode(Node):
         self._switch_state(SystemState.INFERENCE)
         self.infer_event.set()
 
+    def _start_first_observation(self, source):
+        if self.state != SystemState.READY:
+            self.get_logger().warn(f"⚠️  {source}: 当前状态不是 READY，跳过启动 (state={self.state.name})")
+            return
+        self.get_logger().info(f"▶️  {source}: 开始首次观测 (指令='{self.current_instr}')")
+        self.play_sound("start"); self.pub_system_mode.publish(String(data="inference"))
+        self.first_ts_ns = self.get_clock().now().nanoseconds
+        self.total_inactive_ns = 0; self.inactive_start_ns = None
+        self._switch_state(SystemState.FIRST_OBS)
+
+    def _auto_start_after_delay(self):
+        time.sleep(max(0.0, self.auto_start_delay_sec))
+        self._start_first_observation("auto_start")
+
     # --- 传感器回调 (完全无锁，依赖 Executor 并行) ---
     def rgb_cb(self, m): 
         data = self.cv_bridge.imgmsg_to_cv2(m, 'rgb8')
@@ -389,7 +443,13 @@ class ModelInterfaceNode(Node):
         with self.rgb_cb_lock:
             self._update_buffer(self.buf_rgb, m.header, data, "RGB")
 
-    def depth_cb(self, m): 
+    def breast_cb(self, m):
+        data = self.cv_bridge.imgmsg_to_cv2(m, 'rgb8')
+        data = self._resize_image(data, is_depth=False)
+        with self.breast_cb_lock:
+            self._update_buffer(self.buf_breast, m.header, data, "Breast RGB")
+
+    def depth_cb(self, m):
         data = self.cv_bridge.imgmsg_to_cv2(m, 'passthrough')
         data = self._resize_image(data, is_depth=True)
         with self.depth_cb_lock:
@@ -437,6 +497,11 @@ class ModelInterfaceNode(Node):
         else:
             resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
         return resized_img
+
+    def _zero_depth_like(self, rgb_seq):
+        """OpenPI pi0.5 EgoHands does not use depth; keep payload schema stable."""
+        seq_len, height, width = rgb_seq.shape[:3]
+        return np.zeros((seq_len, height, width, 1), dtype=np.uint16)
 
     def _orthogonalize_6d_svd(self, rot_6d):
         """ 使用SVD将非正交矩阵投影回SO(3) """
@@ -521,14 +586,18 @@ class ModelInterfaceNode(Node):
 
     def prepare_inference_payload(self):
         # 1. 创建快照 & 排序
-        all_snaps = [
-            list(self.buf_rgb),
-            list(self.buf_depth),
-            list(self.buf_l_wrist),
-            list(self.buf_r_wrist),
-            list(self.buf_l_kps),
-            list(self.buf_r_kps)
-        ]
+        snap_rgb = list(self.buf_rgb)
+        snap_breast = list(self.buf_breast)
+        snap_depth = list(self.buf_depth)
+        snap_lw = list(self.buf_l_wrist)
+        snap_rw = list(self.buf_r_wrist)
+        snap_lk = list(self.buf_l_kps)
+        snap_rk = list(self.buf_r_kps)
+        all_snaps = [snap_rgb, snap_lw, snap_rw, snap_lk, snap_rk]
+        if self.use_breast:
+            all_snaps.insert(1, snap_breast)
+        if self.require_depth:
+            all_snaps.insert(1, snap_depth)
 
         assert all(len(s) > 0 for s in all_snaps), "缓冲区数据不全"
         
@@ -536,12 +605,11 @@ class ModelInterfaceNode(Node):
             buf_sizes = [len(s) for s in all_snaps]
             self.get_logger().info(f"📊 准备推理数据: 缓冲区大小={buf_sizes}")
 
-        snap_rgb, snap_depth, snap_lw, snap_rw, snap_lk, snap_rk = all_snaps
-
         # check the timestamp of all_snaps
         if self.debug_code:
             self._print_buffer_info("RGB", snap_rgb)
-            self._print_buffer_info("Depth", snap_depth)
+            if self.require_depth:
+                self._print_buffer_info("Depth", snap_depth)
             self._print_buffer_info("Left Wrist", snap_lw)
             self._print_buffer_info("Right Wrist", snap_rw)
             self._print_buffer_info("Left Kps", snap_lk)
@@ -549,10 +617,14 @@ class ModelInterfaceNode(Node):
 
         if self.first_inference:
             rgb_seq = [snap_rgb[-1][1]]
-            depth_seq = [snap_depth[-1][1]]
             rgb_in = np.stack(rgb_seq)
-            depth_in = np.stack(depth_seq)
-            if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
+            if self.use_breast:
+                breast_in = np.stack([snap_breast[-1][1]])
+            if self.require_depth:
+                depth_in = np.stack([snap_depth[-1][1]])
+                if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
+            else:
+                depth_in = self._zero_depth_like(rgb_in)
             tl = self.calc_wrist_to_cam(matrix_from_pose_msg(snap_lw[-1][1]), 'left')
             tr = self.calc_wrist_to_cam(matrix_from_pose_msg(snap_rw[-1][1]), 'right')
             lk = self.calc_keypoints_to_wrist(snap_lk[-1][1], 'left')
@@ -566,7 +638,10 @@ class ModelInterfaceNode(Node):
                 buf.clear()
                 buf.append(retained_data)
             clear_repeated_data(self.buf_rgb, snap_rgb[-1])
-            clear_repeated_data(self.buf_depth, snap_depth[-1])
+            if self.use_breast:
+                clear_repeated_data(self.buf_breast, snap_breast[-1])
+            if self.require_depth:
+                clear_repeated_data(self.buf_depth, snap_depth[-1])
             clear_repeated_data(self.buf_l_wrist, snap_lw[-1])
             clear_repeated_data(self.buf_r_wrist, snap_rw[-1])
             clear_repeated_data(self.buf_l_kps, snap_lk[-1])
@@ -579,16 +654,26 @@ class ModelInterfaceNode(Node):
                 self.get_logger().info(f"⏱️  时间对齐: 参考时间={t_ref/1e9:.3f}s, 网格间隔={self.dt_ns/1e6:.1f}ms")
 
             # Image
-            rgb_seq, depth_seq = [], []
+            rgb_seq, breast_seq, depth_seq = [], [], []
             for h in range(self.i_hor):
                 t = t_ref - (h * self.i_str * self.dt_ns)
-                if not self._is_in_range(snap_rgb, t) or not self._is_in_range(snap_depth, t): break
+                if not self._is_in_range(snap_rgb, t): break
+                if self.use_breast and not self._is_in_range(snap_breast, t): break
+                if self.require_depth and not self._is_in_range(snap_depth, t): break
                 rgb_seq.append(self._find_nearest(snap_rgb, t))
-                depth_seq.append(self._find_nearest(snap_depth, t))
-            
+                if self.use_breast:
+                    breast_seq.append(self._find_nearest(snap_breast, t))
+                if self.require_depth:
+                    depth_seq.append(self._find_nearest(snap_depth, t))
+
             rgb_in = np.stack(rgb_seq)[::-1]
-            depth_in = np.stack(depth_seq)[::-1]
-            if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
+            if self.use_breast:
+                breast_in = np.stack(breast_seq)[::-1]
+            if self.require_depth:
+                depth_in = np.stack(depth_seq)[::-1]
+                if depth_in.ndim == 3: depth_in = np.expand_dims(depth_in, axis=-1)
+            else:
+                depth_in = self._zero_depth_like(rgb_in)
 
             # State
             states_list = []
@@ -614,12 +699,16 @@ class ModelInterfaceNode(Node):
         instr = self.current_instr
         
         if self.debug_code:
-            self.get_logger().info(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Depth形状={depth_in.shape}, 状态形状={states_in.shape}")
+            breast_shape = breast_in.shape if self.use_breast else None
+            self.get_logger().info(f"📦 推理数据准备完成: RGB形状={rgb_in.shape}, Breast形状={breast_shape}, Depth形状={depth_in.shape}, 状态形状={states_in.shape}")
 
-        return {
+        payload = {
             "image": rgb_in, "depth_image": depth_in, "camera_intrinsics": self.K_mat,
             "instruction": instr, "states": states_in
         }
+        if self.use_breast:
+            payload["breast_image"] = breast_in
+        return payload
 
     # --- 推理 Worker ---
     def inference_worker(self):
@@ -643,7 +732,12 @@ class ModelInterfaceNode(Node):
 
                 try:
                     res = self.policy_client.infer(payload)
-                    pred = res["pred_actions"]
+                    pred = res.get("pred_actions", res.get("actions"))
+                    if pred is None:
+                        raise KeyError(f"模型返回缺少 pred_actions/actions，keys={list(res.keys())}")
+                    pred = np.asarray(pred, dtype=np.float32)
+                    if pred.ndim != 2 or pred.shape[1] != 48:
+                        raise ValueError(f"预测动作形状错误: expected (T, 48), got {pred.shape}")
                     # self.get_logger().info("🪄 正在对预测轨迹进行平滑处理...")
                     # pred = self.smooth_action_chunk(pred)
                     steps = min(self.act_len, pred.shape[0])
@@ -723,6 +817,8 @@ class ModelInterfaceNode(Node):
                     self._switch_state(SystemState.READY)
                     
                     self.get_logger().info(f"✅ 指令已接收: '{self.current_instr}' | 模式: {self.mode}")
+                    if self.auto_start:
+                        threading.Thread(target=self._auto_start_after_delay, daemon=True).start()
                 except requests.exceptions.ConnectionError as e:
                     self.get_logger().warn(f"⚠️  无法连接到宿主机服务: {e}")
                     time.sleep(2.0)
@@ -736,12 +832,8 @@ class ModelInterfaceNode(Node):
         try: k = key.char
         except: k = None
         if k == '1' and self.state == SystemState.READY:
-            self.get_logger().info(f"▶️  用户按下 '1': 开始首次观测 (指令='{self.current_instr}')")
-            self.play_sound("start"); self.pub_system_mode.publish(String(data="inference"))
-            self.first_ts_ns = self.get_clock().now().nanoseconds
-            self.total_inactive_ns = 0; self.inactive_start_ns = None
-            self._switch_state(SystemState.FIRST_OBS)
-        elif (k == '2' or key == keyboard.Key.space):
+            self._start_first_observation("用户按下 '1'")
+        elif (k == '2' or (keyboard is not None and key == keyboard.Key.space)):
             if self.mode == 'deploy' and self.state in [SystemState.RUNNING, SystemState.PAUSED]:
                 if self.state != SystemState.PAUSED:
                     self.get_logger().info(f"⏸️  用户按下 '2'/'Space': 暂停执行")
@@ -758,6 +850,15 @@ class ModelInterfaceNode(Node):
             time.sleep(3.0); self._switch_state(SystemState.IDLE)
 
     def find_and_load_calibration(self, cam, arm):
+        if self.use_mock_calibration:
+            T_cam2base = np.eye(4, dtype=np.float32)
+            T_cam2base[:3, 3] = np.array([0.0, 0.18 if arm == 'left' else -0.18, 0.0], dtype=np.float32)
+            camera_matrix = np.array(
+                [[600.0, 0.0, 112.0], [0.0, 600.0, 112.0], [0.0, 0.0, 1.0]],
+                dtype=np.float32,
+            )
+            self.get_logger().warn(f"🧪 使用 mock 标定: 相机={cam}, 手臂={arm}")
+            return T_cam2base, camera_matrix
         subdirs = [d for d in os.listdir(self.calib_root) if os.path.isdir(os.path.join(self.calib_root, d))]
         matches = [d for d in subdirs if cam in d and arm in d]
         if not matches:
