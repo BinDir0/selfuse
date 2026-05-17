@@ -90,6 +90,50 @@ class SingleVideoAdapterTests(unittest.TestCase):
             self.assertTrue(validation.ok)
             self.assertEqual(validation.summary["frame_count"], 4)
 
+    def test_resume_skips_reextraction_only_when_frames_present(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            video = tmp / "input.mp4"
+            _write_test_video(video, fps=12.5, frames=4)
+            config = normalize_pipeline_config(
+                {"video": str(video), "output_root": str(tmp / "out")}
+            )
+            run_dir = Path(config["paths"]["log_root"]) / "run"
+            context = DatasetAdapterContext(
+                project_root=tmp,
+                run_dir=run_dir,
+                manifest_path=run_dir / "clip_manifest.jsonl",
+                shard_dirs_list_path=run_dir / "shard_dirs.txt",
+                summary_path=run_dir / "run_summary.json",
+            )
+            adapter = get_dataset_adapter("single_video")
+            adapter_cfg = config["adapter_config"]
+
+            def _prepare():
+                return adapter.prepare(
+                    dataset_cfg=config["dataset"],
+                    adapter_cfg=adapter_cfg,
+                    paths_cfg=config["paths"],
+                    runtimes_cfg=config["runtimes"],
+                    context=context,
+                )
+
+            first = _prepare()
+            self.assertNotEqual(first.payload.get("resumed"), True)
+
+            adapter_cfg["resume"] = True
+            resumed = _prepare()
+            self.assertTrue(resumed.payload.get("resumed"))
+
+            frame_dir = Path(resumed.payload["descriptor"].frame_dir)
+            next(frame_dir.glob("*.jpg")).unlink()
+            reextracted = _prepare()
+            self.assertNotEqual(reextracted.payload.get("resumed"), True)
+
+            adapter_cfg["resume"] = False
+            never_resumes = _prepare()
+            self.assertNotEqual(never_resumes.payload.get("resumed"), True)
+
 
 if __name__ == "__main__":
     unittest.main()

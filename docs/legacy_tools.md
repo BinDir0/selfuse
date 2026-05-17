@@ -56,3 +56,22 @@ Everything under `deprecated/` should be treated as reference material only unle
 - unrefactored one-off tools preserved under `deprecated/unrefactored_tools/`
 
 Do not build new production paths on top of `deprecated/`.
+
+## Quarantine Boundary
+
+`deprecated/unrefactored_tools/manifest.json` is the source of truth for which
+scripts were moved out of `scripts/` during the single-video pipeline refactor.
+`tests/test_quarantine_unrefactored_tools.py` enforces two invariants:
+
+1. Every manifest entry's `original` path is gone and its `deprecated` path
+   exists.
+2. No active (non-`deprecated/`) file references a moved `original` path; the
+   only allowed reference is the new `deprecated/unrefactored_tools/...` path.
+
+Quarantined tools keep their original relative layout, so their internal
+`PROJECT_ROOT / "scripts" / ...` references resolve **within** the quarantine.
+Some of these tools also reference scripts that were *not* moved (e.g.
+`scripts/rewrite_buildai_interpolated_wds.py`,
+`scripts/check_motion_stage_outputs.py`) — those cross-references are stale by
+design and are not fixed, because everything under `deprecated/` is
+reference-only and must not be wired into production.

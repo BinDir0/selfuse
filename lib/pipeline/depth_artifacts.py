@@ -32,7 +32,7 @@ def _read_cached_track_range(seq_folder: str | Path) -> tuple[int, int] | None:
         raw = cache_file.read_text(encoding="utf-8").strip()
         start_idx, end_idx = raw.split(",", 1)
         return int(start_idx), int(end_idx)
-    except Exception:
+    except (OSError, ValueError):
         return None
 
 

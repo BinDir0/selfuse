@@ -24,7 +24,11 @@ def get_parser() -> argparse.ArgumentParser:
         "--resume",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Resume compatible stages. Defaults to the config value, which defaults to enabled.",
+        help=(
+            "Resume compatible stages (prepare/infer/build), skipping work that "
+            "already produced outputs. Defaults to the config 'resume' value, "
+            "which defaults to disabled. Pass --no-resume to force off."
+        ),
     )
     parser.add_argument(
         "--descriptor_manifest",

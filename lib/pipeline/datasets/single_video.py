@@ -15,6 +15,7 @@ from lib.pipeline.datasets.descriptors import ClipDescriptor
 
 
 def _frame_ext(adapter_cfg: dict) -> str:
+    """Return the normalized, validated frame extension (default ``.jpg``)."""
     ext = str(adapter_cfg.get("frame_ext") or ".jpg").strip().lower()
     if not ext.startswith("."):
         ext = f".{ext}"
@@ -24,11 +25,17 @@ def _frame_ext(adapter_cfg: dict) -> str:
 
 
 def _metadata_path(paths_cfg: dict) -> Path:
-    output_root = Path(paths_cfg["output_root"])
-    return output_root / "prepare" / "single_video_descriptor.json"
+    """Path of the cached single-video descriptor under ``paths.output_root``."""
+    output_root = paths_cfg.get("output_root")
+    if not output_root:
+        raise KeyError(
+            "single_video adapter requires 'paths.output_root' to be configured"
+        )
+    return Path(output_root) / "prepare" / "single_video_descriptor.json"
 
 
 def _descriptor_from_payload(payload: dict) -> ClipDescriptor:
+    """Build a ClipDescriptor from cached metadata, validating its shape."""
     descriptor_payload = payload.get("descriptor")
     if not isinstance(descriptor_payload, dict):
         raise ValueError("single_video metadata is missing descriptor payload")
@@ -36,6 +43,7 @@ def _descriptor_from_payload(payload: dict) -> ClipDescriptor:
 
 
 def _load_prepared_descriptor(paths_cfg: dict) -> ClipDescriptor | None:
+    """Load the cached descriptor if a prior prepare run wrote one, else None."""
     metadata_path = _metadata_path(paths_cfg)
     if not metadata_path.is_file():
         return None
@@ -44,6 +52,7 @@ def _load_prepared_descriptor(paths_cfg: dict) -> ClipDescriptor | None:
 
 
 def _descriptor_frames_exist(descriptor: ClipDescriptor) -> bool:
+    """True only if every frame named by the descriptor is present on disk."""
     frame_dir = Path(descriptor.frame_dir or "")
     if not frame_dir.is_dir():
         return False
@@ -71,7 +80,7 @@ class SingleVideoDatasetAdapter(BaseDatasetAdapter):
             raise FileNotFoundError(f"single_video input not found: {video_path}")
 
         existing = _load_prepared_descriptor(paths_cfg)
-        if bool(adapter_cfg.get("resume", True)) and existing is not None and _descriptor_frames_exist(existing):
+        if bool(adapter_cfg.get("resume", False)) and existing is not None and _descriptor_frames_exist(existing):
             return AdapterPrepareResult(
                 {
                     "descriptor": existing,

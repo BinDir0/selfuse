@@ -61,6 +61,19 @@ def analyze_depth_action_consistency(
     sample_limit: int | None = None,
     max_examples: int = 32,
 ) -> dict:
+    """Compare exported depth against hand keypoints projected from lowdim.
+
+    Iterates WebDataset shards under ``dataset_dir``, projects each sample's
+    hand points into the depth image, and measures the absolute error between
+    sampled depth and projected z. ``sample_limit`` caps total samples scanned;
+    ``max_examples`` caps how many per-sample example/error records are kept.
+
+    Returns a report dict with keys: ``dataset_dir``, ``samples_total``,
+    ``samples_with_depth``, ``samples_checked``, ``points_compared``,
+    ``missing_depth_samples``, ``projection_empty_samples``,
+    ``decode_failures``, ``examples`` (list), and ``abs_error_m`` (a
+    mean/median/p90/p95/max summary, empty when nothing was compared).
+    """
     shard_paths = list(iter_shard_paths(dataset_dir))
     report = {
         "dataset_dir": str(Path(dataset_dir).resolve()),
@@ -76,10 +89,14 @@ def analyze_depth_action_consistency(
     }
     errors = []
 
+    limit_reached = False
     for shard_path in shard_paths:
+        if limit_reached:
+            break
         shard_name = Path(shard_path).name
         for sample in iter_shard_samples(shard_path):
             if sample_limit is not None and report["samples_total"] >= int(sample_limit):
+                limit_reached = True
                 break
             report["samples_total"] += 1
             sample_key = sample["key"]
@@ -126,9 +143,6 @@ def analyze_depth_action_consistency(
                             "error": str(error),
                         }
                     )
-        else:
-            continue
-        break
 
     if errors:
         array = np.asarray(errors, dtype=np.float64)

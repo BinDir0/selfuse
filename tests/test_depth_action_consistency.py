@@ -60,6 +60,39 @@ class DepthActionConsistencyTests(unittest.TestCase):
             self.assertAlmostEqual(report["abs_error_m"]["mean"], 0.5, places=5)
             self.assertEqual(len(report["examples"]), 2)
 
+    def _write_shard(self, shard_path: Path, depth_arrays) -> None:
+        lowdim = _lowdim_with_projected_hands(1.0)
+        with tarfile.open(shard_path, "w") as tar_writer:
+            for idx, depth in enumerate(depth_arrays):
+                key = f"clip_f{idx:06d}"
+                _add_member(tar_writer, f"{key}.image.jpg", b"image")
+                _add_member(tar_writer, f"{key}.lowdim.npy", _encode_npy(lowdim))
+                _add_member(tar_writer, f"{key}.depth.npy", _encode_npy(depth))
+                _add_member(tar_writer, f"{key}.meta.json", b"{}")
+
+    def test_sample_limit_stops_early(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            depths = [np.full((2, 2), 1000, dtype=np.uint16) for _ in range(5)]
+            self._write_shard(root / "shard-000000.tar", depths)
+
+            report = analyze_depth_action_consistency(
+                dataset_dir=str(root), sample_limit=2
+            )
+            self.assertEqual(report["samples_total"], 2)
+
+    def test_all_invalid_sampled_depth_counts_as_projection_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            # Zero depth -> sampled_depth > 0 filter rejects every point.
+            depths = [np.zeros((2, 2), dtype=np.uint16)]
+            self._write_shard(root / "shard-000000.tar", depths)
+
+            report = analyze_depth_action_consistency(dataset_dir=str(root))
+            self.assertEqual(report["samples_checked"], 0)
+            self.assertEqual(report["projection_empty_samples"], 1)
+            self.assertEqual(report["decode_failures"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

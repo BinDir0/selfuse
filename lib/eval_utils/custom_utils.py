@@ -103,7 +103,8 @@ def validate_dense_slam_export(fpath):
     if not dense_by_video_frame and not dense_by_contiguous_tstamp:
         raise RuntimeError(
             f"DPVO infiller requires dense per-frame SLAM cameras; interpolation is disabled for {fpath}. "
-            "Repair old exports first, e.g. with scripts/repair_dpvo_dense_slam_exports.py."
+            "Repair old exports first, e.g. with "
+            "deprecated/unrefactored_tools/scripts/repair_dpvo_dense_slam_exports.py."
         )
 
 

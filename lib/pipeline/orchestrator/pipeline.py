@@ -91,53 +91,70 @@ def _runtime_requirements_for_stages(stages: list[str]) -> tuple[bool, bool]:
     return require_hawor, require_slam
 
 
-def _apply_single_video_native_fps_defaults(config: dict, prepared) -> None:
-    meta = config.get("_meta") or {}
-    if not meta.get("default_build_fps_from_video") or prepared is None:
-        return
-    fps = prepared.payload.get("fps")
-    if fps is None:
-        descriptor = prepared.payload.get("descriptor")
-        fps = getattr(descriptor, "fps", None)
-    if fps is None or float(fps) <= 0.0:
-        return
-    build_cfg = config.get("build") or {}
-    if build_cfg.get("source_fps") is None:
-        build_cfg["source_fps"] = float(fps)
-    if build_cfg.get("target_fps") is None:
-        build_cfg["target_fps"] = float(fps)
+def _resolve_effective_resume(cli_resume, config: dict) -> bool:
+    """Resolve the effective resume flag.
+
+    Precedence: explicit CLI value (``--resume`` / ``--no-resume``) wins;
+    otherwise the config ``resume`` value; otherwise disabled. Resume is
+    opt-in by default so a fresh run never silently skips work.
+    """
+    if cli_resume is None:
+        return bool(config.get("resume", False))
+    return bool(cli_resume)
 
 
-def _apply_single_video_native_fps_defaults_from_descriptors(config: dict, descriptors) -> None:
-    meta = config.get("_meta") or {}
-    if not meta.get("default_build_fps_from_video"):
-        return
-    for descriptor in descriptors or []:
-        fps = getattr(descriptor, "fps", None)
-        if fps is None or float(fps) <= 0.0:
+def _native_build_fps_enabled(config: dict) -> bool:
+    return bool((config.get("_meta") or {}).get("default_build_fps_from_video"))
+
+
+def _first_positive_fps(values) -> float | None:
+    for value in values:
+        if value is None:
             continue
-        build_cfg = config.get("build") or {}
-        if build_cfg.get("source_fps") is None:
-            build_cfg["source_fps"] = float(fps)
-        if build_cfg.get("target_fps") is None:
-            build_cfg["target_fps"] = float(fps)
-        return
+        fps = float(value)
+        if fps > 0.0:
+            return fps
+    return None
 
 
-def _apply_single_video_native_fps_defaults_from_manifest(config: dict, manifest_path: Path) -> None:
-    meta = config.get("_meta") or {}
-    build_cfg = config.get("build") or {}
-    if (
-        not meta.get("default_build_fps_from_video")
-        or (build_cfg.get("source_fps") is not None and build_cfg.get("target_fps") is not None)
-        or not manifest_path.exists()
-    ):
+def _apply_single_video_native_fps_defaults(
+    config: dict,
+    *,
+    prepared=None,
+    descriptors=None,
+    manifest_path: Path | None = None,
+) -> None:
+    """Default build source/target fps from the video when ``_meta`` opts in.
+
+    The fps is taken from the first available source, in order: the prepared
+    payload (or its descriptor), an explicit descriptor list, or descriptors
+    loaded from ``manifest_path``. Missing values stay unset so the build stage
+    can fall back to its own defaults.
+    """
+    if not _native_build_fps_enabled(config):
         return
-    records = load_clip_manifest(manifest_path)
-    _apply_single_video_native_fps_defaults_from_descriptors(
-        config,
-        [record.descriptor for record in records],
-    )
+    # setdefault (not config.get(...) or {}) so the mutation persists even when
+    # the config has no "build" section yet.
+    build_cfg = config.setdefault("build", {})
+    if build_cfg.get("source_fps") is not None and build_cfg.get("target_fps") is not None:
+        return
+
+    fps = None
+    if prepared is not None:
+        descriptor = prepared.payload.get("descriptor")
+        fps = _first_positive_fps([prepared.payload.get("fps"), getattr(descriptor, "fps", None)])
+    if fps is None and descriptors is not None:
+        fps = _first_positive_fps(getattr(d, "fps", None) for d in descriptors)
+    if fps is None and manifest_path is not None and manifest_path.exists():
+        records = load_clip_manifest(manifest_path)
+        fps = _first_positive_fps(getattr(r.descriptor, "fps", None) for r in records)
+    if fps is None:
+        return
+
+    if build_cfg.get("source_fps") is None:
+        build_cfg["source_fps"] = fps
+    if build_cfg.get("target_fps") is None:
+        build_cfg["target_fps"] = fps
 
 
 def _resolved_path_string(path: Path) -> str:
@@ -205,7 +222,7 @@ def run_pipeline(args) -> None:
     annotation_cfg = config.get("annotation", {})
     validation_cfg = config.get("validation", {})
     cli_resume = getattr(args, "resume", None)
-    effective_resume = bool(config.get("resume", True) if cli_resume is None else cli_resume)
+    effective_resume = _resolve_effective_resume(cli_resume, config)
     adapter_cfg.setdefault("resume", effective_resume)
     if cli_resume is not None:
         infer_cfg.setdefault("common", {})["resume"] = effective_resume
@@ -477,7 +494,7 @@ def run_pipeline(args) -> None:
             context=adapter_context,
             run_logged=run_logged,
         )
-        _apply_single_video_native_fps_defaults(config, prepared)
+        _apply_single_video_native_fps_defaults(config, prepared=prepared)
         build_cfg = config.get("build", build_cfg)
         filter_cfg = config.get("filter", filter_cfg)
 
@@ -491,7 +508,7 @@ def run_pipeline(args) -> None:
                 prepared=prepared,
             )
         )
-        _apply_single_video_native_fps_defaults_from_descriptors(config, descriptors)
+        _apply_single_video_native_fps_defaults(config, descriptors=descriptors)
         build_cfg = config.get("build", build_cfg)
         filter_cfg = config.get("filter", filter_cfg)
         records = build_manifest_records_from_descriptors(
@@ -902,7 +919,7 @@ def run_pipeline(args) -> None:
 
     if "filter" in stages:
         ensure_manifest_exists("filter", active_manifest_path)
-        _apply_single_video_native_fps_defaults_from_manifest(config, active_manifest_path)
+        _apply_single_video_native_fps_defaults(config, manifest_path=active_manifest_path)
         build_cfg = config.get("build", build_cfg)
         filter_runtime_cfg = dict(filter_cfg)
         filter_runtime_cfg.setdefault("annotation_root", annotation_root)
@@ -938,7 +955,7 @@ def run_pipeline(args) -> None:
 
     if "build" in stages:
         ensure_manifest_exists("build", active_manifest_path)
-        _apply_single_video_native_fps_defaults_from_manifest(config, active_manifest_path)
+        _apply_single_video_native_fps_defaults(config, manifest_path=active_manifest_path)
         build_cfg = config.get("build", build_cfg)
         build_runtime_cfg = dict(build_cfg)
         build_runtime_cfg.setdefault("feature_cache_dir", str(shared_feature_cache_dir))
