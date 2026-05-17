@@ -489,14 +489,34 @@ class ModelInterfaceNode(Node):
         return (sorted_buf[0][0] - self.dt_ns) <= target_ts <= (sorted_buf[-1][0] + self.dt_ns)
 
     def _resize_image(self, img, width=224, height=224, is_depth=False):
+        # Must match openpi training preprocessing exactly. The pi0.5 WDS
+        # pipeline materializes images with aspect-preserving resize + center
+        # pad (wds_ego_dataset._resize_with_pad_cv2, INTER_LINEAR), and the
+        # serving model_transforms drop ResizeImages when decode_size==224, so
+        # whatever this sends is fed to the model verbatim. A plain distorting
+        # cv2.resize here would be a train/serve mismatch (640x480 -> squashed
+        # 224 square vs. trained 224x168 letterbox).
         if not self.do_resize:
             return img
 
-        if is_depth:
-            resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_NEAREST)
+        cur_h, cur_w = img.shape[:2]
+        if cur_w == width and cur_h == height:
+            return img
+
+        interp = cv2.INTER_NEAREST if is_depth else cv2.INTER_LINEAR
+        ratio = max(cur_w / width, cur_h / height)
+        rw = max(1, int(cur_w / ratio))
+        rh = max(1, int(cur_h / ratio))
+        resized = cv2.resize(img, (rw, rh), interpolation=interp)
+
+        if img.ndim == 3:
+            padded = np.zeros((height, width, img.shape[2]), dtype=img.dtype)
         else:
-            resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
-        return resized_img
+            padded = np.zeros((height, width), dtype=img.dtype)
+        pad_x = max(0, (width - rw) // 2)
+        pad_y = max(0, (height - rh) // 2)
+        padded[pad_y:pad_y + rh, pad_x:pad_x + rw] = resized
+        return padded
 
     def _zero_depth_like(self, rgb_seq):
         """OpenPI pi0.5 EgoHands does not use depth; keep payload schema stable."""
