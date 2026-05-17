@@ -78,9 +78,11 @@ if [ -n "$XAUTHORITY" ] && [ -f "$XAUTHORITY" ] && command -v xauth >/dev/null 2
   done
 fi
 
-# GPU 检测
+# GPU 检测：必须 nvidia-smi 真能跑通（驱动已加载）才加 --gpus，
+# 否则 nvidia-container 钩子会因 "driver not loaded" 导致容器创建失败。
+# ROS 客户端本身不需要 GPU（模型在远端 openpi server）。
 GPU_OPTIONS=()
-if command -v nvidia-smi >/dev/null 2>&1; then
+if nvidia-smi >/dev/null 2>&1; then
   GPU_OPTIONS+=(--gpus all)
 fi
 
