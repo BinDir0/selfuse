@@ -206,6 +206,36 @@ python scripts/run_dataset_pipeline.py --config configs/my_video.yaml
 
 The default run extracts frames, runs HaWoR/Any4D stages, filters, builds a trainable WebDataset, and validates image/lowdim/MANO/meta/depth outputs. Annotation is skipped unless `annotation.command` is configured, so empty instruction/language fields are valid for this first single-video path.
 
+Run with the generic language annotation stage:
+
+```bash
+export DASHSCOPE_API_KEY=sk-...
+
+python scripts/run_dataset_pipeline.py \
+  --config configs/dataset_pipeline_buildai.example.yaml \
+  --stages prepare,annotate,infer,filter,build,validate
+```
+
+`api_annotation.py` is manifest-driven: it reads `{prepared_state}` and writes
+clip sidecars under `{annotation_root}`. The default annotation prompt lives at
+`prompts/annotation_industrial_egocentric.txt`. To use a different prompt, edit
+the config's `annotation.command` and pass another file with `--prompt_file`:
+
+```yaml
+annotation:
+  command: >
+    {hawor_python} {project_root}/api_annotation.py
+    --prepared_state {prepared_state}
+    --annotation_root {annotation_root}
+    --annotation_suffix _qwen-annotation.json
+    --prompt_file /path/to/custom_prompt.txt
+```
+
+For the sake of security, do not commit API keys. Provide the DashScope key at runtime with
+`DASHSCOPE_API_KEY`, `--api_key`, or `--api_keys_file`; the environment variable
+is the recommended path for normal runs. The annotation stage requires the
+`dashscope` package, which is listed in `requirements.txt`.
+
 Extract frames from a single video:
 
 ```bash
@@ -261,6 +291,11 @@ The official dataset-production path is adapter-driven:
 4. `filter`: build-equivalent quality filtering
 5. `build`: final WebDataset export
 6. `validate`: source/output checks
+
+The `annotate` stage is an external command hook. When configured to call
+`api_annotation.py`, it produces standard sidecars containing `instruction`,
+`instruction_num`, `language`, and `hierarchy/global_analysis`; the final
+WebDataset build reads those fields into each `*.meta.json`.
 
 Recommended full run:
 

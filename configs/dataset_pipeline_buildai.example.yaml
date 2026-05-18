@@ -64,6 +64,7 @@ annotation:
     --prepared_state {prepared_state}
     --annotation_root {annotation_root}
     --annotation_suffix _qwen-annotation.json
+    --prompt_file {project_root}/prompts/annotation_industrial_egocentric.txt
     --target_fps 5.0
     --workers 4
     --resume

@@ -41,6 +41,7 @@ loguru
 dill
 lapx
 # chumpy@git+https://github.com/mattloper/chumpy
+dashscope
 
 ## analyze:
 zarr

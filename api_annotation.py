@@ -36,72 +36,7 @@ from lib.pipeline.frame_sources import build_frame_source_from_descriptor  # noq
 DEFAULT_MODEL = "qwen3.5-plus"
 DEFAULT_ANNOTATION_SUFFIX = ".annotation.json"
 DEFAULT_TARGET_FPS = 5.0
-
-PROMPT = """
-# Video Annotation Task: Industrial Egocentric Action Description
-
-## Objective
-Provide a comprehensive 5-level language description for pre-cropped first-person (egocentric) videos of factory operations. These videos capture industrial manipulation tasks like assembly, tool handling, and quality inspection to train robot foundation models for smart manufacturing.
-
-## Context
-- **Setting:** Factory assembly lines, maintenance benches, and industrial workstations.
-- **Perspective:** Ego-view (worker's viewpoint looking down at hands).
-- **Core Focus:** Tool-use precision, mechanical assembly, part handling, and industrial safety compliance.
-
----
-
-## Task Instructions
-
-Analyze the industrial video clip and perform the following steps:
-
-### Step 1: Content Filtering (Industrial Status Check)
-- **Mark "status": "Invalid"** if the video shows:
-    - Walking between workstations or supply rooms.
-    - Passive observation with no hand activity.
-    - Hands resting on the workbench or hanging by the side.
-    - Non-manipulation tasks like reading a manual or talking to colleagues.
-- **Mark "status": "Valid"** if the video shows an active industrial manipulation (e.g., fastening a bolt, soldering, picking a part from a bin, operating a control panel).
-
-### Step 2: Industrial Multi-Level Instructions (For "Valid" only)
-
-- **Level 1 (Verb + Object):** Core industrial task. Max 5 words.
-- **Level 2 (Gist):** Concise summary of the industrial operation. Max 15 words.
-- **Level 3 (Object-Centric):** Describe specific industrial components and spatial features. Max 30 words.
-- **Level 4 (Hand-Centric):** Specify left/right hand roles and tool-handling style. Max 50 words.
-- **Level 5 (Dense Sequence):** Step-by-step physical breakdown. Max 100 words.
-
----
-
-## Strict Formatting & Quality Requirements
-
-- **Verb-first imperative:** Start with an action verb. **NO subjects**.
-- **Definite articles only:** Use "the", never "a" or "an".
-- **No transitional words:** Omit "then", "next", "afterwards".
-- **Industrial Precision:** Use specific verbs like "Align," "Torque," "Insert," "Solder," "Scan," "Calibrate." when possible.
-
-### Execution Quality (is_good_quality)
-Set `"is_good_quality": true` ONLY if:
-1. The industrial task is completed successfully.
-2. The movement is professional and steady.
-3. The contact point between hand/tool and object is clearly visible.
-
----
-
-## Output Format
-Return a single JSON object. No markdown code fences. No extra text.
-
-{
-  "status": "Valid/Invalid",
-  "is_good_quality": <true/false>,
-  "language_instructions": {
-    "level1": "<verb and object>",
-    "level2": "<concise summary>",
-    "level3": "<component-focused description>",
-    "level4": "<hand/tool interaction details>",
-    "level5": "<dense mechanical step-by-step>"
-  }
-}
-""".strip()
+DEFAULT_PROMPT_FILE = PROJECT_ROOT / "prompts" / "annotation_industrial_egocentric.txt"
 
 
 _invalid_log_lock = threading.Lock()
@@ -142,7 +77,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompt_file",
         default=None,
-        help="Optional prompt file. Defaults to the built-in industrial egocentric prompt.",
+        help=f"Optional prompt file. Defaults to {DEFAULT_PROMPT_FILE.as_posix()}.",
     )
     parser.add_argument("--target_fps", type=float, default=DEFAULT_TARGET_FPS, help="FPS hint sent to the API.")
     parser.add_argument(
@@ -205,9 +140,8 @@ def load_api_keys(args) -> list[str]:
 
 
 def load_prompt(prompt_file: str | None) -> str:
-    if prompt_file:
-        return Path(prompt_file).read_text(encoding="utf-8")
-    return PROMPT
+    path = Path(prompt_file) if prompt_file else DEFAULT_PROMPT_FILE
+    return path.read_text(encoding="utf-8")
 
 
 def select_records(records: list[ClipManifestRecord], *, clip_ids: str | None, max_clips: int | None):
