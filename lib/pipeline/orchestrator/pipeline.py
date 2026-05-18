@@ -20,6 +20,7 @@ from lib.pipeline.clip_manifest import (
 )
 from lib.pipeline.batch.cli import SHARED_PROFILE_CACHE_OPTION_DESTS
 from lib.pipeline.batch.state import load_status_payload_with_fallback
+from lib.pipeline.video_clipping import apply_video_clipping_if_configured
 from lib.pipeline.datasets import DatasetAdapterContext, get_dataset_adapter
 from lib.pipeline.frame_sources import classify_descriptor_storage
 from lib.pipeline.multihost import (
@@ -248,6 +249,18 @@ def run_pipeline(args) -> None:
     shared_feature_cache_dir = run_dir / "_episode_feature_cache"
     external_manifest_path = Path(args.descriptor_manifest).resolve() if getattr(args, "descriptor_manifest", None) else None
 
+    video_clipping_summary = None
+    if "preprocess" in stages:
+        video_clipping_summary = apply_video_clipping_if_configured(
+            config=config,
+            run_dir=run_dir,
+            project_root=PROJECT_ROOT,
+        )
+        dataset_cfg = config.get("dataset", dataset_cfg)
+        paths_cfg = config.get("paths", paths_cfg)
+        adapter_cfg = config.get("adapter_config", adapter_cfg)
+        annotation_cfg = config.get("annotation", annotation_cfg)
+
     adapter_name = dataset_cfg.get("adapter") or dataset_cfg.get("source_type", "buildai")
     source_type = adapter_name
     source_id = dataset_cfg.get("source_id", adapter_name)
@@ -303,6 +316,8 @@ def run_pipeline(args) -> None:
         run_summary["prepared_state_override_path"] = str(external_manifest_path)
     if infer_multihost_cfg.enabled:
         run_summary["infer_multihost"] = infer_multihost_cfg.to_summary()
+    if video_clipping_summary is not None:
+        run_summary["video_clipping"] = video_clipping_summary
     summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     use_external_manifest = external_manifest_path is not None and "manifest" not in stages
     if external_manifest_path is not None and "manifest" in stages:
@@ -544,28 +559,38 @@ def run_pipeline(args) -> None:
     if "annotate" in stages:
         ensure_manifest_exists("annotate", annotation_manifest_path)
         annotation_command = annotation_cfg.get("command")
-        if not annotation_command:
+        if not annotation_command and annotation_cfg.get("_api_clip_completed"):
+            run_summary["annotation_stage"] = {
+                "status": "skipped",
+                "reason": "clip.mode API already wrote annotation sidecars during preprocessing",
+            }
+            summary_path.write_text(json.dumps(run_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            annotation_command = None
+        if annotation_command is None and annotation_cfg.get("_api_clip_completed"):
+            pass
+        elif not annotation_command:
             raise RuntimeError("annotate stage selected but annotation.command is missing in config")
-        annotation_context = adapter.resolve_annotation_context(
-            dataset_cfg=dataset_cfg,
-            adapter_cfg=adapter_cfg,
-            paths_cfg=paths_cfg,
-            context=adapter_context,
-            prepared=prepared,
-        )
-        context = {
-            "manifest": str(annotation_manifest_path),
-            "active_manifest": str(active_manifest_path),
-            "prepared_state": str(annotation_manifest_path),
-            "active_prepared_state": str(active_manifest_path),
-            "annotation_root": str(annotation_root or ""),
-            "run_dir": str(run_dir),
-            "hawor_python": hawor_python,
-            "slam_python": slam_python,
-            "project_root": str(PROJECT_ROOT),
-        }
-        context.update(annotation_context)
-        run_logged("annotate", format_annotation_command(annotation_command, context))
+        if annotation_command:
+            annotation_context = adapter.resolve_annotation_context(
+                dataset_cfg=dataset_cfg,
+                adapter_cfg=adapter_cfg,
+                paths_cfg=paths_cfg,
+                context=adapter_context,
+                prepared=prepared,
+            )
+            context = {
+                "manifest": str(annotation_manifest_path),
+                "active_manifest": str(active_manifest_path),
+                "prepared_state": str(annotation_manifest_path),
+                "active_prepared_state": str(active_manifest_path),
+                "annotation_root": str(annotation_root or ""),
+                "run_dir": str(run_dir),
+                "hawor_python": hawor_python,
+                "slam_python": slam_python,
+                "project_root": str(PROJECT_ROOT),
+            }
+            context.update(annotation_context)
+            run_logged("annotate", format_annotation_command(annotation_command, context))
 
     common_batch_args = cli_args_from_mapping(
         infer_cfg.get("common"),

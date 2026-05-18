@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from api_annotation import build_pipeline_annotation_payload, main
+from lib.annotation.api_annotation import build_pipeline_annotation_payload, main
+from lib.annotation.api_annotation_with_clip import _annotation_payload
+from lib.pipeline.annotation_protocol import load_clip_annotation
 from lib.pipeline.clip_manifest import ClipManifestRecord, write_clip_manifest
 from lib.pipeline.datasets.descriptors import ClipDescriptor
 
@@ -74,6 +76,40 @@ class ApiAnnotationTests(unittest.TestCase):
             report = json.loads((annotation_root / "_annotation_report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["summary"]["total"], 1)
             self.assertEqual(report["summary"]["dry_run"], 1)
+
+    def test_api_clip_payload_matches_standard_annotation_protocol(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            annotation_root = tmp / "annotations"
+            payload = _annotation_payload(
+                clip_id="input_clip000",
+                clip_name="input_clip000",
+                source_video=tmp / "input.mp4",
+                segment={
+                    "start": 1.0,
+                    "end": 2.5,
+                    "is_good_quality": True,
+                    "language_instructions": {
+                        "level1": "Open the drawer.",
+                        "level2": "Pull the drawer open.",
+                        "level5": "Grip the handle. Pull the drawer outward.",
+                    },
+                },
+                model="qwen-test",
+                raw_text="[]",
+            )
+            annotation_root.mkdir()
+            (annotation_root / "input_clip000.annotation.json").write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            annotation, error_code, _path = load_clip_annotation(annotation_root, "input_clip000")
+
+            self.assertIsNone(error_code)
+            self.assertIsNotNone(annotation)
+            self.assertEqual(annotation.instruction_num, 3)
+            self.assertEqual(annotation.language, "Grip the handle. Pull the drawer outward.")
 
 
 if __name__ == "__main__":

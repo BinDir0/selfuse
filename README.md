@@ -206,6 +206,94 @@ python scripts/run_dataset_pipeline.py --config configs/my_video.yaml
 
 The default run extracts frames, runs HaWoR/Any4D stages, filters, builds a trainable WebDataset, and validates image/lowdim/MANO/meta/depth outputs. Annotation is skipped unless `annotation.command` is configured, so empty instruction/language fields are valid for this first single-video path.
 
+The pipeline supports three raw-video clipping choices before `prepare`:
+
+- No clipping: omit `clip` or set `clip.mode: none`. The selected dataset adapter runs normally, and later stages use the original prepared clips.
+- Heuristic clipping: set `clip.mode: heuristic`. The pipeline writes clipped MP4 files, extracts frames from those clips, and redirects later stages to the clipped-video directory.
+- API semantic clipping: set `clip.mode: api`. The multimodal API returns segment boundaries and language in one pass; the pipeline writes clipped MP4 files plus annotation sidecars and redirects later stages to the clipped-video directory.
+
+No clipping is the default:
+
+```yaml
+video: /path/to/input.mp4
+
+# clip:
+#   mode: none
+```
+
+Heuristic clipping example:
+
+```yaml
+video: /path/to/input.mp4
+
+clip:
+  mode: heuristic
+  config: lib/clip/heuristic_clip_config.yaml
+```
+
+The heuristic path currently supports raw-video `single_video`, `video_folder`,
+and `buildai` inputs.
+
+The API path combines semantic clipping and language annotation in one model
+call per raw video:
+
+```yaml
+clip:
+  mode: api
+  prompt_file: lib/annotation/prompts/with_clip/annotation_general_clip.txt
+  annotation_suffix: _qwen-annotation.json
+  workers: 4
+  target_fps: 5.0
+```
+
+If `annotate` is included in `--stages`, the pipeline skips the separate
+annotation command because the API clipping step already wrote the sidecars.
+Provide the DashScope key with `DASHSCOPE_API_KEY`, `clip.api_key`, or
+`clip.api_keys_file`; avoid committing keys in config files.
+
+For BuildAI configs, provide the raw video root separately from any existing
+processed shard root:
+
+```yaml
+dataset:
+  adapter: buildai
+  start_factory_id: 1
+  end_factory_id: 3
+
+paths:
+  video_root: /path/to/raw/buildai/videos
+  final_dataset_root: /path/to/output/webdataset
+
+clip:
+  mode: heuristic
+  config: lib/clip/heuristic_clip_config.yaml
+```
+
+If `start_factory_id` and `end_factory_id` are set, the clipper scans matching
+`factoryNNN` subdirectories under `paths.video_root`. After clipping, the run
+is redirected to the generic `video_folder` adapter, so the external BuildAI
+preprocess script is not invoked for that run.
+
+The old BuildAI clipping launcher exported `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libffi.so.7`
+for systems where OpenCV/FFmpeg/decord load the wrong libffi. If your machine
+hits a libffi symbol error during clipping or video decoding, export the same
+variable before running the full pipeline:
+
+```bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libffi.so.7
+```
+
+When using `lib/clip/run_heuristic_video_clipper.sh` directly, set
+`HAWOR_CLIP_LD_PRELOAD=/path/to/libffi.so.7` if your libffi path differs.
+
+Direct use of `lib/clip/heuristic_video_clipper.py` also honors
+`HAWOR_CLIP_CONFIG` through `lib/clip/clip_config.py`, but the normal dataset
+pipeline should prefer the `clip.config:` field in the main YAML. The legacy
+`BUILDAI_PIPELINE_CONFIG` variable is still accepted as a fallback.
+The heuristic clipper uses `opencv-python`; if `paths.model_path` or
+`clip.model_path` points to a detector checkpoint, it also uses `ultralytics`
+for the detection gate. Both are part of the core requirements.
+
 Run with the generic language annotation stage:
 
 ```bash
@@ -216,15 +304,15 @@ python scripts/run_dataset_pipeline.py \
   --stages prepare,annotate,infer,filter,build,validate
 ```
 
-`api_annotation.py` is manifest-driven: it reads `{prepared_state}` and writes
+`lib/annotation/api_annotation.py` is manifest-driven: it reads `{prepared_state}` and writes
 clip sidecars under `{annotation_root}`. The default annotation prompt lives at
-`prompts/annotation_industrial_egocentric.txt`. To use a different prompt, edit
+`lib/annotation/prompts/without_clip/annotation_industrial_egocentric.txt`. To use a different prompt, edit
 the config's `annotation.command` and pass another file with `--prompt_file`:
 
 ```yaml
 annotation:
   command: >
-    {hawor_python} {project_root}/api_annotation.py
+    {hawor_python} {project_root}/lib/annotation/api_annotation.py
     --prepared_state {prepared_state}
     --annotation_root {annotation_root}
     --annotation_suffix _qwen-annotation.json
@@ -235,6 +323,30 @@ For the sake of security, do not commit API keys. Provide the DashScope key at r
 `DASHSCOPE_API_KEY`, `--api_key`, or `--api_keys_file`; the environment variable
 is the recommended path for normal runs. The annotation stage requires the
 `dashscope` package, which is listed in `requirements.txt`.
+
+If you do not run annotation inside the pipeline but still want language in the
+final WebDataset, place existing annotation sidecars under `paths.annotation_root`
+before `build`, and set `build.annotation_suffix` to the matching suffix. The
+standard filename is:
+
+```text
+{paths.annotation_root}/{clip_id}{build.annotation_suffix}
+```
+
+Each sidecar must be a JSON object with `status: "Valid"` and either
+`instruction` or `hierarchy`/`global_analysis` containing `level1` through
+`level5` strings. `language` is optional; if omitted, the build can still use
+the instruction list. When `build.require_annotation: true`, missing, invalid,
+or empty sidecars fail the build. When it is `false`, missing annotations are
+allowed and the exported samples contain empty `instruction`, `instruction_num: 0`,
+and `language: null`.
+
+For no-clipping runs, `clip_id` is the original prepared clip id. For heuristic
+clipping, `clip_id` is generated from the clipped video path relative to the
+clipped video root, with path parts joined by `__`, so external annotations
+must use those clipped ids. For API clipping, the sidecars are written
+automatically next to the clipped-video run under the configured annotation
+root.
 
 Extract frames from a single video:
 
@@ -293,9 +405,24 @@ The official dataset-production path is adapter-driven:
 6. `validate`: source/output checks
 
 The `annotate` stage is an external command hook. When configured to call
-`api_annotation.py`, it produces standard sidecars containing `instruction`,
+`lib/annotation/api_annotation.py`, it produces standard sidecars containing `instruction`,
 `instruction_num`, `language`, and `hierarchy/global_analysis`; the final
 WebDataset build reads those fields into each `*.meta.json`.
+
+Before `prepare`, an optional `clip` block can run raw-video temporal clipping.
+Available modes are `none`, `heuristic`, and `api`. `none` is the default and
+keeps the original adapter path untouched. `heuristic` uses
+`lib/clip/heuristic_clip_config.yaml`; `api` uses
+`lib/annotation/api_annotation_with_clip.py` to produce both clipped videos and
+annotation sidecars. The two clipping modes redirect the rest of the run to the
+new clipped-video directory.
+
+Annotation is independent unless `clip.mode: api` is used. You can run clipping
+without annotation by using `clip.mode: heuristic` and setting
+`build.require_annotation: false`, or by providing external sidecars in
+`paths.annotation_root`. You can run annotation without clipping by keeping
+`clip.mode: none` and configuring the normal `annotation.command`. You can skip
+both only when the build and validation settings allow empty instruction fields.
 
 Recommended full run:
 

@@ -6,6 +6,10 @@ dataset:
   end_factory_id: 2
 
 paths:
+  # Optional for clip.mode=heuristic: raw BuildAI videos. When set together
+  # with the clip block below, the pipeline clips these videos first and then
+  # continues through the generic video_folder adapter.
+  # video_root: /share_data/guantianrui/datasets/Egocentric-10K_raw_videos
   buildai_repo_root: /root/buildai_processing
   buildai_config: /root/buildai_processing/pipeline_config_egocentric10k.yaml
   shard_root: /share_data/guantianrui/datasets/Egocentric-10K_stage3_jpg
@@ -22,6 +26,19 @@ adapter_config:
   stages: 1,2,3
   setup_decord: false
   clean_stage3_output: false
+
+# Optional raw-video clipping before prepare. Requires paths.video_root,
+# clip.video_root, or adapter_config.video_root to point at raw videos.
+# clip:
+#   mode: heuristic
+#   config: lib/clip/heuristic_clip_config.yaml
+#   fallback_full_video: false
+# Alternative: combine semantic clipping and annotation through the API.
+# clip:
+#   mode: api
+#   prompt_file: lib/annotation/prompts/with_clip/annotation_general_clip.txt
+#   annotation_suffix: _qwen-annotation.json
+#   workers: 4
 
 infer:
   common:
@@ -60,11 +77,11 @@ infer:
 
 annotation:
   command: >
-    {hawor_python} {project_root}/api_annotation.py
+    {hawor_python} {project_root}/lib/annotation/api_annotation.py
     --prepared_state {prepared_state}
     --annotation_root {annotation_root}
     --annotation_suffix _qwen-annotation.json
-    --prompt_file {project_root}/prompts/annotation_industrial_egocentric.txt
+    --prompt_file {project_root}/lib/annotation/prompts/without_clip/annotation_industrial_egocentric.txt
     --target_fps 5.0
     --workers 4
     --resume

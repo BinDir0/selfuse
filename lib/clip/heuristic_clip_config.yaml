@@ -1,0 +1,35 @@
+paths:
+  # Optional detector checkpoint for the detection gate. Leave empty to rely on
+  # motion/ROI gates only.
+  model_path: ""
+
+runtime:
+  postfix_update_every: 10
+  gc_every: 32
+
+heuristic:
+  skip_frames: 15
+  decode_width: 448
+  decode_height: 256
+  fallback_full_video: false
+  # Optional resize for written clips. Omit or set null to keep source size.
+  output_size: null
+
+  gate_a:
+    roi: [0.15, 0.20, 0.85, 1.00]
+    min_area_ratio: 0.008
+    max_area_ratio: 0.50
+    conf_thresh: 0.30
+    box_conf_thresh: 0.30
+
+  gate_b:
+    flow_max_corners: 128
+    flow_quality_level: 0.01
+    flow_min_distance: 7
+    flow_block_size: 7
+    flow_min_tracked: 24
+    camera_disp_thresh: 0.2
+
+  gate_c:
+    hand_motion_thresh: 0.012
+    min_keep_sec: 2.0

@@ -24,7 +24,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -36,7 +36,14 @@ from lib.pipeline.frame_sources import build_frame_source_from_descriptor  # noq
 DEFAULT_MODEL = "qwen3.5-plus"
 DEFAULT_ANNOTATION_SUFFIX = ".annotation.json"
 DEFAULT_TARGET_FPS = 5.0
-DEFAULT_PROMPT_FILE = PROJECT_ROOT / "prompts" / "annotation_industrial_egocentric.txt"
+DEFAULT_PROMPT_FILE = (
+    PROJECT_ROOT
+    / "lib"
+    / "annotation"
+    / "prompts"
+    / "without_clip"
+    / "annotation_industrial_egocentric.txt"
+)
 
 
 _invalid_log_lock = threading.Lock()

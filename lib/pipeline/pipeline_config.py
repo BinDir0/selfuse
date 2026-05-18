@@ -18,6 +18,7 @@ _OFFICIAL_TOP_LEVEL_KEYS = {
     "adapter_config",
     "infer",
     "annotation",
+    "clip",
     "build",
     "filter",
     "validation",
@@ -29,6 +30,7 @@ _SINGLE_VIDEO_TOP_LEVEL_KEYS = {
     "run_tag",
     "resume",
     "annotation",
+    "clip",
     "build",
     "filter",
     "validation",
@@ -143,6 +145,7 @@ def _apply_shared_nested_defaults(
     filter_cfg: dict,
     validation_cfg: dict,
     annotation_cfg: dict,
+    clip_cfg: dict,
     adapter_cfg: dict,
     infer_cfg: dict,
     schema: str,
@@ -191,6 +194,8 @@ def _apply_shared_nested_defaults(
     ):
         validation_cfg.setdefault(key, default)
 
+    clip_cfg.setdefault("mode", "none")
+
     normalized_infer_cfg = {
         "common": _as_dict(infer_cfg.get("common")),
         "detect_motion": _as_dict(infer_cfg.get("detect_motion")),
@@ -209,6 +214,7 @@ def _apply_shared_nested_defaults(
         "adapter_config": adapter_cfg,
         "infer": normalized_infer_cfg,
         "annotation": annotation_cfg,
+        "clip": clip_cfg,
         "build": build_cfg,
         "filter": filter_cfg,
         "validation": validation_cfg,
@@ -229,6 +235,7 @@ def _normalize_nested_pipeline_config(raw: dict) -> dict:
     filter_cfg = _ensure_mapping(raw, "filter")
     validation_cfg = _ensure_mapping(raw, "validation")
     annotation_cfg = _ensure_mapping(raw, "annotation")
+    clip_cfg = _ensure_mapping(raw, "clip")
     adapter_cfg = _ensure_mapping(raw, "adapter_config")
     infer_cfg = _ensure_mapping(raw, "infer")
 
@@ -241,6 +248,7 @@ def _normalize_nested_pipeline_config(raw: dict) -> dict:
         filter_cfg=filter_cfg,
         validation_cfg=validation_cfg,
         annotation_cfg=annotation_cfg,
+        clip_cfg=clip_cfg,
         adapter_cfg=adapter_cfg,
         infer_cfg=infer_cfg,
         schema="nested",
@@ -266,6 +274,7 @@ def _normalize_single_video_pipeline_config(raw: dict, *, base_dir: Path | None)
     )
 
     annotation_cfg = _ensure_mapping(raw, "annotation")
+    clip_cfg = _ensure_mapping(raw, "clip")
     adapter_cfg = _ensure_mapping(raw, "adapter_config")
     build_cfg = _ensure_mapping(raw, "build")
     filter_cfg = _ensure_mapping(raw, "filter")
@@ -329,6 +338,7 @@ def _normalize_single_video_pipeline_config(raw: dict, *, base_dir: Path | None)
         filter_cfg=filter_cfg,
         validation_cfg=validation_cfg,
         annotation_cfg=annotation_cfg,
+        clip_cfg=clip_cfg,
         adapter_cfg=adapter_cfg,
         infer_cfg=infer_cfg,
         schema="single_video",
