@@ -65,6 +65,12 @@ pip install --no-build-isolation mmcv
 pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@stable
 pip install --no-build-isolation git+https://github.com/mattloper/chumpy
 
+# DPVO's setup.py expects Eigen 3.4.0 at thirdparty/DPVO/thirdparty/eigen-3.4.0
+# (not vendored / not a submodule — fetch it once):
+( cd thirdparty/DPVO && mkdir -p thirdparty \
+  && wget -q https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip -O thirdparty/eigen-3.4.0.zip \
+  && unzip -q -o thirdparty/eigen-3.4.0.zip -d thirdparty/ )
+
 cd thirdparty/DPVO && pip install . --no-build-isolation && cd ../..
 cd thirdparty/DROID-SLAM && python setup.py install && cd ../..
 ```
@@ -99,6 +105,13 @@ cd ../..
 # The SLAM subprocess still launches this repo's batch_infer.py, so the Any4D
 # env also needs pipeline-control, frame/scale, and DPVO dependencies.
 pip install joblib tqdm natsort opencv-python-headless pycocotools evo pytorch-minimize
+
+# DPVO needs Eigen 3.4.0 at thirdparty/DPVO/thirdparty/eigen-3.4.0 (see step 1).
+# Skip the fetch if you already populated it in the hawor env setup.
+( cd thirdparty/DPVO && mkdir -p thirdparty \
+  && [ -f thirdparty/eigen-3.4.0/Eigen/Core ] \
+  || ( wget -q https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip -O thirdparty/eigen-3.4.0.zip \
+       && unzip -q -o thirdparty/eigen-3.4.0.zip -d thirdparty/ ) )
 cd thirdparty/DPVO && pip install . --no-build-isolation && cd ../..
 ```
 
