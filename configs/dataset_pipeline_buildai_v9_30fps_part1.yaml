@@ -36,7 +36,13 @@ infer:
 
 annotation:
   command: >
-    echo "Read {prepared_state} and write {annotation_root}/<clip_id>_qwen-annotation.json"
+    {hawor_python} {project_root}/api_annotation.py
+    --prepared_state {prepared_state}
+    --annotation_root {annotation_root}
+    --annotation_suffix _qwen-annotation.json
+    --target_fps 5.0
+    --workers 4
+    --resume
 
 filter:
   stages: detect_track,motion,slam,infiller

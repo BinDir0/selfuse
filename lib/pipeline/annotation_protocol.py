@@ -93,7 +93,7 @@ def build_annotation_issue(clip_id: str, error_code: str, resolved_path: str) ->
     return {
         "clip_id": str(clip_id),
         "error_code": str(error_code),
-        "resolved_path": str(resolved_path),
+        "resolved_path": Path(resolved_path).as_posix(),
     }
 
 
@@ -115,7 +115,7 @@ def build_annotation_issue_from_candidates(
         error_code,
         resolved_path or str(candidates[-1] if candidates else ""),
     )
-    issue["candidate_paths"] = [str(path) for path in candidates]
+    issue["candidate_paths"] = [path.as_posix() for path in candidates]
     return issue
 
 

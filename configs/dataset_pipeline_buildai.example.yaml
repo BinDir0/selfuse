@@ -60,11 +60,17 @@ infer:
 
 annotation:
   command: >
-    echo "Provide an external annotation command here that reads {prepared_state}
-    and writes sidecars into {annotation_root}"
+    {hawor_python} {project_root}/api_annotation.py
+    --prepared_state {prepared_state}
+    --annotation_root {annotation_root}
+    --annotation_suffix _qwen-annotation.json
+    --target_fps 5.0
+    --workers 4
+    --resume
 
 build:
   require_annotation: true
+  annotation_suffix: _qwen-annotation.json
   preprocess_workers: 8
   writer_workers: 4
   frames_per_shard: 10000
