@@ -69,6 +69,15 @@ cd thirdparty/DPVO && pip install . --no-build-isolation && cd ../..
 cd thirdparty/DROID-SLAM && python setup.py install && cd ../..
 ```
 
+`requirements.txt` covers only what the pipeline and batch inference need.
+The viewers/demo (aitviewer, moderngl-window, pyrender, gradio, HTML4Vision)
+are optional and pin `numpy<2`, so they must be installed without dependency
+resolution to avoid downgrading numpy:
+
+```bash
+pip install --no-deps -r requirements-viewer.txt
+```
+
 If `torch-scatter==2.1.2` from `requirements.txt` does not match your CUDA/PyTorch
 wheel, reinstall the matching PyG wheel for your local CUDA/PyTorch pair.
 

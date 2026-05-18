@@ -1,0 +1,18 @@
+# Optional visualization / demo dependencies. NOT required to run the
+# dataset pipeline (prepare/infer/filter/build/validate) or batch inference.
+#
+# moderngl-window 2.4.6 pins numpy<2, which conflicts with the numpy 2.x
+# pinned in requirements.txt. These packages must therefore be installed
+# WITHOUT dependency resolution so they do not downgrade numpy:
+#
+#   pip install --no-deps -r requirements-viewer.txt
+#
+# Their runtime deps (moderngl, pyglet, etc.) are already satisfied by the
+# core environment or are listed explicitly below.
+aitviewer
+moderngl-window==2.4.6
+moderngl
+pyglet
+pyrender
+HTML4Vision
+gradio

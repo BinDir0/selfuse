@@ -1,7 +1,14 @@
+# Core dependencies for the dataset pipeline
+# (prepare / infer / filter / build / validate) and batch inference.
+#
+# Optional visualization/demo packages (aitviewer, moderngl-window, pyrender,
+# gradio, HTML4Vision) are NOT listed here: moderngl-window 2.4.6 pins
+# numpy<2, which is incompatible with the numpy 2.x this repo uses. Install
+# them only if you need the viewers/demo, via requirements-viewer.txt with
+# --no-deps. The pipeline does not import them.
 numpy==2.2.6
 opencv-python
 decord
-pyrender
 scikit-image
 smplx==0.1.28
 yacs
@@ -28,16 +35,12 @@ torch-scatter==2.1.2
 evo
 pytorch-minimize
 mmengine==0.10.4
-HTML4Vision
 plyfile
-aitviewer
 easydict
 loguru
 dill
 lapx
 # chumpy@git+https://github.com/mattloper/chumpy
-moderngl-window==2.4.6
-gradio
 
 ## analyze:
 zarr
