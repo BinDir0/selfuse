@@ -87,10 +87,10 @@ wheel, reinstall the matching PyG wheel for your local CUDA/PyTorch pair.
 conda create -n any4d python=3.12 -y
 conda activate any4d
 
-# Install the PyTorch wheel appropriate for this machine. cu121 is the tested
-# default for this repo; use the official PyTorch selector if your driver stack
-# needs a different CUDA runtime.
-pip install torch==2.6.* torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Any4D pins torch~=2.6.0 (see thirdparty/Any4D/pyproject.toml). torch 2.6
+# wheels are NOT published on the cu121 index — use cu124 (tested default) or
+# cu126. Pick the CUDA runtime your driver stack supports.
+pip install torch==2.6.* torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 cd thirdparty/Any4D
 pip install -e .
