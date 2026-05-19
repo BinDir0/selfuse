@@ -23,8 +23,8 @@ def generate_launch_description():
     
     serial_number_arg = DeclareLaunchArgument(
         'serial_number',
-        default_value='234322307484',
-        description='相机序列号，留空则使用默认设备'
+        default_value='',
+        description='相机序列号，留空则使用默认设备（写死序列号会导致换机/换相机后报 No device connected）'
     )
     
     frequency_arg = DeclareLaunchArgument(
