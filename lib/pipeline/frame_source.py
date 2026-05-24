@@ -267,6 +267,56 @@ class ShardVideoFrameSource(BaseFrameSource):
                 pass
 
 
+class CachedFrameSource(BaseFrameSource):
+    """Thread-safe LRU cache wrapper around any BaseFrameSource.
+
+    Motion inference revisits the same frames across overlapping chunks, so an
+    in-memory cache of recently decoded frames avoids repeated JPEG decode / tar
+    reads. ``get_frame`` may be called concurrently by the inference prefetch
+    thread pool, so the cache is guarded by a lock. Cache keys include the
+    ``rgb`` flag since BGR and RGB decodes differ.
+    """
+
+    def __init__(self, inner: BaseFrameSource, max_items: int = 128):
+        self.inner = inner
+        self.max_items = max(0, int(max_items))
+        self._cache = OrderedDict()  # (index, rgb) -> frame
+        self._lock = threading.Lock()
+
+    def __len__(self):
+        return len(self.inner)
+
+    @property
+    def image_paths(self):
+        # Preserve the fast paths in any4d (_direct_frame_path) and FrameDataset
+        # that look up image_paths via getattr on the source.
+        return getattr(self.inner, "image_paths", None)
+
+    def get_frame(self, index: int, rgb: bool = False):
+        if self.max_items <= 0:
+            return self.inner.get_frame(index, rgb=rgb)
+        key = (int(index), bool(rgb))
+        with self._lock:
+            frame = self._cache.get(key)
+            if frame is not None:
+                self._cache.move_to_end(key)
+                return frame
+        # Decode outside the lock so concurrent callers do not serialize on IO.
+        frame = self.inner.get_frame(index, rgb=rgb)
+        with self._lock:
+            self._cache[key] = frame
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.max_items:
+                self._cache.popitem(last=False)
+        return frame
+
+    def get_frame_bytes(self, index: int):
+        return self.inner.get_frame_bytes(index)
+
+    def get_size(self):
+        return self.inner.get_size()
+
+
 class FrameDataset(torch.utils.data.Dataset):
     """PyTorch Dataset wrapper for parallel frame loading via DataLoader.
 
