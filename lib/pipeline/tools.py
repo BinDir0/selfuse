@@ -44,11 +44,27 @@ def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: i
     # overlaps loading batch N+1 while YOLO runs on batch N.
     prefetch_q = queue.Queue(maxsize=2)
     prefetch_error = []
+    stop_event = threading.Event()
+
+    def _put_interruptible(item) -> bool:
+        # Park on a full queue only in short slices so that a consumer which
+        # stops early (generator .close() or an exception in the loop body) can
+        # signal us to bail. Blocking forever on put() while the consumer has
+        # already moved on to join() is the classic producer/consumer deadlock.
+        while not stop_event.is_set():
+            try:
+                prefetch_q.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _load_batches():
         with ThreadPoolExecutor(max_workers=effective_io_workers) as pool:
             try:
                 for start_idx, end_idx in batch_ranges:
+                    if stop_event.is_set():
+                        break
                     batch_indices = list(range(start_idx, end_idx))
                     batch_frames = list(
                         pool.map(
@@ -57,11 +73,15 @@ def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: i
                             chunksize=4,
                         )
                     )
-                    prefetch_q.put((batch_indices, batch_frames))
+                    if not _put_interruptible((batch_indices, batch_frames)):
+                        break
             except Exception as error:
                 prefetch_error.append(error)
             finally:
-                prefetch_q.put(None)
+                try:
+                    prefetch_q.put(None, timeout=0.5)
+                except queue.Full:
+                    pass
 
     loader_thread = threading.Thread(target=_load_batches, daemon=True)
     loader_thread.start()
@@ -78,6 +98,15 @@ def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: i
             yield item
     finally:
         progress.close()
+        # Tell the loader to stop and drain the queue so a loader parked on a
+        # full put() unblocks; otherwise join() here deadlocks (and would mask
+        # any real exception raised by the consumer, e.g. in YOLO.predict()).
+        stop_event.set()
+        while loader_thread.is_alive():
+            try:
+                prefetch_q.get(timeout=0.1)
+            except queue.Empty:
+                pass
         loader_thread.join()
 
 

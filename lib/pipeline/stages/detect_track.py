@@ -1,7 +1,9 @@
 import argparse
-import numpy as np
+import os
 import sys
 from pathlib import Path
+
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
