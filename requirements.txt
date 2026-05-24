@@ -2,11 +2,12 @@
 # (prepare / infer / filter / build / validate) and batch inference.
 #
 # Optional visualization/demo packages (aitviewer, moderngl-window, pyrender,
-# gradio, HTML4Vision) are NOT listed here: moderngl-window 2.4.6 pins
-# numpy<2, which is incompatible with the numpy 2.x this repo uses. Install
-# them only if you need the viewers/demo, via requirements-viewer.txt with
-# --no-deps. The pipeline does not import them.
-numpy==2.2.6
+# gradio, HTML4Vision) are NOT listed here. Install them only if you need the
+# viewers/demo, via requirements-viewer.txt. The pipeline does not import them.
+#
+# numpy is pinned <2: numpy 2.x breaks ABI compatibility with the torch build
+# used here (and several deps). 1.26.4 is the last 1.x release.
+numpy==1.26.4
 opencv-python
 decord
 scikit-image

@@ -6,7 +6,7 @@
 # This file intentionally does not include the repo's full training/inference
 # stack, so it can live in a separate viewer environment.
 
-numpy==2.2.6
+numpy==1.26.4
 opencv-python
 joblib
 tqdm
