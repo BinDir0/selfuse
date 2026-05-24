@@ -314,6 +314,7 @@ def _normalize_single_video_pipeline_config(raw: dict, *, base_dir: Path | None)
     infer_cfg["common"] = common_infer
     slam_infer = _as_dict(infer_cfg.get("slam"))
     slam_infer.setdefault("depth_backend", "any4d")
+    slam_infer.setdefault("slam_backend", "dpvo")
     infer_cfg["slam"] = slam_infer
 
     build_cfg.setdefault("require_annotation", False)
