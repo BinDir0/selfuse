@@ -103,11 +103,17 @@ def _resolve_stage3_tmp_root(args) -> str:
         getattr(args, "stage3_tmp_root", None)
         or os.environ.get("HAWOR_STAGE3_TMP_ROOT")
         or os.environ.get("HAWOR_BATCH_TMPDIR")
-        or "/DATA/guantianrui/tmp"
     )
+    if not tmp_root:
+        raise ValueError(
+            "Stage3 (Any4D SLAM) temporary workspace root is not configured. "
+            "Frame materialization can write many GB, so this is never defaulted "
+            "and must point at a large-capacity disk. Set one of (highest priority "
+            "first): --stage3_tmp_root, $HAWOR_STAGE3_TMP_ROOT, or $HAWOR_BATCH_TMPDIR, "
+            "e.g. `export HAWOR_BATCH_TMPDIR=/efs-exp/<user>/tmp`."
+        )
     tmp_root = os.path.abspath(os.path.expanduser(tmp_root))
-    if not os.path.isdir(tmp_root):
-        raise FileNotFoundError(f"Stage3 tmp root does not exist: {tmp_root}")
+    os.makedirs(tmp_root, exist_ok=True)
     if not os.access(tmp_root, os.W_OK | os.X_OK):
         raise PermissionError(f"Stage3 tmp root is not writable: {tmp_root}")
     return tmp_root

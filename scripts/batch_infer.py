@@ -26,16 +26,18 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*pkg_resources.*")
 warnings.filterwarnings("ignore", message=".*timm.models.layers.*")
 
+# Redirect process-level temp files only when HAWOR_BATCH_TMPDIR is set. Never
+# fall back to the repo dir (fills the project disk / pollutes the worktree); an
+# unset value leaves the system default (e.g. /tmp) in place. Stage3's large
+# frame writes require an explicit tmp root and fail loudly if it is missing.
 _env_tmp = os.environ.get("HAWOR_BATCH_TMPDIR")
 if _env_tmp:
     SHARED_TMP_DIR = Path(_env_tmp).expanduser().resolve()
-else:
-    SHARED_TMP_DIR = (PROJECT_ROOT / ".tmp").resolve()
-SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
-os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
-os.environ["TEMP"] = str(SHARED_TMP_DIR)
-os.environ["TMP"] = str(SHARED_TMP_DIR)
-tempfile.tempdir = str(SHARED_TMP_DIR)
+    SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
+    os.environ["TEMP"] = str(SHARED_TMP_DIR)
+    os.environ["TMP"] = str(SHARED_TMP_DIR)
+    tempfile.tempdir = str(SHARED_TMP_DIR)
 
 
 def get_parser():

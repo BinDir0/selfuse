@@ -25,18 +25,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Temp dir: set HAWOR_BATCH_TMPDIR to override; default is repo-local `.tmp`
+# Temp dir: redirect process-level temp files only when HAWOR_BATCH_TMPDIR is set.
+# Never fall back to the repo dir; an unset value leaves the system default in place.
 # IMPORTANT: Set this AFTER importing torch to avoid library loading issues
 _env_tmp = os.environ.get("HAWOR_BATCH_TMPDIR")
 if _env_tmp:
     SHARED_TMP_DIR = Path(_env_tmp).expanduser().resolve()
-else:
-    SHARED_TMP_DIR = (PROJECT_ROOT / ".tmp").resolve()
-SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
-os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
-os.environ["TEMP"] = str(SHARED_TMP_DIR)
-os.environ["TMP"] = str(SHARED_TMP_DIR)
-tempfile.tempdir = str(SHARED_TMP_DIR)
+    SHARED_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(SHARED_TMP_DIR)
+    os.environ["TEMP"] = str(SHARED_TMP_DIR)
+    os.environ["TMP"] = str(SHARED_TMP_DIR)
+    tempfile.tempdir = str(SHARED_TMP_DIR)
 
 # Suppress verbose output from stage scripts
 os.environ["HAWOR_QUIET"] = "1"
