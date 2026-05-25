@@ -43,7 +43,36 @@ names automatically:
 - `any4d`: SLAM/depth stage when Any4D dense depth is enabled
 
 Keeping Any4D separate avoids the Torch/CUDA/dependency conflicts that tend to
-show up when HaWoR and Any4D are forced into one environment.
+show up when HaWoR and Any4D are forced into one environment (HaWoR pins torch
+2.5/cu121, Any4D pins torch 2.6/cu124).
+
+### Quick install (recommended)
+
+`tools/ops/setup_env.sh` builds either env end to end — torch, requirements,
+the build-isolated extras, the Eigen fetch, and the DPVO/DROID source builds.
+It is idempotent, so re-run it to resume a half-finished install.
+
+```bash
+# DPVO/DROID compile from source — point CUDA_HOME at your toolkit first
+export CUDA_HOME=/usr/local/cuda-12.4
+
+bash tools/ops/setup_env.sh both    # or: hawor | any4d
+```
+
+To run **any4d + dpvo** you only need the `any4d` env:
+
+```bash
+bash tools/ops/setup_env.sh any4d
+```
+
+Override the CUDA wheel index per env if your driver stack differs, e.g.
+`HAWOR_CUDA=cu118 ANY4D_CUDA=cu126 bash tools/ops/setup_env.sh both`.
+
+After install, fetch checkpoints (below), set the runtime exports (below), and
+verify with `bash tools/ops/validate_setup.sh`.
+
+<details>
+<summary><b>Manual install</b> — the exact steps the script runs, if you prefer to do them by hand</summary>
 
 ### 1. HaWoR environment
 
@@ -102,9 +131,14 @@ cd thirdparty/Any4D
 pip install -e .
 cd ../..
 
-# The SLAM subprocess still launches this repo's batch_infer.py, so the Any4D
-# env also needs pipeline-control, frame/scale, and DPVO dependencies.
-pip install joblib tqdm natsort opencv-python-headless pycocotools evo pytorch-minimize
+# The SLAM subprocess launches this repo's batch_infer.py, which imports HaWoR
+# pipeline code (smplx, pytorch-lightning, ultralytics, ...). Install the full
+# pipeline requirements -- a minimal subset leaves the run failing on missing
+# imports. Skip torch-scatter (no pinned torch-2.6 wheel) and opencv-python
+# (Any4D already pins the headless build).
+grep -vE '^(torch-scatter|opencv-python)' requirements.txt | pip install -r /dev/stdin
+pip install pytorch-lightning==2.2.4 --no-deps
+pip install lightning-utilities torchmetrics==1.4.0
 
 # DPVO needs Eigen 3.4.0 at thirdparty/DPVO/thirdparty/eigen-3.4.0 (see step 1).
 # Skip the fetch if you already populated it in the hawor env setup.
@@ -114,6 +148,8 @@ pip install joblib tqdm natsort opencv-python-headless pycocotools evo pytorch-m
        && unzip -q -o thirdparty/eigen-3.4.0.zip -d thirdparty/ ) )
 cd thirdparty/DPVO && pip install . --no-build-isolation && cd ../..
 ```
+
+</details>
 
 Install the Any4D checkpoint:
 
