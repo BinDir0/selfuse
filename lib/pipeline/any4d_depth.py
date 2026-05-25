@@ -401,16 +401,31 @@ def build_any4d_views(frame_source, frame_indices, runner=None, *, any4d_repo_ro
     return _load_any4d_views(load_images, image_paths, runner["resolution_set"])
 
 
-def build_any4d_chunk_specs(frame_indices, any4d_batch_size: int):
+def build_any4d_chunk_specs(frame_indices, any4d_batch_size: int, overlap: int = 0):
+    """Split frames into Any4D inference chunks.
+
+    ``overlap`` > 0 makes consecutive chunks share their last/first ``overlap`` frames.
+    Those shared frames are the SAME frame predicted by both chunks, so the ratio of the
+    two predictions there is purely the per-chunk metric-scale ratio s̃_a/s̃_b (no camera
+    motion, no dynamic-object confound) — used downstream to stitch the batches together.
+    """
     frame_indices = [int(frame_idx) for frame_idx in frame_indices]
     if not frame_indices:
         raise ValueError("[Any4D] frame_indices is empty")
     if int(any4d_batch_size) < 1:
         raise ValueError(f"[Any4D] any4d_batch_size must be >= 1, got {any4d_batch_size}")
+    B = int(any4d_batch_size)
+    ov = max(0, int(overlap))
+    if ov >= B:
+        raise ValueError(f"[Any4D] overlap ({ov}) must be < any4d_batch_size ({B})")
+    stride = B - ov
+    n = len(frame_indices)
 
     batch_specs = []
-    for batch_start in range(0, len(frame_indices), int(any4d_batch_size)):
-        batch_indices = frame_indices[batch_start : batch_start + int(any4d_batch_size)]
+    for batch_start in range(0, n, stride):
+        batch_indices = frame_indices[batch_start : batch_start + B]
+        if not batch_indices:
+            break
         ref_frame_idx = int(batch_indices[len(batch_indices) // 2])
         batch_specs.append(
             {
@@ -419,6 +434,8 @@ def build_any4d_chunk_specs(frame_indices, any4d_batch_size: int):
                 "ref_frame_idx": ref_frame_idx,
             }
         )
+        if batch_start + B >= n:  # last chunk already reaches the end; avoid a tiny dup tail
+            break
     return batch_specs
 
 
@@ -432,8 +449,9 @@ def iter_any4d_depth_sequence_batches(
     progress_disable: bool = False,
     timing_callback=None,
     prediction_view_offset: int = 2,
+    overlap: int = 0,
 ):
-    batch_specs = build_any4d_chunk_specs(frame_indices, any4d_batch_size)
+    batch_specs = build_any4d_chunk_specs(frame_indices, any4d_batch_size, overlap=overlap)
 
     def _record(name: str, elapsed: float) -> None:
         if timing_callback is not None:

@@ -25,7 +25,7 @@ from lib.pipeline.any4d_depth import (
     iter_any4d_depth_sequence_batches,
 )
 from lib.pipeline.errors import CorruptStageDataError
-from lib.pipeline.depth_stitch import stitch_dense_depth, stitch_enabled
+from lib.pipeline.depth_stitch import assemble_overlapping_chunks, overlap_frames, stitch_dense_depth, stitch_enabled
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
@@ -518,6 +518,11 @@ def _predict_any4d_depths_for_frames(
             key = f"3_any4d_{name}"
         timing[key] = timing.get(key, 0.0) + float(elapsed)
 
+    # Overlap > 0 runs chunks with shared frames so they can be metric-scale stitched
+    # (motion-free ratio on the shared frames). overlap == 0 keeps exact prior behavior.
+    overlap = overlap_frames()
+    overlap_chunks = [] if overlap > 0 else None
+
     for batch_result in iter_any4d_depth_sequence_batches(
         frame_ids.tolist(),
         any4d_batch_size=any4d_batch_size,
@@ -527,17 +532,36 @@ def _predict_any4d_depths_for_frames(
         progress_disable=QUIET_MODE,
         timing_callback=_record_any4d_timing,
         prediction_view_offset=2,
+        overlap=overlap,
     ):
         batch_start = int(batch_result["batch_start"])
         batch_indices = list(batch_result["batch_indices"])
         batch_size = len(batch_indices)
         t_resize = time.time()
-        pred_depths[batch_start : batch_start + batch_size] = _resize_depths(
-            np.asarray(batch_result["depths"], dtype=np.float32),
-            output_hw,
-        )
+        resized = _resize_depths(np.asarray(batch_result["depths"], dtype=np.float32), output_hw)
+        if overlap_chunks is not None:
+            overlap_chunks.append((batch_start, resized))
+        else:
+            pred_depths[batch_start : batch_start + batch_size] = resized
         if timing is not None:
             timing["3e_any4d_resize"] = timing.get("3e_any4d_resize", 0.0) + (time.time() - t_resize)
+
+    if overlap_chunks is not None:
+        t_stitch = time.time()
+        pred_depths, stitch_cf, stitch_info = assemble_overlapping_chunks(
+            overlap_chunks, len(frame_ids), tuple(output_hw),
+        )
+        if timing is not None:
+            timing["3e_any4d_overlap_stitch"] = time.time() - t_stitch
+        vprint(f"[any4d-overlap-stitch] overlap={overlap} {stitch_info}")
+        try:
+            np.savez(
+                os.path.join(seq_folder, "SLAM", f"any4d_stitch_cf_{start_idx}_{end_idx}.npz"),
+                cf=np.asarray(stitch_cf, np.float32), overlap=int(overlap),
+                n_chunks=int(stitch_info.get("n_chunks", 0)), n_solved=int(stitch_info.get("n_solved", 0)),
+            )
+        except Exception:
+            pass
 
     os.makedirs(os.path.join(seq_folder, "SLAM"), exist_ok=True)
     t_cache_save = time.time()
@@ -807,7 +831,8 @@ def hawor_slam(
                 depth_frame_indices = frame_ids.astype(np.int64)
                 # Phase 1: remove Any4D per-batch metric-scale steps before saving / scale-est
                 # (gated; default off). Cheap post-process: flow-matched boundary ratios.
-                if stitch_enabled():
+                # Skip if overlap-stitch already handled it inside the prediction loop.
+                if stitch_enabled() and overlap_frames() == 0:
                     import cv2 as _cv2
 
                     def _gray(fid, _src=stage3_frame_source):

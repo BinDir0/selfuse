@@ -32,8 +32,20 @@ except Exception:  # pragma: no cover
 
 
 def stitch_enabled() -> bool:
-    """Gated OFF by default; enable with HAWOR_ANY4D_STITCH=1."""
+    """Post-hoc flow-based stitch (no Any4D re-run). Gated OFF; enable HAWOR_ANY4D_STITCH=1."""
     return str(os.environ.get("HAWOR_ANY4D_STITCH", "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def overlap_frames() -> int:
+    """Frames of overlap between consecutive Any4D chunks (HAWOR_ANY4D_OVERLAP, default 0).
+
+    > 0 enables the rigorous overlap-stitch: shared frames are the SAME frame predicted by
+    two chunks, giving a motion-free per-chunk scale ratio. A small value (e.g. 4) suffices.
+    """
+    try:
+        return max(0, int(os.environ.get("HAWOR_ANY4D_OVERLAP", "0")))
+    except ValueError:
+        return 0
 
 
 def _resize(arr: np.ndarray, hw, nearest: bool = False) -> np.ndarray:
@@ -141,6 +153,71 @@ def compute_batch_correction(
     info.update(applied=True, n_boundaries=len(boundaries), n_solved=n_solved,
                 cf_min=float(cf.min()), cf_max=float(cf.max()))
     return cf.astype(np.float32), info
+
+
+def assemble_overlapping_chunks(chunks, n_frames, hw, *, min_pixels=500):
+    """Stitch + assemble Any4D chunks that were run with frame OVERLAP.
+
+    ``chunks`` : list of (start_pos, depths[m,H,W]) — m frames per chunk, possibly
+                 overlapping the next chunk; depths already at output resolution.
+    On the overlap frames the two chunks predict the SAME frame, so the per-pixel
+    median ratio depth_a/depth_b is exactly s̃_a/s̃_b (zero motion, no dynamic confound).
+    Chain those ratios into a per-chunk correction, re-anchor the global median, then
+    assemble one depth per frame from the chunk whose center is closest (least edge bias).
+
+    Returns (dense[n,H,W] float32, cf_per_frame[n] float32, info).
+    """
+    H, W = hw
+    info = {"applied": False, "reason": "", "n_chunks": len(chunks), "n_solved": 0}
+    chunks = sorted(chunks, key=lambda c: int(c[0]))
+    K = len(chunks)
+    if K == 0:
+        info["reason"] = "no chunks"
+        return np.full((n_frames, H, W), np.nan, np.float32), np.ones(n_frames, np.float32), info
+    cf_chunk = np.ones(K, np.float64)
+    n_solved = 0
+    for k in range(1, K):
+        a_start, a_d = int(chunks[k - 1][0]), chunks[k - 1][1]
+        b_start, b_d = int(chunks[k][0]), chunks[k][1]
+        ov_lo, ov_hi = b_start, min(a_start + a_d.shape[0], b_start + b_d.shape[0])
+        ratios = []
+        for p in range(ov_lo, ov_hi):
+            da, db = a_d[p - a_start], b_d[p - b_start]
+            v = np.isfinite(da) & (da > 0.05) & np.isfinite(db) & (db > 0.05)
+            if int(v.sum()) >= min_pixels:
+                ratios.append(float(np.median(da[v] / db[v])))
+        if ratios:
+            cf_chunk[k] = cf_chunk[k - 1] * float(np.median(ratios))
+            n_solved += 1
+        else:
+            cf_chunk[k] = cf_chunk[k - 1]  # no usable overlap -> carry forward
+
+    centers = [int(c[0]) + c[1].shape[0] / 2.0 for c in chunks]
+    out = np.full((n_frames, H, W), np.nan, np.float32)
+    owner = np.full(n_frames, -1, np.int32)
+    for k, (s, d) in enumerate(chunks):
+        s = int(s)
+        for off in range(d.shape[0]):
+            p = s + off
+            if p >= n_frames:
+                break
+            if owner[p] < 0 or abs(p - centers[k]) < abs(p - centers[owner[p]]):
+                out[p] = d[off]
+                owner[p] = k
+    cf_per_frame = np.where(owner >= 0, cf_chunk[np.clip(owner, 0, K - 1)], 1.0).astype(np.float64)
+
+    # re-anchor global median (memory-safe per-frame medians); this removes STEPS, not level
+    pfm = np.array([np.nanmedian(out[t]) for t in range(n_frames)], np.float64)
+    fin = np.isfinite(pfm)
+    if fin.any():
+        g_raw = float(np.median(pfm[fin]))
+        g_cor = float(np.median((pfm * cf_per_frame)[fin]))
+        if np.isfinite(g_raw) and np.isfinite(g_cor) and g_cor > 0:
+            cf_per_frame *= g_raw / g_cor
+
+    out *= cf_per_frame[:, None, None].astype(out.dtype)
+    info.update(applied=True, n_solved=n_solved, cf_min=float(cf_per_frame.min()), cf_max=float(cf_per_frame.max()))
+    return out, cf_per_frame.astype(np.float32), info
 
 
 def stitch_dense_depth(depths, frame_indices, batch_size, get_gray, get_mask=None, *, min_pixels=200, in_place=True):
