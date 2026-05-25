@@ -25,6 +25,7 @@ from lib.pipeline.any4d_depth import (
     iter_any4d_depth_sequence_batches,
 )
 from lib.pipeline.errors import CorruptStageDataError
+from lib.pipeline.depth_stitch import stitch_dense_depth, stitch_enabled
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
@@ -804,6 +805,39 @@ def hawor_slam(
                     timing=timing,
                 )
                 depth_frame_indices = frame_ids.astype(np.int64)
+                # Phase 1: remove Any4D per-batch metric-scale steps before saving / scale-est
+                # (gated; default off). Cheap post-process: flow-matched boundary ratios.
+                if stitch_enabled():
+                    import cv2 as _cv2
+
+                    def _gray(fid, _src=stage3_frame_source):
+                        img = _src.get_frame(int(fid), rgb=False)
+                        if img is None:
+                            return None
+                        return _cv2.cvtColor(img, _cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+
+                    def _mask(fid, _m=masks):
+                        try:
+                            mk = _m[int(fid)]
+                            return mk.cpu().numpy() if hasattr(mk, "cpu") else np.asarray(mk)
+                        except Exception:
+                            return None
+
+                    t_stitch = time.time()
+                    depth_predictions, _stitch_cf, _stitch_info = stitch_dense_depth(
+                        depth_predictions, depth_frame_indices, int(any4d_batch_size), _gray, _mask,
+                    )
+                    timing["3g_any4d_stitch"] = time.time() - t_stitch
+                    vprint(f"[any4d-stitch] {_stitch_info}")
+                    try:
+                        np.savez(
+                            os.path.join(seq_folder, "SLAM", f"any4d_stitch_cf_{start_idx}_{end_idx}.npz"),
+                            cf=np.asarray(_stitch_cf, np.float32),
+                            n_boundaries=int(_stitch_info.get("n_boundaries", 0)),
+                            n_solved=int(_stitch_info.get("n_solved", 0)),
+                        )
+                    except Exception:
+                        pass
                 dense_cache_path = _dense_depth_cache_path(seq_folder, start_idx, end_idx)
                 t_dense_save = time.time()
                 _save_dense_depth_uint16_npz(dense_cache_path, depth_frame_indices, depth_predictions)

@@ -1,0 +1,157 @@
+"""Stitch Any4D per-batch metric-scale steps out of a dense depth video.
+
+Any4D predicts ONE metric scale ``s̃`` per inference call (see any4d.pdf: Scale MLP,
+exponentiated; per-view depth is scale-normalized and consistent WITHIN a call). The
+dense depth is produced in batches of ``HAWOR_ANY4D_BATCH_SIZE`` frames, each with its
+own ``s̃`` that is NOT renormalized across batches, so the absolute scale jumps at batch
+boundaries (frame positions B, 2B, ...). Offline analysis (scripts/analyze_alignment_methods.py)
+showed this defect is PURELY a per-batch scalar: after a single median scale alignment the
+cross-boundary structure already agrees (δ<1.25 ≈ 1.0), so removing one scalar per batch is
+sufficient and well-posed.
+
+This module removes the steps cheaply and WITHOUT re-running Any4D: at each batch boundary
+the two straddling frames are 1 frame apart (same structure, only ``s̃`` differs), so the
+optical-flow-matched, static-pixel median of ``depth[b-1] / warp(depth[b])`` is exactly the
+scale ratio ``s̃_{b-1}/s̃_b``. We chain these ratios into a per-batch correction and then
+re-anchor the global median so the overall metric level is unchanged (absolute scale is set
+elsewhere, by the camera/hand layers).
+
+Cost is ~one optical-flow per batch boundary (negligible next to Any4D inference).
+"""
+from __future__ import annotations
+
+import os
+from typing import Callable, Optional
+
+import numpy as np
+
+try:
+    import cv2
+except Exception:  # pragma: no cover
+    cv2 = None
+
+
+def stitch_enabled() -> bool:
+    """Gated OFF by default; enable with HAWOR_ANY4D_STITCH=1."""
+    return str(os.environ.get("HAWOR_ANY4D_STITCH", "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resize(arr: np.ndarray, hw, nearest: bool = False) -> np.ndarray:
+    h, w = hw
+    if arr.shape[:2] == (h, w):
+        return arr
+    interp = cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR
+    return cv2.resize(arr, (w, h), interpolation=interp)
+
+
+def _boundary_ratio(depthA, depthB, grayA, grayB, mask_bool, *, max_flow_frac=0.15, min_pixels=200):
+    """Median depthA / warp(depthB) over flow-matched static valid pixels = s̃_A / s̃_B."""
+    if grayA is None or grayB is None:
+        return np.nan
+    flow = cv2.calcOpticalFlowFarneback(grayA, grayB, None, 0.5, 3, 21, 3, 5, 1.2, 0)
+    h, w = grayA.shape
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    mapx, mapy = xs + flow[..., 0], ys + flow[..., 1]
+    dBw = cv2.remap(depthB, mapx, mapy, interpolation=cv2.INTER_LINEAR, borderValue=np.nan)
+    valid = (
+        (mapx >= 0) & (mapx < w) & (mapy >= 0) & (mapy < h)
+        & (np.hypot(flow[..., 0], flow[..., 1]) < max_flow_frac * w)
+        & (~mask_bool)
+        & np.isfinite(depthA) & (depthA > 0.05)
+        & np.isfinite(dBw) & (dBw > 0.05)
+    )
+    if int(valid.sum()) < min_pixels:
+        return np.nan
+    return float(np.median(depthA[valid] / dBw[valid]))
+
+
+def compute_batch_correction(
+    depths: np.ndarray,
+    frame_indices,
+    batch_size: int,
+    get_gray: Callable[[int], Optional[np.ndarray]],
+    get_mask: Optional[Callable[[int], Optional[np.ndarray]]] = None,
+    *,
+    min_pixels: int = 200,
+):
+    """Per-frame multiplicative correction ``cf`` that removes per-batch scale steps.
+
+    ``depths``        : (n, H, W) dense metric depth in prediction order.
+    ``frame_indices`` : (n,) actual frame ids parallel to ``depths`` (for get_gray/get_mask).
+    ``batch_size``    : Any4D inference batch size (boundaries at positions B, 2B, ...).
+    ``get_gray(fid)`` : returns a grayscale image (any resolution; resized to depth HxW here).
+    ``get_mask(fid)`` : optional bool/uint hand mask to exclude (resized, nearest).
+
+    Returns (cf[n] float32, info dict). cf is piecewise-constant per batch, globally
+    re-anchored so median(depths*cf) == median(depths). Fail-open: cf=1 on any problem.
+    """
+    info = {"applied": False, "reason": "", "n_boundaries": 0, "n_solved": 0}
+    if cv2 is None:
+        info["reason"] = "cv2 unavailable"
+        return np.ones(depths.shape[0], np.float32), info
+    n, H, W = depths.shape
+    if n < batch_size + 1 or batch_size < 1:
+        info["reason"] = "too few frames for any boundary"
+        return np.ones(n, np.float32), info
+
+    fids = np.asarray(frame_indices).reshape(-1)
+    boundaries = list(range(batch_size, n, batch_size))  # prediction-order positions
+    edges = [0] + boundaries + [n]
+    nb = len(boundaries) + 1
+    cf_b = np.ones(nb, np.float64)
+
+    gray_cache: dict[int, Optional[np.ndarray]] = {}
+
+    def gray(pos):
+        fid = int(fids[pos])
+        if fid not in gray_cache:
+            g = get_gray(fid)
+            gray_cache[fid] = _resize(g, (H, W)) if g is not None else None
+        return gray_cache[fid]
+
+    n_solved = 0
+    for k, b in enumerate(boundaries):
+        mask_bool = np.zeros((H, W), bool)
+        if get_mask is not None:
+            m = get_mask(int(fids[b - 1]))
+            if m is not None:
+                mask_bool = _resize(np.asarray(m).astype(np.uint8), (H, W), nearest=True) > 0
+        ratio = _boundary_ratio(depths[b - 1], depths[b], gray(b - 1), gray(b), mask_bool, min_pixels=min_pixels)
+        if np.isfinite(ratio) and ratio > 0:
+            cf_b[k + 1] = cf_b[k] * ratio
+            n_solved += 1
+        else:
+            cf_b[k + 1] = cf_b[k]  # carry forward on a failed boundary
+
+    cf = np.ones(n, np.float64)
+    for k in range(nb):
+        cf[edges[k]:edges[k + 1]] = cf_b[k]
+
+    # Re-anchor: hold the global median fixed (this layer removes STEPS, not absolute level).
+    # Use per-frame medians (memory-safe: the full depth array can be GBs; never materialize
+    # depths*cf just to take a median).
+    per_frame_med = np.array([np.nanmedian(depths[t]) for t in range(n)], np.float64)
+    finite = np.isfinite(per_frame_med)
+    if finite.any():
+        g_raw = float(np.median(per_frame_med[finite]))
+        g_cor = float(np.median((per_frame_med * cf)[finite]))
+        if np.isfinite(g_raw) and np.isfinite(g_cor) and g_cor > 0:
+            cf *= g_raw / g_cor
+
+    info.update(applied=True, n_boundaries=len(boundaries), n_solved=n_solved,
+                cf_min=float(cf.min()), cf_max=float(cf.max()))
+    return cf.astype(np.float32), info
+
+
+def stitch_dense_depth(depths, frame_indices, batch_size, get_gray, get_mask=None, *, min_pixels=200, in_place=True):
+    """Convenience wrapper: returns (stitched_depths, cf, info).
+
+    Applies the correction IN PLACE by default (the dense depth array can be GBs; avoid a
+    full duplicate). Pass in_place=False to keep the input untouched.
+    """
+    cf, info = compute_batch_correction(depths, frame_indices, batch_size, get_gray, get_mask, min_pixels=min_pixels)
+    if not info.get("applied"):
+        return depths, cf, info
+    out = depths if in_place else depths.copy()
+    out *= cf[:, None, None].astype(out.dtype)
+    return out, cf, info
