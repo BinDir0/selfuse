@@ -175,42 +175,56 @@ def _gray_at(frames_dir, idx, hw):
     return resize_to(img, hw)
 
 
-def flow_warp_tc_pair(depthA, depthB, gA, gB, mask_hw_bool):
-    """Scale-invariant relative depth disagreement after warping B->A by optical flow.
-    Returns median over static valid pixels of |log(dA) - log(dB_warped)|."""
+def flow_warp_metrics_pair(depthA, depthB, gA, gB, mask_hw_bool):
+    """Warp depthB->A by optical flow; report depth-agreement in the Any4D video-depth
+    metric form (AbsRel, delta<1.25) over static valid pixels, used here as a no-GT
+    TEMPORAL consistency. Returns dict with:
+      absrel/delta            : NO per-pair scale align -> catches absolute scale STEPS.
+      absrel_si/delta_si      : median-scale aligned first (paper protocol) -> catches
+                                STRUCTURE error independent of the scale jump.
+    """
     if gA is None or gB is None:
-        return np.nan
+        return None
     flow = cv2.calcOpticalFlowFarneback(gA, gB, None, 0.5, 3, 21, 3, 5, 1.2, 0)
     h, w = gA.shape
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-    mapx = xs + flow[..., 0]
-    mapy = ys + flow[..., 1]
+    mapx, mapy = xs + flow[..., 0], ys + flow[..., 1]
     dB_w = cv2.remap(depthB, mapx, mapy, interpolation=cv2.INTER_LINEAR, borderValue=np.nan)
     inb = (mapx >= 0) & (mapx < w) & (mapy >= 0) & (mapy < h)
     fmag = np.hypot(flow[..., 0], flow[..., 1])
-    static = inb & (fmag < 0.15 * w) & (~mask_hw_bool)
-    valid = static & np.isfinite(depthA) & (depthA > 0.05) & np.isfinite(dB_w) & (dB_w > 0.05)
+    valid = inb & (fmag < 0.15 * w) & (~mask_hw_bool) \
+        & np.isfinite(depthA) & (depthA > 0.05) & np.isfinite(dB_w) & (dB_w > 0.05)
     if valid.sum() < 200:
-        return np.nan
-    rel = np.abs(np.log(depthA[valid]) - np.log(dB_w[valid]))
-    return float(np.median(rel))
+        return None
+    a, b = depthA[valid], dB_w[valid]
+
+    def _absrel_delta(pred, ref):
+        absrel = float(np.median(np.abs(pred - ref) / ref))
+        ratio = np.maximum(pred / ref, ref / pred)
+        return absrel, float(np.mean(ratio < 1.25))
+
+    absrel, delta = _absrel_delta(a, b)
+    k = float(np.median(b / a))                      # median scale align (Any4D protocol)
+    absrel_si, delta_si = _absrel_delta(a * k, b)
+    return dict(absrel=absrel, delta=delta, absrel_si=absrel_si, delta_si=delta_si)
 
 
-def measure_tc(depths, masks, frames_dir, pairs):
-    """Per-pair flow-warp TC (scale-invariant log-depth disagreement)."""
+def measure_flow_metrics(depths, masks, frames_dir, pairs):
     h, w = depths.shape[1:]
-    out = {}
-    gcache = {}
+    out, gcache = {}, {}
     def g(idx):
         if idx not in gcache:
             gcache[idx] = _gray_at(frames_dir, idx, (h, w))
         return gcache[idx]
     for (a, b) in pairs:
-        mk = np.zeros((h, w), bool)
-        if masks is not None:
-            mk = (resize_to(masks[a].astype(np.uint8), (h, w), nearest=True) > 0)
-        out[(a, b)] = flow_warp_tc_pair(depths[a], depths[b], g(a), g(b), mk)
+        mk = (resize_to(masks[a].astype(np.uint8), (h, w), nearest=True) > 0) if masks is not None else np.zeros((h, w), bool)
+        out[(a, b)] = flow_warp_metrics_pair(depths[a], depths[b], g(a), g(b), mk)
     return out
+
+
+def _agg(metrics, pairs, key):
+    vals = [metrics[p][key] for p in pairs if metrics.get(p) is not None]
+    return float(np.median(vals)) if vals else float("nan")
 
 
 # ----------------------------- main -----------------------------
@@ -264,28 +278,30 @@ def main():
           f"(global median held: {np.nanmedian(s_bg):.3f} -> {np.nanmedian(s_bg_st):.3f} m)")
     report["any4d_factor_stitched"] = bf_st["factor"]
 
-    # ---- OBJECTIVE METRIC A: flow-warp temporal consistency (boundary vs interior) ----
+    # ---- OBJECTIVE METRIC A: flow-warp temporal consistency in Any4D video-depth form ----
     tc_b = tc_b_st = tc_int = float("nan")
     if frames_dir is not None and cv2 is not None:
         bnd_pairs = [(b - 1, b) for b in bf["boundaries"] if 0 <= b - 1 and b < n]
         int_pairs = [(t, t + 1) for t in range(0, n - 1, args.tc_stride) if (t % B) not in (B - 1, 0)]
-        tc_raw = measure_tc(depths, masks, frames_dir, bnd_pairs + int_pairs)
-        # stitched depth = raw * cf (per frame); recompute TC on the SAME pairs
-        depths_st = depths * cf[:, None, None]
-        tc_sti = measure_tc(depths_st, masks, frames_dir, bnd_pairs)
-        bvals = np.array([tc_raw[p] for p in bnd_pairs if np.isfinite(tc_raw[p])])
-        ivals = np.array([tc_raw[p] for p in int_pairs if np.isfinite(tc_raw[p])])
-        bvals_st = np.array([tc_sti[p] for p in bnd_pairs if np.isfinite(tc_sti[p])])
-        tc_b = float(np.median(bvals)) if bvals.size else np.nan
-        tc_int = float(np.median(ivals)) if ivals.size else np.nan
-        tc_b_st = float(np.median(bvals_st)) if bvals_st.size else np.nan
-        print("\n[A] OBJECTIVE flow-warp temporal consistency (scale-inv log-depth disagreement; lower=better)")
-        print(f"    interior pairs (within batch) : {tc_int:.4f}")
-        print(f"    boundary pairs  RAW           : {tc_b:.4f}   (ratio to interior = {tc_b/tc_int:.2f})" if np.isfinite(tc_b) and tc_int else "")
-        print(f"    boundary pairs  STITCHED      : {tc_b_st:.4f}   (ratio to interior = {tc_b_st/tc_int:.2f})" if np.isfinite(tc_b_st) and tc_int else "")
-        report.update(tc_interior=tc_int, tc_boundary_raw=tc_b, tc_boundary_stitched=tc_b_st)
+        m_raw = measure_flow_metrics(depths, masks, frames_dir, bnd_pairs + int_pairs)
+        m_sti = measure_flow_metrics(depths * cf[:, None, None], masks, frames_dir, bnd_pairs)
+        print("\n[A] OBJECTIVE temporal consistency = Any4D video-depth metrics (AbsRel, δ<1.25) on flow-warped pairs")
+        print("    (NO per-pair scale align -> catches batch scale STEPS; δ higher=better, AbsRel lower=better)")
+        print(f"    {'group':<26}{'AbsRel↓':>9}{'δ<1.25↑':>10}")
+        print(f"    {'interior (within batch)':<26}{_agg(m_raw, int_pairs,'absrel'):>9.3f}{_agg(m_raw, int_pairs,'delta'):>10.3f}")
+        print(f"    {'boundary  RAW':<26}{_agg(m_raw, bnd_pairs,'absrel'):>9.3f}{_agg(m_raw, bnd_pairs,'delta'):>10.3f}")
+        print(f"    {'boundary  STITCHED':<26}{_agg(m_sti, bnd_pairs,'absrel'):>9.3f}{_agg(m_sti, bnd_pairs,'delta'):>10.3f}")
+        print("    -- scale-invariant (median-scaled first, Any4D protocol) -> isolates STRUCTURE error --")
+        print(f"    {'interior  (SI)':<26}{_agg(m_raw, int_pairs,'absrel_si'):>9.3f}{_agg(m_raw, int_pairs,'delta_si'):>10.3f}")
+        print(f"    {'boundary RAW (SI)':<26}{_agg(m_raw, bnd_pairs,'absrel_si'):>9.3f}{_agg(m_raw, bnd_pairs,'delta_si'):>10.3f}")
+        print("    => if boundary-SI ≈ interior but boundary-RAW is bad: the batch defect is PURELY a scale step.")
+        tc_int = _agg(m_raw, int_pairs, 'absrel'); tc_b = _agg(m_raw, bnd_pairs, 'absrel'); tc_b_st = _agg(m_sti, bnd_pairs, 'absrel')
+        report.update(absrel_interior=tc_int, absrel_boundary_raw=tc_b, absrel_boundary_stitched=tc_b_st,
+                      delta_interior=_agg(m_raw, int_pairs,'delta'), delta_boundary_raw=_agg(m_raw, bnd_pairs,'delta'),
+                      delta_boundary_stitched=_agg(m_sti, bnd_pairs,'delta'),
+                      absrel_boundary_raw_si=_agg(m_raw, bnd_pairs,'absrel_si'))
     else:
-        print("\n[A] flow-warp TC SKIPPED (no frames dir or no cv2)")
+        print("\n[A] flow-warp metrics SKIPPED (no frames dir or no cv2)")
 
     # ---- [3] hand vs depth global offset; check M1 leaves it ~unchanged (re-anchored) ----
     d_hand = np.full(n, np.nan, np.float32)
@@ -330,8 +346,8 @@ def main():
         if np.isfinite(tc_b):
             ax[1].bar(["interior", "boundary RAW", "boundary STITCHED"], [tc_int, tc_b, tc_b_st],
                       color=["#9ca3af", "#ef4444", "#16a34a"])
-            ax[1].set_title("[A] OBJECTIVE flow-warp temporal consistency (lower=better)")
-            ax[1].set_ylabel("scale-inv log-depth disagree")
+            ax[1].set_title("[A] OBJECTIVE temporal AbsRel (Any4D metric form; lower=better)")
+            ax[1].set_ylabel("AbsRel (flow-warp, no scale align)")
         ax[2].plot(t, r, color="#e11d48", lw=0.9, label=f"r=d_hand/z_wrist (offset {off:.2f})")
         ax[2].axhline(1.0, color="#6b7280", ls=":")
         ax[2].set_title("[3] hand vs depth global offset"); ax[2].set_xlabel("frame")
