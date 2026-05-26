@@ -154,6 +154,15 @@ def run_dpvo_slam(imagedir, masks, calib=None, stride=1, frame_indices=None):
         "HAWOR_DPVO_KEYFRAME_INDEX": "KEYFRAME_INDEX",
         "HAWOR_DPVO_KEYFRAME_THRESH": "KEYFRAME_THRESH",
         "HAWOR_DPVO_MIXED_PRECISION": "MIXED_PRECISION",
+        # Proximity (mid-term) loop closure = DPV-SLAM. Goes through the main BA; needs NO
+        # retrieval/DBoW2/ORBvoc, no rebuild, and leaves terminate()'s output contract intact
+        # (globally-corrected poses + patches/disps). Gated: default off (cfg defaults False).
+        # Classical (CLASSIC_LOOP_CLOSURE) is intentionally NOT exposed here — it needs heavy
+        # extra deps + an async PGO process; revisit only if proximity is insufficient.
+        "HAWOR_DPVO_LOOP_CLOSURE": "LOOP_CLOSURE",
+        "HAWOR_DPVO_MAX_EDGE_AGE": "MAX_EDGE_AGE",
+        "HAWOR_DPVO_GLOBAL_OPT_FREQ": "GLOBAL_OPT_FREQ",
+        "HAWOR_DPVO_BACKEND_THRESH": "BACKEND_THRESH",
     }
     for env_name, cfg_name in env_to_cfg.items():
         if env_name not in os.environ:
@@ -168,6 +177,10 @@ def run_dpvo_slam(imagedir, masks, calib=None, stride=1, frame_indices=None):
             setattr(cfg, cfg_name, int(raw))
         else:
             setattr(cfg, cfg_name, float(raw))
+
+    print(f"[dpvo] LOOP_CLOSURE={bool(cfg.LOOP_CLOSURE)} "
+          f"(MAX_EDGE_AGE={int(cfg.MAX_EDGE_AGE)}, GLOBAL_OPT_FREQ={int(cfg.GLOBAL_OPT_FREQ)}, "
+          f"BACKEND_THRESH={float(cfg.BACKEND_THRESH)})", flush=True)
 
     cfg.BUFFER_SIZE = _resolve_dpvo_buffer_size(
         int(cfg.BUFFER_SIZE),
