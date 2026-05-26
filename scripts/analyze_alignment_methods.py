@@ -227,6 +227,41 @@ def _agg(metrics, pairs, key):
     return float(np.median(vals)) if vals else float("nan")
 
 
+def cf_from_flow_boundaries(depths, masks, frames_dir, boundaries, n):
+    """Per-batch correction cf via PER-PIXEL co-visible ratio at each batch boundary.
+    The boundary frames (b-1, b) are 1 frame apart -> same structure, only s̃ differs;
+    flow-matched static-pixel median of depth[b-1]/depth_warp[b] = s̃_{b-1}/s̃_b. Chain.
+    This is the cheap post-hoc estimate of the per-batch scalar (no Any4D re-run)."""
+    h, w = depths.shape[1:]
+    nb = len(boundaries) + 1
+    cf_b = np.ones(nb)
+    gcache = {}
+    def g(i):
+        if i not in gcache:
+            gcache[i] = _gray_at(frames_dir, i, (h, w))
+        return gcache[i]
+    for k, b in enumerate(boundaries):
+        gA, gB = g(b - 1), g(b)
+        ratio = np.nan
+        if gA is not None and gB is not None:
+            flow = cv2.calcOpticalFlowFarneback(gA, gB, None, 0.5, 3, 21, 3, 5, 1.2, 0)
+            ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+            mapx, mapy = xs + flow[..., 0], ys + flow[..., 1]
+            dBw = cv2.remap(depths[b], mapx, mapy, interpolation=cv2.INTER_LINEAR, borderValue=np.nan)
+            inb = (mapx >= 0) & (mapx < w) & (mapy >= 0) & (mapy < h) & (np.hypot(flow[..., 0], flow[..., 1]) < 0.15 * w)
+            mk = (resize_to(masks[b - 1].astype(np.uint8), (h, w), nearest=True) > 0) if masks is not None else np.zeros((h, w), bool)
+            v = inb & (~mk) & np.isfinite(depths[b - 1]) & (depths[b - 1] > 0.05) & np.isfinite(dBw) & (dBw > 0.05)
+            if v.sum() >= 200:
+                ratio = float(np.median(depths[b - 1][v] / dBw[v]))
+        cf_b[k + 1] = cf_b[k] * ratio if np.isfinite(ratio) and ratio > 0 else cf_b[k]
+    # expand per-batch -> per-frame (batch index = frame // B is implicit via boundary positions)
+    cf = np.ones(n)
+    edges = [0] + list(boundaries) + [n]
+    for k in range(nb):
+        cf[edges[k]:edges[k + 1]] = cf_b[k]
+    return cf
+
+
 # ----------------------------- main -----------------------------
 
 def main():
@@ -285,12 +320,20 @@ def main():
         int_pairs = [(t, t + 1) for t in range(0, n - 1, args.tc_stride) if (t % B) not in (B - 1, 0)]
         m_raw = measure_flow_metrics(depths, masks, frames_dir, bnd_pairs + int_pairs)
         m_sti = measure_flow_metrics(depths * cf[:, None, None], masks, frames_dir, bnd_pairs)
+        # flow-based per-pixel boundary stitch (candidate Phase-1 post-hoc estimator)
+        cf_flow = cf_from_flow_boundaries(depths, masks, frames_dir, bf["boundaries"], n)
+        grf, gsf = np.nanmedian(s_bg), np.nanmedian(s_bg * cf_flow)
+        if np.isfinite(grf) and np.isfinite(gsf) and gsf > 0:
+            cf_flow *= (grf / gsf)
+        m_sti_flow = measure_flow_metrics(depths * cf_flow[:, None, None], masks, frames_dir, bnd_pairs)
         print("\n[A] OBJECTIVE temporal consistency = Any4D video-depth metrics (AbsRel, δ<1.25) on flow-warped pairs")
         print("    (NO per-pair scale align -> catches batch scale STEPS; δ higher=better, AbsRel lower=better)")
-        print(f"    {'group':<26}{'AbsRel↓':>9}{'δ<1.25↑':>10}")
-        print(f"    {'interior (within batch)':<26}{_agg(m_raw, int_pairs,'absrel'):>9.3f}{_agg(m_raw, int_pairs,'delta'):>10.3f}")
-        print(f"    {'boundary  RAW':<26}{_agg(m_raw, bnd_pairs,'absrel'):>9.3f}{_agg(m_raw, bnd_pairs,'delta'):>10.3f}")
-        print(f"    {'boundary  STITCHED':<26}{_agg(m_sti, bnd_pairs,'absrel'):>9.3f}{_agg(m_sti, bnd_pairs,'delta'):>10.3f}")
+        print(f"    {'group':<28}{'AbsRel↓':>9}{'δ<1.25↑':>10}")
+        print(f"    {'interior (within batch)':<28}{_agg(m_raw, int_pairs,'absrel'):>9.3f}{_agg(m_raw, int_pairs,'delta'):>10.3f}")
+        print(f"    {'boundary RAW':<28}{_agg(m_raw, bnd_pairs,'absrel'):>9.3f}{_agg(m_raw, bnd_pairs,'delta'):>10.3f}")
+        print(f"    {'boundary STITCH (frame-med)':<28}{_agg(m_sti, bnd_pairs,'absrel'):>9.3f}{_agg(m_sti, bnd_pairs,'delta'):>10.3f}")
+        print(f"    {'boundary STITCH (flow per-px)':<28}{_agg(m_sti_flow, bnd_pairs,'absrel'):>9.3f}{_agg(m_sti_flow, bnd_pairs,'delta'):>10.3f}")
+        report["absrel_boundary_stitched_flow"] = _agg(m_sti_flow, bnd_pairs, 'absrel')
         print("    -- scale-invariant (median-scaled first, Any4D protocol) -> isolates STRUCTURE error --")
         print(f"    {'interior  (SI)':<26}{_agg(m_raw, int_pairs,'absrel_si'):>9.3f}{_agg(m_raw, int_pairs,'delta_si'):>10.3f}")
         print(f"    {'boundary RAW (SI)':<26}{_agg(m_raw, bnd_pairs,'absrel_si'):>9.3f}{_agg(m_raw, bnd_pairs,'delta_si'):>10.3f}")
