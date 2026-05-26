@@ -57,6 +57,9 @@ def parse_args():
                    help="restrict the 3D trail to video frames >= this")
     p.add_argument("--frame_end", type=int, default=-1,
                    help="restrict the 3D trail to video frames <= this (-1 = last)")
+    p.add_argument("--rrd", default=None,
+                   help="render the 3D trail to a rerun .rrd instead of a PNG "
+                        "(no GL/EGL needed; open in the rerun web viewer)")
     p.add_argument("--hands", choices=["both", "left", "right"], default="both")
     p.add_argument("--view", choices=["auto", "hawor"], default="auto")
     p.add_argument("--cam_azim", type=float, default=60.0)
@@ -129,6 +132,8 @@ def render_3d(args, out_png):
         cmd.append("--no_fade")
     if args.no_ground:
         cmd.append("--no_ground")
+    if args.rrd:
+        cmd += ["--rrd", args.rrd]
     print("  $ " + " ".join(cmd))
     subprocess.run(cmd, check=True)
 
@@ -148,7 +153,7 @@ def main():
 
     if not args.skip_3d:
         out_png = os.path.join(out_dir, "hand_cam_3d.png")
-        print(f"[3d] -> {out_png}")
+        print(f"[3d] -> {args.rrd if args.rrd else out_png}")
         render_3d(args, out_png)
 
     print(f"\ndone. demo images in {out_dir}")

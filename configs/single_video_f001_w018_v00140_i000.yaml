@@ -1,0 +1,8 @@
+# Single-video infer config for the demo clip (81-88s window only, 210 frames).
+# Cut from /root/f001_w018_v00140_i000.mp4 frames 2430-2639 -> ~14x less work
+# than the full 89s video.
+# output_root defaults to /root/f001_w018_v00140_i000_clip.hawor_pipeline/;
+# infer outputs (world_space_res.pth + SLAM/) land in:
+#   /root/f001_w018_v00140_i000_clip.hawor_pipeline/stage_outputs/f001_w018_v00140_i000_clip/
+# Sub-clip frame mapping: obs = frames 0,30,60,90,120,150 ; pred = frames 180-209.
+video: /root/f001_w018_v00140_i000_clip.mp4

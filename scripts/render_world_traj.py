@@ -64,6 +64,9 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--seq_folder", required=True, help="clip dir with world_space_res.pth and SLAM/")
     p.add_argument("--out", default=None, help="output png (default <seq_folder>/world_traj.png)")
+    p.add_argument("--rrd", default=None,
+                   help="if set, skip aitviewer/GL and log the same trail to this rerun .rrd file "
+                        "(open in the rerun web viewer; no display/EGL needed)")
     p.add_argument("--slam_npz", default=None, help="explicit SLAM npz (else auto-glob SLAM/hawor_slam_w_scale_*.npz)")
     p.add_argument("--num_samples", type=int, default=8, help="number of timesteps to lay along the trail")
     p.add_argument("--stride", type=int, default=0, help="if >0, sample every N frames instead of num_samples")
@@ -122,6 +125,63 @@ def _load_align_alpha(seq_folder, explicit):
         return alpha if alpha.size else None
     except Exception:
         return None
+
+
+def _log_rerun_trail(args, idxs, right_verts, left_verts, faces_right, faces_left,
+                     valid_r, valid_l, want_r, want_l, R_c2w, t_c2w):
+    """Log the Figure-1 static trail to a rerun .rrd (no GL context needed).
+
+    Same geometry the aitviewer path renders -- just logged as static rerun
+    entities so it can be opened/orbited/screenshotted in the rerun web viewer.
+    """
+    try:
+        import rerun as rr
+    except ImportError:
+        raise SystemExit("rerun not installed; `pip install rerun-sdk` "
+                         "(see requirements-rerun-viewer.txt)")
+
+    rr.init("hawor_world_trail", spawn=False)
+    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+
+    if not args.no_ground:
+        gv, gf, gvc, _ = checkerboard_geometry(length=100, c1=0, c2=0, up="z")
+        gv[:, 2] -= 2
+        rr.log("world/ground",
+               rr.Mesh3D(vertex_positions=gv, triangle_indices=gf,
+                         vertex_colors=(np.asarray(gvc)[:, :3] * 255).astype(np.uint8)),
+               static=True)
+
+    mverts, mfaces, _ = camera_marker_geometry(args.frustum_radius, args.frustum_height)
+
+    # rerun renders meshes opaque, so convey temporal order with a brightness
+    # ramp (older poses darker) instead of alpha fade.
+    def shade(color, k):
+        if args.no_fade or len(idxs) == 1:
+            f = 1.0
+        else:
+            f = args.alpha_min + (1.0 - args.alpha_min) * (k / (len(idxs) - 1))
+        return [float(c) * f for c in color]
+
+    for k, t in enumerate(idxs):
+        if want_r and bool(valid_r[min(t, len(valid_r) - 1)]):
+            rr.log(f"world/hand_right/t{t:05d}",
+                   rr.Mesh3D(vertex_positions=right_verts[t], triangle_indices=faces_right,
+                             albedo_factor=shade(PURPLE, k)), static=True)
+        if want_l and bool(valid_l[min(t, len(valid_l) - 1)]):
+            rr.log(f"world/hand_left/t{t:05d}",
+                   rr.Mesh3D(vertex_positions=left_verts[t], triangle_indices=faces_left,
+                             albedo_factor=shade(BLUE, k)), static=True)
+        cam_v = np.einsum("ij,nj->ni", R_c2w[t], mverts) + t_c2w[t][None]
+        rr.log(f"world/camera/t{t:05d}",
+               rr.Mesh3D(vertex_positions=cam_v, triangle_indices=mfaces,
+                         albedo_factor=shade((0.6, 0.6, 0.6), k)), static=True)
+
+    cam_centers = np.stack([t_c2w[t] for t in idxs], 0)
+    rr.log("world/camera_trajectory",
+           rr.LineStrips3D([cam_centers], colors=[255, 180, 0], radii=0.004), static=True)
+
+    rr.save(args.rrd)
+    print(f"saved {args.rrd}  ({len(idxs)} samples). open with:  rerun {args.rrd}")
 
 
 def main():
@@ -207,6 +267,12 @@ def main():
     want_l = args.hands in ("both", "left")
     valid_r = pred_valid[ri] if pred_valid.ndim == 2 else np.ones(T, bool)
     valid_l = pred_valid[li] if pred_valid.ndim == 2 else np.ones(T, bool)
+
+    # ---- rerun backend: log the same trail, no GL needed, then stop ----
+    if args.rrd:
+        _log_rerun_trail(args, idxs, right_verts, left_verts, faces_right, faces_left,
+                         valid_r, valid_l, want_r, want_l, R_c2w, t_c2w)
+        return
 
     # ---- build static scene: one mesh per sampled timestep ----
     meshes = {}
