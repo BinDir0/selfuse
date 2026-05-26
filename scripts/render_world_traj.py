@@ -67,6 +67,10 @@ def parse_args():
     p.add_argument("--slam_npz", default=None, help="explicit SLAM npz (else auto-glob SLAM/hawor_slam_w_scale_*.npz)")
     p.add_argument("--num_samples", type=int, default=8, help="number of timesteps to lay along the trail")
     p.add_argument("--stride", type=int, default=0, help="if >0, sample every N frames instead of num_samples")
+    p.add_argument("--frame_start", type=int, default=0,
+                   help="restrict the trail to video frames >= this (default 0)")
+    p.add_argument("--frame_end", type=int, default=-1,
+                   help="restrict the trail to video frames <= this (default -1 = last frame)")
     p.add_argument("--hands", choices=["both", "left", "right"], default="both")
     p.add_argument("--no_fade", action="store_true", help="solid meshes instead of fading alpha")
     p.add_argument("--alpha_min", type=float, default=0.30, help="alpha of the oldest mesh (newest is 1.0)")
@@ -187,11 +191,16 @@ def main():
             left_verts[:m] = cp + a * (left_verts[:m] - cp)
             print(f"[align] applied α(t) to {m} frames (range [{float(alpha[:m].min()):.3f},{float(alpha[:m].max()):.3f}])")
 
-    # ---- choose sample timesteps ----
+    # ---- choose sample timesteps (optionally restricted to a frame window) ----
+    # array index == video frame here (vs == 0), so frame_start/end clamp directly.
+    lo = max(0, args.frame_start)
+    hi = (n - 1) if args.frame_end < 0 else min(args.frame_end, n - 1)
+    if lo > hi:
+        raise ValueError(f"empty frame window: frame_start={args.frame_start} > frame_end={args.frame_end} (n={n})")
     if args.stride > 0:
-        idxs = list(range(0, n, args.stride))
+        idxs = list(range(lo, hi + 1, args.stride))
     else:
-        idxs = np.linspace(0, n - 1, max(2, args.num_samples)).round().astype(int).tolist()
+        idxs = np.linspace(lo, hi, max(2, args.num_samples)).round().astype(int).tolist()
     idxs = sorted(set(idxs))
 
     want_r = args.hands in ("both", "right")
