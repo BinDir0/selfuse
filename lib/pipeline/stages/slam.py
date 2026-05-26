@@ -26,6 +26,7 @@ from lib.pipeline.any4d_depth import (
 )
 from lib.pipeline.errors import CorruptStageDataError
 from lib.pipeline.depth_stitch import assemble_overlapping_chunks, overlap_frames, stitch_dense_depth, stitch_enabled
+from lib.pipeline.hand_metric_anchor import compute_hand_anchor_k, hand_anchor_enabled
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
@@ -860,6 +861,33 @@ def hawor_slam(
                             cf=np.asarray(_stitch_cf, np.float32),
                             n_boundaries=int(_stitch_info.get("n_boundaries", 0)),
                             n_solved=int(_stitch_info.get("n_solved", 0)),
+                        )
+                    except Exception:
+                        pass
+                # Phase 3: anchor depth to the HaWoR hand metric (gated; default off). Applied
+                # BEFORE save + scale-est so the camera scale (fit by est_scale to this depth)
+                # auto-inherits the hand metric. Trusted anchor = HaWoR hand (Any4D abs untrusted).
+                if hand_anchor_enabled():
+                    def _mask_ha(fid, _m=masks):
+                        try:
+                            mk = _m[int(fid)]
+                            return mk.cpu().numpy() if hasattr(mk, "cpu") else np.asarray(mk)
+                        except Exception:
+                            return None
+
+                    t_ha = time.time()
+                    k_anchor, ha_info = compute_hand_anchor_k(
+                        depth_predictions, depth_frame_indices, seq_folder, _mask_ha,
+                    )
+                    if ha_info.get("applied") and abs(k_anchor - 1.0) > 1e-6:
+                        depth_predictions *= np.float32(k_anchor)  # in-place (multi-GB array)
+                    timing["3g_hand_anchor"] = time.time() - t_ha
+                    vprint(f"[hand-anchor] k={k_anchor:.4f} {ha_info}")
+                    try:
+                        np.savez(
+                            os.path.join(seq_folder, "SLAM", f"hand_anchor_k_{start_idx}_{end_idx}.npz"),
+                            k=np.float32(k_anchor),
+                            n_frames_used=int(ha_info.get("n_frames_used", 0)),
                         )
                     except Exception:
                         pass
