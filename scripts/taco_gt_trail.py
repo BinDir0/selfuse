@@ -244,8 +244,19 @@ def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
     rep = [pair_pts(t).mean(0) for t in valid]
     idxs = _arclen_sample(valid, rep, num)
     N = len(idxs)
-    pair = float(np.median([np.linalg.norm(pair_pts(t).max(0) - pair_pts(t).min(0)) for t in idxs]))
-    spacing = pair * (1.0 + gap)
+
+    # space steps by a SINGLE hand's size, not the combined two-hand bbox (which
+    # spans the gap between the hands and would blow the spacing up to ~0.5 m).
+    def hand_diag(t):
+        ds = []
+        if want_r and bool(vr_all[t]):
+            ds.append(np.linalg.norm(rv[t].max(0) - rv[t].min(0)))
+        if want_l and bool(vl_all[t]):
+            ds.append(np.linalg.norm(lv[t].max(0) - lv[t].min(0)))
+        return float(np.median(ds))
+
+    hand = float(np.median([hand_diag(t) for t in idxs]))
+    spacing = hand * (1.0 + gap)
     width = spacing * max(1, N - 1)
     zero = np.zeros((778, 3), np.float32)
 
@@ -255,7 +266,7 @@ def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
         u = (2.0 * k / (N - 1) - 1.0) if N > 1 else 0.0  # -1..1
         x = (k - (N - 1) / 2.0) * spacing + rng.uniform(-1, 1) * spacing * jitter
         z = arc * width * 0.5 * (1.0 - u * u) + rng.uniform(-1, 1) * spacing * jitter
-        y = rng.uniform(-depth_jitter, depth_jitter) * pair
+        y = rng.uniform(-depth_jitter, depth_jitter) * hand
         P = np.array([x, y, z], np.float64)
         has_r = want_r and bool(vr_all[t])
         has_l = want_l and bool(vl_all[t])
