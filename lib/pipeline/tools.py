@@ -78,10 +78,14 @@ def _iter_detect_batches(frame_source, detect_batch_size: int, num_io_workers: i
             except Exception as error:
                 prefetch_error.append(error)
             finally:
-                try:
-                    prefetch_q.put(None, timeout=0.5)
-                except queue.Full:
-                    pass
+                # Reliably deliver the end sentinel. A bare put(None, timeout=0.5)
+                # silently drops the sentinel when the queue is momentarily full
+                # (e.g. small clip: both batches buffered while the consumer is busy
+                # with the cold-start YOLO model load / first predict), leaving the
+                # consumer's blocking get() to deadlock forever. _put_interruptible
+                # retries until a slot frees and only bails once the consumer has
+                # itself stopped (stop_event set), so it can never hang.
+                _put_interruptible(None)
 
     loader_thread = threading.Thread(target=_load_batches, daemon=True)
     loader_thread.start()
