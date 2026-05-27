@@ -112,7 +112,9 @@ def main():
 
     cfg = load_config(args.config)
     work_dir = cfg["work_dir"]
-    env = cfg["envs"]["hawor"]
+    envs = cfg["envs"]
+    fork_env_name = envs.get("fork", envs.get("hawor", ""))
+    orig_env_name = envs.get("orig", envs.get("hawor", ""))
     systems = args.systems.split(",")
     datasets = [args.dataset] if args.dataset else list(cfg["datasets"])
 
@@ -123,9 +125,9 @@ def main():
         for seq_dir in seq_dirs:
             print(f"[{name}] {os.path.basename(seq_dir)}")
             if "fork" in systems:
-                run_fork(seq_dir, cfg["repos"]["fork"], env, args.force, cfg.get("fork_env"))
+                run_fork(seq_dir, cfg["repos"]["fork"], fork_env_name, args.force, cfg.get("fork_env"))
             if "orig" in systems:
-                run_orig(seq_dir, cfg["repos"]["upstream"], env, args.force, cfg.get("orig_env"))
+                run_orig(seq_dir, cfg["repos"]["upstream"], orig_env_name, args.force, cfg.get("orig_env"))
 
 
 if __name__ == "__main__":

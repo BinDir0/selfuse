@@ -18,9 +18,12 @@ fork_env:
   HAWOR_BATCH_TMPDIR: /efs-exp/guantianrui/tmp2   # SLAM stage3 frame-materialization workspace
 orig_env: {}
 
-# conda envs used by the runners (set to "" to skip activation)
+# conda envs used by the runners (set to "" to skip activation).
+# fork and orig run in SEPARATE envs: the upstream /root/HaWoR uses DROID-SLAM/lietorch
+# (built against its own torch), incompatible with the fork's env.
 envs:
-  hawor: hawor
+  fork: hawor                        # env for THIS repo's dataset pipeline
+  orig: hawor_orig                   # env where /root/HaWoR demo.py runs (DROID-SLAM/lietorch OK)
   any4d: any4d
 
 datasets:
