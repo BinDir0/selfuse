@@ -56,6 +56,9 @@ def parse_args():
                         "taco = keep real TACO positions, low-overlap subset.")
     p.add_argument("--arc", type=float, default=0.25,
                    help="[sequence] arc rise as a fraction of the row width (0 = straight row)")
+    p.add_argument("--jitter", type=float, default=0.25,
+                   help="[sequence] random x/z wobble per hand as a fraction of spacing, so the "
+                        "arc isn't perfectly regular (0 = clean arc)")
     # --- taco layout knobs ---
     p.add_argument("--spread", type=float, default=0.6,
                    help="[taco] 2D scatter: 0 = compact/central, 1 = maximally spread.")
@@ -219,7 +222,7 @@ def _arclen_sample(times, pts, num):
 
 
 def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
-                      num, gap=0.35, arc=0.25, depth_jitter=0.1, seed=0):
+                      num, gap=0.35, arc=0.25, depth_jitter=0.1, jitter=0.25, seed=0):
     """Lay a time-ordered hand sequence along a gentle left->right arc so it
     reads as an action unfolding. Both hands are shown per step (keeping their
     real relative configuration), so colours stay balanced; the temporal fade
@@ -249,9 +252,9 @@ def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
     right, left, vr, vl = [], [], [], []
     for k, t in enumerate(idxs):
         pc = pair_pts(t).mean(0)
-        x = (k - (N - 1) / 2.0) * spacing
         u = (2.0 * k / (N - 1) - 1.0) if N > 1 else 0.0  # -1..1
-        z = arc * width * 0.5 * (1.0 - u * u) + rng.uniform(-1, 1) * spacing * 0.05
+        x = (k - (N - 1) / 2.0) * spacing + rng.uniform(-1, 1) * spacing * jitter
+        z = arc * width * 0.5 * (1.0 - u * u) + rng.uniform(-1, 1) * spacing * jitter
         y = rng.uniform(-depth_jitter, depth_jitter) * pair
         P = np.array([x, y, z], np.float64)
         has_r = want_r and bool(vr_all[t])
@@ -338,7 +341,8 @@ def main():
         # time-ordered arc of hand-pairs -> reads as an action unfolding
         right, left, vr, vl, src = _compose_sequence(
             rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, args.num_samples,
-            gap=args.gap, arc=args.arc, depth_jitter=args.depth_jitter, seed=args.seed)
+            gap=args.gap, arc=args.arc, depth_jitter=args.depth_jitter,
+            jitter=args.jitter, seed=args.seed)
         idxs = list(range(len(src)))
         sample_idx = np.asarray(src, np.int64)
         no_fade_flag = bool(args.no_fade)  # fade ON by default -> shows time direction
