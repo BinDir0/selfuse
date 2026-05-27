@@ -57,6 +57,11 @@ def parse_args():
                         "taco = keep real TACO positions, low-overlap subset.")
     p.add_argument("--density", type=float, default=0.55,
                    help="[burst] radial spacing scale: smaller = tighter cluster, larger = more spread")
+    p.add_argument("--band", type=float, default=0.45,
+                   help="[burst] depth(Y)/width(X) ratio: <1 squashes the cluster into a horizontal "
+                        "band (錯落有致) instead of a full disc")
+    p.add_argument("--n_random", type=int, default=3,
+                   help="[burst] this many hands get a fully random yaw; the rest are centrifugal+jitter")
     p.add_argument("--arc", type=float, default=0.25,
                    help="[sequence] arc rise as a fraction of the row width (0 = straight row)")
     p.add_argument("--jitter", type=float, default=0.25,
@@ -279,13 +284,36 @@ def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
     return np.stack(right), np.stack(left), np.array(vr), np.array(vl), idxs
 
 
-def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
-                   num, density=0.55, jitter=0.15, jitter_rot=15.0, depth_jitter=0.2, seed=0):
-    """HaWoR-style radial 'explosion': lay hands on a sunflower/phyllotaxis
-    pattern (golden-angle spiral) so they burst out from a centre, dense near
-    the middle and fanning outward -- organic, evenly packed, no grid feel.
-    Real TACO poses; left/right alternate so colours stay balanced. Only the
-    wrist POSITION is fabricated."""
+def _hand_yaw_xy(Vc):
+    """Estimate the hand's finger-pointing direction as a yaw angle in the XY
+    (table) plane: principal axis of the verts, signed toward the splayed
+    (fingertip) end -- the wrist end is a narrow stalk, the finger end fans out."""
+    _, _, vt = np.linalg.svd(Vc, full_matrices=False)
+    e0 = vt[0]
+    proj = Vc @ e0
+    med = np.median(proj)
+    hi_pts, lo_pts = Vc[proj > med], Vc[proj <= med]
+
+    def perp_spread(pts):
+        if len(pts) == 0:
+            return 0.0
+        perp = pts - np.outer(pts @ e0, e0)
+        return float(perp.std())
+
+    f = e0 if perp_spread(hi_pts) >= perp_spread(lo_pts) else -e0
+    return float(np.arctan2(f[1], f[0]))
+
+
+def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, num,
+                   density=0.55, jitter=0.15, jitter_rot=30.0, depth_jitter=0.15,
+                   band=0.45, n_random=3, seed=0):
+    """HaWoR-style hand 'explosion' on a tabletop. Lay hands on a golden-angle
+    spiral squashed into a horizontal BAND (wider in X than in depth Y, small
+    height) so the placement is organic and well-arranged, not a full disc.
+    Orientation is mostly CENTRIFUGAL (each hand turned to point away from the
+    cluster centre) with `jitter_rot` wobble, except `n_random` hands that get a
+    fully random yaw. Real TACO poses; left/right alternate -> balanced colours.
+    Only wrist POSITION + yaw are fabricated."""
     rng = np.random.RandomState(seed)
     rpool = [t for t in range(lo, hi + 1) if want_r and bool(vr_all[t])]
     lpool = [t for t in range(lo, hi + 1) if want_l and bool(vl_all[t])]
@@ -298,28 +326,33 @@ def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
             [diag(lv[t]) for t in lpool[:: max(1, len(lpool) // 30 or 1)]]
     hand = float(np.median(sizes))
 
-    GA = np.pi * (3.0 - np.sqrt(5.0))  # golden angle
+    GA = np.pi * (3.0 - np.sqrt(5.0))
+    positions = []
+    for i in range(num):
+        r = density * hand * np.sqrt(i)
+        th = i * GA
+        x = r * np.cos(th) + rng.uniform(-1, 1) * hand * jitter
+        y = r * np.sin(th) * band + rng.uniform(-1, 1) * hand * jitter * band  # squash depth
+        z = rng.uniform(-depth_jitter, depth_jitter) * hand                    # small height
+        positions.append(np.array([x, y, z], np.float64))
+    centre = np.mean([p[:2] for p in positions], axis=0)
+    rand_set = set(rng.choice(num, size=min(int(n_random), num), replace=False).tolist())
+
     zero = np.zeros((778, 3), np.float32)
     right, left, vr, vl, src = [], [], [], [], []
-    for i in range(num):
-        r = density * hand * np.sqrt(i)        # sqrt -> even areal density
-        th = i * GA
-        # tabletop: spread on the horizontal X-Y plane, Z (up) only a small wobble
-        x = r * np.cos(th) + rng.uniform(-1, 1) * hand * jitter
-        y = r * np.sin(th) + rng.uniform(-1, 1) * hand * jitter
-        z = rng.uniform(-depth_jitter, depth_jitter) * hand
-        P = np.array([x, y, z], np.float64)
-
+    for i, P in enumerate(positions):
         use_right = (i % 2 == 0 and rpool) or (not lpool)
         if use_right:
             t = rpool[rng.randint(len(rpool))]; v, side = rv[t], "r"
         else:
             t = lpool[rng.randint(len(lpool))]; v, side = lv[t], "l"
         Vc = v - v.mean(0)
-        # yaw each hand about the vertical (Z) by its radial angle + jitter, so
-        # hands fan out to face different directions instead of all aligning
-        yaw = th + np.deg2rad(rng.uniform(-jitter_rot, jitter_rot))
-        Vc = Vc @ _rot_about([0, 0, 1], yaw).T
+        if i in rand_set:
+            target = rng.uniform(-np.pi, np.pi)
+        else:  # centrifugal: face away from the cluster centre, + jitter
+            target = np.arctan2(P[1] - centre[1], P[0] - centre[0]) \
+                + np.deg2rad(rng.uniform(-jitter_rot, jitter_rot))
+        Vc = Vc @ _rot_about([0, 0, 1], target - _hand_yaw_xy(Vc)).T
         placed = (Vc + P).astype(np.float32)
         if side == "r":
             right.append(placed); left.append(zero); vr.append(True); vl.append(False)
@@ -417,7 +450,7 @@ def main():
         right, left, vr, vl, src = _compose_burst(
             rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, args.num_samples,
             density=args.density, jitter=args.jitter, jitter_rot=args.jitter_rot,
-            depth_jitter=args.depth_jitter, seed=args.seed)
+            depth_jitter=args.depth_jitter, band=args.band, n_random=args.n_random, seed=args.seed)
         idxs = list(range(len(src)))
         sample_idx = np.asarray(src, np.int64)
         no_fade_flag = True  # radial layout isn't temporal
