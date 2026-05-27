@@ -23,6 +23,7 @@ import argparse
 import glob
 import os
 import shlex
+import signal
 import subprocess
 
 from scripts.eval_compare.common import load_config
@@ -37,7 +38,8 @@ def _resolve_pred_folder(search_root: str) -> str | None:
     return None
 
 
-def _bash(repo: str, py_cmd: str, env: str, log: str, env_vars: dict | None = None) -> int:
+def _bash(repo: str, py_cmd: str, env: str, log: str, env_vars: dict | None = None,
+          timeout: int | None = None) -> int:
     # cd happens in the outer shell; env vars + conda run wrap the python invocation.
     # env may be a NAME (conda run -n) or a PREFIX PATH (conda run -p, e.g. on a big disk).
     if env:
@@ -50,12 +52,25 @@ def _bash(repo: str, py_cmd: str, env: str, log: str, env_vars: dict | None = No
         f"mkdir -p {shlex.quote(str(v))} && " for k, v in (env_vars or {}).items() if "TMP" in k or "DIR" in k
     )
     full = f"cd {repo} && {mkdirs}{exports}{conda}{py_cmd}"
-    print(f"  $ {full}")
+    print(f"  $ {full}" + (f"   (timeout {timeout}s)" if timeout else ""))
     with open(log, "w") as f:
-        return subprocess.run(["bash", "-lc", full], stdout=f, stderr=subprocess.STDOUT).returncode
+        # start_new_session => own process group, so a timeout can kill the whole tree
+        # (conda run -> python -> spawned GPU workers), not just the top shell.
+        proc = subprocess.Popen(["bash", "-lc", full], stdout=f, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            print(f"  TIMEOUT after {timeout}s -> killed process tree")
+            return 124
 
 
-def run_fork(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | None = None) -> str | None:
+def run_fork(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | None = None,
+             timeout: int | None = None) -> str | None:
     run_dir = os.path.join(seq_dir, "runs", "fork")
     os.makedirs(run_dir, exist_ok=True)
     video = os.path.abspath(os.path.join(seq_dir, "video.mp4"))
@@ -70,7 +85,7 @@ def run_fork(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | No
     with open(cfg_path, "w") as f:
         f.write(f"video: {video}\noutput_root: {os.path.abspath(run_dir)}\n")
     py = f"python scripts/run_dataset_pipeline.py --config {os.path.abspath(cfg_path)} --stages prepare,infer"
-    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"), env_vars=env_vars)
+    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"), env_vars=env_vars, timeout=timeout)
     folder = _resolve_pred_folder(run_dir)
     if rc != 0 or folder is None:
         print(f"  fork: FAILED (rc={rc}); see {run_dir}/run.log"); return None
@@ -78,7 +93,8 @@ def run_fork(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | No
     return folder
 
 
-def run_orig(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | None = None) -> str | None:
+def run_orig(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | None = None,
+             timeout: int | None = None) -> str | None:
     run_dir = os.path.join(seq_dir, "runs", "orig")
     os.makedirs(run_dir, exist_ok=True)
     src = os.path.join(seq_dir, "video.mp4")
@@ -93,7 +109,7 @@ def run_orig(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | No
         print("  orig: outputs present, skip"); _write_marker(run_dir, existing); return existing
 
     py = f"python demo.py --video_path {os.path.abspath(link)} --vis_mode world"
-    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"), env_vars=env_vars)
+    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"), env_vars=env_vars, timeout=timeout)
     folder = _resolve_pred_folder(run_dir)
     if rc != 0 or folder is None:
         print(f"  orig: FAILED (rc={rc}); see {run_dir}/run.log"); return None
@@ -113,6 +129,8 @@ def main():
     ap.add_argument("--systems", default="fork,orig")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--limit", type=int, default=None, help="only first N prepared seqs per dataset (debug)")
+    ap.add_argument("--timeout", type=int, default=None,
+                    help="per-seq inference timeout (s); kills the process tree and marks failed (default: config.run_timeout_sec or none)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -120,6 +138,7 @@ def main():
     envs = cfg["envs"]
     fork_env_name = envs.get("fork", envs.get("hawor", ""))
     orig_env_name = envs.get("orig", envs.get("hawor", ""))
+    timeout = args.timeout if args.timeout is not None else cfg.get("run_timeout_sec")
     systems = args.systems.split(",")
     datasets = [args.dataset] if args.dataset else list(cfg["datasets"])
 
@@ -130,9 +149,9 @@ def main():
         for seq_dir in seq_dirs:
             print(f"[{name}] {os.path.basename(seq_dir)}")
             if "fork" in systems:
-                run_fork(seq_dir, cfg["repos"]["fork"], fork_env_name, args.force, cfg.get("fork_env"))
+                run_fork(seq_dir, cfg["repos"]["fork"], fork_env_name, args.force, cfg.get("fork_env"), timeout)
             if "orig" in systems:
-                run_orig(seq_dir, cfg["repos"]["upstream"], orig_env_name, args.force, cfg.get("orig_env"))
+                run_orig(seq_dir, cfg["repos"]["upstream"], orig_env_name, args.force, cfg.get("orig_env"), timeout)
 
 
 if __name__ == "__main__":
