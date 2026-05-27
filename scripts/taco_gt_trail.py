@@ -44,15 +44,16 @@ def parse_args():
     p.add_argument("--seq_id", required=True, help='"<triplet>/<seq>", e.g. "(dust, roller, pan)/20230927_032"')
     p.add_argument("--dump_npz", required=True, help="output trail .npz (feed to scripts/rrd_from_npz.py)")
     p.add_argument("--num_samples", type=int, default=8,
-                   help="target # hand poses to show (spread by arc length, so overlapping/"
-                        "dwelling hands are de-duplicated)")
-    p.add_argument("--chunk_seconds", type=float, default=2.0, help="length of the action chunk to show")
-    p.add_argument("--fps", type=float, default=30.0)
-    p.add_argument("--frame_start", type=int, default=-1,
-                   help="chunk start frame; -1 = auto-pick the most active <chunk_seconds> window")
-    p.add_argument("--min_sep", type=float, default=0.0,
-                   help="extra de-dup: drop a pose whose hand is within this many metres of the "
-                        "previously kept pose (0 = off; arc-length spread usually suffices)")
+                   help="target # hand poses to show, chosen from the WHOLE episode to minimise "
+                        "pairwise visual (2D) overlap -- 'just non-overlapping', not maxed apart")
+    p.add_argument("--fps", type=float, default=30.0, help="for logging only")
+    p.add_argument("--frame_start", type=int, default=0, help="optional crop start frame")
+    p.add_argument("--frame_end", type=int, default=-1, help="optional crop end frame (-1 = last)")
+    p.add_argument("--spread", type=float, default=0.6,
+                   help="2D scatter: 0 = compact/central, 1 = maximally spread across the view. "
+                        "Lower it if poses fly out to ugly extremes; raise it if they bunch up.")
+    p.add_argument("--overlap", type=float, default=0.25,
+                   help="max allowed pairwise 2D bbox IoU between kept poses (prevents ugly overlap)")
     p.add_argument("--hands", choices=["both", "left", "right"], default="both")
     p.add_argument("--no_fade", action="store_true", help="solid colour instead of fade-to-white")
     p.add_argument("--alpha_min", type=float, default=0.45,
@@ -129,53 +130,62 @@ def _load_hand_verts(data_root, triplet, seq, T, use_cuda):
     return out["right"], out["left"]
 
 
-def _arc_length(pts):
-    """Total path length of a (M,3) polyline."""
-    if len(pts) < 2:
+def _principal_plane(centroids):
+    """Top-2 principal axes of the hand-centroid cloud -- the view in which the
+    poses are MOST spread out, so 2D overlap there is the worst-case visual one."""
+    c = centroids - centroids.mean(0, keepdims=True)
+    if len(c) < 3:
+        return np.array([1.0, 0, 0]), np.array([0, 1.0, 0])
+    _, _, vt = np.linalg.svd(c, full_matrices=False)
+    return vt[0], vt[1]
+
+
+def _iou(a, b):
+    """IoU of two axis-aligned 2D bboxes (xmin,ymin,xmax,ymax)."""
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+    inter = iw * ih
+    if inter <= 0:
         return 0.0
-    return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / (area_a + area_b - inter + 1e-9)
 
 
-def _best_window(rep, T, chunk_len, step=5):
-    """Slide a chunk_len window over the sequence; return the [w0,w1] whose
-    representative hand point travels the most (the most 'active' chunk)."""
-    best_s, best = -1.0, (0, min(chunk_len, T - 1))
-    for w0 in range(0, max(1, T - chunk_len + 1), step):
-        w1 = min(w0 + chunk_len, T - 1)
-        pts = rep[w0:w1 + 1]
-        pts = pts[np.isfinite(pts).all(1)]
-        s = _arc_length(pts)
-        if s > best_s:
-            best_s, best = s, (w0, w1)
-    return best
+def _select_scatter(cent2d, bboxes, num, spread=0.6, overlap=0.25):
+    """Pick `num` poses SCATTERED across the 2D projection (not strung along one
+    axis), via damped farthest-point sampling:
 
+      * seed at the medoid (central pose, not an outlier),
+      * each step add the pose maximising  min-dist-to-kept - (1-spread)*dist-to-centre,
+        so it fills the 2D area but `spread`<1 reins in edge/outlier picks,
+      * never add a pose whose 2D bbox IoU with a kept one exceeds `overlap`.
 
-def _arc_length_idxs(rep, w0, w1, num):
-    """Pick frames in [w0,w1] spread EVENLY BY HAND TRAVEL (not by time), so
-    a dwelling/overlapping hand collapses to one pose instead of a blob."""
-    seg = np.arange(w0, w1 + 1)
-    valid = np.isfinite(rep[seg]).all(1)
-    seg, pts = seg[valid], rep[seg][valid]
-    if len(seg) <= num:
-        return seg.tolist()
-    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
-    if cum[-1] < 1e-6:  # no motion -> fall back to even-in-time
-        return np.linspace(seg[0], seg[-1], num).round().astype(int).tolist()
-    targets = np.linspace(0.0, cum[-1], num)
-    chosen = [int(seg[np.argmin(np.abs(cum - tv))]) for tv in targets]
-    return sorted(set(chosen))
+    spread: 0 = compact/central, 1 = maximally spread. Returns candidate indices.
+    """
+    M = len(cent2d)
+    if M <= num:
+        return list(range(M))
+    centre = cent2d.mean(0)
+    rad = float(np.linalg.norm(cent2d - centre, axis=1).max()) + 1e-9
+    dcent = np.linalg.norm(cent2d - centre, axis=1) / rad
 
-
-def _dedup_min_sep(rep, idxs, min_sep):
-    """Greedily drop a pose whose hand point is within min_sep of the last kept."""
-    kept = []
-    for t in idxs:
-        p = rep[t]
-        if not np.isfinite(p).all():
-            continue
-        if kept and np.linalg.norm(p - rep[kept[-1]]) < min_sep:
-            continue
-        kept.append(t)
+    kept = [int(np.argmin(dcent))]  # medoid seed
+    while len(kept) < num:
+        best, bi = -1e18, -1
+        for i in range(M):
+            if i in kept:
+                continue
+            if max(_iou(bboxes[i], bboxes[j]) for j in kept) > overlap:
+                continue
+            md = min(np.linalg.norm(cent2d[i] - cent2d[j]) for j in kept) / rad
+            score = md - (1.0 - spread) * dcent[i]
+            if score > best:
+                best, bi = score, i
+        if bi < 0:  # overlap cap blocks everything -> stop early
+            break
+        kept.append(bi)
     return kept
 
 
@@ -197,32 +207,40 @@ def main():
     want_r = args.hands in ("both", "right")
     want_l = args.hands in ("both", "left")
 
-    # per-frame representative hand point (mean of the shown hands' centroids)
-    rc, lc = rv.mean(1), lv.mean(1)
-    rep = np.full((T, 3), np.nan, np.float64)
-    for t in range(T):
-        pts = []
-        if want_r and bool(vr_all[t]):
-            pts.append(rc[t])
-        if want_l and bool(vl_all[t]):
-            pts.append(lc[t])
-        if pts:
-            rep[t] = np.mean(pts, 0)
+    # candidate frames = whole episode (optional crop), where the shown hand(s) are valid
+    lo = max(0, args.frame_start)
+    hi = (T - 1) if args.frame_end < 0 else min(args.frame_end, T - 1)
+    cand = [t for t in range(lo, hi + 1)
+            if (want_r and bool(vr_all[t])) or (want_l and bool(vl_all[t]))]
+    if not cand:
+        raise SystemExit(f"no valid hand poses in frames {lo}-{hi}")
 
-    # pick a chunk_seconds action window, then spread poses by hand travel
-    chunk_len = max(1, int(round(args.chunk_seconds * args.fps)))
-    if args.frame_start >= 0:
-        w0 = min(args.frame_start, T - 1)
-        w1 = min(w0 + chunk_len, T - 1)
-    else:
-        w0, w1 = _best_window(rep, T, chunk_len)
-    idxs = _arc_length_idxs(rep, w0, w1, args.num_samples)
-    if args.min_sep > 0:
-        idxs = _dedup_min_sep(rep, idxs, args.min_sep)
-    if not idxs:
-        raise SystemExit(f"no valid hand poses in window {w0}-{w1}; try a different --frame_start")
-    print(f"[chunk] frames {w0}-{w1} ({(w1 - w0 + 1) / args.fps:.2f}s) -> {len(idxs)} poses "
-          f"(travel-spread{', min_sep' if args.min_sep > 0 else ''})")
+    # per-candidate point set + centroid (combine the shown hands)
+    SUB = 120  # subsample verts for cheap bbox/PCA
+    pts_list, centroids = [], []
+    for t in cand:
+        pp = []
+        if want_r and bool(vr_all[t]):
+            pp.append(rv[t][::max(1, 778 // SUB)])
+        if want_l and bool(vl_all[t]):
+            pp.append(lv[t][::max(1, 778 // SUB)])
+        p = np.concatenate(pp, 0)
+        pts_list.append(p)
+        centroids.append(p.mean(0))
+    centroids = np.asarray(centroids)
+
+    # project onto the most-spread plane, take each pose's 2D bbox, pick a
+    # minimally-overlapping subset spanning the episode
+    e1, e2 = _principal_plane(centroids)
+    bboxes = []
+    for p in pts_list:
+        x, y = p @ e1, p @ e2
+        bboxes.append((float(x.min()), float(y.min()), float(x.max()), float(y.max())))
+    cent2d = np.stack([centroids @ e1, centroids @ e2], axis=1)
+    sel = _select_scatter(cent2d, bboxes, args.num_samples, spread=args.spread, overlap=args.overlap)
+    idxs = sorted(cand[i] for i in sel)  # time order for the temporal fade
+    print(f"[select] {len(cand)} valid frames in {lo}-{hi} -> {len(idxs)} poses "
+          f"(scatter spread={args.spread}, overlap<= {args.overlap})")
 
     right = np.stack([rv[t] for t in idxs], 0)
     left = np.stack([lv[t] for t in idxs], 0)
