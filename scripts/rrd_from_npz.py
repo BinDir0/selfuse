@@ -58,8 +58,12 @@ def main():
     alpha_min = float(d["alpha_min"])
 
     def shade(color, k):
+        # newest pose = full colour; older poses fade toward WHITE (afterimage),
+        # never toward black. f in [alpha_min, 1].
         f = 1.0 if (no_fade or n == 1) else alpha_min + (1.0 - alpha_min) * (k / (n - 1))
-        return [float(c) * f for c in color]
+        return [float(c) * f + (1.0 - f) for c in color]
+
+    has_cam = "cam_verts" in d.files
 
     rr.init("hawor_world_trail", spawn=False)
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
@@ -81,12 +85,14 @@ def main():
                    rr.Mesh3D(vertex_positions=d["left_verts"][k], triangle_indices=d["faces_left"],
                              vertex_normals=vertex_normals(d["left_verts"][k], d["faces_left"]),
                              albedo_factor=shade(BLUE, k)), static=True)
-        rr.log(f"world/camera/t{t:05d}",
-               rr.Mesh3D(vertex_positions=d["cam_verts"][k], triangle_indices=d["cam_faces"],
-                         albedo_factor=shade((0.6, 0.6, 0.6), k)), static=True)
+        if has_cam:
+            rr.log(f"world/camera/t{t:05d}",
+                   rr.Mesh3D(vertex_positions=d["cam_verts"][k], triangle_indices=d["cam_faces"],
+                             albedo_factor=shade((0.6, 0.6, 0.6), k)), static=True)
 
-    rr.log("world/camera_trajectory",
-           rr.LineStrips3D([d["cam_centers"]], colors=[255, 180, 0], radii=0.004), static=True)
+    if "cam_centers" in d.files:
+        rr.log("world/camera_trajectory",
+               rr.LineStrips3D([d["cam_centers"]], colors=[255, 180, 0], radii=0.004), static=True)
 
     rr.save(args.rrd)
     print(f"saved {args.rrd}  ({n} samples). open with:  rerun {args.rrd}")

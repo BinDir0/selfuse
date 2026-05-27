@@ -213,14 +213,14 @@ def _log_rerun_trail(args, idxs, right_verts, left_verts, faces_right, faces_lef
 
     mverts, mfaces, _ = camera_marker_geometry(args.frustum_radius, args.frustum_height)
 
-    # rerun renders meshes opaque, so convey temporal order with a brightness
-    # ramp (older poses darker) instead of alpha fade.
+    # rerun renders meshes opaque, so convey temporal order by fading older
+    # poses toward WHITE (afterimage), never toward black.
     def shade(color, k):
         if args.no_fade or len(idxs) == 1:
             f = 1.0
         else:
             f = args.alpha_min + (1.0 - args.alpha_min) * (k / (len(idxs) - 1))
-        return [float(c) * f for c in color]
+        return [float(c) * f + (1.0 - f) for c in color]
 
     for k, t in enumerate(idxs):
         if want_r and bool(valid_r[min(t, len(valid_r) - 1)]):

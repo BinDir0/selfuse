@@ -43,13 +43,22 @@ def parse_args():
     p.add_argument("--data_root", required=True, help="TACO root (has Hand_Poses/, Egocentric_Camera_Parameters/)")
     p.add_argument("--seq_id", required=True, help='"<triplet>/<seq>", e.g. "(dust, roller, pan)/20230927_032"')
     p.add_argument("--dump_npz", required=True, help="output trail .npz (feed to scripts/rrd_from_npz.py)")
-    p.add_argument("--num_samples", type=int, default=8, help="hand/cam poses along the trail")
-    p.add_argument("--stride", type=int, default=0, help="if >0, sample every N frames instead of num_samples")
-    p.add_argument("--frame_start", type=int, default=0)
-    p.add_argument("--frame_end", type=int, default=-1, help="-1 = last frame")
+    p.add_argument("--num_samples", type=int, default=8,
+                   help="target # hand poses to show (spread by arc length, so overlapping/"
+                        "dwelling hands are de-duplicated)")
+    p.add_argument("--chunk_seconds", type=float, default=2.0, help="length of the action chunk to show")
+    p.add_argument("--fps", type=float, default=30.0)
+    p.add_argument("--frame_start", type=int, default=-1,
+                   help="chunk start frame; -1 = auto-pick the most active <chunk_seconds> window")
+    p.add_argument("--min_sep", type=float, default=0.0,
+                   help="extra de-dup: drop a pose whose hand is within this many metres of the "
+                        "previously kept pose (0 = off; arc-length spread usually suffices)")
     p.add_argument("--hands", choices=["both", "left", "right"], default="both")
-    p.add_argument("--no_fade", action="store_true", help="solid meshes instead of brightness ramp")
-    p.add_argument("--alpha_min", type=float, default=0.30)
+    p.add_argument("--no_fade", action="store_true", help="solid colour instead of fade-to-white")
+    p.add_argument("--alpha_min", type=float, default=0.45,
+                   help="oldest-pose colour strength, blended toward white (lower = lighter/more faded)")
+    p.add_argument("--camera", action="store_true",
+                   help="also draw camera frustums + trajectory (off by default)")
     p.add_argument("--ground", action="store_true",
                    help="add a checkerboard ground (off by default; TACO world up-axis is not assumed)")
     p.add_argument("--frustum_radius", type=float, default=0.05)
@@ -120,16 +129,54 @@ def _load_hand_verts(data_root, triplet, seq, T, use_cuda):
     return out["right"], out["left"]
 
 
-def _sample_idxs(args, n):
-    lo = max(0, args.frame_start)
-    hi = (n - 1) if args.frame_end < 0 else min(args.frame_end, n - 1)
-    if lo > hi:
-        raise ValueError(f"empty window: frame_start={args.frame_start} > frame_end={args.frame_end} (n={n})")
-    if args.stride > 0:
-        idxs = list(range(lo, hi + 1, args.stride))
-    else:
-        idxs = np.linspace(lo, hi, max(2, args.num_samples)).round().astype(int).tolist()
-    return sorted(set(idxs))
+def _arc_length(pts):
+    """Total path length of a (M,3) polyline."""
+    if len(pts) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+
+
+def _best_window(rep, T, chunk_len, step=5):
+    """Slide a chunk_len window over the sequence; return the [w0,w1] whose
+    representative hand point travels the most (the most 'active' chunk)."""
+    best_s, best = -1.0, (0, min(chunk_len, T - 1))
+    for w0 in range(0, max(1, T - chunk_len + 1), step):
+        w1 = min(w0 + chunk_len, T - 1)
+        pts = rep[w0:w1 + 1]
+        pts = pts[np.isfinite(pts).all(1)]
+        s = _arc_length(pts)
+        if s > best_s:
+            best_s, best = s, (w0, w1)
+    return best
+
+
+def _arc_length_idxs(rep, w0, w1, num):
+    """Pick frames in [w0,w1] spread EVENLY BY HAND TRAVEL (not by time), so
+    a dwelling/overlapping hand collapses to one pose instead of a blob."""
+    seg = np.arange(w0, w1 + 1)
+    valid = np.isfinite(rep[seg]).all(1)
+    seg, pts = seg[valid], rep[seg][valid]
+    if len(seg) <= num:
+        return seg.tolist()
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+    if cum[-1] < 1e-6:  # no motion -> fall back to even-in-time
+        return np.linspace(seg[0], seg[-1], num).round().astype(int).tolist()
+    targets = np.linspace(0.0, cum[-1], num)
+    chosen = [int(seg[np.argmin(np.abs(cum - tv))]) for tv in targets]
+    return sorted(set(chosen))
+
+
+def _dedup_min_sep(rep, idxs, min_sep):
+    """Greedily drop a pose whose hand point is within min_sep of the last kept."""
+    kept = []
+    for t in idxs:
+        p = rep[t]
+        if not np.isfinite(p).all():
+            continue
+        if kept and np.linalg.norm(p - rep[kept[-1]]) < min_sep:
+            continue
+        kept.append(t)
+    return kept
 
 
 def main():
@@ -138,7 +185,6 @@ def main():
     triplet, seq = triplet.strip(), seq.strip()
 
     from hawor.utils.process import get_mano_faces
-    from lib.vis.run_vis2 import camera_marker_geometry
 
     R_c2w, cam_pos, T_cam = _load_camera(args.data_root, triplet, seq)
     (rv, vr_all), (lv, vl_all) = _load_hand_verts(args.data_root, triplet, seq, T_cam, use_cuda=not args.cpu)
@@ -151,13 +197,35 @@ def main():
     want_r = args.hands in ("both", "right")
     want_l = args.hands in ("both", "left")
 
-    idxs = _sample_idxs(args, T)
-    mverts, mfaces, _ = camera_marker_geometry(args.frustum_radius, args.frustum_height)
+    # per-frame representative hand point (mean of the shown hands' centroids)
+    rc, lc = rv.mean(1), lv.mean(1)
+    rep = np.full((T, 3), np.nan, np.float64)
+    for t in range(T):
+        pts = []
+        if want_r and bool(vr_all[t]):
+            pts.append(rc[t])
+        if want_l and bool(vl_all[t]):
+            pts.append(lc[t])
+        if pts:
+            rep[t] = np.mean(pts, 0)
+
+    # pick a chunk_seconds action window, then spread poses by hand travel
+    chunk_len = max(1, int(round(args.chunk_seconds * args.fps)))
+    if args.frame_start >= 0:
+        w0 = min(args.frame_start, T - 1)
+        w1 = min(w0 + chunk_len, T - 1)
+    else:
+        w0, w1 = _best_window(rep, T, chunk_len)
+    idxs = _arc_length_idxs(rep, w0, w1, args.num_samples)
+    if args.min_sep > 0:
+        idxs = _dedup_min_sep(rep, idxs, args.min_sep)
+    if not idxs:
+        raise SystemExit(f"no valid hand poses in window {w0}-{w1}; try a different --frame_start")
+    print(f"[chunk] frames {w0}-{w1} ({(w1 - w0 + 1) / args.fps:.2f}s) -> {len(idxs)} poses "
+          f"(travel-spread{', min_sep' if args.min_sep > 0 else ''})")
 
     right = np.stack([rv[t] for t in idxs], 0)
     left = np.stack([lv[t] for t in idxs], 0)
-    cam = np.stack([np.einsum("ij,nj->ni", R_c2w[t], mverts) + cam_pos[t][None] for t in idxs], 0)
-    centers = np.stack([cam_pos[t] for t in idxs], 0)
     vr = np.array([want_r and bool(vr_all[t]) for t in idxs])
     vl = np.array([want_l and bool(vl_all[t]) for t in idxs])
 
@@ -166,10 +234,14 @@ def main():
         right_verts=right.astype(np.float32), left_verts=left.astype(np.float32),
         faces_right=faces_right.astype(np.int32), faces_left=faces_left.astype(np.int32),
         valid_r=vr, valid_l=vl,
-        cam_verts=cam.astype(np.float32), cam_faces=np.asarray(mfaces, np.int32),
-        cam_centers=centers.astype(np.float32),
         no_fade=np.asarray(bool(args.no_fade)), alpha_min=np.asarray(float(args.alpha_min)),
     )
+    if args.camera:
+        from lib.vis.run_vis2 import camera_marker_geometry
+        mverts, mfaces, _ = camera_marker_geometry(args.frustum_radius, args.frustum_height)
+        cam = np.stack([np.einsum("ij,nj->ni", R_c2w[t], mverts) + cam_pos[t][None] for t in idxs], 0)
+        data.update(cam_verts=cam.astype(np.float32), cam_faces=np.asarray(mfaces, np.int32),
+                    cam_centers=np.stack([cam_pos[t] for t in idxs], 0).astype(np.float32))
     if args.ground:
         from lib.vis.wham_tools.tools import checkerboard_geometry
         gv, gf, gvc, _ = checkerboard_geometry(length=100, c1=0, c2=0, up="z")
