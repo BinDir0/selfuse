@@ -25,15 +25,15 @@ datasets:
     split_file: null
   h2o:
     enabled: true
-    data_root: /root/datasets/h2odataset/data      # <-- production frame root
-    split_file: /root/datasets/h2odataset/pose_lists/pose_test.txt
+    data_root: /efs-exp/guantianrui/datasets/H2O   # has subjectN_ego_v1_1/subjectN_ego/<scene>/<seq>/cam4/
+    split_file: null                               # null => recursively enumerate cam4/rgb dirs (no pose list needed)
   oakink2:
     enabled: true
-    data_root: /root/datasets/OakInk2/data         # <-- has anno_preview/ + image dirs
+    data_root: /path/to/OakInk2                    # ROOT with data/ + anno_preview/ + program/
     split_file: null
-    ego_cam: egocentric
+    ego_cam: egocentric                            # camera-LAYOUT name; serial auto-resolved via cam_def
   taco:
     enabled: true
-    data_root: /root/datasets/TACO-Instructions/data
-    split_file: /root/datasets/TACO-Instructions/data_lists/v1_overall_data_train_test_split.txt
-    trans_unit: 1.0                                 # set 0.001 if hand_trans is in mm
+    data_root: /path/to/TACO                       # ROOT with Egocentric_RGB_Videos/, Egocentric_Camera_Parameters/, Hand_Poses/
+    split_file: /root/datasets/TACO-Instructions/data_lists/v1_egocentric_data_available_sequences.txt
+    trans_unit: 1.0                                # confirmed metres by convert_taco_to_wds.py

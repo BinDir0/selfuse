@@ -40,8 +40,10 @@ def list_sequences(data_root: str, split_file: str | None = None, limit: int | N
                     seen.add(sid)
                     seqs.append(sid)
     else:
-        for cam_dir in sorted(glob.glob(os.path.join(data_root, "*", "*", "*", EGO_CAM))):
-            seqs.append(os.path.relpath(os.path.dirname(cam_dir), data_root))
+        # recursive so it tolerates the subjectN_ego_v1_1 packaging nesting depth
+        for cam_dir in sorted(glob.glob(os.path.join(data_root, "**", EGO_CAM), recursive=True)):
+            if os.path.isdir(os.path.join(cam_dir, "rgb")):
+                seqs.append(os.path.relpath(cam_dir[: -(len(EGO_CAM) + 1)], data_root))
     return seqs[:limit] if limit else seqs
 
 
