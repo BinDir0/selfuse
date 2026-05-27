@@ -100,7 +100,38 @@ python demo_gradio.py \
 
 The demo accepts uploaded images or a video, runs camera and depth inference,
 and visualizes the depth-unprojected point cloud and predicted cameras as a GLB
-scene.
+scene. Uploaded videos are sampled by the selected FPS and capped at the first
+**10 frames** to keep the demo light.
+
+### Overlaying HaWoR hand meshes (optional)
+
+You can overlay per-frame hand meshes from a [HaWoR](https://github.com/ThunderVVV/HaWoR)
+motion-stage run on top of the reconstruction. First export the motion-stage
+camera-space meshes to a self-contained npz (run this in the HaWoR repo, after its
+motion stage has produced `cam_space/`):
+
+```bash
+python scripts/export_cam_space_meshes.py \
+  --video_path example/video_0.mp4 \
+  --out hand_meshes.npz
+```
+
+Then launch the demo with the npz:
+
+```bash
+python demo_gradio.py \
+  --checkpoint checkpoints/VGGT-Omega-1B-512/model.pt \
+  --image-resolution 512 \
+  --hand-mesh hand_meshes.npz
+```
+
+Notes:
+- **Use the same video** for both pipelines. Hand meshes are aligned to VGGT-Ω
+  frames by their original video frame index, so the frame numbering must match.
+- HaWoR hands are metric (meters) while VGGT-Ω depth is normalized, so by default
+  the hand size is **auto-fit** to VGGT's predicted depth at the hand's pixel.
+  Pass `--no-hand-auto-scale` to disable this, and `--hand-scale <float>` to apply
+  a manual multiplier (combined with auto-scale when enabled).
 
 ## Runtime and GPU Memory
 

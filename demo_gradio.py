@@ -68,6 +68,14 @@ def run_model(target_dir: str, model: VGGTOmega, image_resolution: int) -> dict:
         predictions_np["intrinsic"],
     )
 
+    # Map each VGGT frame back to its original video frame index (image filenames are
+    # named by original frame index). Used to align externally-provided hand meshes.
+    frame_indices = []
+    for idx, name in enumerate(image_names):
+        stem = os.path.splitext(os.path.basename(name))[0]
+        frame_indices.append(int(stem) if stem.isdigit() else idx)
+    predictions_np["frame_indices"] = np.array(frame_indices, dtype=np.int64)
+
     torch.cuda.empty_cache()
     return predictions_np
 
@@ -116,6 +124,10 @@ def file_path(file_data) -> str:
     return str(file_data)
 
 
+# Cap on the number of frames fed to VGGT-Omega (keeps the demo light and bounds GPU memory).
+MAX_FRAMES = 10
+
+
 def handle_uploads(input_video, input_images, video_sample_fps=1.0):
     gc.collect()
     torch.cuda.empty_cache()
@@ -127,7 +139,7 @@ def handle_uploads(input_video, input_images, video_sample_fps=1.0):
 
     image_paths = []
     if input_images is not None:
-        for item in input_images:
+        for item in input_images[:MAX_FRAMES]:
             src_path = file_path(item)
             dst_path = os.path.join(target_dir_images, os.path.basename(src_path))
             shutil.copy(src_path, dst_path)
@@ -142,12 +154,13 @@ def handle_uploads(input_video, input_images, video_sample_fps=1.0):
 
         frame_idx = 0
         saved_idx = 0
-        while True:
+        while saved_idx < MAX_FRAMES:
             ok, frame = video.read()
             if not ok:
                 break
             if frame_idx % frame_interval == 0:
-                image_path = os.path.join(target_dir_images, f"{saved_idx:06}.png")
+                # Name by the original video frame index so hand meshes can align by frame.
+                image_path = os.path.join(target_dir_images, f"{frame_idx:06}.png")
                 cv2.imwrite(image_path, frame)
                 image_paths.append(image_path)
                 saved_idx += 1
@@ -175,6 +188,9 @@ def gradio_demo(
     show_cam=True,
     mask_sky=False,
     max_points_k=1000,
+    hand_data=None,
+    hand_scale=1.0,
+    hand_auto_scale=True,
 ):
     if not target_dir or target_dir == "None" or not os.path.isdir(target_dir):
         raise gr.Error("Please upload images or a video first.")
@@ -209,6 +225,10 @@ def gradio_demo(
         mask_sky=mask_sky,
         target_dir=target_dir,
         max_points=int(max_points_k * 1000),
+        hand_data=hand_data,
+        frame_indices=predictions.get("frame_indices"),
+        hand_scale=hand_scale,
+        hand_auto_scale=hand_auto_scale,
     )
     scene.export(file_obj=glbfile)
 
@@ -246,6 +266,9 @@ def update_visualization(
     show_cam,
     mask_sky,
     max_points_k,
+    hand_data=None,
+    hand_scale=1.0,
+    hand_auto_scale=True,
 ):
     if not target_dir or target_dir == "None" or not os.path.isdir(target_dir):
         return None, "No reconstruction available. Click Reconstruct first."
@@ -277,6 +300,10 @@ def update_visualization(
             mask_sky=mask_sky,
             target_dir=target_dir,
             max_points=int(max_points_k * 1000),
+            hand_data=hand_data,
+            frame_indices=predictions.get("frame_indices"),
+            hand_scale=hand_scale,
+            hand_auto_scale=hand_auto_scale,
         )
         scene.export(file_obj=glbfile)
 
@@ -305,7 +332,13 @@ lake_speedboat_video = "examples/lake_speedboat.mp4"
 desert_road_video = "examples/desert_road.mp4"
 
 
-def build_ui(model: VGGTOmega, image_resolution: int):
+def build_ui(
+    model: VGGTOmega,
+    image_resolution: int,
+    hand_data: dict | None = None,
+    hand_scale: float = 1.0,
+    hand_auto_scale: bool = True,
+):
     def reconstruct(
         target_dir,
         conf_thres,
@@ -325,6 +358,31 @@ def build_ui(model: VGGTOmega, image_resolution: int):
             show_cam,
             mask_sky,
             max_points_k,
+            hand_data=hand_data,
+            hand_scale=hand_scale,
+            hand_auto_scale=hand_auto_scale,
+        )
+
+    def update_visual(
+        target_dir,
+        conf_thres,
+        mask_black_bg,
+        mask_white_bg,
+        show_cam,
+        mask_sky,
+        max_points_k,
+    ):
+        return update_visualization(
+            target_dir,
+            conf_thres,
+            mask_black_bg,
+            mask_white_bg,
+            show_cam,
+            mask_sky,
+            max_points_k,
+            hand_data=hand_data,
+            hand_scale=hand_scale,
+            hand_auto_scale=hand_auto_scale,
         )
 
     theme = gr.themes.Ocean()
@@ -529,7 +587,7 @@ def build_ui(model: VGGTOmega, image_resolution: int):
         )
 
         update_visual_btn.click(fn=update_visual_log, inputs=[], outputs=[log_output]).then(
-            fn=update_visualization,
+            fn=update_visual,
             inputs=[
                 target_dir_output,
                 conf_thres,
@@ -552,14 +610,50 @@ def parse_args():
     parser.add_argument("--server-name", default="0.0.0.0")
     parser.add_argument("--server-port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
+    parser.add_argument(
+        "--hand-mesh",
+        default=None,
+        help="Path to a HaWoR hand-mesh npz (see scripts/export_cam_space_meshes.py). "
+        "When set, per-frame hand meshes are overlaid on the reconstruction.",
+    )
+    parser.add_argument(
+        "--hand-scale",
+        type=float,
+        default=1.0,
+        help="Manual scale multiplier for hand meshes (applied on top of auto-scale).",
+    )
+    parser.add_argument(
+        "--no-hand-auto-scale",
+        dest="hand_auto_scale",
+        action="store_false",
+        help="Disable auto-fitting hand size to VGGT depth; use --hand-scale only.",
+    )
     return parser.parse_args()
+
+
+def load_hand_data(hand_mesh_path: str) -> dict:
+    if not os.path.isfile(hand_mesh_path):
+        raise FileNotFoundError(f"Hand mesh file not found: {hand_mesh_path}")
+    with np.load(hand_mesh_path) as loaded:
+        hand_data = {key: np.array(loaded[key]) for key in loaded.files}
+    n_left = len(hand_data.get("left_frames", []))
+    n_right = len(hand_data.get("right_frames", []))
+    print(f"Loaded hand meshes from {hand_mesh_path}: {n_left} left frames, {n_right} right frames")
+    return hand_data
 
 
 def main():
     args = parse_args()
     print(f"Loading checkpoint from {args.checkpoint}")
     model = load_model(args.checkpoint)
-    demo = build_ui(model, args.image_resolution)
+    hand_data = load_hand_data(args.hand_mesh) if args.hand_mesh else None
+    demo = build_ui(
+        model,
+        args.image_resolution,
+        hand_data=hand_data,
+        hand_scale=args.hand_scale,
+        hand_auto_scale=args.hand_auto_scale,
+    )
     demo.queue(max_size=20).launch(
         server_name=args.server_name,
         server_port=args.server_port,

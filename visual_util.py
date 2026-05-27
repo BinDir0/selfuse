@@ -25,6 +25,10 @@ def predictions_to_glb(
     max_points: int = 300000,
     filter_depth_edges: bool = True,
     depth_edge_rtol: float = 0.03,
+    hand_data: dict | None = None,
+    frame_indices: np.ndarray | None = None,
+    hand_scale: float = 1.0,
+    hand_auto_scale: bool = True,
 ) -> trimesh.Scene:
     """Convert VGGT-Omega camera/depth predictions to a GLB scene."""
     if not isinstance(predictions, dict):
@@ -89,7 +93,112 @@ def predictions_to_glb(
             color = tuple(int(255 * x) for x in rgba[:3])
             integrate_camera_into_scene(scene, camera_to_world, color, scene_scale)
 
+    if hand_data is not None:
+        add_hand_meshes(
+            scene,
+            predictions,
+            hand_data,
+            frame_indices,
+            hand_scale=hand_scale,
+            hand_auto_scale=hand_auto_scale,
+        )
+
     return apply_scene_alignment(scene, extrinsics)
+
+
+# Distinct colors so left/right hands read clearly in the viewer.
+HAND_COLORS = {"left": (60, 120, 255), "right": (255, 80, 80)}
+
+
+def _estimate_hand_scale(predictions: dict, frames_verts: list, frame_indices: np.ndarray) -> float:
+    """Estimate metric->VGGT scale by matching hand depth to VGGT depth at the hand pixel.
+
+    `frames_verts` is a list of (vggt_frame_idx, camera_space_vertices) pairs. The projection
+    of a camera-space point is scale-invariant, so we can locate the hand pixel without knowing
+    the scale, read VGGT's predicted depth there, and infer s = depth_vggt / depth_camera.
+    """
+    intrinsic = predictions.get("intrinsic")
+    depth = predictions.get("depth")
+    if intrinsic is None or depth is None:
+        return 1.0
+    depth = depth[..., 0] if depth.ndim == 4 else depth  # (S,H,W)
+    conf = predictions.get("depth_conf")
+    height, width = depth.shape[-2:]
+
+    ratios = []
+    for vggt_idx, verts in frames_verts:
+        centroid = verts.mean(axis=0)
+        z_cam = float(centroid[2])
+        if not np.isfinite(z_cam) or z_cam <= 1e-3:
+            continue
+        K = intrinsic[vggt_idx]
+        u = int(round(centroid[0] / z_cam * K[0, 0] + K[0, 2]))
+        v = int(round(centroid[1] / z_cam * K[1, 1] + K[1, 2]))
+        if not (0 <= u < width and 0 <= v < height):
+            continue
+        if conf is not None and conf[vggt_idx, v, u] <= 1e-5:
+            continue
+        depth_vggt = float(depth[vggt_idx, v, u])
+        if np.isfinite(depth_vggt) and depth_vggt > 0:
+            ratios.append(depth_vggt / z_cam)
+
+    return float(np.median(ratios)) if ratios else 1.0
+
+
+def add_hand_meshes(
+    scene: trimesh.Scene,
+    predictions: dict,
+    hand_data: dict,
+    frame_indices: np.ndarray | None,
+    hand_scale: float = 1.0,
+    hand_auto_scale: bool = True,
+) -> None:
+    """Place per-frame camera-space hand meshes into the (VGGT world) scene.
+
+    A camera-space vertex v maps to VGGT world via world = R_i^T (s * v - t_i), where
+    [R_i | t_i] is VGGT's world->camera extrinsic for the frame and s converts the metric
+    MANO hand into VGGT's normalized scale.
+    """
+    extrinsic = predictions["extrinsic"]  # (S, 3, 4)
+    num_frames = extrinsic.shape[0]
+    if frame_indices is None:
+        frame_indices = np.arange(num_frames)
+    frame_indices = np.asarray(frame_indices).astype(np.int64)
+
+    # original-video-frame -> VGGT frame index (first match wins)
+    orig_to_vggt = {}
+    for vggt_idx, orig in enumerate(frame_indices[:num_frames]):
+        orig_to_vggt.setdefault(int(orig), vggt_idx)
+
+    placements = []  # (vggt_idx, vertices, faces, side)
+    auto_inputs = []  # (vggt_idx, vertices) for scale estimation
+    for side in ("left", "right"):
+        frames = hand_data.get(f"{side}_frames")
+        verts_all = hand_data.get(f"{side}_vertices")
+        faces = hand_data.get(f"faces_{side}")
+        if frames is None or verts_all is None or len(frames) == 0:
+            continue
+        for orig_frame, verts in zip(np.asarray(frames).astype(np.int64), verts_all):
+            vggt_idx = orig_to_vggt.get(int(orig_frame))
+            if vggt_idx is None or not np.isfinite(verts).all():
+                continue
+            placements.append((vggt_idx, np.asarray(verts, dtype=np.float64), faces, side))
+            auto_inputs.append((vggt_idx, verts))
+
+    if not placements:
+        return
+
+    s = hand_scale
+    if hand_auto_scale:
+        s = _estimate_hand_scale(predictions, auto_inputs, frame_indices) * hand_scale
+
+    for vggt_idx, verts, faces, side in placements:
+        rotation = extrinsic[vggt_idx, :3, :3]
+        translation = extrinsic[vggt_idx, :3, 3]
+        world_verts = (s * verts - translation) @ rotation  # R^T (s v - t) for row vectors
+        mesh = trimesh.Trimesh(vertices=world_verts, faces=np.asarray(faces), process=False)
+        mesh.visual.face_colors[:, :3] = HAND_COLORS[side]
+        scene.add_geometry(mesh)
 
 
 def _images_to_rgb(images: np.ndarray) -> np.ndarray:
