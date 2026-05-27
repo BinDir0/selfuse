@@ -122,7 +122,7 @@ def _load_hand_verts(data_root, triplet, seq, T, use_cuda):
         valid = np.zeros(T, bool)
         pose_pkl = os.path.join(hp_dir, f"{name}_hand.pkl")
         if not os.path.exists(pose_pkl):
-            out[name] = (verts, valid)
+            out[name] = (verts, valid, np.zeros((T, 3), np.float32))
             continue
         with open(pose_pkl, "rb") as f:
             data = pickle.load(f)
@@ -152,7 +152,7 @@ def _load_hand_verts(data_root, triplet, seq, T, use_cuda):
         # TACO MANO is wrist-centred (center_idx=0) then +trans => wrist sits at trans.
         v = v - j[:, 0:1, :] + tsl[:, None, :]
         valid = present & np.isfinite(v).all(axis=(1, 2))
-        out[name] = (v, valid)
+        out[name] = (v, valid, tsl.copy())  # tsl = wrist world position (reliable facing anchor)
     return out["right"], out["left"]
 
 
@@ -284,27 +284,15 @@ def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
     return np.stack(right), np.stack(left), np.array(vr), np.array(vl), idxs
 
 
-def _hand_yaw_xy(Vc):
-    """Estimate the hand's finger-pointing direction as a yaw angle in the XY
-    (table) plane: principal axis of the verts, signed toward the splayed
-    (fingertip) end -- the wrist end is a narrow stalk, the finger end fans out."""
-    _, _, vt = np.linalg.svd(Vc, full_matrices=False)
-    e0 = vt[0]
-    proj = Vc @ e0
-    med = np.median(proj)
-    hi_pts, lo_pts = Vc[proj > med], Vc[proj <= med]
-
-    def perp_spread(pts):
-        if len(pts) == 0:
-            return 0.0
-        perp = pts - np.outer(pts @ e0, e0)
-        return float(perp.std())
-
-    f = e0 if perp_spread(hi_pts) >= perp_spread(lo_pts) else -e0
+def _hand_yaw_xy(verts, wrist):
+    """Hand's forward-facing yaw in the XY (table) plane = direction from the
+    WRIST to the mesh centroid (points into the palm/fingers). Reliable, unlike
+    guessing the fingertip end from vertex spread."""
+    f = verts.mean(0) - np.asarray(wrist)
     return float(np.arctan2(f[1], f[0]))
 
 
-def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, num,
+def _compose_burst(rv, lv, rw, lw, vr_all, vl_all, lo, hi, want_r, want_l, num,
                    density=0.55, jitter=0.15, jitter_rot=30.0, depth_jitter=0.15,
                    band=0.45, n_random=3, seed=0):
     """HaWoR-style hand 'explosion' on a tabletop. Lay hands on a golden-angle
@@ -343,16 +331,16 @@ def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, num,
     for i, P in enumerate(positions):
         use_right = (i % 2 == 0 and rpool) or (not lpool)
         if use_right:
-            t = rpool[rng.randint(len(rpool))]; v, side = rv[t], "r"
+            t = rpool[rng.randint(len(rpool))]; v, w, side = rv[t], rw[t], "r"
         else:
-            t = lpool[rng.randint(len(lpool))]; v, side = lv[t], "l"
+            t = lpool[rng.randint(len(lpool))]; v, w, side = lv[t], lw[t], "l"
         Vc = v - v.mean(0)
         if i in rand_set:
             target = rng.uniform(-np.pi, np.pi)
         else:  # centrifugal: face away from the cluster centre, + jitter
             target = np.arctan2(P[1] - centre[1], P[0] - centre[0]) \
                 + np.deg2rad(rng.uniform(-jitter_rot, jitter_rot))
-        Vc = Vc @ _rot_about([0, 0, 1], target - _hand_yaw_xy(Vc)).T
+        Vc = Vc @ _rot_about([0, 0, 1], target - _hand_yaw_xy(v, w)).T
         placed = (Vc + P).astype(np.float32)
         if side == "r":
             right.append(placed); left.append(zero); vr.append(True); vl.append(False)
@@ -422,7 +410,8 @@ def main():
     from hawor.utils.process import get_mano_faces
 
     R_c2w, cam_pos, T_cam = _load_camera(args.data_root, triplet, seq)
-    (rv, vr_all), (lv, vl_all) = _load_hand_verts(args.data_root, triplet, seq, T_cam, use_cuda=not args.cpu)
+    (rv, vr_all, rw), (lv, vl_all, lw) = _load_hand_verts(
+        args.data_root, triplet, seq, T_cam, use_cuda=not args.cpu)
     T = min(T_cam, rv.shape[0], lv.shape[0])
 
     faces = get_mano_faces()
@@ -448,7 +437,7 @@ def main():
     elif args.layout == "burst":
         # HaWoR-style radial explosion of hands from a centre
         right, left, vr, vl, src = _compose_burst(
-            rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, args.num_samples,
+            rv, lv, rw, lw, vr_all, vl_all, lo, hi, want_r, want_l, args.num_samples,
             density=args.density, jitter=args.jitter, jitter_rot=args.jitter_rot,
             depth_jitter=args.depth_jitter, band=args.band, n_random=args.n_random, seed=args.seed)
         idxs = list(range(len(src)))
