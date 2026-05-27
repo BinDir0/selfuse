@@ -1,7 +1,7 @@
 # Configuration for the fork-vs-upstream HaWoR comparison.
 # Fill the production-machine paths before running there. Office machine has no data.
 
-work_dir: ./eval_compare_work        # prepared inputs, predictions, results land here
+work_dir: /efs-exp/guantianrui/eval_compare_work   # big disk: prepared inputs, predictions, results all land here (keep off /root)
 subset_per_dataset: 10               # sequences sampled per dataset
 seed: 0                              # deterministic sequence sampling
 
