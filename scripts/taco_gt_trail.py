@@ -49,10 +49,13 @@ def parse_args():
     p.add_argument("--fps", type=float, default=30.0, help="for logging only")
     p.add_argument("--frame_start", type=int, default=0, help="optional crop start frame")
     p.add_argument("--frame_end", type=int, default=-1, help="optional crop end frame (-1 = last)")
-    p.add_argument("--layout", choices=["scatter", "taco"], default="scatter",
-                   help="scatter = compose a nice figure: random-ish wrist positions (jittered grid) "
-                        "with real TACO hand poses placed on them (default). "
-                        "taco = keep real TACO positions, pick a low-overlap subset.")
+    p.add_argument("--layout", choices=["sequence", "scatter", "taco"], default="sequence",
+                   help="sequence = time-ordered hand sequence along a gentle arc that reads as an "
+                        "action unfolding (default; both hands per step, temporal fade). "
+                        "scatter = random-ish jittered grid of real poses. "
+                        "taco = keep real TACO positions, low-overlap subset.")
+    p.add_argument("--arc", type=float, default=0.25,
+                   help="[sequence] arc rise as a fraction of the row width (0 = straight row)")
     # --- taco layout knobs ---
     p.add_argument("--spread", type=float, default=0.6,
                    help="[taco] 2D scatter: 0 = compact/central, 1 = maximally spread.")
@@ -201,6 +204,64 @@ def _select_scatter(cent2d, bboxes, num, spread=0.6, overlap=0.25):
     return kept
 
 
+def _arclen_sample(times, pts, num):
+    """Pick `num` frames spread by hand TRAVEL (so dwelling frames don't repeat)."""
+    if len(times) <= num:
+        return list(times)
+    pts = np.asarray(pts)
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+    if cum[-1] < 1e-6:
+        sel = np.linspace(0, len(times) - 1, num).round().astype(int)
+        return [times[i] for i in sel]
+    targ = np.linspace(0.0, cum[-1], num)
+    sel = sorted(set(int(np.argmin(np.abs(cum - tv))) for tv in targ))
+    return [times[i] for i in sel]
+
+
+def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
+                      num, gap=0.35, arc=0.25, depth_jitter=0.1, seed=0):
+    """Lay a time-ordered hand sequence along a gentle left->right arc so it
+    reads as an action unfolding. Both hands are shown per step (keeping their
+    real relative configuration), so colours stay balanced; the temporal fade
+    in rrd_from_npz then shows direction (older = lighter, newest = solid).
+    Only the per-step POSITION is fabricated; poses are real TACO frames."""
+    rng = np.random.RandomState(seed)
+    valid = [t for t in range(lo, hi + 1) if (want_r and bool(vr_all[t])) or (want_l and bool(vl_all[t]))]
+    if not valid:
+        raise SystemExit(f"no valid hand poses in frames {lo}-{hi}")
+
+    def pair_pts(t):
+        pp = []
+        if want_r and bool(vr_all[t]):
+            pp.append(rv[t])
+        if want_l and bool(vl_all[t]):
+            pp.append(lv[t])
+        return np.concatenate(pp, 0)
+
+    rep = [pair_pts(t).mean(0) for t in valid]
+    idxs = _arclen_sample(valid, rep, num)
+    N = len(idxs)
+    pair = float(np.median([np.linalg.norm(pair_pts(t).max(0) - pair_pts(t).min(0)) for t in idxs]))
+    spacing = pair * (1.0 + gap)
+    width = spacing * max(1, N - 1)
+    zero = np.zeros((778, 3), np.float32)
+
+    right, left, vr, vl = [], [], [], []
+    for k, t in enumerate(idxs):
+        pc = pair_pts(t).mean(0)
+        x = (k - (N - 1) / 2.0) * spacing
+        u = (2.0 * k / (N - 1) - 1.0) if N > 1 else 0.0  # -1..1
+        z = arc * width * 0.5 * (1.0 - u * u) + rng.uniform(-1, 1) * spacing * 0.05
+        y = rng.uniform(-depth_jitter, depth_jitter) * pair
+        P = np.array([x, y, z], np.float64)
+        has_r = want_r and bool(vr_all[t])
+        has_l = want_l and bool(vl_all[t])
+        right.append((rv[t] - pc + P).astype(np.float32) if has_r else zero)
+        left.append((lv[t] - pc + P).astype(np.float32) if has_l else zero)
+        vr.append(has_r); vl.append(has_l)
+    return np.stack(right), np.stack(left), np.array(vr), np.array(vl), idxs
+
+
 def _rot_about(axis, ang):
     a = np.asarray(axis, np.float64); a = a / (np.linalg.norm(a) + 1e-9)
     c, s = np.cos(ang), np.sin(ang)
@@ -273,7 +334,17 @@ def main():
     lo = max(0, args.frame_start)
     hi = (T - 1) if args.frame_end < 0 else min(args.frame_end, T - 1)
 
-    if args.layout == "scatter":
+    if args.layout == "sequence":
+        # time-ordered arc of hand-pairs -> reads as an action unfolding
+        right, left, vr, vl, src = _compose_sequence(
+            rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, args.num_samples,
+            gap=args.gap, arc=args.arc, depth_jitter=args.depth_jitter, seed=args.seed)
+        idxs = list(range(len(src)))
+        sample_idx = np.asarray(src, np.int64)
+        no_fade_flag = bool(args.no_fade)  # fade ON by default -> shows time direction
+        print(f"[sequence] {len(idxs)} time-ordered hand poses along an arc "
+              f"(frames {src[0]}..{src[-1]}, gap={args.gap}, arc={args.arc})")
+    elif args.layout == "scatter":
         # compose a figure: real TACO hand poses on fabricated, scattered positions
         pool = []
         for t in range(lo, hi + 1):
