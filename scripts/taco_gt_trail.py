@@ -49,11 +49,14 @@ def parse_args():
     p.add_argument("--fps", type=float, default=30.0, help="for logging only")
     p.add_argument("--frame_start", type=int, default=0, help="optional crop start frame")
     p.add_argument("--frame_end", type=int, default=-1, help="optional crop end frame (-1 = last)")
-    p.add_argument("--layout", choices=["sequence", "scatter", "taco"], default="sequence",
-                   help="sequence = time-ordered hand sequence along a gentle arc that reads as an "
-                        "action unfolding (default; both hands per step, temporal fade). "
-                        "scatter = random-ish jittered grid of real poses. "
+    p.add_argument("--layout", choices=["sequence", "burst", "scatter", "taco"], default="sequence",
+                   help="sequence = time-ordered hand sequence along a gentle arc (default). "
+                        "burst = HaWoR-style radial 'explosion' of hands from a centre "
+                        "(sunflower/golden-angle, real poses, balanced colours). "
+                        "scatter = random-ish jittered grid. "
                         "taco = keep real TACO positions, low-overlap subset.")
+    p.add_argument("--density", type=float, default=0.55,
+                   help="[burst] radial spacing scale: smaller = tighter cluster, larger = more spread")
     p.add_argument("--arc", type=float, default=0.25,
                    help="[sequence] arc rise as a fraction of the row width (0 = straight row)")
     p.add_argument("--jitter", type=float, default=0.25,
@@ -276,6 +279,53 @@ def _compose_sequence(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
     return np.stack(right), np.stack(left), np.array(vr), np.array(vl), idxs
 
 
+def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
+                   num, density=0.55, jitter=0.15, jitter_rot=15.0, depth_jitter=0.2, seed=0):
+    """HaWoR-style radial 'explosion': lay hands on a sunflower/phyllotaxis
+    pattern (golden-angle spiral) so they burst out from a centre, dense near
+    the middle and fanning outward -- organic, evenly packed, no grid feel.
+    Real TACO poses; left/right alternate so colours stay balanced. Only the
+    wrist POSITION is fabricated."""
+    rng = np.random.RandomState(seed)
+    rpool = [t for t in range(lo, hi + 1) if want_r and bool(vr_all[t])]
+    lpool = [t for t in range(lo, hi + 1) if want_l and bool(vl_all[t])]
+    if not rpool and not lpool:
+        raise SystemExit(f"no valid hand poses in frames {lo}-{hi}")
+
+    def diag(v):
+        return float(np.linalg.norm(v.max(0) - v.min(0)))
+    sizes = [diag(rv[t]) for t in rpool[:: max(1, len(rpool) // 30 or 1)]] + \
+            [diag(lv[t]) for t in lpool[:: max(1, len(lpool) // 30 or 1)]]
+    hand = float(np.median(sizes))
+
+    GA = np.pi * (3.0 - np.sqrt(5.0))  # golden angle
+    zero = np.zeros((778, 3), np.float32)
+    right, left, vr, vl, src = [], [], [], [], []
+    for i in range(num):
+        r = density * hand * np.sqrt(i)        # sqrt -> even areal density
+        th = i * GA
+        x = r * np.cos(th) + rng.uniform(-1, 1) * hand * jitter
+        z = r * np.sin(th) + rng.uniform(-1, 1) * hand * jitter
+        y = rng.uniform(-depth_jitter, depth_jitter) * hand
+        P = np.array([x, y, z], np.float64)
+
+        use_right = (i % 2 == 0 and rpool) or (not lpool)
+        if use_right:
+            t = rpool[rng.randint(len(rpool))]; v, side = rv[t], "r"
+        else:
+            t = lpool[rng.randint(len(lpool))]; v, side = lv[t], "l"
+        Vc = v - v.mean(0)
+        if jitter_rot > 0:
+            Vc = Vc @ _rot_about([0, 1, 0], np.deg2rad(rng.uniform(-jitter_rot, jitter_rot))).T
+        placed = (Vc + P).astype(np.float32)
+        if side == "r":
+            right.append(placed); left.append(zero); vr.append(True); vl.append(False)
+        else:
+            left.append(placed); right.append(zero); vl.append(True); vr.append(False)
+        src.append(int(t))
+    return np.stack(right), np.stack(left), np.array(vr), np.array(vl), src
+
+
 def _rot_about(axis, ang):
     a = np.asarray(axis, np.float64); a = a / (np.linalg.norm(a) + 1e-9)
     c, s = np.cos(ang), np.sin(ang)
@@ -359,6 +409,17 @@ def main():
         no_fade_flag = bool(args.no_fade)  # fade ON by default -> shows time direction
         print(f"[sequence] {len(idxs)} time-ordered hand poses along an arc "
               f"(frames {src[0]}..{src[-1]}, gap={args.gap}, arc={args.arc})")
+    elif args.layout == "burst":
+        # HaWoR-style radial explosion of hands from a centre
+        right, left, vr, vl, src = _compose_burst(
+            rv, lv, vr_all, vl_all, lo, hi, want_r, want_l, args.num_samples,
+            density=args.density, jitter=args.jitter, jitter_rot=args.jitter_rot,
+            depth_jitter=args.depth_jitter, seed=args.seed)
+        idxs = list(range(len(src)))
+        sample_idx = np.asarray(src, np.int64)
+        no_fade_flag = True  # radial layout isn't temporal
+        print(f"[burst] {len(idxs)} hands radiating from centre "
+              f"(density={args.density}, {int(vr.sum())} right / {int(vl.sum())} left)")
     elif args.layout == "scatter":
         # compose a figure: real TACO hand poses on fabricated, scattered positions
         pool = []
