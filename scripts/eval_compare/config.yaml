@@ -35,5 +35,5 @@ datasets:
   taco:
     enabled: true
     data_root: /path/to/TACO                       # ROOT with Egocentric_RGB_Videos/, Egocentric_Camera_Parameters/, Hand_Poses/
-    split_file: /root/datasets/TACO-Instructions/data_lists/v1_egocentric_data_available_sequences.txt
+    split_file: null                               # null => enumerate Hand_Poses/<triplet>/<seq> from disk (no toolkit list needed)
     trans_unit: 1.0                                # confirmed metres by convert_taco_to_wds.py
