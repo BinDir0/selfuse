@@ -66,7 +66,13 @@ def parse_args():
     p.add_argument("--out", default=None, help="output png (default <seq_folder>/world_traj.png)")
     p.add_argument("--rrd", default=None,
                    help="if set, skip aitviewer/GL and log the same trail to this rerun .rrd file "
-                        "(open in the rerun web viewer; no display/EGL needed)")
+                        "(open in the rerun web viewer; no display/EGL needed). "
+                        "Needs rerun-sdk in THIS env -- if that conflicts with the hawor numpy, "
+                        "use --dump_npz instead and convert with scripts/rrd_from_npz.py.")
+    p.add_argument("--dump_npz", default=None,
+                   help="if set, skip all rendering and dump the trail geometry (hands + cameras + "
+                        "ground) to this .npz. Runs in the hawor env (no rerun/GL). Convert to a "
+                        ".rrd in a rerun-only env with: python scripts/rrd_from_npz.py <npz> <rrd>")
     p.add_argument("--slam_npz", default=None, help="explicit SLAM npz (else auto-glob SLAM/hawor_slam_w_scale_*.npz)")
     p.add_argument("--num_samples", type=int, default=8, help="number of timesteps to lay along the trail")
     p.add_argument("--stride", type=int, default=0, help="if >0, sample every N frames instead of num_samples")
@@ -125,6 +131,45 @@ def _load_align_alpha(seq_folder, explicit):
         return alpha if alpha.size else None
     except Exception:
         return None
+
+
+def _sampled_trail_arrays(args, idxs, right_verts, left_verts, valid_r, valid_l,
+                          want_r, want_l, R_c2w, t_c2w):
+    """Pull the per-sample hand/camera geometry the rerun trail needs."""
+    mverts, mfaces, _ = camera_marker_geometry(args.frustum_radius, args.frustum_height)
+    right = np.stack([right_verts[t] for t in idxs], 0)
+    left = np.stack([left_verts[t] for t in idxs], 0)
+    cam = np.stack([np.einsum("ij,nj->ni", R_c2w[t], mverts) + t_c2w[t][None] for t in idxs], 0)
+    centers = np.stack([t_c2w[t] for t in idxs], 0)
+    vr = np.array([bool(want_r) and bool(valid_r[min(t, len(valid_r) - 1)]) for t in idxs])
+    vl = np.array([bool(want_l) and bool(valid_l[min(t, len(valid_l) - 1)]) for t in idxs])
+    return right, left, cam, mfaces, centers, vr, vl
+
+
+def _dump_trail_npz(args, idxs, right_verts, left_verts, faces_right, faces_left,
+                    valid_r, valid_l, want_r, want_l, R_c2w, t_c2w):
+    """Dump trail geometry to .npz so a rerun-only env can build the .rrd
+    without importing torch/aitviewer (avoids the hawor<->rerun numpy clash)."""
+    right, left, cam, cam_faces, centers, vr, vl = _sampled_trail_arrays(
+        args, idxs, right_verts, left_verts, valid_r, valid_l, want_r, want_l, R_c2w, t_c2w)
+    data = dict(
+        sample_idx=np.asarray(idxs, np.int64),
+        right_verts=right.astype(np.float32), left_verts=left.astype(np.float32),
+        faces_right=np.asarray(faces_right, np.int32), faces_left=np.asarray(faces_left, np.int32),
+        valid_r=vr, valid_l=vl,
+        cam_verts=cam.astype(np.float32), cam_faces=np.asarray(cam_faces, np.int32),
+        cam_centers=centers.astype(np.float32),
+        no_fade=np.asarray(bool(args.no_fade)), alpha_min=np.asarray(float(args.alpha_min)),
+    )
+    if not args.no_ground:
+        gv, gf, gvc, _ = checkerboard_geometry(length=100, c1=0, c2=0, up="z")
+        gv[:, 2] -= 2
+        data.update(ground_v=gv.astype(np.float32), ground_f=np.asarray(gf, np.int32),
+                    ground_c=(np.asarray(gvc)[:, :3] * 255).astype(np.uint8))
+    os.makedirs(os.path.dirname(os.path.abspath(args.dump_npz)) or ".", exist_ok=True)
+    np.savez_compressed(args.dump_npz, **data)
+    print(f"saved {args.dump_npz}  ({len(idxs)} samples). convert with:\n"
+          f"  python scripts/rrd_from_npz.py {args.dump_npz} <out.rrd>")
 
 
 def _log_rerun_trail(args, idxs, right_verts, left_verts, faces_right, faces_left,
@@ -267,6 +312,12 @@ def main():
     want_l = args.hands in ("both", "left")
     valid_r = pred_valid[ri] if pred_valid.ndim == 2 else np.ones(T, bool)
     valid_l = pred_valid[li] if pred_valid.ndim == 2 else np.ones(T, bool)
+
+    # ---- npz backend: dump geometry only (hawor env, no rerun/GL), then stop ----
+    if args.dump_npz:
+        _dump_trail_npz(args, idxs, right_verts, left_verts, faces_right, faces_left,
+                        valid_r, valid_l, want_r, want_l, R_c2w, t_c2w)
+        return
 
     # ---- rerun backend: log the same trail, no GL needed, then stop ----
     if args.rrd:
