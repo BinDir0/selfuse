@@ -77,19 +77,22 @@ def load_sequence(
                 sd = pickle.load(f)
             shape = _to_np(sd["hand_shape"] if isinstance(sd, dict) and "hand_shape" in sd else sd).reshape(10)
 
+        # keys are arbitrary; sorted position aligns to the egocentric frame order
+        # (mirrors dataset_utils/hand_pose_loader.py).
+        keys = sorted(data.keys())
         g_aa = np.zeros((T, 3), np.float32); pose_aa = np.zeros((T, 45), np.float32)
         tsl = np.zeros((T, 3), np.float32); betas = np.tile(shape, (T, 1)).astype(np.float32)
         present = np.zeros(T, bool)
-        for i in range(T):
-            entry = data.get(i, data.get(str(i)))
-            if entry is None:
-                continue
+        for i in range(min(T, len(keys))):
+            entry = data[keys[i]]
             full = _to_np(entry["hand_pose"]).reshape(-1)  # 48 axis-angle (1 global + 15)
             g_aa[i] = full[:3]; pose_aa[i] = full[3:48]
             tsl[i] = _to_np(entry["hand_trans"]).reshape(3) * trans_unit
             present[i] = True
         if present.any():
             j = mano_fk_world(g_aa, pose_aa, tsl, betas, is_right=is_right, use_cuda=use_cuda)
+            # TACO MANO uses center_idx=0 (wrist-centred) then +trans => wrist sits at trans.
+            j = j - j[:, 0:1, :] + tsl[:, None, :]
             joints[hand_idx] = j
             valid[hand_idx] = present & np.isfinite(j).all(axis=(1, 2))
 
