@@ -304,9 +304,10 @@ def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
     for i in range(num):
         r = density * hand * np.sqrt(i)        # sqrt -> even areal density
         th = i * GA
+        # tabletop: spread on the horizontal X-Y plane, Z (up) only a small wobble
         x = r * np.cos(th) + rng.uniform(-1, 1) * hand * jitter
-        z = r * np.sin(th) + rng.uniform(-1, 1) * hand * jitter
-        y = rng.uniform(-depth_jitter, depth_jitter) * hand
+        y = r * np.sin(th) + rng.uniform(-1, 1) * hand * jitter
+        z = rng.uniform(-depth_jitter, depth_jitter) * hand
         P = np.array([x, y, z], np.float64)
 
         use_right = (i % 2 == 0 and rpool) or (not lpool)
@@ -315,8 +316,10 @@ def _compose_burst(rv, lv, vr_all, vl_all, lo, hi, want_r, want_l,
         else:
             t = lpool[rng.randint(len(lpool))]; v, side = lv[t], "l"
         Vc = v - v.mean(0)
-        if jitter_rot > 0:
-            Vc = Vc @ _rot_about([0, 1, 0], np.deg2rad(rng.uniform(-jitter_rot, jitter_rot))).T
+        # yaw each hand about the vertical (Z) by its radial angle + jitter, so
+        # hands fan out to face different directions instead of all aligning
+        yaw = th + np.deg2rad(rng.uniform(-jitter_rot, jitter_rot))
+        Vc = Vc @ _rot_about([0, 0, 1], yaw).T
         placed = (Vc + P).astype(np.float32)
         if side == "r":
             right.append(placed); left.append(zero); vr.append(True); vl.append(False)
