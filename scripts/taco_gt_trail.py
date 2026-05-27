@@ -49,11 +49,23 @@ def parse_args():
     p.add_argument("--fps", type=float, default=30.0, help="for logging only")
     p.add_argument("--frame_start", type=int, default=0, help="optional crop start frame")
     p.add_argument("--frame_end", type=int, default=-1, help="optional crop end frame (-1 = last)")
+    p.add_argument("--layout", choices=["scatter", "taco"], default="scatter",
+                   help="scatter = compose a nice figure: random-ish wrist positions (jittered grid) "
+                        "with real TACO hand poses placed on them (default). "
+                        "taco = keep real TACO positions, pick a low-overlap subset.")
+    # --- taco layout knobs ---
     p.add_argument("--spread", type=float, default=0.6,
-                   help="2D scatter: 0 = compact/central, 1 = maximally spread across the view. "
-                        "Lower it if poses fly out to ugly extremes; raise it if they bunch up.")
+                   help="[taco] 2D scatter: 0 = compact/central, 1 = maximally spread.")
     p.add_argument("--overlap", type=float, default=0.25,
-                   help="max allowed pairwise 2D bbox IoU between kept poses (prevents ugly overlap)")
+                   help="[taco] max allowed pairwise 2D bbox IoU between kept poses")
+    # --- scatter layout knobs ---
+    p.add_argument("--gap", type=float, default=0.3,
+                   help="[scatter] spacing between hands as a fraction of hand size (bigger = more spread)")
+    p.add_argument("--jitter_rot", type=float, default=20.0,
+                   help="[scatter] random in-plane rotation per hand, degrees (variety)")
+    p.add_argument("--depth_jitter", type=float, default=0.15,
+                   help="[scatter] random depth offset as a fraction of hand size (non-flat look)")
+    p.add_argument("--seed", type=int, default=0, help="[scatter] RNG seed for positions/pose picks")
     p.add_argument("--hands", choices=["both", "left", "right"], default="both")
     p.add_argument("--no_fade", action="store_true", help="solid colour instead of fade-to-white")
     p.add_argument("--alpha_min", type=float, default=0.45,
@@ -189,6 +201,58 @@ def _select_scatter(cent2d, bboxes, num, spread=0.6, overlap=0.25):
     return kept
 
 
+def _rot_about(axis, ang):
+    a = np.asarray(axis, np.float64); a = a / (np.linalg.norm(a) + 1e-9)
+    c, s = np.cos(ang), np.sin(ang)
+    K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+    return np.eye(3) + s * K + (1 - c) * (K @ K)
+
+
+def _compose_scatter(pool, num, seed=0, gap=0.3, jitter_rot=20.0, depth_jitter=0.15):
+    """Compose a teaser figure: lay `num` hands on a jittered grid (a poster
+    wall in the X-Z plane, Y = depth), each using a real TACO hand pose sampled
+    from `pool` (so finger articulation/orientation is genuine; only the wrist
+    POSITION is fabricated for looks). Returns right/left/vr/vl arrays + src ids.
+
+    Grid is centred at the origin; spacing = hand_size*(1+gap); small per-hand
+    position jitter, optional in-plane rotation, and depth jitter add variety.
+    """
+    rng = np.random.RandomState(seed)
+    diag = float(np.median([np.linalg.norm(v.max(0) - v.min(0)) for v, _ in pool]))
+    spacing = diag * (1.0 + gap)
+    cols = int(np.ceil(np.sqrt(num)))
+    rows = int(np.ceil(num / cols))
+    jit = spacing * 0.33
+
+    positions = []
+    for r in range(rows):
+        for c in range(cols):
+            if len(positions) >= num:
+                break
+            x = (c - (cols - 1) / 2.0) * spacing + rng.uniform(-jit, jit)
+            z = ((rows - 1) / 2.0 - r) * spacing + rng.uniform(-jit, jit)
+            y = rng.uniform(-depth_jitter, depth_jitter) * diag
+            positions.append(np.array([x, y, z], np.float64))
+
+    order = rng.permutation(len(pool))
+    zero = None
+    right, left, vr, vl, src = [], [], [], [], []
+    for i, P in enumerate(positions):
+        v, side = pool[order[i % len(pool)]]
+        Vc = v - v.mean(0)
+        if jitter_rot > 0:
+            Vc = Vc @ _rot_about([0, 1, 0], np.deg2rad(rng.uniform(-jitter_rot, jitter_rot))).T
+        placed = (Vc + P).astype(np.float32)
+        if zero is None:
+            zero = np.zeros_like(placed)
+        if side == "r":
+            right.append(placed); left.append(zero); vr.append(True); vl.append(False)
+        else:
+            left.append(placed); right.append(zero); vl.append(True); vr.append(False)
+        src.append(int(order[i % len(pool)]))
+    return np.stack(right), np.stack(left), np.array(vr), np.array(vl), src
+
+
 def main():
     args = parse_args()
     triplet, seq = args.seq_id.rsplit("/", 1)
@@ -206,55 +270,68 @@ def main():
 
     want_r = args.hands in ("both", "right")
     want_l = args.hands in ("both", "left")
-
-    # candidate frames = whole episode (optional crop), where the shown hand(s) are valid
     lo = max(0, args.frame_start)
     hi = (T - 1) if args.frame_end < 0 else min(args.frame_end, T - 1)
-    cand = [t for t in range(lo, hi + 1)
-            if (want_r and bool(vr_all[t])) or (want_l and bool(vl_all[t]))]
-    if not cand:
-        raise SystemExit(f"no valid hand poses in frames {lo}-{hi}")
 
-    # per-candidate point set + centroid (combine the shown hands)
-    SUB = 120  # subsample verts for cheap bbox/PCA
-    pts_list, centroids = [], []
-    for t in cand:
-        pp = []
-        if want_r and bool(vr_all[t]):
-            pp.append(rv[t][::max(1, 778 // SUB)])
-        if want_l and bool(vl_all[t]):
-            pp.append(lv[t][::max(1, 778 // SUB)])
-        p = np.concatenate(pp, 0)
-        pts_list.append(p)
-        centroids.append(p.mean(0))
-    centroids = np.asarray(centroids)
-
-    # project onto the most-spread plane, take each pose's 2D bbox, pick a
-    # minimally-overlapping subset spanning the episode
-    e1, e2 = _principal_plane(centroids)
-    bboxes = []
-    for p in pts_list:
-        x, y = p @ e1, p @ e2
-        bboxes.append((float(x.min()), float(y.min()), float(x.max()), float(y.max())))
-    cent2d = np.stack([centroids @ e1, centroids @ e2], axis=1)
-    sel = _select_scatter(cent2d, bboxes, args.num_samples, spread=args.spread, overlap=args.overlap)
-    idxs = sorted(cand[i] for i in sel)  # time order for the temporal fade
-    print(f"[select] {len(cand)} valid frames in {lo}-{hi} -> {len(idxs)} poses "
-          f"(scatter spread={args.spread}, overlap<= {args.overlap})")
-
-    right = np.stack([rv[t] for t in idxs], 0)
-    left = np.stack([lv[t] for t in idxs], 0)
-    vr = np.array([want_r and bool(vr_all[t]) for t in idxs])
-    vl = np.array([want_l and bool(vl_all[t]) for t in idxs])
+    if args.layout == "scatter":
+        # compose a figure: real TACO hand poses on fabricated, scattered positions
+        pool = []
+        for t in range(lo, hi + 1):
+            if want_r and bool(vr_all[t]):
+                pool.append((rv[t], "r"))
+            if want_l and bool(vl_all[t]):
+                pool.append((lv[t], "l"))
+        if not pool:
+            raise SystemExit(f"no valid hand poses in frames {lo}-{hi}")
+        right, left, vr, vl, src = _compose_scatter(
+            pool, args.num_samples, seed=args.seed, gap=args.gap,
+            jitter_rot=args.jitter_rot, depth_jitter=args.depth_jitter)
+        idxs = list(range(len(src)))
+        sample_idx = np.asarray(src, np.int64)
+        no_fade_flag = True  # temporal fade is meaningless for a composed layout
+        print(f"[scatter] composed {len(idxs)} hands from {len(pool)} TACO poses "
+              f"(gap={args.gap}, jitter_rot={args.jitter_rot})")
+    else:
+        # keep real TACO positions; pick a low-overlap, 2D-spread subset
+        cand = [t for t in range(lo, hi + 1)
+                if (want_r and bool(vr_all[t])) or (want_l and bool(vl_all[t]))]
+        if not cand:
+            raise SystemExit(f"no valid hand poses in frames {lo}-{hi}")
+        SUB = 120  # subsample verts for cheap bbox/PCA
+        pts_list, centroids = [], []
+        for t in cand:
+            pp = []
+            if want_r and bool(vr_all[t]):
+                pp.append(rv[t][::max(1, 778 // SUB)])
+            if want_l and bool(vl_all[t]):
+                pp.append(lv[t][::max(1, 778 // SUB)])
+            p = np.concatenate(pp, 0)
+            pts_list.append(p)
+            centroids.append(p.mean(0))
+        centroids = np.asarray(centroids)
+        e1, e2 = _principal_plane(centroids)
+        bboxes = [(float((p @ e1).min()), float((p @ e2).min()),
+                   float((p @ e1).max()), float((p @ e2).max())) for p in pts_list]
+        cent2d = np.stack([centroids @ e1, centroids @ e2], axis=1)
+        sel = _select_scatter(cent2d, bboxes, args.num_samples, spread=args.spread, overlap=args.overlap)
+        idxs = sorted(cand[i] for i in sel)  # time order for the temporal fade
+        right = np.stack([rv[t] for t in idxs], 0)
+        left = np.stack([lv[t] for t in idxs], 0)
+        vr = np.array([want_r and bool(vr_all[t]) for t in idxs])
+        vl = np.array([want_l and bool(vl_all[t]) for t in idxs])
+        sample_idx = np.asarray(idxs, np.int64)
+        no_fade_flag = bool(args.no_fade)
+        print(f"[select] {len(cand)} valid frames in {lo}-{hi} -> {len(idxs)} poses "
+              f"(spread={args.spread}, overlap<= {args.overlap})")
 
     data = dict(
-        sample_idx=np.asarray(idxs, np.int64),
+        sample_idx=sample_idx,
         right_verts=right.astype(np.float32), left_verts=left.astype(np.float32),
         faces_right=faces_right.astype(np.int32), faces_left=faces_left.astype(np.int32),
         valid_r=vr, valid_l=vl,
-        no_fade=np.asarray(bool(args.no_fade)), alpha_min=np.asarray(float(args.alpha_min)),
+        no_fade=np.asarray(bool(no_fade_flag)), alpha_min=np.asarray(float(args.alpha_min)),
     )
-    if args.camera:
+    if args.camera and args.layout == "taco":
         from lib.vis.run_vis2 import camera_marker_geometry
         mverts, mfaces, _ = camera_marker_geometry(args.frustum_radius, args.frustum_height)
         cam = np.stack([np.einsum("ij,nj->ni", R_c2w[t], mverts) + cam_pos[t][None] for t in idxs], 0)
