@@ -60,6 +60,21 @@ _PALM = np.array([[92, 38, 234], [234, 38, 239], [38, 122, 239], [239, 122, 279]
                   [120, 108, 78], [78, 108, 79]])
 
 
+def vertex_normals(verts, faces):
+    """Smooth (area-weighted) per-vertex normals so rerun shades the mesh with
+    a soft light->dark gradient instead of rendering it flat single-colour."""
+    verts = np.asarray(verts, np.float64)
+    faces = np.asarray(faces, np.int64)
+    nrm = np.zeros_like(verts)
+    tris = verts[faces]
+    fn = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])  # area-weighted face normals
+    for i in range(3):
+        np.add.at(nrm, faces[:, i], fn)
+    ln = np.linalg.norm(nrm, axis=1, keepdims=True)
+    ln[ln == 0] = 1.0
+    return (nrm / ln).astype(np.float32)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--seq_folder", required=True, help="clip dir with world_space_res.pth and SLAM/")
@@ -211,10 +226,12 @@ def _log_rerun_trail(args, idxs, right_verts, left_verts, faces_right, faces_lef
         if want_r and bool(valid_r[min(t, len(valid_r) - 1)]):
             rr.log(f"world/hand_right/t{t:05d}",
                    rr.Mesh3D(vertex_positions=right_verts[t], triangle_indices=faces_right,
+                             vertex_normals=vertex_normals(right_verts[t], faces_right),
                              albedo_factor=shade(PURPLE, k)), static=True)
         if want_l and bool(valid_l[min(t, len(valid_l) - 1)]):
             rr.log(f"world/hand_left/t{t:05d}",
                    rr.Mesh3D(vertex_positions=left_verts[t], triangle_indices=faces_left,
+                             vertex_normals=vertex_normals(left_verts[t], faces_left),
                              albedo_factor=shade(BLUE, k)), static=True)
         cam_v = np.einsum("ij,nj->ni", R_c2w[t], mverts) + t_c2w[t][None]
         rr.log(f"world/camera/t{t:05d}",

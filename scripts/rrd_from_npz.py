@@ -21,6 +21,21 @@ PURPLE = (0.804, 0.600, 0.820)   # right hand
 BLUE = (0.207, 0.596, 0.792)     # left hand
 
 
+def vertex_normals(verts, faces):
+    """Smooth per-vertex normals so rerun shades the mesh with a soft
+    gradient instead of a flat single colour (mirrors render_world_traj)."""
+    verts = np.asarray(verts, np.float64)
+    faces = np.asarray(faces, np.int64)
+    nrm = np.zeros_like(verts)
+    tris = verts[faces]
+    fn = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    for i in range(3):
+        np.add.at(nrm, faces[:, i], fn)
+    ln = np.linalg.norm(nrm, axis=1, keepdims=True)
+    ln[ln == 0] = 1.0
+    return (nrm / ln).astype(np.float32)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -59,10 +74,12 @@ def main():
         if bool(d["valid_r"][k]):
             rr.log(f"world/hand_right/t{t:05d}",
                    rr.Mesh3D(vertex_positions=d["right_verts"][k], triangle_indices=d["faces_right"],
+                             vertex_normals=vertex_normals(d["right_verts"][k], d["faces_right"]),
                              albedo_factor=shade(PURPLE, k)), static=True)
         if bool(d["valid_l"][k]):
             rr.log(f"world/hand_left/t{t:05d}",
                    rr.Mesh3D(vertex_positions=d["left_verts"][k], triangle_indices=d["faces_left"],
+                             vertex_normals=vertex_normals(d["left_verts"][k], d["faces_left"]),
                              albedo_factor=shade(BLUE, k)), static=True)
         rr.log(f"world/camera/t{t:05d}",
                rr.Mesh3D(vertex_positions=d["cam_verts"][k], triangle_indices=d["cam_faces"],
