@@ -39,7 +39,12 @@ def _resolve_pred_folder(search_root: str) -> str | None:
 
 def _bash(repo: str, py_cmd: str, env: str, log: str, env_vars: dict | None = None) -> int:
     # cd happens in the outer shell; env vars + conda run wrap the python invocation.
-    conda = f"conda run --no-capture-output -n {env} " if env else ""
+    # env may be a NAME (conda run -n) or a PREFIX PATH (conda run -p, e.g. on a big disk).
+    if env:
+        flag = "-p" if ("/" in env or os.path.isabs(env)) else "-n"
+        conda = f"conda run --no-capture-output {flag} {env} "
+    else:
+        conda = ""
     exports = "".join(f"{k}={shlex.quote(str(v))} " for k, v in (env_vars or {}).items())
     mkdirs = "".join(
         f"mkdir -p {shlex.quote(str(v))} && " for k, v in (env_vars or {}).items() if "TMP" in k or "DIR" in k
