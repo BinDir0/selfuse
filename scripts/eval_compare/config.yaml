@@ -13,6 +13,11 @@ repos:
   fork: .                            # this repo (run from its root)
   upstream: /root/HaWoR              # reference HaWoR
 
+# env vars exported before each system's inference command (paths/large-disk tmp roots).
+fork_env:
+  HAWOR_BATCH_TMPDIR: /efs-exp/guantianrui/tmp2   # SLAM stage3 frame-materialization workspace
+orig_env: {}
+
 # conda envs used by the runners (set to "" to skip activation)
 envs:
   hawor: hawor

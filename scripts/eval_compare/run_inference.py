@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import shlex
 import subprocess
 
 from scripts.eval_compare.common import load_config
@@ -36,16 +37,20 @@ def _resolve_pred_folder(search_root: str) -> str | None:
     return None
 
 
-def _bash(repo: str, py_cmd: str, env: str, log: str) -> int:
-    # cd happens in the outer shell; conda run wraps ONLY the python invocation.
+def _bash(repo: str, py_cmd: str, env: str, log: str, env_vars: dict | None = None) -> int:
+    # cd happens in the outer shell; env vars + conda run wrap the python invocation.
     conda = f"conda run --no-capture-output -n {env} " if env else ""
-    full = f"cd {repo} && {conda}{py_cmd}"
+    exports = "".join(f"{k}={shlex.quote(str(v))} " for k, v in (env_vars or {}).items())
+    mkdirs = "".join(
+        f"mkdir -p {shlex.quote(str(v))} && " for k, v in (env_vars or {}).items() if "TMP" in k or "DIR" in k
+    )
+    full = f"cd {repo} && {mkdirs}{exports}{conda}{py_cmd}"
     print(f"  $ {full}")
     with open(log, "w") as f:
         return subprocess.run(["bash", "-lc", full], stdout=f, stderr=subprocess.STDOUT).returncode
 
 
-def run_fork(seq_dir: str, repo: str, env: str, force: bool) -> str | None:
+def run_fork(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | None = None) -> str | None:
     run_dir = os.path.join(seq_dir, "runs", "fork")
     os.makedirs(run_dir, exist_ok=True)
     video = os.path.abspath(os.path.join(seq_dir, "video.mp4"))
@@ -60,7 +65,7 @@ def run_fork(seq_dir: str, repo: str, env: str, force: bool) -> str | None:
     with open(cfg_path, "w") as f:
         f.write(f"video: {video}\noutput_root: {os.path.abspath(run_dir)}\n")
     py = f"python scripts/run_dataset_pipeline.py --config {os.path.abspath(cfg_path)} --stages prepare,infer"
-    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"))
+    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"), env_vars=env_vars)
     folder = _resolve_pred_folder(run_dir)
     if rc != 0 or folder is None:
         print(f"  fork: FAILED (rc={rc}); see {run_dir}/run.log"); return None
@@ -68,7 +73,7 @@ def run_fork(seq_dir: str, repo: str, env: str, force: bool) -> str | None:
     return folder
 
 
-def run_orig(seq_dir: str, repo: str, env: str, force: bool) -> str | None:
+def run_orig(seq_dir: str, repo: str, env: str, force: bool, env_vars: dict | None = None) -> str | None:
     run_dir = os.path.join(seq_dir, "runs", "orig")
     os.makedirs(run_dir, exist_ok=True)
     src = os.path.join(seq_dir, "video.mp4")
@@ -83,7 +88,7 @@ def run_orig(seq_dir: str, repo: str, env: str, force: bool) -> str | None:
         print("  orig: outputs present, skip"); _write_marker(run_dir, existing); return existing
 
     py = f"python demo.py --video_path {os.path.abspath(link)} --vis_mode world"
-    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"))
+    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"), env_vars=env_vars)
     folder = _resolve_pred_folder(run_dir)
     if rc != 0 or folder is None:
         print(f"  orig: FAILED (rc={rc}); see {run_dir}/run.log"); return None
@@ -118,9 +123,9 @@ def main():
         for seq_dir in seq_dirs:
             print(f"[{name}] {os.path.basename(seq_dir)}")
             if "fork" in systems:
-                run_fork(seq_dir, cfg["repos"]["fork"], env, args.force)
+                run_fork(seq_dir, cfg["repos"]["fork"], env, args.force, cfg.get("fork_env"))
             if "orig" in systems:
-                run_orig(seq_dir, cfg["repos"]["upstream"], env, args.force)
+                run_orig(seq_dir, cfg["repos"]["upstream"], env, args.force, cfg.get("orig_env"))
 
 
 if __name__ == "__main__":
