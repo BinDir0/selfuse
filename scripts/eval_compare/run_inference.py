@@ -36,8 +36,10 @@ def _resolve_pred_folder(search_root: str) -> str | None:
     return None
 
 
-def _bash(cmd: str, env: str, log: str) -> int:
-    full = cmd if not env else f"conda run --no-capture-output -n {env} {cmd}"
+def _bash(repo: str, py_cmd: str, env: str, log: str) -> int:
+    # cd happens in the outer shell; conda run wraps ONLY the python invocation.
+    conda = f"conda run --no-capture-output -n {env} " if env else ""
+    full = f"cd {repo} && {conda}{py_cmd}"
     print(f"  $ {full}")
     with open(log, "w") as f:
         return subprocess.run(["bash", "-lc", full], stdout=f, stderr=subprocess.STDOUT).returncode
@@ -57,8 +59,8 @@ def run_fork(seq_dir: str, repo: str, env: str, force: bool) -> str | None:
     cfg_path = os.path.join(run_dir, "pipeline_config.yaml")
     with open(cfg_path, "w") as f:
         f.write(f"video: {video}\noutput_root: {os.path.abspath(run_dir)}\n")
-    cmd = f"cd {repo} && python scripts/run_dataset_pipeline.py --config {os.path.abspath(cfg_path)} --stages prepare,infer"
-    rc = _bash(cmd, env, os.path.join(run_dir, "run.log"))
+    py = f"python scripts/run_dataset_pipeline.py --config {os.path.abspath(cfg_path)} --stages prepare,infer"
+    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"))
     folder = _resolve_pred_folder(run_dir)
     if rc != 0 or folder is None:
         print(f"  fork: FAILED (rc={rc}); see {run_dir}/run.log"); return None
@@ -80,8 +82,8 @@ def run_orig(seq_dir: str, repo: str, env: str, force: bool) -> str | None:
     if existing and not force:
         print("  orig: outputs present, skip"); _write_marker(run_dir, existing); return existing
 
-    cmd = f"cd {repo} && python demo.py --video_path {os.path.abspath(link)} --vis_mode world"
-    rc = _bash(cmd, env, os.path.join(run_dir, "run.log"))
+    py = f"python demo.py --video_path {os.path.abspath(link)} --vis_mode world"
+    rc = _bash(repo, py, env, os.path.join(run_dir, "run.log"))
     folder = _resolve_pred_folder(run_dir)
     if rc != 0 or folder is None:
         print(f"  orig: FAILED (rc={rc}); see {run_dir}/run.log"); return None
