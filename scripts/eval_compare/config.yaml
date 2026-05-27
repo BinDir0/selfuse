@@ -20,7 +20,7 @@ envs:
 
 datasets:
   egoverse:
-    enabled: true
+    enabled: false                                 # dropped: episodes are zarr v3, hawor env ships zarr v2 (incompatible)
     data_root: /efs-exp/guantianrui/eval/egoverse  # episode dirs (zarr v3 groups, no .zarr suffix)
     split_file: null
   h2o:
