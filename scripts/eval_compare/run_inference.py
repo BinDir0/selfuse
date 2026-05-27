@@ -102,6 +102,7 @@ def main():
     ap.add_argument("--dataset", default=None)
     ap.add_argument("--systems", default="fork,orig")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--limit", type=int, default=None, help="only first N prepared seqs per dataset (debug)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -111,9 +112,10 @@ def main():
     datasets = [args.dataset] if args.dataset else list(cfg["datasets"])
 
     for name in datasets:
-        for seq_dir in sorted(glob.glob(os.path.join(work_dir, name, "*"))):
-            if not os.path.isdir(seq_dir):
-                continue
+        seq_dirs = [d for d in sorted(glob.glob(os.path.join(work_dir, name, "*"))) if os.path.isdir(d)]
+        if args.limit:
+            seq_dirs = seq_dirs[: args.limit]
+        for seq_dir in seq_dirs:
             print(f"[{name}] {os.path.basename(seq_dir)}")
             if "fork" in systems:
                 run_fork(seq_dir, cfg["repos"]["fork"], env, args.force)
