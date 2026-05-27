@@ -1,0 +1,39 @@
+# Configuration for the fork-vs-upstream HaWoR comparison.
+# Fill the production-machine paths before running there. Office machine has no data.
+
+work_dir: ./eval_compare_work        # prepared inputs, predictions, results land here
+subset_per_dataset: 10               # sequences sampled per dataset
+seed: 0                              # deterministic sequence sampling
+
+# 100-frame segments + 1-frame RPE delta == HaWoR paper defaults.
+wa_segment: 100
+rpe_delta: 1
+
+repos:
+  fork: .                            # this repo (run from its root)
+  upstream: /root/HaWoR              # reference HaWoR
+
+# conda envs used by the runners (set to "" to skip activation)
+envs:
+  hawor: hawor
+  any4d: any4d
+
+datasets:
+  egoverse:
+    enabled: true
+    data_root: /root/datasets/EgoVerse/data        # <-- production zarr root
+    split_file: null
+  h2o:
+    enabled: true
+    data_root: /root/datasets/h2odataset/data      # <-- production frame root
+    split_file: /root/datasets/h2odataset/pose_lists/pose_test.txt
+  oakink2:
+    enabled: true
+    data_root: /root/datasets/OakInk2/data         # <-- has anno_preview/ + image dirs
+    split_file: null
+    ego_cam: egocentric
+  taco:
+    enabled: true
+    data_root: /root/datasets/TACO-Instructions/data
+    split_file: /root/datasets/TACO-Instructions/data_lists/v1_overall_data_train_test_split.txt
+    trans_unit: 1.0                                 # set 0.001 if hand_trans is in mm
