@@ -43,7 +43,17 @@ def _quat_wxyz_to_R(q: np.ndarray) -> np.ndarray:
 
 
 def list_sequences(data_root: str, split_file: str | None = None, limit: int | None = None):
-    seqs = [os.path.relpath(p, data_root) for p in sorted(glob.glob(os.path.join(data_root, "**", "*.zarr"), recursive=True))]
+    # Episodes are zarr v3 GROUP dirs (named with or without a .zarr suffix); each
+    # contains a top-level zarr.json. Pick immediate subdirs that look like a group.
+    seqs = []
+    for name in sorted(os.listdir(data_root)):
+        p = os.path.join(data_root, name)
+        if os.path.isdir(p) and os.path.exists(os.path.join(p, "zarr.json")):
+            seqs.append(name)
+    # fallback: also accept *.zarr anywhere if the flat scan found nothing
+    if not seqs:
+        seqs = [os.path.relpath(p, data_root)
+                for p in sorted(glob.glob(os.path.join(data_root, "**", "*.zarr"), recursive=True))]
     return seqs[:limit] if limit else seqs
 
 

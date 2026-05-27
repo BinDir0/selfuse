@@ -48,11 +48,33 @@ def list_sequences(data_root: str, split_file: str | None = None, limit: int | N
 
 
 def _image_path(data_root, token, serial, fid):
-    for ext in ("png", "jpg"):
+    for ext in ("png", "jpg", "jpeg"):
         fp = os.path.join(data_root, "data", token, serial, f"{fid:0>6}.{ext}")
         if os.path.exists(fp):
             return fp
     return None
+
+
+def _tar_frame_index(data_root, token, serial):
+    """Map fid -> member name for frames of `serial` inside data/<token>.tar.
+
+    Returns (tar_path, {fid: member}) or (None, {}). Matches members whose path has
+    `serial` as a component and a 6-digit image basename.
+    """
+    import re
+    import tarfile
+
+    tar_path = os.path.join(data_root, "data", f"{token}.tar")
+    if not os.path.exists(tar_path):
+        return None, {}
+    idx = {}
+    pat = re.compile(rf"(?:^|/){re.escape(serial)}/0*([0-9]+)\.(?:png|jpe?g)$")
+    with tarfile.open(tar_path, "r") as tf:
+        for m in tf.getnames():
+            mm = pat.search(m)
+            if mm:
+                idx[int(mm.group(1))] = m
+    return tar_path, idx
 
 
 def load_sequence(
@@ -65,15 +87,21 @@ def load_sequence(
     serial = {v: k for k, v in anno["cam_def"].items()}[ego_cam]
     cam_intr, cam_extr, raw_mano = anno["cam_intr"][ego_cam], anno["cam_extr"][ego_cam], anno["raw_mano"]
 
-    # frames present in cam params, MANO, and on disk
+    # frames present in cam params, MANO, and on disk (loose files OR inside <token>.tar)
     cand = sorted(set(cam_extr) & set(cam_intr) & set(raw_mano))
-    fids, frames = [], []
-    for f in cand:
-        img = _image_path(data_root, token, serial, f)
-        if img is not None:
-            fids.append(f); frames.append(img)
+    frame_paths, tar_path, tar_members = None, None, None
+    fids = [f for f in cand if _image_path(data_root, token, serial, f) is not None]
+    if fids:
+        frame_paths = [_image_path(data_root, token, serial, f) for f in fids]
+    else:
+        tar_path, tar_idx = _tar_frame_index(data_root, token, serial)
+        if tar_idx:
+            fids = [f for f in cand if f in tar_idx]
+            tar_members = [tar_idx[f] for f in fids]
     if not fids:
-        raise FileNotFoundError(f"no ego frames for {seq_id} (serial {serial})")
+        raise FileNotFoundError(
+            f"no ego frames for {seq_id} (serial {serial}); checked loose files and data/{token}.tar"
+        )
     T = len(fids)
 
     K = np.asarray(cam_intr[fids[0]], dtype=np.float64).reshape(3, 3)
@@ -106,5 +134,5 @@ def load_sequence(
     return GTSequence(
         seq_id=seq_id, dataset="oakink2", fps=fps, K=K,
         cam_R_w2c=R_w2c, cam_t_w2c=t_w2c, joints_world=joints, valid=valid,
-        frame_paths=frames,
+        frame_paths=frame_paths, frame_archive=tar_path, frame_members=tar_members,
     )

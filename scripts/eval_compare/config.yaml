@@ -21,7 +21,7 @@ envs:
 datasets:
   egoverse:
     enabled: true
-    data_root: /root/datasets/EgoVerse/data        # <-- production zarr root
+    data_root: /efs-exp/guantianrui/eval/egoverse  # episode dirs (zarr v3 groups, no .zarr suffix)
     split_file: null
   h2o:
     enabled: true
@@ -29,7 +29,7 @@ datasets:
     split_file: null                               # null => recursively enumerate cam4/rgb dirs (no pose list needed)
   oakink2:
     enabled: true
-    data_root: /path/to/OakInk2                    # ROOT with data/ + anno_preview/ + program/
+    data_root: /efs-exp/guantianrui/datasets/OakInk-v2  # ROOT with data/ (per-seq .tar or extracted) + anno_preview/
     split_file: null
     ego_cam: egocentric                            # camera-LAYOUT name; serial auto-resolved via cam_def
   taco:

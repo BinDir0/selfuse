@@ -24,6 +24,7 @@ from scripts.eval_compare.common import (
     sample_sequences,
     seq_workdir,
     write_video_from_frames,
+    write_video_from_tar,
     write_video_from_zarr,
 )
 from scripts.eval_compare.gt_adapters import get_adapter
@@ -34,6 +35,8 @@ def _extract_video(gt, out_video: str, fps: float, dataset: str) -> None:
         return
     if dataset == "egoverse":
         write_video_from_zarr(gt.video_path, out_video, fps)
+    elif gt.frame_archive and gt.frame_members:
+        write_video_from_tar(gt.frame_archive, gt.frame_members, out_video, fps)
     elif gt.frame_paths:
         write_video_from_frames(gt.frame_paths, out_video, fps)
     elif gt.video_path and gt.video_path.endswith((".mp4", ".avi")):

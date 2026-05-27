@@ -40,6 +40,8 @@ class GTSequence:
     valid: np.ndarray          # (2, T) bool
     frame_paths: list[str] | None = None   # ordered ego RGB frames (alt to video)
     video_path: str | None = None          # ego RGB video (alt to frames)
+    frame_archive: str | None = None        # tar holding ego frames (OakInk2)
+    frame_members: list[str] | None = None  # ordered member names inside frame_archive
 
     # ----- derived camera geometry --------------------------------------- #
     @property
@@ -65,7 +67,12 @@ class GTSequence:
             joints_world=self.joints_world.astype(np.float32),
             valid=self.valid.astype(bool),
         )
-        meta = {"frame_paths": self.frame_paths, "video_path": self.video_path}
+        meta = {
+            "frame_paths": self.frame_paths,
+            "video_path": self.video_path,
+            "frame_archive": self.frame_archive,
+            "frame_members": self.frame_members,
+        }
         with open(path + ".meta.json", "w") as f:
             json.dump(meta, f)
 
@@ -85,6 +92,8 @@ class GTSequence:
             valid=d["valid"],
             frame_paths=meta.get("frame_paths"),
             video_path=meta.get("video_path"),
+            frame_archive=meta.get("frame_archive"),
+            frame_members=meta.get("frame_members"),
         )
 
 

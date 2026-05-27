@@ -46,6 +46,31 @@ def write_video_from_frames(frame_paths: list[str], out_path: str, fps: float) -
     vw.release()
 
 
+def write_video_from_tar(tar_path: str, members: list[str], out_path: str, fps: float) -> int:
+    """Encode an mp4 from ordered image members inside a tar (no full extraction)."""
+    import tarfile
+
+    import cv2
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    vw = None
+    with tarfile.open(tar_path, "r") as tf:
+        for m in members:
+            fobj = tf.extractfile(m)
+            if fobj is None:
+                continue
+            img = cv2.imdecode(np.frombuffer(fobj.read(), np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+            if vw is None:
+                h, w = img.shape[:2]
+                vw = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+            vw.write(img)
+    if vw is not None:
+        vw.release()
+    return len(members)
+
+
 def write_video_from_zarr(zarr_path: str, out_path: str, fps: float, key: str = "images.front_1") -> int:
     """Decode jpeg-encoded ego frames from a zarr episode into an mp4. Returns frame count."""
     import cv2
