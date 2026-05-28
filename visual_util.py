@@ -326,6 +326,95 @@ def depth_edge(depth: np.ndarray, rtol: float = 0.03, kernel_size: int = 3) -> n
     return (relative_jump > rtol).reshape(original_shape)
 
 
+def camera_trajectory_to_glb(
+    predictions: dict,
+    scatter_frac: float = 0.04,
+    marker_radius_frac: float = 0.015,
+    tube_radius_frac: float = 0.004,
+) -> trimesh.Scene:
+    """Build a standalone GLB showing the camera trajectory only.
+
+    Each VGGT frame contributes one small sphere at the camera center; consecutive
+    centers are joined by a thin cylinder so the path reads as a polyline. The
+    centers get a deterministic per-index Gaussian scatter so a dense trajectory
+    looks looser instead of stacking on a tight curve. Colors fade from light gray
+    to near-black along time, matching the main scene's camera glyphs.
+    """
+    extrinsic = predictions["extrinsic"]
+    n = len(extrinsic)
+    if n == 0:
+        return trimesh.Scene()
+
+    cam_pos = np.empty((n, 3), dtype=np.float64)
+    for i in range(n):
+        E = np.eye(4)
+        E[:3, :4] = extrinsic[i]
+        cam_pos[i] = np.linalg.inv(E)[:3, 3]
+
+    if n >= 2:
+        span = float(np.linalg.norm(cam_pos.max(0) - cam_pos.min(0)))
+    else:
+        span = 0.0
+    if span < 1e-6:
+        span = 1.0
+
+    # Deterministic per-index jitter (seed by frame index so re-renders match exactly).
+    if scatter_frac > 0:
+        sigma = span * scatter_frac
+        jitter = np.empty_like(cam_pos)
+        for i in range(n):
+            jitter[i] = np.random.default_rng(int(i) * 257 + 11).standard_normal(3) * sigma
+        cam_pos = cam_pos + jitter
+
+    scene = trimesh.Scene()
+    cam_light = np.array([170, 170, 170])
+    cam_dark = np.array([20, 20, 20])
+
+    def lerp_gray(t: float) -> tuple:
+        return tuple(int(round(c)) for c in cam_light * (1.0 - t) + cam_dark * t)
+
+    r_marker = span * marker_radius_frac
+    r_tube = span * tube_radius_frac
+
+    for i, p in enumerate(cam_pos):
+        t = i / max(n - 1, 1)
+        sph = trimesh.creation.icosphere(subdivisions=2, radius=r_marker)
+        sph.apply_translation(p)
+        sph.visual.face_colors[:, :3] = lerp_gray(t)
+        scene.add_geometry(sph)
+
+    z_axis = np.array([0.0, 0.0, 1.0])
+    for i in range(n - 1):
+        a, b = cam_pos[i], cam_pos[i + 1]
+        seg = b - a
+        length = float(np.linalg.norm(seg))
+        if length < 1e-9:
+            continue
+        v = seg / length
+        dot = float(np.clip(np.dot(z_axis, v), -1.0, 1.0))
+        if dot > 1.0 - 1e-9:
+            R = np.eye(3)
+        elif dot < -1.0 + 1e-9:
+            R = Rotation.from_rotvec(np.pi * np.array([1.0, 0.0, 0.0])).as_matrix()
+        else:
+            axis = np.cross(z_axis, v)
+            axis = axis / (np.linalg.norm(axis) + 1e-9)
+            R = Rotation.from_rotvec(axis * np.arccos(dot)).as_matrix()
+
+        cyl = trimesh.creation.cylinder(radius=r_tube, height=length, sections=8)
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = (a + b) / 2.0
+        cyl.apply_transform(T)
+        cyl.visual.face_colors[:, :3] = lerp_gray((i + 0.5) / max(n - 1, 1))
+        scene.add_geometry(cyl)
+
+    extrinsics_h = np.zeros((n, 4, 4), dtype=np.float64)
+    extrinsics_h[:, :3, :4] = extrinsic
+    extrinsics_h[:, 3, 3] = 1.0
+    return apply_scene_alignment(scene, extrinsics_h)
+
+
 def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float):
     cam_width = scene_scale * 0.025
     cam_height = scene_scale * 0.05

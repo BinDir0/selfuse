@@ -16,7 +16,7 @@ import gradio as gr
 import numpy as np
 import torch
 
-from visual_util import predictions_to_glb
+from visual_util import camera_trajectory_to_glb, predictions_to_glb
 from vggt_omega.models import VGGTOmega
 from vggt_omega.utils.load_fn import load_and_preprocess_images
 from vggt_omega.utils.pose_enc import encoding_to_camera
@@ -258,14 +258,23 @@ def gradio_demo(
     )
     scene.export(file_obj=glbfile)
 
+    traj_glbfile = traj_glb_path(target_dir)
+    traj_scene = camera_trajectory_to_glb(predictions)
+    traj_scene.export(file_obj=traj_glbfile)
+
     del predictions
     gc.collect()
     torch.cuda.empty_cache()
 
     return (
         glbfile,
+        traj_glbfile,
         f"Reconstruction complete: {len(all_files)} frames.",
     )
+
+
+def traj_glb_path(target_dir: str) -> str:
+    return os.path.join(target_dir, "trajectory.glb")
 
 
 def glb_path(
@@ -300,11 +309,11 @@ def update_visualization(
     hand_max_frames=4,
 ):
     if not target_dir or target_dir == "None" or not os.path.isdir(target_dir):
-        return None, "No reconstruction available. Click Reconstruct first."
+        return None, None, "No reconstruction available. Click Reconstruct first."
 
     predictions_path = os.path.join(target_dir, "predictions.npz")
     if not os.path.exists(predictions_path):
-        return None, "No reconstruction available. Click Reconstruct first."
+        return None, None, "No reconstruction available. Click Reconstruct first."
 
     conf_thres = max(3.0, float(conf_thres))
 
@@ -338,11 +347,18 @@ def update_visualization(
         )
         scene.export(file_obj=glbfile)
 
-    return glbfile, "Visualization updated."
+    traj_glbfile = traj_glb_path(target_dir)
+    if not os.path.exists(traj_glbfile):
+        with np.load(predictions_path) as loaded:
+            predictions = {key: np.array(loaded[key]) for key in loaded.files}
+        traj_scene = camera_trajectory_to_glb(predictions)
+        traj_scene.export(file_obj=traj_glbfile)
+
+    return glbfile, traj_glbfile, "Visualization updated."
 
 
 def clear_model3d():
-    return None
+    return None, None
 
 
 def update_log():
@@ -518,12 +534,14 @@ def build_ui(
                         elem_classes=["custom-log"],
                     )
                     reconstruction_output = gr.Model3D(height=780, zoom_speed=0.2, pan_speed=0.2)
+                    gr.Markdown("**Camera Trajectory (positions only, time-ordered)**")
+                    trajectory_output = gr.Model3D(height=420, zoom_speed=0.2, pan_speed=0.2)
 
                 with gr.Row():
                     submit_btn = gr.Button("Reconstruct", scale=1, variant="primary")
                     update_visual_btn = gr.Button("Update Visual", scale=1)
                     clear_btn = gr.ClearButton(
-                        [input_video, input_images, reconstruction_output, log_output, target_dir_output, image_gallery],
+                        [input_video, input_images, reconstruction_output, trajectory_output, log_output, target_dir_output, image_gallery],
                         scale=1,
                     )
 
@@ -578,7 +596,7 @@ def build_ui(
             max_points_k,
         ):
             target_dir, image_paths = handle_uploads(input_video, input_images, video_sample_fps)
-            glbfile, log_msg = reconstruct(
+            glbfile, traj_glbfile, log_msg = reconstruct(
                 target_dir,
                 conf_thres,
                 mask_black_bg,
@@ -588,7 +606,7 @@ def build_ui(
                 max_points_k,
                 MAX_FRAMES,  # examples have no hand data, value is a no-op there
             )
-            return glbfile, log_msg, target_dir, image_paths
+            return glbfile, traj_glbfile, log_msg, target_dir, image_paths
 
         gr.Markdown("Click any row to load an example.")
 
@@ -607,6 +625,7 @@ def build_ui(
             ],
             outputs=[
                 reconstruction_output,
+                trajectory_output,
                 log_output,
                 target_dir_output,
                 image_gallery,
@@ -632,7 +651,7 @@ def build_ui(
             outputs=[reconstruction_output, target_dir_output, image_gallery, log_output],
         )
 
-        submit_btn.click(fn=clear_model3d, inputs=[], outputs=[reconstruction_output]).then(
+        submit_btn.click(fn=clear_model3d, inputs=[], outputs=[reconstruction_output, trajectory_output]).then(
             fn=update_log,
             inputs=[],
             outputs=[log_output],
@@ -648,7 +667,7 @@ def build_ui(
                 max_points_k,
                 hand_max_frames_slider,
             ],
-            outputs=[reconstruction_output, log_output],
+            outputs=[reconstruction_output, trajectory_output, log_output],
         )
 
         update_visual_btn.click(fn=update_visual_log, inputs=[], outputs=[log_output]).then(
@@ -663,7 +682,7 @@ def build_ui(
                 max_points_k,
                 hand_max_frames_slider,
             ],
-            outputs=[reconstruction_output, log_output],
+            outputs=[reconstruction_output, trajectory_output, log_output],
         )
 
     return demo
