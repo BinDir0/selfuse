@@ -17,8 +17,29 @@ import argparse
 
 import numpy as np
 
-PURPLE = (0.804, 0.600, 0.820)   # right hand
-BLUE = (0.207, 0.596, 0.792)     # left hand
+PURPLE = (0.804, 0.600, 0.820)   # right hand (purple_blue colormap)
+BLUE = (0.207, 0.596, 0.792)     # left hand  (purple_blue colormap)
+
+# Inferno-style stops: oldest -> (near) black, newest -> bright yellow. Both
+# hands share the gradient; time direction drives colour. Matches the
+# 'predicted hand action' figure look (semi-transparent black -> yellow).
+INFERNO_STOPS = (
+    (0.02, 0.00, 0.10),   # 0.00 near-black (oldest; pure 0,0,0 reads as a blob)
+    (0.30, 0.05, 0.40),   # 0.25 purple
+    (0.80, 0.15, 0.25),   # 0.50 red
+    (1.00, 0.55, 0.15),   # 0.75 orange
+    (1.00, 0.92, 0.20),   # 1.00 yellow (newest)
+)
+
+
+def _cmap_lookup(stops, f):
+    """Piecewise-linear RGB interp at f in [0,1] across evenly spaced `stops`."""
+    n = len(stops) - 1
+    fi = max(0.0, min(1.0, f)) * n
+    i = min(int(fi), n - 1)
+    u = fi - i
+    a, b = stops[i], stops[i + 1]
+    return [a[c] * (1.0 - u) + b[c] * u for c in range(3)]
 
 
 def vertex_normals(verts, faces):
@@ -41,6 +62,10 @@ def parse_args():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("npz", help="trail npz from render_world_traj.py --dump_npz")
     p.add_argument("rrd", help="output .rrd path")
+    p.add_argument("--colormap", choices=["inferno", "purple_blue"], default="inferno",
+                   help="inferno = black -> purple -> red -> orange -> yellow temporal gradient "
+                        "on BOTH hands (default, matches the action-prediction figure look). "
+                        "purple_blue = original PURPLE-right / BLUE-left + fade to white.")
     return p.parse_args()
 
 
@@ -57,11 +82,14 @@ def main():
     no_fade = bool(d["no_fade"])
     alpha_min = float(d["alpha_min"])
 
-    def shade(color, k):
-        # newest pose = full colour; older poses fade toward WHITE (afterimage),
-        # never toward black. f in [alpha_min, 1].
+    def shade(_color_unused, k):
+        if args.colormap == "inferno":
+            # both hands ride the inferno gradient by time; ignore base colour
+            f = 1.0 if (no_fade or n == 1) else (k / (n - 1))
+            return _cmap_lookup(INFERNO_STOPS, f)
+        # purple_blue: tint base by colour, fade toward white for older poses
         f = 1.0 if (no_fade or n == 1) else alpha_min + (1.0 - alpha_min) * (k / (n - 1))
-        return [float(c) * f + (1.0 - f) for c in color]
+        return [float(c) * f + (1.0 - f) for c in _color_unused]
 
     has_cam = "cam_verts" in d.files
 
