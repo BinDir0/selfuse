@@ -191,6 +191,7 @@ def gradio_demo(
     hand_data=None,
     hand_scale=1.0,
     hand_auto_scale=True,
+    hand_max_frames=4,
 ):
     if not target_dir or target_dir == "None" or not os.path.isdir(target_dir):
         raise gr.Error("Please upload images or a video first.")
@@ -215,6 +216,7 @@ def gradio_demo(
         show_cam,
         mask_sky,
         max_points_k,
+        hand_max_frames=hand_max_frames,
     )
     scene = predictions_to_glb(
         predictions,
@@ -229,6 +231,7 @@ def gradio_demo(
         frame_indices=predictions.get("frame_indices"),
         hand_scale=hand_scale,
         hand_auto_scale=hand_auto_scale,
+        hand_max_frames=hand_max_frames,
     )
     scene.export(file_obj=glbfile)
 
@@ -250,11 +253,13 @@ def glb_path(
     show_cam,
     mask_sky,
     max_points_k,
+    hand_max_frames=None,
 ):
+    hand_tag = f"_hf{int(hand_max_frames)}" if hand_max_frames is not None else ""
     return os.path.join(
         target_dir,
         f"scene_conf{conf_thres}_black{mask_black_bg}_white{mask_white_bg}_"
-        f"cam{show_cam}_sky{mask_sky}_max{int(max_points_k)}k.glb",
+        f"cam{show_cam}_sky{mask_sky}_max{int(max_points_k)}k{hand_tag}.glb",
     )
 
 
@@ -269,6 +274,7 @@ def update_visualization(
     hand_data=None,
     hand_scale=1.0,
     hand_auto_scale=True,
+    hand_max_frames=4,
 ):
     if not target_dir or target_dir == "None" or not os.path.isdir(target_dir):
         return None, "No reconstruction available. Click Reconstruct first."
@@ -287,6 +293,7 @@ def update_visualization(
         show_cam,
         mask_sky,
         max_points_k,
+        hand_max_frames=hand_max_frames,
     )
     if not os.path.exists(glbfile):
         with np.load(predictions_path) as loaded:
@@ -304,6 +311,7 @@ def update_visualization(
             frame_indices=predictions.get("frame_indices"),
             hand_scale=hand_scale,
             hand_auto_scale=hand_auto_scale,
+            hand_max_frames=hand_max_frames,
         )
         scene.export(file_obj=glbfile)
 
@@ -347,6 +355,7 @@ def build_ui(
         show_cam,
         mask_sky,
         max_points_k,
+        hand_max_frames,
     ):
         return gradio_demo(
             target_dir,
@@ -361,6 +370,7 @@ def build_ui(
             hand_data=hand_data,
             hand_scale=hand_scale,
             hand_auto_scale=hand_auto_scale,
+            hand_max_frames=int(hand_max_frames),
         )
 
     def update_visual(
@@ -371,6 +381,7 @@ def build_ui(
         show_cam,
         mask_sky,
         max_points_k,
+        hand_max_frames,
     ):
         return update_visualization(
             target_dir,
@@ -383,6 +394,7 @@ def build_ui(
             hand_data=hand_data,
             hand_scale=hand_scale,
             hand_auto_scale=hand_auto_scale,
+            hand_max_frames=int(hand_max_frames),
         )
 
     theme = gr.themes.Ocean()
@@ -495,6 +507,16 @@ def build_ui(
                         mask_black_bg = gr.Checkbox(label="Filter Black Background", value=False)
                         mask_white_bg = gr.Checkbox(label="Filter White Background", value=False)
 
+                with gr.Row():
+                    hand_max_frames_slider = gr.Slider(
+                        minimum=1,
+                        maximum=MAX_FRAMES,
+                        value=4,
+                        step=1,
+                        label="Hand frames (evenly spaced)",
+                        info="How many of the sampled frames' hand meshes to overlay.",
+                    )
+
         # ---------------------- Examples section ----------------------
         examples = [
             [snow_lift_video, 1.0, [], 20.0, False, False, True, False, 1000],
@@ -523,6 +545,7 @@ def build_ui(
                 show_cam,
                 mask_sky,
                 max_points_k,
+                MAX_FRAMES,  # examples have no hand data, value is a no-op there
             )
             return glbfile, log_msg, target_dir, image_paths
 
@@ -582,6 +605,7 @@ def build_ui(
                 show_cam,
                 mask_sky,
                 max_points_k,
+                hand_max_frames_slider,
             ],
             outputs=[reconstruction_output, log_output],
         )
@@ -596,6 +620,7 @@ def build_ui(
                 show_cam,
                 mask_sky,
                 max_points_k,
+                hand_max_frames_slider,
             ],
             outputs=[reconstruction_output, log_output],
         )

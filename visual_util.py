@@ -29,6 +29,7 @@ def predictions_to_glb(
     frame_indices: np.ndarray | None = None,
     hand_scale: float = 1.0,
     hand_auto_scale: bool = True,
+    hand_max_frames: int | None = None,
 ) -> trimesh.Scene:
     """Convert VGGT-Omega camera/depth predictions to a GLB scene."""
     if not isinstance(predictions, dict):
@@ -101,6 +102,7 @@ def predictions_to_glb(
             frame_indices,
             hand_scale=hand_scale,
             hand_auto_scale=hand_auto_scale,
+            hand_max_frames=hand_max_frames,
         )
 
     return apply_scene_alignment(scene, extrinsics)
@@ -152,6 +154,7 @@ def add_hand_meshes(
     frame_indices: np.ndarray | None,
     hand_scale: float = 1.0,
     hand_auto_scale: bool = True,
+    hand_max_frames: int | None = None,
 ) -> None:
     """Place per-frame camera-space hand meshes into the (VGGT world) scene.
 
@@ -188,9 +191,21 @@ def add_hand_meshes(
     if not placements:
         return
 
+    # Auto-scale uses every available hand so the scalar stays stable regardless of
+    # how many frames the user chooses to render.
     s = hand_scale
     if hand_auto_scale:
         s = _estimate_hand_scale(predictions, auto_inputs, frame_indices) * hand_scale
+
+    # Optional subsample: keep at most `hand_max_frames` VGGT frames, evenly spaced
+    # across the timeline. Picks frame indices (not placements) so left/right at the
+    # same instant are kept together.
+    if hand_max_frames is not None and hand_max_frames > 0:
+        unique_idxs = sorted({p[0] for p in placements})
+        if len(unique_idxs) > hand_max_frames:
+            picks = np.linspace(0, len(unique_idxs) - 1, hand_max_frames).round().astype(int)
+            kept = {unique_idxs[i] for i in picks}
+            placements = [p for p in placements if p[0] in kept]
 
     for vggt_idx, verts, faces, side in placements:
         rotation = extrinsic[vggt_idx, :3, :3]
