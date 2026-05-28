@@ -11,6 +11,7 @@ import numpy as np
 import requests
 import trimesh
 from matplotlib import colormaps
+from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation
 
 
@@ -331,6 +332,8 @@ def camera_trajectory_to_glb(
     scatter_frac: float = 0.04,
     glyph_scale_frac: float = 1.0,
     tube_radius_frac: float = 0.004,
+    wobble_frac: float = 0.02,
+    wobble_inserts: int = 2,
 ) -> trimesh.Scene:
     """Build a standalone GLB showing the camera trajectory only.
 
@@ -381,32 +384,68 @@ def camera_trajectory_to_glb(
         t = i / max(n - 1, 1)
         integrate_camera_into_scene(scene, cam_to_world[i], lerp_gray(t), glyph_scale)
 
-    r_tube = span * tube_radius_frac
-    z_axis = np.array([0.0, 0.0, 1.0])
-    for i in range(n - 1):
-        a, b = cam_pos[i], cam_pos[i + 1]
-        seg = b - a
-        length = float(np.linalg.norm(seg))
-        if length < 1e-9:
-            continue
-        v = seg / length
-        dot = float(np.clip(np.dot(z_axis, v), -1.0, 1.0))
-        if dot > 1.0 - 1e-9:
-            R = np.eye(3)
-        elif dot < -1.0 + 1e-9:
-            R = Rotation.from_rotvec(np.pi * np.array([1.0, 0.0, 0.0])).as_matrix()
+    # Insert jittered intermediate control points between adjacent cameras, then
+    # fit a cubic spline through both originals and intermediates. The spline
+    # still passes through every camera but wobbles between them instead of
+    # tracing a math-perfect smooth curve.
+    if n >= 2:
+        if wobble_frac > 0 and wobble_inserts > 0 and n >= 2:
+            augmented = [cam_pos[0]]
+            for i in range(n - 1):
+                a, b = cam_pos[i], cam_pos[i + 1]
+                for k in range(1, wobble_inserts + 1):
+                    alpha = k / (wobble_inserts + 1)
+                    base = a * (1.0 - alpha) + b * alpha
+                    rng = np.random.default_rng(int(i) * 991 + int(k) * 17 + 3)
+                    base = base + rng.standard_normal(3) * span * wobble_frac
+                    augmented.append(base)
+                augmented.append(b)
+            augmented = np.asarray(augmented, dtype=np.float64)
         else:
-            axis = np.cross(z_axis, v)
-            axis = axis / (np.linalg.norm(axis) + 1e-9)
-            R = Rotation.from_rotvec(axis * np.arccos(dot)).as_matrix()
+            augmented = cam_pos
 
-        cyl = trimesh.creation.cylinder(radius=r_tube, height=length, sections=8)
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = (a + b) / 2.0
-        cyl.apply_transform(T)
-        cyl.visual.face_colors[:, :3] = lerp_gray((i + 0.5) / max(n - 1, 1))
-        scene.add_geometry(cyl)
+        seg_lens = np.linalg.norm(np.diff(augmented, axis=0), axis=1)
+        t_ctrl = np.concatenate([[0.0], np.cumsum(seg_lens)])
+        total = float(t_ctrl[-1])
+        if total > 1e-9:
+            t_norm = t_ctrl / total
+            samples_per_gap = 20
+            ts = np.linspace(0.0, 1.0, samples_per_gap * (n - 1) + 1)
+            if len(augmented) >= 3:
+                curve = np.stack(
+                    [CubicSpline(t_norm, augmented[:, k], bc_type="natural")(ts) for k in range(3)],
+                    axis=1,
+                )
+            else:
+                curve = augmented[0] * (1.0 - ts[:, None]) + augmented[-1] * ts[:, None]
+
+            r_tube = span * tube_radius_frac
+            z_axis = np.array([0.0, 0.0, 1.0])
+            n_seg = len(curve) - 1
+            for i in range(n_seg):
+                a, b = curve[i], curve[i + 1]
+                seg = b - a
+                length = float(np.linalg.norm(seg))
+                if length < 1e-9:
+                    continue
+                v = seg / length
+                dot = float(np.clip(np.dot(z_axis, v), -1.0, 1.0))
+                if dot > 1.0 - 1e-9:
+                    R = np.eye(3)
+                elif dot < -1.0 + 1e-9:
+                    R = Rotation.from_rotvec(np.pi * np.array([1.0, 0.0, 0.0])).as_matrix()
+                else:
+                    axis = np.cross(z_axis, v)
+                    axis = axis / (np.linalg.norm(axis) + 1e-9)
+                    R = Rotation.from_rotvec(axis * np.arccos(dot)).as_matrix()
+
+                cyl = trimesh.creation.cylinder(radius=r_tube, height=length, sections=8)
+                T = np.eye(4)
+                T[:3, :3] = R
+                T[:3, 3] = (a + b) / 2.0
+                cyl.apply_transform(T)
+                cyl.visual.face_colors[:, :3] = lerp_gray((i + 0.5) / max(n_seg, 1))
+                scene.add_geometry(cyl)
 
     return apply_scene_alignment(scene, extrinsics_h)
 
