@@ -91,6 +91,17 @@ def parse_args():
     p.add_argument("--slam_npz", default=None, help="explicit SLAM npz (else auto-glob SLAM/hawor_slam_w_scale_*.npz)")
     p.add_argument("--num_samples", type=int, default=8, help="number of timesteps to lay along the trail")
     p.add_argument("--stride", type=int, default=0, help="if >0, sample every N frames instead of num_samples")
+    p.add_argument("--select", choices=["even", "scatter"], default="even",
+                   help="how to pick the trail timesteps in [frame_start, frame_end]: "
+                        "'even' = linspace (original behaviour). "
+                        "'scatter' = 2D-overlap-aware pick (same as taco_gt_trail's --layout taco) "
+                        "so hands don't visually overlap in the trail; great for real pipeline output.")
+    p.add_argument("--spread", type=float, default=0.6,
+                   help="[--select scatter] 0 = compact/central, 1 = maximally spread")
+    p.add_argument("--overlap", type=float, default=0.25,
+                   help="[--select scatter] max pairwise 2D bbox IoU between kept poses")
+    p.add_argument("--no_camera", action="store_true",
+                   help="hands only: omit camera frustums + trajectory")
     p.add_argument("--frame_start", type=int, default=0,
                    help="restrict the trail to video frames >= this (default 0)")
     p.add_argument("--frame_end", type=int, default=-1,
@@ -172,10 +183,11 @@ def _dump_trail_npz(args, idxs, right_verts, left_verts, faces_right, faces_left
         right_verts=right.astype(np.float32), left_verts=left.astype(np.float32),
         faces_right=np.asarray(faces_right, np.int32), faces_left=np.asarray(faces_left, np.int32),
         valid_r=vr, valid_l=vl,
-        cam_verts=cam.astype(np.float32), cam_faces=np.asarray(cam_faces, np.int32),
-        cam_centers=centers.astype(np.float32),
         no_fade=np.asarray(bool(args.no_fade)), alpha_min=np.asarray(float(args.alpha_min)),
     )
+    if not getattr(args, "no_camera", False):
+        data.update(cam_verts=cam.astype(np.float32), cam_faces=np.asarray(cam_faces, np.int32),
+                    cam_centers=centers.astype(np.float32))
     if not args.no_ground:
         gv, gf, gvc, _ = checkerboard_geometry(length=100, c1=0, c2=0, up="z")
         gv[:, 2] -= 2
@@ -233,14 +245,16 @@ def _log_rerun_trail(args, idxs, right_verts, left_verts, faces_right, faces_lef
                    rr.Mesh3D(vertex_positions=left_verts[t], triangle_indices=faces_left,
                              vertex_normals=vertex_normals(left_verts[t], faces_left),
                              albedo_factor=shade(BLUE, k)), static=True)
-        cam_v = np.einsum("ij,nj->ni", R_c2w[t], mverts) + t_c2w[t][None]
-        rr.log(f"world/camera/t{t:05d}",
-               rr.Mesh3D(vertex_positions=cam_v, triangle_indices=mfaces,
-                         albedo_factor=shade((0.6, 0.6, 0.6), k)), static=True)
+        if not getattr(args, "no_camera", False):
+            cam_v = np.einsum("ij,nj->ni", R_c2w[t], mverts) + t_c2w[t][None]
+            rr.log(f"world/camera/t{t:05d}",
+                   rr.Mesh3D(vertex_positions=cam_v, triangle_indices=mfaces,
+                             albedo_factor=shade((0.6, 0.6, 0.6), k)), static=True)
 
-    cam_centers = np.stack([t_c2w[t] for t in idxs], 0)
-    rr.log("world/camera_trajectory",
-           rr.LineStrips3D([cam_centers], colors=[255, 180, 0], radii=0.004), static=True)
+    if not getattr(args, "no_camera", False):
+        cam_centers = np.stack([t_c2w[t] for t in idxs], 0)
+        rr.log("world/camera_trajectory",
+               rr.LineStrips3D([cam_centers], colors=[255, 180, 0], radii=0.004), static=True)
 
     rr.save(args.rrd)
     print(f"saved {args.rrd}  ({len(idxs)} samples). open with:  rerun {args.rrd}")
@@ -319,16 +333,46 @@ def main():
     hi = (n - 1) if args.frame_end < 0 else min(args.frame_end, n - 1)
     if lo > hi:
         raise ValueError(f"empty frame window: frame_start={args.frame_start} > frame_end={args.frame_end} (n={n})")
-    if args.stride > 0:
-        idxs = list(range(lo, hi + 1, args.stride))
-    else:
-        idxs = np.linspace(lo, hi, max(2, args.num_samples)).round().astype(int).tolist()
-    idxs = sorted(set(idxs))
-
     want_r = args.hands in ("both", "right")
     want_l = args.hands in ("both", "left")
     valid_r = pred_valid[ri] if pred_valid.ndim == 2 else np.ones(T, bool)
     valid_l = pred_valid[li] if pred_valid.ndim == 2 else np.ones(T, bool)
+
+    if args.stride > 0:
+        idxs = sorted(set(range(lo, hi + 1, args.stride)))
+    elif args.select == "scatter":
+        # 2D-overlap-aware pick within [lo, hi] -- same recipe as taco_gt_trail's
+        # --layout taco; keeps real pipeline positions but spreads them visually.
+        from scripts.taco_gt_trail import _principal_plane, _select_scatter
+        SUB = 120
+        step = max(1, 778 // SUB)
+        cand, pts_list, centroids = [], [], []
+        for t in range(lo, hi + 1):
+            pp = []
+            if want_r and bool(valid_r[t]):
+                pp.append(right_verts[t][::step])
+            if want_l and bool(valid_l[t]):
+                pp.append(left_verts[t][::step])
+            if not pp:
+                continue
+            cand.append(t)
+            p = np.concatenate(pp, 0)
+            pts_list.append(p)
+            centroids.append(p.mean(0))
+        if not cand:
+            raise ValueError(f"no valid hand poses in frames {lo}-{hi}")
+        centroids = np.asarray(centroids)
+        e1, e2 = _principal_plane(centroids)
+        bboxes = [(float((p @ e1).min()), float((p @ e2).min()),
+                   float((p @ e1).max()), float((p @ e2).max())) for p in pts_list]
+        cent2d = np.stack([centroids @ e1, centroids @ e2], axis=1)
+        sel = _select_scatter(cent2d, bboxes, args.num_samples,
+                              spread=args.spread, overlap=args.overlap)
+        idxs = sorted(cand[i] for i in sel)
+        print(f"[select scatter] {len(cand)} valid frames in {lo}-{hi} -> {len(idxs)} poses "
+              f"(spread={args.spread}, overlap<= {args.overlap})")
+    else:
+        idxs = sorted(set(np.linspace(lo, hi, max(2, args.num_samples)).round().astype(int).tolist()))
 
     # ---- npz backend: dump geometry only (hawor env, no rerun/GL), then stop ----
     if args.dump_npz:
@@ -367,10 +411,11 @@ def main():
             meshes[f"hand_l_{t}"] = Meshes(left_verts[t][None], faces_left, name=f"hand_l_{t}",
                                            material=Material(color=(*BLUE, a), ambient=0.2), flat_shading=False)
             centers.append(left_verts[t].mean(0))
-        cam_v = np.einsum("ij,nj->ni", R_c2w[t], mverts) + t_c2w[t][None]
-        meshes[f"cam_{t}"] = Meshes(cam_v[None], mfaces, face_colors=mfcolors, name=f"cam_{t}",
-                                    material=Material(color=(0.5, 0.5, 0.5, a), ambient=0.2))
-        centers.append(t_c2w[t])
+        if not args.no_camera:
+            cam_v = np.einsum("ij,nj->ni", R_c2w[t], mverts) + t_c2w[t][None]
+            meshes[f"cam_{t}"] = Meshes(cam_v[None], mfaces, face_colors=mfcolors, name=f"cam_{t}",
+                                        material=Material(color=(0.5, 0.5, 0.5, a), ambient=0.2))
+            centers.append(t_c2w[t])
 
     # ---- viewer camera (single static still) ----
     if args.view == "hawor":
