@@ -114,8 +114,10 @@ def parse_args():
     p.add_argument("--overlay_image", default=None,
                    help="[overlay] explicit background image path (else looks under "
                         "<pipeline_root>/frames/<clip_id>/NNNNNN.jpg)")
-    p.add_argument("--overlay_alpha", type=float, default=0.55,
-                   help="[overlay] per-pose alpha for the hand mesh layer (0..1)")
+    p.add_argument("--overlay_alpha_min", type=float, default=0.5,
+                   help="[overlay] alpha of the OLDEST pose (0..1)")
+    p.add_argument("--overlay_alpha_max", type=float, default=0.75,
+                   help="[overlay] alpha of the NEWEST pose (0..1); ramped linearly in between")
     p.add_argument("--bg_fade", type=float, default=0.4,
                    help="[overlay] blend the background frame toward white by this fraction "
                         "(0 = full colour, 1 = pure white) so the hands stand out")
@@ -308,6 +310,45 @@ def _load_focal(seq, default=600.0):
         return float(default)
 
 
+def _raster_gouraud(uv, faces, vert_shades, color_bgr, depths, in_front, layer):
+    """In-place Gouraud rasteriser: for each visible triangle, paint each
+    interior pixel with shade interpolated from the 3 vertex shades (barycentric),
+    so adjacent triangles read as a continuous smooth surface -- not facets.
+    Painter's algorithm via `depths` (back -> front)."""
+    H, W = layer.shape[:2]
+    order = np.argsort(-depths)
+    for fi in order:
+        tri = faces[fi]
+        if not in_front[tri].all():
+            continue
+        p = uv[tri].astype(np.float64)
+        x0 = max(int(np.floor(p[:, 0].min())), 0)
+        y0 = max(int(np.floor(p[:, 1].min())), 0)
+        x1 = min(int(np.ceil(p[:, 0].max())) + 1, W)
+        y1 = min(int(np.ceil(p[:, 1].max())) + 1, H)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        denom = (p[1, 1] - p[2, 1]) * (p[0, 0] - p[2, 0]) + (p[2, 0] - p[1, 0]) * (p[0, 1] - p[2, 1])
+        if abs(denom) < 1e-9:
+            continue
+        xs = np.arange(x0, x1)
+        ys = np.arange(y0, y1)
+        gx, gy = np.meshgrid(xs, ys)
+        l1 = ((p[1, 1] - p[2, 1]) * (gx - p[2, 0]) + (p[2, 0] - p[1, 0]) * (gy - p[2, 1])) / denom
+        l2 = ((p[2, 1] - p[0, 1]) * (gx - p[2, 0]) + (p[0, 0] - p[2, 0]) * (gy - p[2, 1])) / denom
+        l3 = 1.0 - l1 - l2
+        inside = (l1 >= 0) & (l2 >= 0) & (l3 >= 0)
+        if not inside.any():
+            continue
+        s = vert_shades[tri]
+        shade = l1 * s[0] + l2 * s[1] + l3 * s[2]
+        sub = layer[y0:y1, x0:x1]
+        # broadcast shaded colour where inside
+        sub_inside = sub[inside]
+        col = color_bgr[None, :] * shade[inside][:, None]
+        sub[inside] = col
+
+
 def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left,
                     valid_r, valid_l, want_r, want_l, R_c2w, t_c2w,
                     right_wrists=None, left_wrists=None):
@@ -346,20 +387,23 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
     t_w2c = -R_w2c @ t_c2w[ref]
     out = base
     n = len(idxs)
+    a_min = float(args.overlay_alpha_min)
+    a_max = float(args.overlay_alpha_max)
     drawn = 0
     for k in range(n):
-        rgb = _inferno_at(k / max(1, n - 1))
-        col_bgr = np.array([rgb[2], rgb[1], rgb[0]]) * 255.0
+        f_t = (k / (n - 1)) if n > 1 else 1.0
+        rgb = _inferno_at(f_t)
+        col_bgr = np.array([rgb[2], rgb[1], rgb[0]], np.float64) * 255.0
+        alpha_k = a_min + (a_max - a_min) * f_t                 # ramp 0.5 -> 0.75
         for verts_per, faces, valid in (
                 (right[k] if vr[k] else None, faces_right, vr[k]),
                 (left[k] if vl[k] else None, faces_left, vl[k])):
             if not valid:
                 continue
-            # smooth (area-weighted) per-vertex normals -> shading is continuous
-            # across adjacent triangles, so no visible facets
+            # smooth per-vertex normals -> per-pixel Gouraud (no facet look)
             vn_w = vertex_normals(verts_per, faces)
             vn_c = vn_w @ R_w2c.T
-            shade_v = np.maximum(0.35, -vn_c[:, 2])  # lambert, light from camera
+            shade_v = np.maximum(0.35, -vn_c[:, 2])
             v_cam = verts_per @ R_w2c.T + t_w2c
             in_front = v_cam[:, 2] > 0.05
             if not in_front.any():
@@ -367,22 +411,12 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
             uv = (K @ v_cam.T)
             uv = (uv[:2] / np.maximum(uv[2:], 1e-6)).T
             depths = v_cam[faces, 2].mean(1)
-            order = np.argsort(-depths)
             layer = np.zeros_like(base, dtype=np.float32)
-            mask_any = False
-            for fi in order:
-                tri = faces[fi]
-                if not in_front[tri].all():
-                    continue
-                shade = float(shade_v[tri].mean())
-                cv2.fillPoly(layer, [uv[tri].astype(np.int32)], (col_bgr * shade).tolist(),
-                             lineType=cv2.LINE_AA)
-                mask_any = True
-            if not mask_any:
-                continue
-            # soft alpha from AA-edged layer (partial pixel intensity -> partial alpha)
+            _raster_gouraud(uv, faces, shade_v, col_bgr, depths, in_front, layer)
             soft = (layer.max(-1, keepdims=True) / 255.0).clip(0.0, 1.0)
-            a = soft * float(args.overlay_alpha)
+            if not soft.any():
+                continue
+            a = soft * alpha_k
             out = out * (1.0 - a) + layer * a
             drawn += 1
     if ss > 1:
