@@ -330,8 +330,9 @@ def depth_edge(depth: np.ndarray, rtol: float = 0.03, kernel_size: int = 3) -> n
 def camera_trajectory_to_glb(
     predictions: dict,
     scatter_frac: float = 0.04,
-    glyph_scale_frac: float = 1.0,
-    tube_radius_frac: float = 0.004,
+    glyph_scale_frac: float = 1.8,
+    glyph_inner_scale: float = 0.78,
+    tube_radius_frac: float = 0.006,
     wobble_frac: float = 0.02,
     wobble_inserts: int = 2,
 ) -> trimesh.Scene:
@@ -371,18 +372,21 @@ def camera_trajectory_to_glb(
     cam_to_world[:, :3, 3] = cam_pos  # propagate scatter into the glyph transform
 
     scene = trimesh.Scene()
-    cam_light = np.array([170, 170, 170])
-    cam_dark = np.array([20, 20, 20])
+    # Lavender -> deep violet gradient (early = pale, late = saturated).
+    traj_light = np.array([200, 195, 230])
+    traj_dark = np.array([75, 50, 130])
 
-    def lerp_gray(t: float) -> tuple:
-        return tuple(int(round(c)) for c in cam_light * (1.0 - t) + cam_dark * t)
+    def lerp_color(t: float) -> tuple:
+        return tuple(int(round(c)) for c in traj_light * (1.0 - t) + traj_dark * t)
 
     # Use span as the implicit scale for integrate_camera_into_scene (frustum sized
     # relative to the trajectory itself rather than a point cloud that isn't there).
     glyph_scale = span * float(glyph_scale_frac)
     for i in range(n):
         t = i / max(n - 1, 1)
-        integrate_camera_into_scene(scene, cam_to_world[i], lerp_gray(t), glyph_scale)
+        integrate_camera_into_scene(
+            scene, cam_to_world[i], lerp_color(t), glyph_scale, inner_scale=glyph_inner_scale,
+        )
 
     # Insert jittered intermediate control points between adjacent cameras, then
     # fit a cubic spline through both originals and intermediates. The spline
@@ -444,13 +448,19 @@ def camera_trajectory_to_glb(
                 T[:3, :3] = R
                 T[:3, 3] = (a + b) / 2.0
                 cyl.apply_transform(T)
-                cyl.visual.face_colors[:, :3] = lerp_gray((i + 0.5) / max(n_seg, 1))
+                cyl.visual.face_colors[:, :3] = lerp_color((i + 0.5) / max(n_seg, 1))
                 scene.add_geometry(cyl)
 
     return apply_scene_alignment(scene, extrinsics_h)
 
 
-def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float):
+def integrate_camera_into_scene(
+    scene: trimesh.Scene,
+    transform: np.ndarray,
+    face_colors: tuple,
+    scene_scale: float,
+    inner_scale: float = 0.95,
+):
     cam_width = scene_scale * 0.025
     cam_height = scene_scale * 0.05
 
@@ -467,7 +477,7 @@ def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, fac
     vertices = np.concatenate(
         [
             camera_cone_shape.vertices,
-            0.95 * camera_cone_shape.vertices,
+            inner_scale * camera_cone_shape.vertices,
             transform_points(slight_rotation, camera_cone_shape.vertices),
         ]
     )
