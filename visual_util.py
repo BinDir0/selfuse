@@ -87,11 +87,15 @@ def predictions_to_glb(
     extrinsics[:, 3, 3] = 1.0
 
     if show_cam:
-        colormap = colormaps.get_cmap("gist_rainbow")
+        # Light gray at the earliest frame -> near-black at the latest; matches the
+        # subdued look of the hand overlay instead of a saturated rainbow.
+        cam_light = np.array([170, 170, 170])
+        cam_dark = np.array([20, 20, 20])
+        n_cam = len(extrinsics)
         for i, world_to_camera in enumerate(extrinsics):
             camera_to_world = np.linalg.inv(world_to_camera)
-            rgba = colormap(i / max(len(extrinsics), 1))
-            color = tuple(int(255 * x) for x in rgba[:3])
+            t = i / max(n_cam - 1, 1)
+            color = tuple(int(round(c)) for c in cam_light * (1.0 - t) + cam_dark * t)
             integrate_camera_into_scene(scene, camera_to_world, color, scene_scale)
 
     if hand_data is not None:
@@ -323,8 +327,8 @@ def depth_edge(depth: np.ndarray, rtol: float = 0.03, kernel_size: int = 3) -> n
 
 
 def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float):
-    cam_width = scene_scale * 0.05
-    cam_height = scene_scale * 0.1
+    cam_width = scene_scale * 0.025
+    cam_height = scene_scale * 0.05
 
     rot_45_degree = np.eye(4)
     rot_45_degree[:3, :3] = Rotation.from_euler("z", 45, degrees=True).as_matrix()
