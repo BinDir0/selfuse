@@ -180,33 +180,38 @@ def _sampled_trail_arrays(args, idxs, right_verts, left_verts, valid_r, valid_l,
     vr = np.array([bool(want_r) and bool(valid_r[min(t, len(valid_r) - 1)]) for t in idxs])
     vl = np.array([bool(want_l) and bool(valid_l[min(t, len(valid_l) - 1)]) for t in idxs])
 
-    # Optional horizontal-only spread: scale each pose's XY about the cluster
-    # centroid (and/or add XY jitter) so a clumped real trajectory reads as a
-    # set of distinguishable hands. Z (height) untouched; hand shapes untouched
-    # (rigid per-pose translation, both hands of a pose shift together).
+    # Optional horizontal-only spread: scale each HAND's XY about the global
+    # hand-cluster centroid (per-hand, not per-pose pair) so the left-hand and
+    # right-hand sub-clusters also separate from each other -- 'pair' shifts
+    # would keep them stuck together. Z untouched; hand shapes untouched.
     s = float(getattr(args, "xy_scatter", 1.0))
     j = float(getattr(args, "xy_jitter", 0.0))
     if s != 1.0 or j > 0.0:
-        per_pose_xy = []
+        hands = []  # (k, side, xy)
         for k in range(len(idxs)):
-            pts = []
             if vr[k]:
-                pts.append(right[k].mean(0)[:2])
+                hands.append((k, "r", right[k].mean(0)[:2]))
             if vl[k]:
-                pts.append(left[k].mean(0)[:2])
-            per_pose_xy.append(np.mean(pts, axis=0) if pts else np.array([0.0, 0.0]))
-        per_pose_xy = np.asarray(per_pose_xy)
-        cluster_xy = per_pose_xy.mean(0)
-        rng = np.random.RandomState(int(getattr(args, "seed", 0)))
-        for k in range(len(idxs)):
-            d = (per_pose_xy[k] - cluster_xy) * (s - 1.0)
-            if j > 0.0:
-                d = d + rng.uniform(-j, j, size=2)
-            shift = np.array([d[0], d[1], 0.0], np.float32)
-            right[k] += shift
-            left[k] += shift
-            cam[k] += shift
-            centers[k] += shift
+                hands.append((k, "l", left[k].mean(0)[:2]))
+        if hands:
+            cluster_xy = np.mean([h[2] for h in hands], axis=0)
+            rng = np.random.RandomState(int(getattr(args, "seed", 0)))
+            per_pose_sum = np.zeros((len(idxs), 2))
+            per_pose_n = np.zeros(len(idxs))
+            for k, side, xy in hands:
+                d = (xy - cluster_xy) * (s - 1.0)
+                if j > 0.0:
+                    d = d + rng.uniform(-j, j, size=2)
+                shift = np.array([d[0], d[1], 0.0], np.float32)
+                (right if side == "r" else left)[k] += shift
+                per_pose_sum[k] += d
+                per_pose_n[k] += 1
+            for k in range(len(idxs)):
+                if per_pose_n[k] > 0:
+                    avg = per_pose_sum[k] / per_pose_n[k]
+                    shift = np.array([avg[0], avg[1], 0.0], np.float32)
+                    cam[k] += shift
+                    centers[k] += shift
     return right, left, cam, mfaces, centers, vr, vl
 
 
