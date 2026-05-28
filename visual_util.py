@@ -116,8 +116,8 @@ def predictions_to_glb(
 # One base hue per hand (left=pink, right=blue), lerped from a pale tint at the
 # earliest kept frame to a saturated end at the latest. Soft like the reference.
 HAND_PALETTES = {
-    "left":  {"light": np.array([245, 220, 230]), "dark": np.array([210, 130, 170])},
-    "right": {"light": np.array([220, 235, 240]), "dark": np.array([ 70, 170, 210])},
+    "left":  {"light": np.array([220, 235, 240]), "dark": np.array([ 70, 170, 210])},
+    "right": {"light": np.array([245, 220, 230]), "dark": np.array([210, 130, 170])},
 }
 
 
