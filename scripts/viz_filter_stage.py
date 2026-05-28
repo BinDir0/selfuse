@@ -496,10 +496,11 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
 
     if style == "grid":
         max_stroke_px = float(cfg.get("max_stroke_px", 32.0))
+        head_px = int(cfg.get("head_px", 4))
         _draw_flow_grid(img, fl, sx, sy,
                         target_stroke_px=target_stroke_px,
                         max_stroke_px=max_stroke_px,
-                        alpha=alpha)
+                        alpha=alpha, head_px=head_px)
         if draw_legend:
             _flow_grid_legend(img)
         return
@@ -545,7 +546,7 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
 
 
 def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
-                    max_stroke_px=80, alpha=0.92):
+                    max_stroke_px=80, alpha=0.92, head_px=4):
     """Paint the 4x7 grid LK as either a tapered comet trail (preferred)
     or a single colored stroke (fallback when no trail is available).
 
@@ -566,7 +567,8 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
     # ----- quiver-style arrows (preferred) -----
     if g_traj is not None and g_traj.shape[0] >= 2:
         _paint_arrows(img, g_traj, g_traj_first, sx, sy, palette,
-                      max_arrow_px=max_stroke_px, alpha=alpha)
+                      max_arrow_px=max_stroke_px, alpha=alpha,
+                      head_px=int(head_px))
         return
 
     # ----- fallback: single-step LK line -----
@@ -606,8 +608,33 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 
+def _thin_arrow(img, p0, p1, color, *, head_px=4, line_thick=1, head_angle_deg=22):
+    """Thin antialiased arrow with a small *fixed-size* arrowhead.
+
+    cv2.arrowedLine sizes the head as a fraction of the line, so long arrows
+    look top-heavy. matplotlib's quiver uses an absolute head size in display
+    units; this matches that convention so arrows of any length share the
+    same delicate look.
+    """
+    cv2.line(img, p0, p1, color, line_thick, cv2.LINE_AA)
+    dx = float(p1[0] - p0[0])
+    dy = float(p1[1] - p0[1])
+    L = (dx * dx + dy * dy) ** 0.5
+    if L < 1e-3:
+        return
+    ux, uy = -dx / L, -dy / L                       # unit vector back from head
+    a = head_angle_deg * np.pi / 180.0
+    ca, sa = float(np.cos(a)), float(np.sin(a))
+    h1 = (int(p1[0] + head_px * (ux * ca - uy * sa)),
+          int(p1[1] + head_px * (ux * sa + uy * ca)))
+    h2 = (int(p1[0] + head_px * (ux * ca + uy * sa)),
+          int(p1[1] + head_px * (-ux * sa + uy * ca)))
+    cv2.line(img, p1, h1, color, line_thick, cv2.LINE_AA)
+    cv2.line(img, p1, h2, color, line_thick, cv2.LINE_AA)
+
+
 def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
-                  max_arrow_px=40, target_arrow_px=18, alpha=0.95):
+                  max_arrow_px=40, target_arrow_px=18, alpha=0.95, head_px=4):
     """matplotlib-quiver-style arrows on the 4x7 grid.
 
     Each grid point at the current frame (positions[T, n]) gets a small
@@ -656,7 +683,8 @@ def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
             continue
         bx = int(ax + disp[n, 0])
         by = int(ay + disp[n, 1])
-        cv2.arrowedLine(overlay, (ax, ay), (bx, by), col, 1, cv2.LINE_AA, tipLength=0.32)
+        _thin_arrow(overlay, (ax, ay), (bx, by), col,
+                    head_px=head_px, line_thick=1)
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 
@@ -901,7 +929,7 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         "gate_a": gate_a, "gate_b": gate_b, "gate_c": gate_c,
         "_flow_viz": flow_viz or {
             "style": "grid", "legend": False, "banner": False, "roi": False,
-            "n_trail": 4, "max_stroke_px": 32.0,
+            "n_trail": 1, "max_stroke_px": 40.0, "head_px": 4,
         },
     }
 
@@ -1013,6 +1041,10 @@ def main(argv=None):
                     help="grid style: hard cap per arrow length in output px "
                          "(direction preserved). Default 40. Larger => arrows "
                          "convey more motion intensity but clutter the figure.")
+    ap.add_argument("--arrow_head_px", type=int, default=4,
+                    help="arrowhead size in pixels (FIXED, not a fraction of "
+                         "the arrow length, so heads stay delicate even on "
+                         "long arrows). Default 4 - matplotlib quiver look.")
     ap.add_argument("--camera_disp_thresh", type=float, default=None,
                     help="override gate_b.camera_disp_thresh for this run (fraction "
                          "of decoded max-side). Default config is 0.2 (= ~89.6 px "
@@ -1079,6 +1111,7 @@ def main(argv=None):
         "n_trail": int(args.n_trail),
         "banner": bool(args.banner),
         "roi": bool(args.roi),
+        "head_px": int(args.arrow_head_px),
     }
 
     out_dir = Path(args.out_dir)
