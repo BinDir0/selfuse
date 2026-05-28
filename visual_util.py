@@ -327,12 +327,31 @@ def depth_edge(depth: np.ndarray, rtol: float = 0.03, kernel_size: int = 3) -> n
     return (relative_jump > rtol).reshape(original_shape)
 
 
+def _simple_camera_glyph(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scale: float) -> None:
+    """Solid 4-sided pyramid camera marker — uniform thickness, no wireframe diagonals.
+
+    The apex sits at the camera center and the base faces the camera's forward
+    direction, so each marker reads as a small directional arrow.
+    """
+    cam_width = scale * 0.025
+    cam_height = scale * 0.05
+    rot_45 = np.eye(4)
+    rot_45[:3, :3] = Rotation.from_euler("z", 45, degrees=True).as_matrix()
+    rot_45[2, 3] = -cam_height
+    complete = transform @ get_opengl_conversion_matrix() @ rot_45
+    cone = trimesh.creation.cone(cam_width, cam_height, sections=4)
+    verts = transform_points(complete, cone.vertices)
+    mesh = trimesh.Trimesh(vertices=verts, faces=cone.faces, process=False)
+    mesh.visual.face_colors[:, :3] = face_colors
+    scene.add_geometry(mesh)
+
+
 def camera_trajectory_to_glb(
     predictions: dict,
     scatter_frac: float = 0.04,
     glyph_scale_frac: float = 1.8,
-    glyph_inner_scale: float = 0.78,
-    tube_radius_frac: float = 0.006,
+    tube_radius_frac: float = 0.005,
+    tube_thickness_end_ratio: float = 1.7,
     wobble_frac: float = 0.02,
     wobble_inserts: int = 2,
 ) -> trimesh.Scene:
@@ -379,14 +398,11 @@ def camera_trajectory_to_glb(
     def lerp_color(t: float) -> tuple:
         return tuple(int(round(c)) for c in traj_light * (1.0 - t) + traj_dark * t)
 
-    # Use span as the implicit scale for integrate_camera_into_scene (frustum sized
-    # relative to the trajectory itself rather than a point cloud that isn't there).
+    # Plain solid-pyramid markers — uniform thickness, no decorative wireframe.
     glyph_scale = span * float(glyph_scale_frac)
     for i in range(n):
         t = i / max(n - 1, 1)
-        integrate_camera_into_scene(
-            scene, cam_to_world[i], lerp_color(t), glyph_scale, inner_scale=glyph_inner_scale,
-        )
+        _simple_camera_glyph(scene, cam_to_world[i], lerp_color(t), glyph_scale)
 
     # Insert jittered intermediate control points between adjacent cameras, then
     # fit a cubic spline through both originals and intermediates. The spline
@@ -423,7 +439,8 @@ def camera_trajectory_to_glb(
             else:
                 curve = augmented[0] * (1.0 - ts[:, None]) + augmented[-1] * ts[:, None]
 
-            r_tube = span * tube_radius_frac
+            r_base = span * tube_radius_frac
+            r_end = r_base * float(tube_thickness_end_ratio)
             z_axis = np.array([0.0, 0.0, 1.0])
             n_seg = len(curve) - 1
             for i in range(n_seg):
@@ -443,24 +460,20 @@ def camera_trajectory_to_glb(
                     axis = axis / (np.linalg.norm(axis) + 1e-9)
                     R = Rotation.from_rotvec(axis * np.arccos(dot)).as_matrix()
 
+                tt = (i + 0.5) / max(n_seg, 1)
+                r_tube = r_base * (1.0 - tt) + r_end * tt
                 cyl = trimesh.creation.cylinder(radius=r_tube, height=length, sections=8)
                 T = np.eye(4)
                 T[:3, :3] = R
                 T[:3, 3] = (a + b) / 2.0
                 cyl.apply_transform(T)
-                cyl.visual.face_colors[:, :3] = lerp_color((i + 0.5) / max(n_seg, 1))
+                cyl.visual.face_colors[:, :3] = lerp_color(tt)
                 scene.add_geometry(cyl)
 
     return apply_scene_alignment(scene, extrinsics_h)
 
 
-def integrate_camera_into_scene(
-    scene: trimesh.Scene,
-    transform: np.ndarray,
-    face_colors: tuple,
-    scene_scale: float,
-    inner_scale: float = 0.95,
-):
+def integrate_camera_into_scene(scene: trimesh.Scene, transform: np.ndarray, face_colors: tuple, scene_scale: float):
     cam_width = scene_scale * 0.025
     cam_height = scene_scale * 0.05
 
@@ -477,7 +490,7 @@ def integrate_camera_into_scene(
     vertices = np.concatenate(
         [
             camera_cone_shape.vertices,
-            inner_scale * camera_cone_shape.vertices,
+            0.95 * camera_cone_shape.vertices,
             transform_points(slight_rotation, camera_cone_shape.vertices),
         ]
     )
