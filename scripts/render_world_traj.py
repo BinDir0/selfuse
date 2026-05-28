@@ -116,6 +116,12 @@ def parse_args():
                         "<pipeline_root>/frames/<clip_id>/NNNNNN.jpg)")
     p.add_argument("--overlay_alpha", type=float, default=0.55,
                    help="[overlay] per-pose alpha for the hand mesh layer (0..1)")
+    p.add_argument("--bg_fade", type=float, default=0.4,
+                   help="[overlay] blend the background frame toward white by this fraction "
+                        "(0 = full colour, 1 = pure white) so the hands stand out")
+    p.add_argument("--ss", type=int, default=1,
+                   help="[overlay] supersample factor (render at SS x resolution, downscale "
+                        "for smoother mesh edges). 1 = off, 2 = nice, 3 = slow.")
     p.add_argument("--xy_scatter", type=float, default=1.0,
                    help="horizontal spread: scale each pose's XY about the cluster centroid by "
                         "this factor (Z unchanged, hand shape unchanged). 1.0 = off, 1.3-1.6 "
@@ -319,16 +325,26 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
     if ref < 0 or ref >= len(R_c2w):
         raise ValueError(f"overlay_frame {ref} out of [0,{len(R_c2w) - 1}]")
     img_path = args.overlay_image or _default_frame_path(args.seq_folder, ref)
-    base = cv2.imread(img_path)
-    if base is None:
+    base_orig = cv2.imread(img_path)
+    if base_orig is None:
         raise FileNotFoundError(f"background frame not found: {img_path}")
-    H, W = base.shape[:2]
-    f = _load_focal(args.seq_folder)
-    K = np.array([[f, 0, W / 2.0], [0, f, H / 2.0], [0, 0, 1.0]], np.float64)
+    H, W = base_orig.shape[:2]
+
+    # supersample: render at SS x resolution, downscale at the end (smoother edges)
+    ss = max(1, int(args.ss))
+    base = (cv2.resize(base_orig, (W * ss, H * ss), interpolation=cv2.INTER_CUBIC)
+            if ss > 1 else base_orig.copy()).astype(np.float32)
+    Hr, Wr = base.shape[:2]
+    # fade background toward white so hands stand out
+    bg = float(max(0.0, min(1.0, args.bg_fade)))
+    if bg > 0.0:
+        base = base * (1.0 - bg) + 255.0 * bg
+    f = _load_focal(args.seq_folder) * ss
+    K = np.array([[f, 0, Wr / 2.0], [0, f, Hr / 2.0], [0, 0, 1.0]], np.float64)
 
     R_w2c = R_c2w[ref].T
     t_w2c = -R_w2c @ t_c2w[ref]
-    out = base.astype(np.float32)
+    out = base
     n = len(idxs)
     drawn = 0
     for k in range(n):
@@ -339,6 +355,11 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
                 (left[k] if vl[k] else None, faces_left, vl[k])):
             if not valid:
                 continue
+            # smooth (area-weighted) per-vertex normals -> shading is continuous
+            # across adjacent triangles, so no visible facets
+            vn_w = vertex_normals(verts_per, faces)
+            vn_c = vn_w @ R_w2c.T
+            shade_v = np.maximum(0.35, -vn_c[:, 2])  # lambert, light from camera
             v_cam = verts_per @ R_w2c.T + t_w2c
             in_front = v_cam[:, 2] > 0.05
             if not in_front.any():
@@ -346,29 +367,30 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
             uv = (K @ v_cam.T)
             uv = (uv[:2] / np.maximum(uv[2:], 1e-6)).T
             depths = v_cam[faces, 2].mean(1)
-            order = np.argsort(-depths)            # back -> front
+            order = np.argsort(-depths)
             layer = np.zeros_like(base, dtype=np.float32)
             mask_any = False
             for fi in order:
                 tri = faces[fi]
                 if not in_front[tri].all():
                     continue
-                p3 = v_cam[tri]
-                nrm = np.cross(p3[1] - p3[0], p3[2] - p3[0])
-                nn = np.linalg.norm(nrm)
-                if nn < 1e-9:
-                    continue
-                shade = max(0.45, float(-nrm[2] / nn))  # simple lambert, light from cam
-                cv2.fillPoly(layer, [uv[tri].astype(np.int32)], (col_bgr * shade).tolist())
+                shade = float(shade_v[tri].mean())
+                cv2.fillPoly(layer, [uv[tri].astype(np.int32)], (col_bgr * shade).tolist(),
+                             lineType=cv2.LINE_AA)
                 mask_any = True
             if not mask_any:
                 continue
-            a = (layer.sum(-1, keepdims=True) > 0).astype(np.float32) * float(args.overlay_alpha)
+            # soft alpha from AA-edged layer (partial pixel intensity -> partial alpha)
+            soft = (layer.max(-1, keepdims=True) / 255.0).clip(0.0, 1.0)
+            a = soft * float(args.overlay_alpha)
             out = out * (1.0 - a) + layer * a
             drawn += 1
+    if ss > 1:
+        out = cv2.resize(out, (W, H), interpolation=cv2.INTER_AREA)
     os.makedirs(os.path.dirname(os.path.abspath(args.overlay_out)) or ".", exist_ok=True)
     cv2.imwrite(args.overlay_out, np.clip(out, 0, 255).astype(np.uint8))
-    print(f"overlay: ref frame {ref}  ({img_path}), {drawn} hand layers -> {args.overlay_out}")
+    print(f"overlay: ref={ref} bg_fade={bg} ss={ss}  ({img_path}) -> {args.overlay_out}  "
+          f"({drawn} hand layers)")
 
 
 def _dump_trail_npz(args, idxs, right_verts, left_verts, faces_right, faces_left,
