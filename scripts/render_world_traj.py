@@ -403,7 +403,7 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
             # smooth per-vertex normals -> per-pixel Gouraud (no facet look)
             vn_w = vertex_normals(verts_per, faces)
             vn_c = vn_w @ R_w2c.T
-            shade_v = np.maximum(0.35, -vn_c[:, 2])
+            shade_v = np.maximum(0.50, -vn_c[:, 2])  # min shade up: less ghostly backside
             v_cam = verts_per @ R_w2c.T + t_w2c
             in_front = v_cam[:, 2] > 0.05
             if not in_front.any():
@@ -413,10 +413,13 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
             depths = v_cam[faces, 2].mean(1)
             layer = np.zeros_like(base, dtype=np.float32)
             _raster_gouraud(uv, faces, shade_v, col_bgr, depths, in_front, layer)
-            soft = (layer.max(-1, keepdims=True) / 255.0).clip(0.0, 1.0)
-            if not soft.any():
+            # BINARY coverage mask (was: layer.max()/255 which made dim-shaded
+            # interior pixels look transparent -> the 'ghostly' look). Edges get
+            # antialiased by the --ss downscale, not by per-pixel intensity.
+            cov = (layer.sum(-1, keepdims=True) > 0).astype(np.float32)
+            if not cov.any():
                 continue
-            a = soft * alpha_k
+            a = cov * alpha_k
             out = out * (1.0 - a) + layer * a
             drawn += 1
     if ss > 1:
