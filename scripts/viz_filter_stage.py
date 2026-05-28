@@ -188,14 +188,14 @@ def _flow(prev_gray, gray, gate_b, gate_c, roi_px):
         "stable_camera": stable,
         "gateB_pass": bool(out["hand_motion"] and stable),
     })
-    # extra: LK on a fixed 4x7 grid inside the ROI, used purely for visualisation
-    # (does not feed into the gate decision; goodFeatures path above does that).
+    # extra: single-step LK on a fixed 4x7 grid spread across the FULL frame
+    # (visualisation only; gate B's decision still uses goodFeaturesToTrack
+    # restricted to the ROI in the path above).
     try:
+        Hf, Wf = prev_gray.shape[:2]
         rows, cols = 4, 7
-        xs = np.linspace(x1 + (x2 - x1) / (2 * cols),
-                         x2 - (x2 - x1) / (2 * cols), cols, dtype=np.float32)
-        ys = np.linspace(y1 + (y2 - y1) / (2 * rows),
-                         y2 - (y2 - y1) / (2 * rows), rows, dtype=np.float32)
+        xs = np.linspace(Wf / (2 * cols), Wf - Wf / (2 * cols), cols, dtype=np.float32)
+        ys = np.linspace(Hf / (2 * rows), Hf - Hf / (2 * rows), rows, dtype=np.float32)
         gj, gi = np.meshgrid(xs, ys)
         grid_in = np.stack([gj.ravel(), gi.ravel()], axis=-1).reshape(-1, 1, 2).astype(np.float32)
         grid_nxt, gst, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, grid_in, None)
@@ -398,26 +398,26 @@ def _grid_seed_pts(roi_px, rows=4, cols=7):
     return np.stack([gj.ravel(), gi.ravel()], axis=-1).astype(np.float32)
 
 
-def _grid_lk_trail(grays, roi_px, *, rows=4, cols=7):
+def _grid_lk_trail(grays, *, rows=4, cols=7):
     """Backward LK chain so head dots stay anchored on the grid.
 
-    The seed grid is placed on the CURRENT frame (grays[-1]) and LK propagates
-    *backwards* one step at a time, asking "where was this current-frame point
-    one step ago?". Result:
-      positions:  (T+1, N, 2) float32; positions[T] is exactly the seed grid,
-                  positions[t<T] is where each point was at frame t (frozen at
-                  the latest good location once a tracker dies).
-      first_idx:  (N,) int; the earliest step index for which a valid backward
-                  position exists. first_idx[n] == T means tracking died at
-                  the very first backward step and the caller should draw only
-                  an in-place dot. trail length = T - first_idx[n].
+    Seed grid spans the FULL decoded frame (uniform 4x7 over [0, W) x [0, H))
+    rather than just the gate's ROI - the visualisation is meant to read
+    the whole image. Gate B's own median-flow decision is unaffected (it
+    still runs on goodFeaturesToTrack inside the ROI in `_motion_gate`).
 
-    This is what CoTracker / PIPs do for short tracklets - it guarantees the
-    painted head dots line up on a clean 4x7 grid regardless of camera shake.
+    Result:
+      positions:  (T+1, N, 2) float32; positions[T] == seed grid; earlier
+                  rows hold the backward-LK-tracked locations, frozen at
+                  the last good spot once a tracker dies.
+      first_idx:  (N,) int; the earliest step index for which a valid
+                  backward position exists. first_idx[n] == T means tracking
+                  died immediately and the caller should draw only a dot.
     """
     if len(grays) < 2:
         return None, None
-    seed = _grid_seed_pts(roi_px, rows=rows, cols=cols)            # (N, 2)
+    H, W = grays[0].shape[:2]
+    seed = _grid_seed_pts((0, 0, W, H), rows=rows, cols=cols)       # (N, 2)
     N = seed.shape[0]
     T = len(grays) - 1
     positions = np.tile(seed[None, :, :], (T + 1, 1, 1)).astype(np.float32)
@@ -496,11 +496,12 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
 
     if style == "grid":
         max_stroke_px = float(cfg.get("max_stroke_px", 32.0))
-        head_px = int(cfg.get("head_px", 4))
+        head_px = int(cfg.get("head_px", 6))
+        line_thick = int(cfg.get("line_thick", 2))
         _draw_flow_grid(img, fl, sx, sy,
                         target_stroke_px=target_stroke_px,
                         max_stroke_px=max_stroke_px,
-                        alpha=alpha, head_px=head_px)
+                        alpha=alpha, head_px=head_px, line_thick=line_thick)
         if draw_legend:
             _flow_grid_legend(img)
         return
@@ -546,7 +547,7 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
 
 
 def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
-                    max_stroke_px=80, alpha=0.92, head_px=4):
+                    max_stroke_px=80, alpha=0.92, head_px=6, line_thick=2):
     """Paint the 4x7 grid LK as either a tapered comet trail (preferred)
     or a single colored stroke (fallback when no trail is available).
 
@@ -568,7 +569,7 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
     if g_traj is not None and g_traj.shape[0] >= 2:
         _paint_arrows(img, g_traj, g_traj_first, sx, sy, palette,
                       max_arrow_px=max_stroke_px, alpha=alpha,
-                      head_px=int(head_px))
+                      head_px=int(head_px), line_thick=int(line_thick))
         return
 
     # ----- fallback: single-step LK line -----
@@ -634,7 +635,8 @@ def _thin_arrow(img, p0, p1, color, *, head_px=4, line_thick=1, head_angle_deg=2
 
 
 def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
-                  max_arrow_px=40, target_arrow_px=18, alpha=0.95, head_px=4):
+                  max_arrow_px=40, target_arrow_px=18, alpha=0.95,
+                  head_px=6, line_thick=2):
     """matplotlib-quiver-style arrows on the 4x7 grid.
 
     Each grid point at the current frame (positions[T, n]) gets a small
@@ -684,7 +686,7 @@ def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
         bx = int(ax + disp[n, 0])
         by = int(ay + disp[n, 1])
         _thin_arrow(overlay, (ax, ay), (bx, by), col,
-                    head_px=head_px, line_thick=1)
+                    head_px=head_px, line_thick=line_thick)
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 
@@ -770,7 +772,7 @@ def _ensure_grid_trail(video_path, sample, meta, n_trail):
     cap.release()
     if len(grays) < 2:
         return
-    traj, first_idx = _grid_lk_trail(grays, roi_px)
+    traj, first_idx = _grid_lk_trail(grays)
     if traj is None:
         return
     fl["grid_traj"] = traj
@@ -929,7 +931,7 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         "gate_a": gate_a, "gate_b": gate_b, "gate_c": gate_c,
         "_flow_viz": flow_viz or {
             "style": "grid", "legend": False, "banner": False, "roi": False,
-            "n_trail": 1, "max_stroke_px": 40.0, "head_px": 4,
+            "n_trail": 1, "max_stroke_px": 40.0, "head_px": 6, "line_thick": 2,
         },
     }
 
@@ -964,7 +966,7 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         boxes, qcount, gateA = _detect_boxes(model, small, gate_a)
         fl = _flow(prev_gray, gray, gate_b, gate_c, roi_px)
         if len(gray_window) >= 2 and n_trail > 0:
-            traj, traj_first = _grid_lk_trail(list(gray_window), roi_px)
+            traj, traj_first = _grid_lk_trail(list(gray_window))
             if traj is not None:
                 fl["grid_traj"] = traj
                 fl["grid_traj_first"] = traj_first
@@ -1041,10 +1043,13 @@ def main(argv=None):
                     help="grid style: hard cap per arrow length in output px "
                          "(direction preserved). Default 40. Larger => arrows "
                          "convey more motion intensity but clutter the figure.")
-    ap.add_argument("--arrow_head_px", type=int, default=4,
+    ap.add_argument("--arrow_head_px", type=int, default=6,
                     help="arrowhead size in pixels (FIXED, not a fraction of "
-                         "the arrow length, so heads stay delicate even on "
-                         "long arrows). Default 4 - matplotlib quiver look.")
+                         "the arrow length). Default 6.")
+    ap.add_argument("--arrow_line_thick", type=int, default=2,
+                    help="arrow shaft thickness in pixels. Default 2 - keeps "
+                         "the shaft close to the 4 px filled grid dot so the "
+                         "arrow doesn't look like a hair next to the anchor.")
     ap.add_argument("--camera_disp_thresh", type=float, default=None,
                     help="override gate_b.camera_disp_thresh for this run (fraction "
                          "of decoded max-side). Default config is 0.2 (= ~89.6 px "
@@ -1112,6 +1117,7 @@ def main(argv=None):
         "banner": bool(args.banner),
         "roi": bool(args.roi),
         "head_px": int(args.arrow_head_px),
+        "line_thick": int(args.arrow_line_thick),
     }
 
     out_dir = Path(args.out_dir)
