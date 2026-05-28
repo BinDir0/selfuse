@@ -329,27 +329,29 @@ def depth_edge(depth: np.ndarray, rtol: float = 0.03, kernel_size: int = 3) -> n
 def camera_trajectory_to_glb(
     predictions: dict,
     scatter_frac: float = 0.04,
-    marker_radius_frac: float = 0.015,
+    glyph_scale_frac: float = 1.0,
     tube_radius_frac: float = 0.004,
 ) -> trimesh.Scene:
     """Build a standalone GLB showing the camera trajectory only.
 
-    Each VGGT frame contributes one small sphere at the camera center; consecutive
-    centers are joined by a thin cylinder so the path reads as a polyline. The
-    centers get a deterministic per-index Gaussian scatter so a dense trajectory
-    looks looser instead of stacking on a tight curve. Colors fade from light gray
-    to near-black along time, matching the main scene's camera glyphs.
+    Each VGGT frame is drawn as the same wireframe-cone glyph used in the main
+    scene (small box + diagonals), placed at the camera's world position and
+    oriented by the camera's world rotation. Consecutive positions are joined by
+    a thin cylinder so the time order reads as a polyline. Centers get a
+    deterministic per-index Gaussian scatter so a dense trajectory loosens up
+    instead of stacking on a tight curve. Colors fade light gray -> near-black.
     """
     extrinsic = predictions["extrinsic"]
     n = len(extrinsic)
     if n == 0:
         return trimesh.Scene()
 
-    cam_pos = np.empty((n, 3), dtype=np.float64)
-    for i in range(n):
-        E = np.eye(4)
-        E[:3, :4] = extrinsic[i]
-        cam_pos[i] = np.linalg.inv(E)[:3, 3]
+    extrinsics_h = np.zeros((n, 4, 4), dtype=np.float64)
+    extrinsics_h[:, :3, :4] = extrinsic
+    extrinsics_h[:, 3, 3] = 1.0
+
+    cam_to_world = np.array([np.linalg.inv(E) for E in extrinsics_h])  # (n,4,4)
+    cam_pos = cam_to_world[:, :3, 3].copy()
 
     if n >= 2:
         span = float(np.linalg.norm(cam_pos.max(0) - cam_pos.min(0)))
@@ -358,13 +360,12 @@ def camera_trajectory_to_glb(
     if span < 1e-6:
         span = 1.0
 
-    # Deterministic per-index jitter (seed by frame index so re-renders match exactly).
+    # Deterministic per-index Gaussian jitter.
     if scatter_frac > 0:
         sigma = span * scatter_frac
-        jitter = np.empty_like(cam_pos)
         for i in range(n):
-            jitter[i] = np.random.default_rng(int(i) * 257 + 11).standard_normal(3) * sigma
-        cam_pos = cam_pos + jitter
+            cam_pos[i] = cam_pos[i] + np.random.default_rng(int(i) * 257 + 11).standard_normal(3) * sigma
+    cam_to_world[:, :3, 3] = cam_pos  # propagate scatter into the glyph transform
 
     scene = trimesh.Scene()
     cam_light = np.array([170, 170, 170])
@@ -373,16 +374,14 @@ def camera_trajectory_to_glb(
     def lerp_gray(t: float) -> tuple:
         return tuple(int(round(c)) for c in cam_light * (1.0 - t) + cam_dark * t)
 
-    r_marker = span * marker_radius_frac
-    r_tube = span * tube_radius_frac
-
-    for i, p in enumerate(cam_pos):
+    # Use span as the implicit scale for integrate_camera_into_scene (frustum sized
+    # relative to the trajectory itself rather than a point cloud that isn't there).
+    glyph_scale = span * float(glyph_scale_frac)
+    for i in range(n):
         t = i / max(n - 1, 1)
-        sph = trimesh.creation.icosphere(subdivisions=2, radius=r_marker)
-        sph.apply_translation(p)
-        sph.visual.face_colors[:, :3] = lerp_gray(t)
-        scene.add_geometry(sph)
+        integrate_camera_into_scene(scene, cam_to_world[i], lerp_gray(t), glyph_scale)
 
+    r_tube = span * tube_radius_frac
     z_axis = np.array([0.0, 0.0, 1.0])
     for i in range(n - 1):
         a, b = cam_pos[i], cam_pos[i + 1]
@@ -409,9 +408,6 @@ def camera_trajectory_to_glb(
         cyl.visual.face_colors[:, :3] = lerp_gray((i + 0.5) / max(n - 1, 1))
         scene.add_geometry(cyl)
 
-    extrinsics_h = np.zeros((n, 4, 4), dtype=np.float64)
-    extrinsics_h[:, :3, :4] = extrinsic
-    extrinsics_h[:, 3, 3] = 1.0
     return apply_scene_alignment(scene, extrinsics_h)
 
 
