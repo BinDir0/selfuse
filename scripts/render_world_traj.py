@@ -111,6 +111,13 @@ def parse_args():
                         "loosens a clumped real trajectory so hands are more distinguishable.")
     p.add_argument("--xy_jitter", type=float, default=0.0,
                    help="extra per-pose random horizontal offset in metres (0 = off)")
+    p.add_argument("--exaggerate_translate", type=float, default=1.0,
+                   help="per-hand wrist XY translation amplification about the cluster mean "
+                        "(1.0 = off; 2.0 doubles each pose's horizontal deviation). Pairs well "
+                        "with --select even on a short window for a dramatised action.")
+    p.add_argument("--exaggerate_rotate", type=float, default=1.0,
+                   help="per-hand wrist yaw amplification (rotation about Z through the wrist) "
+                        "by this factor (1.0 = off, 2.0 doubles each pose's yaw deviation)")
     p.add_argument("--seed", type=int, default=0, help="RNG seed for --xy_jitter")
     p.add_argument("--frame_start", type=int, default=0,
                    help="restrict the trail to video frames >= this (default 0)")
@@ -170,7 +177,8 @@ def _load_align_alpha(seq_folder, explicit):
 
 
 def _sampled_trail_arrays(args, idxs, right_verts, left_verts, valid_r, valid_l,
-                          want_r, want_l, R_c2w, t_c2w):
+                          want_r, want_l, R_c2w, t_c2w,
+                          right_wrists=None, left_wrists=None):
     """Pull the per-sample hand/camera geometry the rerun trail needs."""
     mverts, mfaces, _ = camera_marker_geometry(args.frustum_radius, args.frustum_height)
     right = np.stack([right_verts[t] for t in idxs], 0)
@@ -179,6 +187,33 @@ def _sampled_trail_arrays(args, idxs, right_verts, left_verts, valid_r, valid_l,
     centers = np.stack([t_c2w[t] for t in idxs], 0)
     vr = np.array([bool(want_r) and bool(valid_r[min(t, len(valid_r) - 1)]) for t in idxs])
     vl = np.array([bool(want_l) and bool(valid_l[min(t, len(valid_l) - 1)]) for t in idxs])
+
+    # Optional exaggeration: amplify each pose's wrist XY translation AND yaw
+    # (about Z, through the wrist) relative to the cluster mean -- per-hand, so
+    # the bimanual delta gets dramatised too. Z + hand shape untouched.
+    et = float(getattr(args, "exaggerate_translate", 1.0))
+    er = float(getattr(args, "exaggerate_rotate", 1.0))
+    if (et != 1.0 or er != 1.0) and right_wrists is not None and left_wrists is not None:
+        rw = np.stack([right_wrists[t] for t in idxs], 0)
+        lw = np.stack([left_wrists[t] for t in idxs], 0)
+        for side, verts_arr, wrists_arr, valid_arr in (("r", right, rw, vr),
+                                                       ("l", left, lw, vl)):
+            ks = [k for k in range(len(idxs)) if valid_arr[k]]
+            if len(ks) < 2:
+                continue
+            xys = np.array([wrists_arr[k][:2] for k in ks])
+            yaws = np.array([np.arctan2(*(verts_arr[k].mean(0)[:2] - wrists_arr[k][:2])[::-1])
+                             for k in ks])
+            mean_xy = xys.mean(0)
+            mean_yaw = float(np.arctan2(np.sin(yaws).mean(), np.cos(yaws).mean()))
+            for ki, k in enumerate(ks):
+                dxy = (xys[ki] - mean_xy) * (et - 1.0)
+                dy = ((yaws[ki] - mean_yaw + np.pi) % (2 * np.pi) - np.pi) * (er - 1.0)
+                w = wrists_arr[k]
+                cy, sy = np.cos(dy), np.sin(dy)
+                Rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], np.float32)
+                verts_arr[k] = ((verts_arr[k] - w) @ Rz.T + w
+                                + np.array([dxy[0], dxy[1], 0.0], np.float32))
 
     # Optional horizontal-only spread: scale each HAND's XY about the global
     # hand-cluster centroid (per-hand, not per-pose pair) so the left-hand and
@@ -216,11 +251,13 @@ def _sampled_trail_arrays(args, idxs, right_verts, left_verts, valid_r, valid_l,
 
 
 def _dump_trail_npz(args, idxs, right_verts, left_verts, faces_right, faces_left,
-                    valid_r, valid_l, want_r, want_l, R_c2w, t_c2w):
+                    valid_r, valid_l, want_r, want_l, R_c2w, t_c2w,
+                    right_wrists=None, left_wrists=None):
     """Dump trail geometry to .npz so a rerun-only env can build the .rrd
     without importing torch/aitviewer (avoids the hawor<->rerun numpy clash)."""
     right, left, cam, cam_faces, centers, vr, vl = _sampled_trail_arrays(
-        args, idxs, right_verts, left_verts, valid_r, valid_l, want_r, want_l, R_c2w, t_c2w)
+        args, idxs, right_verts, left_verts, valid_r, valid_l, want_r, want_l, R_c2w, t_c2w,
+        right_wrists=right_wrists, left_wrists=left_wrists)
     data = dict(
         sample_idx=np.asarray(idxs, np.int64),
         right_verts=right.astype(np.float32), left_verts=left.astype(np.float32),
@@ -337,12 +374,19 @@ def main():
         vis_idx = np.arange(vs, ve, dtype=np.int64)
         R_c2w, t_c2w = interpolate_slam_cameras_at_video_frames(npz, vis_idx)
 
+    # wrist world position == pred_trans[hand,t] (MANO centre_idx=0 -> joint0 sits at trans).
+    # Take same time slice the verts use, and apply the same flip + optional rebase.
+    right_wrists = pred_trans[ri, vs:ve].clone()
+    left_wrists = pred_trans[li, vs:ve].clone()
+
     # ---- coordinate flip (matches demo.py) ----
     R_x = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=torch.float32)
     R_c2w = torch.einsum("ij,njk->nik", R_x, R_c2w)
     t_c2w = torch.einsum("ij,nj->ni", R_x, t_c2w)
     left_verts = torch.einsum("ij,tnj->tni", R_x, left_verts.cpu())
     right_verts = torch.einsum("ij,tnj->tni", R_x, right_verts.cpu())
+    right_wrists = torch.einsum("ij,tj->ti", R_x, right_wrists)
+    left_wrists = torch.einsum("ij,tj->ti", R_x, left_wrists)
 
     if args.rebase and R_c2w.shape[0] > 0:
         R0, t0 = R_c2w[0], t_c2w[0]
@@ -352,8 +396,11 @@ def main():
         t_c2w = torch.einsum("ij,nj->ni", Ra, t_c2w) + ta[None]
         left_verts = torch.einsum("ij,tnj->tni", Ra, left_verts) + ta[None, None]
         right_verts = torch.einsum("ij,tnj->tni", Ra, right_verts) + ta[None, None]
+        right_wrists = torch.einsum("ij,tj->ti", Ra, right_wrists) + ta[None]
+        left_wrists = torch.einsum("ij,tj->ti", Ra, left_wrists) + ta[None]
 
     right_verts, left_verts = right_verts.numpy(), left_verts.numpy()
+    right_wrists, left_wrists = right_wrists.numpy(), left_wrists.numpy()
     R_c2w, t_c2w = R_c2w.numpy(), t_c2w.numpy()
     n = min(right_verts.shape[0], left_verts.shape[0], R_c2w.shape[0])
 
@@ -420,7 +467,8 @@ def main():
     # ---- npz backend: dump geometry only (hawor env, no rerun/GL), then stop ----
     if args.dump_npz:
         _dump_trail_npz(args, idxs, right_verts, left_verts, faces_right, faces_left,
-                        valid_r, valid_l, want_r, want_l, R_c2w, t_c2w)
+                        valid_r, valid_l, want_r, want_l, R_c2w, t_c2w,
+                        right_wrists=right_wrists, left_wrists=left_wrists)
         return
 
     # ---- rerun backend: log the same trail, no GL needed, then stop ----
