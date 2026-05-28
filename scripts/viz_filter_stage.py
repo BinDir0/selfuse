@@ -401,20 +401,31 @@ def _grid_seed_pts(roi_px, rows=4, cols=7):
 def _grid_lk_trail(grays, roi_px, *, rows=4, cols=7):
     """Forward LK chain over a stack of grayscale frames (oldest first).
 
-    Mirrors what CoTracker / PIPs do for short trajectories: seed N grid
-    points at frame 0, propagate via LK to each subsequent frame, return
-    the full (T+1, N, 2) trajectory plus an N-vector validity mask.
+    Returns (positions, last_valid):
+      positions:  (T+1, N, 2) float32 - frozen at last-good location once a
+                  point's tracker dies, so the (T+1, N, 2) shape is always
+                  filled.
+      last_valid: (N,) int - the last step index (0..T) for which LK was
+                  successful. last_valid[n] == 0 means the point died right
+                  out of the gate; the caller draws those as in-place dots
+                  (no trail, no border) instead of throwing them away.
+
+    Each point is tracked as far as it can go; a death at step t1 does NOT
+    invalidate steps 0..t1-1 (which was the old behavior and caused caseB
+    frames to show all-dead dots).
     """
     if len(grays) < 2:
         return None, None
     seed = _grid_seed_pts(roi_px, rows=rows, cols=cols)            # (N, 2)
     N = seed.shape[0]
     T = len(grays) - 1
-    positions = np.zeros((T + 1, N, 2), dtype=np.float32)
-    positions[0] = seed
-    valid = np.ones(N, dtype=bool)
-    cur = seed.reshape(-1, 1, 2)
+    positions = np.tile(seed[None, :, :], (T + 1, 1, 1)).astype(np.float32)
+    last_valid = np.zeros(N, dtype=np.int32)
+    alive = np.ones(N, dtype=bool)
+    cur = seed.reshape(-1, 1, 2).copy()
     for t in range(1, T + 1):
+        if not alive.any():
+            break
         try:
             nxt, status, _ = cv2.calcOpticalFlowPyrLK(
                 grays[t - 1], grays[t], cur, None,
@@ -422,18 +433,17 @@ def _grid_lk_trail(grays, roi_px, *, rows=4, cols=7):
                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
             )
         except Exception:
-            valid[:] = False
             break
         if nxt is None or status is None:
-            valid[:] = False
             break
-        s = status.reshape(-1) > 0
-        valid &= s
-        positions[t] = nxt.reshape(-1, 2)
-        # propagate even invalid points (their positions become meaningless but
-        # we keep the array shape; the valid mask handles drawing)
-        cur = nxt
-    return positions, valid
+        s = (status.reshape(-1) > 0) & alive
+        nxt_flat = nxt.reshape(-1, 2)
+        # alive points advance; freshly-dead and already-dead points freeze
+        positions[t] = np.where(s[:, None], nxt_flat, positions[t - 1])
+        last_valid[s] = t
+        alive = s
+        cur = positions[t].reshape(-1, 1, 2).astype(np.float32)
+    return positions, last_valid
 
 
 # BGR corner colors for the 4x7 grid (each point gets a bilinear blend of
@@ -544,7 +554,7 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
     structure is always visible.
     """
     g_traj = fl.get("grid_traj")
-    g_traj_valid = fl.get("grid_traj_valid")
+    g_traj_last = fl.get("grid_traj_last")
     g_shape = fl.get("grid_shape")
     if g_shape is None:
         return
@@ -553,7 +563,7 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
 
     # ----- trail style (preferred) -----
     if g_traj is not None and g_traj.shape[0] >= 2:
-        _paint_trail(img, g_traj, g_traj_valid, sx, sy, palette,
+        _paint_trail(img, g_traj, g_traj_last, sx, sy, palette,
                      max_stroke_px=max_stroke_px, alpha=alpha)
         return
 
@@ -585,80 +595,70 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
         ax = int(g_pts[k, 0] * sx)
         ay = int(g_pts[k, 1] * sy)
         if g_valid is not None and not bool(g_valid[k]):
-            cv2.circle(overlay, (ax, ay), 6, (20, 20, 20), -1, cv2.LINE_AA)
-            cv2.circle(overlay, (ax, ay), 5, col_t, -1, cv2.LINE_AA)
+            cv2.circle(overlay, (ax, ay), 3, col_t, -1, cv2.LINE_AA)
             continue
         bx = int(ax + displayed[k, 0])
         by = int(ay + displayed[k, 1])
         cv2.line(overlay, (ax, ay), (bx, by), col_t, 3, cv2.LINE_AA)
-        cv2.circle(overlay, (ax, ay), 4, col_t, -1, cv2.LINE_AA)
+        cv2.circle(overlay, (ax, ay), 3, col_t, -1, cv2.LINE_AA)
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 
-def _paint_trail(img, traj, valid, sx, sy, palette, *, max_stroke_px=80, alpha=0.92):
-    """Render comet-style trails per grid point.
+def _paint_trail(img, traj, last_valid, sx, sy, palette, *, max_stroke_px=80, alpha=0.92):
+    """Render per-grid-point trails. No borders, no halos, no sparkles.
 
-    Visual recipe (copied from CoTracker/PIPs):
-      * each per-track polyline is drawn segment by segment from tail to head;
-      * segment thickness grows linearly (2 -> 5) and segment brightness ramps
-        up (0.55 -> 1.0 of the base colour) so the head feels alive;
-      * head receives a small colored disk with a white highlight (looks like
-        a sparkle, hides aliasing at sharp angles);
-      * if the total spatial span of a trail exceeds max_stroke_px, the whole
-        polyline is uniformly compressed toward the head -- direction and
-        shape preserved, so the painting stays clean on fast-motion frames.
+    Each track is drawn as a tapered/brightening polyline up to its own
+    last-valid step L:
+      * L == 0 (no flow ever tracked): a small in-place coloured dot at the
+        seed position - same size as a head dot, just no trail.
+      * L  > 0: segments 0->1, 1->2, ..., (L-1)->L drawn with thickness
+        2->4 and brightness 0.55->1.0, ending in a clean coloured dot.
+
+    Total per-track spatial span (head-tail) is capped at max_stroke_px;
+    over-budget trails are uniformly shrunk toward the head.
     """
     T = traj.shape[0] - 1
     N = traj.shape[1]
-    rows, cols = palette.shape[0], palette.shape[1]
+    cols = palette.shape[1]
 
-    # Map to output coords once
     out = traj * np.array([sx, sy], dtype=np.float32)  # (T+1, N, 2)
 
-    # Compress overly long trails toward the head
-    head = out[-1]                                     # (N, 2)
-    tail = out[0]                                      # (N, 2)
-    span = np.linalg.norm(head - tail, axis=1)         # (N,)
+    # Compress overly long trails toward each track's own head (= position
+    # at last_valid[n]); points with L=0 are unaffected by this loop.
+    head_per_n = out[last_valid, np.arange(N)] if last_valid is not None else out[-1]
+    span = np.linalg.norm(head_per_n - out[0], axis=1)
     over = span > max_stroke_px
     if over.any():
         scale = np.ones(N, dtype=np.float32)
         scale[over] = max_stroke_px / np.maximum(span[over], 1e-6)
-        out = head[None, :, :] + (out - head[None, :, :]) * scale[None, :, None]
+        out = head_per_n[None, :, :] + (out - head_per_n[None, :, :]) * scale[None, :, None]
 
     overlay = img.copy()
     for n in range(N):
         i, j = divmod(n, cols)
-        base = palette[i, j].astype(np.float32)        # (3,)
+        base = palette[i, j].astype(np.float32)
+        col_base = (int(base[0]), int(base[1]), int(base[2]))
+        L = int(last_valid[n]) if last_valid is not None else T
 
-        # Always draw a seed ring at the FIRST decoded position so the 4x7
-        # structure is visible regardless of LK success.
-        sx0, sy0 = int(out[0, n, 0]), int(out[0, n, 1])
-        is_valid = True if valid is None else bool(valid[n])
-        if not is_valid:
-            col_t = (int(base[0]), int(base[1]), int(base[2]))
-            cv2.circle(overlay, (sx0, sy0), 6, (20, 20, 20), -1, cv2.LINE_AA)
-            cv2.circle(overlay, (sx0, sy0), 5, col_t, -1, cv2.LINE_AA)
+        if L == 0:
+            # in-place dot — small, no halo, no border
+            x0, y0 = int(out[0, n, 0]), int(out[0, n, 1])
+            cv2.circle(overlay, (x0, y0), 3, col_base, -1, cv2.LINE_AA)
             continue
 
-        # Per-segment tapered, brightening polyline (tail -> head)
-        for t in range(T):
-            f0 = t / max(1, T)
-            f1 = (t + 1) / max(1, T)
-            # use the LATER endpoint's f for colour/thickness so head pops
-            f = f1
+        # Tapered/brightening polyline 0 -> 1 -> ... -> L
+        for t in range(L):
+            f = (t + 1) / max(1, L)
             col_f = base * (0.55 + 0.45 * f)
-            col_t = (int(col_f[0]), int(col_f[1]), int(col_f[2]))
-            thick = int(round(2 + 3 * f))             # 2 -> 5
+            col_seg = (int(col_f[0]), int(col_f[1]), int(col_f[2]))
+            thick = int(round(2 + 2 * f))            # 2 -> 4
             p0 = (int(out[t, n, 0]), int(out[t, n, 1]))
             p1 = (int(out[t + 1, n, 0]), int(out[t + 1, n, 1]))
-            cv2.line(overlay, p0, p1, col_t, thick, cv2.LINE_AA)
+            cv2.line(overlay, p0, p1, col_seg, thick, cv2.LINE_AA)
 
-        # Head dot: dark halo + base color + tiny white sparkle
-        hx, hy = int(out[T, n, 0]), int(out[T, n, 1])
-        col_head = (int(base[0]), int(base[1]), int(base[2]))
-        cv2.circle(overlay, (hx, hy), 6, (20, 20, 20), -1, cv2.LINE_AA)
-        cv2.circle(overlay, (hx, hy), 5, col_head, -1, cv2.LINE_AA)
-        cv2.circle(overlay, (hx, hy), 2, (250, 250, 250), -1, cv2.LINE_AA)
+        # Clean head dot — no halo, no sparkle
+        hx, hy = int(out[L, n, 0]), int(out[L, n, 1])
+        cv2.circle(overlay, (hx, hy), 3, col_base, -1, cv2.LINE_AA)
 
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
@@ -745,11 +745,11 @@ def _ensure_grid_trail(video_path, sample, meta, n_trail):
     cap.release()
     if len(grays) < 2:
         return
-    traj, valid = _grid_lk_trail(grays, roi_px)
+    traj, last_valid = _grid_lk_trail(grays, roi_px)
     if traj is None:
         return
     fl["grid_traj"] = traj
-    fl["grid_traj_valid"] = valid
+    fl["grid_traj_last"] = last_valid
     fl["grid_shape"] = (4, 7)
     sample["flow"] = fl
 
@@ -902,7 +902,10 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         "video": str(video_path), "fps": fps, "skip": 1,
         "decode": (dw, dh), "full": (Wf, Hf), "roi_px_small": roi_px,
         "gate_a": gate_a, "gate_b": gate_b, "gate_c": gate_c,
-        "_flow_viz": flow_viz or {"style": "grid", "legend": True},
+        "_flow_viz": flow_viz or {
+            "style": "grid", "legend": False, "banner": False, "roi": False,
+            "n_trail": 4, "max_stroke_px": 32.0,
+        },
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -936,10 +939,10 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         boxes, qcount, gateA = _detect_boxes(model, small, gate_a)
         fl = _flow(prev_gray, gray, gate_b, gate_c, roi_px)
         if len(gray_window) >= 2 and n_trail > 0:
-            traj, traj_valid = _grid_lk_trail(list(gray_window), roi_px)
+            traj, traj_last = _grid_lk_trail(list(gray_window), roi_px)
             if traj is not None:
                 fl["grid_traj"] = traj
-                fl["grid_traj_valid"] = traj_valid
+                fl["grid_traj_last"] = traj_last
                 fl["grid_shape"] = (4, 7)
         sample = {
             "frame_idx": fi, "boxes": boxes, "qualified": qcount,
@@ -1002,12 +1005,13 @@ def main(argv=None):
                     help="force caseC_pass to render exactly this frame index "
                          "(requires --video). caseA/caseB still auto-picked.")
     ap.add_argument("--flow_style", choices=["grid", "hsv", "mag"], default="grid",
-                    help="flow viz style. grid (default) = 4x7 fixed-grid LK strokes, "
+                    help="flow viz style. grid (default) = 4x7 fixed-grid LK trails, "
                          "each cell coloured by its position (bilinear corner blend); "
                          "hsv = Middlebury direction colormap on goodFeatures pts; "
                          "mag = legacy green->red by magnitude.")
-    ap.add_argument("--no_flow_legend", action="store_true",
-                    help="suppress the small flow style legend in the corner.")
+    ap.add_argument("--flow_legend", action="store_true",
+                    help="(debug) show the small flow style legend in the corner. "
+                         "OFF by default for clean figures.")
     ap.add_argument("--max_stroke_px", type=float, default=32.0,
                     help="grid style: hard per-stroke length cap in output px "
                          "(direction preserved). Lower this if the pass frame "
@@ -1023,12 +1027,10 @@ def main(argv=None):
                     help="grid style: paint a CoTracker-like trail of N past "
                          "positions per grid point (set 0 to fall back to a "
                          "single-step line). Default 4.")
-    ap.add_argument("--no_banner", action="store_true",
-                    help="suppress the gate-status banner (for small figures).")
-    ap.add_argument("--no_roi", action="store_true",
-                    help="suppress the amber ROI rectangle (for small figures).")
-    ap.add_argument("--clean", action="store_true",
-                    help="shortcut: --no_banner --no_roi --no_flow_legend.")
+    ap.add_argument("--banner", action="store_true",
+                    help="(debug) show the gate-status A/B/C banner. OFF by default.")
+    ap.add_argument("--roi", action="store_true",
+                    help="(debug) show the amber central ROI rectangle. OFF by default.")
     args = ap.parse_args(argv)
 
     if not args.video and not args.video_root:
@@ -1072,17 +1074,13 @@ def main(argv=None):
     if args.max_videos:
         videos = videos[: args.max_videos]
 
-    if args.clean:
-        args.no_banner = True
-        args.no_roi = True
-        args.no_flow_legend = True
     flow_viz_cfg = {
         "style": args.flow_style,
-        "legend": not args.no_flow_legend,
+        "legend": bool(args.flow_legend),
         "max_stroke_px": float(args.max_stroke_px),
         "n_trail": int(args.n_trail),
-        "banner": not args.no_banner,
-        "roi": not args.no_roi,
+        "banner": bool(args.banner),
+        "roi": bool(args.roi),
     }
 
     out_dir = Path(args.out_dir)
