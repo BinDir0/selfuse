@@ -128,7 +128,15 @@ def file_path(file_data) -> str:
 MAX_FRAMES = 10
 
 
-def handle_uploads(input_video, input_images, video_sample_fps=1.0):
+def handle_uploads(input_video, input_images, video_sample_fps=1.0, hand_frame_indices=None):
+    """Sample up to MAX_FRAMES frames from a video, evenly spaced over the timeline.
+
+    When ``hand_frame_indices`` is provided (frames where HaWoR detected a hand), the
+    spread is restricted to those frames so every saved image actually carries a hand.
+    The fps argument is kept for backward compatibility with examples but is no longer
+    used — the goal here is maximum pose variety across the whole clip, not dense
+    sampling of the opening seconds.
+    """
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -148,33 +156,48 @@ def handle_uploads(input_video, input_images, video_sample_fps=1.0):
     if input_video is not None:
         video_path = file_path(input_video)
         video = cv2.VideoCapture(video_path)
-        fps = video.get(cv2.CAP_PROP_FPS)
-        video_sample_fps = max(float(video_sample_fps), 0.1)
-        frame_interval = max(int(round((fps if fps and fps > 0 else 1) / video_sample_fps)), 1)
+        total = int(video.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
-        frame_idx = 0
-        saved_idx = 0
-        while saved_idx < MAX_FRAMES:
-            ok, frame = video.read()
-            if not ok:
-                break
-            if frame_idx % frame_interval == 0:
-                # Name by the original video frame index so hand meshes can align by frame.
+        if hand_frame_indices is not None and len(hand_frame_indices) > 0:
+            candidates = sorted(int(f) for f in hand_frame_indices if 0 <= int(f) < (total or int(f) + 1))
+        else:
+            candidates = list(range(total)) if total > 0 else []
+
+        if candidates:
+            k = min(MAX_FRAMES, len(candidates))
+            picks = np.linspace(0, len(candidates) - 1, k).round().astype(int)
+            chosen = sorted({candidates[i] for i in picks})
+            for fi in chosen:
+                video.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                ok, frame = video.read()
+                if not ok:
+                    continue
+                image_path = os.path.join(target_dir_images, f"{fi:06}.png")
+                cv2.imwrite(image_path, frame)
+                image_paths.append(image_path)
+        else:
+            # Fallback when frame count is unknown: sequentially read up to MAX_FRAMES.
+            frame_idx = 0
+            while len(image_paths) < MAX_FRAMES:
+                ok, frame = video.read()
+                if not ok:
+                    break
                 image_path = os.path.join(target_dir_images, f"{frame_idx:06}.png")
                 cv2.imwrite(image_path, frame)
                 image_paths.append(image_path)
-                saved_idx += 1
-            frame_idx += 1
+                frame_idx += 1
         video.release()
 
     image_paths = sorted(image_paths)
     return target_dir, image_paths
 
 
-def update_gallery_on_upload(input_video, input_images, video_sample_fps):
+def update_gallery_on_upload(input_video, input_images, video_sample_fps, hand_frame_indices=None):
     if not input_video and not input_images:
         return None, "None", None, "Upload images or a video."
-    target_dir, image_paths = handle_uploads(input_video, input_images, video_sample_fps)
+    target_dir, image_paths = handle_uploads(
+        input_video, input_images, video_sample_fps, hand_frame_indices=hand_frame_indices
+    )
     return None, target_dir, image_paths, "Upload complete. Click Reconstruct."
 
 
@@ -347,6 +370,23 @@ def build_ui(
     hand_scale: float = 1.0,
     hand_auto_scale: bool = True,
 ):
+    hand_frame_indices = None
+    if hand_data is not None:
+        lf = hand_data.get("left_frames", np.array([], dtype=np.int64))
+        rf = hand_data.get("right_frames", np.array([], dtype=np.int64))
+        union = np.union1d(np.asarray(lf, np.int64), np.asarray(rf, np.int64))
+        if union.size > 0:
+            hand_frame_indices = union.tolist()
+            print(
+                f"Frame sampling restricted to {len(hand_frame_indices)} frames with detected hands "
+                f"(range {hand_frame_indices[0]}..{hand_frame_indices[-1]})."
+            )
+
+    def gallery_on_upload(input_video, input_images, video_sample_fps):
+        return update_gallery_on_upload(
+            input_video, input_images, video_sample_fps, hand_frame_indices=hand_frame_indices
+        )
+
     def reconstruct(
         target_dir,
         conf_thres,
@@ -457,6 +497,7 @@ def build_ui(
                     value=1.0,
                     step=0.1,
                     label="Video Sampling FPS",
+                    info=f"Videos are sampled into {MAX_FRAMES} frames evenly spread across the clip; this slider is kept for compatibility and no longer affects sampling.",
                     interactive=True,
                 )
                 input_images = gr.File(file_count="multiple", label="Upload Images", interactive=True)
@@ -576,17 +617,17 @@ def build_ui(
         )
 
         input_video.change(
-            fn=update_gallery_on_upload,
+            fn=gallery_on_upload,
             inputs=[input_video, input_images, video_sample_fps],
             outputs=[reconstruction_output, target_dir_output, image_gallery, log_output],
         )
         input_images.change(
-            fn=update_gallery_on_upload,
+            fn=gallery_on_upload,
             inputs=[input_video, input_images, video_sample_fps],
             outputs=[reconstruction_output, target_dir_output, image_gallery, log_output],
         )
         video_sample_fps.change(
-            fn=update_gallery_on_upload,
+            fn=gallery_on_upload,
             inputs=[input_video, input_images, video_sample_fps],
             outputs=[reconstruction_output, target_dir_output, image_gallery, log_output],
         )
