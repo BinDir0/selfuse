@@ -399,20 +399,21 @@ def _grid_seed_pts(roi_px, rows=4, cols=7):
 
 
 def _grid_lk_trail(grays, roi_px, *, rows=4, cols=7):
-    """Forward LK chain over a stack of grayscale frames (oldest first).
+    """Backward LK chain so head dots stay anchored on the grid.
 
-    Returns (positions, last_valid):
-      positions:  (T+1, N, 2) float32 - frozen at last-good location once a
-                  point's tracker dies, so the (T+1, N, 2) shape is always
-                  filled.
-      last_valid: (N,) int - the last step index (0..T) for which LK was
-                  successful. last_valid[n] == 0 means the point died right
-                  out of the gate; the caller draws those as in-place dots
-                  (no trail, no border) instead of throwing them away.
+    The seed grid is placed on the CURRENT frame (grays[-1]) and LK propagates
+    *backwards* one step at a time, asking "where was this current-frame point
+    one step ago?". Result:
+      positions:  (T+1, N, 2) float32; positions[T] is exactly the seed grid,
+                  positions[t<T] is where each point was at frame t (frozen at
+                  the latest good location once a tracker dies).
+      first_idx:  (N,) int; the earliest step index for which a valid backward
+                  position exists. first_idx[n] == T means tracking died at
+                  the very first backward step and the caller should draw only
+                  an in-place dot. trail length = T - first_idx[n].
 
-    Each point is tracked as far as it can go; a death at step t1 does NOT
-    invalidate steps 0..t1-1 (which was the old behavior and caused caseB
-    frames to show all-dead dots).
+    This is what CoTracker / PIPs do for short tracklets - it guarantees the
+    painted head dots line up on a clean 4x7 grid regardless of camera shake.
     """
     if len(grays) < 2:
         return None, None
@@ -420,15 +421,16 @@ def _grid_lk_trail(grays, roi_px, *, rows=4, cols=7):
     N = seed.shape[0]
     T = len(grays) - 1
     positions = np.tile(seed[None, :, :], (T + 1, 1, 1)).astype(np.float32)
-    last_valid = np.zeros(N, dtype=np.int32)
+    first_idx = np.full(N, T, dtype=np.int32)
     alive = np.ones(N, dtype=bool)
     cur = seed.reshape(-1, 1, 2).copy()
-    for t in range(1, T + 1):
+    # walk grays[T] -> grays[T-1] -> ... -> grays[0]
+    for t in range(T - 1, -1, -1):
         if not alive.any():
             break
         try:
             nxt, status, _ = cv2.calcOpticalFlowPyrLK(
-                grays[t - 1], grays[t], cur, None,
+                grays[t + 1], grays[t], cur, None,
                 winSize=(21, 21), maxLevel=4,
                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
             )
@@ -438,12 +440,12 @@ def _grid_lk_trail(grays, roi_px, *, rows=4, cols=7):
             break
         s = (status.reshape(-1) > 0) & alive
         nxt_flat = nxt.reshape(-1, 2)
-        # alive points advance; freshly-dead and already-dead points freeze
-        positions[t] = np.where(s[:, None], nxt_flat, positions[t - 1])
-        last_valid[s] = t
+        # alive points walk back; freshly-dead and already-dead points freeze
+        positions[t] = np.where(s[:, None], nxt_flat, positions[t + 1])
+        first_idx[s] = t
         alive = s
         cur = positions[t].reshape(-1, 1, 2).astype(np.float32)
-    return positions, last_valid
+    return positions, first_idx
 
 
 # BGR corner colors for the 4x7 grid (each point gets a bilinear blend of
@@ -554,17 +556,17 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
     structure is always visible.
     """
     g_traj = fl.get("grid_traj")
-    g_traj_last = fl.get("grid_traj_last")
+    g_traj_first = fl.get("grid_traj_first")
     g_shape = fl.get("grid_shape")
     if g_shape is None:
         return
     rows, cols = g_shape
     palette = _grid_color_field(rows, cols)
 
-    # ----- trail style (preferred) -----
+    # ----- quiver-style arrows (preferred) -----
     if g_traj is not None and g_traj.shape[0] >= 2:
-        _paint_trail(img, g_traj, g_traj_last, sx, sy, palette,
-                     max_stroke_px=max_stroke_px, alpha=alpha)
+        _paint_arrows(img, g_traj, g_traj_first, sx, sy, palette,
+                      max_arrow_px=max_stroke_px, alpha=alpha)
         return
 
     # ----- fallback: single-step LK line -----
@@ -604,62 +606,57 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 
-def _paint_trail(img, traj, last_valid, sx, sy, palette, *, max_stroke_px=80, alpha=0.92):
-    """Render per-grid-point trails. No borders, no halos, no sparkles.
+def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
+                  max_arrow_px=40, target_arrow_px=18, alpha=0.95):
+    """matplotlib-quiver-style arrows on the 4x7 grid.
 
-    Each track is drawn as a tapered/brightening polyline up to its own
-    last-valid step L:
-      * L == 0 (no flow ever tracked): a small in-place coloured dot at the
-        seed position - same size as a head dot, just no trail.
-      * L  > 0: segments 0->1, 1->2, ..., (L-1)->L drawn with thickness
-        2->4 and brightness 0.55->1.0, ending in a clean coloured dot.
+    Each grid point at the current frame (positions[T, n]) gets a small
+    coloured dot. If single-step backward LK succeeded, it ALSO gets a
+    thin antialiased arrow from the grid pointing in the direction of the
+    motion that just brought the point to its current spot. Magnitude is
+    auto-amped to a median visible length of ~target_arrow_px and
+    hard-capped at max_arrow_px per arrow (direction preserved).
 
-    Total per-track spatial span (head-tail) is capped at max_stroke_px;
-    over-budget trails are uniformly shrunk toward the head.
+    Inspired by /root/optical-flow/flow_display.py's `sparse_flow` (which
+    uses plt.quiver); we keep the per-point bilinear palette colour from
+    earlier so each arrow's origin in the grid is still readable.
     """
     T = traj.shape[0] - 1
     N = traj.shape[1]
     cols = palette.shape[1]
 
     out = traj * np.array([sx, sy], dtype=np.float32)  # (T+1, N, 2)
+    base_pts = out[T]                                   # current grid
+    prev_pts = out[T - 1] if T >= 1 else base_pts       # one step back
+    motion = base_pts - prev_pts                        # output px
+    motion_mag = np.linalg.norm(motion, axis=1)
+    valid = first_idx < T if first_idx is not None else np.ones(N, dtype=bool)
 
-    # Compress overly long trails toward each track's own head (= position
-    # at last_valid[n]); points with L=0 are unaffected by this loop.
-    head_per_n = out[last_valid, np.arange(N)] if last_valid is not None else out[-1]
-    span = np.linalg.norm(head_per_n - out[0], axis=1)
-    over = span > max_stroke_px
+    nz = motion_mag[valid & (motion_mag > 1e-3)]
+    med = float(np.median(nz)) if nz.size else 0.0
+    amp = float(np.clip(target_arrow_px / max(med, 1e-3), 1.0, 8.0)) if med > 0 else 2.0
+
+    disp = motion * amp
+    disp_mag = np.linalg.norm(disp, axis=1)
+    over = disp_mag > max_arrow_px
     if over.any():
-        scale = np.ones(N, dtype=np.float32)
-        scale[over] = max_stroke_px / np.maximum(span[over], 1e-6)
-        out = head_per_n[None, :, :] + (out - head_per_n[None, :, :]) * scale[None, :, None]
+        scale = np.ones_like(disp_mag)
+        scale[over] = max_arrow_px / np.maximum(disp_mag[over], 1e-6)
+        disp = disp * scale[:, None]
 
     overlay = img.copy()
     for n in range(N):
         i, j = divmod(n, cols)
         base = palette[i, j].astype(np.float32)
-        col_base = (int(base[0]), int(base[1]), int(base[2]))
-        L = int(last_valid[n]) if last_valid is not None else T
-
-        if L == 0:
-            # in-place dot — small, no halo, no border
-            x0, y0 = int(out[0, n, 0]), int(out[0, n, 1])
-            cv2.circle(overlay, (x0, y0), 3, col_base, -1, cv2.LINE_AA)
+        col = (int(base[0]), int(base[1]), int(base[2]))
+        ax = int(base_pts[n, 0])
+        ay = int(base_pts[n, 1])
+        cv2.circle(overlay, (ax, ay), 3, col, -1, cv2.LINE_AA)   # grid dot
+        if not bool(valid[n]) or motion_mag[n] < 0.3:
             continue
-
-        # Tapered/brightening polyline 0 -> 1 -> ... -> L
-        for t in range(L):
-            f = (t + 1) / max(1, L)
-            col_f = base * (0.55 + 0.45 * f)
-            col_seg = (int(col_f[0]), int(col_f[1]), int(col_f[2]))
-            thick = int(round(2 + 2 * f))            # 2 -> 4
-            p0 = (int(out[t, n, 0]), int(out[t, n, 1]))
-            p1 = (int(out[t + 1, n, 0]), int(out[t + 1, n, 1]))
-            cv2.line(overlay, p0, p1, col_seg, thick, cv2.LINE_AA)
-
-        # Clean head dot — no halo, no sparkle
-        hx, hy = int(out[L, n, 0]), int(out[L, n, 1])
-        cv2.circle(overlay, (hx, hy), 3, col_base, -1, cv2.LINE_AA)
-
+        bx = int(ax + disp[n, 0])
+        by = int(ay + disp[n, 1])
+        cv2.arrowedLine(overlay, (ax, ay), (bx, by), col, 1, cv2.LINE_AA, tipLength=0.32)
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 
@@ -745,11 +742,11 @@ def _ensure_grid_trail(video_path, sample, meta, n_trail):
     cap.release()
     if len(grays) < 2:
         return
-    traj, last_valid = _grid_lk_trail(grays, roi_px)
+    traj, first_idx = _grid_lk_trail(grays, roi_px)
     if traj is None:
         return
     fl["grid_traj"] = traj
-    fl["grid_traj_last"] = last_valid
+    fl["grid_traj_first"] = first_idx
     fl["grid_shape"] = (4, 7)
     sample["flow"] = fl
 
@@ -939,10 +936,10 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         boxes, qcount, gateA = _detect_boxes(model, small, gate_a)
         fl = _flow(prev_gray, gray, gate_b, gate_c, roi_px)
         if len(gray_window) >= 2 and n_trail > 0:
-            traj, traj_last = _grid_lk_trail(list(gray_window), roi_px)
+            traj, traj_first = _grid_lk_trail(list(gray_window), roi_px)
             if traj is not None:
                 fl["grid_traj"] = traj
-                fl["grid_traj_last"] = traj_last
+                fl["grid_traj_first"] = traj_first
                 fl["grid_shape"] = (4, 7)
         sample = {
             "frame_idx": fi, "boxes": boxes, "qualified": qcount,
@@ -1012,10 +1009,10 @@ def main(argv=None):
     ap.add_argument("--flow_legend", action="store_true",
                     help="(debug) show the small flow style legend in the corner. "
                          "OFF by default for clean figures.")
-    ap.add_argument("--max_stroke_px", type=float, default=32.0,
-                    help="grid style: hard per-stroke length cap in output px "
-                         "(direction preserved). Lower this if the pass frame "
-                         "still has a few long whips; default 32.")
+    ap.add_argument("--max_stroke_px", type=float, default=40.0,
+                    help="grid style: hard cap per arrow length in output px "
+                         "(direction preserved). Default 40. Larger => arrows "
+                         "convey more motion intensity but clutter the figure.")
     ap.add_argument("--camera_disp_thresh", type=float, default=None,
                     help="override gate_b.camera_disp_thresh for this run (fraction "
                          "of decoded max-side). Default config is 0.2 (= ~89.6 px "
@@ -1023,10 +1020,11 @@ def main(argv=None):
                          "footage actually trip caseB. Banner shows the value in use.")
     ap.add_argument("--hand_motion_thresh", type=float, default=None,
                     help="override gate_c.hand_motion_thresh for this run.")
-    ap.add_argument("--n_trail", type=int, default=4,
-                    help="grid style: paint a CoTracker-like trail of N past "
-                         "positions per grid point (set 0 to fall back to a "
-                         "single-step line). Default 4.")
+    ap.add_argument("--n_trail", type=int, default=1,
+                    help="number of backward LK steps for the quiver direction "
+                         "(default 1 = use immediate previous-frame motion). "
+                         "Higher values average over a longer window but the "
+                         "arrow itself is always single-step.")
     ap.add_argument("--banner", action="store_true",
                     help="(debug) show the gate-status A/B/C banner. OFF by default.")
     ap.add_argument("--roi", action="store_true",
