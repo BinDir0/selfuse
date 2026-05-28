@@ -434,7 +434,11 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
         return
 
     if style == "grid":
-        _draw_flow_grid(img, fl, sx, sy, target_stroke_px=target_stroke_px, alpha=alpha)
+        max_stroke_px = float(cfg.get("max_stroke_px", 32.0))
+        _draw_flow_grid(img, fl, sx, sy,
+                        target_stroke_px=target_stroke_px,
+                        max_stroke_px=max_stroke_px,
+                        alpha=alpha)
         if draw_legend:
             _flow_grid_legend(img)
         return
@@ -479,8 +483,17 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
         _flow_wheel_legend(img)
 
 
-def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24, alpha=0.9):
-    """Paint the 28 grid LK vectors as colored strokes (no arrowheads)."""
+def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
+                    max_stroke_px=32, alpha=0.9):
+    """Paint the 28 grid LK vectors as colored strokes (no arrowheads).
+
+    target_stroke_px: median visible stroke is auto-amped to about this length.
+    max_stroke_px:    hard ceiling per stroke (direction preserved). Without
+        this, on a stable-camera frame the auto-amp climbs to its 12x clamp,
+        and the few grid points that land on a moving hand draw very long
+        whips. The cap keeps the painting readable even when the underlying
+        flow distribution is heavy-tailed.
+    """
     g_pts = fl.get("grid_pts")
     g_nxt = fl.get("grid_nxt")
     g_valid = fl.get("grid_valid")
@@ -489,12 +502,23 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24, alpha=0.9):
         return
     rows, cols = g_shape
     palette = _grid_color_field(rows, cols)               # (R, C, 3) BGR uint8
+
+    # raw displacement in output (full-res) pixels
     vec_out = (g_nxt - g_pts) * np.array([sx, sy], dtype=np.float32)
     mag_out = np.linalg.norm(vec_out, axis=1)
-    valid_mag = mag_out[(g_valid if g_valid is not None else np.ones_like(mag_out, bool))
-                        & (mag_out > 1e-3)]
-    med = float(np.median(valid_mag)) if valid_mag.size else 0.0
+    valid_mask = g_valid if g_valid is not None else np.ones_like(mag_out, bool)
+    nz_mag = mag_out[valid_mask & (mag_out > 1e-3)]
+    med = float(np.median(nz_mag)) if nz_mag.size else 0.0
     amp = float(np.clip(target_stroke_px / max(med, 1e-3), 1.0, 12.0)) if med > 0 else 4.0
+
+    # apply amp, then cap final stroke length at max_stroke_px (preserve dir)
+    displayed = vec_out * amp                                       # (N, 2)
+    disp_mag = np.linalg.norm(displayed, axis=1)                    # (N,)
+    over = disp_mag > max_stroke_px
+    if over.any():
+        scale = np.ones_like(disp_mag)
+        scale[over] = max_stroke_px / np.maximum(disp_mag[over], 1e-6)
+        displayed = displayed * scale[:, None]
 
     overlay = img.copy()
     for k in range(rows * cols):
@@ -505,8 +529,8 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24, alpha=0.9):
         col = (int(col[0]), int(col[1]), int(col[2]))
         ax = int(g_pts[k, 0] * sx)
         ay = int(g_pts[k, 1] * sy)
-        bx = int(g_pts[k, 0] * sx + vec_out[k, 0] * amp)
-        by = int(g_pts[k, 1] * sy + vec_out[k, 1] * amp)
+        bx = int(ax + displayed[k, 0])
+        by = int(ay + displayed[k, 1])
         # dark halo for contrast on bright frames, then the colored stroke,
         # then a small filled dot at the origin.
         cv2.line(overlay, (ax, ay), (bx, by), (20, 20, 20), 5, cv2.LINE_AA)
@@ -802,6 +826,17 @@ def main(argv=None):
                          "mag = legacy green->red by magnitude.")
     ap.add_argument("--no_flow_legend", action="store_true",
                     help="suppress the small flow style legend in the corner.")
+    ap.add_argument("--max_stroke_px", type=float, default=32.0,
+                    help="grid style: hard per-stroke length cap in output px "
+                         "(direction preserved). Lower this if the pass frame "
+                         "still has a few long whips; default 32.")
+    ap.add_argument("--camera_disp_thresh", type=float, default=None,
+                    help="override gate_b.camera_disp_thresh for this run (fraction "
+                         "of decoded max-side). Default config is 0.2 (= ~89.6 px "
+                         "on 448x256); lower it (e.g. 0.05) to make walking-camera "
+                         "footage actually trip caseB. Banner shows the value in use.")
+    ap.add_argument("--hand_motion_thresh", type=float, default=None,
+                    help="override gate_c.hand_motion_thresh for this run.")
     args = ap.parse_args(argv)
 
     if not args.video and not args.video_root:
@@ -817,6 +852,22 @@ def main(argv=None):
         import yaml
         override = yaml.safe_load(Path(args.override_config).read_text()) or {}
     cfg = load_clip_config(args.config, override)
+    # CLI threshold overrides (applied AFTER config merge so they always win)
+    if args.camera_disp_thresh is not None or args.hand_motion_thresh is not None:
+        heur = cfg.setdefault("heuristic", {})
+        if args.camera_disp_thresh is not None:
+            gb = heur.setdefault("gate_b", {})
+            old = gb.get("camera_disp_thresh", 0.2)
+            gb["camera_disp_thresh"] = float(args.camera_disp_thresh)
+            print(f"[override] gate_b.camera_disp_thresh: {old} -> "
+                  f"{gb['camera_disp_thresh']} (= "
+                  f"{gb['camera_disp_thresh'] * max(int(heur.get('decode_width', 448)), int(heur.get('decode_height', 256))):.1f} "
+                  f"px on decoded grid)")
+        if args.hand_motion_thresh is not None:
+            gc = heur.setdefault("gate_c", {})
+            old = gc.get("hand_motion_thresh", 0.012)
+            gc["hand_motion_thresh"] = float(args.hand_motion_thresh)
+            print(f"[override] gate_c.hand_motion_thresh: {old} -> {gc['hand_motion_thresh']}")
     model = _load_yolo(args.model_path)
     if model is None:
         print(f"[warn] detector not loaded from {args.model_path}; "
@@ -829,7 +880,11 @@ def main(argv=None):
     if args.max_videos:
         videos = videos[: args.max_videos]
 
-    flow_viz_cfg = {"style": args.flow_style, "legend": not args.no_flow_legend}
+    flow_viz_cfg = {
+        "style": args.flow_style,
+        "legend": not args.no_flow_legend,
+        "max_stroke_px": float(args.max_stroke_px),
+    }
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
