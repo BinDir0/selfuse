@@ -103,13 +103,16 @@ def predictions_to_glb(
             hand_scale=hand_scale,
             hand_auto_scale=hand_auto_scale,
             hand_max_frames=hand_max_frames,
+            scene_scale=scene_scale,
         )
 
     return apply_scene_alignment(scene, extrinsics)
 
 
-# Distinct colors so left/right hands read clearly in the viewer.
-HAND_COLORS = {"left": (60, 120, 255), "right": (255, 80, 80)}
+# Per-hand colormaps; index by temporal position (0 = earliest kept frame, 1 = latest).
+# winter goes blue->cyan, autumn goes red->yellow — same-hand frames remain readable when
+# stacked, and the two hands never collide in hue.
+HAND_COLORMAPS = {"left": "winter", "right": "autumn"}
 
 
 def _estimate_hand_scale(predictions: dict, frames_verts: list, frame_indices: np.ndarray) -> float:
@@ -155,6 +158,8 @@ def add_hand_meshes(
     hand_scale: float = 1.0,
     hand_auto_scale: bool = True,
     hand_max_frames: int | None = None,
+    scene_scale: float = 1.0,
+    left_jitter_frac: float = 0.06,
 ) -> None:
     """Place per-frame camera-space hand meshes into the (VGGT world) scene.
 
@@ -207,12 +212,35 @@ def add_hand_meshes(
             kept = {unique_idxs[i] for i in picks}
             placements = [p for p in placements if p[0] in kept]
 
+    # Map each kept vggt_idx to its temporal position (0 = earliest kept, 1 = latest)
+    # so we can shade each mesh along the per-hand colormap.
+    kept_idxs = sorted({p[0] for p in placements})
+    n_kept = max(len(kept_idxs), 1)
+    time_pos = {idx: i / max(n_kept - 1, 1) for i, idx in enumerate(kept_idxs)}
+
+    # World-space direction of camera 0's "left" — spread piled left hands along this.
+    R0 = extrinsic[0, :3, :3]
+    left_dir_world = R0.T @ np.array([-1.0, 0.0, 0.0])
+    norm = float(np.linalg.norm(left_dir_world))
+    left_dir_world = left_dir_world / norm if norm > 1e-9 else np.array([-1.0, 0.0, 0.0])
+
     for vggt_idx, verts, faces, side in placements:
         rotation = extrinsic[vggt_idx, :3, :3]
         translation = extrinsic[vggt_idx, :3, 3]
         world_verts = (s * verts - translation) @ rotation  # R^T (s v - t) for row vectors
+
+        if side == "left" and left_jitter_frac > 0:
+            rng = np.random.default_rng(int(vggt_idx) + 1)
+            mag = scene_scale * left_jitter_frac * rng.uniform(0.6, 1.6)
+            perp = rng.standard_normal(3) * scene_scale * left_jitter_frac * 0.2
+            world_verts = world_verts + left_dir_world * mag + perp
+
+        cmap = colormaps.get_cmap(HAND_COLORMAPS[side])
+        rgba = cmap(time_pos[vggt_idx])
+        rgb = tuple(int(255 * x) for x in rgba[:3])
+
         mesh = trimesh.Trimesh(vertices=world_verts, faces=np.asarray(faces), process=False)
-        mesh.visual.face_colors[:, :3] = HAND_COLORS[side]
+        mesh.visual.face_colors[:, :3] = rgb
         scene.add_geometry(mesh)
 
 
