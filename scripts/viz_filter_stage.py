@@ -188,6 +188,24 @@ def _flow(prev_gray, gray, gate_b, gate_c, roi_px):
         "stable_camera": stable,
         "gateB_pass": bool(out["hand_motion"] and stable),
     })
+    # extra: LK on a fixed 4x7 grid inside the ROI, used purely for visualisation
+    # (does not feed into the gate decision; goodFeatures path above does that).
+    try:
+        rows, cols = 4, 7
+        xs = np.linspace(x1 + (x2 - x1) / (2 * cols),
+                         x2 - (x2 - x1) / (2 * cols), cols, dtype=np.float32)
+        ys = np.linspace(y1 + (y2 - y1) / (2 * rows),
+                         y2 - (y2 - y1) / (2 * rows), rows, dtype=np.float32)
+        gj, gi = np.meshgrid(xs, ys)
+        grid_in = np.stack([gj.ravel(), gi.ravel()], axis=-1).reshape(-1, 1, 2).astype(np.float32)
+        grid_nxt, gst, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, grid_in, None)
+        if grid_nxt is not None and gst is not None:
+            out["grid_pts"] = grid_in.reshape(-1, 2)
+            out["grid_nxt"] = grid_nxt.reshape(-1, 2)
+            out["grid_valid"] = (gst.reshape(-1) > 0)
+            out["grid_shape"] = (rows, cols)
+    except Exception:
+        pass
     return out
 
 
@@ -369,21 +387,44 @@ def _flow_wheel_legend(img, *, radius=42, margin=18):
                 (240, 240, 240), 1, cv2.LINE_AA)
 
 
-def _draw_flow(img, sample, meta, *, style=None, target_arrow_px=22,
-               alpha=0.85, draw_legend=None):
+# BGR corner colors for the 4x7 grid (each point gets a bilinear blend of
+# these so its colour identifies its origin in the grid).
+_GRID_TL = np.array([ 80,  80, 240], dtype=np.float32)  # warm red
+_GRID_TR = np.array([ 80, 230, 230], dtype=np.float32)  # yellow
+_GRID_BL = np.array([240, 120,  80], dtype=np.float32)  # blue
+_GRID_BR = np.array([220, 220, 100], dtype=np.float32)  # cyan/teal
+
+
+def _grid_color_field(rows, cols):
+    """Return (rows, cols, 3) BGR uint8 grid: bilinear blend of corner colours."""
+    u = np.linspace(0.0, 1.0, cols, dtype=np.float32)[None, :, None]   # (1, C, 1)
+    v = np.linspace(0.0, 1.0, rows, dtype=np.float32)[:, None, None]   # (R, 1, 1)
+    top = (1 - u) * _GRID_TL + u * _GRID_TR
+    bot = (1 - u) * _GRID_BL + u * _GRID_BR
+    col = (1 - v) * top + v * bot
+    return np.clip(col, 0, 255).astype(np.uint8)
+
+
+def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
+               alpha=0.9, draw_legend=None):
     """Overlay sparse LK flow.
 
-    Default style ("hsv") follows the Middlebury convention: each arrow's
-    colour encodes direction (hue) and magnitude (saturation), so a single
-    glance reads both quantities; the old magnitude-only colormap is kept as
-    style="mag" for A/B comparisons.
+    Default style ("grid") draws 28 colored brush strokes from a fixed 4x7
+    grid; each grid cell's colour is a unique bilinear blend of four corner
+    colours so the painting itself is the legend (top-left red, top-right
+    yellow, bottom-left blue, bottom-right cyan). No arrowheads, no white
+    dots - just smooth thick antialiased strokes with a small filled dot at
+    the origin to anchor the eye.
 
-    target_arrow_px auto-scales arrow length so the *median* arrow on the
-    output frame is ~22 px regardless of how fast things actually move; this
-    avoids both "everything is a dot" and "screen full of giant arrows".
+    Older styles still selectable for A/B:
+      "hsv" - Middlebury wheel (direction=hue, magnitude=sat) on goodFeatures pts.
+      "mag" - legacy green->red ramp by magnitude on goodFeatures pts.
+
+    target_stroke_px auto-scales stroke length so the median visible stroke
+    on the output frame is ~24 px regardless of underlying flow magnitude.
     """
     cfg = meta.get("_flow_viz", {}) if isinstance(meta, dict) else {}
-    style = style or cfg.get("style", "hsv")
+    style = style or cfg.get("style", "grid")
     if draw_legend is None:
         draw_legend = cfg.get("legend", True)
 
@@ -391,37 +432,39 @@ def _draw_flow(img, sample, meta, *, style=None, target_arrow_px=22,
     fl = sample["flow"]
     if not fl["have_flow"]:
         return
+
+    if style == "grid":
+        _draw_flow_grid(img, fl, sx, sy, target_stroke_px=target_stroke_px, alpha=alpha)
+        if draw_legend:
+            _flow_grid_legend(img)
+        return
+
+    # ----- legacy styles ("hsv" / "mag") on goodFeaturesToTrack points -----
     pts, nxt = fl["pts"], fl["nxt"]
     if pts is None or len(pts) == 0:
         return
-
-    # displacements expressed in the *output* (full-res) pixel grid
     vec = (nxt - pts) * np.array([sx, sy], dtype=np.float32)
     mag = np.linalg.norm(vec, axis=1)
     pos_x = (pts[:, 0] * sx).astype(np.int32)
     pos_y = (pts[:, 1] * sy).astype(np.int32)
-
     nz = mag[mag > 1e-3]
     med = float(np.median(nz)) if nz.size else 0.0
-    amp = float(np.clip(target_arrow_px / max(med, 1e-3), 1.0, 12.0)) if med > 0 else 4.0
+    amp = float(np.clip(target_stroke_px / max(med, 1e-3), 1.0, 12.0)) if med > 0 else 4.0
     mag_ref = max(1.0, float(np.percentile(mag, 95))) if mag.size else 1.0
-
     if style == "hsv":
         ang = np.arctan2(vec[:, 1], vec[:, 0])
         hue = ((ang + np.pi) / (2.0 * np.pi)) * 180.0
-        sat = np.clip(mag / mag_ref, 0.0, 1.0) * 255.0
-        sat = np.clip(sat, 70.0, 255.0)  # never invisible
+        sat = np.clip(np.clip(mag / mag_ref, 0, 1) * 255.0, 70.0, 255.0)
         val = np.full_like(hue, 255.0)
         hsv = np.stack([hue, sat, val], axis=-1)[None, ...].astype(np.uint8)
         colors = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0]
-    else:  # "mag" -- legacy green->red ramp by magnitude
+    else:  # "mag"
         t = np.clip(mag / mag_ref, 0.0, 1.0)
         colors = np.stack([
             (80 * (1 - t)).astype(np.uint8),
             (220 * (1 - t) + 40 * t).astype(np.uint8),
             (60 + 195 * t).astype(np.uint8),
         ], axis=-1)
-
     overlay = img.copy()
     for i in range(len(pts)):
         a = (int(pos_x[i]), int(pos_y[i]))
@@ -432,9 +475,74 @@ def _draw_flow(img, sample, meta, *, style=None, target_arrow_px=22,
         else:
             cv2.arrowedLine(overlay, a, b, col, 1, cv2.LINE_AA, tipLength=0.28)
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
-
     if draw_legend and style == "hsv":
         _flow_wheel_legend(img)
+
+
+def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24, alpha=0.9):
+    """Paint the 28 grid LK vectors as colored strokes (no arrowheads)."""
+    g_pts = fl.get("grid_pts")
+    g_nxt = fl.get("grid_nxt")
+    g_valid = fl.get("grid_valid")
+    g_shape = fl.get("grid_shape")
+    if g_pts is None or g_nxt is None or g_shape is None:
+        return
+    rows, cols = g_shape
+    palette = _grid_color_field(rows, cols)               # (R, C, 3) BGR uint8
+    vec_out = (g_nxt - g_pts) * np.array([sx, sy], dtype=np.float32)
+    mag_out = np.linalg.norm(vec_out, axis=1)
+    valid_mag = mag_out[(g_valid if g_valid is not None else np.ones_like(mag_out, bool))
+                        & (mag_out > 1e-3)]
+    med = float(np.median(valid_mag)) if valid_mag.size else 0.0
+    amp = float(np.clip(target_stroke_px / max(med, 1e-3), 1.0, 12.0)) if med > 0 else 4.0
+
+    overlay = img.copy()
+    for k in range(rows * cols):
+        if g_valid is not None and not bool(g_valid[k]):
+            continue
+        i, j = divmod(k, cols)
+        col = palette[i, j]
+        col = (int(col[0]), int(col[1]), int(col[2]))
+        ax = int(g_pts[k, 0] * sx)
+        ay = int(g_pts[k, 1] * sy)
+        bx = int(g_pts[k, 0] * sx + vec_out[k, 0] * amp)
+        by = int(g_pts[k, 1] * sy + vec_out[k, 1] * amp)
+        # dark halo for contrast on bright frames, then the colored stroke,
+        # then a small filled dot at the origin.
+        cv2.line(overlay, (ax, ay), (bx, by), (20, 20, 20), 5, cv2.LINE_AA)
+        cv2.line(overlay, (ax, ay), (bx, by), col, 3, cv2.LINE_AA)
+        cv2.circle(overlay, (ax, ay), 4, (20, 20, 20), -1, cv2.LINE_AA)
+        cv2.circle(overlay, (ax, ay), 3, col, -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+
+def _flow_grid_legend(img, *, rows=4, cols=7, cell=10, margin=18):
+    """Small thumbnail of the 4x7 colour grid in the bottom-right so the
+    reader knows colour = grid origin (TL red, TR yellow, BL blue, BR cyan)."""
+    H, W = img.shape[:2]
+    pal = _grid_color_field(rows, cols)
+    panel_w = cols * cell
+    panel_h = rows * cell
+    x0 = W - panel_w - margin
+    y0 = H - panel_h - margin - 14
+    if x0 < 0 or y0 < 0:
+        return
+    # solid background for legibility
+    cv2.rectangle(img, (x0 - 4, y0 - 4), (x0 + panel_w + 4, y0 + panel_h + 4), (24, 24, 24), -1)
+    for i in range(rows):
+        for j in range(cols):
+            c = pal[i, j]
+            col = (int(c[0]), int(c[1]), int(c[2]))
+            cv2.rectangle(img,
+                          (x0 + j * cell, y0 + i * cell),
+                          (x0 + (j + 1) * cell, y0 + (i + 1) * cell),
+                          col, -1)
+    cv2.rectangle(img, (x0, y0), (x0 + panel_w, y0 + panel_h), (240, 240, 240), 1, cv2.LINE_AA)
+    label = "color = grid origin"
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+    tx = max(2, x0 + panel_w // 2 - tw // 2)
+    cv2.putText(img, label, (tx, y0 + panel_h + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
 
 
 def gate_lines(sample, meta):
@@ -604,7 +712,7 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         "video": str(video_path), "fps": fps, "skip": 1,
         "decode": (dw, dh), "full": (Wf, Hf), "roi_px_small": roi_px,
         "gate_a": gate_a, "gate_b": gate_b, "gate_c": gate_c,
-        "_flow_viz": flow_viz or {"style": "hsv", "legend": True},
+        "_flow_viz": flow_viz or {"style": "grid", "legend": True},
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -687,12 +795,13 @@ def main(argv=None):
     ap.add_argument("--pass_frame", type=int, default=None,
                     help="force caseC_pass to render exactly this frame index "
                          "(requires --video). caseA/caseB still auto-picked.")
-    ap.add_argument("--flow_style", choices=["hsv", "mag"], default="hsv",
-                    help="flow arrow colormap. hsv = Middlebury (direction=hue, "
-                         "magnitude=saturation, default); mag = legacy green->red "
-                         "by magnitude only.")
+    ap.add_argument("--flow_style", choices=["grid", "hsv", "mag"], default="grid",
+                    help="flow viz style. grid (default) = 4x7 fixed-grid LK strokes, "
+                         "each cell coloured by its position (bilinear corner blend); "
+                         "hsv = Middlebury direction colormap on goodFeatures pts; "
+                         "mag = legacy green->red by magnitude.")
     ap.add_argument("--no_flow_legend", action="store_true",
-                    help="suppress the small HSV color-wheel legend.")
+                    help="suppress the small flow style legend in the corner.")
     args = ap.parse_args(argv)
 
     if not args.video and not args.video_root:
