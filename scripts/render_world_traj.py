@@ -124,6 +124,9 @@ def parse_args():
     p.add_argument("--ss", type=int, default=1,
                    help="[overlay] supersample factor (render at SS x resolution, downscale "
                         "for smoother mesh edges). 1 = off, 2 = nice, 3 = slow.")
+    p.add_argument("--overlay_colormap", choices=["pink_blue", "inferno"], default="pink_blue",
+                   help="[overlay] pink_blue = per-hand light->deep ramp "
+                        "(right pink, left blue; default). inferno = unified black->yellow.")
     p.add_argument("--xy_scatter", type=float, default=1.0,
                    help="horizontal spread: scale each pose's XY about the cluster centroid by "
                         "this factor (Z unchanged, hand shape unchanged). 1.0 = off, 1.3-1.6 "
@@ -279,15 +282,39 @@ _INFERNO_STOPS = (
     (1.00, 0.92, 0.20),
 )
 
+# Per-side ramps for the pink_blue colormap: oldest = pale, newest = saturated.
+_PINK_STOPS = (   # right hand
+    (1.00, 0.88, 0.93),   # light pink
+    (0.96, 0.55, 0.75),   # medium pink
+    (0.78, 0.18, 0.50),   # deep magenta
+)
+_BLUE_STOPS = (   # left hand
+    (0.82, 0.92, 1.00),   # light blue
+    (0.40, 0.62, 0.93),   # medium blue
+    (0.10, 0.30, 0.78),   # deep blue
+)
 
-def _inferno_at(f):
+
+def _cmap_at(stops, f):
     f = max(0.0, min(1.0, float(f)))
-    n = len(_INFERNO_STOPS) - 1
+    n = len(stops) - 1
     fi = f * n
     i = min(int(fi), n - 1)
     u = fi - i
-    a, b = _INFERNO_STOPS[i], _INFERNO_STOPS[i + 1]
+    a, b = stops[i], stops[i + 1]
     return [a[c] * (1.0 - u) + b[c] * u for c in range(3)]
+
+
+def _inferno_at(f):
+    return _cmap_at(_INFERNO_STOPS, f)
+
+
+def _pose_color(cmap, side, f):
+    """RGB in [0,1] for pose fraction f. cmap='pink_blue' splits by hand side
+    (right=pink, left=blue), both light->deep with time. 'inferno' is unified."""
+    if cmap == "pink_blue":
+        return _cmap_at(_PINK_STOPS if side == "r" else _BLUE_STOPS, f)
+    return _cmap_at(_INFERNO_STOPS, f)
 
 
 def _default_frame_path(seq, idx):
@@ -392,14 +419,14 @@ def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left
     drawn = 0
     for k in range(n):
         f_t = (k / (n - 1)) if n > 1 else 1.0
-        rgb = _inferno_at(f_t)
-        col_bgr = np.array([rgb[2], rgb[1], rgb[0]], np.float64) * 255.0
         alpha_k = a_min + (a_max - a_min) * f_t                 # ramp 0.5 -> 0.75
-        for verts_per, faces, valid in (
-                (right[k] if vr[k] else None, faces_right, vr[k]),
-                (left[k] if vl[k] else None, faces_left, vl[k])):
+        for verts_per, faces, valid, side in (
+                (right[k] if vr[k] else None, faces_right, vr[k], "r"),
+                (left[k] if vl[k] else None, faces_left, vl[k], "l")):
             if not valid:
                 continue
+            rgb = _pose_color(args.overlay_colormap, side, f_t)
+            col_bgr = np.array([rgb[2], rgb[1], rgb[0]], np.float64) * 255.0
             # smooth per-vertex normals -> per-pixel Gouraud (no facet look)
             vn_w = vertex_normals(verts_per, faces)
             vn_c = vn_w @ R_w2c.T
