@@ -28,8 +28,11 @@ Typical use:
       --out_dir docs/figure_assets/filter_stage \
       --topk 3 --clip
 
-Outputs into --out_dir:
-  <stem>_f<idx>_caseA_size.png / _caseB_flow.png / _caseC_pass.png
+Outputs into --out_dir (one per case found):
+  <stem>_f<idx>_caseA_size.png   -> hand size out of band
+  <stem>_f<idx>_caseA_roi.png    -> hand confident + right-sized but OUTSIDE central ROI
+  <stem>_f<idx>_caseB_flow.png   -> camera moves too much
+  <stem>_f<idx>_caseC_pass.png   -> a frame clearing all gates
   (and *_clip.mp4 per case if --clip)
   _filter_viz_report.json   (every candidate frame + its gate metrics)
 
@@ -274,22 +277,45 @@ def _size_reject_score(s):
     return best
 
 
+def _roi_reject_score(s):
+    """Higher = clearer 'detected hand rejected purely by outside-ROI' example.
+
+    Looks for a box with high conf and area inside [min, max] but whose
+    centre / rectangle does NOT overlap the central ROI rectangle. _detect_boxes
+    sets reason='outside_roi' only AFTER conf/area checks pass, so any box with
+    that reason is guaranteed to be well-detected and right-sized -- a clean
+    figure of "hand exists, but not in the central region".
+    """
+    if s["gateA_pass"]:
+        return -1.0
+    best = -1.0
+    for b in s["boxes"]:
+        if b["reason"] == "outside_roi":
+            best = max(best, b["conf"])
+    return best
+
+
 def select_candidates(samples, topk):
-    size_rej, flow_rej, passed = [], [], []
+    size_rej, roi_rej, flow_rej, passed = [], [], [], []
     for s in samples:
         sc = _size_reject_score(s)
         if sc >= 0:
             size_rej.append((sc, s))
+        sc_roi = _roi_reject_score(s)
+        if sc_roi >= 0:
+            roi_rej.append((sc_roi, s))
         fl = s["flow"]
         if fl["have_flow"] and not fl["stable_camera"]:
             flow_rej.append((fl["median_disp"], s))
         if s["overall"]:
             passed.append((s["flow"]["diff_score"], s))
     size_rej.sort(key=lambda t: -t[0])
+    roi_rej.sort(key=lambda t: -t[0])
     flow_rej.sort(key=lambda t: -t[0])
     passed.sort(key=lambda t: -t[0])
     return {
         "caseA_size": [s for _, s in size_rej[:topk]],
+        "caseA_roi": [s for _, s in roi_rej[:topk]],
         "caseB_flow": [s for _, s in flow_rej[:topk]],
         "caseC_pass": [s for _, s in passed[:topk]],
     }
@@ -333,7 +359,7 @@ def _draw_roi(img, meta):
     p1 = (int(x1 * sx), int(y1 * sy))
     p2 = (int(x2 * sx), int(y2 * sy))
     # dashed-ish rectangle: just a thick amber box + label
-    cv2.rectangle(img, p1, p2, C_ROI, 3)
+    cv2.rectangle(img, p1, p2, C_ROI, 6, cv2.LINE_AA)
     _label(img, "Central ROI (gate A)", (p1[0], max(p1[1], 22)), C_ROI, (0, 0, 0))
 
 
@@ -348,7 +374,7 @@ def _draw_boxes(img, sample, meta):
         p1 = (int(x1 * sx), int(y1 * sy))
         p2 = (int(x2 * sx), int(y2 * sy))
         col = C_OK if b["qualifies"] else C_BAD
-        cv2.rectangle(img, p1, p2, col, 2)
+        cv2.rectangle(img, p1, p2, col, 4, cv2.LINE_AA)
         tag = f"hand {b['conf']:.2f} | {b['area_ratio'] * 100:.1f}%"
         if not b["qualifies"]:
             tag += f" REJ:{reason_txt.get(b['reason'], b['reason'])}"
@@ -496,8 +522,8 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
 
     if style == "grid":
         max_stroke_px = float(cfg.get("max_stroke_px", 32.0))
-        head_px = int(cfg.get("head_px", 6))
-        line_thick = int(cfg.get("line_thick", 2))
+        head_px = int(cfg.get("head_px", 8))
+        line_thick = int(cfg.get("line_thick", 3))
         synth_keep_dot_prob = float(cfg.get("synth_keep_dot_prob", 0.3))
         _draw_flow_grid(img, fl, sx, sy,
                         target_stroke_px=target_stroke_px,
@@ -549,7 +575,7 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
 
 
 def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
-                    max_stroke_px=80, alpha=0.92, head_px=6, line_thick=2,
+                    max_stroke_px=80, alpha=0.92, head_px=8, line_thick=3,
                     synth_keep_dot_prob=0.3):
     """Paint the 4x7 grid LK as either a tapered comet trail (preferred)
     or a single colored stroke (fallback when no trail is available).
@@ -640,7 +666,7 @@ def _thin_arrow(img, p0, p1, color, *, head_px=4, line_thick=1, head_angle_deg=2
 
 def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
                   max_arrow_px=40, target_arrow_px=18, alpha=0.95,
-                  head_px=6, line_thick=2,
+                  head_px=8, line_thick=3, dot_radius=4,
                   synth_keep_dot_prob=0.3,
                   synth_jitter_deg=15.0, synth_mag_jitter=0.2):
     """matplotlib-quiver-style arrows on the 4x7 grid.
@@ -717,7 +743,7 @@ def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
         col = (int(base[0]), int(base[1]), int(base[2]))
         ax = int(base_pts[n, 0])
         ay = int(base_pts[n, 1])
-        cv2.circle(overlay, (ax, ay), 3, col, -1, cv2.LINE_AA)   # grid dot
+        cv2.circle(overlay, (ax, ay), int(dot_radius), col, -1, cv2.LINE_AA)   # grid dot
         if not bool(draw_mask[n]):
             continue
         bx = int(ax + disp[n, 0])
@@ -832,8 +858,12 @@ def render_frame(video_path, sample, meta, case):
     if case in ("caseB_flow", "caseC_pass") and n_trail > 0:
         _ensure_grid_trail(video_path, sample, meta, n_trail)
     img = frame.copy()
-    if case in ("caseA_size", "caseC_pass"):
-        if show_roi:
+    if case in ("caseA_size", "caseA_roi", "caseC_pass"):
+        # caseA_roi REQUIRES the ROI rectangle (it IS the rejection reason),
+        # and caseC_pass benefits from it too (the story is "hand confident +
+        # right-sized + INSIDE ROI"). caseA_size is about size only, so it
+        # still respects --roi.
+        if show_roi or case in ("caseA_roi", "caseC_pass"):
             _draw_roi(img, meta)
         _draw_boxes(img, sample, meta)
     if case in ("caseB_flow", "caseC_pass"):
@@ -869,7 +899,7 @@ def render_clip(video_path, sample, meta, case, out_path, pre=12, post=12):
         s = {"frame_idx": fi, "boxes": boxes, "qualified": qcount,
              "gateA_pass": gateA, "flow": fl, "overall": bool(gateA and fl["gateB_pass"])}
         img = frame.copy()
-        if case in ("caseA_size", "caseC_pass"):
+        if case in ("caseA_size", "caseA_roi", "caseC_pass"):
             _draw_roi(img, meta)
         if case in ("caseB_flow", "caseC_pass"):
             _draw_flow(img, s, meta)
@@ -968,7 +998,7 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         "gate_a": gate_a, "gate_b": gate_b, "gate_c": gate_c,
         "_flow_viz": flow_viz or {
             "style": "grid", "legend": False, "banner": False, "roi": False,
-            "n_trail": 1, "max_stroke_px": 40.0, "head_px": 6, "line_thick": 2,
+            "n_trail": 1, "max_stroke_px": 40.0, "head_px": 8, "line_thick": 3,
         },
     }
 
@@ -1080,13 +1110,12 @@ def main(argv=None):
                     help="grid style: hard cap per arrow length in output px "
                          "(direction preserved). Default 40. Larger => arrows "
                          "convey more motion intensity but clutter the figure.")
-    ap.add_argument("--arrow_head_px", type=int, default=6,
+    ap.add_argument("--arrow_head_px", type=int, default=8,
                     help="arrowhead size in pixels (FIXED, not a fraction of "
-                         "the arrow length). Default 6.")
-    ap.add_argument("--arrow_line_thick", type=int, default=2,
-                    help="arrow shaft thickness in pixels. Default 2 - keeps "
-                         "the shaft close to the 4 px filled grid dot so the "
-                         "arrow doesn't look like a hair next to the anchor.")
+                         "the arrow length). Default 8.")
+    ap.add_argument("--arrow_line_thick", type=int, default=3,
+                    help="arrow shaft thickness in pixels. Default 3 - kept "
+                         "in proportion to the 4 px grid dot.")
     ap.add_argument("--synth_keep_dot_prob", type=float, default=0.3,
                     help="probability (0-1) that an LK-failed grid point stays "
                          "as a bare dot instead of getting a synthesised "
