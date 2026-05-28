@@ -337,24 +337,104 @@ def _draw_boxes(img, sample, meta):
         _label(img, tag, (p1[0], max(p1[1], 18)), col, (0, 0, 0), scale=0.45)
 
 
-def _draw_flow(img, sample, meta):
+def _flow_wheel_legend(img, *, radius=42, margin=18):
+    """Paint a small Middlebury HSV color wheel (direction=hue, magnitude=sat)
+    in the bottom-right corner so readers can decode the arrow colors."""
+    H, W = img.shape[:2]
+    cx = W - radius - margin
+    cy = H - radius - margin - 14
+    if cx - radius < 0 or cy - radius < 0:
+        return
+    rr = np.arange(-radius, radius + 1, dtype=np.float32)
+    yy, xx = np.meshgrid(rr, rr, indexing="ij")
+    rho = np.sqrt(xx * xx + yy * yy)
+    inside = rho <= radius
+    ang = np.arctan2(yy, xx)
+    hue = ((ang + np.pi) / (2.0 * np.pi)) * 180.0
+    sat = np.clip(rho / max(1.0, radius), 0.0, 1.0) * 255.0
+    val = np.full_like(hue, 255.0)
+    hsv = np.stack([hue, sat, val], axis=-1).astype(np.uint8)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    y0, x0 = cy - radius, cx - radius
+    roi = img[y0:y0 + 2 * radius + 1, x0:x0 + 2 * radius + 1]
+    mask3 = np.repeat(inside[..., None], 3, axis=2)
+    np.copyto(roi, bgr, where=mask3)
+    cv2.circle(img, (cx, cy), radius, (240, 240, 240), 1, cv2.LINE_AA)
+    cv2.circle(img, (cx, cy), 1, (240, 240, 240), -1, cv2.LINE_AA)
+    label = "flow: hue=dir  sat=mag"
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+    tx = max(2, cx - tw // 2)
+    ty = min(H - 4, cy + radius + 14)
+    cv2.putText(img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (240, 240, 240), 1, cv2.LINE_AA)
+
+
+def _draw_flow(img, sample, meta, *, style=None, target_arrow_px=22,
+               alpha=0.85, draw_legend=None):
+    """Overlay sparse LK flow.
+
+    Default style ("hsv") follows the Middlebury convention: each arrow's
+    colour encodes direction (hue) and magnitude (saturation), so a single
+    glance reads both quantities; the old magnitude-only colormap is kept as
+    style="mag" for A/B comparisons.
+
+    target_arrow_px auto-scales arrow length so the *median* arrow on the
+    output frame is ~22 px regardless of how fast things actually move; this
+    avoids both "everything is a dot" and "screen full of giant arrows".
+    """
+    cfg = meta.get("_flow_viz", {}) if isinstance(meta, dict) else {}
+    style = style or cfg.get("style", "hsv")
+    if draw_legend is None:
+        draw_legend = cfg.get("legend", True)
+
     sx, sy = _scaler(meta)
     fl = sample["flow"]
     if not fl["have_flow"]:
         return
     pts, nxt = fl["pts"], fl["nxt"]
-    disp = np.linalg.norm(nxt - pts, axis=1)
-    dmax = max(1e-6, float(disp.max()))
-    amp = 2.0  # amplify arrows for visibility
-    for (p, q, d) in zip(pts, nxt, disp):
-        a = (int(p[0] * sx), int(p[1] * sy))
-        # amplified endpoint
-        vx, vy = (q[0] - p[0]) * amp, (q[1] - p[1]) * amp
-        b = (int((p[0] + vx) * sx), int((p[1] + vy) * sy))
-        t = d / dmax
-        col = (int(80 * (1 - t)), int(220 * (1 - t) + 40 * t), int(60 + 195 * t))  # green->red
-        cv2.arrowedLine(img, a, b, col, 2, tipLength=0.35)
-        cv2.circle(img, a, 2, (255, 255, 255), -1)
+    if pts is None or len(pts) == 0:
+        return
+
+    # displacements expressed in the *output* (full-res) pixel grid
+    vec = (nxt - pts) * np.array([sx, sy], dtype=np.float32)
+    mag = np.linalg.norm(vec, axis=1)
+    pos_x = (pts[:, 0] * sx).astype(np.int32)
+    pos_y = (pts[:, 1] * sy).astype(np.int32)
+
+    nz = mag[mag > 1e-3]
+    med = float(np.median(nz)) if nz.size else 0.0
+    amp = float(np.clip(target_arrow_px / max(med, 1e-3), 1.0, 12.0)) if med > 0 else 4.0
+    mag_ref = max(1.0, float(np.percentile(mag, 95))) if mag.size else 1.0
+
+    if style == "hsv":
+        ang = np.arctan2(vec[:, 1], vec[:, 0])
+        hue = ((ang + np.pi) / (2.0 * np.pi)) * 180.0
+        sat = np.clip(mag / mag_ref, 0.0, 1.0) * 255.0
+        sat = np.clip(sat, 70.0, 255.0)  # never invisible
+        val = np.full_like(hue, 255.0)
+        hsv = np.stack([hue, sat, val], axis=-1)[None, ...].astype(np.uint8)
+        colors = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0]
+    else:  # "mag" -- legacy green->red ramp by magnitude
+        t = np.clip(mag / mag_ref, 0.0, 1.0)
+        colors = np.stack([
+            (80 * (1 - t)).astype(np.uint8),
+            (220 * (1 - t) + 40 * t).astype(np.uint8),
+            (60 + 195 * t).astype(np.uint8),
+        ], axis=-1)
+
+    overlay = img.copy()
+    for i in range(len(pts)):
+        a = (int(pos_x[i]), int(pos_y[i]))
+        b = (int(pos_x[i] + vec[i, 0] * amp), int(pos_y[i] + vec[i, 1] * amp))
+        col = (int(colors[i, 0]), int(colors[i, 1]), int(colors[i, 2]))
+        if mag[i] < 0.5:
+            cv2.circle(overlay, a, 2, col, -1, cv2.LINE_AA)
+        else:
+            cv2.arrowedLine(overlay, a, b, col, 1, cv2.LINE_AA, tipLength=0.28)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+    if draw_legend and style == "hsv":
+        _flow_wheel_legend(img)
 
 
 def gate_lines(sample, meta):
@@ -492,7 +572,8 @@ def analyze_at_frame(video_path, cfg, model, frame_idx):
 # --------------------------------------------------------------------------- #
 # range mode: dump every frame in [start, end) as an annotated jpg
 # --------------------------------------------------------------------------- #
-def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_quality=92):
+def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_quality=92,
+                 flow_viz=None):
     """Walk [start, end) and write one annotated jpg per frame.
 
     Overlays match caseC (ROI + qualified/rejected YOLO boxes + LK flow arrows +
@@ -523,6 +604,7 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
         "video": str(video_path), "fps": fps, "skip": 1,
         "decode": (dw, dh), "full": (Wf, Hf), "roi_px_small": roi_px,
         "gate_a": gate_a, "gate_b": gate_b, "gate_c": gate_c,
+        "_flow_viz": flow_viz or {"style": "hsv", "legend": True},
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -605,6 +687,12 @@ def main(argv=None):
     ap.add_argument("--pass_frame", type=int, default=None,
                     help="force caseC_pass to render exactly this frame index "
                          "(requires --video). caseA/caseB still auto-picked.")
+    ap.add_argument("--flow_style", choices=["hsv", "mag"], default="hsv",
+                    help="flow arrow colormap. hsv = Middlebury (direction=hue, "
+                         "magnitude=saturation, default); mag = legacy green->red "
+                         "by magnitude only.")
+    ap.add_argument("--no_flow_legend", action="store_true",
+                    help="suppress the small HSV color-wheel legend.")
     args = ap.parse_args(argv)
 
     if not args.video and not args.video_root:
@@ -632,6 +720,8 @@ def main(argv=None):
     if args.max_videos:
         videos = videos[: args.max_videos]
 
+    flow_viz_cfg = {"style": args.flow_style, "legend": not args.no_flow_legend}
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -641,7 +731,8 @@ def main(argv=None):
         sub = out_dir / f"{stem}_f{args.start:06d}-{args.end:06d}"
         print(f"[range] {vp} -> frames [{args.start},{args.end}) stride={args.stride}")
         render_range(vp, cfg, model, args.start, args.end, sub,
-                     stride=max(1, args.stride), jpg_quality=int(args.jpg_quality))
+                     stride=max(1, args.stride), jpg_quality=int(args.jpg_quality),
+                     flow_viz=flow_viz_cfg)
         return
 
     report = {"videos": [], "thresholds": _heuristic_section(cfg)}
@@ -653,6 +744,7 @@ def main(argv=None):
         except Exception as exc:
             print(f"  [skip] {exc}")
             continue
+        meta["_flow_viz"] = flow_viz_cfg
         cands = select_candidates(samples, args.topk)
         if args.pass_frame is not None:
             try:
@@ -660,6 +752,7 @@ def main(argv=None):
             except Exception as exc:
                 print(f"  [warn] --pass_frame {args.pass_frame}: {exc}")
             else:
+                meta["_flow_viz"] = flow_viz_cfg
                 if not forced["overall"]:
                     fl = forced["flow"]
                     print(f"  [warn] forced frame {args.pass_frame} does NOT actually "
