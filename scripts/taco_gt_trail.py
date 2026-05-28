@@ -179,17 +179,12 @@ def _iou(a, b):
     return inter / (area_a + area_b - inter + 1e-9)
 
 
-def _select_scatter(cent2d, bboxes, num, spread=0.6, overlap=0.25):
-    """Pick `num` poses SCATTERED across the 2D projection (not strung along one
-    axis), via damped farthest-point sampling:
-
-      * seed at the medoid (central pose, not an outlier),
-      * each step add the pose maximising  min-dist-to-kept - (1-spread)*dist-to-centre,
-        so it fills the 2D area but `spread`<1 reins in edge/outlier picks,
-      * never add a pose whose 2D bbox IoU with a kept one exceeds `overlap`.
-
-    spread: 0 = compact/central, 1 = maximally spread. Returns candidate indices.
-    """
+def _select_scatter(cent2d, bboxes, num, spread=0.6, overlap=-1.0):
+    """Pick `num` poses SCATTERED across the 2D projection (damped FPS, capped
+    by pairwise bbox IoU). When `overlap` < 0, binary-search the cap so we
+    actually land on ~`num` poses -- otherwise a clustered real trajectory
+    (e.g. tabletop manipulation where every frame's hand mostly overlaps) gets
+    blocked after a couple of picks."""
     M = len(cent2d)
     if M <= num:
         return list(range(M))
@@ -197,22 +192,36 @@ def _select_scatter(cent2d, bboxes, num, spread=0.6, overlap=0.25):
     rad = float(np.linalg.norm(cent2d - centre, axis=1).max()) + 1e-9
     dcent = np.linalg.norm(cent2d - centre, axis=1) / rad
 
-    kept = [int(np.argmin(dcent))]  # medoid seed
-    while len(kept) < num:
-        best, bi = -1e18, -1
-        for i in range(M):
-            if i in kept:
-                continue
-            if max(_iou(bboxes[i], bboxes[j]) for j in kept) > overlap:
-                continue
-            md = min(np.linalg.norm(cent2d[i] - cent2d[j]) for j in kept) / rad
-            score = md - (1.0 - spread) * dcent[i]
-            if score > best:
-                best, bi = score, i
-        if bi < 0:  # overlap cap blocks everything -> stop early
-            break
-        kept.append(bi)
-    return kept
+    def pick(thr):
+        kept = [int(np.argmin(dcent))]
+        while len(kept) < num:
+            best, bi = -1e18, -1
+            for i in range(M):
+                if i in kept:
+                    continue
+                if max(_iou(bboxes[i], bboxes[j]) for j in kept) > thr:
+                    continue
+                md = min(np.linalg.norm(cent2d[i] - cent2d[j]) for j in kept) / rad
+                score = md - (1.0 - spread) * dcent[i]
+                if score > best:
+                    best, bi = score, i
+            if bi < 0:
+                break
+            kept.append(bi)
+        return kept
+
+    if overlap >= 0:
+        return pick(overlap)
+    # auto-tune: walk length is ~non-decreasing in thr; bisect to hit `num`
+    lo_t, hi_t = 0.0, 0.98
+    for _ in range(30):
+        mid = 0.5 * (lo_t + hi_t)
+        if len(pick(mid)) < num:
+            lo_t = mid
+        else:
+            hi_t = mid
+    a, b = pick(lo_t), pick(hi_t)
+    return min((a, b), key=lambda k: abs(len(k) - num))
 
 
 def _arclen_sample(times, pts, num):

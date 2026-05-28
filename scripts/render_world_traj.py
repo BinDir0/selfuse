@@ -98,8 +98,11 @@ def parse_args():
                         "so hands don't visually overlap in the trail; great for real pipeline output.")
     p.add_argument("--spread", type=float, default=0.6,
                    help="[--select scatter] 0 = compact/central, 1 = maximally spread")
-    p.add_argument("--overlap", type=float, default=0.25,
-                   help="[--select scatter] max pairwise 2D bbox IoU between kept poses")
+    p.add_argument("--overlap", type=float, default=-1.0,
+                   help="[--select scatter] max pairwise 2D bbox IoU between kept poses. "
+                        "Default -1 = auto-tune so we actually get --num_samples poses "
+                        "(real clustered trajectories need this; set a fixed value like 0.25 "
+                        "to enforce a hard clearance and accept fewer poses).")
     p.add_argument("--no_camera", action="store_true",
                    help="hands only: omit camera frustums + trajectory")
     p.add_argument("--frame_start", type=int, default=0,
