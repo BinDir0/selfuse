@@ -285,14 +285,14 @@ _INFERNO_STOPS = (
 # Per-side ramps for the pink_blue colormap: oldest = pale, newest = bright/saturated
 # (not dark) -- adjacent stops are spaced for a clear progression without going navy.
 _PINK_STOPS = (   # right hand
-    (1.00, 0.90, 0.94),   # very light pink
-    (1.00, 0.68, 0.83),   # medium pink
-    (0.96, 0.42, 0.70),   # bright deep pink (not magenta-dark)
+    (1.00, 0.92, 0.95),   # very light pink
+    (1.00, 0.76, 0.88),   # light medium pink
+    (1.00, 0.58, 0.80),   # bright pastel pink (newest; never goes dark)
 )
 _BLUE_STOPS = (   # left hand
-    (0.86, 0.94, 1.00),   # very light blue
-    (0.58, 0.77, 0.98),   # medium sky blue
-    (0.32, 0.58, 0.93),   # bright deep blue (not navy)
+    (0.90, 0.96, 1.00),   # very light blue
+    (0.70, 0.85, 0.99),   # light sky blue
+    (0.50, 0.72, 0.97),   # bright sky blue (newest; never goes navy)
 )
 
 
