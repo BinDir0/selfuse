@@ -109,10 +109,12 @@ def predictions_to_glb(
     return apply_scene_alignment(scene, extrinsics)
 
 
-# Per-hand colormaps; index by temporal position (0 = earliest kept frame, 1 = latest).
-# winter goes blue->cyan, autumn goes red->yellow — same-hand frames remain readable when
-# stacked, and the two hands never collide in hue.
-HAND_COLORMAPS = {"left": "winter", "right": "autumn"}
+# One base hue per hand (left=pink, right=blue), lerped from a pale tint at the
+# earliest kept frame to a saturated end at the latest. Soft like the reference.
+HAND_PALETTES = {
+    "left":  {"light": np.array([245, 220, 230]), "dark": np.array([210, 130, 170])},
+    "right": {"light": np.array([220, 235, 240]), "dark": np.array([ 70, 170, 210])},
+}
 
 
 def _estimate_hand_scale(predictions: dict, frames_verts: list, frame_indices: np.ndarray) -> float:
@@ -159,7 +161,9 @@ def add_hand_meshes(
     hand_auto_scale: bool = True,
     hand_max_frames: int | None = None,
     scene_scale: float = 1.0,
-    left_jitter_frac: float = 0.06,
+    hand_spread_frac: float = 0.10,
+    collision_iters: int = 60,
+    collision_gap: float = 1.3,
 ) -> None:
     """Place per-frame camera-space hand meshes into the (VGGT world) scene.
 
@@ -212,34 +216,75 @@ def add_hand_meshes(
             kept = {unique_idxs[i] for i in picks}
             placements = [p for p in placements if p[0] in kept]
 
-    # Map each kept vggt_idx to its temporal position (0 = earliest kept, 1 = latest)
-    # so we can shade each mesh along the per-hand colormap.
-    kept_idxs = sorted({p[0] for p in placements})
-    n_kept = max(len(kept_idxs), 1)
-    time_pos = {idx: i / max(n_kept - 1, 1) for i, idx in enumerate(kept_idxs)}
-
-    # World-space direction of camera 0's "left" — spread piled left hands along this.
+    # World-space direction of camera 0's "left" — used for the directional bias step.
     R0 = extrinsic[0, :3, :3]
     left_dir_world = R0.T @ np.array([-1.0, 0.0, 0.0])
     norm = float(np.linalg.norm(left_dir_world))
     left_dir_world = left_dir_world / norm if norm > 1e-9 else np.array([-1.0, 0.0, 0.0])
 
+    # Step 1: transform each placement's camera-space vertices into VGGT world.
+    items = []
     for vggt_idx, verts, faces, side in placements:
         rotation = extrinsic[vggt_idx, :3, :3]
         translation = extrinsic[vggt_idx, :3, 3]
         world_verts = (s * verts - translation) @ rotation  # R^T (s v - t) for row vectors
+        items.append({"idx": int(vggt_idx), "verts": world_verts, "faces": np.asarray(faces), "side": side})
 
-        if side == "left" and left_jitter_frac > 0:
-            rng = np.random.default_rng(int(vggt_idx) + 1)
-            mag = scene_scale * left_jitter_frac * rng.uniform(0.6, 1.6)
-            perp = rng.standard_normal(3) * scene_scale * left_jitter_frac * 0.2
-            world_verts = world_verts + left_dir_world * mag + perp
+    # Step 2: directional bias — push left hands toward camera-left, right hands toward
+    # camera-right, with deterministic per-frame randomness so they don't all stack on a
+    # single line. This matches the natural left/right grouping in the reference image.
+    for it in items:
+        rng = np.random.default_rng(it["idx"] * 13 + (0 if it["side"] == "left" else 7))
+        # left_dir_world points toward camera-left; left hand follows it, right hand against.
+        sign = 1.0 if it["side"] == "left" else -1.0
+        bias_mag = scene_scale * hand_spread_frac * rng.uniform(0.5, 2.0)
+        perp = rng.standard_normal(3) * scene_scale * hand_spread_frac * 0.3
+        it["verts"] = it["verts"] + sign * left_dir_world * bias_mag + perp
 
-        cmap = colormaps.get_cmap(HAND_COLORMAPS[side])
-        rgba = cmap(time_pos[vggt_idx])
-        rgb = tuple(int(255 * x) for x in rgba[:3])
+    # Step 3: collision relaxation — iteratively push apart any pair of placements whose
+    # centroids are closer than `collision_gap * median(hand_radius)`. Each iteration
+    # applies a rigid translation to the offending placements; we stop early when no
+    # pair overlaps. O(n^2) per iter but n <= 2 * hand_max_frames, so trivial.
+    n = len(items)
+    if n >= 2 and collision_iters > 0:
+        centroids = np.stack([it["verts"].mean(axis=0) for it in items])
+        radii = np.array(
+            [float(np.linalg.norm(it["verts"].max(0) - it["verts"].min(0))) * 0.5 for it in items]
+        )
+        sep = float(np.median(radii)) * float(collision_gap)
+        if sep > 1e-6:
+            for _ in range(collision_iters):
+                shifts = np.zeros_like(centroids)
+                moved = False
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        d = centroids[j] - centroids[i]
+                        r = float(np.linalg.norm(d))
+                        if r < sep:
+                            push = (sep - r) * 0.5 + 1e-4
+                            if r > 1e-6:
+                                direction = d / r
+                            else:
+                                rng2 = np.random.default_rng(i * 1000 + j)
+                                direction = rng2.standard_normal(3)
+                                direction /= np.linalg.norm(direction) + 1e-9
+                            shifts[i] -= direction * push
+                            shifts[j] += direction * push
+                            moved = True
+                if not moved:
+                    break
+                centroids = centroids + shifts
+                for it, sh in zip(items, shifts):
+                    it["verts"] = it["verts"] + sh
 
-        mesh = trimesh.Trimesh(vertices=world_verts, faces=np.asarray(faces), process=False)
+    # Step 4: color and add to scene. Earliest kept frame -> palette light, latest -> dark.
+    kept_idxs = sorted({it["idx"] for it in items})
+    time_pos = {idx: i / max(len(kept_idxs) - 1, 1) for i, idx in enumerate(kept_idxs)}
+    for it in items:
+        pos = time_pos[it["idx"]]
+        pal = HAND_PALETTES[it["side"]]
+        rgb = tuple(int(round(c)) for c in pal["light"] * (1.0 - pos) + pal["dark"] * pos)
+        mesh = trimesh.Trimesh(vertices=it["verts"], faces=it["faces"], process=False)
         mesh.visual.face_colors[:, :3] = rgb
         scene.add_geometry(mesh)
 
