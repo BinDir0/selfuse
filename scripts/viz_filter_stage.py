@@ -498,10 +498,12 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
         max_stroke_px = float(cfg.get("max_stroke_px", 32.0))
         head_px = int(cfg.get("head_px", 6))
         line_thick = int(cfg.get("line_thick", 2))
+        synth_keep_dot_prob = float(cfg.get("synth_keep_dot_prob", 0.3))
         _draw_flow_grid(img, fl, sx, sy,
                         target_stroke_px=target_stroke_px,
                         max_stroke_px=max_stroke_px,
-                        alpha=alpha, head_px=head_px, line_thick=line_thick)
+                        alpha=alpha, head_px=head_px, line_thick=line_thick,
+                        synth_keep_dot_prob=synth_keep_dot_prob)
         if draw_legend:
             _flow_grid_legend(img)
         return
@@ -547,7 +549,8 @@ def _draw_flow(img, sample, meta, *, style=None, target_stroke_px=24,
 
 
 def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
-                    max_stroke_px=80, alpha=0.92, head_px=6, line_thick=2):
+                    max_stroke_px=80, alpha=0.92, head_px=6, line_thick=2,
+                    synth_keep_dot_prob=0.3):
     """Paint the 4x7 grid LK as either a tapered comet trail (preferred)
     or a single colored stroke (fallback when no trail is available).
 
@@ -569,7 +572,8 @@ def _draw_flow_grid(img, fl, sx, sy, *, target_stroke_px=24,
     if g_traj is not None and g_traj.shape[0] >= 2:
         _paint_arrows(img, g_traj, g_traj_first, sx, sy, palette,
                       max_arrow_px=max_stroke_px, alpha=alpha,
-                      head_px=int(head_px), line_thick=int(line_thick))
+                      head_px=int(head_px), line_thick=int(line_thick),
+                      synth_keep_dot_prob=float(synth_keep_dot_prob))
         return
 
     # ----- fallback: single-step LK line -----
@@ -636,28 +640,37 @@ def _thin_arrow(img, p0, p1, color, *, head_px=4, line_thick=1, head_angle_deg=2
 
 def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
                   max_arrow_px=40, target_arrow_px=18, alpha=0.95,
-                  head_px=6, line_thick=2):
+                  head_px=6, line_thick=2,
+                  synth_keep_dot_prob=0.3,
+                  synth_jitter_deg=15.0, synth_mag_jitter=0.2):
     """matplotlib-quiver-style arrows on the 4x7 grid.
 
-    Each grid point at the current frame (positions[T, n]) gets a small
-    coloured dot. If single-step backward LK succeeded, it ALSO gets a
-    thin antialiased arrow from the grid pointing in the direction of the
-    motion that just brought the point to its current spot. Magnitude is
-    auto-amped to a median visible length of ~target_arrow_px and
-    hard-capped at max_arrow_px per arrow (direction preserved).
+    Each grid point gets a small coloured dot at the current frame; valid
+    backward-LK points additionally get a thin antialiased arrow in the
+    direction of the most recent motion. For caseB-like frames where many
+    LK trackers fail (camera shake), the "dot-only" points are unsightly
+    in bulk, so we synthesise a fill-in arrow for most of them:
+
+      direction = mean(real arrows' direction) + uniform(+-jitter_deg)
+      length    = mean(real arrows' length)    * (1 +- mag_jitter)
+
+    Up to `synth_keep_dot_prob` of invalid points are left as bare dots
+    to keep the painting from looking like a uniform combed field. The
+    RNG is seeded from the trajectory so the same demo frame reproduces
+    bit-for-bit.
 
     Inspired by /root/optical-flow/flow_display.py's `sparse_flow` (which
-    uses plt.quiver); we keep the per-point bilinear palette colour from
-    earlier so each arrow's origin in the grid is still readable.
+    uses plt.quiver); we keep the per-point bilinear palette colour so
+    each arrow's grid origin remains identifiable.
     """
     T = traj.shape[0] - 1
     N = traj.shape[1]
     cols = palette.shape[1]
 
-    out = traj * np.array([sx, sy], dtype=np.float32)  # (T+1, N, 2)
-    base_pts = out[T]                                   # current grid
-    prev_pts = out[T - 1] if T >= 1 else base_pts       # one step back
-    motion = base_pts - prev_pts                        # output px
+    out = traj * np.array([sx, sy], dtype=np.float32)
+    base_pts = out[T]
+    prev_pts = out[T - 1] if T >= 1 else base_pts
+    motion = base_pts - prev_pts
     motion_mag = np.linalg.norm(motion, axis=1)
     valid = first_idx < T if first_idx is not None else np.ones(N, dtype=bool)
 
@@ -673,6 +686,30 @@ def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
         scale[over] = max_arrow_px / np.maximum(disp_mag[over], 1e-6)
         disp = disp * scale[:, None]
 
+    real_mask = valid & (motion_mag > 1e-3)
+    draw_mask = real_mask.copy()
+
+    # synthesise fill-in arrows for the LK-failed / zero-motion points
+    if real_mask.sum() >= 4:
+        disp_real = disp[real_mask]
+        mean_vec = disp_real.mean(axis=0)
+        mean_len = float(np.linalg.norm(disp_real, axis=1).mean())
+        if mean_len > 1.0:
+            mean_angle = float(np.arctan2(mean_vec[1], mean_vec[0]))
+            jitter = float(np.deg2rad(synth_jitter_deg))
+            seed_val = int(abs(float(traj.sum())) * 1e3) & 0xFFFFFFFF
+            rng = np.random.default_rng(seed_val)
+            for n in range(N):
+                if real_mask[n]:
+                    continue
+                if rng.random() < float(synth_keep_dot_prob):
+                    continue
+                a = mean_angle + rng.uniform(-jitter, jitter)
+                m = mean_len * (1.0 + rng.uniform(-synth_mag_jitter, synth_mag_jitter))
+                disp[n, 0] = m * float(np.cos(a))
+                disp[n, 1] = m * float(np.sin(a))
+                draw_mask[n] = True
+
     overlay = img.copy()
     for n in range(N):
         i, j = divmod(n, cols)
@@ -681,7 +718,7 @@ def _paint_arrows(img, traj, first_idx, sx, sy, palette, *,
         ax = int(base_pts[n, 0])
         ay = int(base_pts[n, 1])
         cv2.circle(overlay, (ax, ay), 3, col, -1, cv2.LINE_AA)   # grid dot
-        if not bool(valid[n]) or motion_mag[n] < 0.3:
+        if not bool(draw_mask[n]):
             continue
         bx = int(ax + disp[n, 0])
         by = int(ay + disp[n, 1])
@@ -1050,6 +1087,12 @@ def main(argv=None):
                     help="arrow shaft thickness in pixels. Default 2 - keeps "
                          "the shaft close to the 4 px filled grid dot so the "
                          "arrow doesn't look like a hair next to the anchor.")
+    ap.add_argument("--synth_keep_dot_prob", type=float, default=0.3,
+                    help="probability (0-1) that an LK-failed grid point stays "
+                         "as a bare dot instead of getting a synthesised "
+                         "fill-in arrow (mean-of-real direction + jitter). "
+                         "Default 0.3 = ~70%% of failures get filled. Set 1.0 "
+                         "to disable synthesis entirely.")
     ap.add_argument("--camera_disp_thresh", type=float, default=None,
                     help="override gate_b.camera_disp_thresh for this run (fraction "
                          "of decoded max-side). Default config is 0.2 (= ~89.6 px "
@@ -1118,6 +1161,7 @@ def main(argv=None):
         "roi": bool(args.roi),
         "head_px": int(args.arrow_head_px),
         "line_thick": int(args.arrow_line_thick),
+        "synth_keep_dot_prob": float(args.synth_keep_dot_prob),
     }
 
     out_dir = Path(args.out_dir)
