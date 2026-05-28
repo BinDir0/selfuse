@@ -127,6 +127,15 @@ def parse_args():
     p.add_argument("--overlay_colormap", choices=["pink_blue", "inferno"], default="pink_blue",
                    help="[overlay] pink_blue = per-hand light->deep ramp "
                         "(right pink, left blue; default). inferno = unified black->yellow.")
+    p.add_argument("--overlay_per_frame_out", default=None,
+                   help="per-frame overlay: write ONE png per frame in [--frame_start, --frame_end] "
+                        "into this dir (NNNNNN.png). Each png shows ONLY that frame's own hand mesh "
+                        "drawn onto that frame's image. Useful for building a video.")
+    p.add_argument("--overlay_per_frame_alpha", type=float, default=0.75,
+                   help="[per-frame overlay] alpha for the hand layer (single mesh, no ramp)")
+    p.add_argument("--overlay_per_frame_t", type=float, default=0.7,
+                   help="[per-frame overlay] colormap position in [0,1] for the per-frame colour "
+                        "(0=lightest, 1=deepest; default 0.7 is saturated but not the deepest)")
     p.add_argument("--xy_scatter", type=float, default=1.0,
                    help="horizontal spread: scale each pose's XY about the cluster centroid by "
                         "this factor (Z unchanged, hand shape unchanged). 1.0 = off, 1.3-1.6 "
@@ -375,6 +384,75 @@ def _raster_gouraud(uv, faces, vert_shades, color_bgr, depths, in_front, layer):
         sub_inside = sub[inside]
         col = color_bgr[None, :] * shade[inside][:, None]
         sub[inside] = col
+
+
+def _render_overlay_per_frame(args, right_verts, left_verts, faces_right, faces_left,
+                              valid_r, valid_l, want_r, want_l, R_c2w, t_c2w, lo, hi):
+    """Per-frame overlay: write one PNG per frame in [lo, hi]. Each PNG shows
+    ONLY that frame's own hand mesh drawn onto that frame's image (no trail)."""
+    import cv2
+
+    out_dir = args.overlay_per_frame_out
+    os.makedirs(out_dir, exist_ok=True)
+    focal = _load_focal(args.seq_folder)
+    ss = max(1, int(args.ss))
+    bg = float(max(0.0, min(1.0, args.bg_fade)))
+    alpha = float(args.overlay_per_frame_alpha)
+    t_color = float(args.overlay_per_frame_t)
+    n_written = 0
+    n_skipped_img = 0
+    for t in range(lo, hi + 1):
+        if t < 0 or t >= len(R_c2w):
+            continue
+        img_path = _default_frame_path(args.seq_folder, t)
+        base_orig = cv2.imread(img_path)
+        if base_orig is None:
+            n_skipped_img += 1
+            continue
+        H, W = base_orig.shape[:2]
+        base = (cv2.resize(base_orig, (W * ss, H * ss), interpolation=cv2.INTER_CUBIC)
+                if ss > 1 else base_orig.copy()).astype(np.float32)
+        Hr, Wr = base.shape[:2]
+        if bg > 0.0:
+            base = base * (1.0 - bg) + 255.0 * bg
+        K = np.array([[focal * ss, 0, Wr / 2.0],
+                      [0, focal * ss, Hr / 2.0],
+                      [0, 0, 1.0]], np.float64)
+        R_w2c = R_c2w[t].T
+        t_w2c = -R_w2c @ t_c2w[t]
+        out = base
+        for verts_full, faces, valid_arr, side, do in (
+                (right_verts, faces_right, valid_r, "r", want_r),
+                (left_verts, faces_left, valid_l, "l", want_l)):
+            if not do or not bool(valid_arr[min(t, len(valid_arr) - 1)]):
+                continue
+            verts_per = verts_full[t]
+            vn_w = vertex_normals(verts_per, faces)
+            vn_c = vn_w @ R_w2c.T
+            shade_v = np.maximum(0.50, -vn_c[:, 2])
+            v_cam = verts_per @ R_w2c.T + t_w2c
+            in_front = v_cam[:, 2] > 0.05
+            if not in_front.any():
+                continue
+            uv = (K @ v_cam.T)
+            uv = (uv[:2] / np.maximum(uv[2:], 1e-6)).T
+            depths = v_cam[faces, 2].mean(1)
+            rgb = _pose_color(args.overlay_colormap, side, t_color)
+            col_bgr = np.array([rgb[2], rgb[1], rgb[0]], np.float64) * 255.0
+            layer = np.zeros_like(base, dtype=np.float32)
+            _raster_gouraud(uv, faces, shade_v, col_bgr, depths, in_front, layer)
+            cov = (layer.sum(-1, keepdims=True) > 0).astype(np.float32)
+            if not cov.any():
+                continue
+            a = cov * alpha
+            out = out * (1.0 - a) + layer * a
+        if ss > 1:
+            out = cv2.resize(out, (W, H), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(os.path.join(out_dir, f"{t:06d}.png"),
+                    np.clip(out, 0, 255).astype(np.uint8))
+        n_written += 1
+    print(f"overlay_per_frame: wrote {n_written} png(s) to {out_dir}"
+          + (f"  ({n_skipped_img} frames had no image)" if n_skipped_img else ""))
 
 
 def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left,
@@ -671,6 +749,12 @@ def main():
               f"(spread={args.spread}, overlap<= {args.overlap})")
     else:
         idxs = sorted(set(np.linspace(lo, hi, max(2, args.num_samples)).round().astype(int).tolist()))
+
+    # ---- per-frame overlay: one png per frame in [lo, hi] ----
+    if args.overlay_per_frame_out:
+        _render_overlay_per_frame(args, right_verts, left_verts, faces_right, faces_left,
+                                  valid_r, valid_l, want_r, want_l, R_c2w, t_c2w, lo, hi)
+        return
 
     # ---- overlay backend: project meshes onto one frame (no rerun/GL) ----
     if args.overlay_out:
