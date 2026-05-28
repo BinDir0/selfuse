@@ -105,6 +105,17 @@ def parse_args():
                         "to enforce a hard clearance and accept fewer poses).")
     p.add_argument("--no_camera", action="store_true",
                    help="hands only: omit camera frustums + trajectory")
+    p.add_argument("--overlay_out", default=None,
+                   help="2D image-space overlay (VITRA-style): project the selected hand meshes "
+                        "onto a single reference frame and save as PNG. Bypasses rerun entirely.")
+    p.add_argument("--overlay_frame", type=int, default=-1,
+                   help="[overlay] which video frame to use as background "
+                        "(default -1 = first selected pose's frame)")
+    p.add_argument("--overlay_image", default=None,
+                   help="[overlay] explicit background image path (else looks under "
+                        "<pipeline_root>/frames/<clip_id>/NNNNNN.jpg)")
+    p.add_argument("--overlay_alpha", type=float, default=0.55,
+                   help="[overlay] per-pose alpha for the hand mesh layer (0..1)")
     p.add_argument("--xy_scatter", type=float, default=1.0,
                    help="horizontal spread: scale each pose's XY about the cluster centroid by "
                         "this factor (Z unchanged, hand shape unchanged). 1.0 = off, 1.3-1.6 "
@@ -248,6 +259,116 @@ def _sampled_trail_arrays(args, idxs, right_verts, left_verts, valid_r, valid_l,
                     cam[k] += shift
                     centers[k] += shift
     return right, left, cam, mfaces, centers, vr, vl
+
+
+# Inferno-ish stops -> matches rrd_from_npz.INFERNO_STOPS, kept inline so this
+# script stays self-contained (no rerun-env import needed).
+_INFERNO_STOPS = (
+    (0.02, 0.00, 0.10),
+    (0.30, 0.05, 0.40),
+    (0.80, 0.15, 0.25),
+    (1.00, 0.55, 0.15),
+    (1.00, 0.92, 0.20),
+)
+
+
+def _inferno_at(f):
+    f = max(0.0, min(1.0, float(f)))
+    n = len(_INFERNO_STOPS) - 1
+    fi = f * n
+    i = min(int(fi), n - 1)
+    u = fi - i
+    a, b = _INFERNO_STOPS[i], _INFERNO_STOPS[i + 1]
+    return [a[c] * (1.0 - u) + b[c] * u for c in range(3)]
+
+
+def _default_frame_path(seq, idx):
+    """<X>.hawor_pipeline/stage_outputs/<clip_id>  ->  .../frames/<clip_id>/NNNNNN.jpg"""
+    seq = os.path.abspath(seq.rstrip("/"))
+    clip_id = os.path.basename(seq)
+    pipeline_root = os.path.dirname(os.path.dirname(seq))
+    for w in (6, 5, 4, 0):
+        p = os.path.join(pipeline_root, "frames", clip_id, f"{idx:0{w}d}.jpg")
+        if os.path.exists(p):
+            return p
+    return os.path.join(pipeline_root, "frames", clip_id, f"{idx:06d}.jpg")
+
+
+def _load_focal(seq, default=600.0):
+    p = os.path.join(seq, "est_focal.txt")
+    try:
+        return float(open(p).read().strip())
+    except Exception:
+        return float(default)
+
+
+def _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left,
+                    valid_r, valid_l, want_r, want_l, R_c2w, t_c2w,
+                    right_wrists=None, left_wrists=None):
+    """Project selected hand meshes onto one frame, painter's-algorithm + cv2.fillPoly,
+    inferno temporal colour + alpha blend -- VITRA-style overlay, no rerun/GL."""
+    import cv2
+
+    # apply the same per-pose transforms (xy_scatter / exaggerate_*) the rerun
+    # path would, so the overlay matches what dump_npz would have produced.
+    right, left, _cam, _mf, _ce, vr, vl = _sampled_trail_arrays(
+        args, idxs, right_verts, left_verts, valid_r, valid_l, want_r, want_l, R_c2w, t_c2w,
+        right_wrists=right_wrists, left_wrists=left_wrists)
+
+    ref = args.overlay_frame if args.overlay_frame >= 0 else (idxs[0] if idxs else 0)
+    if ref < 0 or ref >= len(R_c2w):
+        raise ValueError(f"overlay_frame {ref} out of [0,{len(R_c2w) - 1}]")
+    img_path = args.overlay_image or _default_frame_path(args.seq_folder, ref)
+    base = cv2.imread(img_path)
+    if base is None:
+        raise FileNotFoundError(f"background frame not found: {img_path}")
+    H, W = base.shape[:2]
+    f = _load_focal(args.seq_folder)
+    K = np.array([[f, 0, W / 2.0], [0, f, H / 2.0], [0, 0, 1.0]], np.float64)
+
+    R_w2c = R_c2w[ref].T
+    t_w2c = -R_w2c @ t_c2w[ref]
+    out = base.astype(np.float32)
+    n = len(idxs)
+    drawn = 0
+    for k in range(n):
+        rgb = _inferno_at(k / max(1, n - 1))
+        col_bgr = np.array([rgb[2], rgb[1], rgb[0]]) * 255.0
+        for verts_per, faces, valid in (
+                (right[k] if vr[k] else None, faces_right, vr[k]),
+                (left[k] if vl[k] else None, faces_left, vl[k])):
+            if not valid:
+                continue
+            v_cam = verts_per @ R_w2c.T + t_w2c
+            in_front = v_cam[:, 2] > 0.05
+            if not in_front.any():
+                continue
+            uv = (K @ v_cam.T)
+            uv = (uv[:2] / np.maximum(uv[2:], 1e-6)).T
+            depths = v_cam[faces, 2].mean(1)
+            order = np.argsort(-depths)            # back -> front
+            layer = np.zeros_like(base, dtype=np.float32)
+            mask_any = False
+            for fi in order:
+                tri = faces[fi]
+                if not in_front[tri].all():
+                    continue
+                p3 = v_cam[tri]
+                nrm = np.cross(p3[1] - p3[0], p3[2] - p3[0])
+                nn = np.linalg.norm(nrm)
+                if nn < 1e-9:
+                    continue
+                shade = max(0.45, float(-nrm[2] / nn))  # simple lambert, light from cam
+                cv2.fillPoly(layer, [uv[tri].astype(np.int32)], (col_bgr * shade).tolist())
+                mask_any = True
+            if not mask_any:
+                continue
+            a = (layer.sum(-1, keepdims=True) > 0).astype(np.float32) * float(args.overlay_alpha)
+            out = out * (1.0 - a) + layer * a
+            drawn += 1
+    os.makedirs(os.path.dirname(os.path.abspath(args.overlay_out)) or ".", exist_ok=True)
+    cv2.imwrite(args.overlay_out, np.clip(out, 0, 255).astype(np.uint8))
+    print(f"overlay: ref frame {ref}  ({img_path}), {drawn} hand layers -> {args.overlay_out}")
 
 
 def _dump_trail_npz(args, idxs, right_verts, left_verts, faces_right, faces_left,
@@ -463,6 +584,13 @@ def main():
               f"(spread={args.spread}, overlap<= {args.overlap})")
     else:
         idxs = sorted(set(np.linspace(lo, hi, max(2, args.num_samples)).round().astype(int).tolist()))
+
+    # ---- overlay backend: project meshes onto one frame (no rerun/GL) ----
+    if args.overlay_out:
+        _render_overlay(args, idxs, right_verts, left_verts, faces_right, faces_left,
+                        valid_r, valid_l, want_r, want_l, R_c2w, t_c2w,
+                        right_wrists=right_wrists, left_wrists=left_wrists)
+        return
 
     # ---- npz backend: dump geometry only (hawor env, no rerun/GL), then stop ----
     if args.dump_npz:
