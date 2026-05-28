@@ -105,6 +105,13 @@ def parse_args():
                         "to enforce a hard clearance and accept fewer poses).")
     p.add_argument("--no_camera", action="store_true",
                    help="hands only: omit camera frustums + trajectory")
+    p.add_argument("--xy_scatter", type=float, default=1.0,
+                   help="horizontal spread: scale each pose's XY about the cluster centroid by "
+                        "this factor (Z unchanged, hand shape unchanged). 1.0 = off, 1.3-1.6 "
+                        "loosens a clumped real trajectory so hands are more distinguishable.")
+    p.add_argument("--xy_jitter", type=float, default=0.0,
+                   help="extra per-pose random horizontal offset in metres (0 = off)")
+    p.add_argument("--seed", type=int, default=0, help="RNG seed for --xy_jitter")
     p.add_argument("--frame_start", type=int, default=0,
                    help="restrict the trail to video frames >= this (default 0)")
     p.add_argument("--frame_end", type=int, default=-1,
@@ -172,6 +179,34 @@ def _sampled_trail_arrays(args, idxs, right_verts, left_verts, valid_r, valid_l,
     centers = np.stack([t_c2w[t] for t in idxs], 0)
     vr = np.array([bool(want_r) and bool(valid_r[min(t, len(valid_r) - 1)]) for t in idxs])
     vl = np.array([bool(want_l) and bool(valid_l[min(t, len(valid_l) - 1)]) for t in idxs])
+
+    # Optional horizontal-only spread: scale each pose's XY about the cluster
+    # centroid (and/or add XY jitter) so a clumped real trajectory reads as a
+    # set of distinguishable hands. Z (height) untouched; hand shapes untouched
+    # (rigid per-pose translation, both hands of a pose shift together).
+    s = float(getattr(args, "xy_scatter", 1.0))
+    j = float(getattr(args, "xy_jitter", 0.0))
+    if s != 1.0 or j > 0.0:
+        per_pose_xy = []
+        for k in range(len(idxs)):
+            pts = []
+            if vr[k]:
+                pts.append(right[k].mean(0)[:2])
+            if vl[k]:
+                pts.append(left[k].mean(0)[:2])
+            per_pose_xy.append(np.mean(pts, axis=0) if pts else np.array([0.0, 0.0]))
+        per_pose_xy = np.asarray(per_pose_xy)
+        cluster_xy = per_pose_xy.mean(0)
+        rng = np.random.RandomState(int(getattr(args, "seed", 0)))
+        for k in range(len(idxs)):
+            d = (per_pose_xy[k] - cluster_xy) * (s - 1.0)
+            if j > 0.0:
+                d = d + rng.uniform(-j, j, size=2)
+            shift = np.array([d[0], d[1], 0.0], np.float32)
+            right[k] += shift
+            left[k] += shift
+            cam[k] += shift
+            centers[k] += shift
     return right, left, cam, mfaces, centers, vr, vl
 
 
