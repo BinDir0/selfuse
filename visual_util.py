@@ -372,9 +372,9 @@ def camera_trajectory_to_glb(
     cam_to_world[:, :3, 3] = cam_pos  # propagate scatter into the glyph transform
 
     scene = trimesh.Scene()
-    # Lavender -> deep violet gradient (early = pale, late = saturated).
-    traj_light = np.array([200, 195, 230])
-    traj_dark = np.array([75, 50, 130])
+    # Pale sky -> deep navy gradient (early = pale, late = saturated).
+    traj_light = np.array([195, 215, 240])
+    traj_dark = np.array([40, 80, 170])
 
     def lerp_color(t: float) -> tuple:
         return tuple(int(round(c)) for c in traj_light * (1.0 - t) + traj_dark * t)
