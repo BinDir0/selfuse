@@ -88,6 +88,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         view_dropout: ViewDropoutConfig = ViewDropoutConfig(),
         keep_ratio: float = 1.0,
         sanity_checks: Optional[Dict] = None,
+        dagger_quality_filter: bool = True,
     ):
         super().__init__()
         self.shape_meta = shape_meta
@@ -115,6 +116,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
         self.keep_ratio = float(keep_ratio)
         self.sanity_checks = dict(sanity_checks or {})
+        self.dagger_quality_filter = bool(dagger_quality_filter)
         # (H, W) tuple or None. Resize all RGB frames to this resolution
         # before HF processor. Required when world model is enabled so that
         # temporal attention patches share identical spatial semantics.
@@ -147,6 +149,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             future_frame_horizon=self.future_frame_horizon,
             future_frame_stride=self.future_frame_stride,
             future_frame_pad_mode=ff_cfg.get("pad_mode", "repeat"),
+            dagger_quality_filter=self.dagger_quality_filter,
         )
 
         # process_image only checks truthiness; actual color aug lives in
@@ -549,6 +552,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             load_breast=self.load_breast,
             keep_ratio=1.0,
             sanity_checks=self.sanity_checks,
+            dagger_quality_filter=self.dagger_quality_filter,
         )
         if self.collator is not None:
             val_dataset.set_collator(self.collator)
@@ -749,6 +753,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         min_shards_per_dataset: int = 8,
         seed: int = 0,
         sanity_checks: Optional[Dict] = None,
+        dagger_quality_filter: bool = True,
     ):
         super().__init__()
         self.wds_datasets = wds_datasets
@@ -761,6 +766,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
         self.min_shards_per_dataset = min_shards_per_dataset
         self.seed = seed
         self.sanity_checks = dict(sanity_checks or {})
+        self.dagger_quality_filter = bool(dagger_quality_filter)
 
         if self.mode != "val":
             warnings.warn(
@@ -782,6 +788,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             image_stride=shape_meta["obs"]["rgb"]["stride"],
             history_pad_mode=shape_meta.get("history_pad_mode", "repeat"),
             action_pad_mode=shape_meta["action"].get("pad_mode", "truncate"),
+            dagger_quality_filter=self.dagger_quality_filter,
         )
 
         self.checker = DataChecker(sanity_cfg=self.sanity_checks)
