@@ -631,7 +631,7 @@ class TestBreastCameraFormatting:
         )
         assert "Head camera intrinsics: fx:500.00" in text
         assert "Breast camera intrinsics: fx:600.00" in text
-        assert "Videos: first video is head camera; second video is breast camera." in text
+        assert "There are two videos: the first video is from the head camera; the second video is from the breast camera." in text
 
     def test_build_vla_user_text_breast_only_prompt(self):
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="text")
@@ -642,7 +642,7 @@ class TestBreastCameraFormatting:
             active_views=["breast"],
             breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
-        assert "Videos: first video is breast camera." in text
+        assert "The video is from the breast camera." in text
         assert "Breast camera intrinsics: fx:600.00" in text
         assert "Head camera intrinsic" not in text
 
