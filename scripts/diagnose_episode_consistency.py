@@ -173,6 +173,19 @@ def main():
         E = skew(t_rel / nt) @ R_rel
         return Kinv.T @ E @ Kinv, (Ra, ta, Rb, tb)
 
+    def dpvo_H(a, b, K, Kinv):
+        """Infinite homography K R_rel K^-1 (a->b). The CORRECT consistency model when the camera
+        is ROTATION-dominated (near-zero translation => no parallax => epipolar/triangulation degenerate).
+        Tests whether DPVO's ROTATION is globally consistent; residual rises with Δ => rotation drift."""
+        Ra, _ = pose_w2c(a); Rb, _ = pose_w2c(b)
+        return K @ (Rb @ Ra.T) @ Kinv
+
+    def homog_err(H, ptsA, ptsB):
+        a = np.hstack([ptsA, np.ones((len(ptsA), 1))])
+        p = a @ H.T
+        p = p[:, :2] / p[:, 2:3]
+        return np.linalg.norm(p - ptsB, axis=1)
+
     def sampson(F, ptsA, ptsB):
         """Symmetric Sampson distance (px) of correspondences to F (per-point)."""
         a = np.hstack([ptsA, np.ones((len(ptsA), 1))])
@@ -212,12 +225,23 @@ def main():
     MIN_INL = 8
     get_feats(anchors[0])           # ensure hw populated before build_K
     K = build_K(); Kinv = np.linalg.inv(K)
+    # --- motion regime: is the camera rotation-dominated (near-zero translation)? ---
+    # Parallax ~ |Δt| / scene_depth. If tiny, epipolar/triangulation are DEGENERATE (no parallax)
+    # and only the homography (rotation) test is valid. All in raw DPVO units (scale-invariant ratio).
+    tpath = float(np.linalg.norm(np.diff(traj[:, :3], axis=0), axis=1).sum())
+    tspan = float(np.linalg.norm(traj[:, :3].max(0) - traj[:, :3].min(0)))
+    scene_d = float(np.median(1.0 / np.clip(np.load(_find(seq, "SLAM/hawor_slam_w_scale_*.npz"),
+                                                    allow_pickle=True)["disps"], 1e-9, None)))
+    parallax = tspan / max(scene_d, 1e-9)
+    rot_dom = parallax < 0.05
+    print(f"\n[regime] camera translation path={tpath:.1f} span={tspan:.1f} (raw) vs scene depth~{scene_d:.1f} "
+          f"=> parallax≈{100*parallax:.1f}%  {'=> ROTATION-DOMINATED: trust HOMOG, epipolar/tri are DEGENERATE' if rot_dom else '=> translation present: epipolar/tri valid'}")
     print(f"\n[M1] consistency vs time-baseline Δ  (anchors={len(anchors)}, MIN_INL={MIN_INL})")
-    print("  sampson_dpvo=scale-free pose-direction drift (bad-match immune); reproj=full(+scale) drift")
-    print(f"  {'Δ(frames)':>10}{'pairs':>7}{'med_inl':>9}{'sampson_px':>12}{'reproj_px':>11}{'tri_kept%':>10}")
+    print("  homog_px=rotation-consistency (valid under low parallax); sampson/reproj need translation (degenerate if rotation-dominated)")
+    print(f"  {'Δ(frames)':>10}{'pairs':>7}{'med_inl':>9}{'homog_px':>10}{'sampson_px':>12}{'reproj_px':>11}")
     rows = []
     for d in deltas:
-        inl_counts, samp_meds, reproj, tri_rates = [], [], [], []
+        inl_counts, samp_meds, reproj, tri_rates, homogs = [], [], [], [], []
         for a in anchors:
             b = a + d
             if b >= n:
@@ -231,7 +255,12 @@ def main():
                 inl_counts.append(0); continue
             ptsA = np.float64([kpA[g.queryIdx].pt for g in good])
             ptsB = np.float64([kpB[g.trainIdx].pt for g in good])
-            F, mask_in = cv2.findFundamentalMat(ptsA, ptsB, cv2.FM_RANSAC, 1.5, 0.999)
+            # filter correspondences with the model VALID for the regime: homography when
+            # rotation-dominated (F is degenerate at zero parallax), else fundamental matrix.
+            if rot_dom:
+                _, mask_in = cv2.findHomography(ptsA, ptsB, cv2.RANSAC, 3.0)
+            else:
+                _, mask_in = cv2.findFundamentalMat(ptsA, ptsB, cv2.FM_RANSAC, 1.5, 0.999)
             if mask_in is None:
                 inl_counts.append(0); continue
             inl = mask_in.ravel().astype(bool)
@@ -239,62 +268,66 @@ def main():
             if inl.sum() < MIN_INL:
                 continue
             pa, pb = ptsA[inl], ptsB[inl]      # data-consistent good correspondences
+            # rotation-consistency (valid even at zero parallax): does DPVO's rotation transfer a->b?
+            homogs.append(float(np.median(homog_err(dpvo_H(a, b, K, Kinv), pa, pb))))
             fd = dpvo_F(a, b, Kinv)
             if fd is None:
                 continue
             Fdp, pose = fd
-            # scale-free: do DPVO poses explain these good correspondences?
+            # scale-free: do DPVO poses explain these good correspondences? (needs translation)
             samp_meds.append(float(np.median(sampson(Fdp, pa, pb))))
-            # full (incl. scale): cheirality + parallax gated triangulation reprojection
+            # full (incl. scale): cheirality + parallax gated triangulation reprojection (needs translation)
             es = [e for e in (triangulate_reproj(ua, ub, K, Kinv, pose) for ua, ub in zip(pa, pb)) if e is not None]
             if es:
                 reproj.append(float(np.median(es)))
                 tri_rates.append(len(es) / len(pa))
         med_inl = float(np.median(inl_counts)) if inl_counts else 0.0
+        med_homog = float(np.median(homogs)) if homogs else float("nan")
         med_samp = float(np.median(samp_meds)) if samp_meds else float("nan")
         med_rep = float(np.median(reproj)) if reproj else float("nan")
-        tri_rate = float(np.median(tri_rates)) if tri_rates else 0.0
-        rows.append((d, len(inl_counts), med_inl, med_samp, med_rep))
-        print(f"  {d:>10}{len(inl_counts):>7}{med_inl:>9.0f}{med_samp:>12.3f}{med_rep:>11.2f}{100*tri_rate:>9.0f}%")
+        rows.append((d, len(inl_counts), med_inl, med_homog, med_samp, med_rep))
+        print(f"  {d:>10}{len(inl_counts):>7}{med_inl:>9.0f}{med_homog:>10.3f}{med_samp:>12.3f}{med_rep:>11.2f}")
 
     # --- verdict ---
-    rr = np.array(rows, float)   # cols: d, pairs, med_inl, sampson, reproj
+    rr = np.array(rows, float)   # cols: d, pairs, med_inl, homog, sampson, reproj
+
+    def trend(col, name, rising_msg, flat_msg):
+        v = rr[np.isfinite(rr[:, col])]
+        if v.shape[0] < 3:
+            return
+        sh = v[v[:, 0] <= 30, col]; lo = v[v[:, 0] >= max(60, 0.3 * (n - 1)), col]
+        if sh.size and lo.size:
+            ratio = np.median(lo) / max(np.median(sh), 1e-6)
+            print(f"  [{name}] short-Δ {np.median(sh):.2f}px vs long-Δ {np.median(lo):.2f}px ratio={ratio:.2f}"
+                  f"  => {rising_msg if ratio >= 2 else flat_msg}")
+
     print("\n=== VERDICT ===")
     usable = rr[rr[:, 2] >= 8]
     max_cov_delta = int(usable[-1, 0]) if usable.size else 0
     print(f"  co-visibility usable (median inliers>=8) up to Δ≈{max_cov_delta} frames "
           f"({100*max_cov_delta/max(n-1,1):.0f}% of clip).")
-    # scale-free pose-direction drift (primary, bad-match immune)
-    sp = rr[np.isfinite(rr[:, 3])]
-    if sp.shape[0] >= 3:
-        s_short = sp[sp[:, 0] <= 30, 3]; s_long = sp[sp[:, 0] >= max(60, 0.3 * (n - 1)), 3]
-        if s_short.size and s_long.size:
-            print(f"  [scale-free] Sampson short-Δ {np.median(s_short):.2f}px vs long-Δ {np.median(s_long):.2f}px "
-                  f"ratio={np.median(s_long)/max(np.median(s_short),1e-6):.2f}  "
-                  f"=> {'pose-direction DRIFT' if np.median(s_long)>=3*np.median(s_short)+1 else 'pose direction consistent'}")
-    # full (incl. scale) reprojection drift
-    rp = rr[np.isfinite(rr[:, 4])]
-    if rp.shape[0] >= 3:
-        r_short = rp[rp[:, 0] <= 30, 4]; r_long = rp[rp[:, 0] >= max(60, 0.3 * (n - 1)), 4]
-        if r_short.size and r_long.size:
-            ratio = np.median(r_long) / max(np.median(r_short), 1e-6)
-            print(f"  [full+scale] reproj short-Δ {np.median(r_short):.2f}px vs long-Δ {np.median(r_long):.2f}px "
-                  f"ratio={ratio:.2f}  => {'RISING = drift over episode' if ratio >= 2 else '~flat = globally consistent'}")
-    if max_cov_delta < 0.3 * (n - 1):
-        print("  => camera rarely revisits; WHOLE-EPISODE geometric drift is largely UNMEASURABLE from images.")
-        print("     Rely on M3 (hand self-consistency) + accept local consistency for the windows that matter.")
-    print("  NOTE: Sampson rising but reproj flat => pure rotation/translation-direction drift; "
-          "both rising => scale drift too; both flat => globally consistent.")
+    # ROTATION consistency (homography) — the VALID metric when rotation-dominated
+    trend(3, "ROTATION (homog)", "ROTATION DRIFTS over episode", "rotation globally consistent")
+    if rot_dom:
+        print("  ^ camera is ROTATION-DOMINATED => the homog row above is the trustworthy verdict.")
+        print("    The sampson/reproj rows below are DEGENERATE here (no parallax) — IGNORE them.")
+    trend(4, "scale-free Sampson (needs translation)", "pose-direction inconsistent", "consistent")
+    trend(5, "full+scale reproj (needs translation)", "rising", "flat")
+    if rot_dom:
+        print("  => If rotation is consistent but the rerun cloud still blobs, the smear is DEPTH "
+              "inconsistency (Any4D across frames), NOT camera drift. Different fix.")
 
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(1, 3, figsize=(16, 4))
+        fig, ax = plt.subplots(1, 4, figsize=(20, 4))
         ax[0].plot(rr[:, 0], rr[:, 2], "o-"); ax[0].set_ylabel("median inlier matches")
         ax[0].set_title("co-visibility vs Δ")
-        ax[1].plot(rr[:, 0], rr[:, 3], "o-", color="#2563eb"); ax[1].set_ylabel("median Sampson (px)")
-        ax[1].set_title("scale-free pose-direction drift")
-        ax[2].plot(rr[:, 0], rr[:, 4], "o-", color="#e11d48"); ax[2].set_ylabel("median reproj err (px)")
-        ax[2].set_title("full (+scale) drift")
+        ax[1].plot(rr[:, 0], rr[:, 3], "o-", color="#16a34a"); ax[1].set_ylabel("median homography err (px)")
+        ax[1].set_title("ROTATION consistency (valid @ low parallax)")
+        ax[2].plot(rr[:, 0], rr[:, 4], "o-", color="#2563eb"); ax[2].set_ylabel("median Sampson (px)")
+        ax[2].set_title("scale-free pose-dir drift (needs translation)")
+        ax[3].plot(rr[:, 0], rr[:, 5], "o-", color="#e11d48"); ax[3].set_ylabel("median reproj err (px)")
+        ax[3].set_title("full (+scale) drift (needs translation)")
         for a in ax:
             a.set_xlabel("Δ (frames)"); a.set_xscale("log"); a.grid(alpha=.3)
         out = os.path.join(seq, "episode_consistency.png"); fig.tight_layout(); fig.savefig(out, dpi=120)
