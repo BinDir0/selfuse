@@ -52,6 +52,8 @@ class HAWOR(pl.LightningModule):
         backbone_pretrained = cfg.MODEL.BACKBONE.get('PRETRAINED_WEIGHTS', None)
         _allow_random = os.environ.get("HAWOR_ALLOW_RANDOM_BACKBONE", "").strip().lower() in ("1", "true", "yes", "on")
         if backbone_pretrained:
+            # PRETRAINED_WEIGHTS is configured -> a load failure here is a real error
+            # that the old bare-except hid (silent random init -> garbage).
             try:
                 whole_state_dict = torch.load(backbone_pretrained, map_location='cpu')['state_dict']
                 backbone_state_dict = {}
@@ -63,8 +65,6 @@ class HAWOR(pl.LightningModule):
                 for param in self.backbone.parameters():
                     param.requires_grad = False
             except Exception as error:
-                # A silently random-initialized backbone produces garbage outputs that
-                # look like a successful run. Fail loudly unless explicitly allowed.
                 if _allow_random:
                     log.warning(
                         f"Failed to load backbone weights from {backbone_pretrained} ({error}); "
@@ -76,13 +76,14 @@ class HAWOR(pl.LightningModule):
                         "This would silently produce a randomly-initialized backbone and garbage outputs. "
                         "Fix the checkpoint path, or set HAWOR_ALLOW_RANDOM_BACKBONE=1 to proceed intentionally."
                     ) from error
-        elif _allow_random:
-            log.warning('No backbone PRETRAINED_WEIGHTS configured -> initializing backbone from scratch.')
         else:
-            raise RuntimeError(
-                "No backbone PRETRAINED_WEIGHTS configured. This would silently use a randomly-initialized "
-                "backbone and produce garbage outputs. Set MODEL.BACKBONE.PRETRAINED_WEIGHTS, or "
-                "HAWOR_ALLOW_RANDOM_BACKBONE=1 to proceed intentionally (e.g. training from scratch)."
+            # No PRETRAINED_WEIGHTS is the NORMAL inference case: the full model
+            # (backbone included) is loaded from the HaWoR checkpoint via
+            # load_from_checkpoint AFTER __init__, so the from-scratch init here is
+            # transient and immediately overwritten. Warn (visible) but never block.
+            log.warning(
+                'No backbone PRETRAINED_WEIGHTS configured; backbone initialized from scratch in __init__ '
+                '(expected when loading a full checkpoint via load_from_checkpoint; weights are restored there).'
             )
 
         # Space-time memory
