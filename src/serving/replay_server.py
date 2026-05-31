@@ -45,7 +45,7 @@ DEFAULT_WINDOW_CONFIG = WindowConfig(
     image_horizon=6,
     image_stride=30,
     history_pad_mode="repeat",
-    future_pad_mode="truncate",
+    future_frame_pad_mode="truncate",
 )
 
 
