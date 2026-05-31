@@ -30,7 +30,10 @@ import cv2
 from hawor.utils.process import get_mano_faces, run_mano, run_mano_left
 from hawor.utils.rotation import angle_axis_to_rotation_matrix, rotation_matrix_to_angle_axis
 from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
+from lib.pipeline.logging_setup import get_logger
 from infiller.lib.model.network import TransformerModel
+
+_logger = get_logger("scripts_test_video.hawor_video")
 
 # Set HAWOR_INFILLER_NO_SANITIZE=1 to disable (debug / A-B).
 _INFILLER_SANITIZE = os.environ.get("HAWOR_INFILLER_NO_SANITIZE", "0").strip() != "1"
@@ -179,8 +182,12 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
             try:
                 with open(os.path.join(seq_folder, 'est_focal.txt'), 'r') as f:
                     img_focal = float(f.read())
-            except:
+            except Exception as error:
                 img_focal = 600
+                _logger.warning(
+                    "Could not read focal from %s (%s); falling back to default %s.",
+                    os.path.join(seq_folder, 'est_focal.txt'), error, img_focal,
+                )
         frame_chunks_all = joblib.load(frame_chunks_file)
         return frame_chunks_all, img_focal
 
@@ -275,9 +282,12 @@ def run_motion_for_video(args, start_idx, end_idx, seq_folder, motion_runner=Non
             with open(os.path.join(seq_folder, 'est_focal.txt'), 'r') as f:
                 img_focal = f.read()
                 img_focal = float(img_focal)
-        except:
+        except Exception as error:
             img_focal = 600
-            vprint(f'No focal length provided, use default {img_focal}')
+            _logger.warning(
+                "No focal length available at %s (%s); using default %s.",
+                os.path.join(seq_folder, 'est_focal.txt'), error, img_focal,
+            )
             with open(os.path.join(seq_folder, 'est_focal.txt'), 'w') as f:
                 f.write(str(img_focal))
 

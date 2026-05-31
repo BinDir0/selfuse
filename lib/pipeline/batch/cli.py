@@ -126,6 +126,39 @@ def build_batch_infer_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--run_dir", type=str, help="Custom run directory. Default: batch_runs/<timestamp>.")
     parser.add_argument(
+        "--output_root",
+        type=str,
+        default=None,
+        help=(
+            "Root for per-video stage intermediates (sets $HAWOR_OUTPUT_ROOT). "
+            "Intermediates go to <output_root>/<stem>.hawor_pipeline/stage_outputs/<stem>. "
+            "Default: a sibling <stem>.hawor_pipeline next to each video."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-seq-folder",
+        dest="legacy_seq_folder",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt in to the legacy layout that writes intermediates directly next to "
+            "the input video (parent/<stem>/). Off by default."
+        ),
+    )
+    parser.add_argument(
+        "--keep_intermediates",
+        type=str,
+        default="none",
+        choices=["none", "slam", "all"],
+        help=(
+            "Retention after the final (infiller) stage. 'none' (default): keep only "
+            "the consolidated result.npz (+ SLAM scale), removing tracks/masks/cam-space/"
+            "stage-3 frames/markers and the redundant depth+pose files. 'slam': keep "
+            "intermediates but drop heavy redundant SLAM caches + stage-3 frames. 'all': "
+            "keep everything."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint",
         type=str,
         default="./weights/hawor/checkpoints/hawor.ckpt",

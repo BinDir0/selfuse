@@ -52,11 +52,44 @@ def _resolve_run_dir(run_dir: str | None) -> Path:
 
 
 def main(argv: list[str] | None = None):
+    from lib.pipeline.logging_setup import configure_logging
+
+    configure_logging()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = get_parser()
     args = parser.parse_args(raw_argv)
     compatibility_notes = normalize_batch_infer_args(args, raw_argv=raw_argv)
+
+    # Export workspace controls to the environment so in-process stage workers and
+    # the path resolvers in lib.pipeline.workspace pick them up consistently.
+    if getattr(args, "output_root", None):
+        os.environ["HAWOR_OUTPUT_ROOT"] = str(Path(args.output_root).expanduser().resolve())
+    if getattr(args, "legacy_seq_folder", False):
+        os.environ["HAWOR_LEGACY_SEQ_FOLDER"] = "1"
+
     inputs = load_batch_inputs(args)
+
+    # Preflight: validate weights / MANO / inputs / scratch root + disk / GPU once,
+    # before any run dir is created or GPU work starts. Reports all problems at once.
+    if os.environ.get("HAWOR_SKIP_PREFLIGHT", "").strip().lower() not in ("1", "true", "yes", "on"):
+        from lib.pipeline.preflight import collect_batch_weights, run_preflight
+
+        stage_list = [s.strip() for s in str(args.stages).split(",") if s.strip()]
+        report = run_preflight(
+            stages=stage_list,
+            weights=collect_batch_weights(PROJECT_ROOT, args),
+            video_paths=inputs.video_paths,
+            args=args,
+            gpus=args.gpus,
+            project_root=PROJECT_ROOT,
+        )
+        if not report.ok:
+            print(report.render(), file=sys.stderr)
+            print(
+                "\nAborting before GPU work. Set HAWOR_SKIP_PREFLIGHT=1 to bypass (not recommended).",
+                file=sys.stderr,
+            )
+            return 2
 
     run_dir = _resolve_run_dir(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)

@@ -200,8 +200,16 @@ def maybe_run_auto_infill(args, cache_file, writer_workers):
                 "`scripts/batch_infer.py --stages infiller` before building WebDataset."
             )
         print(f"Running infill for {len(missing_infill)} episodes...")
+        infill_failures = []
         for ep in tqdm(missing_infill, desc="Infill"):
-            run_infill_for_episode(ep["crop_dir"], args.checkpoint, args.infiller_weight, args.mano_device)
+            ok = run_infill_for_episode(ep["crop_dir"], args.checkpoint, args.infiller_weight, args.mano_device)
+            if not ok:
+                infill_failures.append(ep["crop_dir"])
+        if infill_failures:
+            print(
+                f"WARNING: infill failed for {len(infill_failures)}/{len(missing_infill)} episodes "
+                f"(see errors above). First few: {infill_failures[:5]}"
+            )
 
     if os.path.exists(cache_file):
         os.remove(cache_file)

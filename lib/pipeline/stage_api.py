@@ -5,10 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import joblib
 import numpy as np
 
 from lib.pipeline.datasets.descriptors import ClipDescriptor
 from lib.pipeline.frame_sources import build_frame_source_from_descriptor
+from lib.pipeline.workspace import resolve_seq_folder
 
 
 STAGES = ["detect_track", "motion", "slam", "infiller"]
@@ -37,6 +39,10 @@ class StageExecutionConfig:
     stage3_tmp_root: Optional[str] = None
     vis_mode: str = "world"
     skip_vis: bool = True
+    # Retention after the final (infiller) stage: all|slam|none. Default 'all'
+    # (no cleanup) so programmatic callers are never surprised; the batch CLI
+    # sets the user-facing default.
+    keep_intermediates: str = "all"
 
     @classmethod
     def from_namespace(cls, ns):
@@ -60,6 +66,7 @@ class StageExecutionConfig:
             any4d_resolution_set=getattr(ns, "any4d_resolution_set", None),
             any4d_use_amp=getattr(ns, "any4d_use_amp", None),
             stage3_tmp_root=getattr(ns, "stage3_tmp_root", None),
+            keep_intermediates=getattr(ns, "keep_intermediates", "all"),
         )
 
     def to_stage_args(self, video_path: str):
@@ -141,10 +148,10 @@ class StageArtifacts:
 
 
 def get_seq_folder(video_path: str = None, descriptor: ClipDescriptor = None) -> Path:
-    if descriptor is not None:
-        return Path(descriptor.seq_folder)
-    video_path = Path(video_path)
-    return video_path.parent / video_path.stem
+    # Centralized in lib.pipeline.workspace: honors descriptor.seq_folder, then
+    # the consolidated <output_root>/stage_outputs/<stem> default (overridable via
+    # $HAWOR_OUTPUT_ROOT), with next-to-video only as an explicit legacy opt-in.
+    return resolve_seq_folder(descriptor=descriptor, video_path=video_path)
 
 
 def get_tracks_dir(seq_folder: Path, start_idx: int, end_idx: int) -> Path:
@@ -289,11 +296,10 @@ def _validate_slam_output(seq_folder: Path, start_idx: int, end_idx: int):
 
 
 def _validate_infiller_output(seq_folder: Path, _start_idx: int, _end_idx: int):
-    import joblib
+    from lib.pipeline.result_io import final_artifact_exists, load_pose_arrays
 
-    world_file = seq_folder / "world_space_res.pth"
-    assert world_file.exists(), "world_space_res.pth missing"
-    pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = joblib.load(world_file)
+    assert final_artifact_exists(seq_folder), "final result (result.npz or world_space_res.pth) missing"
+    pred_trans, pred_rot, pred_hand_pose, pred_betas, pred_valid = load_pose_arrays(seq_folder)
     assert pred_trans.shape[0] == 2 and pred_trans.shape[-1] == 3, "pred_trans shape invalid"
     assert pred_rot.shape[0] == 2 and pred_rot.shape[-1] == 3, "pred_rot shape invalid"
     assert pred_hand_pose.shape[0] == 2 and pred_hand_pose.shape[-1] == 45, "pred_hand_pose shape invalid"
@@ -327,7 +333,9 @@ def _validate_slam_output_fast(seq_folder: Path, start_idx: int, end_idx: int):
 
 
 def _validate_infiller_output_fast(seq_folder: Path, _start_idx: int, _end_idx: int):
-    return (seq_folder / "world_space_res.pth").exists()
+    from lib.pipeline.result_io import final_artifact_exists
+
+    return final_artifact_exists(seq_folder)
 
 
 _STAGE_VALIDATORS = {
@@ -381,6 +389,15 @@ def _run_full_stage_check(stage: str, seq_folder: Path):
 def is_stage_complete(stage: str, seq_folder: Path, fast_check=False):
     if not seq_folder.exists():
         return False
+
+    # If the consolidated final result exists, the whole clip is done -- even if
+    # retention cleanup removed upstream intermediates and stage markers. Without
+    # this, a resumed run would wrongly re-run earlier stages whose outputs were
+    # cleaned away.
+    from lib.pipeline.result_io import final_artifact_exists
+
+    if final_artifact_exists(seq_folder):
+        return True
 
     if fast_check and get_stage_done_marker(seq_folder, stage).exists():
         return True
@@ -484,8 +501,6 @@ def _run_slam_stage(task, stage_args, config, runtime, frame_source, start_idx, 
 
 
 def _run_infiller_stage(task, stage_args, runtime, frame_source, prefetched_data, start_idx, end_idx):
-    import joblib
-
     from lib.pipeline.stages.hawor_video import run_infiller_for_video
 
     tracks_dir = get_tracks_dir(task.seq_folder, start_idx, end_idx)
@@ -591,7 +606,7 @@ def run_pipeline_stage(
             force,
         )
 
-    return _finalize_stage_run(
+    finalize_result = _finalize_stage_run(
         stage,
         task.seq_folder,
         start_idx,
@@ -599,3 +614,32 @@ def run_pipeline_stage(
         metrics=metrics,
         wall_sec=time.time() - stage_start_time,
     )
+
+    # Retention: after the final (infiller) stage succeeds, optionally drop the now
+    # redundant intermediates (depth is preserved inside result.npz). Only the
+    # batch/infer-only path enables this; the dataset orchestrator passes
+    # keep_intermediates='all' so the downstream build still has what it needs.
+    level = getattr(config, "keep_intermediates", "all")
+    if stage == "infiller" and level != "all":
+        _run_retention_cleanup(task.seq_folder, level, start_idx, end_idx, config)
+
+    return finalize_result
+
+
+def _run_retention_cleanup(seq_folder: Path, level: str, start_idx: int, end_idx: int, config):
+    try:
+        from lib.pipeline.cleanup import cleanup_seq_folder
+        from lib.pipeline.workspace import resolve_tmp_root
+
+        tmp_root = resolve_tmp_root(config, required=False)
+        cleanup_seq_folder(
+            seq_folder,
+            level=level,
+            tmp_root=tmp_root,
+            start_idx=start_idx,
+            end_idx=end_idx,
+        )
+    except Exception as error:  # cleanup must never fail the run
+        from lib.pipeline.logging_setup import get_logger
+
+        get_logger("stage_api").warning("Retention cleanup failed for %s: %s", seq_folder, error)

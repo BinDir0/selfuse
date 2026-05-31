@@ -8,6 +8,8 @@ import subprocess
 from copy import deepcopy
 from pathlib import Path
 
+from lib.pipeline.workspace import default_output_root
+
 
 _OFFICIAL_TOP_LEVEL_KEYS = {
     "run_tag",
@@ -270,7 +272,7 @@ def _normalize_single_video_pipeline_config(raw: dict, *, base_dir: Path | None)
     output_root = (
         _resolve_path(raw["output_root"], base_dir=base_dir)
         if raw.get("output_root")
-        else (video_path.parent / f"{video_path.stem}.hawor_pipeline").resolve()
+        else default_output_root(video_path)
     )
 
     annotation_cfg = _ensure_mapping(raw, "annotation")

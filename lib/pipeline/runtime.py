@@ -43,6 +43,7 @@ class WorkerRuntime:
         any4d_resolution_set: int = None,
         any4d_use_amp: bool = None,
         stage3_tmp_root: str = None,
+        keep_intermediates: str = "all",
     ):
         self.gpu = gpu
         self.stage_config = StageExecutionConfig(
@@ -65,6 +66,7 @@ class WorkerRuntime:
             any4d_resolution_set=any4d_resolution_set,
             any4d_use_amp=any4d_use_amp,
             stage3_tmp_root=stage3_tmp_root,
+            keep_intermediates=keep_intermediates,
         )
 
         self.detector_runner = None

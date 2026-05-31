@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 from datetime import datetime
@@ -281,6 +282,38 @@ def run_pipeline(args) -> None:
         default_hawor_python=hawor_python,
         default_slam_python=slam_python,
     )
+    # Preflight (orchestrated path): validate conda runtimes, weights/MANO, and the
+    # stage-3 scratch root BEFORE the expensive prepare/frame-extraction stage. The
+    # GPU check is intentionally skipped here -- it runs in the correct env inside
+    # the batch_infer subprocess, which carries its own preflight.
+    if os.environ.get("HAWOR_SKIP_PREFLIGHT", "").strip().lower() not in ("1", "true", "yes", "on"):
+        from lib.pipeline import preflight as _preflight
+
+        _pf = _preflight.PreflightReport()
+        _preflight.check_runtimes(
+            _pf, {"hawor_python": hawor_python, "slam_python": slam_python}
+        )
+        if _preflight._needs(stages, {"detect_motion", "motion", "infiller"}):
+            _preflight.check_weights(
+                _pf,
+                {
+                    "detector": PROJECT_ROOT / "weights" / "external" / "detector.pt",
+                    "hawor checkpoint": PROJECT_ROOT / "weights" / "hawor" / "checkpoints" / "hawor.ckpt",
+                    "hawor model_config": PROJECT_ROOT / "weights" / "hawor" / "model_config.yaml",
+                    "infiller weight": PROJECT_ROOT / "weights" / "hawor" / "checkpoints" / "infiller.pt",
+                },
+            )
+            _preflight.check_mano(_pf, PROJECT_ROOT)
+        if _preflight._needs(stages, _preflight._TMP_STAGES):
+            _preflight.check_tmp_root(_pf, args=None)
+        if not _pf.ok:
+            print(_pf.render(), file=sys.stderr)
+            print(
+                "\nAborting before prepare. Set HAWOR_SKIP_PREFLIGHT=1 to bypass (not recommended).",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
     adapter = get_dataset_adapter(adapter_name)
     adapter_context = DatasetAdapterContext(
         project_root=PROJECT_ROOT,
@@ -596,6 +629,12 @@ def run_pipeline(args) -> None:
         infer_cfg.get("common"),
         negative_bool_flags=BATCH_INFER_NEGATIVE_BOOL_FLAGS,
     )
+    # The dataset pipeline's build stage still consumes per-clip intermediates
+    # (frames, cam-space, depth), so the infer subprocess must NOT mid-clean them.
+    # batch_infer defaults to --keep_intermediates none for standalone runs; force
+    # 'all' here. Post-build retention is handled by the orchestrator separately.
+    if "--keep_intermediates" not in common_batch_args:
+        common_batch_args = (*common_batch_args, "--keep_intermediates", "all")
     native_depth_cfg = infer_cfg.get("native_depth") or {}
     native_infer_stages = [stage for stage in ("detect_motion", "slam", "infiller") if stage in stages]
     if native_infer_stages:
@@ -1033,5 +1072,8 @@ def run_pipeline(args) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from lib.pipeline.logging_setup import configure_logging
+
+    configure_logging()
     args = get_parser().parse_args(argv)
     run_pipeline(args)

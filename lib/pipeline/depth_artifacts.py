@@ -85,11 +85,32 @@ def _load_depth_npz(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
     return frame_indices, depths
 
 
+def _load_consolidated_result_depths(seq_folder: Path, expected_frame_count: int, expected_indices: np.ndarray):
+    """Read depth from the consolidated result.npz, if present and aligned."""
+    from lib.pipeline import result_io
+
+    depth = result_io.load_result_depth(seq_folder)
+    if depth is None:
+        return None
+    frame_indices, depths_uint16 = depth
+    depths = depths_uint16.astype(np.float32) * 1e-3
+    if depths.ndim != 3 or frame_indices.shape[0] < expected_frame_count:
+        return None
+    if not np.array_equal(frame_indices[:expected_frame_count], expected_indices):
+        return None
+    return np.asarray(depths[:expected_frame_count], dtype=np.float32)
+
+
 def load_export_depths(seq_folder: str | Path, expected_frame_count: int) -> np.ndarray:
     """Load per-frame metric depth aligned to exported frame indices [0..T-1]."""
     seq_folder = Path(seq_folder)
     expected_frame_count = int(expected_frame_count)
     expected_indices = np.arange(expected_frame_count, dtype=np.int64)
+
+    # Prefer the consolidated result.npz (new single-file output).
+    consolidated = _load_consolidated_result_depths(seq_folder, expected_frame_count, expected_indices)
+    if consolidated is not None:
+        return consolidated
 
     native_path = get_native_depth_output_path(seq_folder)
     candidate_artifacts = []

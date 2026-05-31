@@ -36,7 +36,10 @@ from lib.pipeline.workspace import (
     resolve_tmp_root,
     stage3_frame_cache_dir,
 )
+from lib.pipeline.logging_setup import get_logger
 from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
+
+_logger = get_logger("stages.slam")
 
 CORRUPT_STAGE_ERROR_TOKENS = (
     "bad crc-32",
@@ -79,9 +82,14 @@ def _resolve_focal(seq_folder: str, requested_focal: float = None) -> float:
     try:
         with open(focal_path, "r", encoding="utf-8") as handle:
             return float(handle.read())
-    except Exception:
+    except Exception as error:
         focal = 600.0
-        vprint("No focal length provided")
+        # Visible at WARNING even under quiet mode: a wrong focal cascades through
+        # SLAM/infiller, so the silent default must not pass unnoticed.
+        _logger.warning(
+            "Could not read focal length from %s (%s); falling back to default %.1f.",
+            focal_path, error, focal,
+        )
         with open(focal_path, "w", encoding="utf-8") as handle:
             handle.write(str(focal))
         return focal

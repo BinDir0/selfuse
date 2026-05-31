@@ -11,15 +11,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.pipeline.frame_source import build_frame_source
 from lib.pipeline.tools import detect_track
+from lib.pipeline.workspace import resolve_seq_folder
 from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
 
 
 def detect_track_video(args, detector_runner=None, force=False, detect_batch_size=128, num_io_workers=8, device='cuda:0', half_precision=True, frame_source=None, seq_folder=None):
     if seq_folder is None:
-        file = args.video_path
-        root = os.path.dirname(file)
-        seq = os.path.basename(file).split('.')[0]
-        seq_folder = f'{root}/{seq}'
+        seq_folder = str(resolve_seq_folder(video_path=args.video_path))
     if frame_source is None:
         frame_source = build_frame_source(args.video_path)
 

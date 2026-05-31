@@ -42,6 +42,7 @@ class BatchRunConfig:
     any4d_resolution_set: Optional[int] = None
     any4d_use_amp: Optional[bool] = None
     stage3_tmp_root: Optional[str] = None
+    keep_intermediates: str = "all"
     infer_profile: str = DEFAULT_INFER_PROFILE
     local_cache_root: Optional[str] = None
     local_cache_quota_gb: Optional[float] = None
@@ -127,6 +128,7 @@ class BatchRunConfig:
             any4d_resolution_set=getattr(ns, "any4d_resolution_set", None),
             any4d_use_amp=getattr(ns, "any4d_use_amp", None),
             stage3_tmp_root=getattr(ns, "stage3_tmp_root", None),
+            keep_intermediates=getattr(ns, "keep_intermediates", "all"),
             infer_profile=getattr(ns, "infer_profile", DEFAULT_INFER_PROFILE),
             local_cache_root=getattr(ns, "local_cache_root", None),
             local_cache_quota_gb=getattr(ns, "local_cache_quota_gb", None),

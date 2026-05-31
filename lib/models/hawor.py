@@ -49,21 +49,41 @@ class HAWOR(pl.LightningModule):
 
         # Create backbone feature extractor
         self.backbone = create_backbone(cfg)
-        try:
-            if cfg.MODEL.BACKBONE.get('PRETRAINED_WEIGHTS', None):
-                whole_state_dict = torch.load(cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS, map_location='cpu')['state_dict']
+        backbone_pretrained = cfg.MODEL.BACKBONE.get('PRETRAINED_WEIGHTS', None)
+        _allow_random = os.environ.get("HAWOR_ALLOW_RANDOM_BACKBONE", "").strip().lower() in ("1", "true", "yes", "on")
+        if backbone_pretrained:
+            try:
+                whole_state_dict = torch.load(backbone_pretrained, map_location='cpu')['state_dict']
                 backbone_state_dict = {}
                 for key in whole_state_dict:
                     if key[:9] == 'backbone.':
                         backbone_state_dict[key[9:]] = whole_state_dict[key]
                 self.backbone.load_state_dict(backbone_state_dict)
-                print(f'Loaded backbone weights from {cfg.MODEL.BACKBONE.PRETRAINED_WEIGHTS}')
+                log.info(f'Loaded backbone weights from {backbone_pretrained}')
                 for param in self.backbone.parameters():
                     param.requires_grad = False
-            else:
-                print('WARNING: init backbone from sratch !!!')
-        except:
-            print('WARNING: init backbone from sratch !!!')
+            except Exception as error:
+                # A silently random-initialized backbone produces garbage outputs that
+                # look like a successful run. Fail loudly unless explicitly allowed.
+                if _allow_random:
+                    log.warning(
+                        f"Failed to load backbone weights from {backbone_pretrained} ({error}); "
+                        "HAWOR_ALLOW_RANDOM_BACKBONE is set -> initializing backbone from scratch."
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Failed to load backbone pretrained weights from {backbone_pretrained}: {error}. "
+                        "This would silently produce a randomly-initialized backbone and garbage outputs. "
+                        "Fix the checkpoint path, or set HAWOR_ALLOW_RANDOM_BACKBONE=1 to proceed intentionally."
+                    ) from error
+        elif _allow_random:
+            log.warning('No backbone PRETRAINED_WEIGHTS configured -> initializing backbone from scratch.')
+        else:
+            raise RuntimeError(
+                "No backbone PRETRAINED_WEIGHTS configured. This would silently use a randomly-initialized "
+                "backbone and produce garbage outputs. Set MODEL.BACKBONE.PRETRAINED_WEIGHTS, or "
+                "HAWOR_ALLOW_RANDOM_BACKBONE=1 to proceed intentionally (e.g. training from scratch)."
+            )
 
         # Space-time memory
         if cfg.MODEL.ST_MODULE: 

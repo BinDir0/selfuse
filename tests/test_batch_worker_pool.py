@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import sys
 import tempfile
@@ -7,20 +8,26 @@ from pathlib import Path
 from unittest import mock
 
 
-if "tqdm" not in sys.modules:
+def _module_absent(name):
+    # Only stub when genuinely not installed; otherwise we'd clobber a real module
+    # that just hasn't been imported yet and pollute later tests in this process.
+    return name not in sys.modules and importlib.util.find_spec(name) is None
+
+
+if _module_absent("tqdm"):
     tqdm_module = types.ModuleType("tqdm")
     tqdm_module.tqdm = lambda iterable=None, **_kwargs: iterable if iterable is not None else []
     sys.modules["tqdm"] = tqdm_module
 
 
-if "joblib" not in sys.modules:
+if _module_absent("joblib"):
     joblib_module = types.ModuleType("joblib")
     joblib_module.load = lambda *_args, **_kwargs: None
     joblib_module.dump = lambda *_args, **_kwargs: None
     sys.modules["joblib"] = joblib_module
 
 
-if "torch" not in sys.modules:
+if _module_absent("torch"):
     torch_module = types.ModuleType("torch")
     torch_module.manual_seed = lambda *_args, **_kwargs: None
     torch_module.cuda = types.SimpleNamespace(

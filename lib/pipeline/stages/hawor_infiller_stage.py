@@ -21,6 +21,8 @@ from lib.eval_utils.custom_utils import (
 from lib.eval_utils.filling_utils import filling_postprocess, filling_preprocess
 from lib.pipeline.frame_source import build_frame_source
 from lib.pipeline.tools import parse_chunks_hand_frame
+from lib.pipeline.workspace import resolve_seq_folder
+from lib.pipeline import result_io
 
 from .hawor_cache import _load_or_build_cam_space_cache, _slice_cam_space_pred_dict
 from .hawor_common import QUIET_MODE, vprint
@@ -266,8 +268,7 @@ def _flush_infiller_windows(
 def _resolve_seq_folder(args, seq_folder):
     if seq_folder is not None:
         return seq_folder
-    video_path = args.video_path
-    return os.path.join(os.path.dirname(video_path), os.path.basename(video_path).split(".")[0])
+    return str(resolve_seq_folder(video_path=args.video_path))
 
 
 def _prepare_infiller_state(seq_folder, start_idx, end_idx, frame_chunks_all, frame_source, rebuild_cam_space_cache):
@@ -456,7 +457,7 @@ def _run_infiller_pass(state, filling_model, src_mask, device, horizon, window_b
     return total_windows, timing
 
 
-def _save_infiller_result(seq_folder, state, total_windows, window_batch_size, timing, load_cam_space_time):
+def _save_infiller_result(seq_folder, state, total_windows, window_batch_size, timing, load_cam_space_time, start_idx=None, end_idx=None):
     t_save = time.time()
     _sanitize_infiller_tensors(state)
     save_path = os.path.join(seq_folder, "world_space_res.pth")
@@ -464,6 +465,34 @@ def _save_infiller_result(seq_folder, state, total_windows, window_batch_size, t
         [state.pred_trans, state.pred_rot, state.pred_hand_pose, state.pred_betas, state.pred_valid],
         save_path,
     )
+    # Also write the consolidated single-file result (poses + depth). The legacy
+    # .pth stays for now so existing readers keep working; cleanup later removes it
+    # in favor of result.npz.
+    if start_idx is not None and end_idx is not None:
+        try:
+            depth = result_io._read_legacy_depth(seq_folder, start_idx, end_idx)
+            depth_kwargs = {}
+            if depth is not None:
+                indices, depths, h, w = depth
+                depth_kwargs = {
+                    "depth_frame_indices": indices,
+                    "depths_uint16": depths,
+                    "depth_height": h,
+                    "depth_width": w,
+                }
+            result_io.save_result(
+                seq_folder,
+                pred_trans=state.pred_trans,
+                pred_rot=state.pred_rot,
+                pred_hand_pose=state.pred_hand_pose,
+                pred_betas=state.pred_betas,
+                pred_valid=state.pred_valid,
+                **depth_kwargs,
+            )
+        except Exception as error:
+            # Consolidation is best-effort; the legacy .pth + depth npz remain the
+            # source of truth if it fails. Make the failure visible.
+            result_io._logger.warning("Failed to write consolidated result.npz for %s: %s", seq_folder, error)
     save_time = time.time() - t_save
     print(
         f"[infiller] {os.path.basename(seq_folder)} windows={total_windows} "
@@ -537,6 +566,8 @@ def run_infiller_for_video(
         window_batch_size,
         timing,
         load_cam_space_time,
+        start_idx=start_idx,
+        end_idx=end_idx,
     )
     if return_timing:
         return {

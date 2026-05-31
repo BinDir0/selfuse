@@ -15,6 +15,7 @@ import numpy as np
 from lib.pipeline.batch.config import BatchRunConfig
 from lib.pipeline.errors import CorruptStageDataError
 from lib.pipeline.frame_source import build_frame_source
+from lib.pipeline.logging_setup import get_logger
 from lib.pipeline.runtime import WorkerRuntime, set_determinism
 from lib.pipeline.stage_api import (
     PipelineVideoTask,
@@ -23,6 +24,8 @@ from lib.pipeline.stage_api import (
     is_stage_complete,
     run_pipeline_stage,
 )
+
+_logger = get_logger("batch.worker_pool")
 
 
 def _build_runtime(config: BatchRunConfig, gpu: int) -> WorkerRuntime:
@@ -49,6 +52,7 @@ def _build_runtime(config: BatchRunConfig, gpu: int) -> WorkerRuntime:
         any4d_resolution_set=config.any4d_resolution_set,
         any4d_use_amp=config.any4d_use_amp,
         stage3_tmp_root=config.stage3_tmp_root,
+        keep_intermediates=getattr(config, "keep_intermediates", "all"),
     )
 
 
@@ -115,6 +119,10 @@ def _prefetch_video_data(video_path: str, stage: str, descriptor_map, config: Ba
             "tracks": tracks,
         }
     except Exception:
+        # Prefetch is a best-effort optimization; the stage re-loads on its own.
+        # Log so a recurring prefetch failure (corrupt cache, disk error) is visible
+        # instead of silently degrading throughput.
+        _logger.warning("Prefetch failed for %s (stage=%s); stage will load inline.", video_path, stage, exc_info=True)
         return None
 
 
@@ -231,11 +239,14 @@ class StageWorkerPool:
                 start_idx, end_idx = get_track_range(seq_folder, fast=True)
                 return end_idx - start_idx
             except Exception:
-                pass
+                # Fall back to file size for work estimation; log so a broken track
+                # range (which skews scheduling priority) is observable.
+                _logger.debug("Work estimate via track range failed for %s (stage=%s); using file size.", video_path, stage)
 
         try:
             return os.path.getsize(video_path)
-        except OSError:
+        except OSError as error:
+            _logger.warning("Could not estimate work for %s: %s", video_path, error)
             return 0
 
     def _prioritize_descriptor_locality_videos(self, video_paths: List[str], stage: str) -> List[str]:

@@ -12,6 +12,7 @@ from lib.pipeline.stage_api import (
     get_stage_done_marker,
 )
 from lib.pipeline.datasets.descriptors import ClipDescriptor
+from lib.pipeline.workspace import resolve_seq_folder
 
 
 @dataclass
@@ -219,9 +220,7 @@ class BatchRunState:
         self._done_marker_cache: Dict[str, Dict[str, bool]] = defaultdict(dict)
 
     def _task_seq_folder(self, task: VideoTaskState) -> Path:
-        if task.descriptor is not None:
-            return Path(task.descriptor.seq_folder)
-        return Path(task.video_path).parent / Path(task.video_path).stem
+        return resolve_seq_folder(descriptor=task.descriptor, video_path=task.video_path)
 
     def _first_incomplete_stage(self, task: VideoTaskState) -> str:
         return next(

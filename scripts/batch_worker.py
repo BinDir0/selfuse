@@ -37,8 +37,10 @@ if _env_tmp:
     os.environ["TMP"] = str(SHARED_TMP_DIR)
     tempfile.tempdir = str(SHARED_TMP_DIR)
 
-# Suppress verbose output from stage scripts
-os.environ["HAWOR_QUIET"] = "1"
+# Quiet routine stage chatter by default, but let the user override with
+# HAWOR_QUIET=0. Genuine warnings/errors go through lib.pipeline.logging_setup,
+# which stays visible regardless of this flag.
+os.environ.setdefault("HAWOR_QUIET", "1")
 
 
 STAGES = ["detect_track", "motion", "slam", "infiller"]
@@ -56,6 +58,12 @@ def set_determinism(seed: int):
 
 
 def get_seq_folder(video_path: str) -> Path:
+    # NOTE: This is the legacy demo/standalone fork (also used by the
+    # webdataset_features infiller fallback, which passes a clip *directory* as
+    # video_path and expects world_space_res.pth written in place). It must stay
+    # on the next-to-video layout and self-consistent with the scripts_test_video
+    # stage copies. The centralized layout (lib.pipeline.workspace) is for the
+    # canonical pipeline only.
     video_path = Path(video_path)
     return video_path.parent / video_path.stem
 
@@ -76,8 +84,9 @@ def get_track_range(seq_folder: Path, fast=False):
                 content = cache_file.read_text().strip()
                 start_idx, end_idx = map(int, content.split(","))
                 return start_idx, end_idx
-            except:
-                pass  # Fallback to directory scan
+            except (OSError, ValueError):
+                # Corrupt/unreadable cache -> fall back to directory scan below.
+                pass
 
         # Fast mode: assume standard naming tracks_0_N
         # Try to find it without full iteration
@@ -116,8 +125,8 @@ def get_track_range(seq_folder: Path, fast=False):
                 try:
                     p.rmdir()
                     continue  # Skip this directory
-                except:
-                    pass  # If removal fails, keep it in the list
+                except OSError:
+                    pass  # If removal fails (race / non-empty), keep it in the list
 
         track_dirs.append((start_idx, end_idx, p))
 
