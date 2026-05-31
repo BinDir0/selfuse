@@ -131,11 +131,16 @@ def _detect_gate(model, frame_bgr, *, gate_a: dict) -> bool:
     min_area = float(gate_a.get("min_area_ratio", 0.0)) * width * height
     max_area = float(gate_a.get("max_area_ratio", 1.0)) * width * height
     conf_thresh = float(gate_a.get("conf_thresh", gate_a.get("box_conf_thresh", 0.25)))
+    # A frame passes only when at least `min_hands` clearly visible hands sit in the
+    # central ROI: this is what distinguishes a genuine (typically two-handed)
+    # manipulation from a missing hand or a stray bystander hand at the frame edge.
+    min_hands = max(1, int(gate_a.get("min_hands", 2)))
     try:
         result = model.predict(frame_bgr, verbose=False, conf=conf_thresh)[0]
         boxes = result.boxes
         if boxes is None:
             return False
+        qualified = 0
         for xyxy, conf in zip(boxes.xyxy.cpu().numpy(), boxes.conf.cpu().numpy()):
             if float(conf) < conf_thresh:
                 continue
@@ -144,57 +149,184 @@ def _detect_gate(model, frame_bgr, *, gate_a: dict) -> bool:
             if area < min_area or area > max_area:
                 continue
             if _box_intersects_roi((bx1, by1, bx2, by2), roi_px):
-                return True
+                qualified += 1
+                if qualified >= min_hands:
+                    return True
     except Exception:
         return True
     return False
 
 
-def _motion_gate(prev_gray, gray, *, gate_b: dict, gate_c: dict, roi_px) -> tuple[bool, float]:
+@dataclass
+class MotionSignals:
+    """Camera-stability signal for a pair of (sampled) frames.
+
+    Derived from a single sparse LK pass plus a RANSAC global-motion fit:
+
+    * ``camera_motion_px`` -- median displacement induced by the fitted global
+      (similarity) model on its inliers; this is the camera ego-motion, free of
+      foreground contamination.
+    * ``inlier_ratio`` -- share of tracks explained by that global model; a low
+      ratio means there is no coherent global motion (blur / abrupt motion).
+
+    ``diff_score`` is a cheap ROI frame-difference activity score kept only for
+    reporting; it does not affect the gate decision. Raw tracks
+    (``pts``/``nxt``/``valid``/``inliers``) are exposed so the filter-stage
+    visualiser can render them without re-running the flow.
+    """
+
+    have_flow: bool = False
+    camera_motion_px: float = 0.0
+    inlier_ratio: float = 0.0
+    stable_camera: bool = False
+    diff_score: float = 0.0
+    passed: bool = False
+    pts: "np.ndarray | None" = None
+    nxt: "np.ndarray | None" = None
+    valid: "np.ndarray | None" = None
+    inliers: "np.ndarray | None" = None
+
+
+def _camera_thresh_fraction(gate_b: dict) -> float:
+    """Resolve the camera-motion threshold fraction.
+
+    Prefers the new ``camera_motion_thresh`` key but falls back to the legacy
+    ``camera_disp_thresh`` so existing configs / pipeline overrides / the
+    visualiser keep working.
+    """
+    if "camera_motion_thresh" in gate_b:
+        return float(gate_b["camera_motion_thresh"])
+    return float(gate_b.get("camera_disp_thresh", 0.2))
+
+
+def compute_motion_signals(prev_gray, gray, *, gate_b: dict, gate_c: dict, roi_px) -> MotionSignals:
+    """Compute the camera-stability signal for an adjacent sample pair.
+
+    A RANSAC similarity model is fitted to whole-frame LK tracks; its inlier
+    displacement is the camera ego-motion. A frame passes when that motion is
+    small *and* a coherent global model exists (high inlier ratio). The moving
+    foreground (hands/objects) is intentionally NOT scored here -- hand presence
+    is handled by the detection gate (gate_a). ``gate_c`` is accepted for call
+    compatibility but unused. ``diff_score`` is a reporting-only ROI activity
+    score.
+    """
     import cv2
 
+    signals = MotionSignals()
     if prev_gray is None:
-        return False, 0.0
+        return signals
 
     x1, y1, x2, y2 = roi_px
     roi_prev = prev_gray[y1:y2, x1:x2]
     roi_gray = gray[y1:y2, x1:x2]
     if roi_prev.size == 0 or roi_gray.size == 0:
-        return False, 0.0
+        return signals
 
-    diff_score = float(np.mean(cv2.absdiff(roi_prev, roi_gray))) / 255.0
-    hand_motion = diff_score >= float(gate_c.get("hand_motion_thresh", 0.012))
+    signals.diff_score = float(np.mean(cv2.absdiff(roi_prev, roi_gray))) / 255.0
 
-    max_corners = int(gate_b.get("flow_max_corners", 128))
+    min_tracked = int(gate_b.get("flow_min_tracked", 24))
+    camera_thresh_px = _camera_thresh_fraction(gate_b) * max(prev_gray.shape[:2])
+    reproj_thresh = float(gate_b.get("ransac_reproj_thresh", 3.0))
+    min_inlier_ratio = float(gate_b.get("min_inlier_ratio", 0.30))
+
     points = cv2.goodFeaturesToTrack(
         prev_gray,
-        maxCorners=max_corners,
+        maxCorners=int(gate_b.get("flow_max_corners", 128)),
         qualityLevel=float(gate_b.get("flow_quality_level", 0.01)),
         minDistance=float(gate_b.get("flow_min_distance", 7)),
         blockSize=int(gate_b.get("flow_block_size", 7)),
     )
-    if points is None or len(points) < int(gate_b.get("flow_min_tracked", 24)):
-        return hand_motion, diff_score
+    if points is None or len(points) < min_tracked:
+        # Texture-flat frame: nothing to track -> assume the camera is stable.
+        signals.stable_camera = True
+        signals.passed = True
+        return signals
 
     next_points, status, _err = cv2.calcOpticalFlowPyrLK(prev_gray, gray, points, None)
     if next_points is None or status is None:
-        return hand_motion, diff_score
+        signals.stable_camera = False
+        return signals
     valid = status.reshape(-1) > 0
-    if int(valid.sum()) < int(gate_b.get("flow_min_tracked", 24)):
-        return hand_motion, diff_score
-    flow = next_points[valid].reshape(-1, 2) - points[valid].reshape(-1, 2)
-    median_disp = float(np.median(np.linalg.norm(flow, axis=1)))
-    camera_disp_thresh = float(gate_b.get("camera_disp_thresh", 0.2))
-    stable_camera = median_disp <= camera_disp_thresh * max(prev_gray.shape[:2])
-    return bool(hand_motion and stable_camera), diff_score
+    if int(valid.sum()) < min_tracked:
+        # We had enough corners but lost most tracks: this almost always means
+        # large camera motion / motion blur -> treat the camera as unstable.
+        signals.stable_camera = False
+        return signals
+
+    pts = points[valid].reshape(-1, 2).astype(np.float32)
+    nxt = next_points[valid].reshape(-1, 2).astype(np.float32)
+    signals.pts = pts
+    signals.nxt = nxt
+    signals.valid = valid
+    signals.have_flow = True
+
+    model, inlier_mask = cv2.estimateAffinePartial2D(
+        pts, nxt, method=cv2.RANSAC, ransacReprojThreshold=reproj_thresh
+    )
+    if model is None:
+        # Degenerate fit -> cannot trust the geometry; reject as unstable.
+        signals.stable_camera = False
+        return signals
+
+    inliers = inlier_mask.reshape(-1).astype(bool) if inlier_mask is not None else np.zeros(len(pts), bool)
+    signals.inliers = inliers
+    inlier_ratio = float(inliers.mean()) if inliers.size else 0.0
+    signals.inlier_ratio = inlier_ratio
+
+    # Camera motion: displacement predicted by the global model on its inliers.
+    predicted = (pts @ model[:, :2].T) + model[:, 2]
+    model_disp = np.linalg.norm(predicted - pts, axis=1)
+    if inliers.any():
+        signals.camera_motion_px = float(np.median(model_disp[inliers]))
+    else:
+        signals.camera_motion_px = float(np.median(model_disp))
+    signals.stable_camera = bool(
+        signals.camera_motion_px <= camera_thresh_px and inlier_ratio >= min_inlier_ratio
+    )
+    signals.passed = signals.stable_camera
+    return signals
 
 
-def _merge_valid_samples(samples: list[tuple[int, bool, float]], *, fps: float, skip_frames: int, min_keep_sec: float) -> list[ClipInterval]:
+def _motion_gate(prev_gray, gray, *, gate_b: dict, gate_c: dict, roi_px) -> tuple[bool, float]:
+    signals = compute_motion_signals(prev_gray, gray, gate_b=gate_b, gate_c=gate_c, roi_px=roi_px)
+    return signals.passed, signals.diff_score
+
+
+def _merge_valid_samples(
+    samples: list[tuple[int, bool, float]],
+    *,
+    fps: float,
+    skip_frames: int,
+    min_keep_sec: float,
+    max_consecutive_invalid: int = 3,
+) -> list[ClipInterval]:
+    """Merge per-sample valid/invalid decisions into clip intervals.
+
+    A span is cut only after ``max_consecutive_invalid`` consecutive failing
+    samples; isolated failures below that run are tolerated and folded into the
+    current span (treated as brief occlusion / jitter). The span always ends at
+    the last *valid* sample, so the tolerated trailing failures are excluded.
+    """
     intervals: list[ClipInterval] = []
     start = None
     scores = []
     last_frame = None
+    bad_run = 0
     min_frames = max(1, int(round(float(min_keep_sec) * fps)))
+    cut_threshold = max(1, int(max_consecutive_invalid))
+
+    def _flush():
+        nonlocal start, scores, last_frame, bad_run
+        if start is not None and last_frame is not None:
+            end = last_frame + skip_frames
+            if end - start >= min_frames:
+                intervals.append(
+                    ClipInterval(start, end, start / fps, end / fps, float(np.mean(scores) if scores else 0.0))
+                )
+        start = None
+        scores = []
+        last_frame = None
+        bad_run = 0
 
     for frame_idx, is_valid, score in samples:
         if is_valid:
@@ -203,21 +335,15 @@ def _merge_valid_samples(samples: list[tuple[int, bool, float]], *, fps: float, 
                 scores = []
             scores.append(score)
             last_frame = frame_idx
+            bad_run = 0
             continue
-        if start is not None and last_frame is not None:
-            end = last_frame + skip_frames
-            if end - start >= min_frames:
-                intervals.append(
-                    ClipInterval(start, end, start / fps, end / fps, float(np.mean(scores) if scores else 0.0))
-                )
-            start = None
-            scores = []
-            last_frame = None
+        if start is None:
+            continue
+        bad_run += 1
+        if bad_run >= cut_threshold:
+            _flush()
 
-    if start is not None and last_frame is not None:
-        end = last_frame + skip_frames
-        if end - start >= min_frames:
-            intervals.append(ClipInterval(start, end, start / fps, end / fps, float(np.mean(scores) if scores else 0.0)))
+    _flush()
     return intervals
 
 
@@ -268,6 +394,7 @@ def analyze_video_intervals(video_path: str | Path, cfg: dict, *, model=None) ->
         fps=fps,
         skip_frames=skip_frames,
         min_keep_sec=float(gate_c.get("min_keep_sec", 2.0)),
+        max_consecutive_invalid=int(gate_c.get("max_consecutive_invalid", 3)),
     )
     return intervals, {
         "video": str(video_path),

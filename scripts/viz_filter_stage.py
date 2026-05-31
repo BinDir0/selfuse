@@ -63,9 +63,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.clip.heuristic_video_clipper import (  # noqa: E402
+    _camera_thresh_fraction,
     _heuristic_section,
     _load_yolo,
     _roi_bounds,
+    compute_motion_signals,
     discover_videos,
     load_clip_config,
 )
@@ -139,58 +141,39 @@ def _detect_boxes(model, frame_small, gate_a):
 
 
 def _flow(prev_gray, gray, gate_b, gate_c, roi_px):
-    """Return flow detail dict mirroring _motion_gate's numbers."""
+    """Return flow detail dict mirroring the shared motion gate's numbers.
+
+    Thin adapter over ``compute_motion_signals`` so the visualiser and the real
+    gate can never drift apart. ``median_disp`` here is the RANSAC global-model
+    camera motion; the gate decides on camera stability only. The 4x7 grid LK
+    below is visualisation-only and stays local to this script.
+    """
     out = {
         "have_flow": False,
-        "pts": None, "nxt": None, "valid": None,
+        "pts": None, "nxt": None, "valid": None, "inliers": None,
         "median_disp": 0.0, "thresh_px": 0.0,
-        "stable_camera": False, "diff_score": 0.0, "hand_motion": False,
+        "stable_camera": False, "diff_score": 0.0, "inlier_ratio": 0.0,
         "gateB_pass": False,
     }
     if prev_gray is None:
         return out
-    x1, y1, x2, y2 = roi_px
-    roi_prev = prev_gray[y1:y2, x1:x2]
-    roi_gray = gray[y1:y2, x1:x2]
-    if roi_prev.size == 0 or roi_gray.size == 0:
-        return out
-    diff_score = float(np.mean(cv2.absdiff(roi_prev, roi_gray))) / 255.0
-    out["diff_score"] = diff_score
-    out["hand_motion"] = diff_score >= float(gate_c.get("hand_motion_thresh", 0.012))
 
-    min_tracked = int(gate_b.get("flow_min_tracked", 24))
-    pts = cv2.goodFeaturesToTrack(
-        prev_gray,
-        maxCorners=int(gate_b.get("flow_max_corners", 128)),
-        qualityLevel=float(gate_b.get("flow_quality_level", 0.01)),
-        minDistance=float(gate_b.get("flow_min_distance", 7)),
-        blockSize=int(gate_b.get("flow_block_size", 7)),
-    )
-    thresh_px = float(gate_b.get("camera_disp_thresh", 0.2)) * max(prev_gray.shape[:2])
-    out["thresh_px"] = thresh_px
-    if pts is None or len(pts) < min_tracked:
-        # gate returns (hand_motion, diff): camera assumed stable for stitching
-        out["gateB_pass"] = out["hand_motion"]
-        return out
-    nxt, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts, None)
-    if nxt is None or status is None:
-        out["gateB_pass"] = out["hand_motion"]
-        return out
-    valid = status.reshape(-1) > 0
-    if int(valid.sum()) < min_tracked:
-        out["gateB_pass"] = out["hand_motion"]
-        return out
-    flow = nxt[valid].reshape(-1, 2) - pts[valid].reshape(-1, 2)
-    median_disp = float(np.median(np.linalg.norm(flow, axis=1)))
-    stable = median_disp <= thresh_px
+    sig = compute_motion_signals(prev_gray, gray, gate_b=gate_b, gate_c=gate_c, roi_px=roi_px)
     out.update({
-        "have_flow": True,
-        "pts": pts[valid].reshape(-1, 2),
-        "nxt": nxt[valid].reshape(-1, 2),
-        "median_disp": median_disp,
-        "stable_camera": stable,
-        "gateB_pass": bool(out["hand_motion"] and stable),
+        "have_flow": sig.have_flow,
+        "pts": sig.pts,
+        "nxt": sig.nxt,
+        "valid": sig.valid,
+        "inliers": sig.inliers,
+        "median_disp": sig.camera_motion_px,
+        "thresh_px": _camera_thresh_fraction(gate_b) * max(prev_gray.shape[:2]),
+        "stable_camera": sig.stable_camera,
+        "diff_score": sig.diff_score,
+        "inlier_ratio": sig.inlier_ratio,
+        "gateB_pass": sig.passed,
     })
+    if not sig.have_flow:
+        return out
     # extra: single-step LK on a fixed 4x7 grid spread across the FULL frame
     # (visualisation only; gate B's decision still uses goodFeaturesToTrack
     # restricted to the ROI in the path above).
@@ -785,10 +768,8 @@ def _flow_grid_legend(img, *, rows=4, cols=7, cell=10, margin=18):
 def gate_lines(sample, meta):
     fl = sample["flow"]
     ga = meta["gate_a"]
-    gc = meta["gate_c"]
     a_col = C_PASS if sample["gateA_pass"] else C_REJECT
     b_col = C_PASS if (not fl["have_flow"] or fl["stable_camera"]) else C_REJECT
-    c_col = C_PASS if fl["hand_motion"] else C_REJECT
     o_col = C_PASS if sample["overall"] else C_REJECT
     lines = [
         (f"frame {sample['frame_idx']}  |  OVERALL: {'PASS' if sample['overall'] else 'REJECT'}", o_col),
@@ -798,14 +779,12 @@ def gate_lines(sample, meta):
     ]
     if fl["have_flow"]:
         lines.append((
-            f"B camera: median flow {fl['median_disp']:.1f}px "
-            f"(thr {fl['thresh_px']:.1f}px) -> {'pass' if fl['stable_camera'] else 'FAIL too much motion'}",
+            f"B camera: model flow {fl['median_disp']:.1f}px "
+            f"(thr {fl['thresh_px']:.1f}px, inlier {fl['inlier_ratio']:.2f}) -> "
+            f"{'pass' if fl['stable_camera'] else 'FAIL too much motion'}",
             b_col))
     else:
-        lines.append(("B camera: insufficient tracked points", b_col))
-    lines.append((
-        f"C hand motion: diff {fl['diff_score']:.3f} (thr {gc.get('hand_motion_thresh')}) -> "
-        f"{'pass' if fl['hand_motion'] else 'fail'}", c_col))
+        lines.append(("B camera: insufficient tracked points (flat texture) -> stable", b_col))
     return lines
 
 
@@ -1057,9 +1036,9 @@ def render_range(video_path, cfg, model, start, end, out_dir, stride=1, jpg_qual
             "qualified": qcount,
             "gateA_pass": bool(gateA),
             "stable_camera": bool(fl["stable_camera"]),
-            "hand_motion": bool(fl["hand_motion"]),
             "median_disp": fl["median_disp"],
             "thresh_px": fl["thresh_px"],
+            "inlier_ratio": fl["inlier_ratio"],
             "diff_score": fl["diff_score"],
             "have_flow": bool(fl["have_flow"]),
             "overall": sample["overall"],
@@ -1127,8 +1106,6 @@ def main(argv=None):
                          "of decoded max-side). Default config is 0.2 (= ~89.6 px "
                          "on 448x256); lower it (e.g. 0.05) to make walking-camera "
                          "footage actually trip caseB. Banner shows the value in use.")
-    ap.add_argument("--hand_motion_thresh", type=float, default=None,
-                    help="override gate_c.hand_motion_thresh for this run.")
     ap.add_argument("--n_trail", type=int, default=1,
                     help="number of backward LK steps for the quiver direction "
                          "(default 1 = use immediate previous-frame motion). "
@@ -1154,21 +1131,18 @@ def main(argv=None):
         override = yaml.safe_load(Path(args.override_config).read_text()) or {}
     cfg = load_clip_config(args.config, override)
     # CLI threshold overrides (applied AFTER config merge so they always win)
-    if args.camera_disp_thresh is not None or args.hand_motion_thresh is not None:
+    if args.camera_disp_thresh is not None:
         heur = cfg.setdefault("heuristic", {})
-        if args.camera_disp_thresh is not None:
-            gb = heur.setdefault("gate_b", {})
-            old = gb.get("camera_disp_thresh", 0.2)
-            gb["camera_disp_thresh"] = float(args.camera_disp_thresh)
-            print(f"[override] gate_b.camera_disp_thresh: {old} -> "
-                  f"{gb['camera_disp_thresh']} (= "
-                  f"{gb['camera_disp_thresh'] * max(int(heur.get('decode_width', 448)), int(heur.get('decode_height', 256))):.1f} "
-                  f"px on decoded grid)")
-        if args.hand_motion_thresh is not None:
-            gc = heur.setdefault("gate_c", {})
-            old = gc.get("hand_motion_thresh", 0.012)
-            gc["hand_motion_thresh"] = float(args.hand_motion_thresh)
-            print(f"[override] gate_c.hand_motion_thresh: {old} -> {gc['hand_motion_thresh']}")
+        gb = heur.setdefault("gate_b", {})
+        old = gb.get("camera_motion_thresh", gb.get("camera_disp_thresh", 0.2))
+        # Set both keys so the override wins regardless of which one the
+        # config defines (camera_motion_thresh takes precedence).
+        gb["camera_motion_thresh"] = float(args.camera_disp_thresh)
+        gb["camera_disp_thresh"] = float(args.camera_disp_thresh)
+        print(f"[override] gate_b.camera_motion_thresh: {old} -> "
+              f"{gb['camera_motion_thresh']} (= "
+              f"{gb['camera_motion_thresh'] * max(int(heur.get('decode_width', 448)), int(heur.get('decode_height', 256))):.1f} "
+              f"px on decoded grid)")
     model = _load_yolo(args.model_path)
     if model is None:
         print(f"[warn] detector not loaded from {args.model_path}; "
@@ -1228,7 +1202,7 @@ def main(argv=None):
                     fl = forced["flow"]
                     print(f"  [warn] forced frame {args.pass_frame} does NOT actually "
                           f"pass all gates (gateA={forced['gateA_pass']} "
-                          f"stable_cam={fl['stable_camera']} hand_motion={fl['hand_motion']}); "
+                          f"stable_cam={fl['stable_camera']}); "
                           f"rendering it anyway as caseC_pass.")
                 cands["caseC_pass"] = [forced]
         stem = "".join(c if c.isalnum() or c in "-_." else "_" for c in vp.stem)
