@@ -42,6 +42,12 @@ Diagnostics:
   These are developer tools, not part of the pipeline; run them directly, e.g.
   `python tools/diagnostics/diagnose_camera_drift_reproj.py --seq_folder <clip>`.
 
+Dataset / export tools:
+
+- Frame/mesh/shard utilities and demo packaging: `tools/dataset/` (e.g. `make_demo`,
+  `export_cam_space_meshes`, `repack_webdataset`, `prepare_partial_infer_manifest`,
+  `generate_video_list`).
+
 ## Public Scripts
 
 Use these as the maintained public scripts:

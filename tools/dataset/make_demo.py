@@ -15,7 +15,7 @@ motion + SLAM stages:
 and the extracted RGB frames sitting next to it (the pipeline's frames/<clip_id>/).
 
 The 3D render needs aitviewer with headless EGL, so run this on a GPU machine:
-  python scripts/make_demo.py --seq_folder /path/to/<clip>.hawor_pipeline/stage_outputs/<clip_id>
+  python tools/dataset/make_demo.py --seq_folder /path/to/<clip>.hawor_pipeline/stage_outputs/<clip_id>
 
 If the frames live somewhere non-standard, pass --frames_dir explicitly.
 Extra render knobs (view/azim/elev/num_samples/hands/...) are forwarded to

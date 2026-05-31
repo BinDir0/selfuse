@@ -11,10 +11,10 @@ Camera convention of the exported vertices is OpenCV (x-right, y-down, z-forward
 matching how the motion stage projects them (u = x/z*focal + cx).
 
 Usage:
-    python scripts/export_cam_space_meshes.py --video_path example/video_0.mp4 \
+    python tools/dataset/export_cam_space_meshes.py --video_path example/video_0.mp4 \
         --out example/video_0/hand_meshes.npz
     # or point directly at the sequence folder that contains cam_space/
-    python scripts/export_cam_space_meshes.py --seq_folder example/video_0 --out hand_meshes.npz
+    python tools/dataset/export_cam_space_meshes.py --seq_folder example/video_0 --out hand_meshes.npz
 """
 import argparse
 import glob

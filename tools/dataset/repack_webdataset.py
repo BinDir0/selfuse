@@ -9,7 +9,7 @@ import os
 import tarfile
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 import sys
 
 from tqdm import tqdm
