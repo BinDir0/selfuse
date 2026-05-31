@@ -167,6 +167,41 @@ class GpuParseTests(unittest.TestCase):
         self.assertEqual(preflight._parse_gpu_indices(None), [])
 
 
+class GpuCheckTests(unittest.TestCase):
+    """check_gpu must probe CUDA in a subprocess (never init CUDA in-process, which
+    would break forked workers) and report missing/insufficient devices."""
+
+    def test_probe_failure_reports_problem(self):
+        from unittest import mock
+        r = preflight.PreflightReport()
+        with mock.patch.object(preflight, "_query_cuda", return_value=None):
+            preflight.check_gpu(r, "0")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.problems[0].category, "gpu")
+
+    def test_cuda_unavailable_reports_problem(self):
+        from unittest import mock
+        r = preflight.PreflightReport()
+        with mock.patch.object(preflight, "_query_cuda", return_value=(False, 0)):
+            preflight.check_gpu(r, "0")
+        self.assertFalse(r.ok)
+
+    def test_enough_devices_ok(self):
+        from unittest import mock
+        r = preflight.PreflightReport()
+        with mock.patch.object(preflight, "_query_cuda", return_value=(True, 4)):
+            preflight.check_gpu(r, "0,1,3")
+        self.assertTrue(r.ok, r.render())
+
+    def test_requested_index_out_of_range(self):
+        from unittest import mock
+        r = preflight.PreflightReport()
+        with mock.patch.object(preflight, "_query_cuda", return_value=(True, 2)):
+            preflight.check_gpu(r, "5")
+        self.assertFalse(r.ok)
+        self.assertIn("index 5", r.render())
+
+
 class GatingTests(unittest.TestCase):
     def test_no_gpu_or_tmp_stage_skips_those_checks(self):
         # 'build'/'validate' are not GPU/tmp stages: report should be ok even with

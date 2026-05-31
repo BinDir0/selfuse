@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
@@ -167,27 +169,55 @@ def _parse_gpu_indices(gpus) -> List[int]:
     return indices
 
 
+_GPU_PROBE = (
+    "import torch;"
+    "a=torch.cuda.is_available();"
+    "print(int(a), torch.cuda.device_count() if a else 0)"
+)
+
+
+def _query_cuda(timeout: float = 60.0):
+    """Return (available, device_count) by probing torch.cuda in a SUBPROCESS.
+
+    Crucially this never initializes a CUDA context in the current process: doing
+    so before the worker pool forks would break the workers with "Cannot
+    re-initialize CUDA in forked subprocess". Returns None on probe failure.
+    """
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c", _GPU_PROBE],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    parts = out.stdout.split()
+    if len(parts) < 2:
+        return None
+    try:
+        return (parts[0] == "1", int(parts[1]))
+    except ValueError:
+        return None
+
+
 def check_gpu(report: PreflightReport, gpus) -> None:
     indices = _parse_gpu_indices(gpus)
-    try:
-        import torch  # noqa: PLC0415 (lazy: keep module importable without torch)
-    except ImportError:
-        report.add("gpu", "torch is not importable", "install the pipeline requirements (see README)")
+    probe = _query_cuda()
+    if probe is None:
+        report.add(
+            "gpu",
+            "could not verify CUDA via torch (import/query failed)",
+            "ensure a CUDA-enabled torch is installed (see README)",
+        )
         return
-    # Be defensive: never let preflight itself crash on a partial/odd torch.
-    cuda = getattr(torch, "cuda", None)
-    is_available = getattr(cuda, "is_available", None)
-    if not callable(is_available):
-        report.add("gpu", "torch.cuda is unavailable", "install a CUDA-enabled torch (see README)")
-        return
-    try:
-        available = bool(is_available())
-        device_count = int(torch.cuda.device_count()) if available else 0
-    except Exception as error:  # pragma: no cover - defensive
-        report.add("gpu", f"could not query CUDA devices: {error}", "check the torch/CUDA install")
-        return
+    available, device_count = probe
     if not available:
-        report.add("gpu", "CUDA is not available (torch.cuda.is_available() is False)", "check drivers / CUDA_VISIBLE_DEVICES")
+        report.add(
+            "gpu",
+            "CUDA is not available (torch.cuda.is_available() is False)",
+            "check drivers / CUDA_VISIBLE_DEVICES",
+        )
         return
     for idx in indices:
         if idx >= device_count:
