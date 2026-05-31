@@ -75,10 +75,16 @@ def main(argv: list[str] | None = None):
         from lib.pipeline.preflight import collect_batch_weights, run_preflight
 
         stage_list = [s.strip() for s in str(args.stages).split(",") if s.strip()]
+        # In descriptor-manifest mode the "video paths" are descriptor clip-ids, not
+        # filesystem paths (the real inputs are the descriptors' frame sources,
+        # produced by the prepare stage). Only validate raw paths for file/dir modes.
+        preflight_video_paths = (
+            inputs.video_paths if inputs.input_mode in ("video_list", "video_dir") else None
+        )
         report = run_preflight(
             stages=stage_list,
             weights=collect_batch_weights(PROJECT_ROOT, args),
-            video_paths=inputs.video_paths,
+            video_paths=preflight_video_paths,
             args=args,
             gpus=args.gpus,
             project_root=PROJECT_ROOT,

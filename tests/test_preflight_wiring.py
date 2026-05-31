@@ -34,11 +34,19 @@ import scripts.batch_infer as batch_infer  # noqa: E402
 from lib.pipeline import preflight as preflight_mod  # noqa: E402
 
 
-def _fake_inputs():
+def _fake_inputs(input_mode="video_list", video_paths=None):
     return types.SimpleNamespace(
-        video_paths=["v.mp4"], descriptors=None, input_mode="video_list",
+        video_paths=video_paths or ["v.mp4"], descriptors=None, input_mode=input_mode,
         input_path="list.txt", total_items=1, start_idx=0, end_idx=1,
     )
+
+
+def _fake_batch_module():
+    fake = types.ModuleType("lib.pipeline.batch")
+    fake.BatchRunConfig = types.SimpleNamespace(from_args=lambda *a, **k: object())
+    sched = types.SimpleNamespace(run=lambda: True)
+    fake.BatchScheduler = lambda *a, **k: sched
+    return fake
 
 
 class PreflightWiringTests(unittest.TestCase):
@@ -73,6 +81,42 @@ class PreflightWiringTests(unittest.TestCase):
             self.assertEqual(rc, 0)
         finally:
             os.environ.pop("HAWOR_SKIP_PREFLIGHT", None)
+
+
+class PreflightInputGatingTests(unittest.TestCase):
+    """Regression: descriptor-manifest 'video paths' are clip-ids, not files, so the
+    input-existence check must be skipped for that mode (else it false-fails)."""
+
+    def setUp(self):
+        os.environ.pop("HAWOR_SKIP_PREFLIGHT", None)
+
+    def _run_and_capture(self, input_mode, video_paths):
+        ok = preflight_mod.PreflightReport()
+        captured = {}
+
+        def _fake_run_preflight(**kwargs):
+            captured.update(kwargs)
+            return ok
+
+        import tempfile
+        with mock.patch.object(batch_infer, "load_batch_inputs",
+                               return_value=_fake_inputs(input_mode, video_paths)), \
+            mock.patch.object(preflight_mod, "run_preflight", side_effect=_fake_run_preflight), \
+            mock.patch.dict(sys.modules, {"lib.pipeline.batch": _fake_batch_module()}), \
+            tempfile.TemporaryDirectory() as run_dir, \
+            mock.patch.object(batch_infer, "_resolve_run_dir", return_value=Path(run_dir)):
+            batch_infer.main(["--descriptor_manifest", "m.jsonl", "--gpus", "0", "--stages", "detect_track,motion"])
+        return captured
+
+    def test_descriptor_manifest_skips_input_path_check(self):
+        captured = self._run_and_capture("descriptor_manifest", ["f001_w018_v00140_i000"])
+        self.assertIsNone(captured.get("video_paths"),
+                          "descriptor-manifest clip-ids must not be path-checked")
+
+    def test_video_list_mode_still_checks_paths(self):
+        # For real file modes, the paths ARE forwarded for existence checking.
+        captured = self._run_and_capture("video_list", ["/abs/v.mp4"])
+        self.assertEqual(captured.get("video_paths"), ["/abs/v.mp4"])
 
 
 if __name__ == "__main__":
