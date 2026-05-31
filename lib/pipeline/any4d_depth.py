@@ -381,6 +381,38 @@ def _predict_depths_from_views(
     return np.stack(depth_list, axis=0)
 
 
+def build_any4d_camera_views_from_paths(
+    image_paths,
+    intrinsics_per_view,
+    camera_poses_c2w_per_view,
+    runner,
+    *,
+    task=None,
+    norm_type="dinov2",
+):
+    """Pose-conditioned variant of build_any4d_views (Goal A.1 of the metric plan).
+
+    Reads each image file as bytes and forwards to ``build_any4d_camera_views_from_image_bytes``
+    with per-view intrinsics (3x3 K matrices) and cam2world poses (4x4 OpenCV-RDF).
+    Use when the slam stage's selected Any4D task is pose-conditioned (anything other than
+    ``images_only``), so the network gets DPVO's scale-free per-frame geometry as input.
+    Returns model-ready processed views (same shape contract as ``build_any4d_views``).
+    """
+    payloads = []
+    for path in image_paths:
+        with open(path, "rb") as fh:
+            payloads.append(fh.read())
+    views, _ = build_any4d_camera_views_from_image_bytes(
+        payloads,
+        intrinsics_per_view,
+        camera_poses_c2w_per_view,
+        runner=runner,
+        task=task or runner.get("task"),
+        norm_type=norm_type,
+    )
+    return views
+
+
 def build_any4d_views(frame_source, frame_indices, runner=None, *, any4d_repo_root=None, checkpoint_path=None, resolution_set=None, use_amp=None, image_paths=None):
     frame_indices = [int(frame_idx) for frame_idx in frame_indices]
     if not frame_indices:

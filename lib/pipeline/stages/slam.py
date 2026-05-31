@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import math
 import os
 import shutil
@@ -20,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.any4d_depth import (
+    build_any4d_camera_views_from_paths,
     build_any4d_runner,
     build_any4d_views,
     iter_any4d_depth_sequence_batches,
@@ -31,6 +31,11 @@ from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
 from lib.pipeline.slam_geom_utils import est_calib, get_dimention
+from lib.pipeline.workspace import (
+    resolve_seq_folder,
+    resolve_tmp_root,
+    stage3_frame_cache_dir,
+)
 from hawor.utils.logging import QUIET_MODE, vprint  # noqa: F401
 
 CORRUPT_STAGE_ERROR_TOKENS = (
@@ -51,8 +56,7 @@ CORRUPT_STAGE_ERROR_TOKENS = (
 def _resolve_seq_folder(video_path: str, seq_folder: str = None) -> str:
     if seq_folder is not None:
         return seq_folder
-    video_path_obj = Path(video_path)
-    return str(video_path_obj.parent / video_path_obj.stem)
+    return str(resolve_seq_folder(video_path=video_path))
 
 
 def _resolve_frame_source(video_path: str, frame_source=None):
@@ -101,24 +105,9 @@ def _resolve_any4d_batch_size(default_batch_size: int) -> int:
 
 
 def _resolve_stage3_tmp_root(args) -> str:
-    tmp_root = (
-        getattr(args, "stage3_tmp_root", None)
-        or os.environ.get("HAWOR_STAGE3_TMP_ROOT")
-        or os.environ.get("HAWOR_BATCH_TMPDIR")
-    )
-    if not tmp_root:
-        raise ValueError(
-            "Stage3 (Any4D SLAM) temporary workspace root is not configured. "
-            "Frame materialization can write many GB, so this is never defaulted "
-            "and must point at a large-capacity disk. Set one of (highest priority "
-            "first): --stage3_tmp_root, $HAWOR_STAGE3_TMP_ROOT, or $HAWOR_BATCH_TMPDIR, "
-            "e.g. `export HAWOR_BATCH_TMPDIR=/efs-exp/<user>/tmp`."
-        )
-    tmp_root = os.path.abspath(os.path.expanduser(tmp_root))
-    os.makedirs(tmp_root, exist_ok=True)
-    if not os.access(tmp_root, os.W_OK | os.X_OK):
-        raise PermissionError(f"Stage3 tmp root is not writable: {tmp_root}")
-    return tmp_root
+    # Resolution + validation lives in lib.pipeline.workspace so preflight can run
+    # the same check at startup instead of only here, mid-run.
+    return resolve_tmp_root(args, required=True)
 
 
 def _keep_stage3_tmp() -> bool:
@@ -160,9 +149,7 @@ def _frame_output_extension(frame_source, frame_idx: int):
 
 
 def _stage3_frame_cache_dir(tmp_root: str, seq_folder: str, start_idx: int, end_idx: int) -> str:
-    seq_hash = hashlib.sha1(os.path.abspath(seq_folder).encode("utf-8")).hexdigest()[:12]
-    seq_name = Path(seq_folder).name
-    return os.path.join(tmp_root, "hawor_stage3_frames", f"{seq_name}_{seq_hash}_{start_idx}_{end_idx}")
+    return stage3_frame_cache_dir(tmp_root, seq_folder, start_idx, end_idx)
 
 
 def _stage3_frame_cache_marker(cache_dir: str) -> str:
@@ -461,6 +448,33 @@ def _resize_depths(depth_batch: np.ndarray, output_hw):
     return np.stack(resized, axis=0)
 
 
+def _quat_to_mat3_xyzw(q):
+    """4-vec [qx,qy,qz,qw] -> 3x3 rotation matrix (numpy)."""
+    x, y, z, w = [float(v) for v in q]
+    n = (x * x + y * y + z * z + w * w) ** 0.5 or 1.0
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+    ], dtype=np.float64)
+
+
+def _traj_row_to_c2w_4x4(traj_row):
+    """traj[i] = [tx,ty,tz, qx,qy,qz,qw] (c2w) -> 4x4 c2w matrix (OpenCV RDF)."""
+    t = np.asarray(traj_row[:3], dtype=np.float64)
+    R = _quat_to_mat3_xyzw(traj_row[3:7])
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R; T[:3, 3] = t
+    return T
+
+
+def _build_intrinsics_K(focal, calib):
+    """3x3 K from focal + calib's principal point (last two entries [cx, cy])."""
+    cx, cy = float(calib[-2]), float(calib[-1])
+    return np.array([[float(focal), 0.0, cx], [0.0, float(focal), cy], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
 def _predict_any4d_depths_for_frames(
     frame_source,
     frame_ids: np.ndarray,
@@ -475,6 +489,9 @@ def _predict_any4d_depths_for_frames(
     frame_path_map,
     any4d_cache_suffix: str = "",
     timing: dict | None = None,
+    traj_dense=None,     # (N,7) c2w from DPVO; required when task is pose-conditioned (Goal A.1)
+    focal=None,          # scalar; required with traj_dense
+    calib=None,          # [fx, fy, cx, cy]; required with traj_dense (for principal point)
 ):
     cache_path = _any4d_cache_path(seq_folder, start_idx, end_idx, suffix=any4d_cache_suffix)
     force = os.environ.get("HAWOR_ANY4D_FORCE_RERUN", "0") == "1"
@@ -495,8 +512,32 @@ def _predict_any4d_depths_for_frames(
     pred_depths = np.empty((len(frame_ids),) + tuple(output_hw), dtype=np.float32)
     desc = "Any4D batches (all frames)" if any4d_cache_suffix else "Any4D batches"
 
+    # Goal A.1: if the selected Any4D task is pose-conditioned (anything other than
+    # images_only), feed DPVO's scale-free per-frame c2w pose + intrinsics for every view.
+    # Order matches `predict_any4d_depths_from_views` expectation: [ref, *batch] -> pred1
+    # is the ref (discarded), pred2.. correspond to batch_indices.
+    posed_task = str(any4d_runner.get("task", "images_only")) != "images_only"
+    if posed_task and (traj_dense is None or focal is None or calib is None):
+        raise RuntimeError(
+            "[Any4D] pose-conditioned task selected (HAWOR_ANY4D_TASK="
+            f"{any4d_runner.get('task')}), but traj_dense/focal/calib were not threaded "
+            "into _predict_any4d_depths_for_frames — fix the caller."
+        )
+    K = _build_intrinsics_K(focal, calib) if posed_task else None
+
     def _prepare_views(batch_indices, ref_frame_idx):
-        batch_image_paths = [frame_path_map[int(ref_frame_idx)], *[frame_path_map[int(frame_idx)] for frame_idx in batch_indices]]
+        ordered = [int(ref_frame_idx), *[int(frame_idx) for frame_idx in batch_indices]]
+        batch_image_paths = [frame_path_map[i] for i in ordered]
+        if posed_task:
+            cam_poses = [_traj_row_to_c2w_4x4(traj_dense[i]) for i in ordered]
+            intrinsics = [K] * len(ordered)
+            return build_any4d_camera_views_from_paths(
+                batch_image_paths,
+                intrinsics,
+                cam_poses,
+                runner=any4d_runner,
+                task=any4d_runner.get("task"),
+            )
         return build_any4d_views(
             frame_source,
             list(batch_indices),
@@ -828,6 +869,9 @@ def hawor_slam(
                     frame_path_map=stage3_frame_path_map,
                     any4d_cache_suffix="_allframes",
                     timing=timing,
+                    traj_dense=traj_dense,
+                    focal=focal,
+                    calib=calib,
                 )
                 depth_frame_indices = frame_ids.astype(np.int64)
                 # Phase 1: remove Any4D per-batch metric-scale steps before saving / scale-est
@@ -916,6 +960,9 @@ def hawor_slam(
                 frame_path_map=stage3_frame_path_map,
                 any4d_cache_suffix="",
                 timing=timing,
+                traj_dense=traj_dense,
+                focal=focal,
+                calib=calib,
             )
             keyframe_depths = [depth_predictions[i] for i in range(len(depth_predictions))]
             stats["any4d_batch_cache_hit"] = int(bool(depth_cache_used))
