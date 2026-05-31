@@ -13,7 +13,7 @@ scope here (those reuse the existing Stage-4 figures / a separate lowdim pass).
 
 Examples
 --------
-  python scripts/dataset_stats.py \
+  python tools/diagnostics/dataset_stats.py \
       --manifest /path/to/clip_manifest.jsonl \
       --annotation_root /path/to/annotations \
       --tokenizer tiktoken \
@@ -36,7 +36,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 # repo imports
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from lib.pipeline.clip_manifest import load_clip_manifest
 from lib.pipeline.annotation_protocol import HIERARCHY_KEYS, load_clip_annotation
 

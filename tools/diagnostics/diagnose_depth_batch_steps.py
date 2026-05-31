@@ -18,7 +18,7 @@ What it does for one clip:
   * reports the SLAM global `scale` for context
 
 Run on the production machine (after an export) on clips spanning >2s (>=2 batches):
-  python scripts/diagnose_depth_batch_steps.py --seq_folder /path/to/outputs/<clip_id>
+  python tools/diagnostics/diagnose_depth_batch_steps.py --seq_folder /path/to/outputs/<clip_id>
 """
 import argparse
 import glob

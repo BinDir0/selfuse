@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 import sys
 
 if str(PROJECT_ROOT) not in sys.path:

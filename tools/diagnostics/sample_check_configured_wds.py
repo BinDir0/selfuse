@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 FILTER_SCRIPT = Path(__file__).resolve().with_name("filter_and_check_datasets.py")
 if not FILTER_SCRIPT.exists():
     FILTER_SCRIPT = REPO_ROOT / "data" / "filter_and_check_datasets.py"

@@ -23,7 +23,7 @@ noisy. Mitigated by (a) keeping only tracks with enough parallax, (b) robust med
 to separate, the script says so.
 
 Read-only. Run on a finished seq_folder:
-  python scripts/diagnose_camera_drift_reproj.py --seq_folder /path/to/stage_outputs/<clip>
+  python tools/diagnostics/diagnose_camera_drift_reproj.py --seq_folder /path/to/stage_outputs/<clip>
 """
 import argparse
 import glob

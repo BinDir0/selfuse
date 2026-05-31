@@ -18,7 +18,7 @@ Joint order (lib/models/mano_wrapper.py mano_to_openpose): 0=wrist, 5=index-MCP,
   hand breadth = |index MCP - pinky MCP| (5->17)       middle finger= |middle MCP - tip| (9->12)
 
 Run from repo root (production env with torch+smplx+the MANO model):
-  python scripts/validate_hand_metric_size.py --seq_folder /path/stage_outputs/<clip>
+  python tools/diagnostics/validate_hand_metric_size.py --seq_folder /path/stage_outputs/<clip>
 You can also pass several --seq_folder to pool clips, or --use_cuda.
 """
 import argparse

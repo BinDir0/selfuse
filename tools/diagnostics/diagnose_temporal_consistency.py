@@ -13,7 +13,7 @@ and a per-batch decomposition that separates the Any4D batch STEPS from any END-
 (trend of per-batch medians across the clip) and the residual NOISE (after de-trend).
 
 Read-only. numpy + cv2 + matplotlib. Run on a finished seq_folder (pre- or post-fix):
-  python scripts/diagnose_temporal_consistency.py --seq_folder /path/to/stage_outputs/<clip>
+  python tools/diagnostics/diagnose_temporal_consistency.py --seq_folder /path/to/stage_outputs/<clip>
 """
 import argparse
 import glob

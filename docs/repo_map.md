@@ -35,6 +35,13 @@ Visualization:
 - Viewer/runtime code: `lib/vis/`
 - Ops/debug helpers: `tools/ops/`
 
+Diagnostics:
+
+- Read-only inspection / analysis tools: `tools/diagnostics/` (e.g. `diagnose_*`,
+  `audit_*`, `check_fps_alignment`, `dataset_stats`, `validate_hand_metric_size`).
+  These are developer tools, not part of the pipeline; run them directly, e.g.
+  `python tools/diagnostics/diagnose_camera_drift_reproj.py --seq_folder <clip>`.
+
 ## Public Scripts
 
 Use these as the maintained public scripts:

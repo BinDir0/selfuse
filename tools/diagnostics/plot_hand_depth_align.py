@@ -9,8 +9,8 @@ when HAWOR_HAND_DEPTH_ALIGN=1) and produces, per clip:
 plus a printed summary (median/p90 residual before & after, corr(z,d), α range).
 
 Run on the production machine after an aligned export:
-  python scripts/plot_hand_depth_align.py --seq_folder /path/to/outputs/<clip_id>
-  python scripts/plot_hand_depth_align.py --seq_folder ... --out /tmp/align_check.png
+  python tools/diagnostics/plot_hand_depth_align.py --seq_folder /path/to/outputs/<clip_id>
+  python tools/diagnostics/plot_hand_depth_align.py --seq_folder ... --out /tmp/align_check.png
 """
 import argparse
 import glob

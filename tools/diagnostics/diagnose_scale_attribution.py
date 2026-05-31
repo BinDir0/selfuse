@@ -19,7 +19,7 @@ This produces a single per-clip report quantifying each source so we can decide
 where to invest (Phase 1 stitching vs Phase 2 time-varying scale vs Phase 3 hand).
 
 Run on the production machine (after an export), clips spanning >2s (>=2 batches):
-  python scripts/diagnose_scale_attribution.py --seq_folder /path/to/outputs/<clip_id>
+  python tools/diagnostics/diagnose_scale_attribution.py --seq_folder /path/to/outputs/<clip_id>
 """
 import argparse
 import glob
