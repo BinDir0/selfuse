@@ -306,16 +306,20 @@ def main():
     max_cov_delta = int(usable[-1, 0]) if usable.size else 0
     print(f"  co-visibility usable (median inliers>=8) up to Δ≈{max_cov_delta} frames "
           f"({100*max_cov_delta/max(n-1,1):.0f}% of clip).")
-    # ROTATION consistency (homography) — the VALID metric when rotation-dominated
-    trend(3, "ROTATION (homog)", "ROTATION DRIFTS over episode", "rotation globally consistent")
     if rot_dom:
+        # Rotation-dominated: homography is the valid drift metric; epipolar/tri are degenerate.
+        trend(3, "ROTATION (homog)", "ROTATION DRIFTS over episode", "rotation globally consistent")
         print("  ^ camera is ROTATION-DOMINATED => the homog row above is the trustworthy verdict.")
-        print("    The sampson/reproj rows below are DEGENERATE here (no parallax) — IGNORE them.")
-    trend(4, "scale-free Sampson (needs translation)", "pose-direction inconsistent", "consistent")
-    trend(5, "full+scale reproj (needs translation)", "rising", "flat")
-    if rot_dom:
+        print("    sampson/reproj below are DEGENERATE here (no parallax) — IGNORE them.")
         print("  => If rotation is consistent but the rerun cloud still blobs, the smear is DEPTH "
               "inconsistency (Any4D across frames), NOT camera drift. Different fix.")
+    else:
+        # Translation present: sampson/reproj are valid; the pure-rotation homography is CONFOUNDED
+        # by depth parallax (large homog_px is geometric, not drift) — do not report it as drift.
+        print("  [homog] translation present => homography (pure-rotation model) is CONFOUNDED by "
+              "parallax; NOT a drift signal here — judge by sampson/reproj below.")
+        trend(4, "scale-free Sampson (valid: translation present)", "pose drift over episode", "consistent")
+        trend(5, "full+scale reproj (valid: translation present)", "drift over episode", "globally consistent")
 
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
