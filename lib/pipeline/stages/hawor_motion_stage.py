@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from lib.pipeline.frame_source import build_frame_source
+from lib.pipeline.intrinsics import read_recorded_focal, resolve_calibration
 from lib.pipeline.tools import parse_chunks
 from lib.eval_utils.custom_utils import interpolate_bboxes, validate_motion_velocity
 from hawor.utils.process import get_mano_cfg, get_mano_faces, run_mano, run_mano_left
@@ -54,22 +55,6 @@ class MotionStageContext:
     output_dir: str
     frame_chunks_file: str
     model_masks_file: str
-
-
-def _resolve_img_focal(args, seq_folder):
-    img_focal = args.img_focal
-    if img_focal is not None:
-        return img_focal
-
-    try:
-        with open(os.path.join(seq_folder, "est_focal.txt"), "r") as handle:
-            return float(handle.read())
-    except Exception:
-        img_focal = 600
-        vprint(f"No focal length provided, use default {img_focal}")
-        with open(os.path.join(seq_folder, "est_focal.txt"), "w") as handle:
-            handle.write(str(img_focal))
-        return img_focal
 
 
 def _load_motion_inputs(args, seq_folder, start_idx, end_idx, prefetched_data=None, frame_source=None):
@@ -198,13 +183,9 @@ def _resolve_cached_motion_output(args, seq_folder, start_idx, end_idx, force=Fa
 
     if (not force) and os.path.exists(frame_chunks_file) and os.path.exists(model_masks_file):
         vprint("skip hawor motion estimation")
-        img_focal = args.img_focal
-        if img_focal is None:
-            try:
-                with open(os.path.join(seq_folder, "est_focal.txt"), "r") as handle:
-                    img_focal = float(handle.read())
-            except Exception:
-                img_focal = 600
+        # Informational only (the caller discards this focal); the authoritative resolution
+        # happens via resolve_calibration when motion actually runs. Report what's on record.
+        img_focal = args.img_focal if args.img_focal is not None else read_recorded_focal(seq_folder)
         frame_chunks_all = joblib.load(frame_chunks_file)
         return output_dir, frame_chunks_file, model_masks_file, frame_chunks_all, img_focal
 
@@ -243,10 +224,12 @@ def _build_motion_context(
     )
     frame_source = _maybe_wrap_motion_frame_cache(frame_source)
     tracks = _sanitize_tracks_for_available_frames(tracks, len(frame_source))
-    img_focal = _resolve_img_focal(args, seq_folder)
+
+    calib = resolve_calibration(frame_source, seq_folder, requested_focal=args.img_focal)
+    img_focal = calib[0]
+    img_center = [calib[2], calib[3]]
 
     first_frame = frame_source.get_frame(0, rgb=False)
-    img_center = [first_frame.shape[1] / 2, first_frame.shape[0] / 2]
     height, width = first_frame.shape[:2]
     model_masks_tensor = torch.zeros((len(frame_source), height, width), dtype=torch.bool)
     faces_right, faces_left = _build_hand_faces()

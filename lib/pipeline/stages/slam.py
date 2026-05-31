@@ -30,7 +30,8 @@ from lib.pipeline.hand_metric_anchor import compute_hand_anchor_k, hand_anchor_e
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
-from lib.pipeline.slam_geom_utils import est_calib, get_dimention
+from lib.pipeline.intrinsics import resolve_calibration
+from lib.pipeline.slam_geom_utils import get_dimention
 from lib.pipeline.workspace import (
     resolve_seq_folder,
     resolve_tmp_root,
@@ -72,33 +73,6 @@ def _load_masks(seq_folder: str, start_idx: int, end_idx: int) -> torch.Tensor:
         return torch.from_numpy(np.load(masks_path, allow_pickle=True))
     except (OSError, ValueError, EOFError, zipfile.BadZipFile, zlib.error) as error:
         raise CorruptStageDataError(f"Corrupt masks file: {masks_path} ({error})") from error
-
-
-def _resolve_focal(seq_folder: str, requested_focal: float = None) -> float:
-    if requested_focal is not None:
-        return float(requested_focal)
-
-    focal_path = os.path.join(seq_folder, "est_focal.txt")
-    try:
-        with open(focal_path, "r", encoding="utf-8") as handle:
-            return float(handle.read())
-    except Exception as error:
-        focal = 600.0
-        # Visible at WARNING even under quiet mode: a wrong focal cascades through
-        # SLAM/infiller, so the silent default must not pass unnoticed.
-        _logger.warning(
-            "Could not read focal length from %s (%s); falling back to default %.1f.",
-            focal_path, error, focal,
-        )
-        with open(focal_path, "w", encoding="utf-8") as handle:
-            handle.write(str(focal))
-        return focal
-
-
-def _build_calibration(frame_source, focal: float) -> np.ndarray:
-    calib = np.asarray(est_calib(frame_source), dtype=np.float32)
-    calib[:2] = float(focal)
-    return calib
 
 
 def _depth_predict_all_frames_enabled(explicit: Optional[bool]) -> bool:
@@ -808,8 +782,10 @@ def hawor_slam(
     try:
         t0 = time.time()
         masks = _load_masks(seq_folder, start_idx, end_idx)
-        focal = _resolve_focal(seq_folder, getattr(args, "img_focal", None))
-        calib = _build_calibration(stage3_frame_source, focal)
+        calib = resolve_calibration(
+            stage3_frame_source, seq_folder, requested_focal=getattr(args, "img_focal", None)
+        )
+        focal = calib[0]
         timing["1_load_masks"] = time.time() - t0
 
         t0 = time.time()
