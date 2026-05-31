@@ -233,12 +233,14 @@ def main():
     scene_d = float(np.median(1.0 / np.clip(np.load(_find(seq, "SLAM/hawor_slam_w_scale_*.npz"),
                                                     allow_pickle=True)["disps"], 1e-9, None)))
     parallax = tspan / max(scene_d, 1e-9)
+    # NOTE: parallax from disps-median can be unreliable; the robust regime signal is the
+    # small-Δ homog/reproj ratio computed below (set after the sweep) — see `rot_dom_robust`.
     rot_dom = parallax < 0.05
     print(f"\n[regime] camera translation path={tpath:.1f} span={tspan:.1f} (raw) vs scene depth~{scene_d:.1f} "
           f"=> parallax≈{100*parallax:.1f}%  {'=> ROTATION-DOMINATED: trust HOMOG, epipolar/tri are DEGENERATE' if rot_dom else '=> translation present: epipolar/tri valid'}")
     print(f"\n[M1] consistency vs time-baseline Δ  (anchors={len(anchors)}, MIN_INL={MIN_INL})")
     print("  homog_px=rotation-consistency (valid under low parallax); sampson/reproj need translation (degenerate if rotation-dominated)")
-    print(f"  {'Δ(frames)':>10}{'pairs':>7}{'med_inl':>9}{'homog_px':>10}{'sampson_px':>12}{'reproj_px':>11}")
+    print(f"  {'Δ(frames)':>10}{'pairs':>7}{'med_inl':>9}{'homog_px':>10}{'sampson_px':>12}{'reproj_px':>11}{'tri_kept':>9}")
     rows = []
     for d in deltas:
         inl_counts, samp_meds, reproj, tri_rates, homogs = [], [], [], [], []
@@ -285,11 +287,12 @@ def main():
         med_homog = float(np.median(homogs)) if homogs else float("nan")
         med_samp = float(np.median(samp_meds)) if samp_meds else float("nan")
         med_rep = float(np.median(reproj)) if reproj else float("nan")
-        rows.append((d, len(inl_counts), med_inl, med_homog, med_samp, med_rep))
-        print(f"  {d:>10}{len(inl_counts):>7}{med_inl:>9.0f}{med_homog:>10.3f}{med_samp:>12.3f}{med_rep:>11.2f}")
+        tri_kept = float(np.median(tri_rates)) if tri_rates else 0.0  # frac of matches w/ real parallax
+        rows.append((d, len(inl_counts), med_inl, med_homog, med_samp, med_rep, tri_kept))
+        print(f"  {d:>10}{len(inl_counts):>7}{med_inl:>9.0f}{med_homog:>10.3f}{med_samp:>12.3f}{med_rep:>11.2f}{100*tri_kept:>9.0f}%")
 
     # --- verdict ---
-    rr = np.array(rows, float)   # cols: d, pairs, med_inl, homog, sampson, reproj
+    rr = np.array(rows, float)   # cols: d, pairs, med_inl, homog, sampson, reproj, tri_kept
 
     def trend(col, name, rising_msg, flat_msg):
         v = rr[np.isfinite(rr[:, col])]
@@ -320,6 +323,46 @@ def main():
               "parallax; NOT a drift signal here — judge by sampson/reproj below.")
         trend(4, "scale-free Sampson (valid: translation present)", "pose drift over episode", "consistent")
         trend(5, "full+scale reproj (valid: translation present)", "drift over episode", "globally consistent")
+
+    # --- robust regime + machine-readable summary (for the multi-clip survey) ---
+    def _med(col, lo, hi):
+        v = rr[(rr[:, 0] >= lo) & (rr[:, 0] <= hi) & np.isfinite(rr[:, col]), col]
+        return float(np.median(v)) if v.size else float("nan")
+
+    # Regime signal = translation / scene_depth (disps-based parallax), which is the ONLY clean
+    # discriminator here. NOTE the seductive-but-WRONG alternatives: (a) tri_kept% is contaminated
+    # by ROTATION — a pure-rotation camera keeps a fixed optical centre, so a static point's two
+    # rays diverge by the ROTATION angle and pass the parallax gate even with zero translation
+    # (office shows tri_kept 97% at 0.1% parallax); (b) homog/reproj ratio is fooled by reproj
+    # being computed on a tiny biased subset when true parallax is rare. So trust parallax_disps.
+    small_tri_kept = _med(6, 0, 30)
+    translation_present = parallax > 0.05
+    drift_col = 5 if translation_present else 3   # reproj if translation, else homog
+    drift_name = "reproj" if translation_present else "homog"
+    long_lo = max(60, 0.3 * (n - 1))
+    d_short, d_long = _med(drift_col, 0, 30), _med(drift_col, long_lo, 1e9)
+    print(f"\n[regime-robust] parallax_disps={100*parallax:.1f}% (tri_kept {100*small_tri_kept:.0f}% is rotation-contaminated, ignore) => "
+          f"{'TRANSLATION present (judge by reproj/sampson)' if translation_present else 'ROTATION-dominated (judge by homog)'}")
+    print(f"[domain-metric] valid={drift_name}: short-Δ {d_short:.2f}px -> long-Δ {d_long:.2f}px "
+          f"({100*d_long/max(2*cx0,1):.1f}% of image width)")
+
+    try:
+        import json
+        summary = {
+            "seq": seq, "n_frames": int(n), "focal": float(focal), "img_width": float(2 * cx0),
+            "parallax_disps": float(parallax), "small_tri_kept": float(small_tri_kept),
+            "translation_present": bool(translation_present),
+            "valid_metric": drift_name,
+            "drift_short_px": float(d_short), "drift_long_px": float(d_long),
+            "drift_long_pct_width": float(100 * d_long / max(2 * cx0, 1)),
+            "max_cov_delta": int(max_cov_delta),
+            "rows": [[float(x) for x in row] for row in rr.tolist()],
+        }
+        with open(os.path.join(seq, "episode_consistency_summary.json"), "w") as fh:
+            json.dump(summary, fh, indent=2)
+        print(f"saved {os.path.join(seq, 'episode_consistency_summary.json')}")
+    except Exception as e:
+        print(f"[summary] skipped: {e}")
 
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
