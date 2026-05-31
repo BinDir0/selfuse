@@ -118,12 +118,14 @@ class Qwen3VLChatFormatter:
 
     def format_video_order_part(self, active_views: list[str]) -> str:
         labels = {"head": "head camera", "breast": "breast camera"}
+        if len(active_views) == 1:
+            return f"The video is from the {labels[active_views[0]]}."
         ordinals = ["first", "second"]
         parts = [
-            f"{ordinals[idx]} video is {labels[view]}"
+            f"the {ordinals[idx]} video is from the {labels[view]}"
             for idx, view in enumerate(active_views)
         ]
-        return f"Videos: {'; '.join(parts)}."
+        return f"There are two videos: {'; '.join(parts)}."
 
     def build_vla_user_text(
         self,
