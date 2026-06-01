@@ -109,6 +109,32 @@ def tokenize(text: str) -> list[str]:
     return [t.lower() for t in WORD_RE.findall(text or "")]
 
 
+def _progress(iterable, total=None, desc=""):
+    """Progress wrapper: tqdm if available, else a periodic stderr fallback."""
+    try:
+        from tqdm import tqdm  # type: ignore
+
+        return tqdm(iterable, total=total, desc=desc, unit="clip", dynamic_ncols=True)
+    except Exception:
+        import sys
+        import time
+
+        def _gen():
+            n = 0
+            t0 = time.time()
+            step = max(1, (total // 100) if total else 2000)
+            for item in iterable:
+                yield item
+                n += 1
+                if n % step == 0:
+                    rate = n / (time.time() - t0 + 1e-9)
+                    tail = f"/{total}" if total else ""
+                    print(f"\r[{desc}] {n}{tail}  ({rate:.0f}/s)", end="", file=sys.stderr, flush=True)
+            print(f"\r[{desc}] {n} done" + " " * 20, file=sys.stderr)
+
+        return _gen()
+
+
 # --------------------------------------------------------------------------- #
 # spaCy POS/dependency backend for action-verb + object-noun extraction.
 # Lightweight (CPU, deterministic) and accurate enough for distribution stats;
@@ -227,7 +253,9 @@ def dist_summary(values: list[float]) -> dict | None:
 
 def load_annotations(root: Path, suffix: str) -> tuple[list[dict], dict]:
     """Return (valid_records, coverage_counts). Each record: clip_id, levels, instruction."""
+    print(f"[scan] discovering *{suffix} under {root} ...", file=sys.stderr, flush=True)
     files = sorted(root.rglob(f"*{suffix}"))
+    print(f"[scan] found {len(files)} files", file=sys.stderr, flush=True)
     coverage = {
         "files_found": len(files),
         "valid": 0,
@@ -236,7 +264,7 @@ def load_annotations(root: Path, suffix: str) -> tuple[list[dict], dict]:
         "empty_instruction": 0,
     }
     records = []
-    for path in files:
+    for path in _progress(files, total=len(files), desc="parse annotations"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -361,12 +389,12 @@ def main(argv=None):
     #   * spaCy        : per-level POS/dependency extraction across all 5 levels.
     #   * heuristic    : no spaCy + no extraction -> L1 head verb/object only.
     def _spacy_records(ext):
-        for rec in records:
+        for rec in _progress(records, total=len(records), desc="spaCy verb/object"):
             yield {"levels": {k: ext.extract_level_terms(rec["levels"][k])
                               for k in HIERARCHY_KEYS if rec["levels"].get(k)}}
 
     def _heuristic_records(ext):
-        for rec in records:
+        for rec in _progress(records, total=len(records), desc="heuristic verb/object"):
             l1 = rec["levels"].get("level1") or (rec["instruction"][0] if rec["instruction"] else "")
             v = ext.head_verb(l1)
             n = ext.object_noun(l1)
@@ -377,8 +405,10 @@ def main(argv=None):
         agg = aggregate_levelterms(iter_extraction_records(Path(args.extraction).expanduser().resolve()))
         print(f"[extraction] {agg['clips']} clips loaded from {args.extraction}")
     else:
+        print("[extract] loading spaCy model (en_core_web_lg/md/sm) ...", file=sys.stderr, flush=True)
         extractor = _Extractor()
         extractor_mode = extractor.mode
+        print(f"[extract] backend = {extractor_mode}", file=sys.stderr, flush=True)
         gen = _spacy_records if extractor.mode == "spacy" else _heuristic_records
         agg = aggregate_levelterms(gen(extractor))
 
