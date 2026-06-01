@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import statistics
 import sys
@@ -147,9 +148,13 @@ class _Extractor:
         try:
             import spacy  # type: ignore
 
+            # We only read tok.pos_ + tok.lemma_ (never dep_/head), so the dependency
+            # PARSER -- the most expensive component -- is pure waste. Disable it (and
+            # ner): POS comes from tagger+attribute_ruler and lemmas from the rule-based
+            # lemmatizer, neither of which needs the parser. Big speedup, identical output.
             for name in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm"):
                 try:
-                    self.nlp = spacy.load(name, disable=["ner"])
+                    self.nlp = spacy.load(name, disable=["ner", "parser"])
                     break
                 except Exception:
                     continue
@@ -157,21 +162,20 @@ class _Extractor:
             self.nlp = None
         self.mode = "spacy" if self.nlp is not None else "heuristic"
 
-    def extract_level_terms(self, text: str) -> dict:
-        """Extract deduped action verbs + object nouns from one level's text (spaCy).
+    @staticmethod
+    def terms_from_doc(doc) -> dict:
+        """Deduped action verbs + object nouns from an already-parsed spaCy Doc.
 
         verbs   = VERB lemmas minus linking/perception/light verbs (VERB_STOP).
-        objects = NOUN/PROPN lemmas (head nouns) minus body parts / generic nouns
-                  (NOUN_STOP). Passive voice is handled by spaCy's parser, so
-                  "the cup is lifted" still yields verb=lift, object=cup.
+        objects = NOUN/PROPN lemmas minus body parts / generic nouns (NOUN_STOP).
+        Tagging alone (no dependency parse) decides VERB vs NOUN, so passive voice
+        ("the cup is lifted") still yields verb=lift, object=cup.
         """
         verbs: list[str] = []
         objects: list[str] = []
-        if self.nlp is None or not text:
-            return {"verbs": verbs, "objects": objects}
         vseen: set[str] = set()
         oseen: set[str] = set()
-        for tok in self.nlp(text):
+        for tok in doc:
             lemma = tok.lemma_.lower().strip()
             if not _TERM_OK.match(lemma):
                 continue
@@ -184,6 +188,13 @@ class _Extractor:
                     oseen.add(lemma)
                     objects.append(lemma)
         return {"verbs": verbs, "objects": objects}
+
+    def extract_level_terms(self, text: str) -> dict:
+        """Single-text convenience wrapper around terms_from_doc (the batched
+        nlp.pipe path in main() is what the full run uses)."""
+        if self.nlp is None or not text:
+            return {"verbs": [], "objects": []}
+        return self.terms_from_doc(self.nlp(text))
 
     # --- heuristic fallback (no spaCy): only L1 verb-object phrase is reliable ---
     def head_verb(self, l1: str) -> str | None:
@@ -362,6 +373,13 @@ def main(argv=None):
     ap.add_argument("--suffix", default=".annotation.json", help="Annotation file suffix to glob (default .annotation.json).")
     ap.add_argument("--top_k", type=int, default=60, help="How many top verbs/nouns to keep in the JSON summary.")
     ap.add_argument("--examples", type=int, default=5, help="How many representative episode candidates to dump.")
+    ap.add_argument("--n_process", type=int, default=max(1, min(8, (os.cpu_count() or 2) - 1)),
+                    help="spaCy nlp.pipe worker processes for verb/object extraction (CPU "
+                         "parallelism). Default ~min(8, cores-1). Bump it on a big box; with "
+                         "en_core_web_lg each worker holds the model, so prefer en_core_web_sm "
+                         "for high --n_process.")
+    ap.add_argument("--spacy_batch_size", type=int, default=512,
+                    help="Texts per spaCy pipe batch (larger amortizes per-worker IPC).")
     ap.add_argument(
         "--extraction",
         default=None,
@@ -389,9 +407,30 @@ def main(argv=None):
     #   * spaCy        : per-level POS/dependency extraction across all 5 levels.
     #   * heuristic    : no spaCy + no extraction -> L1 head verb/object only.
     def _spacy_records(ext):
-        for rec in _progress(records, total=len(records), desc="spaCy verb/object"):
-            yield {"levels": {k: ext.extract_level_terms(rec["levels"][k])
-                              for k in HIERARCHY_KEYS if rec["levels"].get(k)}}
+        # Flatten every (clip, level) text and stream them through nlp.pipe, which batches
+        # and (n_process>1) parallelizes across CPU cores -- far faster than one nlp(text)
+        # call per level. Texts are fed in clip order, so docs come back grouped by clip and
+        # we re-emit one record per clip on each clip-index change. Progress is now per
+        # level-text (~5x clips), the true unit of work.
+        metas: list[tuple[int, str]] = []
+        texts: list[str] = []
+        for ci, rec in enumerate(records):
+            for k in HIERARCHY_KEYS:
+                t = rec["levels"].get(k)
+                if t:
+                    metas.append((ci, k))
+                    texts.append(t)
+        docs = ext.nlp.pipe(texts, batch_size=args.spacy_batch_size, n_process=args.n_process)
+        cur_ci = None
+        cur_levels: dict = {}
+        for (ci, k), doc in _progress(zip(metas, docs), total=len(texts), desc="spaCy verb/object"):
+            if ci != cur_ci:
+                if cur_ci is not None:
+                    yield {"levels": cur_levels}
+                cur_ci, cur_levels = ci, {}
+            cur_levels[k] = ext.terms_from_doc(doc)
+        if cur_ci is not None:
+            yield {"levels": cur_levels}
 
     def _heuristic_records(ext):
         for rec in _progress(records, total=len(records), desc="heuristic verb/object"):
