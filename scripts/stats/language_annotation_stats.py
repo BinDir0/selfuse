@@ -7,24 +7,31 @@ suffix) and computes the language statistics we want to report:
   * valid-language coverage (status == "Valid", non-empty instruction)
   * unique verbs   : count + frequency distribution (+ word cloud)
   * unique object nouns : count + frequency distribution (+ word cloud)
-  * per-level (L1-L5) token count + vocabulary size
+  * per-level (L1-L5) verb/object distributions, token count + vocabulary size
   * diversity metrics: distinct-1/2, verb h-index, type-token ratio
   * instructions-per-clip + instruction-length distributions
   * representative episodes (all 5 levels present) for a qualitative L1-L5 table
+
+Verb/object extraction backend (in order of preference):
+  * spaCy (default): POS + dependency over ALL 5 levels -> action verbs (VERB
+    lemmas minus linking/perception verbs) + object nouns (NOUN/PROPN lemmas minus
+    body parts / generic nouns). CPU, fast, deterministic. Needs en_core_web_sm.
+  * --extraction extraction.jsonl: per-level lists from the Qwen LLM backend
+    (extract_verbs_objects_qwen.py). Only worth it for messy text / canonicalization.
+  * heuristic (no spaCy, no --extraction): L1 first-token verb + first content noun
+    only -- coarse; counts are not paper-grade (no lemmatization). Install spaCy.
 
 Parsing reuses the pipeline's own normalization (lib/pipeline/annotation_protocol)
 so these stats match exactly what the build consumes.
 
 Run on the PRODUCTION machine (this only reads annotation JSON, no GPU):
 
+    pip install spacy && python -m spacy download en_core_web_sm   # recommended
+    pip install wordcloud matplotlib                               # for word-cloud PNGs
     python scripts/stats/language_annotation_stats.py \
         --annotation_root /path/to/annotations \
         --out_dir /path/to/lang_stats_out \
-        [--suffix .annotation.json] [--top_k 60] [--examples 5]
-
-Optional extras (graceful fallback if missing):
-    pip install spacy && python -m spacy download en_core_web_sm   # better verb/noun POS
-    pip install wordcloud matplotlib                               # word-cloud PNGs
+        [--suffix .annotation.json] [--extraction extraction.jsonl] [--top_k 60]
 
 Outputs under --out_dir:
     language_stats.json      all numeric stats + provenance
@@ -70,13 +77,43 @@ _FALLBACK_STOP = _ARTICLES | {
     "left", "right", "hand", "both", "hands",  # too generic to be the "object"
 }
 
+# Linking / auxiliary / perception / light verbs -- not manipulation actions.
+# Tune freely; kept conservative so genuine manipulation verbs survive.
+VERB_STOP = {
+    "be", "is", "am", "are", "was", "were", "been", "being",
+    "have", "has", "had", "having", "do", "does", "did", "doing",
+    "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+    "seem", "appear", "remain", "stay", "become", "get", "keep",
+    "look", "see", "watch", "observe", "show", "depict", "feature", "involve",
+    "begin", "start", "continue", "end", "finish",
+}
+# Body parts + generic nouns that are not manipulation TARGETS. Tune freely.
+NOUN_STOP = {
+    "hand", "hands", "finger", "fingers", "fingertip", "fingertips",
+    "thumb", "thumbs", "arm", "arms", "wrist", "wrists", "palm", "palms",
+    "knuckle", "knuckles",
+    "object", "objects", "thing", "things", "item", "items", "area", "areas",
+    "side", "sides", "part", "parts", "piece", "pieces", "scene", "image",
+    "images", "view", "frame", "frames", "person", "people", "way", "ways",
+    "state", "states", "position", "positions", "motion", "motions",
+    "movement", "movements", "action", "actions", "step", "steps", "process",
+    "direction", "directions", "background", "foreground", "center", "centre",
+    "middle", "front", "back", "top", "bottom", "left", "right", "camera",
+    "picture",
+}
+
+_TERM_OK = re.compile(r"[a-z][a-z-]*\Z")
+
 
 def tokenize(text: str) -> list[str]:
     return [t.lower() for t in WORD_RE.findall(text or "")]
 
 
 # --------------------------------------------------------------------------- #
-# Optional spaCy backend for POS-based verb/noun extraction.
+# spaCy POS/dependency backend for action-verb + object-noun extraction.
+# Lightweight (CPU, deterministic) and accurate enough for distribution stats;
+# an LLM (extract_verbs_objects_qwen.py --extraction) is only needed for messy
+# text or semantic canonicalization.
 # --------------------------------------------------------------------------- #
 class _Extractor:
     def __init__(self):
@@ -84,58 +121,54 @@ class _Extractor:
         try:
             import spacy  # type: ignore
 
-            try:
-                self.nlp = spacy.load("en_core_web_sm", disable=["ner"])
-            except Exception:
-                self.nlp = None
+            for name in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm"):
+                try:
+                    self.nlp = spacy.load(name, disable=["ner"])
+                    break
+                except Exception:
+                    continue
         except Exception:
             self.nlp = None
         self.mode = "spacy" if self.nlp is not None else "heuristic"
 
+    def extract_level_terms(self, text: str) -> dict:
+        """Extract deduped action verbs + object nouns from one level's text (spaCy).
+
+        verbs   = VERB lemmas minus linking/perception/light verbs (VERB_STOP).
+        objects = NOUN/PROPN lemmas (head nouns) minus body parts / generic nouns
+                  (NOUN_STOP). Passive voice is handled by spaCy's parser, so
+                  "the cup is lifted" still yields verb=lift, object=cup.
+        """
+        verbs: list[str] = []
+        objects: list[str] = []
+        if self.nlp is None or not text:
+            return {"verbs": verbs, "objects": objects}
+        vseen: set[str] = set()
+        oseen: set[str] = set()
+        for tok in self.nlp(text):
+            lemma = tok.lemma_.lower().strip()
+            if not _TERM_OK.match(lemma):
+                continue
+            if tok.pos_ == "VERB":
+                if lemma not in VERB_STOP and lemma not in vseen:
+                    vseen.add(lemma)
+                    verbs.append(lemma)
+            elif tok.pos_ in ("NOUN", "PROPN"):
+                if lemma not in NOUN_STOP and lemma not in oseen:
+                    oseen.add(lemma)
+                    objects.append(lemma)
+        return {"verbs": verbs, "objects": objects}
+
+    # --- heuristic fallback (no spaCy): only L1 verb-object phrase is reliable ---
     def head_verb(self, l1: str) -> str | None:
-        """Main action verb of the L1 verb-object phrase."""
-        if not l1:
-            return None
-        if self.nlp is not None:
-            doc = self.nlp(l1)
-            for tok in doc:
-                if tok.pos_ == "VERB":
-                    return tok.lemma_.lower()
-            for tok in doc:  # imperative sometimes tagged ROOT/AUX
-                if tok.dep_ == "ROOT" and tok.is_alpha:
-                    return tok.lemma_.lower()
-            return None
         toks = tokenize(l1)
         return toks[0] if toks else None  # imperative head ≈ first token
 
     def object_noun(self, l1: str) -> str | None:
-        """Direct object of the L1 phrase (the thing being manipulated)."""
-        if not l1:
-            return None
-        if self.nlp is not None:
-            doc = self.nlp(l1)
-            for tok in doc:  # prefer the grammatical direct object
-                if tok.dep_ in ("dobj", "obj") and tok.pos_ in ("NOUN", "PROPN"):
-                    return tok.lemma_.lower()
-            for tok in doc:
-                if tok.pos_ in ("NOUN", "PROPN"):
-                    return tok.lemma_.lower()
-            return None
-        toks = tokenize(l1)[1:]  # drop head verb
-        for t in toks:
+        for t in tokenize(l1)[1:]:  # drop head verb
             if t not in _FALLBACK_STOP:
                 return t
         return None
-
-    def all_verbs(self, text: str) -> list[str]:
-        if self.nlp is None or not text:
-            return []
-        return [t.lemma_.lower() for t in self.nlp(text) if t.pos_ == "VERB"]
-
-    def all_nouns(self, text: str) -> list[str]:
-        if self.nlp is None or not text:
-            return []
-        return [t.lemma_.lower() for t in self.nlp(text) if t.pos_ in ("NOUN", "PROPN")]
 
 
 # --------------------------------------------------------------------------- #
@@ -229,23 +262,19 @@ def load_annotations(root: Path, suffix: str) -> tuple[list[dict], dict]:
     return records, coverage
 
 
-def aggregate_extraction(path: Path) -> dict:
-    """Aggregate a Qwen extraction.jsonl into per-level + per-clip-union Counters."""
+def aggregate_levelterms(records) -> dict:
+    """Aggregate per-clip per-level {verbs, objects} into per-level + per-clip-union Counters.
+
+    ``records`` is any iterable of dicts shaped like
+    ``{"levels": {"level1": {"verbs": [...], "objects": [...]}, ...}}`` -- shared by
+    the Qwen extraction backend and the spaCy backend.
+    """
     level_verbs = {k: Counter() for k in HIERARCHY_KEYS}
     level_nouns = {k: Counter() for k in HIERARCHY_KEYS}
     union_verbs: Counter = Counter()
     union_nouns: Counter = Counter()
     clips = 0
-    if not path.exists():
-        raise SystemExit(f"extraction file not found: {path}")
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
+    for rec in records:
         clips += 1
         clip_verbs: set[str] = set()
         clip_nouns: set[str] = set()
@@ -266,6 +295,20 @@ def aggregate_extraction(path: Path) -> dict:
         "union_verbs": union_verbs,
         "union_nouns": union_nouns,
     }
+
+
+def iter_extraction_records(path: Path):
+    """Yield per-clip level records from a Qwen extraction.jsonl."""
+    if not path.exists():
+        raise SystemExit(f"extraction file not found: {path}")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue
 
 
 def maybe_wordcloud(freq: Counter, out_path: Path) -> bool:
@@ -294,9 +337,10 @@ def main(argv=None):
     ap.add_argument(
         "--extraction",
         default=None,
-        help="Optional extraction.jsonl from extract_verbs_objects_qwen.py. When given, "
-             "verb/object stats come from the LLM extraction (per-level + per-clip union) "
-             "instead of the spaCy/heuristic L1-headline path.",
+        help="Optional extraction.jsonl from extract_verbs_objects_qwen.py (LLM backend). "
+             "When omitted, verbs/objects are extracted with spaCy POS/dependency across "
+             "all 5 levels (CPU, deterministic); install spaCy + en_core_web_sm for this. "
+             "Use the LLM backend only for messy text or semantic canonicalization.",
     )
     args = ap.parse_args(argv)
 
@@ -311,47 +355,46 @@ def main(argv=None):
         raise SystemExit(f"No valid annotations under {root} (coverage={coverage})")
 
     # ---- verbs / nouns ----
-    # Two backends:
-    #   (a) --extraction: per-level lists from the Qwen extraction; headline freq =
-    #       per-clip UNION over levels; also keep per-level distributions.
-    #   (b) default: spaCy/heuristic head-verb + object-noun from L1 only.
-    verb_freq: Counter = Counter()
-    noun_freq: Counter = Counter()
-    all_verb_freq: Counter = Counter()
-    all_noun_freq: Counter = Counter()
-    per_level_terms = None
+    # Three backends, all funnelled through aggregate_levelterms (per-level lists ->
+    # per-level Counters + per-clip union):
+    #   * --extraction : per-level lists from the Qwen LLM extraction.
+    #   * spaCy        : per-level POS/dependency extraction across all 5 levels.
+    #   * heuristic    : no spaCy + no extraction -> L1 head verb/object only.
+    def _spacy_records(ext):
+        for rec in records:
+            yield {"levels": {k: ext.extract_level_terms(rec["levels"][k])
+                              for k in HIERARCHY_KEYS if rec["levels"].get(k)}}
+
+    def _heuristic_records(ext):
+        for rec in records:
+            l1 = rec["levels"].get("level1") or (rec["instruction"][0] if rec["instruction"] else "")
+            v = ext.head_verb(l1)
+            n = ext.object_noun(l1)
+            yield {"levels": {"level1": {"verbs": [v] if v else [], "objects": [n] if n else []}}}
+
     if args.extraction:
-        agg = aggregate_extraction(Path(args.extraction).expanduser().resolve())
-        verb_freq = agg["union_verbs"]
-        noun_freq = agg["union_nouns"]
         extractor_mode = "qwen_extraction"
-        per_level_terms = {
-            k: {
-                "unique_verbs": len(agg["level_verbs"][k]),
-                "unique_objects": len(agg["level_nouns"][k]),
-                "verb_h_index": h_index(agg["level_verbs"][k]),
-                "object_h_index": h_index(agg["level_nouns"][k]),
-                "top_verbs": agg["level_verbs"][k].most_common(args.top_k),
-                "top_objects": agg["level_nouns"][k].most_common(args.top_k),
-            }
-            for k in HIERARCHY_KEYS
-        }
+        agg = aggregate_levelterms(iter_extraction_records(Path(args.extraction).expanduser().resolve()))
         print(f"[extraction] {agg['clips']} clips loaded from {args.extraction}")
     else:
         extractor = _Extractor()
         extractor_mode = extractor.mode
-        for rec in records:
-            l1 = rec["levels"].get("level1") or (rec["instruction"][0] if rec["instruction"] else "")
-            v = extractor.head_verb(l1)
-            if v:
-                verb_freq[v] += 1
-            n = extractor.object_noun(l1)
-            if n:
-                noun_freq[n] += 1
-            if extractor.mode == "spacy":
-                all_text = " ".join(t for t in rec["levels"].values() if t)
-                all_verb_freq.update(extractor.all_verbs(all_text))
-                all_noun_freq.update(extractor.all_nouns(all_text))
+        gen = _spacy_records if extractor.mode == "spacy" else _heuristic_records
+        agg = aggregate_levelterms(gen(extractor))
+
+    verb_freq = agg["union_verbs"]      # per-clip union over levels
+    noun_freq = agg["union_nouns"]
+    per_level_terms = {
+        k: {
+            "unique_verbs": len(agg["level_verbs"][k]),
+            "unique_objects": len(agg["level_nouns"][k]),
+            "verb_h_index": h_index(agg["level_verbs"][k]),
+            "object_h_index": h_index(agg["level_nouns"][k]),
+            "top_verbs": agg["level_verbs"][k].most_common(args.top_k),
+            "top_objects": agg["level_nouns"][k].most_common(args.top_k),
+        }
+        for k in HIERARCHY_KEYS
+    }
 
     # ---- per-level token / vocab ----
     per_level = {}
@@ -404,7 +447,7 @@ def main(argv=None):
     (out_dir / "example_episodes.json").write_text(
         json.dumps(examples, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # Per-level term distributions (qwen extraction mode only).
+    # Per-level term distributions (verbs/objects per L1..L5).
     if per_level_terms is not None:
         for key in HIERARCHY_KEYS:
             for kind, col in (("top_verbs", "verb"), ("top_objects", "object")):
@@ -426,7 +469,7 @@ def main(argv=None):
                 coverage["valid"] / coverage["files_found"] if coverage["files_found"] else 0.0
             ),
         },
-        "verbs": {  # in qwen_extraction mode these are the per-clip UNION over levels
+        "verbs": {  # per-clip UNION over levels (all backends)
             "unique": len(verb_freq),
             "total_occurrences": sum(verb_freq.values()),
             "h_index": h_index(verb_freq),
@@ -438,13 +481,7 @@ def main(argv=None):
             "h_index": h_index(noun_freq),
             "top": noun_freq.most_common(args.top_k),
         },
-        "per_level_terms": per_level_terms,  # per-level verb/object distributions (qwen mode)
-        "all_levels_pos": {  # only populated by the spaCy fallback backend
-            "unique_verbs": len(all_verb_freq),
-            "unique_nouns": len(all_noun_freq),
-            "top_verbs": all_verb_freq.most_common(args.top_k),
-            "top_nouns": all_noun_freq.most_common(args.top_k),
-        } if extractor_mode == "spacy" else None,
+        "per_level_terms": per_level_terms,  # per-level verb/object distributions
         "per_level": per_level,
         "diversity": {
             "type_token_ratio_L1": ttr,
