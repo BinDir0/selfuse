@@ -48,6 +48,12 @@ Dataset / export tools:
   `export_cam_space_meshes`, `repack_webdataset`, `prepare_partial_infer_manifest`,
   `generate_video_list`).
 
+End-to-end regression:
+
+- `tools/ops/e2e_smoke.sh` runs the REAL pipeline (real worker fork + CUDA + manifest
+  flow) and asserts invariants the CPU unit tests can't cover (CUDA-in-fork, input
+  wiring, preflight fail-fast, result.npz health, cleanup, resume). Run on a GPU box.
+
 ## Public Scripts
 
 Use these as the maintained public scripts:
