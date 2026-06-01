@@ -81,7 +81,12 @@ def _wordcloud(freq_pairs, out_path: Path, max_words: int) -> bool:
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Render language-stats figures.")
     ap.add_argument("--stats_dir", required=True, help="Output dir from language_annotation_stats.py.")
-    ap.add_argument("--top_k", type=int, default=30, help="Bars to show in top-K charts.")
+    ap.add_argument("--top_k", type=int, default=30, help="Bars to show in top-K charts (used when --min_count is 0).")
+    ap.add_argument("--min_count", type=int, default=0,
+                    help="If >0, bar charts (and word clouds) keep only terms with count >= this "
+                         "frequency threshold instead of a fixed top-K. Bars are still capped at "
+                         "--max_bars for readability.")
+    ap.add_argument("--max_bars", type=int, default=60, help="Hard cap on bars when --min_count selects many terms.")
     ap.add_argument("--max_words", type=int, default=150, help="Max words in each word cloud.")
     ap.add_argument("--dpi", type=int, default=150)
     args = ap.parse_args(argv)
@@ -105,23 +110,41 @@ def main(argv=None):
         raise SystemExit(f"no verb_freq.csv / noun_freq.csv under {stats_dir} (run language_annotation_stats.py first)")
 
     written = []
+    min_count = args.min_count if args.min_count and args.min_count > 0 else 0
 
-    # ---- word clouds ----
+    def _threshold(pairs):
+        """Keep terms with count >= min_count (pairs are pre-sorted desc); else all."""
+        return [p for p in pairs if p[1] >= min_count] if min_count else pairs
+
+    def _select_bars(pairs):
+        """(bars, description) for one bar chart: frequency threshold or fixed top-K."""
+        if min_count:
+            sel = _threshold(pairs)
+            note = f"count ≥ {min_count}  (n={len(sel)}"
+            note += f", showing {args.max_bars})" if len(sel) > args.max_bars else ")"
+            return sel[: args.max_bars], note
+        return pairs[: args.top_k], f"top {args.top_k}"
+
+    # ---- word clouds (also honor the frequency threshold when set) ----
     wc_ok = []
-    if _wordcloud(verbs, fig_dir / "verbs_wordcloud.png", args.max_words):
+    if _wordcloud(_threshold(verbs), fig_dir / "verbs_wordcloud.png", args.max_words):
         written.append("verbs_wordcloud.png"); wc_ok.append("verbs")
-    if _wordcloud(nouns, fig_dir / "nouns_wordcloud.png", args.max_words):
+    if _wordcloud(_threshold(nouns), fig_dir / "nouns_wordcloud.png", args.max_words):
         written.append("nouns_wordcloud.png"); wc_ok.append("nouns")
 
-    # ---- top-K bar charts ----
-    for pairs, name, color, title in (
-        (verbs, "verbs_topk.png", "#3b78b0", f"Top {args.top_k} verbs"),
-        (nouns, "nouns_topk.png", "#b0533b", f"Top {args.top_k} object nouns"),
+    # ---- bar charts: frequency threshold (--min_count) or fixed top-K ----
+    for pairs, name, color, kind in (
+        (verbs, "verbs_topk.png", "#3b78b0", "verbs"),
+        (nouns, "nouns_topk.png", "#b0533b", "object nouns"),
     ):
         if not pairs:
             continue
-        fig, ax = plt.subplots(figsize=(7, max(3, 0.22 * min(args.top_k, len(pairs)))))
-        _barh(ax, pairs[: args.top_k], title, color)
+        bars, note = _select_bars(pairs)
+        if not bars:
+            print(f"  (no {kind} with count >= {min_count}; lower --min_count)")
+            continue
+        fig, ax = plt.subplots(figsize=(7, max(3, 0.22 * len(bars))))
+        _barh(ax, bars, f"{kind[:1].upper() + kind[1:]} ({note})", color)
         fig.tight_layout(); fig.savefig(fig_dir / name, dpi=args.dpi); plt.close(fig)
         written.append(name)
 
