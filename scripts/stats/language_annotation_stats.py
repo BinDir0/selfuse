@@ -52,6 +52,7 @@ import re
 import statistics
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -262,8 +263,36 @@ def dist_summary(values: list[float]) -> dict | None:
     }
 
 
-def load_annotations(root: Path, suffix: str) -> tuple[list[dict], dict]:
-    """Return (valid_records, coverage_counts). Each record: clip_id, levels, instruction."""
+def _parse_one(path: Path):
+    """Read + normalize one annotation file. Returns (category, record_or_None) where
+    category is one of valid/invalid_json/invalid_status/empty_instruction. Pure per-file
+    work (no shared state) so it is safe to run across a thread pool; the read_text I/O
+    releases the GIL, which is where the win comes from on a network filesystem."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ("invalid_json", None)
+    if not isinstance(payload, dict):
+        return ("invalid_json", None)
+    if str(payload.get("status", "Valid")).strip() != "Valid":
+        return ("invalid_status", None)
+    hierarchy = _normalize_hierarchy(payload)
+    instruction = _normalize_instruction(payload, hierarchy)
+    if not instruction:
+        return ("empty_instruction", None)
+    return ("valid", {
+        "clip_id": path.stem,
+        "levels": {k: hierarchy.get(k) for k in HIERARCHY_KEYS},
+        "instruction": instruction,
+    })
+
+
+def load_annotations(root: Path, suffix: str, n_workers: int = 16) -> tuple[list[dict], dict]:
+    """Return (valid_records, coverage_counts). Each record: clip_id, levels, instruction.
+
+    Reading 100k+ small JSON sidecars off a network filesystem is I/O-latency bound, so
+    we fan the per-file read+normalize out over a thread pool (n_workers). Results are
+    consumed in input order (executor.map), keeping output stable across runs."""
     print(f"[scan] discovering *{suffix} under {root} ...", file=sys.stderr, flush=True)
     files = sorted(root.rglob(f"*{suffix}"))
     print(f"[scan] found {len(files)} files", file=sys.stderr, flush=True)
@@ -275,29 +304,19 @@ def load_annotations(root: Path, suffix: str) -> tuple[list[dict], dict]:
         "empty_instruction": 0,
     }
     records = []
-    for path in _progress(files, total=len(files), desc="parse annotations"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            coverage["invalid_json"] += 1
-            continue
-        if not isinstance(payload, dict):
-            coverage["invalid_json"] += 1
-            continue
-        if str(payload.get("status", "Valid")).strip() != "Valid":
-            coverage["invalid_status"] += 1
-            continue
-        hierarchy = _normalize_hierarchy(payload)
-        instruction = _normalize_instruction(payload, hierarchy)
-        if not instruction:
-            coverage["empty_instruction"] += 1
-            continue
-        coverage["valid"] += 1
-        records.append({
-            "clip_id": path.stem,
-            "levels": {k: hierarchy.get(k) for k in HIERARCHY_KEYS},
-            "instruction": instruction,
-        })
+    if n_workers and n_workers > 1 and files:
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            results = ex.map(_parse_one, files, chunksize=256)
+            for category, rec in _progress(results, total=len(files), desc="parse annotations"):
+                coverage[category] += 1
+                if rec is not None:
+                    records.append(rec)
+    else:
+        for path in _progress(files, total=len(files), desc="parse annotations"):
+            category, rec = _parse_one(path)
+            coverage[category] += 1
+            if rec is not None:
+                records.append(rec)
     return records, coverage
 
 
@@ -380,6 +399,10 @@ def main(argv=None):
                          "for high --n_process.")
     ap.add_argument("--spacy_batch_size", type=int, default=512,
                     help="Texts per spaCy pipe batch (larger amortizes per-worker IPC).")
+    ap.add_argument("--parse_workers", type=int, default=32,
+                    help="Threads for reading/parsing the annotation JSON sidecars. This step "
+                         "is I/O-latency bound on a network FS, so threads (which overlap I/O) "
+                         "help a lot; bump to 64+ on slow/EFS storage. Set 1 to disable.")
     ap.add_argument(
         "--extraction",
         default=None,
@@ -396,7 +419,7 @@ def main(argv=None):
     if not root.is_dir():
         raise SystemExit(f"annotation_root not found: {root}")
 
-    records, coverage = load_annotations(root, args.suffix)
+    records, coverage = load_annotations(root, args.suffix, args.parse_workers)
     if not records:
         raise SystemExit(f"No valid annotations under {root} (coverage={coverage})")
 
