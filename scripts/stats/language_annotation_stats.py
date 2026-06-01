@@ -146,22 +146,40 @@ def _progress(iterable, total=None, desc=""):
 class _Extractor:
     def __init__(self):
         self.nlp = None
+        reason = ""
         try:
             import spacy  # type: ignore
-
+        except Exception as e:
+            spacy = None
+            reason = f"import spacy failed: {e}"
+        if spacy is not None:
             # We only read tok.pos_ + tok.lemma_ (never dep_/head), so the dependency
-            # PARSER -- the most expensive component -- is pure waste. Disable it (and
-            # ner): POS comes from tagger+attribute_ruler and lemmas from the rule-based
-            # lemmatizer, neither of which needs the parser. Big speedup, identical output.
+            # PARSER -- the most expensive component -- is pure waste. Load the model
+            # plainly, THEN disable ner+parser only if present. (Do NOT pass disable= to
+            # spacy.load: a model/version that doesn't accept disabling one of them would
+            # make the whole load raise and silently drop us to the heuristic backend.)
+            # POS comes from tagger+attribute_ruler, lemmas from the rule-based lemmatizer
+            # -- neither needs the parser, so output is identical, just faster.
             for name in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm"):
                 try:
-                    self.nlp = spacy.load(name, disable=["ner", "parser"])
-                    break
-                except Exception:
+                    nlp = spacy.load(name)
+                except Exception as e:
+                    reason = f"spacy.load('{name}') failed: {e}"
                     continue
-        except Exception:
-            self.nlp = None
+                for pipe in ("ner", "parser"):
+                    if pipe in nlp.pipe_names:
+                        try:
+                            nlp.disable_pipe(pipe)
+                        except Exception:
+                            pass
+                self.nlp = nlp
+                reason = ""
+                break
         self.mode = "spacy" if self.nlp is not None else "heuristic"
+        if self.nlp is None and reason:
+            print(f"[extract] spaCy unavailable -> heuristic fallback ({reason}). "
+                  f"Fix: pip install spacy && python -m spacy download en_core_web_sm",
+                  file=sys.stderr, flush=True)
 
     @staticmethod
     def terms_from_doc(doc) -> dict:
