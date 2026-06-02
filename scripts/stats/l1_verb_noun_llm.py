@@ -139,11 +139,12 @@ def run_single(texts: list[str], args) -> dict:
               gpu_memory_utilization=args.gpu_memory_utilization, max_model_len=args.max_model_len)
     tok = llm.get_tokenizer()
     sp_kwargs = dict(temperature=0.0, max_tokens=args.max_tokens)
-    try:
-        from vllm.sampling_params import GuidedDecodingParams
-        sp_kwargs["guided_decoding"] = GuidedDecodingParams(json=JSON_SCHEMA)
-    except Exception:
-        pass
+    if not getattr(args, "no_guided", False):
+        try:
+            from vllm.sampling_params import GuidedDecodingParams
+            sp_kwargs["guided_decoding"] = GuidedDecodingParams(json=JSON_SCHEMA)
+        except Exception:
+            pass
     try:
         sp = SamplingParams(**sp_kwargs)
     except TypeError:
@@ -184,6 +185,8 @@ def run_data_parallel(texts: list[str], args, out_dir: Path) -> dict:
                "--model", args.model, "--max_tokens", str(args.max_tokens),
                "--gpu_memory_utilization", str(args.gpu_memory_utilization),
                "--max_model_len", str(args.max_model_len), "--tensor_parallel_size", "1"]
+        if args.no_guided:
+            cmd.append("--no_guided")
         print(f"[dp] launch shard {i}/{len(shards)} on GPU {env['CUDA_VISIBLE_DEVICES']} "
               f"({len(sh)} unique texts)", flush=True)
         procs.append(subprocess.Popen(cmd, env=env))
@@ -256,6 +259,9 @@ def main(argv=None):
     ap.add_argument("--tensor_parallel_size", type=int, default=1)
     ap.add_argument("--gpu_memory_utilization", type=float, default=0.90)
     ap.add_argument("--max_model_len", type=int, default=4096)
+    ap.add_argument("--no_guided", action="store_true",
+                    help="Disable JSON-schema guided decoding (use if outlines deps are broken, "
+                         "e.g. missing pyairports). parse_extraction tolerates free-text JSON.")
     ap.add_argument("--data_parallel", type=int, default=1, help="Independent tp=1 replicas across N GPUs.")
     ap.add_argument("--gpu_ids", default=None, help="Comma list of GPU ids for --data_parallel (default 0..N-1).")
     ap.add_argument("--dry_run", action="store_true", help="No model load; empty extractions (plumbing test).")
