@@ -353,12 +353,15 @@ def _save_records_cache(cache_path: str, root, suffix: str, records, coverage):
     try:
         os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
         tmp = f"{cache_path}.tmp.{os.getpid()}"
-        with gzip.open(tmp, "wb") as fh:
+        # compresslevel=1: the cache is for speed, so favour fast write/read over size.
+        with gzip.open(tmp, "wb", compresslevel=1) as fh:
             pickle.dump({"version": _CACHE_VERSION, "root": os.path.abspath(str(root)),
                          "suffix": suffix, "coverage": coverage, "records": records},
                         fh, protocol=pickle.HIGHEST_PROTOCOL)
+        size_mb = os.path.getsize(tmp) / 1e6
         os.replace(tmp, cache_path)
-        print(f"[cache] wrote {len(records)} records -> {cache_path}", file=sys.stderr, flush=True)
+        print(f"[cache] wrote {len(records)} records ({size_mb:.0f} MB) -> {cache_path}",
+              file=sys.stderr, flush=True)
     except Exception as e:
         print(f"[cache] failed to write cache {cache_path}: {e}", file=sys.stderr)
 
