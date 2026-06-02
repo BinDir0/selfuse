@@ -65,14 +65,42 @@ def _zipf(ax, pairs, title, color):
     ax.set_title(title)
 
 
-def _wordcloud(freq_pairs, out_path: Path, max_words: int) -> bool:
+# Warm-dominant categorical palette tuned to match the dense, multi-color "OBJECTS/ACTIONS"
+# style (coral/orange/gold lead, with green/teal/blue/gray accents).
+_PALETTE = [
+    "#D7574B", "#E0685E", "#E8823C", "#EE9A3A",   # reds / oranges (more entries -> warm-dominant)
+    "#E3B23C", "#D9A23A",                          # golds
+    "#7E9F3A",                                     # olive green
+    "#3FA38B",                                     # teal
+    "#3D78A8",                                     # blue
+    "#8A8D93",                                     # slate gray
+]
+
+
+def _palette_color_func(palette, seed=0):
+    import random
+    rng = random.Random(seed)
+    return lambda *a, **k: rng.choice(palette)
+
+
+def _wordcloud(freq_pairs, out_path: Path, max_words: int, *, prefer_horizontal: float = 0.95,
+               font_path=None, seed: int = 0, width: int = 2000, height: int = 900) -> bool:
+    """Dense, mostly-horizontal, multi-color cloud (warm palette) -- the designed-figure look,
+    not wordcloud's default colors. Multi-word keys (e.g. 'sewing machine') stay single units
+    because we generate from frequencies, not raw text."""
     if not freq_pairs:
         return False
     try:
         from wordcloud import WordCloud  # type: ignore
     except Exception:
         return False
-    wc = WordCloud(width=1600, height=900, background_color="white", max_words=max_words)
+    wc = WordCloud(
+        width=width, height=height, background_color="white",
+        max_words=max_words, prefer_horizontal=prefer_horizontal,
+        relative_scaling=0.5, min_font_size=8, margin=2,
+        font_path=font_path, random_state=seed,
+        color_func=_palette_color_func(_PALETTE, seed),
+    )
     wc.generate_from_frequencies(dict(freq_pairs))
     wc.to_file(str(out_path))
     return True
@@ -87,7 +115,10 @@ def main(argv=None):
                          "frequency threshold instead of a fixed top-K. Bars are still capped at "
                          "--max_bars for readability.")
     ap.add_argument("--max_bars", type=int, default=60, help="Hard cap on bars when --min_count selects many terms.")
-    ap.add_argument("--max_words", type=int, default=150, help="Max words in each word cloud.")
+    ap.add_argument("--max_words", type=int, default=400, help="Max words in each word cloud (dense look).")
+    ap.add_argument("--prefer_horizontal", type=float, default=0.95, help="Fraction of words laid horizontally.")
+    ap.add_argument("--font", default=None, help="Path to a .ttf for nicer cloud text (optional).")
+    ap.add_argument("--wc_seed", type=int, default=0, help="Seed for word-cloud layout + colors (reproducible).")
     ap.add_argument("--dpi", type=int, default=150)
     args = ap.parse_args(argv)
 
@@ -127,9 +158,10 @@ def main(argv=None):
 
     # ---- word clouds (also honor the frequency threshold when set) ----
     wc_ok = []
-    if _wordcloud(_threshold(verbs), fig_dir / "verbs_wordcloud.png", args.max_words):
+    wc_kw = dict(prefer_horizontal=args.prefer_horizontal, font_path=args.font, seed=args.wc_seed)
+    if _wordcloud(_threshold(verbs), fig_dir / "verbs_wordcloud.png", args.max_words, **wc_kw):
         written.append("verbs_wordcloud.png"); wc_ok.append("verbs")
-    if _wordcloud(_threshold(nouns), fig_dir / "nouns_wordcloud.png", args.max_words):
+    if _wordcloud(_threshold(nouns), fig_dir / "nouns_wordcloud.png", args.max_words, **wc_kw):
         written.append("nouns_wordcloud.png"); wc_ok.append("nouns")
 
     # ---- bar charts: frequency threshold (--min_count) or fixed top-K ----
