@@ -29,6 +29,10 @@ Speed: dedup + a 3B model makes this minutes on ONE A800. For more, --data_paral
 the unique texts across N GPUs (independent tp=1 replicas -- the right pattern for a small
 model; vLLM does continuous batching within each, so no manual batch size is needed).
 
+Resumable: extractions are checkpointed to JSONL as they are produced (l1_extraction.jsonl for
+single-process; _dp/shard_i.jsonl per data-parallel worker), flushed every --checkpoint_every.
+If the run is killed, just rerun the SAME command -- it skips everything already done.
+
 RUN ON THE PRODUCTION MACHINE (needs GPU + vllm). Example (8x A800):
 
     python scripts/stats/l1_verb_noun_llm.py \
@@ -131,35 +135,76 @@ def build_messages(text: str) -> list[dict]:
     return msgs
 
 
-def run_single(texts: list[str], args) -> dict:
-    """Load vLLM (tensor_parallel_size as given) and extract {verbs, objects} per text."""
-    from vllm import LLM, SamplingParams
+def _chunked(seq, n):
+    n = max(1, int(n))
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
 
-    llm = LLM(model=args.model, tensor_parallel_size=args.tensor_parallel_size,
-              gpu_memory_utilization=args.gpu_memory_utilization, max_model_len=args.max_model_len)
-    tok = llm.get_tokenizer()
-    sp_kwargs = dict(temperature=0.0, max_tokens=args.max_tokens)
-    if not getattr(args, "no_guided", False):
+
+def _load_done_jsonl(path) -> dict:
+    """Load {text: {verbs, objects}} from a resumable extraction JSONL (one record per line)."""
+    done: dict = {}
+    if path and os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    done[r["text"]] = {"verbs": r.get("verbs", []), "objects": r.get("objects", [])}
+                except Exception:
+                    continue
+    return done
+
+
+def run_single(texts: list[str], args, jsonl_path: str, keep_raw: bool = False) -> dict:
+    """Extract {verbs, objects} per text, RESUMABLY: each result is appended to jsonl_path and
+    flushed every --checkpoint_every, so a rerun (same args) skips what's already there. The model
+    is loaded once and only the not-yet-done texts are inferred. Returns results for `texts`."""
+    done = _load_done_jsonl(jsonl_path)
+    todo = [t for t in texts if t not in done]
+    print(f"[infer] texts={len(texts)}  resume_done={len(done)}  to_do={len(todo)}  -> {jsonl_path}",
+          flush=True)
+    if todo:
+        from vllm import LLM, SamplingParams
+
+        llm = LLM(model=args.model, tensor_parallel_size=args.tensor_parallel_size,
+                  gpu_memory_utilization=args.gpu_memory_utilization, max_model_len=args.max_model_len)
+        tok = llm.get_tokenizer()
+        sp_kwargs = dict(temperature=0.0, max_tokens=args.max_tokens)
+        if not getattr(args, "no_guided", False):
+            try:
+                from vllm.sampling_params import GuidedDecodingParams
+                sp_kwargs["guided_decoding"] = GuidedDecodingParams(json=JSON_SCHEMA)
+            except Exception:
+                pass
         try:
-            from vllm.sampling_params import GuidedDecodingParams
-            sp_kwargs["guided_decoding"] = GuidedDecodingParams(json=JSON_SCHEMA)
-        except Exception:
-            pass
-    try:
-        sp = SamplingParams(**sp_kwargs)
-    except TypeError:
-        sp_kwargs.pop("guided_decoding", None)
-        sp = SamplingParams(**sp_kwargs)
+            sp = SamplingParams(**sp_kwargs)
+        except TypeError:
+            sp_kwargs.pop("guided_decoding", None)
+            sp = SamplingParams(**sp_kwargs)
 
-    prompts = [tok.apply_chat_template(build_messages(t), tokenize=False, add_generation_prompt=True)
-               for t in texts]
-    outputs = llm.generate(prompts, sp)
-    res = {}
-    for t, o in zip(texts, outputs):
-        raw = o.outputs[0].text
-        p = parse_extraction(raw)
-        res[t] = {"verbs": p["verbs"], "objects": p["objects"], "_raw": raw}
-    return res
+        os.makedirs(os.path.dirname(jsonl_path) or ".", exist_ok=True)
+        n = len(done)
+        with open(jsonl_path, "a", encoding="utf-8") as fh:
+            for chunk in _chunked(todo, args.checkpoint_every):
+                prompts = [tok.apply_chat_template(build_messages(t), tokenize=False,
+                                                   add_generation_prompt=True) for t in chunk]
+                outputs = llm.generate(prompts, sp)
+                for t, o in zip(chunk, outputs):
+                    raw = o.outputs[0].text
+                    p = parse_extraction(raw)
+                    fh.write(json.dumps({"text": t, "verbs": p["verbs"], "objects": p["objects"]},
+                                        ensure_ascii=False) + "\n")
+                    entry = {"verbs": p["verbs"], "objects": p["objects"]}
+                    if keep_raw:
+                        entry["_raw"] = raw
+                    done[t] = entry
+                fh.flush()
+                n += len(chunk)
+                print(f"[ckpt] {n}/{len(texts)} done (+{len(chunk)}) -> {jsonl_path}", flush=True)
+    return {t: done.get(t, {"verbs": [], "objects": []}) for t in texts}
 
 
 def _shard(lst, n):
@@ -168,24 +213,29 @@ def _shard(lst, n):
 
 
 def run_data_parallel(texts: list[str], args, out_dir: Path) -> dict:
-    """Shard unique texts across N GPUs as independent tp=1 worker processes; merge results."""
+    """Shard unique texts across N GPUs as independent tp=1 worker processes; merge results.
+
+    Sharding is DETERMINISTIC (contiguous split of the same frequency-sorted texts), and each
+    worker checkpoints to its own resumable JSONL (_dp/shard_i.jsonl). So if the run is killed,
+    just rerun the SAME command: every worker resumes its shard where it left off."""
     shards = _shard(texts, args.data_parallel)
     gpu_ids = ([s.strip() for s in args.gpu_ids.split(",") if s.strip()]
                if args.gpu_ids else [str(i) for i in range(args.data_parallel)])
     dp_dir = out_dir / "_dp"
     dp_dir.mkdir(parents=True, exist_ok=True)
-    procs, out_files = [], []
+    procs, jsonls = [], []
     for i, sh in enumerate(shards):
-        fin, fout = dp_dir / f"shard_{i}.json", dp_dir / f"shard_{i}.out.json"
+        fin, fjsonl = dp_dir / f"shard_{i}.json", dp_dir / f"shard_{i}.jsonl"
         fin.write_text(json.dumps(sh, ensure_ascii=False), encoding="utf-8")
-        out_files.append(fout)
+        jsonls.append(fjsonl)
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_ids[i % len(gpu_ids)]
         cmd = [sys.executable, str(Path(__file__).resolve()), "--worker",
-               "--shard_in", str(fin), "--shard_out", str(fout),
+               "--shard_in", str(fin), "--shard_jsonl", str(fjsonl),
                "--model", args.model, "--max_tokens", str(args.max_tokens),
                "--gpu_memory_utilization", str(args.gpu_memory_utilization),
-               "--max_model_len", str(args.max_model_len), "--tensor_parallel_size", "1"]
+               "--max_model_len", str(args.max_model_len), "--tensor_parallel_size", "1",
+               "--checkpoint_every", str(args.checkpoint_every)]
         if args.no_guided:
             cmd.append("--no_guided")
         print(f"[dp] launch shard {i}/{len(shards)} on GPU {env['CUDA_VISIBLE_DEVICES']} "
@@ -193,10 +243,11 @@ def run_data_parallel(texts: list[str], args, out_dir: Path) -> dict:
         procs.append(subprocess.Popen(cmd, env=env))
     rcs = [p.wait() for p in procs]
     if any(rc != 0 for rc in rcs):
-        raise SystemExit(f"[dp] a worker failed (return codes={rcs}); see logs above")
+        raise SystemExit(f"[dp] a worker failed (return codes={rcs}); FINISHED work is checkpointed "
+                         f"in {dp_dir} -- rerun the SAME command to resume from where it stopped.")
     merged = {}
-    for fout in out_files:
-        merged.update(json.loads(Path(fout).read_text(encoding="utf-8")))
+    for fj in jsonls:
+        merged.update(_load_done_jsonl(str(fj)))
     return merged
 
 
@@ -265,17 +316,19 @@ def main(argv=None):
                          "e.g. missing pyairports). parse_extraction tolerates free-text JSON.")
     ap.add_argument("--data_parallel", type=int, default=1, help="Independent tp=1 replicas across N GPUs.")
     ap.add_argument("--gpu_ids", default=None, help="Comma list of GPU ids for --data_parallel (default 0..N-1).")
+    ap.add_argument("--checkpoint_every", type=int, default=4000,
+                    help="Append+flush extraction results to the resumable JSONL every N texts; a "
+                         "rerun (same args) skips what's already done.")
     ap.add_argument("--dry_run", action="store_true", help="No model load; empty extractions (plumbing test).")
     # internal worker mode (used by --data_parallel)
     ap.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--shard_in", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--shard_out", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--shard_jsonl", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
-    if args.worker:  # one data-parallel shard: run vLLM (tp=1) and dump {text: {verbs,objects}}
+    if args.worker:  # one data-parallel shard: resumably checkpoint to its shard JSONL
         texts = json.loads(Path(args.shard_in).read_text(encoding="utf-8"))
-        Path(args.shard_out).write_text(json.dumps(run_single(texts, args), ensure_ascii=False),
-                                        encoding="utf-8")
+        run_single(texts, args, args.shard_jsonl)
         return
 
     if not args.annotation_root or not args.out_dir:
@@ -318,6 +371,7 @@ def main(argv=None):
           f"model={args.model}", flush=True)
 
     ext_path = out_dir / "l1_extraction.json"
+    ext_jsonl = out_dir / "l1_extraction.jsonl"   # resumable checkpoint store (single-process)
     if args.from_extraction:
         results = json.loads(Path(args.from_extraction).read_text(encoding="utf-8"))
         print(f"[extract] loaded {len(results)} cached extractions from {args.from_extraction} (no GPU)", flush=True)
@@ -326,7 +380,7 @@ def main(argv=None):
     elif args.data_parallel and args.data_parallel > 1:
         results = run_data_parallel(unique_texts, args, out_dir)
     else:
-        results = run_single(unique_texts, args)
+        results = run_single(unique_texts, args, str(ext_jsonl), keep_raw=bool(args.print_samples))
 
     if not args.dry_run and not args.from_extraction:
         slim = {t: {"verbs": r["verbs"], "objects": r["objects"]} for t, r in results.items()}
