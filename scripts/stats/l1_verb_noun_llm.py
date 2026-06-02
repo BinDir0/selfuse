@@ -291,6 +291,11 @@ def main(argv=None):
                          "and routinely mention SEVERAL objects per sentence; the per-clip union "
                          "over these levels is what feeds the verb/noun stats.")
     ap.add_argument("--wordcloud", action="store_true", help="Also emit verbs/nouns word clouds here.")
+    ap.add_argument("--sample_frac", type=float, default=None,
+                    help="Randomly keep this FRACTION of clips (e.g. 0.1 for 1/10) before computing "
+                         "stats -- a representative subsample, NOT the first ones. Reproducible via --seed.")
+    ap.add_argument("--sample_n", type=int, default=None, help="Randomly keep exactly N clips (alternative to --sample_frac).")
+    ap.add_argument("--seed", type=int, default=0, help="RNG seed for --sample_frac/--sample_n (keep fixed so resume is stable).")
     ap.add_argument("--limit", type=int, default=None,
                     help="Infer only the first N (most frequent) UNIQUE level-texts -- a fast trial.")
     ap.add_argument("--print_samples", type=int, default=0,
@@ -344,6 +349,16 @@ def main(argv=None):
                                          rebuild_cache=args.rebuild_cache)
     if not records:
         raise SystemExit(f"No valid annotations under {root} (coverage={coverage})")
+
+    if args.sample_frac is not None or args.sample_n is not None:
+        import random
+        n_total = len(records)
+        k = args.sample_n if args.sample_n is not None else max(1, int(round(n_total * args.sample_frac)))
+        k = min(int(k), n_total)
+        # clip-level random subsample (seeded -> reproducible, so resume stays consistent); keeps
+        # the true frequency distribution, unlike taking the first ones (which biases by factory).
+        records = random.Random(args.seed).sample(records, k)
+        print(f"[sample] randomly kept {len(records)}/{n_total} clips (seed={args.seed})", flush=True)
 
     levels = [lv.strip() for lv in args.levels.split(",") if lv.strip()]
     # Per clip, collect its chosen-level texts (L1 falls back to the first instruction). One
