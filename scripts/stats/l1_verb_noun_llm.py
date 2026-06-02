@@ -364,10 +364,11 @@ def main(argv=None):
     # Per clip, collect its chosen-level texts (L1 falls back to the first instruction). One
     # text can carry several objects, so we keep the per-clip list and union later. text_occ
     # counts identical strings across the corpus -> we infer each UNIQUE text once and broadcast.
-    per_clip: list[tuple[str, list[str]]] = []   # (clip_id, level-texts)
+    per_clip: list[tuple[str, str, list[str]]] = []   # (clip_id, level1_text, level-texts)
     text_occ: Counter = Counter()
     for rec in records:
         ts = []
+        l1t = None
         for lv in levels:
             t = rec["levels"].get(lv)
             if not t and lv == "level1":
@@ -375,7 +376,9 @@ def main(argv=None):
             if t:
                 ts.append(t)
                 text_occ[t] += 1
-        per_clip.append((rec["clip_id"], ts))
+                if lv == "level1":
+                    l1t = t
+        per_clip.append((rec["clip_id"], l1t, ts))
     unique_texts = [t for t, _ in text_occ.most_common()]   # frequency-sorted (for --limit)
     n_unique, n_slots = len(unique_texts), sum(text_occ.values())
     if args.limit:
@@ -423,8 +426,9 @@ def main(argv=None):
         print(f"[weight] loaded {len(durations)} clip durations from {args.durations}", flush=True)
     verb_freq: Counter = Counter()
     noun_freq: Counter = Counter()
+    task_freq: Counter = Counter()      # (verb, object) pairs from L1
     n_missing_w = 0
-    for clip_id, ts in per_clip:
+    for clip_id, l1t, ts in per_clip:
         if durations is not None:
             w = durations.get(clip_id, 0.0)
             if w <= 0:
@@ -446,6 +450,15 @@ def main(argv=None):
         for o in co:
             if o and o not in _OBJECT_STOP:
                 noun_freq[o] += w
+        # (verb, object) TASK pairs from L1: pair when one side is singular (skip ambiguous NxM).
+        rl1 = results.get(l1t) if l1t else None
+        if rl1:
+            vs = [v for v in rl1.get("verbs", []) if v and v not in VERB_STOP]
+            os_ = [o for o in rl1.get("objects", []) if o and o not in _OBJECT_STOP]
+            if vs and os_ and (len(vs) == 1 or len(os_) == 1):
+                for v in vs:
+                    for o in os_:
+                        task_freq[(v, o)] += w
     if durations is not None:
         known = len(per_clip) - n_missing_w
         print(f"[weight] duration-weighted; clips with a known duration: {known}/{len(per_clip)} "
@@ -453,6 +466,12 @@ def main(argv=None):
 
     write_freq_csv(out_dir / "verb_freq.csv", verb_freq, ["verb", "count"])
     write_freq_csv(out_dir / "noun_freq.csv", noun_freq, ["noun", "count"])
+    import csv as _csv
+    with (out_dir / "task_freq.csv").open("w", newline="", encoding="utf-8") as _fh:
+        _w = _csv.writer(_fh)
+        _w.writerow(["verb", "object", "count"])
+        for (v, o), c in task_freq.most_common():
+            _w.writerow([v, o, int(round(c))])
 
     wc = {"verbs": False, "nouns": False}
     if args.wordcloud:
@@ -474,8 +493,10 @@ def main(argv=None):
                   "h_index": h_index(verb_freq), "top": verb_freq.most_common(args.top_k)},
         "object_nouns": {"unique": len(noun_freq), "total_occurrences": sum(noun_freq.values()),
                          "h_index": h_index(noun_freq), "top": noun_freq.most_common(args.top_k)},
+        "tasks": {"unique": len(task_freq), "total_occurrences": sum(task_freq.values()),
+                  "top": [[f"{v} {o}", c] for (v, o), c in task_freq.most_common(args.top_k)]},
         "outputs": {"verb_freq_csv": "verb_freq.csv", "noun_freq_csv": "noun_freq.csv",
-                    "l1_extraction_json": "l1_extraction.json",
+                    "task_freq_csv": "task_freq.csv", "l1_extraction_json": "l1_extraction.json",
                     "verbs_wordcloud_png": "verbs_wordcloud.png" if wc["verbs"] else None,
                     "nouns_wordcloud_png": "nouns_wordcloud.png" if wc["nouns"] else None},
     }
@@ -485,8 +506,10 @@ def main(argv=None):
     print("=" * 60)
     print(f"unique verbs : {len(verb_freq)}  (h-index {summary['verbs']['h_index']})")
     print(f"unique nouns : {len(noun_freq)}  (h-index {summary['object_nouns']['h_index']})")
+    print(f"unique tasks : {len(task_freq)}  ((verb,object) pairs from L1)")
     print(f"top verbs    : {[v for v, _ in verb_freq.most_common(12)]}")
     print(f"top nouns    : {[n for n, _ in noun_freq.most_common(12)]}")
+    print(f"top tasks    : {[f'{v} {o}' for (v, o), _ in task_freq.most_common(12)]}")
     if args.dry_run:
         print("DRY RUN: extractions empty (plumbing only). Re-run without --dry_run on a GPU box.")
     print(f"-> {out_dir}  (plot: python scripts/stats/plot_language_stats.py --stats_dir {out_dir} --min_count 50)")

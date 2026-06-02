@@ -45,6 +45,20 @@ def read_freq_csv(path: Path) -> list[tuple[str, int]]:
     return rows
 
 
+def read_task_csv(path: Path) -> list[tuple[str, int]]:
+    """task_freq.csv (verb,object,count) -> [('verb object', count), ...] for a bar chart."""
+    if not path.exists():
+        return []
+    rows = []
+    with path.open("r", encoding="utf-8") as fh:
+        reader = csv.reader(fh)
+        next(reader, None)
+        for row in reader:
+            if len(row) >= 3 and row[2].strip().isdigit():
+                rows.append((f"{row[0]} {row[1]}", int(row[2])))
+    return rows
+
+
 def _barh(ax, pairs, title, color, value_label="count"):
     pairs = pairs[::-1]  # largest on top
     labels = [p[0] for p in pairs]
@@ -172,6 +186,7 @@ def main(argv=None):
 
     verbs = read_freq_csv(stats_dir / "verb_freq.csv")
     nouns = read_freq_csv(stats_dir / "noun_freq.csv")
+    tasks = read_task_csv(stats_dir / "task_freq.csv")   # (verb, object) pairs -> bar chart only
     if not verbs and not nouns:
         raise SystemExit(f"no verb_freq.csv / noun_freq.csv under {stats_dir} (run language_annotation_stats.py first)")
 
@@ -200,9 +215,11 @@ def main(argv=None):
         written.append("nouns_wordcloud.png"); wc_ok.append("nouns")
 
     # ---- bar charts: frequency threshold (--min_count) or fixed top-K ----
+    # tasks = (verb, object) pairs -> bar chart only (no word cloud, by design).
     for pairs, name, color, kind in (
         (verbs, "verbs_topk.png", "#3b78b0", "verbs"),
         (nouns, "nouns_topk.png", "#b0533b", "object nouns"),
+        (tasks, "tasks_topk.png", "#5a7d3b", "tasks (verb-object)"),
     ):
         if not pairs:
             continue
