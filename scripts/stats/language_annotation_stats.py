@@ -46,8 +46,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
+import hashlib
 import json
 import os
+import pickle
 import re
 import statistics
 import sys
@@ -305,12 +308,80 @@ def _parse_one(path: Path):
     })
 
 
-def load_annotations(root: Path, suffix: str, n_workers: int = 16) -> tuple[list[dict], dict]:
+_CACHE_VERSION = 1
+
+
+def default_annotation_cache(root, suffix: str) -> str:
+    """Stable cache path for the parsed records of one (annotation_root, suffix) pair.
+    Override the directory with env HAWOR_LANG_CACHE_DIR."""
+    base = os.environ.get("HAWOR_LANG_CACHE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".cache", "hawor_lang_annotation")
+    key = hashlib.sha1(f"{os.path.abspath(str(root))}|{suffix}".encode("utf-8")).hexdigest()[:16]
+    return os.path.join(base, f"records_{key}.pkl.gz")
+
+
+def add_cache_args(ap):
+    """Shared --cache/--rebuild_cache/--no_cache flags (used by all the stats scripts)."""
+    ap.add_argument("--cache", default=None,
+                    help="Parsed-records cache path (default: ~/.cache/hawor_lang_annotation/<hash>; "
+                         "env HAWOR_LANG_CACHE_DIR to relocate). Read if present, written after a build.")
+    ap.add_argument("--rebuild_cache", action="store_true", help="Re-parse and overwrite the cache.")
+    ap.add_argument("--no_cache", action="store_true", help="Ignore the cache entirely (no read, no write).")
+
+
+def resolve_cache(args, root, suffix):
+    if getattr(args, "no_cache", False):
+        return None
+    return getattr(args, "cache", None) or default_annotation_cache(root, suffix)
+
+
+def _load_records_cache(cache_path: str, root, suffix: str):
+    try:
+        with gzip.open(cache_path, "rb") as fh:
+            blob = pickle.load(fh)
+    except Exception as e:
+        print(f"[cache] ignoring unreadable cache {cache_path}: {e}", file=sys.stderr)
+        return None
+    if (not isinstance(blob, dict) or blob.get("version") != _CACHE_VERSION
+            or blob.get("root") != os.path.abspath(str(root)) or blob.get("suffix") != suffix):
+        print("[cache] cache header mismatch -> rebuilding", file=sys.stderr)
+        return None
+    return blob["records"], blob["coverage"]
+
+
+def _save_records_cache(cache_path: str, root, suffix: str, records, coverage):
+    try:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        tmp = f"{cache_path}.tmp.{os.getpid()}"
+        with gzip.open(tmp, "wb") as fh:
+            pickle.dump({"version": _CACHE_VERSION, "root": os.path.abspath(str(root)),
+                         "suffix": suffix, "coverage": coverage, "records": records},
+                        fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, cache_path)
+        print(f"[cache] wrote {len(records)} records -> {cache_path}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[cache] failed to write cache {cache_path}: {e}", file=sys.stderr)
+
+
+def load_annotations(root: Path, suffix: str, n_workers: int = 16, *,
+                     cache: str | None = None, rebuild_cache: bool = False) -> tuple[list[dict], dict]:
     """Return (valid_records, coverage_counts). Each record: clip_id, levels, instruction.
 
     Reading 100k+ small JSON sidecars off a network filesystem is I/O-latency bound, so
     we fan the per-file read+normalize out over a thread pool (n_workers). Results are
-    consumed in input order (executor.map), keeping output stable across runs."""
+    consumed in input order (executor.map), keeping output stable across runs.
+
+    If `cache` is given, the parsed records are read from it when present (skip the whole
+    scan+parse) and written to it after a fresh build. `rebuild_cache=True` forces a re-parse
+    and overwrites. The cache is keyed by (root, suffix); rebuild it when the data changes."""
+    if cache and not rebuild_cache and os.path.exists(cache):
+        hit = _load_records_cache(cache, root, suffix)
+        if hit is not None:
+            records, coverage = hit
+            print(f"[cache] loaded {len(records)} parsed records from {cache} "
+                  f"(--rebuild_cache to refresh)", file=sys.stderr, flush=True)
+            return records, coverage
+
     print(f"[scan] discovering *{suffix} under {root} ...", file=sys.stderr, flush=True)
     files = sorted(root.rglob(f"*{suffix}"))
     print(f"[scan] found {len(files)} files", file=sys.stderr, flush=True)
@@ -335,6 +406,8 @@ def load_annotations(root: Path, suffix: str, n_workers: int = 16) -> tuple[list
             coverage[category] += 1
             if rec is not None:
                 records.append(rec)
+    if cache:
+        _save_records_cache(cache, root, suffix, records, coverage)
     return records, coverage
 
 
@@ -421,6 +494,7 @@ def main(argv=None):
                     help="Threads for reading/parsing the annotation JSON sidecars. This step "
                          "is I/O-latency bound on a network FS, so threads (which overlap I/O) "
                          "help a lot; bump to 64+ on slow/EFS storage. Set 1 to disable.")
+    add_cache_args(ap)
     ap.add_argument(
         "--extraction",
         default=None,
@@ -437,7 +511,9 @@ def main(argv=None):
     if not root.is_dir():
         raise SystemExit(f"annotation_root not found: {root}")
 
-    records, coverage = load_annotations(root, args.suffix, args.parse_workers)
+    records, coverage = load_annotations(root, args.suffix, args.parse_workers,
+                                         cache=resolve_cache(args, root, args.suffix),
+                                         rebuild_cache=args.rebuild_cache)
     if not records:
         raise SystemExit(f"No valid annotations under {root} (coverage={coverage})")
 

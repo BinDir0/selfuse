@@ -50,9 +50,11 @@ for _p in (str(PROJECT_ROOT), str(HERE)):
         sys.path.insert(0, _p)
 
 from language_annotation_stats import (  # noqa: E402
+    add_cache_args,
     h_index,
     load_annotations,
     maybe_wordcloud,
+    resolve_cache,
 )
 from extract_verbs_objects_qwen import JSON_SCHEMA, parse_extraction  # noqa: E402
 
@@ -173,6 +175,7 @@ def main(argv=None):
     ap.add_argument("--out_dir")
     ap.add_argument("--suffix", default=".annotation.json")
     ap.add_argument("--parse_workers", type=int, default=32)
+    add_cache_args(ap)
     ap.add_argument("--top_k", type=int, default=60)
     ap.add_argument("--wordcloud", action="store_true", help="Also emit verbs/nouns word clouds here.")
     ap.add_argument("--limit", type=int, default=None,
@@ -208,7 +211,9 @@ def main(argv=None):
     if not root.is_dir():
         raise SystemExit(f"annotation_root not found: {root}")
 
-    records, coverage = load_annotations(root, args.suffix, args.parse_workers)
+    records, coverage = load_annotations(root, args.suffix, args.parse_workers,
+                                         cache=resolve_cache(args, root, args.suffix),
+                                         rebuild_cache=args.rebuild_cache)
     if not records:
         raise SystemExit(f"No valid annotations under {root} (coverage={coverage})")
 
