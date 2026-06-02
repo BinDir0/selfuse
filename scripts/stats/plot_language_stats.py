@@ -45,27 +45,38 @@ def read_freq_csv(path: Path) -> list[tuple[str, int]]:
     return rows
 
 
-def _barh(ax, pairs, title, color):
+def _barh(ax, pairs, title, color, value_label="count"):
     pairs = pairs[::-1]  # largest on top
     labels = [p[0] for p in pairs]
     counts = [p[1] for p in pairs]
     ax.barh(range(len(labels)), counts, color=color)
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("count")
+    ax.set_xlabel(value_label)
     ax.set_title(title)
 
 
-def _barv(ax, pairs, title, color):
+def _barv(ax, pairs, title, color, value_label="count"):
     """Vertical bars spread left-to-right (landscape), labels rotated under the x-axis."""
     labels = [p[0] for p in pairs]
     counts = [p[1] for p in pairs]
     ax.bar(range(len(labels)), counts, color=color)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("count")
+    ax.set_ylabel(value_label)
     ax.set_title(title)
     ax.margins(x=0.005)
+
+
+def _unit_scale_label(count_unit, fps):
+    """How to scale the raw counts (frame-weighted) and what to label the axis."""
+    if count_unit == "hours":
+        return 1.0 / (fps * 3600.0), "hours"
+    if count_unit == "minutes":
+        return 1.0 / (fps * 60.0), "minutes"
+    if count_unit == "seconds":
+        return 1.0 / fps, "seconds"
+    return 1.0, "count"
 
 
 def _zipf(ax, pairs, title, color):
@@ -130,6 +141,10 @@ def main(argv=None):
     ap.add_argument("--bar_orient", choices=["v", "h"], default="v",
                     help="v: vertical bars spread left-to-right (wide/landscape, default). "
                          "h: horizontal bars stacked top-to-bottom (tall/portrait).")
+    ap.add_argument("--count_unit", choices=["count", "seconds", "minutes", "hours"], default="count",
+                    help="Bar axis unit. For duration-weighted stats the counts are FRAMES; "
+                         "'hours' divides by fps*3600 and labels the axis accordingly.")
+    ap.add_argument("--fps", type=float, default=30.0, help="Frames per second, for --count_unit time conversion.")
     ap.add_argument("--max_words", type=int, default=400, help="Max words in each word cloud (dense look).")
     ap.add_argument("--prefer_horizontal", type=float, default=0.95, help="Fraction of words laid horizontally.")
     ap.add_argument("--font", default=None, help="Path to a .ttf for nicer cloud text (optional).")
@@ -191,12 +206,14 @@ def main(argv=None):
             print(f"  (no {kind} with count >= {min_count}; lower --min_count)")
             continue
         title = f"{kind[:1].upper() + kind[1:]} ({note})"
+        scale, vlabel = _unit_scale_label(args.count_unit, args.fps)
+        bars_s = [(t, c * scale) for t, c in bars]
         if args.bar_orient == "h":
-            fig, ax = plt.subplots(figsize=(8, max(3, 0.24 * len(bars))))
-            _barh(ax, bars, title, color)
+            fig, ax = plt.subplots(figsize=(8, max(3, 0.24 * len(bars_s))))
+            _barh(ax, bars_s, title, color, vlabel)
         else:
-            fig, ax = plt.subplots(figsize=(max(7, 0.34 * len(bars)), 5))
-            _barv(ax, bars, title, color)
+            fig, ax = plt.subplots(figsize=(max(7, 0.34 * len(bars_s)), 5))
+            _barv(ax, bars_s, title, color, vlabel)
         fig.tight_layout(); fig.savefig(fig_dir / name, dpi=args.dpi); plt.close(fig)
         written.append(name)
 
