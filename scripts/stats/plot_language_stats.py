@@ -145,6 +145,11 @@ def main(argv=None):
                     help="Bar axis unit. For duration-weighted stats the counts are FRAMES; "
                          "'hours' divides by fps*3600 and labels the axis accordingly.")
     ap.add_argument("--fps", type=float, default=30.0, help="Frames per second, for --count_unit time conversion.")
+    ap.add_argument("--count_scale", type=float, default=1.0,
+                    help="Extra multiplier on the bar-axis values, e.g. 10 to extrapolate a 1/10 "
+                         "sample (--sample_frac 0.1) back to full-dataset scale.")
+    ap.add_argument("--bar_width", type=float, default=0.22,
+                    help="Inches per bar (smaller = more compact figure). Default 0.22.")
     ap.add_argument("--max_words", type=int, default=400, help="Max words in each word cloud (dense look).")
     ap.add_argument("--prefer_horizontal", type=float, default=0.95, help="Fraction of words laid horizontally.")
     ap.add_argument("--font", default=None, help="Path to a .ttf for nicer cloud text (optional).")
@@ -207,12 +212,13 @@ def main(argv=None):
             continue
         title = f"{kind[:1].upper() + kind[1:]} ({note})"
         scale, vlabel = _unit_scale_label(args.count_unit, args.fps)
-        bars_s = [(t, c * scale) for t, c in bars]
+        bars_s = [(t, c * scale * args.count_scale) for t, c in bars]
+        bw = args.bar_width
         if args.bar_orient == "h":
-            fig, ax = plt.subplots(figsize=(8, max(3, 0.24 * len(bars_s))))
+            fig, ax = plt.subplots(figsize=(8, max(3, bw * len(bars_s))))
             _barh(ax, bars_s, title, color, vlabel)
         else:
-            fig, ax = plt.subplots(figsize=(max(7, 0.34 * len(bars_s)), 5))
+            fig, ax = plt.subplots(figsize=(max(6, bw * len(bars_s)), 4.5))
             _barv(ax, bars_s, title, color, vlabel)
         fig.tight_layout(); fig.savefig(fig_dir / name, dpi=args.dpi); plt.close(fig)
         written.append(name)
