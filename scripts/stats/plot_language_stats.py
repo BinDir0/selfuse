@@ -132,7 +132,7 @@ def _wordcloud(freq_pairs, out_path: Path, max_words: int, *, prefer_horizontal:
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Render language-stats figures.")
     ap.add_argument("--stats_dir", required=True, help="Output dir from language_annotation_stats.py.")
-    ap.add_argument("--top_k", type=int, default=30, help="Bars to show in top-K charts (used when --min_count is 0).")
+    ap.add_argument("--top_k", type=int, default=50, help="Bars to show in top-K charts (used when --min_count is 0).")
     ap.add_argument("--min_count", type=int, default=0,
                     help="If >0, bar charts (and word clouds) keep only terms with count >= this "
                          "frequency threshold instead of a fixed top-K. Bars are still capped at "
