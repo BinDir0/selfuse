@@ -156,8 +156,9 @@ def run_single(texts: list[str], args) -> dict:
     outputs = llm.generate(prompts, sp)
     res = {}
     for t, o in zip(texts, outputs):
-        p = parse_extraction(o.outputs[0].text)
-        res[t] = {"verbs": p["verbs"], "objects": p["objects"]}
+        raw = o.outputs[0].text
+        p = parse_extraction(raw)
+        res[t] = {"verbs": p["verbs"], "objects": p["objects"], "_raw": raw}
     return res
 
 
@@ -328,8 +329,9 @@ def main(argv=None):
         results = run_single(unique_texts, args)
 
     if not args.dry_run and not args.from_extraction:
-        ext_path.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
-        print(f"[extract] saved {len(results)} extractions -> {ext_path} "
+        slim = {t: {"verbs": r["verbs"], "objects": r["objects"]} for t, r in results.items()}
+        ext_path.write_text(json.dumps(slim, ensure_ascii=False), encoding="utf-8")
+        print(f"[extract] saved {len(slim)} extractions -> {ext_path} "
               f"(re-tune stop-lists offline via --from_extraction)", flush=True)
 
     if args.print_samples:
@@ -337,6 +339,8 @@ def main(argv=None):
         for t in unique_texts[: args.print_samples]:
             r = results.get(t) or {}
             print(f"[{text_occ[t]:>6}x] {t[:100]}\n         verbs={r.get('verbs')}  objects={r.get('objects')}")
+            if not r.get("verbs") and not r.get("objects") and r.get("_raw") is not None:
+                print(f"         RAW={r['_raw'][:240]!r}")   # why did it come back empty?
         print("-" * 60)
 
     # aggregate: per clip, UNION verbs/objects across ITS levels, then add the clip's WEIGHT
