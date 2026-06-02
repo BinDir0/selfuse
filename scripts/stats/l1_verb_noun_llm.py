@@ -175,6 +175,10 @@ def main(argv=None):
     ap.add_argument("--parse_workers", type=int, default=32)
     ap.add_argument("--top_k", type=int, default=60)
     ap.add_argument("--wordcloud", action="store_true", help="Also emit verbs/nouns word clouds here.")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="Infer only the first N (most frequent) UNIQUE L1 texts -- a fast accuracy/speed trial.")
+    ap.add_argument("--print_samples", type=int, default=0,
+                    help="Print this many 'L1 text -> verbs/objects' rows for eyeballing.")
     # model / vLLM
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--max_tokens", type=int, default=256)
@@ -210,10 +214,14 @@ def main(argv=None):
 
     l1_texts = [t for t in (_l1_text(rec) for rec in records) if t]
     text_count = Counter(l1_texts)          # identical L1 strings -> infer once, broadcast
-    unique_texts = list(text_count)
-    print(f"[l1] clips with L1: {len(l1_texts)}   unique L1 texts: {len(unique_texts)}   "
-          f"dedup ratio: {len(unique_texts) / max(1, len(l1_texts)):.3f}   model={args.model}",
-          flush=True)
+    unique_texts = [t for t, _ in text_count.most_common()]   # frequency-sorted
+    n_unique = len(unique_texts)
+    if args.limit:
+        unique_texts = unique_texts[: args.limit]
+    print(f"[l1] clips with L1: {len(l1_texts)}   unique L1 texts: {n_unique}   "
+          f"dedup ratio: {n_unique / max(1, len(l1_texts)):.3f}   "
+          f"{'inferring ' + str(len(unique_texts)) + ' (--limit)   ' if args.limit else ''}"
+          f"model={args.model}", flush=True)
 
     if args.dry_run:
         results = {t: {"verbs": [], "objects": []} for t in unique_texts}
@@ -221,6 +229,13 @@ def main(argv=None):
         results = run_data_parallel(unique_texts, args, out_dir)
     else:
         results = run_single(unique_texts, args)
+
+    if args.print_samples:
+        print("-" * 60)
+        for t in unique_texts[: args.print_samples]:
+            r = results.get(t) or {}
+            print(f"[{text_count[t]:>6}x] {t[:90]}\n         verbs={r.get('verbs')}  objects={r.get('objects')}")
+        print("-" * 60)
 
     # aggregate: each clip contributes its L1 SET once -> weight unique-text terms by clip count
     verb_freq: Counter = Counter()
