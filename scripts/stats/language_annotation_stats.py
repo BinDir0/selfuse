@@ -313,7 +313,15 @@ def _parse_one(path: Path, suffix: str = ""):
     })
 
 
-_CACHE_VERSION = 2  # bumped: clip_id now strips the full suffix
+_CACHE_VERSION = 3  # bumped: cache now also fingerprints the root's subdir (factory) count
+
+
+def _root_subdir_count(root) -> int:
+    """Cheap staleness fingerprint: number of immediate subdirectories (factories) under root."""
+    try:
+        return sum(1 for e in os.scandir(str(root)) if e.is_dir())
+    except Exception:
+        return -1
 
 
 def default_annotation_cache(root, suffix: str) -> str:
@@ -351,6 +359,11 @@ def _load_records_cache(cache_path: str, root, suffix: str):
             or blob.get("root") != os.path.abspath(str(root)) or blob.get("suffix") != suffix):
         print("[cache] cache header mismatch -> rebuilding", file=sys.stderr)
         return None
+    cur = _root_subdir_count(root)
+    if blob.get("n_subdirs") is not None and cur >= 0 and blob["n_subdirs"] != cur:
+        print(f"[cache] root subdir (factory) count changed {blob['n_subdirs']} -> {cur} "
+              f"(data grew) -> rebuilding", file=sys.stderr)
+        return None
     return blob["records"], blob["coverage"]
 
 
@@ -361,7 +374,8 @@ def _save_records_cache(cache_path: str, root, suffix: str, records, coverage):
         # compresslevel=1: the cache is for speed, so favour fast write/read over size.
         with gzip.open(tmp, "wb", compresslevel=1) as fh:
             pickle.dump({"version": _CACHE_VERSION, "root": os.path.abspath(str(root)),
-                         "suffix": suffix, "coverage": coverage, "records": records},
+                         "suffix": suffix, "n_subdirs": _root_subdir_count(root),
+                         "coverage": coverage, "records": records},
                         fh, protocol=pickle.HIGHEST_PROTOCOL)
         size_mb = os.path.getsize(tmp) / 1e6
         os.replace(tmp, cache_path)
