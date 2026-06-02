@@ -201,7 +201,26 @@ def write_freq_csv(path: Path, counter: Counter, header):
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(header)
-        w.writerows(counter.most_common())
+        # integer counts so plot_language_stats.py (which does int()) reads them
+        w.writerows((term, int(round(c))) for term, c in counter.most_common())
+
+
+def load_durations(path: str) -> dict:
+    """clip_id -> length weight (frames or seconds). Accepts JSON {id: num} or CSV 'id,num'.
+    Keyed by the annotation file stem (== record clip_id)."""
+    import csv
+    p = Path(path).expanduser()
+    if p.suffix.lower() == ".json":
+        return {str(k): float(v) for k, v in json.loads(p.read_text(encoding="utf-8")).items()}
+    out: dict = {}
+    with p.open("r", encoding="utf-8") as fh:
+        for row in csv.reader(fh):
+            if len(row) >= 2:
+                try:
+                    out[str(row[0]).strip()] = float(row[1])
+                except ValueError:
+                    continue  # header / non-numeric
+    return out
 
 
 def main(argv=None):
@@ -223,7 +242,14 @@ def main(argv=None):
                     help="Print this many 'text -> verbs/objects' rows for eyeballing.")
     ap.add_argument("--from_extraction", default=None,
                     help="Skip the GPU: re-aggregate from a previously saved l1_extraction.json "
-                         "(lets you re-tune the object stop-list offline).")
+                         "(lets you re-tune the object stop-list / weighting offline).")
+    ap.add_argument("--weight", choices=["clips", "duration"], default="clips",
+                    help="clips: each clip counts once per term (task-instance diversity). "
+                         "duration: weight each clip by its length from --durations (data volume "
+                         "-- 'hours of footage involving the concept').")
+    ap.add_argument("--durations", default=None,
+                    help="clip_id -> length (frames or seconds) for --weight duration. JSON "
+                         "{id:num} or CSV id,num, keyed by the annotation file stem (clip_id).")
     # model / vLLM
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--max_tokens", type=int, default=256)
@@ -263,7 +289,7 @@ def main(argv=None):
     # Per clip, collect its chosen-level texts (L1 falls back to the first instruction). One
     # text can carry several objects, so we keep the per-clip list and union later. text_occ
     # counts identical strings across the corpus -> we infer each UNIQUE text once and broadcast.
-    per_clip_texts: list[list[str]] = []
+    per_clip: list[tuple[str, list[str]]] = []   # (clip_id, level-texts)
     text_occ: Counter = Counter()
     for rec in records:
         ts = []
@@ -274,7 +300,7 @@ def main(argv=None):
             if t:
                 ts.append(t)
                 text_occ[t] += 1
-        per_clip_texts.append(ts)
+        per_clip.append((rec["clip_id"], ts))
     unique_texts = [t for t, _ in text_occ.most_common()]   # frequency-sorted (for --limit)
     n_unique, n_slots = len(unique_texts), sum(text_occ.values())
     if args.limit:
@@ -307,11 +333,26 @@ def main(argv=None):
             print(f"[{text_occ[t]:>6}x] {t[:100]}\n         verbs={r.get('verbs')}  objects={r.get('objects')}")
         print("-" * 60)
 
-    # aggregate: per clip, UNION verbs/objects across ITS levels and count each once (#clips
-    # mentioning the term). Deterministic stop-lists are a backstop to the LLM's classification.
+    # aggregate: per clip, UNION verbs/objects across ITS levels, then add the clip's WEIGHT
+    # once per distinct term. weight = 1 (clips) or the clip's length (duration). Deterministic
+    # stop-lists are a backstop to the LLM's classification.
+    durations = None
+    if args.weight == "duration":
+        if not args.durations:
+            raise SystemExit("--weight duration requires --durations <clip_id->length file>")
+        durations = load_durations(args.durations)
+        print(f"[weight] loaded {len(durations)} clip durations from {args.durations}", flush=True)
     verb_freq: Counter = Counter()
     noun_freq: Counter = Counter()
-    for ts in per_clip_texts:
+    n_missing_w = 0
+    for clip_id, ts in per_clip:
+        if durations is not None:
+            w = durations.get(clip_id, 0.0)
+            if w <= 0:
+                n_missing_w += 1
+                continue
+        else:
+            w = 1
         cv: set = set()
         co: set = set()
         for t in ts:
@@ -322,10 +363,14 @@ def main(argv=None):
             co.update(r.get("objects", []))
         for v in cv:
             if v and v not in VERB_STOP:
-                verb_freq[v] += 1
+                verb_freq[v] += w
         for o in co:
             if o and o not in _OBJECT_STOP:
-                noun_freq[o] += 1
+                noun_freq[o] += w
+    if durations is not None:
+        known = len(per_clip) - n_missing_w
+        print(f"[weight] duration-weighted; clips with a known duration: {known}/{len(per_clip)} "
+              f"(missing {n_missing_w} -- check the clip_id join key)", flush=True)
 
     write_freq_csv(out_dir / "verb_freq.csv", verb_freq, ["verb", "count"])
     write_freq_csv(out_dir / "noun_freq.csv", noun_freq, ["noun", "count"])
@@ -339,6 +384,8 @@ def main(argv=None):
         "source": "l1_verb_noun_llm",
         "model": args.model,
         "levels": levels,
+        "weight": args.weight,
+        "duration_weighted_clips": (len(per_clip) - n_missing_w) if durations is not None else None,
         "coverage": {**coverage,
                      "valid_language_coverage": (coverage["valid"] / coverage["files_found"]
                                                  if coverage["files_found"] else 0.0)},
