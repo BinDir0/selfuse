@@ -23,15 +23,20 @@ import argparse
 import csv
 import glob
 import json
+import os
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+HERE = Path(__file__).resolve().parent
+PROJECT_ROOT = HERE.parents[1]
+for _p in (str(PROJECT_ROOT), str(HERE)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from lib.pipeline.annotation_protocol import _build_buildai_qwen_annotation_name  # noqa: E402
+from language_annotation_stats import _progress  # noqa: E402
 
 _FACTORY_RE = re.compile(r"^factory_(\d+)_worker_(\d+)_(\d+)_cut(\d+)$")
 
@@ -49,11 +54,37 @@ def _alt_keys(name: str) -> set[str]:
     return keys
 
 
+def _process_index(ip: str):
+    """Worker: parse ONE _video_index.json -> (ip, (n_clips, total_frames, rows), err). Each
+    index JSON is large and json.load is CPU-bound, so this runs in a process pool; only the
+    small (key, frame_count) rows cross back, not the parsed dict."""
+    try:
+        with open(ip, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except Exception as e:  # noqa: BLE001
+        return (ip, None, str(e))
+    rows = []
+    n_clips = total = 0
+    for clip_id, entry in (d.get("videos") or {}).items():
+        frames = entry.get("frames")
+        fc = len(frames) if isinstance(frames, list) else int(entry.get("num_frames", 0) or 0)
+        if fc <= 0:
+            continue
+        n_clips += 1
+        total += fc
+        for key in _alt_keys(str(clip_id)):
+            rows.append((key, fc))
+    return (ip, (n_clips, total, rows), None)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", required=True, help="processed_*_jpg dir holding factory*/_video_index.json")
     ap.add_argument("--out", required=True, help="Output CSV (clip_id,frame_count).")
     ap.add_argument("--index_glob", default="*/_video_index.json", help="Glob (under --root) for the index JSONs.")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="Process-pool workers for parsing the index JSONs (default min(16, cores)). "
+                         "Each worker holds one parsed JSON, so lower it if memory is tight.")
     ap.add_argument("--show", type=int, default=8)
     args = ap.parse_args(argv)
 
@@ -62,25 +93,29 @@ def main(argv=None):
     if not index_files:
         raise SystemExit(f"no index files at {root}/{args.index_glob}")
 
+    workers = args.workers if args.workers and args.workers > 0 else min(16, (os.cpu_count() or 4))
     rows = []
     n_clips = n_ok = total_frames = 0
-    for ip in index_files:
-        try:
-            with open(ip, encoding="utf-8") as fh:
-                d = json.load(fh)
-        except Exception as e:
-            print(f"[warn] skip {ip}: {e}", file=sys.stderr)
-            continue
+
+    def _consume(ip, res, err):
+        nonlocal n_clips, n_ok, total_frames
+        if err:
+            print(f"[warn] skip {ip}: {err}", file=sys.stderr)
+            return
+        nc, tf, rws = res
         n_ok += 1
-        for clip_id, entry in (d.get("videos") or {}).items():
-            frames = entry.get("frames")
-            fc = len(frames) if isinstance(frames, list) else int(entry.get("num_frames", 0) or 0)
-            if fc <= 0:
-                continue
-            n_clips += 1
-            total_frames += fc
-            for key in _alt_keys(str(clip_id)):
-                rows.append((key, fc))
+        n_clips += nc
+        total_frames += tf
+        rows.extend(rws)
+
+    if workers > 1 and len(index_files) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            for ip, res, err in _progress(ex.map(_process_index, index_files),
+                                          total=len(index_files), desc="index json"):
+                _consume(ip, res, err)
+    else:
+        for ip in _progress(index_files, total=len(index_files), desc="index json"):
+            _consume(*_process_index(ip))
 
     out_path = Path(args.out).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
