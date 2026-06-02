@@ -190,6 +190,29 @@ def build_batch_infer_parser() -> argparse.ArgumentParser:
         help="Batch size for Any4D depth in the SLAM stage.",
     )
     parser.add_argument(
+        "--any4d_overlap",
+        type=int,
+        default=0,
+        help="Frames of overlap between consecutive Any4D chunks (default 0 = off). >0 runs the "
+        "rigorous overlap scale-stitch; sets HAWOR_ANY4D_OVERLAP for SLAM workers. Must be < "
+        "--any4d_batch_size.",
+    )
+    parser.add_argument(
+        "--hand_anchor",
+        action="store_true",
+        default=False,
+        help="Anchor the dense depth metric to the trusted HaWoR hand with one global factor k "
+        "(before est_scale, so camera+hand inherit the hand metric). Sets HAWOR_HAND_ANCHOR.",
+    )
+    parser.add_argument(
+        "--hand_anchor_alpha",
+        action="store_true",
+        default=False,
+        help="On top of --hand_anchor, apply a temporally-smooth per-frame scale alpha(t) to the "
+        "SAVED depth map only (hand sits on the depth surface per-frame; camera/hand trajectory "
+        "untouched). Sets HAWOR_HAND_ANCHOR_ALPHA.",
+    )
+    parser.add_argument(
         "--metric3d_batch_size",
         type=int,
         default=None,

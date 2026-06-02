@@ -48,6 +48,24 @@ def overlap_frames() -> int:
         return 0
 
 
+def stitch_max_mad() -> float:
+    """Max allowed spatial dispersion of a shared frame's log-depth-ratio (flatness gate).
+
+    On a frame shared by two overlapping chunks the per-pixel ratio ``d_a/d_b`` must be a
+    *spatially flat* field iff the per-batch defect is a pure scalar (``G`` cancels). We measure
+    flatness as the median-absolute-deviation (MAD) of ``log(d_a) - log(d_b)`` over valid pixels
+    (a robust, unit-free spread: ~the typical multiplicative deviation of a pixel from the
+    frame's median ratio). A boundary frame whose MAD exceeds this threshold means the two
+    predictions of the same frame disagree in STRUCTURE, not just scale -> the pure-scalar model
+    is violated there and that link is not trusted. Default deliberately permissive; calibrate
+    from the logged distribution. Override with HAWOR_ANY4D_STITCH_MAX_MAD.
+    """
+    try:
+        return float(os.environ.get("HAWOR_ANY4D_STITCH_MAX_MAD", "0.25"))
+    except ValueError:
+        return 0.25
+
+
 def _resize(arr: np.ndarray, hw, nearest: bool = False) -> np.ndarray:
     h, w = hw
     if arr.shape[:2] == (h, w):
@@ -155,20 +173,83 @@ def compute_batch_correction(
     return cf.astype(np.float32), info
 
 
-def assemble_overlapping_chunks(chunks, n_frames, hw, *, min_pixels=500):
+def _boundary_scale_ratio(a_d, a_start, b_d, b_start, *, min_pixels, max_mad):
+    """Estimate the per-chunk scale ratio s̃_a/s̃_b from the frames two chunks share.
+
+    Each shared frame is the SAME frame predicted by both chunks, so per pixel
+    ``log(d_a) - log(d_b)`` should be a flat field whose level is ``log(s̃_a/s̃_b)``. Per shared
+    frame we take the median log-ratio (the scale) and its MAD (the spatial flatness); a frame is
+    "clean" iff it has enough valid pixels AND its MAD is within ``max_mad``. The link ratio is the
+    median over the clean frames' levels (robust to one bad/blurred/occluded shared frame).
+
+    Returns (ratio, diag). ``ratio`` is NaN if no shared frame had enough valid pixels (caller then
+    carries the previous correction forward). ``diag`` records reliability for the gate + logging.
+    """
+    ov_lo, ov_hi = b_start, min(a_start + a_d.shape[0], b_start + b_d.shape[0])
+    levels, mads, clean_levels = [], [], []
+    n_valid_max = 0
+    for p in range(ov_lo, ov_hi):
+        da, db = a_d[p - a_start], b_d[p - b_start]
+        v = np.isfinite(da) & (da > 0.05) & np.isfinite(db) & (db > 0.05)
+        nv = int(v.sum())
+        if nv < min_pixels:
+            continue
+        n_valid_max = max(n_valid_max, nv)
+        lr = np.log(da[v].astype(np.float64)) - np.log(db[v].astype(np.float64))
+        m = float(np.median(lr))
+        mad = float(np.median(np.abs(lr - m)))
+        levels.append(m)
+        mads.append(mad)
+        if mad <= max_mad:
+            clean_levels.append(m)
+
+    diag = {
+        "ratio": float("nan"),
+        "flatness": float(np.median(mads)) if mads else float("nan"),
+        "cross_frame_spread": float("nan"),
+        "n_valid": int(n_valid_max),
+        "n_frames_total": len(levels),
+        "n_frames_clean": len(clean_levels),
+        "trusted": False,
+    }
+    if not levels:
+        diag["reason"] = "no shared frame with enough valid pixels"
+        return float("nan"), diag
+    if clean_levels:
+        link_log = float(np.median(clean_levels))
+        diag["ratio"] = float(np.exp(link_log))
+        diag["cross_frame_spread"] = (
+            float(np.median(np.abs(np.asarray(clean_levels) - link_log))) if len(clean_levels) > 1 else 0.0
+        )
+        diag["trusted"] = True
+        return diag["ratio"], diag
+    # measured, but every shared frame is too non-flat -> structure mismatch, not a pure scalar
+    diag["ratio"] = float(np.exp(float(np.median(levels))))
+    diag["reason"] = "flatness above threshold on all shared frames"
+    return float("nan"), diag
+
+
+def assemble_overlapping_chunks(chunks, n_frames, hw, *, min_pixels=500, max_mad=None):
     """Stitch + assemble Any4D chunks that were run with frame OVERLAP.
 
     ``chunks`` : list of (start_pos, depths[m,H,W]) — m frames per chunk, possibly
                  overlapping the next chunk; depths already at output resolution.
     On the overlap frames the two chunks predict the SAME frame, so the per-pixel
     median ratio depth_a/depth_b is exactly s̃_a/s̃_b (zero motion, no dynamic confound).
-    Chain those ratios into a per-chunk correction, re-anchor the global median, then
-    assemble one depth per frame from the chunk whose center is closest (least edge bias).
+    Each boundary is gated on the spatial flatness of that ratio (see ``_boundary_scale_ratio``):
+    a boundary whose shared-frame ratio is not a flat field is NOT trusted (the previous
+    correction is carried forward) so a structure mismatch cannot silently corrupt the chain.
+    Trusted ratios are chained into a per-chunk correction, the global median is re-anchored, then
+    one depth per frame is assembled from the chunk whose center is closest (least edge bias).
 
-    Returns (dense[n,H,W] float32, cf_per_frame[n] float32, info).
+    Returns (dense[n,H,W] float32, cf_per_frame[n] float32, info). ``info`` carries per-boundary
+    diagnostics (parallel arrays) for persistence + the independent SLAM cross-check.
     """
     H, W = hw
-    info = {"applied": False, "reason": "", "n_chunks": len(chunks), "n_solved": 0}
+    if max_mad is None:
+        max_mad = stitch_max_mad()
+    info = {"applied": False, "reason": "", "n_chunks": len(chunks), "n_solved": 0, "n_flagged": 0,
+            "max_mad": float(max_mad)}
     chunks = sorted(chunks, key=lambda c: int(c[0]))
     K = len(chunks)
     if K == 0:
@@ -176,21 +257,35 @@ def assemble_overlapping_chunks(chunks, n_frames, hw, *, min_pixels=500):
         return np.full((n_frames, H, W), np.nan, np.float32), np.ones(n_frames, np.float32), info
     cf_chunk = np.ones(K, np.float64)
     n_solved = 0
+    n_flagged = 0
+    b_ratio, b_flat, b_spread, b_nvalid, b_trusted = [], [], [], [], []
     for k in range(1, K):
         a_start, a_d = int(chunks[k - 1][0]), chunks[k - 1][1]
         b_start, b_d = int(chunks[k][0]), chunks[k][1]
-        ov_lo, ov_hi = b_start, min(a_start + a_d.shape[0], b_start + b_d.shape[0])
-        ratios = []
-        for p in range(ov_lo, ov_hi):
-            da, db = a_d[p - a_start], b_d[p - b_start]
-            v = np.isfinite(da) & (da > 0.05) & np.isfinite(db) & (db > 0.05)
-            if int(v.sum()) >= min_pixels:
-                ratios.append(float(np.median(da[v] / db[v])))
-        if ratios:
-            cf_chunk[k] = cf_chunk[k - 1] * float(np.median(ratios))
+        ratio, diag = _boundary_scale_ratio(
+            a_d, a_start, b_d, b_start, min_pixels=min_pixels, max_mad=max_mad,
+        )
+        b_ratio.append(diag["ratio"])
+        b_flat.append(diag["flatness"])
+        b_spread.append(diag["cross_frame_spread"])
+        b_nvalid.append(diag["n_valid"])
+        b_trusted.append(bool(diag["trusted"]))
+        if diag["trusted"] and np.isfinite(ratio) and ratio > 0:
+            cf_chunk[k] = cf_chunk[k - 1] * ratio
             n_solved += 1
         else:
-            cf_chunk[k] = cf_chunk[k - 1]  # no usable overlap -> carry forward
+            cf_chunk[k] = cf_chunk[k - 1]  # untrusted / no usable overlap -> carry forward
+            if diag["n_frames_total"] > 0:  # had data but failed the flatness gate
+                n_flagged += 1
+
+    info.update(
+        boundary_ratio=np.asarray(b_ratio, np.float32),
+        boundary_flatness=np.asarray(b_flat, np.float32),
+        boundary_cross_spread=np.asarray(b_spread, np.float32),
+        boundary_nvalid=np.asarray(b_nvalid, np.int64),
+        boundary_trusted=np.asarray(b_trusted, bool),
+        n_flagged=int(n_flagged),
+    )
 
     centers = [int(c[0]) + c[1].shape[0] / 2.0 for c in chunks]
     out = np.full((n_frames, H, W), np.nan, np.float32)

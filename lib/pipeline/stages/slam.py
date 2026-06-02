@@ -26,7 +26,12 @@ from lib.pipeline.any4d_depth import (
 )
 from lib.pipeline.errors import CorruptStageDataError
 from lib.pipeline.depth_stitch import assemble_overlapping_chunks, overlap_frames, stitch_dense_depth, stitch_enabled
-from lib.pipeline.hand_metric_anchor import compute_hand_anchor_k, hand_anchor_enabled
+from lib.pipeline.hand_metric_anchor import (
+    compute_hand_anchor_alpha,
+    compute_hand_anchor_k,
+    hand_anchor_alpha_enabled,
+    hand_anchor_enabled,
+)
 from lib.pipeline.dpvo_slam import run_dpvo_slam
 from lib.pipeline.est_scale import est_scale_hybrid, est_scale_hybrid_batch
 from lib.pipeline.frame_source import ImageFolderFrameSource, build_frame_source
@@ -325,9 +330,15 @@ def _any4d_cache_path(seq_folder: str, start_idx: int, end_idx: int, suffix: str
     return os.path.join(seq_folder, "SLAM", f"any4d_depth_dpvo_{start_idx}_{end_idx}{suffix}.npz")
 
 
-def _save_dense_depth_uint16_npz(out_path: str, frame_indices, depths):
+def _save_dense_depth_uint16_npz(out_path: str, frame_indices, depths, per_frame_scale=None):
+    # nan_to_num returns a fresh array, so the optional per-frame scaling below never mutates the
+    # caller's depth (which est_scale still reads as views) — the refinement lives on disk only.
     depth_stack = np.asarray(depths, dtype=np.float32)
     depth_stack = np.nan_to_num(depth_stack, nan=0.0, posinf=0.0, neginf=0.0)
+    if per_frame_scale is not None:
+        s = np.asarray(per_frame_scale, dtype=np.float32).reshape(-1)
+        if s.shape[0] == depth_stack.shape[0]:
+            depth_stack *= s[:, None, None]
     depth_stack = np.clip(depth_stack, 0.0, None)
     depth_mm = np.clip(np.round(depth_stack * 1000.0), 0.0, 65535.0).astype(np.uint16)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
@@ -475,7 +486,13 @@ def _predict_any4d_depths_for_frames(
     focal=None,          # scalar; required with traj_dense
     calib=None,          # [fx, fy, cx, cy]; required with traj_dense (for principal point)
 ):
-    cache_path = _any4d_cache_path(seq_folder, start_idx, end_idx, suffix=any4d_cache_suffix)
+    # Overlap > 0 runs chunks with shared frames so they can be metric-scale stitched (motion-free
+    # ratio on the shared frames); overlap == 0 keeps exact prior behavior. The all-frames depth is
+    # cached, so the cache key MUST include overlap — otherwise enabling overlap silently reuses a
+    # prior non-overlap cache and the stitch never runs.
+    overlap = overlap_frames()
+    cache_suffix = f"{any4d_cache_suffix}_ov{overlap}" if overlap > 0 else any4d_cache_suffix
+    cache_path = _any4d_cache_path(seq_folder, start_idx, end_idx, suffix=cache_suffix)
     force = os.environ.get("HAWOR_ANY4D_FORCE_RERUN", "0") == "1"
     if force and os.path.isfile(cache_path):
         try:
@@ -542,9 +559,6 @@ def _predict_any4d_depths_for_frames(
             key = f"3_any4d_{name}"
         timing[key] = timing.get(key, 0.0) + float(elapsed)
 
-    # Overlap > 0 runs chunks with shared frames so they can be metric-scale stitched
-    # (motion-free ratio on the shared frames). overlap == 0 keeps exact prior behavior.
-    overlap = overlap_frames()
     overlap_chunks = [] if overlap > 0 else None
 
     for batch_result in iter_any4d_depth_sequence_batches(
@@ -577,12 +591,28 @@ def _predict_any4d_depths_for_frames(
         )
         if timing is not None:
             timing["3e_any4d_overlap_stitch"] = time.time() - t_stitch
-        vprint(f"[any4d-overlap-stitch] overlap={overlap} {stitch_info}")
+        _flat = stitch_info.get("boundary_flatness")
+        _flat_med = float(np.nanmedian(_flat)) if _flat is not None and len(_flat) else float("nan")
+        n_bound = max(0, int(stitch_info.get("n_chunks", 1)) - 1)
+        vprint(
+            f"[any4d-overlap-stitch] overlap={overlap} chunks={stitch_info.get('n_chunks')} "
+            f"solved={stitch_info.get('n_solved')}/{n_bound} flagged={stitch_info.get('n_flagged')} "
+            f"flatness_med={_flat_med:.4f} max_mad={stitch_info.get('max_mad', float('nan')):.3f} "
+            f"cf=[{stitch_info.get('cf_min', float('nan')):.4f},{stitch_info.get('cf_max', float('nan')):.4f}]"
+        )
         try:
             np.savez(
                 os.path.join(seq_folder, "SLAM", f"any4d_stitch_cf_{start_idx}_{end_idx}.npz"),
                 cf=np.asarray(stitch_cf, np.float32), overlap=int(overlap),
-                n_chunks=int(stitch_info.get("n_chunks", 0)), n_solved=int(stitch_info.get("n_solved", 0)),
+                n_chunks=int(stitch_info.get("n_chunks", 0)),
+                n_solved=int(stitch_info.get("n_solved", 0)),
+                n_flagged=int(stitch_info.get("n_flagged", 0)),
+                max_mad=np.float32(stitch_info.get("max_mad", np.nan)),
+                boundary_ratio=np.asarray(stitch_info.get("boundary_ratio", []), np.float32),
+                boundary_flatness=np.asarray(stitch_info.get("boundary_flatness", []), np.float32),
+                boundary_cross_spread=np.asarray(stitch_info.get("boundary_cross_spread", []), np.float32),
+                boundary_nvalid=np.asarray(stitch_info.get("boundary_nvalid", []), np.int64),
+                boundary_trusted=np.asarray(stitch_info.get("boundary_trusted", []), bool),
             )
         except Exception:
             pass
@@ -892,10 +922,14 @@ def hawor_slam(
                         )
                     except Exception:
                         pass
-                # Phase 3: anchor depth to the HaWoR hand metric (gated; default off). Applied
-                # BEFORE save + scale-est so the camera scale (fit by est_scale to this depth)
-                # auto-inherits the hand metric. Trusted anchor = HaWoR hand (Any4D abs untrusted).
-                if hand_anchor_enabled():
+                # Phase 3: anchor depth to the HaWoR hand metric (gated; default off). The global
+                # factor k is applied IN PLACE BEFORE scale-est so the camera scale (fit by
+                # est_scale to this depth) auto-inherits the hand metric. The optional per-frame
+                # smooth refinement alpha(t) is applied to the SAVED depth map ONLY (via
+                # per_frame_scale below) — never to the depth est_scale sees — so the camera/hand
+                # trajectory is untouched. Trusted anchor = HaWoR hand (Any4D abs untrusted).
+                dense_per_frame_scale = None
+                if hand_anchor_enabled() or hand_anchor_alpha_enabled():
                     def _mask_ha(fid, _m=masks):
                         try:
                             mk = _m[int(fid)]
@@ -904,24 +938,43 @@ def hawor_slam(
                             return None
 
                     t_ha = time.time()
-                    k_anchor, ha_info = compute_hand_anchor_k(
-                        depth_predictions, depth_frame_indices, seq_folder, _mask_ha,
-                    )
-                    if ha_info.get("applied") and abs(k_anchor - 1.0) > 1e-6:
+                    if hand_anchor_alpha_enabled():
+                        alpha_arr, k_anchor, ha_info = compute_hand_anchor_alpha(
+                            depth_predictions, depth_frame_indices, seq_folder, _mask_ha,
+                        )
+                    else:
+                        k_anchor, ha_info = compute_hand_anchor_k(
+                            depth_predictions, depth_frame_indices, seq_folder, _mask_ha,
+                        )
+                        alpha_arr = None
+                    anchored = bool(ha_info.get("applied")) and k_anchor > 0 and abs(k_anchor - 1.0) > 1e-6
+                    if anchored:
                         depth_predictions *= np.float32(k_anchor)  # in-place (multi-GB array)
+                        if alpha_arr is not None:
+                            # depth-map-only per-frame refinement; median(alpha/k) ~= 1 so the
+                            # saved map's global level matches what est_scale used.
+                            dense_per_frame_scale = (np.asarray(alpha_arr, np.float64) / k_anchor).astype(np.float32)
                     timing["3g_hand_anchor"] = time.time() - t_ha
-                    vprint(f"[hand-anchor] k={k_anchor:.4f} {ha_info}")
+                    vprint(f"[hand-anchor] k={k_anchor:.4f} alpha={'on' if alpha_arr is not None else 'off'} {ha_info}")
                     try:
-                        np.savez(
-                            os.path.join(seq_folder, "SLAM", f"hand_anchor_k_{start_idx}_{end_idx}.npz"),
+                        anchor_kwargs = dict(
                             k=np.float32(k_anchor),
                             n_frames_used=int(ha_info.get("n_frames_used", 0)),
+                        )
+                        if alpha_arr is not None:
+                            anchor_kwargs["alpha"] = np.asarray(alpha_arr, np.float32)
+                        np.savez(
+                            os.path.join(seq_folder, "SLAM", f"hand_anchor_k_{start_idx}_{end_idx}.npz"),
+                            **anchor_kwargs,
                         )
                     except Exception:
                         pass
                 dense_cache_path = _dense_depth_cache_path(seq_folder, start_idx, end_idx)
                 t_dense_save = time.time()
-                _save_dense_depth_uint16_npz(dense_cache_path, depth_frame_indices, depth_predictions)
+                _save_dense_depth_uint16_npz(
+                    dense_cache_path, depth_frame_indices, depth_predictions,
+                    per_frame_scale=dense_per_frame_scale,
+                )
                 timing["3g_dense_depth_cache_save"] = time.time() - t_dense_save
                 depth_cache_path = any4d_cache_path if used_any4d_cache else dense_cache_path
                 depth_cache_used = used_any4d_cache

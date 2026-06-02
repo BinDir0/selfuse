@@ -29,6 +29,9 @@ class BatchRunConfig:
     chunk_batch_size: int = 64
     num_workers: int = 16
     any4d_batch_size: int = 32
+    any4d_overlap: int = 0
+    hand_anchor: bool = False
+    hand_anchor_alpha: bool = False
     render_batch_size: int = 8
     infiller_window_batch_size: int = 64
     detect_batch_size: int = 128
@@ -99,6 +102,13 @@ class BatchRunConfig:
             raise ValueError(f"Worker counts must be >= 1: {invalid_counts}")
         if any4d_batch_size < 1:
             raise ValueError("--any4d_batch_size must be >= 1")
+        any4d_overlap = int(getattr(ns, "any4d_overlap", 0) or 0)
+        if any4d_overlap < 0:
+            raise ValueError("--any4d_overlap must be >= 0")
+        if any4d_overlap >= any4d_batch_size:
+            raise ValueError(
+                f"--any4d_overlap ({any4d_overlap}) must be < --any4d_batch_size ({any4d_batch_size})"
+            )
         if wave_stall_timeout_sec < 1:
             raise ValueError("--wave_stall_timeout_sec must be >= 1")
 
@@ -115,6 +125,9 @@ class BatchRunConfig:
             chunk_batch_size=getattr(ns, "chunk_batch_size", 64),
             num_workers=getattr(ns, "num_workers", 16),
             any4d_batch_size=any4d_batch_size,
+            any4d_overlap=any4d_overlap,
+            hand_anchor=bool(getattr(ns, "hand_anchor", False)),
+            hand_anchor_alpha=bool(getattr(ns, "hand_anchor_alpha", False)),
             render_batch_size=getattr(ns, "render_batch_size", 8),
             infiller_window_batch_size=getattr(ns, "infiller_window_batch_size", 64),
             detect_batch_size=getattr(ns, "detect_batch_size", 128),
@@ -160,9 +173,18 @@ class BatchRunConfig:
         return overrides.get(stage) or self.workers_per_gpu
 
     def worker_env_overrides(self) -> Mapping[str, str | None]:
-        return {
+        overrides: dict[str, str | None] = {
             "HAWOR_LOCAL_CACHE_ROOT": self.local_cache_root,
             "HAWOR_LOCAL_CACHE_QUOTA_GB": None if self.local_cache_quota_gb is None else str(self.local_cache_quota_gb),
             "HAWOR_LOCAL_CACHE_MODE": self.local_cache_mode,
             "HAWOR_LOCAL_CACHE_MIN_FRAMES": str(self.local_cache_min_frames),
         }
+        # Only set these env vars when explicitly enabled, so the defaults leave any
+        # externally-exported HAWOR_ANY4D_OVERLAP / HAWOR_HAND_ANCHOR* untouched.
+        if self.any4d_overlap and self.any4d_overlap > 0:
+            overrides["HAWOR_ANY4D_OVERLAP"] = str(self.any4d_overlap)
+        if self.hand_anchor:
+            overrides["HAWOR_HAND_ANCHOR"] = "1"
+        if self.hand_anchor_alpha:
+            overrides["HAWOR_HAND_ANCHOR_ALPHA"] = "1"
+        return overrides
