@@ -267,8 +267,14 @@ def build_any4d_camera_views_from_image_bytes(
     use_amp=None,
     task="mvs",
     norm_type="dinov2",
+    is_metric_scale: bool = True,
 ):
     """Build Any4D views with calibrated intrinsics and OpenCV RDF cam2world poses.
+
+    ``is_metric_scale`` flags whether the input camera poses are metric. Pass True for true-metric
+    extrinsics (e.g. HOT3D GT); pass False for scale-free poses (e.g. DPVO), which must be paired
+    with a non-metric pose task (model/task=non_metric_poses_metric_depth) so the model normalizes
+    the input translations instead of treating them as metres.
 
     ``camera_poses`` must already be cam2world. For HOT3D lowdim extrinsics this
     means passing ``np.linalg.inv(world2cam)``.
@@ -330,7 +336,7 @@ def build_any4d_camera_views_from_image_bytes(
                 "img": img_transform(resized_image)[None],
                 "intrinsics": torch.from_numpy(resized_intrinsics_matrix)[None].float(),
                 "camera_poses": torch.from_numpy(camera_pose)[None].float(),
-                "is_metric_scale": torch.ones(1, dtype=torch.bool),
+                "is_metric_scale": torch.full((1,), bool(is_metric_scale), dtype=torch.bool),
                 "true_shape": np.int32([resized_image.size[::-1]]),
                 "idx": view_idx,
                 "instance": str(view_idx),
@@ -389,13 +395,16 @@ def build_any4d_camera_views_from_paths(
     *,
     task=None,
     norm_type="dinov2",
+    is_metric_scale: bool = True,
 ):
     """Pose-conditioned variant of build_any4d_views (Goal A.1 of the metric plan).
 
     Reads each image file as bytes and forwards to ``build_any4d_camera_views_from_image_bytes``
     with per-view intrinsics (3x3 K matrices) and cam2world poses (4x4 OpenCV-RDF).
     Use when the slam stage's selected Any4D task is pose-conditioned (anything other than
-    ``images_only``), so the network gets DPVO's scale-free per-frame geometry as input.
+    ``images_only``), so the network gets DPVO's scale-free per-frame geometry as input. DPVO poses
+    are scale-free, so callers should pass ``is_metric_scale=False`` together with a non-metric pose
+    task (e.g. ``non_metric_poses_metric_depth``).
     Returns model-ready processed views (same shape contract as ``build_any4d_views``).
     """
     payloads = []
@@ -409,6 +418,7 @@ def build_any4d_camera_views_from_paths(
         runner=runner,
         task=task or runner.get("task"),
         norm_type=norm_type,
+        is_metric_scale=is_metric_scale,
     )
     return views
 

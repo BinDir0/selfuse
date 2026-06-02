@@ -486,12 +486,19 @@ def _predict_any4d_depths_for_frames(
     focal=None,          # scalar; required with traj_dense
     calib=None,          # [fx, fy, cx, cy]; required with traj_dense (for principal point)
 ):
-    # Overlap > 0 runs chunks with shared frames so they can be metric-scale stitched (motion-free
-    # ratio on the shared frames); overlap == 0 keeps exact prior behavior. The all-frames depth is
-    # cached, so the cache key MUST include overlap — otherwise enabling overlap silently reuses a
-    # prior non-overlap cache and the stitch never runs.
+    # The all-frames depth is cached, so the cache key MUST encode everything that changes the
+    # depth — otherwise a different setting silently reuses a stale cache. Two contributors:
+    #   * overlap > 0 runs chunks with shared frames for the metric-scale stitch (motion-free
+    #     ratio on the shared frames); overlap == 0 keeps exact prior behavior.
+    #   * the Any4D task (images_only vs a pose-conditioned task like non_metric_poses_metric_depth)
+    #     produces a different depth, so it must be part of the key too.
     overlap = overlap_frames()
-    cache_suffix = f"{any4d_cache_suffix}_ov{overlap}" if overlap > 0 else any4d_cache_suffix
+    task = str(any4d_runner.get("task", "images_only"))
+    cache_suffix = any4d_cache_suffix
+    if overlap > 0:
+        cache_suffix += f"_ov{overlap}"
+    if task != "images_only":
+        cache_suffix += f"_{task}"
     cache_path = _any4d_cache_path(seq_folder, start_idx, end_idx, suffix=cache_suffix)
     force = os.environ.get("HAWOR_ANY4D_FORCE_RERUN", "0") == "1"
     if force and os.path.isfile(cache_path):
@@ -536,6 +543,7 @@ def _predict_any4d_depths_for_frames(
                 cam_poses,
                 runner=any4d_runner,
                 task=any4d_runner.get("task"),
+                is_metric_scale=False,  # DPVO poses are scale-free -> use a non-metric pose task
             )
         return build_any4d_views(
             frame_source,
