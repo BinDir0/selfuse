@@ -421,7 +421,7 @@ def test_gather_future_refs_truncate_drops_invalid_tail():
 
 
 # ---------------------------------------------------------------------------
-# Multi-camera (breast) support
+# Multi-camera (chest) support
 # ---------------------------------------------------------------------------
 
 def encode_jpeg(array):
@@ -440,7 +440,7 @@ def encode_npy(array):
 
 def make_dual_camera_frame(frame_idx, episode_index=0, dataset_name="test_real",
                            with_depth=True, with_media_bytes=False):
-    """Frame with head + breast cameras declared via meta.cameras."""
+    """Frame with head + chest cameras declared via meta.cameras."""
     lowdim = np.full(136, float(frame_idx), dtype=np.float32)
     lowdim[96:112] = np.arange(16, dtype=np.float32) + frame_idx
     lowdim[112:116] = np.array([500, 500, 320, 240], dtype=np.float32)
@@ -452,41 +452,41 @@ def make_dual_camera_frame(frame_idx, episode_index=0, dataset_name="test_real",
         "instruction": "pick up",
         "instruction_num": 1,
         "presence": 3,
-        "cameras": ["head", "breast"],
+        "cameras": ["head", "chest"],
     }
     head_img = np.full((4, 4, 3), frame_idx, dtype=np.uint8)
-    breast_img = np.full((4, 4, 3), frame_idx + 100, dtype=np.uint8)
+    chest_img = np.full((4, 4, 3), frame_idx + 100, dtype=np.uint8)
     frame = {"lowdim.npy": lowdim, "meta.json": meta}
     if with_media_bytes:
         frame["image.jpg"] = encode_jpeg(head_img)
-        frame["breast_image.jpg"] = encode_jpeg(breast_img)
+        frame["chest_image.jpg"] = encode_jpeg(chest_img)
     else:
         frame["image.jpg"] = head_img
-        frame["breast_image.jpg"] = breast_img
+        frame["chest_image.jpg"] = chest_img
     if with_depth:
         head_depth = np.full((4, 4), frame_idx, dtype=np.uint16)
-        breast_depth = np.full((4, 4), frame_idx + 100, dtype=np.uint16)
+        chest_depth = np.full((4, 4), frame_idx + 100, dtype=np.uint16)
         if with_media_bytes:
             frame["depth.npy"] = encode_npy(head_depth)
-            frame["breast_depth.npy"] = encode_npy(breast_depth)
+            frame["chest_depth.npy"] = encode_npy(chest_depth)
         else:
             frame["depth.npy"] = head_depth
-            frame["breast_depth.npy"] = breast_depth
+            frame["chest_depth.npy"] = chest_depth
     return frame
 
 
-def test_build_lowdim_slices_head_breast_layout():
-    """Two-camera slice table should pack head then breast in 20D chunks."""
-    slices = build_lowdim_slices(["head", "breast"])
+def test_build_lowdim_slices_head_chest_layout():
+    """Two-camera slice table should pack head then chest in 20D chunks."""
+    slices = build_lowdim_slices(["head", "chest"])
     assert slices["head_extrinsic"] == (96, 112)
     assert slices["head_intrinsic"] == (112, 116)
-    assert slices["breast_extrinsic"] == (116, 132)
-    assert slices["breast_intrinsic"] == (132, 136)
+    assert slices["chest_extrinsic"] == (116, 132)
+    assert slices["chest_intrinsic"] == (132, 136)
 
 
 def test_build_lowdim_slices_rejects_non_head_first():
     """cameras[0] must always be 'head'."""
-    for bad_cameras in (["breast", "head"], []):
+    for bad_cameras in (["chest", "head"], []):
         try:
             build_lowdim_slices(bad_cameras)
         except ValueError:
@@ -507,12 +507,12 @@ def test_build_sample_from_window_legacy_meta_is_head_only():
 
     assert sample["extrinsic"].shape == (16,)
     assert sample["intrinsic"].shape == (4,)
-    assert "breast_extrinsic" not in sample
-    assert "breast_intrinsic" not in sample
+    assert "chest_extrinsic" not in sample
+    assert "chest_intrinsic" not in sample
 
 
-def test_build_sample_from_window_breast_calibration_driven_by_meta():
-    """Breast ext/intr are emitted whenever meta['cameras'] declares breast;
+def test_build_sample_from_window_chest_calibration_driven_by_meta():
+    """Chest ext/intr are emitted whenever meta['cameras'] declares chest;
     media filtering is done upstream by select_files, not this function."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
@@ -525,27 +525,27 @@ def test_build_sample_from_window_breast_calibration_driven_by_meta():
 
     # Head canonical keys: always filled from lowdim[96:116].
     np.testing.assert_allclose(sample["intrinsic"], [500, 500, 320, 240])
-    # Breast calibration is meta-driven and cheap, always emitted.
-    assert sample["breast_extrinsic"].shape == (16,)
-    assert sample["breast_intrinsic"].shape == (4,)
-    np.testing.assert_allclose(sample["breast_intrinsic"], [600, 600, 320, 240])
+    # Chest calibration is meta-driven and cheap, always emitted.
+    assert sample["chest_extrinsic"].shape == (16,)
+    assert sample["chest_intrinsic"].shape == (4,)
+    np.testing.assert_allclose(sample["chest_intrinsic"], [600, 600, 320, 240])
 
 
-def test_materialize_sample_media_skips_breast_when_bytes_absent():
-    """When select_files filtered out breast_* members upstream, the frame
-    refs carry no breast bytes and materialize skips the breast decode."""
+def test_materialize_sample_media_skips_chest_when_bytes_absent():
+    """When select_files filtered out chest_* members upstream, the frame
+    refs carry no chest bytes and materialize skips the chest decode."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
     )
     past = collections.deque(maxlen=config.past_size)
-    # Build frames with breast declared in meta but no breast media bytes,
-    # mimicking what build_select_files(load_breast=False) yields.
+    # Build frames with chest declared in meta but no chest media bytes,
+    # mimicking what build_select_files(load_chest=False) yields.
     frames = []
     for i in (1, 2):
         f = make_dual_camera_frame(i, with_media_bytes=True)
-        del f["breast_image.jpg"]
-        del f["breast_depth.npy"]
+        del f["chest_image.jpg"]
+        del f["chest_depth.npy"]
         frames.append(f)
     buf = collections.deque(frames)
 
@@ -554,12 +554,12 @@ def test_materialize_sample_media_skips_breast_when_bytes_absent():
 
     assert "image" in sample
     assert "depth" in sample
-    assert "breast_image" not in sample
-    assert "breast_depth" not in sample
+    assert "chest_image" not in sample
+    assert "chest_depth" not in sample
 
 
 def test_materialize_sample_media_decodes_both_views_when_bytes_present():
-    """All modalities present → both head and breast streams are decoded."""
+    """All modalities present → both head and chest streams are decoded."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
@@ -574,19 +574,19 @@ def test_materialize_sample_media_decodes_both_views_when_bytes_present():
     materialize_sample_media(sample)
 
     assert sample["image"].shape == (1, 4, 4, 3)
-    assert sample["breast_image"].shape == (1, 4, 4, 3)
+    assert sample["chest_image"].shape == (1, 4, 4, 3)
     assert sample["depth"].shape == (1, 4, 4)
-    assert sample["breast_depth"].shape == (1, 4, 4)
+    assert sample["chest_depth"].shape == (1, 4, 4)
 
 
 def test_sliding_window_compose_handles_mixed_cameras():
-    """Single pipeline can stream human (head-only) and real (head+breast) samples."""
+    """Single pipeline can stream human (head-only) and real (head+chest) samples."""
     config = WindowConfig(
         action_horizon=2, state_horizon=1, state_stride=1,
         image_horizon=1, image_stride=1,
         action_pad_mode="truncate",
     )
-    # Episode 0: head-only (legacy human data); Episode 1: head+breast (real robot).
+    # Episode 0: head-only (legacy human data); Episode 1: head+chest (real robot).
     human_frames = [make_frame(i, episode_index=0, dataset_name="human") for i in range(3)]
     real_frames = [
         make_dual_camera_frame(i, episode_index=1, dataset_name="real_robot")
@@ -599,8 +599,8 @@ def test_sliding_window_compose_handles_mixed_cameras():
 
     head_only_samples = samples[:3]
     dual_samples = samples[3:]
-    assert all("breast_extrinsic" not in s for s in head_only_samples)
-    assert all("breast_extrinsic" in s for s in dual_samples)
+    assert all("chest_extrinsic" not in s for s in head_only_samples)
+    assert all("chest_extrinsic" in s for s in dual_samples)
 
 
 # ---------------------------------------------------------------------------

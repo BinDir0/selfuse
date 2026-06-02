@@ -28,7 +28,7 @@ def _backbone_output(batch_size):
     return SimpleNamespace(last_hidden_states=torch.zeros(batch_size, 1, 1))
 
 
-def test_wm_loss_masks_inactive_breast_view():
+def test_wm_loss_masks_inactive_chest_view():
     pred = torch.zeros(1, 2, 2, 1, 1)
     target = torch.tensor([[[[[1.0]], [[1.0]]], [[[100.0]], [[100.0]]]]])
     view_mask = torch.tensor([[True, False]])

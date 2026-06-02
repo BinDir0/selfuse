@@ -415,7 +415,7 @@ def compute_wm_loss(
     """Masked MSE between world model predictions and frozen teacher features.
 
     Both pred and target are ``[B, 2, K, spatial, D]`` in canonical
-    head/breast order. By default ``view_mask`` controls which views contribute
+    head/chest order. By default ``view_mask`` controls which views contribute
     loss; ``world_model_config.mask_loss_by_view_mask=False`` supervises all
     views.
     """

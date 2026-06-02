@@ -151,7 +151,7 @@ wandb login
 
 ### WebDataset 约定
 
-团队内部对 WebDataset 样本结构、字段命名、相机命名（`head` / `breast`）、动作/状态向量布局等有统一约定。新数据集接入前请先对齐此文档：
+团队内部对 WebDataset 样本结构、字段命名、相机命名（`head` / `chest`）、动作/状态向量布局等有统一约定。新数据集接入前请先对齐此文档：
 
 📖 [WebDataset 数据格式约定（飞书 Wiki）](https://psi-robot.feishu.cn/wiki/Tg2Vwtm3visp3akregXcTphZnQb)
 

@@ -73,7 +73,7 @@ def resolve_active_views(sample: dict[str, Any]) -> list[str]:
     if "active_views" not in sample:
         raise KeyError("Video samples must provide active_views.")
     views = [str(view) for view in sample["active_views"]]
-    valid = {"head", "breast"}
+    valid = {"head", "chest"}
     invalid = [view for view in views if view not in valid]
     if invalid:
         raise ValueError(f"Unsupported active_views entries: {invalid}")
@@ -117,7 +117,7 @@ class Qwen3VLChatFormatter:
         )
 
     def format_video_order_part(self, active_views: list[str]) -> str:
-        labels = {"head": "head camera", "breast": "breast camera"}
+        labels = {"head": "head camera", "chest": "chest camera"}
         if len(active_views) == 1:
             return f"The video is from the {labels[active_views[0]]}."
         ordinals = ["first", "second"]
@@ -133,17 +133,17 @@ class Qwen3VLChatFormatter:
         head_intrinsic: torch.Tensor,
         n_states: torch.Tensor,
         active_views: list[str],
-        breast_intrinsic: torch.Tensor | None = None,
+        chest_intrinsic: torch.Tensor | None = None,
     ) -> str:
         state_slots = self.state_token * int(n_states.item())
         camera_parts = []
         for view in active_views:
             if view == "head":
                 camera_parts.append(self.format_intrinsic_part("Head", head_intrinsic))
-            elif view == "breast":
-                if breast_intrinsic is None:
-                    raise ValueError("breast view is active but breast_intrinsic is missing.")
-                camera_parts.append(self.format_intrinsic_part("Breast", breast_intrinsic))
+            elif view == "chest":
+                if chest_intrinsic is None:
+                    raise ValueError("chest view is active but chest_intrinsic is missing.")
+                camera_parts.append(self.format_intrinsic_part("Chest", chest_intrinsic))
             else:
                 raise ValueError(f"Unsupported active view: {view}")
         camera_part = " ".join(camera_parts)
@@ -172,7 +172,7 @@ class Qwen3VLChatFormatter:
                 head_intrinsic=sample["intrinsic"],
                 n_states=sample["n_states"],
                 active_views=active_views,
-                breast_intrinsic=sample.get("breast_intrinsic"),
+                chest_intrinsic=sample.get("chest_intrinsic"),
             )
             assistant_text = self.action_token * int(sample["n_actions"].item())
             if self.predict_future_frames:
@@ -308,7 +308,7 @@ class Qwen3VLBatchProcessor:
         self, batch_samples: list[dict[str, Any]]
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Build modality inputs. `videos` is flat in placeholder order;
-        per sample head video first, then breast (when present)."""
+        per sample head video first, then chest (when present)."""
         images: list[Any] = []
         videos: list[Any] = []
         video_metadata: list[dict[str, Any]] = []
@@ -323,10 +323,10 @@ class Qwen3VLBatchProcessor:
                 for view in resolve_active_views(sample):
                     if view == "head":
                         video = sample["images"]
-                    elif view == "breast":
-                        if sample.get("breast_images") is None:
-                            raise ValueError("breast view is active but breast_images is missing.")
-                        video = sample["breast_images"]
+                    elif view == "chest":
+                        if sample.get("chest_images") is None:
+                            raise ValueError("chest view is active but chest_images is missing.")
+                        video = sample["chest_images"]
                     else:
                         raise ValueError(f"Unsupported active view: {view}")
                     self.append_video_entry(

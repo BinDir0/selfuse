@@ -4,7 +4,7 @@ Post-collator data visualization for LegendVLA.
 For each sample in a real batch from UnifiedWdsDataset (after the full
 collator + Qwen3-VL processor pass), this script:
 
-  1. De-patchifies pixel_values_videos (and the breast half when present)
+  1. De-patchifies pixel_values_videos (and the chest half when present)
      back to viewable (T, H, W, 3) uint8 frames. These are the exact pixels
      the ViT consumes — any cropping / resize / mean-std normalization done
      by the processor is reversed here only for display.
@@ -12,7 +12,7 @@ collator + Qwen3-VL processor pass), this script:
      absolute wrist / fingertip positions in the head-camera frame (same
      geometry helpers used by rerun_inference_vis.py and debug_dataloader_batch),
      projects them with the head intrinsic and overlays markers on the last
-     head frame. Breast view gets the same overlay using breast_intrinsic.
+     head frame. Chest view gets the same overlay using chest_intrinsic.
   3. Dumps instruction text and the rendered chat template for text sanity.
 
 Output: one self-contained HTML per preset under --output-dir/<preset>/index.html,
@@ -32,11 +32,11 @@ open in any browser; no asset directory to ship along.
 #         --num-workers 0 \
 #         --shuffle-buffer 16
 #
-# Dual-view run (sources only from shard subsets that actually ship a breast
-# camera; the preset sets load_breast=True and narrows
+# Dual-view run (sources only from shard subsets that actually ship a chest
+# camera; the preset sets load_chest=True and narrows
 # vla_wds_datasets to those subsets automatically):
 #     python -m scripts.viz_loaded_data \
-#         --preset with-breast \
+#         --preset with-chest \
 #         --num-samples 6 \
 #         --num-workers 0 \
 #         --shuffle-buffer 16
@@ -48,7 +48,7 @@ open in any browser; no asset directory to ship along.
 #
 # Output produced (per run):
 #     outputs/viz/head_only/index.html     # ~10 MB, self-contained
-#     outputs/viz/with_breast/index.html   # ~10-20 MB, self-contained
+#     outputs/viz/with_chest/index.html   # ~10-20 MB, self-contained
 # To view: `scp <remote>:outputs/viz/<preset>/index.html .` then open locally.
 #
 # Notes:
@@ -56,7 +56,7 @@ open in any browser; no asset directory to ship along.
 #   is 16384, which fills for minutes before the first batch is yielded.
 # * --num-workers 0 keeps everything in-process for easy debugging; bump to 2-4
 #   once the pipeline is confirmed working end-to-end.
-# * with-breast currently requires shards that store `breast_image.jpg`; the
+# * with-chest currently requires shards that store `chest_image.jpg`; the
 #   preset filters to dataset names listed inline (see load_config), edit that
 #   allow-list if new dual-view shards land elsewhere.
 # ────────────────────────────────────────────────────────────────────────────
@@ -99,10 +99,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--preset",
-        choices=["head-only", "with-breast"],
+        choices=["head-only", "with-chest"],
         default="head-only",
-        help="head-only: load_breast=False (default recipe). "
-             "with-breast: force load_breast=True and filter to teleop_xiaozi.",
+        help="head-only: load_chest=False (default recipe). "
+             "with-chest: force load_chest=True and filter to teleop_xiaozi.",
     )
     parser.add_argument(
         "--config-path",
@@ -138,7 +138,7 @@ def load_config(args: argparse.Namespace):
     """Compose the Hydra experiment config, then patch for viz.
 
     Keeps all real dataset paths / normalizer / shape_meta intact. Only the
-    shuffle buffer and per-subset breast toggles change.
+    shuffle buffer and per-subset chest toggles change.
     """
     OmegaConf.register_new_resolver("eval", eval, replace=True)
     OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
@@ -170,26 +170,26 @@ def load_config(args: argparse.Namespace):
     if cfg.dataset.get("vlm_dataset") is not None:
         cfg.dataset.vlm_dataset.shuffle_buffer = int(args.shuffle_buffer)
 
-    if args.preset == "with-breast":
-        cfg.dataset.vla_dataset.load_breast = True
-        # Filter VLA subsets to those that declare a breast camera so every
+    if args.preset == "with-chest":
+        cfg.dataset.vla_dataset.load_chest = True
+        # Filter VLA subsets to those that declare a chest camera so every
         # sampled batch exercises the dual-view branch. teleop_xiaozi is the
-        # only production dataset with breast shards today.
+        # only production dataset with chest shards today.
         filtered = []
         for entry in cfg.vla_wds_datasets:
             if entry.name in {"teleop_xiaozi"}:
                 filtered.append(entry)
         if not filtered:
             raise RuntimeError(
-                "with-breast preset requires at least one dataset named 'teleop_xiaozi' "
+                "with-chest preset requires at least one dataset named 'teleop_xiaozi' "
                 "in vla_wds_datasets; none found in the current config."
             )
         cfg.vla_wds_datasets = filtered
-        # Disable VLM interleaving for a focused breast batch — we still want to
-        # confirm the VLA path's breast handling, not VLM.
+        # Disable VLM interleaving for a focused chest batch — we still want to
+        # confirm the VLA path's chest handling, not VLM.
         cfg.dataset.vlm_dataset = None
     else:
-        cfg.dataset.vla_dataset.load_breast = False
+        cfg.dataset.vla_dataset.load_chest = False
 
     # Single-process DataLoader settings are applied in build_dataloader.
     return cfg
@@ -284,14 +284,14 @@ def split_per_sample_videos(
     pixel_values_videos: torch.Tensor,
     video_grid_thw: torch.Tensor,
     is_vla_mask: np.ndarray,
-    load_breast: bool,
+    load_chest: bool,
 ):
-    """Return per-sample dict with {"head": (T,H,W,3), "breast": ... | None}.
+    """Return per-sample dict with {"head": (T,H,W,3), "chest": ... | None}.
 
-    Grid rows are laid out per sample: one row when breast is absent for that
+    Grid rows are laid out per sample: one row when chest is absent for that
     sample (VLM sample in token-padded mode still emits a video), two rows
-    (head first, then breast) when load_breast=True and the sample has
-    a breast shard. We use `is_vla_mask` + the existence of breast slots
+    (head first, then chest) when load_chest=True and the sample has
+    a chest shard. We use `is_vla_mask` + the existence of chest slots
     (inferred from total rows) to split.
     """
     # Each video's patch-row count is cumulative. build offsets.
@@ -314,13 +314,13 @@ def split_per_sample_videos(
         head_patches = pixel_values_videos[offsets[start_v]: offsets[start_v + 1]]
         head_video = depatchify_video(head_patches, video_grid_thw[start_v])
         entry = {"head": head_video}
-        if load_breast and videos_per_sample >= 2:
-            breast_patches = pixel_values_videos[
+        if load_chest and videos_per_sample >= 2:
+            chest_patches = pixel_values_videos[
                 offsets[start_v + 1]: offsets[start_v + 2]
             ]
-            entry["breast"] = depatchify_video(breast_patches, video_grid_thw[start_v + 1])
+            entry["chest"] = depatchify_video(chest_patches, video_grid_thw[start_v + 1])
         else:
-            entry["breast"] = None
+            entry["chest"] = None
         per_sample.append(entry)
     return per_sample
 
@@ -411,27 +411,27 @@ def frame_strip(video: np.ndarray, label: str, stride: int = 1) -> str:
 def sample_section(
     index: int,
     head_video: np.ndarray,
-    breast_video: np.ndarray | None,
+    chest_video: np.ndarray | None,
     state_overlay: np.ndarray,
     action_overlay: np.ndarray,
     combined_overlay: np.ndarray,
-    breast_overlay: np.ndarray | None,
+    chest_overlay: np.ndarray | None,
     meta: dict,
 ) -> str:
     parts = [f"<section><h2>Sample #{index}</h2>"]
     parts.append(f"<pre class='meta'>{meta['header']}</pre>")
     parts.append(frame_strip(head_video, "Head RGB (after processor, un-normalized)"))
-    if breast_video is not None:
-        parts.append(frame_strip(breast_video, "Breast RGB (after processor, un-normalized)"))
+    if chest_video is not None:
+        parts.append(frame_strip(chest_video, "Chest RGB (after processor, un-normalized)"))
     parts.append("<div class='strip'><div class='strip-label'>State / action overlay on last head frame</div><div class='row'>")
     parts.append(img_tag(state_overlay))
     parts.append(img_tag(action_overlay))
     parts.append(img_tag(combined_overlay))
     parts.append("</div></div>")
-    if breast_overlay is not None:
+    if chest_overlay is not None:
         parts.append(
-            "<div class='strip'><div class='strip-label'>State+action combined overlay on last breast frame</div>"
-            f"<div class='row'>{img_tag(breast_overlay)}</div></div>"
+            "<div class='strip'><div class='strip-label'>State+action combined overlay on last chest frame</div>"
+            f"<div class='row'>{img_tag(chest_overlay)}</div></div>"
         )
     parts.append(f"<pre class='meta'>{meta['body']}</pre></section>")
     return "\n".join(parts)
@@ -489,7 +489,7 @@ def main():
         return
     per_sample = split_per_sample_videos(
         pixel_values_videos, video_grid_thw, is_vla_mask,
-        load_breast=(args.preset == "with-breast"),
+        load_chest=(args.preset == "with-chest"),
     )
 
     sections = []
@@ -520,14 +520,14 @@ def main():
             last_head_frame, sa["states_abs"], sa["actions_abs"], intrinsic, presence,
         )
 
-        breast_video = per_sample[i].get("breast")
-        breast_overlay = None
-        if breast_video is not None and "breast_intrinsic" in batch:
-            breast_intrinsic = batch["breast_intrinsic"][i].cpu().numpy().astype(np.float32)
-            last_breast = breast_video[-1]
-            breast_overlay = build_combined_overlay(
-                last_breast, sa["states_abs"], sa["actions_abs"],
-                breast_intrinsic, presence,
+        chest_video = per_sample[i].get("chest")
+        chest_overlay = None
+        if chest_video is not None and "chest_intrinsic" in batch:
+            chest_intrinsic = batch["chest_intrinsic"][i].cpu().numpy().astype(np.float32)
+            last_chest = chest_video[-1]
+            chest_overlay = build_combined_overlay(
+                last_chest, sa["states_abs"], sa["actions_abs"],
+                chest_intrinsic, presence,
             )
 
         dataset_name = batch.get("dataset_name", ["?"] * len(per_sample))
@@ -541,12 +541,12 @@ def main():
             f"n_actions    = {sa['n_actions']}\n"
             f"head intrin  = fx={intrinsic[0]:.2f} fy={intrinsic[1]:.2f} cx={intrinsic[2]:.2f} cy={intrinsic[3]:.2f}\n"
             + (
-                "breast intrin= "
-                f"fx={batch['breast_intrinsic'][i, 0].item():.2f} "
-                f"fy={batch['breast_intrinsic'][i, 1].item():.2f} "
-                f"cx={batch['breast_intrinsic'][i, 2].item():.2f} "
-                f"cy={batch['breast_intrinsic'][i, 3].item():.2f}\n"
-                if breast_video is not None and "breast_intrinsic" in batch else ""
+                "chest intrin= "
+                f"fx={batch['chest_intrinsic'][i, 0].item():.2f} "
+                f"fy={batch['chest_intrinsic'][i, 1].item():.2f} "
+                f"cx={batch['chest_intrinsic'][i, 2].item():.2f} "
+                f"cy={batch['chest_intrinsic'][i, 3].item():.2f}\n"
+                if chest_video is not None and "chest_intrinsic" in batch else ""
             )
         )
         body_parts = []
@@ -561,8 +561,8 @@ def main():
         meta = {"header": header, "body": "\n\n".join(body_parts)}
 
         sections.append(sample_section(
-            i, per_sample[i]["head"], breast_video,
-            state_overlay, action_overlay, combined, breast_overlay, meta,
+            i, per_sample[i]["head"], chest_video,
+            state_overlay, action_overlay, combined, chest_overlay, meta,
         ))
 
     summary = (

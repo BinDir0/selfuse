@@ -79,15 +79,15 @@ dataset:
     # When training does not need depth, skip depth reading entirely at the
     # tar layer (also disables augment_depth downstream).
     load_depth: ${training.train_depth}
-    # Decode breast (chest) camera when real-robot shards declare it.
+    # Decode chest camera when real-robot shards declare it.
     # Model side still ignores these keys; set true only once downstream is ready.
-    load_breast: false
+    load_chest: false
     # Per-sample training-time view dropout for dual-camera samples.
-    # Validation and samples without breast video always keep the available views.
+    # Validation and samples without chest video always keep the available views.
     view_dropout:
       _target_: src.dataset.vla_dataset.ViewDropoutConfig
       drop_head: 0.0
-      drop_breast: 0.0
+      drop_chest: 0.0
     # Pre-shuffle Bernoulli keep rate (train only). Lower = more shard diversity,
     # higher IO. 1.0 disables. Ref: DreamZero shard_sampling_rate.
     keep_ratio: 0.2

@@ -52,7 +52,7 @@ class SpanMaskConfig:
 
 class WorldModelHead(nn.Module):
     """Query tokens + output projection. view_embed is added per view
-    (head/breast); zero-init keeps single-view output bit-identical.
+    (head/chest); zero-init keeps single-view output bit-identical.
     """
 
     def __init__(self, n_queries: int, hidden_size: int, upsample_factor: int,
@@ -721,7 +721,7 @@ class LegendVLA(nn.Module):
         """Run world model expert and frozen teacher on future frames.
 
         ``view_mask`` is the sample-level switch and the canonical view order
-        is fixed to head, breast. Inactive view motion and query segments are
+        is fixed to head, chest. Inactive view motion and query segments are
         present but masked out, and only active views contribute to loss.
         """
         cfg = self.world_model_config
@@ -773,7 +773,7 @@ class LegendVLA(nn.Module):
                 device=device,
             )
             seg_position_ids.append(pos_ids)
-            segments.append(self.wm_motion_encoder(batch["future_breast_motion"]))
+            segments.append(self.wm_motion_encoder(batch["future_chest_motion"]))
             seg_masks.append(frame_valid & view_mask[:, 1:2])
             pos_ids, text_cur_pos, rope_cur_pos = self._build_text_mrope_position_ids(
                 text_start=text_cur_pos,
@@ -832,9 +832,9 @@ class LegendVLA(nn.Module):
         pred = x.flatten(1, 2).reshape(B, V, K, -1, D)
 
         # Batch the teacher along B so DINOv3 only runs once.
-        stacked = torch.cat([batch["future_frames"], batch["breast_future_frames"]], dim=0)
-        head_t, breast_t = self.frozen_teacher(stacked).chunk(2, dim=0)
-        target = torch.stack([head_t, breast_t], dim=1)
+        stacked = torch.cat([batch["future_frames"], batch["chest_future_frames"]], dim=0)
+        head_t, chest_t = self.frozen_teacher(stacked).chunk(2, dim=0)
+        target = torch.stack([head_t, chest_t], dim=1)
 
         return {
             "pred": pred,

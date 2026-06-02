@@ -34,18 +34,18 @@ from .wds_dataset import (
 class ViewDropoutConfig:
     """Per-sample view dropout (train only). keep_both is the implicit residual."""
     drop_head: float = 0.0
-    drop_breast: float = 0.0
+    drop_chest: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.drop_head < 0.0 or self.drop_breast < 0.0:
+        if self.drop_head < 0.0 or self.drop_chest < 0.0:
             raise ValueError(
                 f"view_dropout probabilities must be non-negative, "
-                f"got drop_head={self.drop_head}, drop_breast={self.drop_breast}"
+                f"got drop_head={self.drop_head}, drop_chest={self.drop_chest}"
             )
-        if self.drop_head + self.drop_breast > 1.0 + 1e-6:
+        if self.drop_head + self.drop_chest > 1.0 + 1e-6:
             raise ValueError(
-                f"drop_head + drop_breast must be <= 1.0, "
-                f"got {self.drop_head + self.drop_breast:.6f}"
+                f"drop_head + drop_chest must be <= 1.0, "
+                f"got {self.drop_head + self.drop_chest:.6f}"
             )
 
 
@@ -84,7 +84,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         debug_capture_processed_sample: bool = False,
         debug_profile_timing: bool = False,
         load_depth: bool = False,
-        load_breast: bool = False,
+        load_chest: bool = False,
         view_dropout: ViewDropoutConfig = ViewDropoutConfig(),
         keep_ratio: float = 1.0,
         sanity_checks: Optional[Dict] = None,
@@ -111,7 +111,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         # depth decoding + augment_depth saves ~25 ms/sample (depth
         # augmentation is the single biggest CPU cost).
         self.load_depth = bool(load_depth)
-        self.load_breast = bool(load_breast)
+        self.load_chest = bool(load_chest)
         self.view_dropout = view_dropout
         assert 0.0 < keep_ratio <= 1.0, f"keep_ratio must be in (0, 1], got {keep_ratio}"
         self.keep_ratio = float(keep_ratio)
@@ -158,28 +158,28 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
 
         self.checker = DataChecker(sanity_cfg=self.sanity_checks)
 
-    def sample_active_views(self, *, has_breast: bool) -> list[str]:
+    def sample_active_views(self, *, has_chest: bool) -> list[str]:
         """Sample which views are active for the current sample.
 
-        Train mode + has_breast: roll view_dropout to optionally drop one side.
-        Otherwise (val mode, or no breast available): keep all available views.
+        Train mode + has_chest: roll view_dropout to optionally drop one side.
+        Otherwise (val mode, or no chest available): keep all available views.
         view_mask is derived from the result at the data-build site.
         """
-        if not has_breast or self.mode != "train":
-            return ["head", "breast"] if has_breast else ["head"]
+        if not has_chest or self.mode != "train":
+            return ["head", "chest"] if has_chest else ["head"]
 
         drop_head = self.view_dropout.drop_head
-        drop_breast = self.view_dropout.drop_breast
-        keep_both = 1.0 - drop_head - drop_breast
+        drop_chest = self.view_dropout.drop_chest
+        keep_both = 1.0 - drop_head - drop_chest
         choice = np.random.choice(
-            ["keep_both", "drop_head", "drop_breast"],
-            p=[keep_both, drop_head, drop_breast],
+            ["keep_both", "drop_head", "drop_chest"],
+            p=[keep_both, drop_head, drop_chest],
         )
         if choice == "drop_head":
-            return ["breast"]
-        if choice == "drop_breast":
+            return ["chest"]
+        if choice == "drop_chest":
             return ["head"]
-        return ["head", "breast"]
+        return ["head", "chest"]
 
     def set_collator(self, collator):
         """Set the batch collator used to build model inputs."""
@@ -195,11 +195,11 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         image,
         intrinsic,
         active_views,
-        breast_image=None,
-        breast_intrinsic=None,
+        chest_image=None,
+        chest_intrinsic=None,
     ):
         view_mask = np.array(
-            ["head" in active_views, "breast" in active_views], dtype=bool
+            ["head" in active_views, "chest" in active_views], dtype=bool
         )
         data = {
             "images": image,
@@ -214,9 +214,9 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             ),
             "has_depth_values": np.array(False, dtype=bool),
         }
-        if breast_image is not None:
-            data["breast_images"] = breast_image
-            data["breast_intrinsic"] = breast_intrinsic
+        if chest_image is not None:
+            data["chest_images"] = chest_image
+            data["chest_intrinsic"] = chest_intrinsic
         return data
 
     def copy_debug_value(self, value):
@@ -291,10 +291,10 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             extrinsic=extrinsic_raw,
             instruction=(sample["instruction"], sample["instruction_num"]),
         )
-        if sample.get("breast_image") is not None:
+        if sample.get("chest_image") is not None:
             self.checker.check(
-                intrinsic=sample["breast_intrinsic"].astype(np.float32),
-                extrinsic=sample["breast_extrinsic"].astype(np.float32).reshape(4, 4),
+                intrinsic=sample["chest_intrinsic"].astype(np.float32),
+                extrinsic=sample["chest_extrinsic"].astype(np.float32).reshape(4, 4),
             )
         future_head_ext_raw = sample.get("future_head_extrinsic")
         if self.future_frame_horizon > 0 and future_head_ext_raw is not None:
@@ -354,21 +354,21 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             finite={"image": image, "depth_images": depth_images},
         )
 
-        breast_image = None
-        breast_intrinsic = None
-        if sample.get("breast_image") is not None:
-            breast_intrinsic = sample["breast_intrinsic"].astype(np.float32)
-            breast_image, _, breast_intrinsic = process_image(
-                sample["breast_image"],
-                sample.get("breast_depth", None),
-                breast_intrinsic,
+        chest_image = None
+        chest_intrinsic = None
+        if sample.get("chest_image") is not None:
+            chest_intrinsic = sample["chest_intrinsic"].astype(np.float32)
+            chest_image, _, chest_intrinsic = process_image(
+                sample["chest_image"],
+                sample.get("chest_depth", None),
+                chest_intrinsic,
                 self.aug_transform,
                 self.depth_clip_range,
                 target_size=self.target_image_size,
             )
-            self.checker.check(image=breast_image, finite={"breast_image": breast_image})
+            self.checker.check(image=chest_image, finite={"chest_image": chest_image})
         # Sample dropout perspective
-        active_views = self.sample_active_views(has_breast=breast_image is not None)
+        active_views = self.sample_active_views(has_chest=chest_image is not None)
         instruction = sample["instruction"]
         instruction_num = sample["instruction_num"]
 
@@ -396,8 +396,8 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             image=image,
             intrinsic=intrinsic,
             active_views=active_views,
-            breast_image=breast_image,
-            breast_intrinsic=breast_intrinsic,
+            chest_image=chest_image,
+            chest_intrinsic=chest_intrinsic,
         )
 
         data.update({
@@ -410,7 +410,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
         })
 
         # Future frames for world model supervision (raw uint8, no augmentation).
-        # Always emit future_frames when K > 0 so collator can stack; breast
+        # Always emit future_frames when K > 0 so collator can stack; chest
         # shares head's valid length (same frame_refs window).
         K = self.future_frame_horizon
         if K > 0:
@@ -446,17 +446,17 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             )
             data["future_head_motion"] = head_motion
 
-            breast_ff, _ = pad_future(sample.get("breast_future_frames")) # will be filled with dummy value if load_brease=False
-            data["breast_future_frames"] = breast_ff
-            if "breast_future_frames" in sample:
-                breast_motion = compute_relative_motion_padded(
-                    current_flat16=sample.get("breast_extrinsic"),
-                    future_flat=sample.get("future_breast_extrinsic"),
+            chest_ff, _ = pad_future(sample.get("chest_future_frames")) # will be filled with dummy value if load_brease=False
+            data["chest_future_frames"] = chest_ff
+            if "chest_future_frames" in sample:
+                chest_motion = compute_relative_motion_padded(
+                    current_flat16=sample.get("chest_extrinsic"),
+                    future_flat=sample.get("future_chest_extrinsic"),
                     n_valid=n_valid, K=K,
                 )
-                data["future_breast_motion"] = breast_motion
+                data["future_chest_motion"] = chest_motion
             else:
-                data["future_breast_motion"] = np.zeros((K, 16), dtype=np.float32)
+                data["future_chest_motion"] = np.zeros((K, 16), dtype=np.float32)
         else:
             data["n_future_frames"] = np.array(0, dtype=np.int32)
         if self.return_dataset_info:
@@ -517,7 +517,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             config=self.window_config,
             load_image=True,
             load_depth=self.load_depth,
-            load_breast=self.load_breast,
+            load_chest=self.load_chest,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=self.shuffle_buffer,
             shuffle_initial=self.shuffle_initial,
@@ -549,7 +549,7 @@ class VLAWdsDataset(torch.utils.data.IterableDataset):
             debug_capture_processed_sample=self.debug_capture_processed_sample,
             debug_profile_timing=self.debug_profile_timing,
             load_depth=self.load_depth,
-            load_breast=self.load_breast,
+            load_chest=self.load_chest,
             keep_ratio=1.0,
             sanity_checks=self.sanity_checks,
             dagger_quality_filter=self.dagger_quality_filter,
@@ -706,10 +706,10 @@ class UnifiedWdsDataset(torch.utils.data.IterableDataset):
             tH, tW = tgt
             vlm_sample["future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
             vlm_sample["future_head_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
-            vlm_sample["breast_future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
-            vlm_sample["future_breast_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
-        if self.vla_dataset.load_breast:
-            vlm_sample["breast_intrinsic"] = torch.zeros(4, dtype=torch.float32)
+            vlm_sample["chest_future_frames"] = torch.zeros(ff_horizon, tH, tW, 3, dtype=torch.uint8)
+            vlm_sample["future_chest_motion"] = torch.zeros(ff_horizon, 16, dtype=torch.float32)
+        if self.vla_dataset.load_chest:
+            vlm_sample["chest_intrinsic"] = torch.zeros(4, dtype=torch.float32)
         if getattr(self.vla_dataset, "debug_capture_raw_sample", False):
             vlm_sample["debug_raw_sample"] = None
         if getattr(self.vla_dataset, "debug_capture_processed_sample", False):
@@ -981,7 +981,7 @@ class VLALowLevelWdsDataset(torch.utils.data.IterableDataset):
             # and depth entirely at tar-read time.
             load_image=False,
             load_depth=False,
-            load_breast=False,
+            load_chest=False,
             preprocess_fn=preprocess_fn,
             shuffle_buffer=0,
             mode=self.mode,

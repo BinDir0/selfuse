@@ -102,7 +102,7 @@ def build_head_video_indices(batch, video_grid_thw):
     """Map batch sample index -> head video entry index in video_grid_thw.
 
     Collator flattens per-sample videos in sample order. For dual-view VLA
-    samples the order is [head, breast] per sample, so head indices are 0,2,4...
+    samples the order is [head, chest] per sample, so head indices are 0,2,4...
     For single-view samples the head index matches sample index.
     """
     if video_grid_thw is None:
@@ -198,7 +198,7 @@ def main(eval_cfg):
     shape_meta = OmegaConf.to_container(train_cfg.data.shape_meta, resolve=True)
     target_image_size = train_cfg.data.get("target_image_size")
     load_depth = bool(vla_ds_cfg.get("load_depth", False))
-    load_breast = bool(vla_ds_cfg.get("load_breast", False))
+    load_chest = bool(vla_ds_cfg.get("load_chest", False))
 
     dataset = VLAWdsDataset(
         wds_datasets=[{"shard_urls": selected_shards, "weight": 1.0, "name": "eval"}],
@@ -210,7 +210,7 @@ def main(eval_cfg):
         video_base_fps=float(train_cfg.data.video_base_fps),
         target_image_size=list(target_image_size) if target_image_size else None,
         load_depth=load_depth,
-        load_breast=load_breast,
+        load_chest=load_chest,
     )
     dataset.set_collator(collator)
     dataset.set_normalizer(normalizer)

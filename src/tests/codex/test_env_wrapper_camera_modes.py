@@ -8,7 +8,7 @@ class _EchoPolicy:
         return obs
 
 
-def test_single_rgb_sets_depth_none_without_breast_keys():
+def test_single_rgb_sets_depth_none_without_chest_keys():
     wrapper = EnvWrapper(
         policy=_EchoPolicy(),
         camera_setup_mode="single",
@@ -30,9 +30,9 @@ def test_single_rgb_sets_depth_none_without_breast_keys():
     assert mapped["image"] == "head_rgb"
     assert mapped["intrinsic"] == "head_K"
     assert mapped["depth"] is None
-    assert "breast_image" not in mapped
-    assert "breast_intrinsic" not in mapped
-    assert "breast_depth" not in mapped
+    assert "chest_image" not in mapped
+    assert "chest_intrinsic" not in mapped
+    assert "chest_depth" not in mapped
 
 
 def test_both_rgb_maps_chest_without_depth_keys():
@@ -61,9 +61,9 @@ def test_both_rgb_maps_chest_without_depth_keys():
     assert mapped["chest_intrinsic"] == "chest_K"
     assert mapped["depth"] is None
     assert mapped["chest_depth"] is None
-    assert "breast_image" not in mapped
-    assert "breast_intrinsic" not in mapped
-    assert "breast_depth" not in mapped
+    assert "chest_image" not in mapped
+    assert "chest_intrinsic" not in mapped
+    assert "chest_depth" not in mapped
 
 
 def test_both_rgbd_maps_head_and_chest_depth():
@@ -89,4 +89,4 @@ def test_both_rgbd_maps_head_and_chest_depth():
 
     assert mapped["depth"] == "head_depth"
     assert mapped["chest_depth"] == "chest_depth"
-    assert "breast_depth" not in mapped
+    assert "chest_depth" not in mapped

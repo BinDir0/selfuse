@@ -284,15 +284,15 @@ class LegendVLAInference(nn.Module):
         if self.target_image_size is not None:
             images, _, intrinsic = process_image(images, intrinsic=intrinsic, target_size=self.target_image_size)
 
-        breast_images = None
-        breast_intrinsic = None
+        chest_images = None
+        chest_intrinsic = None
         if chest_image is not None and chest_intrinsic_raw is not None:
-            breast_images, _ = self.prepare_history(np.asarray(chest_image), self.image_horizon)
-            breast_intrinsic = self.extract_intrinsic(chest_intrinsic_raw)
+            chest_images, _ = self.prepare_history(np.asarray(chest_image), self.image_horizon)
+            chest_intrinsic = self.extract_intrinsic(chest_intrinsic_raw)
             if self.target_image_size is not None:
-                breast_images, _, breast_intrinsic = process_image(
-                    breast_images,
-                    intrinsic=breast_intrinsic,
+                chest_images, _, chest_intrinsic = process_image(
+                    chest_images,
+                    intrinsic=chest_intrinsic,
                     target_size=self.target_image_size,
                 )
 
@@ -312,8 +312,8 @@ class LegendVLAInference(nn.Module):
             "images": torch.as_tensor(images),
             "instruction": instruction,
             "intrinsic": torch.from_numpy(intrinsic),
-            "active_views": ["head", "breast"] if breast_images is not None else ["head"],
-            "view_mask": torch.tensor([True, breast_images is not None], dtype=torch.bool),
+            "active_views": ["head", "chest"] if chest_images is not None else ["head"],
+            "view_mask": torch.tensor([True, chest_images is not None], dtype=torch.bool),
             "vision_type": "video",
             "video_fps": torch.tensor(self.video_base_fps / self.image_stride, dtype=torch.float32),
             "states": torch.from_numpy(states),
@@ -321,9 +321,9 @@ class LegendVLAInference(nn.Module):
             "n_actions": torch.tensor(self.action_horizon, dtype=torch.long),
             "is_vla_data": torch.tensor(True, dtype=torch.bool),
         }
-        if breast_images is not None and breast_intrinsic is not None:
-            sample["breast_images"] = torch.as_tensor(breast_images)
-            sample["breast_intrinsic"] = torch.from_numpy(breast_intrinsic)
+        if chest_images is not None and chest_intrinsic is not None:
+            sample["chest_images"] = torch.as_tensor(chest_images)
+            sample["chest_intrinsic"] = torch.from_numpy(chest_intrinsic)
 
         batch = self.data_collator([sample])
 
@@ -363,7 +363,7 @@ class LegendVLAInference(nn.Module):
     ) -> np.ndarray:
         """Aggregate expert attention into [T_total, tH, tW].
 
-        Multi-video inputs (head+breast) are concatenated along T, head first.
+        Multi-video inputs (head+chest) are concatenated along T, head first.
         """
         from src.utils.visual_attention import MERGE_SIZE
 

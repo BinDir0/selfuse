@@ -289,16 +289,16 @@ class TestUnifiedVLACollatorRaw:
         assert batch["actions"].shape == (2, 4, 48)
 
     @staticmethod
-    def make_raw_vla_sample_with_breast():
+    def make_raw_vla_sample_with_chest():
         sample = TestUnifiedVLACollatorRaw.make_raw_vla_sample()
-        sample["breast_images"] = torch.zeros(1, 8, 8, 3, dtype=torch.uint8)
-        sample["breast_intrinsic"] = torch.tensor([2.0, 2.0, 0.25, 0.25])
-        sample["active_views"] = ["head", "breast"]
+        sample["chest_images"] = torch.zeros(1, 8, 8, 3, dtype=torch.uint8)
+        sample["chest_intrinsic"] = torch.tensor([2.0, 2.0, 0.25, 0.25])
+        sample["active_views"] = ["head", "chest"]
         sample["view_mask"] = torch.tensor([True, True])
         return sample
 
     def test_token_mode_flattens_camera_intrinsic_per_slot(self):
-        """Token mode: one row per rendered <camera> slot (head + optional breast),
+        """Token mode: one row per rendered <camera> slot (head + optional chest),
         VLM samples contribute zero rows."""
         collator = UnifiedVLACollator(
             formatter=Qwen3VLChatFormatter(camera_intrinsic_mode="token"),
@@ -306,7 +306,7 @@ class TestUnifiedVLACollatorRaw:
         )
         batch = collator([
             self.make_raw_vla_sample(),
-            self.make_raw_vla_sample_with_breast(),
+            self.make_raw_vla_sample_with_chest(),
         ])
         assert batch["camera_intrinsic"].shape == (3, 4)
         torch.testing.assert_close(batch["camera_intrinsic"][0], torch.tensor([1.0, 1.0, 0.5, 0.5]))
@@ -318,17 +318,17 @@ class TestUnifiedVLACollatorRaw:
             formatter=Qwen3VLChatFormatter(camera_intrinsic_mode="token"),
             batch_processor=DummyBatchProcessor(),
         )
-        head_only = self.make_raw_vla_sample_with_breast()
+        head_only = self.make_raw_vla_sample_with_chest()
         head_only["active_views"] = ["head"]
         head_only["view_mask"] = torch.tensor([True, False])
-        breast_only = self.make_raw_vla_sample_with_breast()
-        breast_only["active_views"] = ["breast"]
-        breast_only["view_mask"] = torch.tensor([False, True])
-        dual = self.make_raw_vla_sample_with_breast()
-        dual["active_views"] = ["head", "breast"]
+        chest_only = self.make_raw_vla_sample_with_chest()
+        chest_only["active_views"] = ["chest"]
+        chest_only["view_mask"] = torch.tensor([False, True])
+        dual = self.make_raw_vla_sample_with_chest()
+        dual["active_views"] = ["head", "chest"]
         dual["view_mask"] = torch.tensor([True, True])
 
-        batch = collator([head_only, breast_only, dual])
+        batch = collator([head_only, chest_only, dual])
 
         assert batch["camera_intrinsic"].shape == (4, 4)
         expected = torch.stack([
@@ -358,7 +358,7 @@ class TestUnifiedVLACollatorRaw:
         )
         batch = collator([
             self.make_raw_vla_sample(),
-            self.make_raw_vla_sample_with_breast(),
+            self.make_raw_vla_sample_with_chest(),
         ])
         assert "camera_intrinsic" not in batch
 
@@ -568,109 +568,109 @@ class TestProcessorPromptBuilding:
 
 
 # ======================================================================
-# Module 4b: Breast-camera (dual-view) formatting & batching
+# Module 4b: Chest-camera (dual-view) formatting & batching
 # ======================================================================
 
 
-class TestBreastCameraFormatting:
-    """Dual-view (head + breast) formatter / batcher paths."""
+class TestChestCameraFormatting:
+    """Dual-view (head + chest) formatter / batcher paths."""
 
     @staticmethod
-    def breast_sample():
+    def chest_sample():
         return {
             "is_vla_data": torch.tensor(True),
             "instruction": "Pick up the cup",
             "intrinsic": torch.tensor([500.0, 500.0, 320.0, 240.0]),
-            "breast_intrinsic": torch.tensor([600.0, 600.0, 320.0, 240.0]),
+            "chest_intrinsic": torch.tensor([600.0, 600.0, 320.0, 240.0]),
             "n_states": torch.tensor(2, dtype=torch.int32),
             "n_actions": torch.tensor(2, dtype=torch.int32),
             "vision_type": "video",
             "images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
-            "breast_images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
+            "chest_images": torch.zeros(3, 8, 8, 3, dtype=torch.uint8),
             "video_fps": torch.tensor(15.0),
-            "active_views": ["head", "breast"],
+            "active_views": ["head", "chest"],
             "view_mask": torch.tensor([True, True]),
         }
 
-    def test_build_visual_content_returns_two_video_blocks_when_breast_present(self):
+    def test_build_visual_content_returns_two_video_blocks_when_chest_present(self):
         formatter = Qwen3VLChatFormatter()
-        content = formatter.build_visual_content(self.breast_sample())
+        content = formatter.build_visual_content(self.chest_sample())
         assert content == [{"type": "video"}, {"type": "video"}]
 
     def test_build_visual_content_uses_active_views(self):
         formatter = Qwen3VLChatFormatter()
-        sample = self.breast_sample()
+        sample = self.chest_sample()
 
         sample["active_views"] = ["head"]
         assert formatter.build_visual_content(sample) == [{"type": "video"}]
 
-        sample["active_views"] = ["breast"]
+        sample["active_views"] = ["chest"]
         assert formatter.build_visual_content(sample) == [{"type": "video"}]
 
-        sample["active_views"] = ["head", "breast"]
+        sample["active_views"] = ["head", "chest"]
         assert formatter.build_visual_content(sample) == [{"type": "video"}, {"type": "video"}]
 
     def test_build_visual_content_head_only_sample_still_one_block(self):
         formatter = Qwen3VLChatFormatter()
-        sample = self.breast_sample()
-        sample.pop("breast_images")
-        sample.pop("breast_intrinsic")
+        sample = self.chest_sample()
+        sample.pop("chest_images")
+        sample.pop("chest_intrinsic")
         sample["active_views"] = ["head"]
         sample["view_mask"] = torch.tensor([True, False])
         content = formatter.build_visual_content(sample)
         assert content == [{"type": "video"}]
 
-    def test_build_vla_user_text_text_mode_appends_breast_intrinsic(self):
+    def test_build_vla_user_text_text_mode_appends_chest_intrinsic(self):
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="text")
         text = formatter.build_vla_user_text(
             instruction="Pick up the cup",
             head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
             n_states=torch.tensor(2, dtype=torch.int32),
-            active_views=["head", "breast"],
-            breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
+            active_views=["head", "chest"],
+            chest_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
         assert "Head camera intrinsics: fx:500.00" in text
-        assert "Breast camera intrinsics: fx:600.00" in text
-        assert "There are two videos: the first video is from the head camera; the second video is from the breast camera." in text
+        assert "Chest camera intrinsics: fx:600.00" in text
+        assert "There are two videos: the first video is from the head camera; the second video is from the chest camera." in text
 
-    def test_build_vla_user_text_breast_only_prompt(self):
+    def test_build_vla_user_text_chest_only_prompt(self):
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="text")
         text = formatter.build_vla_user_text(
             instruction="Pick up the cup",
             head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
             n_states=torch.tensor(2, dtype=torch.int32),
-            active_views=["breast"],
-            breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
+            active_views=["chest"],
+            chest_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
-        assert "The video is from the breast camera." in text
-        assert "Breast camera intrinsics: fx:600.00" in text
+        assert "The video is from the chest camera." in text
+        assert "Chest camera intrinsics: fx:600.00" in text
         assert "Head camera intrinsic" not in text
 
-    def test_build_vla_user_text_head_only_omits_breast_segment(self):
+    def test_build_vla_user_text_head_only_omits_chest_segment(self):
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="text")
         text = formatter.build_vla_user_text(
             instruction="Pick up the cup",
             head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
             n_states=torch.tensor(2, dtype=torch.int32),
             active_views=["head"],
-            breast_intrinsic=None,
+            chest_intrinsic=None,
         )
         assert "Head camera intrinsic" in text
-        assert "Breast" not in text
+        assert "Chest" not in text
 
     def test_build_vla_user_text_token_mode_emits_two_camera_slots(self):
-        """Token mode with breast: two <camera> slots, one per view."""
+        """Token mode with chest: two <camera> slots, one per view."""
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="token", camera_token="<cam>")
         text = formatter.build_vla_user_text(
             instruction="Pick up the cup",
             head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
             n_states=torch.tensor(2, dtype=torch.int32),
-            active_views=["head", "breast"],
-            breast_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
+            active_views=["head", "chest"],
+            chest_intrinsic=torch.tensor([600.0, 600.0, 320.0, 240.0]),
         )
         assert text.count("<cam>") == 2
         assert "Head camera intrinsics: <cam>" in text
-        assert "Breast camera intrinsics: <cam>" in text
+        assert "Chest camera intrinsics: <cam>" in text
 
     def test_build_vla_user_text_token_mode_head_only_single_slot(self):
         formatter = Qwen3VLChatFormatter(camera_intrinsic_mode="token", camera_token="<cam>")
@@ -679,32 +679,32 @@ class TestBreastCameraFormatting:
             head_intrinsic=torch.tensor([500.0, 500.0, 320.0, 240.0]),
             n_states=torch.tensor(2, dtype=torch.int32),
             active_views=["head"],
-            breast_intrinsic=None,
+            chest_intrinsic=None,
         )
         assert text.count("<cam>") == 1
-        assert "Breast" not in text
+        assert "Chest" not in text
 
-    def test_build_vision_inputs_flattens_head_then_breast_per_sample(self):
+    def test_build_vision_inputs_flattens_head_then_chest_per_sample(self):
         batch_processor = Qwen3VLBatchProcessor(
             model_name_or_path="demo",
             processor_call_kwargs={"padding": "longest", "max_length": 32},
             processor=DummyProcessorForBatchProcessor(),
             mem_enabled=False,
         )
-        samples = [self.breast_sample(), self.breast_sample()]
-        # Mark head vs breast distinctively so we can assert ordering.
+        samples = [self.chest_sample(), self.chest_sample()]
+        # Mark head vs chest distinctively so we can assert ordering.
         samples[0]["images"] = torch.full((3, 8, 8, 3), 1, dtype=torch.uint8)
-        samples[0]["breast_images"] = torch.full((3, 8, 8, 3), 2, dtype=torch.uint8)
+        samples[0]["chest_images"] = torch.full((3, 8, 8, 3), 2, dtype=torch.uint8)
         samples[1]["images"] = torch.full((3, 8, 8, 3), 3, dtype=torch.uint8)
-        samples[1]["breast_images"] = torch.full((3, 8, 8, 3), 4, dtype=torch.uint8)
+        samples[1]["chest_images"] = torch.full((3, 8, 8, 3), 4, dtype=torch.uint8)
 
         batch_inputs, _ = batch_processor.build_vision_inputs(samples)
 
         assert len(batch_inputs["videos"]) == 4
         assert int(batch_inputs["videos"][0][0, 0, 0, 0]) == 1  # sample0 head
-        assert int(batch_inputs["videos"][1][0, 0, 0, 0]) == 2  # sample0 breast
+        assert int(batch_inputs["videos"][1][0, 0, 0, 0]) == 2  # sample0 chest
         assert int(batch_inputs["videos"][2][0, 0, 0, 0]) == 3  # sample1 head
-        assert int(batch_inputs["videos"][3][0, 0, 0, 0]) == 4  # sample1 breast
+        assert int(batch_inputs["videos"][3][0, 0, 0, 0]) == 4  # sample1 chest
         assert len(batch_inputs["video_metadata"]) == 4
 
     def test_build_vision_inputs_follows_active_view_order(self):
@@ -714,20 +714,20 @@ class TestBreastCameraFormatting:
             processor=DummyProcessorForBatchProcessor(),
             mem_enabled=False,
         )
-        head_only = self.breast_sample()
+        head_only = self.chest_sample()
         head_only["images"] = torch.full((3, 8, 8, 3), 1, dtype=torch.uint8)
-        head_only["breast_images"] = torch.full((3, 8, 8, 3), 2, dtype=torch.uint8)
+        head_only["chest_images"] = torch.full((3, 8, 8, 3), 2, dtype=torch.uint8)
         head_only["active_views"] = ["head"]
-        breast_only = self.breast_sample()
-        breast_only["images"] = torch.full((3, 8, 8, 3), 3, dtype=torch.uint8)
-        breast_only["breast_images"] = torch.full((3, 8, 8, 3), 4, dtype=torch.uint8)
-        breast_only["active_views"] = ["breast"]
-        dual = self.breast_sample()
+        chest_only = self.chest_sample()
+        chest_only["images"] = torch.full((3, 8, 8, 3), 3, dtype=torch.uint8)
+        chest_only["chest_images"] = torch.full((3, 8, 8, 3), 4, dtype=torch.uint8)
+        chest_only["active_views"] = ["chest"]
+        dual = self.chest_sample()
         dual["images"] = torch.full((3, 8, 8, 3), 5, dtype=torch.uint8)
-        dual["breast_images"] = torch.full((3, 8, 8, 3), 6, dtype=torch.uint8)
-        dual["active_views"] = ["head", "breast"]
+        dual["chest_images"] = torch.full((3, 8, 8, 3), 6, dtype=torch.uint8)
+        dual["active_views"] = ["head", "chest"]
 
-        batch_inputs, _ = batch_processor.build_vision_inputs([head_only, breast_only, dual])
+        batch_inputs, _ = batch_processor.build_vision_inputs([head_only, chest_only, dual])
 
         assert len(batch_inputs["videos"]) == 4
         assert [int(video[0, 0, 0, 0]) for video in batch_inputs["videos"]] == [1, 4, 5, 6]
@@ -740,13 +740,13 @@ class TestBreastCameraFormatting:
             processor=DummyProcessorForBatchProcessor(),
             mem_enabled=False,
         )
-        head_only = self.breast_sample()
-        head_only.pop("breast_images")
-        head_only.pop("breast_intrinsic")
+        head_only = self.chest_sample()
+        head_only.pop("chest_images")
+        head_only.pop("chest_intrinsic")
         head_only["active_views"] = ["head"]
         head_only["view_mask"] = torch.tensor([True, False])
 
-        batch_inputs, _ = batch_processor.build_vision_inputs([head_only, self.breast_sample()])
+        batch_inputs, _ = batch_processor.build_vision_inputs([head_only, self.chest_sample()])
         # 1 (head-only) + 2 (dual) = 3 entries
         assert len(batch_inputs["videos"]) == 3
 

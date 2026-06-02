@@ -260,8 +260,8 @@ def build_sample_from_window(buf, past, config):
     """Build a training sample from the sliding window buffer.
 
     RGB/depth stay as frame refs until ``materialize_sample_media`` runs
-    post-shuffle. breast_* calibration keys appear iff meta["cameras"]
-    declares breast; media decode is driven by key presence.
+    post-shuffle. chest_* calibration keys appear iff meta["cameras"]
+    declares chest; media decode is driven by key presence.
     """
     current = buf[0]
     meta = current["meta.json"]
@@ -298,7 +298,7 @@ def build_sample_from_window(buf, past, config):
                 [frame["lowdim.npy"] for frame in ff_refs], axis=0
             )
 
-    # head_* map to canonical extrinsic/intrinsic; breast_* pass through.
+    # head_* map to canonical extrinsic/intrinsic; chest_* pass through.
     ld = current["lowdim.npy"]
     result = {}
     for field, (s, e) in lowdim_slices.items():
@@ -310,7 +310,7 @@ def build_sample_from_window(buf, past, config):
             result["extrinsic"] = ld[s:e].astype(np.float32)
         elif field == "head_intrinsic":
             result["intrinsic"] = ld[s:e].astype(np.float32)
-        elif field in ("breast_extrinsic", "breast_intrinsic"):
+        elif field in ("chest_extrinsic", "chest_intrinsic"):
             result[field] = ld[s:e].astype(np.float32)
 
     result.update({
@@ -333,9 +333,9 @@ def build_sample_from_window(buf, past, config):
         if future_lowdims is not None:
             hs, he = lowdim_slices["head_extrinsic"]
             result["future_head_extrinsic"] = future_lowdims[:, hs:he].astype(np.float32)
-            if "breast_extrinsic" in lowdim_slices:
-                bs, be = lowdim_slices["breast_extrinsic"]
-                result["future_breast_extrinsic"] = future_lowdims[:, bs:be].astype(np.float32)
+            if "chest_extrinsic" in lowdim_slices:
+                bs, be = lowdim_slices["chest_extrinsic"]
+                result["future_chest_extrinsic"] = future_lowdims[:, bs:be].astype(np.float32)
     return result
 
 
@@ -382,13 +382,13 @@ def materialize_sample_media(sample):
     if image_refs is not None:
         stack_optional(sample, "image", image_refs, "image.jpg", decode_image_bytes)
         stack_optional(sample, "depth", image_refs, "depth.npy", decode_depth_bytes)
-        stack_optional(sample, "breast_image", image_refs, "breast_image.jpg", decode_image_bytes)
-        stack_optional(sample, "breast_depth", image_refs, "breast_depth.npy", decode_depth_bytes)
+        stack_optional(sample, "chest_image", image_refs, "chest_image.jpg", decode_image_bytes)
+        stack_optional(sample, "chest_depth", image_refs, "chest_depth.npy", decode_depth_bytes)
 
     future_refs = sample.pop("future_frame_refs", None)
     if future_refs is not None:
         stack_optional(sample, "future_frames", future_refs, "image.jpg", decode_image_bytes)
-        stack_optional(sample, "breast_future_frames", future_refs, "breast_image.jpg", decode_image_bytes)
+        stack_optional(sample, "chest_future_frames", future_refs, "chest_image.jpg", decode_image_bytes)
 
     return sample
 
@@ -472,7 +472,7 @@ def resolve_shuffle_initial(shuffle_buffer: int | None, shuffle_initial: int | N
     return max(1, min(int(shuffle_initial), int(shuffle_buffer)))
 
 
-def build_select_files(load_image: bool, load_depth: bool, load_breast: bool):
+def build_select_files(load_image: bool, load_depth: bool, load_chest: bool):
     """Allow-list predicate for ``wds.WebDataset(select_files=...)``.
     ``meta.json`` + ``lowdim.npy`` always pass; other VLA members gated
     by the three flags.  Uses webdataset's own ``base_plus_ext`` so the
@@ -483,10 +483,10 @@ def build_select_files(load_image: bool, load_depth: bool, load_breast: bool):
         allowed.add("image.jpg")
     if load_depth:
         allowed.add("depth.npy")
-    if load_breast:
-        allowed.add("breast_image.jpg")
-    if load_depth and load_breast:
-        allowed.add("breast_depth.npy")
+    if load_chest:
+        allowed.add("chest_image.jpg")
+    if load_depth and load_chest:
+        allowed.add("chest_depth.npy")
 
     def predicate(fname: str) -> bool:
         _, suffix = base_plus_ext(fname)
@@ -497,7 +497,7 @@ def build_select_files(load_image: bool, load_depth: bool, load_breast: bool):
 
 
 def build_wds_pipeline(shard_urls, config=None,
-                       load_image=True, load_depth=False, load_breast=False,
+                       load_image=True, load_depth=False, load_chest=False,
                        preprocess_fn=None, shuffle_buffer=16384, shuffle_initial=None,
                        mode='train',
                        use_sliding_window=True,
@@ -516,10 +516,10 @@ def build_wds_pipeline(shard_urls, config=None,
     Args:
         shard_urls: tar path(s), braceexpand pattern, or list of globs.
         config: WindowConfig (defaults if None).
-        load_image / load_depth / load_breast: tar-level modality gates.
-            load_breast=True pulls breast_image; combined with load_depth
-            also pulls breast_depth. Breast extrinsic/intrinsic slices
-            are meta-driven (independent of load_breast).
+        load_image / load_depth / load_chest: tar-level modality gates.
+            load_chest=True pulls chest_image; combined with load_depth
+            also pulls chest_depth. Chest extrinsic/intrinsic slices
+            are meta-driven (independent of load_chest).
         preprocess_fn: optional final map(sample) -> sample.
         shuffle_buffer: sample-level buffer (train only).
         shuffle_initial: number of kept samples to preload before yielding
@@ -547,7 +547,7 @@ def build_wds_pipeline(shard_urls, config=None,
     is_train = (mode == 'train')
     # VLM uses image_N.jpg with variable N; skip tar-level filter.
     select_files = (
-        build_select_files(load_image, load_depth, load_breast)
+        build_select_files(load_image, load_depth, load_chest)
         if use_sliding_window else None
     )
 
@@ -597,7 +597,7 @@ def build_wds_pipeline(shard_urls, config=None,
 
 
 def build_blended_dataset(datasets_config, config=None,
-                          load_image=True, load_depth=False, load_breast=False,
+                          load_image=True, load_depth=False, load_chest=False,
                           preprocess_fn=None, shuffle_buffer=16384, shuffle_initial=None,
                           mode='train',
                           use_sliding_window=True,
@@ -612,7 +612,7 @@ def build_blended_dataset(datasets_config, config=None,
     Args:
         datasets_config: list of {"shard_urls": ..., "weight": ...}.
         config: WindowConfig (defaults if None).
-        load_image / load_depth / load_breast: see ``build_wds_pipeline``.
+        load_image / load_depth / load_chest: see ``build_wds_pipeline``.
         preprocess_fn: optional final map(sample) -> sample.
         shuffle_buffer: sample-level buffer (train only).
         shuffle_initial: number of kept samples to preload before yielding
@@ -640,7 +640,7 @@ def build_blended_dataset(datasets_config, config=None,
             urls, config,
             load_image=load_image,
             load_depth=load_depth,
-            load_breast=load_breast,
+            load_chest=load_chest,
             preprocess_fn=preprocess_fn if not is_train else None,
             shuffle_buffer=shuffle_buffer,
             shuffle_initial=shuffle_initial,

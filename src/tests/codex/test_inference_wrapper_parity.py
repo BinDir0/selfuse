@@ -95,7 +95,7 @@ def test_prepare_process_accepts_chest_fields_from_env_wrapper_path():
     obs["chest_intrinsic"] = torch.tensor([2.0, 2.0, 0.5, 0.5], dtype=torch.float32).numpy()
 
     prepared = wrapper.prepare_process(obs)
-    assert "breast_images" in spy_collator.last_samples[0]
-    assert "breast_intrinsic" in spy_collator.last_samples[0]
+    assert "chest_images" in spy_collator.last_samples[0]
+    assert "chest_intrinsic" in spy_collator.last_samples[0]
     assert torch.is_tensor(prepared["dummy_float"])
 

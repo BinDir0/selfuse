@@ -118,8 +118,8 @@ class UnifiedVLACollator:
             "n_states", "n_actions", "n_future_frames",
             "depth_values", "has_depth_values", "future_frames",
             "intrinsic",
-            "breast_intrinsic", "breast_future_frames",
-            "future_head_motion", "future_breast_motion",
+            "chest_intrinsic", "chest_future_frames",
+            "future_head_motion", "future_chest_motion",
             "view_mask",
         ]
         for key in collatable_keys:
@@ -138,8 +138,8 @@ class UnifiedVLACollator:
                 for view in resolve_active_views(s):
                     if view == "head":
                         cam_list.append(s["intrinsic"])
-                    elif view == "breast":
-                        cam_list.append(s["breast_intrinsic"])
+                    elif view == "chest":
+                        cam_list.append(s["chest_intrinsic"])
                     else:
                         raise ValueError(f"Unsupported active view: {view}")
             if cam_list:
