@@ -59,25 +59,35 @@ def read_task_csv(path: Path) -> list[tuple[str, int]]:
     return rows
 
 
-def _barh(ax, pairs, title, color, value_label="count"):
+def _barh(ax, pairs, title, color, value_label="count", log=False):
     pairs = pairs[::-1]  # largest on top
     labels = [p[0] for p in pairs]
     counts = [p[1] for p in pairs]
     ax.barh(range(len(labels)), counts, color=color)
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel(value_label)
+    if log:
+        ax.set_xscale("log")
+        pos = [c for c in counts if c > 0]
+        if pos:
+            ax.set_xlim(left=max(min(pos) * 0.6, 1e-9))
+    ax.set_xlabel(value_label + (" (log)" if log else ""))
     ax.set_title(title)
 
 
-def _barv(ax, pairs, title, color, value_label="count"):
+def _barv(ax, pairs, title, color, value_label="count", log=False):
     """Vertical bars spread left-to-right (landscape), labels rotated under the x-axis."""
     labels = [p[0] for p in pairs]
     counts = [p[1] for p in pairs]
     ax.bar(range(len(labels)), counts, color=color)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(value_label)
+    if log:
+        ax.set_yscale("log")
+        pos = [c for c in counts if c > 0]
+        if pos:
+            ax.set_ylim(bottom=max(min(pos) * 0.6, 1e-9))
+    ax.set_ylabel(value_label + (" (log)" if log else ""))
     ax.set_title(title)
     ax.margins(x=0.005)
 
@@ -164,6 +174,8 @@ def main(argv=None):
                          "sample (--sample_frac 0.1) back to full-dataset scale.")
     ap.add_argument("--bar_width", type=float, default=0.22,
                     help="Inches per bar (smaller = more compact figure). Default 0.22.")
+    ap.add_argument("--log", action="store_true",
+                    help="Log-scale the count axis (1/10/100/1000...) -- good for skewed distributions.")
     ap.add_argument("--max_words", type=int, default=400, help="Max words in each word cloud (dense look).")
     ap.add_argument("--prefer_horizontal", type=float, default=0.95, help="Fraction of words laid horizontally.")
     ap.add_argument("--font", default=None, help="Path to a .ttf for nicer cloud text (optional).")
@@ -233,10 +245,10 @@ def main(argv=None):
         bw = args.bar_width
         if args.bar_orient == "h":
             fig, ax = plt.subplots(figsize=(8, max(3, bw * len(bars_s))))
-            _barh(ax, bars_s, title, color, vlabel)
+            _barh(ax, bars_s, title, color, vlabel, log=args.log)
         else:
             fig, ax = plt.subplots(figsize=(max(6, bw * len(bars_s)), 4.5))
-            _barv(ax, bars_s, title, color, vlabel)
+            _barv(ax, bars_s, title, color, vlabel, log=args.log)
         fig.tight_layout(); fig.savefig(fig_dir / name, dpi=args.dpi); plt.close(fig)
         written.append(name)
 
