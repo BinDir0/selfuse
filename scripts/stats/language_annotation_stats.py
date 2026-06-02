@@ -56,6 +56,7 @@ import statistics
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -284,7 +285,7 @@ def dist_summary(values: list[float]) -> dict | None:
     }
 
 
-def _parse_one(path: Path):
+def _parse_one(path: Path, suffix: str = ""):
     """Read + normalize one annotation file. Returns (category, record_or_None) where
     category is one of valid/invalid_json/invalid_status/empty_instruction. Pure per-file
     work (no shared state) so it is safe to run across a thread pool; the read_text I/O
@@ -301,14 +302,18 @@ def _parse_one(path: Path):
     instruction = _normalize_instruction(payload, hierarchy)
     if not instruction:
         return ("empty_instruction", None)
+    # clip_id = filename minus the FULL suffix (Path.stem only strips the last extension, which
+    # would leave e.g. '..._qwen-annotation' for suffix '_qwen-annotation.json').
+    name = path.name
+    clip_id = name[:-len(suffix)] if suffix and name.endswith(suffix) else path.stem
     return ("valid", {
-        "clip_id": path.stem,
+        "clip_id": clip_id,
         "levels": {k: hierarchy.get(k) for k in HIERARCHY_KEYS},
         "instruction": instruction,
     })
 
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2  # bumped: clip_id now strips the full suffix
 
 
 def default_annotation_cache(root, suffix: str) -> str:
@@ -396,16 +401,17 @@ def load_annotations(root: Path, suffix: str, n_workers: int = 16, *,
         "empty_instruction": 0,
     }
     records = []
+    worker = partial(_parse_one, suffix=suffix)
     if n_workers and n_workers > 1 and files:
         with ThreadPoolExecutor(max_workers=n_workers) as ex:
-            results = ex.map(_parse_one, files, chunksize=256)
+            results = ex.map(worker, files, chunksize=256)
             for category, rec in _progress(results, total=len(files), desc="parse annotations"):
                 coverage[category] += 1
                 if rec is not None:
                     records.append(rec)
     else:
         for path in _progress(files, total=len(files), desc="parse annotations"):
-            category, rec = _parse_one(path)
+            category, rec = worker(path)
             coverage[category] += 1
             if rec is not None:
                 records.append(rec)
