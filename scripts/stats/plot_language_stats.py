@@ -56,6 +56,18 @@ def _barh(ax, pairs, title, color):
     ax.set_title(title)
 
 
+def _barv(ax, pairs, title, color):
+    """Vertical bars spread left-to-right (landscape), labels rotated under the x-axis."""
+    labels = [p[0] for p in pairs]
+    counts = [p[1] for p in pairs]
+    ax.bar(range(len(labels)), counts, color=color)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("count")
+    ax.set_title(title)
+    ax.margins(x=0.005)
+
+
 def _zipf(ax, pairs, title, color):
     counts = sorted((c for _, c in pairs), reverse=True)
     ranks = range(1, len(counts) + 1)
@@ -115,6 +127,9 @@ def main(argv=None):
                          "frequency threshold instead of a fixed top-K. Bars are still capped at "
                          "--max_bars for readability.")
     ap.add_argument("--max_bars", type=int, default=60, help="Hard cap on bars when --min_count selects many terms.")
+    ap.add_argument("--bar_orient", choices=["v", "h"], default="v",
+                    help="v: vertical bars spread left-to-right (wide/landscape, default). "
+                         "h: horizontal bars stacked top-to-bottom (tall/portrait).")
     ap.add_argument("--max_words", type=int, default=400, help="Max words in each word cloud (dense look).")
     ap.add_argument("--prefer_horizontal", type=float, default=0.95, help="Fraction of words laid horizontally.")
     ap.add_argument("--font", default=None, help="Path to a .ttf for nicer cloud text (optional).")
@@ -175,8 +190,13 @@ def main(argv=None):
         if not bars:
             print(f"  (no {kind} with count >= {min_count}; lower --min_count)")
             continue
-        fig, ax = plt.subplots(figsize=(7, max(3, 0.22 * len(bars))))
-        _barh(ax, bars, f"{kind[:1].upper() + kind[1:]} ({note})", color)
+        title = f"{kind[:1].upper() + kind[1:]} ({note})"
+        if args.bar_orient == "h":
+            fig, ax = plt.subplots(figsize=(8, max(3, 0.24 * len(bars))))
+            _barh(ax, bars, title, color)
+        else:
+            fig, ax = plt.subplots(figsize=(max(7, 0.34 * len(bars)), 5))
+            _barv(ax, bars, title, color)
         fig.tight_layout(); fig.savefig(fig_dir / name, dpi=args.dpi); plt.close(fig)
         written.append(name)
 
