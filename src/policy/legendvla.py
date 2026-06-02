@@ -11,7 +11,7 @@ from src.model.vlm.prefix_cache import (
     BackboneStreamOutput,
     slice_prefix_cache_from_full_kv,
 )
-from src.utils.sample_utils import generate_multi_span_mask
+from src.utils.sample_utils import generate_bernoulli_mask, generate_multi_span_mask
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,16 @@ class SpanMaskConfig:
     prefer_early: bool = True
 
 
+@dataclass(frozen=True)
+class StateMaskConfig:
+    # Per-frame independent Bernoulli masking for the short (6-frame) state
+    # history. Span masking is meaningless at this length, so each frame is
+    # masked independently instead.
+    mask_prob: float = 0.75    # per-frame independent mask probability
+    keep_last: bool = True     # never mask the current (last) frame
+    p_no_mask: float = 0.05    # fraction of samples left fully unmasked
+
+
 class WorldModelHead(nn.Module):
     """Query tokens + output projection. view_embed is added per view
     (head/chest); zero-init keeps single-view output bit-identical.
@@ -83,10 +93,7 @@ class ARActionTrainConfig:
     diffloss_repeat: int = 1
     input_mask_enabled: bool = False
     action_mask: SpanMaskConfig = SpanMaskConfig()
-    state_mask: SpanMaskConfig = SpanMaskConfig(
-        mask_ratio=0.65, mean_span_len=5.0, start_bias_alpha=2.0,
-        p_no_mask=0.1, keep_last=True, prefer_early=False,
-    )
+    state_mask: StateMaskConfig = StateMaskConfig()
 
 
 class InputMaskEmbeddings(nn.Module):
@@ -590,7 +597,7 @@ class LegendVLA(nn.Module):
         if "states" in batch:
             state_embeds = self.state_encoder(batch["states"])  # [B, H_s, vlm_hidden_size]
             if do_mask:
-                state_mask = generate_multi_span_mask(
+                state_mask = generate_bernoulli_mask(
                     state_embeds.shape[0], self.num_state_tokens,
                     mask_cfg.state_mask, device=state_embeds.device,
                 )

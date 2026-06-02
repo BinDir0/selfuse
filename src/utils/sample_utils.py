@@ -207,6 +207,41 @@ def sample_rtc_delay(
 # Multi-span mask generation
 # ---------------------------------------------------------------------------
 
+def generate_bernoulli_mask(
+    batch_size: int,
+    seq_len: int,
+    config,
+    *,
+    device: torch.device = torch.device("cpu"),
+) -> torch.BoolTensor:
+    """Per-frame independent Bernoulli mask for short state histories.
+
+    Reads ``mask_prob``, ``keep_last``, ``p_no_mask`` from ``config``. Each frame
+    is masked independently with probability ``mask_prob``; the last frame
+    (current state) is kept when ``keep_last``; a fraction ``p_no_mask`` of
+    samples are left fully unmasked.
+
+    Args:
+        batch_size: Number of samples in the batch.
+        seq_len: Sequence length (H_state).
+        config: A StateMaskConfig (or duck-typed equivalent).
+        device: Target device for the output tensor.
+
+    Returns:
+        [B, seq_len] BoolTensor where True = masked position.
+    """
+    if config.mask_prob <= 0 or seq_len <= 0:
+        return torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+
+    mask = torch.rand(batch_size, seq_len, device=device) < config.mask_prob
+    if config.keep_last:
+        mask[:, -1] = False
+    if config.p_no_mask > 0:
+        unmasked = torch.rand(batch_size, device=device) < config.p_no_mask
+        mask[unmasked] = False
+    return mask
+
+
 def generate_multi_span_mask(
     batch_size: int,
     seq_len: int,
