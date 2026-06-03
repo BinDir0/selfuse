@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import csv as csvmod
-import math
 from pathlib import Path
 
 # ----------------------------- FILL REAL DATA HERE -----------------------------
@@ -69,6 +68,19 @@ def _contrast(hex_color: str) -> str:
     return "white" if (0.299 * r + 0.587 * g + 0.114 * b) < 145 else "#222222"
 
 
+def _fmt_eps(n: float) -> str:
+    if n >= 1e6:
+        return f"{n / 1e6:.2f}M"
+    if n >= 1e3:
+        return f"{n / 1e3:.1f}k"
+    return f"{int(n)}"
+
+
+def _legend_labels(items):
+    """`name   <hours> h · <episodes> ep` for the side legend."""
+    return [f"{name}   {h:g} h · {_fmt_eps(e)} ep" for name, h, e in items]
+
+
 def _nested_donut(ax, hours, eps, colors, w, min_pct, *, fs_out=9.5, fs_in=8.5):
     """Two-ring donut on ax: outer=episodes, inner=hours. Returns the outer wedge list."""
     def autopct(minp):
@@ -104,16 +116,14 @@ def plot_single(data, args, plt):
     _nested_donut(ax, hours, eps, colors, args.width, args.min_pct)
     _center(ax, hours, eps)
     ax.set_title(args.title, fontsize=16, weight="bold", pad=16)
-    ax.legend(labels, title="Dataset", loc="center left", bbox_to_anchor=(1.02, 0.5),
-              frameon=False, fontsize=10.5, title_fontsize=11)
+    ax.legend(_legend_labels(data), title="Dataset  (hours · episodes)", loc="center left",
+              bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=10.5, title_fontsize=11)
     ax.text(0, -1.16, "outer ring: episodes   ·   inner ring: hours (duration)",
             ha="center", fontsize=10, color="#555555")
     return fig
 
 
 def plot_pie_of_pie(data, args, plt):
-    from matplotlib.patches import ConnectionPatch
-
     big = [d for d in data if float(d[1]) >= args.rest_below_hours]
     small = [d for d in data if float(d[1]) < args.rest_below_hours]
     if not small:
@@ -121,43 +131,31 @@ def plot_pie_of_pie(data, args, plt):
 
     rest = ("Rest", sum(float(d[1]) for d in small), sum(float(d[2]) for d in small))
     main = big + [rest]
-    main_labels = [d[0] for d in main]
     main_hours = [float(d[1]) for d in main]
     main_eps = [float(d[2]) for d in main]
     main_colors = [PALETTE[i % len(PALETTE)] for i in range(len(big))] + [REST_COLOR]
 
-    small_labels = [d[0] for d in small]
     small_hours = [float(d[1]) for d in small]
     small_eps = [float(d[2]) for d in small]
     small_colors = [PALETTE[i % len(PALETTE)] for i in range(len(small))]
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(17, 9), gridspec_kw=dict(wspace=0.05))
-    wout = _nested_donut(axL, main_hours, main_eps, main_colors, args.width, args.min_pct)
+    _nested_donut(axL, main_hours, main_eps, main_colors, args.width, args.min_pct)
     _center(axL, main_hours, main_eps)
     axL.set_title(args.title, fontsize=16, weight="bold", pad=14)
-    axL.legend(main_labels, title="Dataset", loc="center left", bbox_to_anchor=(-0.32, 0.5),
-               frameon=False, fontsize=10.5, title_fontsize=11)
+    axL.legend(_legend_labels(main), title="Dataset  (hours · episodes)", loc="center left",
+               bbox_to_anchor=(-0.45, 0.5), frameon=False, fontsize=10.5, title_fontsize=11)
 
-    # smaller zoom donut, shrunk + nudged so it reads as a callout
+    # smaller zoom donut on the right (the grey "Rest" broken out)
     _nested_donut(axR, small_hours, small_eps, small_colors, args.width, 0.0, fs_out=9, fs_in=8)
     axR.text(0, 0, f"Rest\n{sum(small_hours):,.1f} h\n{int(sum(small_eps)):,} ep",
              ha="center", va="center", fontsize=10, weight="bold", linespacing=1.3)
     axR.set_title("Rest — zoomed", fontsize=13, weight="bold", pad=14)
-    axR.legend(small_labels, loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=10)
+    axR.legend(_legend_labels(small), title="(hours · episodes)", loc="center left",
+               bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=10, title_fontsize=10)
 
     fig.text(0.5, 0.04, "outer ring: episodes   ·   inner ring: hours (duration)",
              ha="center", fontsize=10, color="#555555")
-
-    # connection lines from the grey "Rest" wedge (last outer wedge of axL) to axR
-    rest_wedge = wout[-1]
-    th1, th2 = rest_wedge.theta1, rest_wedge.theta2
-    for theta, y_target in ((th2, 1.0), (th1, -1.0)):
-        x = math.cos(math.radians(theta))
-        y = math.sin(math.radians(theta))
-        con = ConnectionPatch(xyA=(x, y), coordsA=axL.transData,
-                              xyB=(-1.0, y_target), coordsB=axR.transData,
-                              color=REST_COLOR, lw=1.2, linestyle=(0, (4, 3)))
-        fig.add_artist(con)
     return fig
 
 
