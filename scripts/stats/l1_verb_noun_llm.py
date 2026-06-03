@@ -89,6 +89,68 @@ _OBJECT_EXTRA_STOP = {
 }
 _OBJECT_STOP = NOUN_STOP | _OBJECT_EXTRA_STOP
 
+# Descriptive modifiers (color / material / size / shape) stripped from the FRONT of an object,
+# so "electronic components" / "metal components" / "small white component" all collapse to
+# "component". Noun-compound modifiers (circuit, sewing, phone) are NOT here, so "circuit board"
+# and "sewing machine" stay intact.
+_OBJ_ADJ_STOP = {
+    "electronic", "electrical", "metal", "metallic", "plastic", "wooden", "rubber", "glass",
+    "leather", "cardboard", "paper",
+    "white", "black", "red", "blue", "green", "yellow", "grey", "gray", "brown", "silver",
+    "gold", "golden", "orange", "purple", "pink", "transparent", "colored", "coloured",
+    "small", "large", "big", "tiny", "little", "long", "short", "thin", "thick", "tall", "mini",
+    "round", "square", "rectangular", "circular", "flat", "handheld", "protective",
+}
+
+
+def _build_singularizer():
+    try:
+        import inflect  # type: ignore
+        _eng = inflect.engine()
+
+        def _sing(word: str) -> str:
+            *head, last = word.split()
+            s = _eng.singular_noun(last)
+            return " ".join(head + [s if s else last])
+        return _sing
+    except Exception:  # lightweight fallback when `inflect` is not installed
+        def _sing(word: str) -> str:
+            parts = word.split()
+            if not parts:
+                return word
+            last = parts[-1]
+            if len(last) > 3 and last.endswith("ies"):
+                last = last[:-3] + "y"
+            elif len(last) > 3 and last.endswith(("ses", "xes", "zes", "ches", "shes")):
+                last = last[:-2]
+            elif len(last) > 2 and last.endswith("s") and not last.endswith("ss"):
+                last = last[:-1]
+            return " ".join(parts[:-1] + [last])
+        return _sing
+
+
+_SINGULARIZE = _build_singularizer()
+
+
+def _norm_object(o: str) -> str:
+    toks = o.split()
+    while len(toks) > 1 and toks[0] in _OBJ_ADJ_STOP:   # drop leading descriptive adjectives
+        toks = toks[1:]
+    return _SINGULARIZE(" ".join(toks))                  # plural -> singular
+
+
+def _clean_verbs(verbs):
+    return [v for v in (verbs or []) if v and v not in VERB_STOP]
+
+
+def _clean_objects(objs, normalize=True):
+    out = []
+    for o in (objs or []):
+        o2 = _norm_object(o) if normalize else o
+        if o2 and o2 not in _OBJECT_STOP:
+            out.append(o2)
+    return out
+
 # Hardened, MEANING-based prompt: base-form verbs even from gerunds/nominalizations, and
 # context for verb/noun-ambiguous tool words. Few-shot nails the exact failure modes.
 SYSTEM_PROMPT = (
@@ -315,6 +377,9 @@ def main(argv=None):
     ap.add_argument("--durations", default=None,
                     help="clip_id -> length (frames or seconds) for --weight duration. JSON "
                          "{id:num} or CSV id,num, keyed by the annotation file stem (clip_id).")
+    ap.add_argument("--no_normalize", action="store_true",
+                    help="Disable object normalization (singularize + strip color/material/size "
+                         "adjectives so 'electronic/metal components' all merge to 'component').")
     # model / vLLM
     ap.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--max_tokens", type=int, default=256)
@@ -435,6 +500,7 @@ def main(argv=None):
     verb_freq: Counter = Counter()
     noun_freq: Counter = Counter()
     task_freq: Counter = Counter()      # (verb, object) pairs from L1
+    norm = not args.no_normalize
     n_missing_w = 0
     for clip_id, l1t, ts in per_clip:
         if durations is not None:
@@ -450,19 +516,17 @@ def main(argv=None):
             r = results.get(t)
             if not r:
                 continue
-            cv.update(r.get("verbs", []))
-            co.update(r.get("objects", []))
+            cv.update(_clean_verbs(r.get("verbs")))
+            co.update(_clean_objects(r.get("objects"), normalize=norm))
         for v in cv:
-            if v and v not in VERB_STOP:
-                verb_freq[v] += w
+            verb_freq[v] += w
         for o in co:
-            if o and o not in _OBJECT_STOP:
-                noun_freq[o] += w
+            noun_freq[o] += w
         # (verb, object) TASK pairs from L1: pair when one side is singular (skip ambiguous NxM).
         rl1 = results.get(l1t) if l1t else None
         if rl1:
-            vs = [v for v in rl1.get("verbs", []) if v and v not in VERB_STOP]
-            os_ = [o for o in rl1.get("objects", []) if o and o not in _OBJECT_STOP]
+            vs = _clean_verbs(rl1.get("verbs"))
+            os_ = _clean_objects(rl1.get("objects"), normalize=norm)
             if vs and os_ and (len(vs) == 1 or len(os_) == 1):
                 for v in vs:
                     for o in os_:
