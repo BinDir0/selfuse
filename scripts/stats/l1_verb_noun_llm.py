@@ -92,37 +92,34 @@ _OBJECT_STOP = NOUN_STOP | _OBJECT_EXTRA_STOP
 # Hardened, MEANING-based prompt: base-form verbs even from gerunds/nominalizations, and
 # context for verb/noun-ambiguous tool words. Few-shot nails the exact failure modes.
 SYSTEM_PROMPT = (
-    "You read ONE short human-hand manipulation instruction and return the manipulation "
-    "ACTIONS and the manipulated OBJECTS, by MEANING, not grammar. NOT every word is a verb or "
-    "a noun -- ignore adverbs, spatial directions, and abstract words. Return ONLY a JSON "
-    "object {\"verbs\": [...], \"objects\": [...]}.\n"
-    "- verbs: each manipulation action as a base-form lowercase verb. Convert gerunds and "
-    "nominalizations to the base verb: 'sewing'->sew, 'inspection'->inspect, 'assembly'->"
-    "assemble. Exclude state/linking/perception verbs (be, remain, look, see, watch).\n"
-    "- objects: ONLY the actual physical thing(s) the hand manipulates, lowercase singular, no "
-    "article. Output the WHOLE object, NEVER a part/feature of it: 'the edge of the paper'->"
-    "paper; 'the top of the box'->box; 'the panel surface'->panel.\n"
-    "  NEVER put these in objects: parts/features (edge, end, side, corner, surface, top, "
-    "bottom, hole, seam, crack, gap); directions/adverbs (left, right, up, rightward, "
-    "clockwise); abstract concepts (alignment, orientation, position, angle, pressure); "
-    "actions/verbs (insert, align, push); body parts; the person; generic words (thing, item, "
-    "object, area). A word can be a tool object in one place and an action in another -- decide "
-    "by context ('the drill' is an object; 'drill a hole' is the verb drill).\n"
-    "One instruction may describe SEVERAL actions and SEVERAL objects (especially longer, "
-    "descriptive sentences) -- list ALL of them, do not stop at one. Deduplicate within each "
-    "array. If nothing qualifies, use an empty array."
+    "You read ONE short instruction describing a hand action and extract the action VERB(S) and "
+    "the OBJECT(S) the hand acts on. Return ONLY a JSON object {\"verbs\": [...], \"objects\": "
+    "[...]}.\n"
+    "- verbs: every action as a base-form lowercase verb; convert gerunds/nominalizations to the "
+    "base verb ('sewing'->sew, 'inspection'->inspect). Almost EVERY instruction has an action "
+    "verb -- extract it (fold, place, pack, operate, handle, sort, seal, peel, assemble, ...). "
+    "Only drop pure state/linking verbs (be, remain).\n"
+    "- objects: the physical thing(s) acted on, lowercase singular, no article. Keep concrete "
+    "objects of ANY domain -- textile (fabric, cloth), electronics (phone, tablet, board), "
+    "packaging (box, tray, label), garments (shirt, jacket), parts (screw, gear). Take the WHOLE "
+    "object, not a part of it ('the edge of the paper'->paper). Drop ONLY: parts/features (edge, "
+    "hole, surface, seam), directions (left, rightward, clockwise), abstract words (alignment, "
+    "position, angle), body parts, and generic words (thing, item, object, area).\n"
+    "List ALL verbs and ALL objects (an instruction may have several). Deduplicate. Use [] only "
+    "if there truly is no action or object."
 )
 
+# Few-shot spans MANY domains on purpose (textile, electronics, packaging, garment, assembly,
+# tools) so the model does not over-fit one domain and return empty on the others.
 _FEWSHOT = [
-    ("Sewing the fabric edge along the seam.", {"verbs": ["sew"], "objects": ["fabric"]}),
-    ("Inspection of the panel surface for scratches.", {"verbs": ["inspect"], "objects": ["panel"]}),
+    ("Fold the shirt.", {"verbs": ["fold"], "objects": ["shirt"]}),
+    ("Place the phone on the tray.", {"verbs": ["place"], "objects": ["phone"]}),
+    ("Pack boxes.", {"verbs": ["pack"], "objects": ["box"]}),
+    ("Operate the tablet.", {"verbs": ["operate"], "objects": ["tablet"]}),
+    ("Sewing the fabric edge.", {"verbs": ["sew"], "objects": ["fabric"]}),
+    ("Assemble the phone components.", {"verbs": ["assemble"], "objects": ["component"]}),
     ("Pick up the drill and drill a hole in the panel.",
      {"verbs": ["pick", "drill"], "objects": ["drill", "panel"]}),
-    ("Slide the bracket rightward to adjust the alignment.",
-     {"verbs": ["slide", "adjust"], "objects": ["bracket"]}),
-    ("The left hand holds the bracket while the right hand inserts a screw and tightens it "
-     "with a screwdriver.",
-     {"verbs": ["hold", "insert", "tighten"], "objects": ["bracket", "screw", "screwdriver"]}),
 ]
 
 
@@ -163,6 +160,12 @@ def run_single(texts: list[str], args, jsonl_path: str, keep_raw: bool = False) 
     flushed every --checkpoint_every, so a rerun (same args) skips what's already there. The model
     is loaded once and only the not-yet-done texts are inferred. Returns results for `texts`."""
     done = _load_done_jsonl(jsonl_path)
+    if getattr(args, "redo_empty", False):
+        kept = {t: r for t, r in done.items() if r.get("verbs")}
+        if len(kept) < len(done):
+            print(f"[redo] re-inferring {len(done) - len(kept)} verb-empty texts (keeping {len(kept)} good)",
+                  flush=True)
+        done = kept   # verb-empty entries fall back into todo and get re-inferred (new lines win on load)
     todo = [t for t in texts if t not in done]
     print(f"[infer] texts={len(texts)}  resume_done={len(done)}  to_do={len(todo)}  -> {jsonl_path}",
           flush=True)
@@ -238,6 +241,8 @@ def run_data_parallel(texts: list[str], args, out_dir: Path) -> dict:
                "--checkpoint_every", str(args.checkpoint_every)]
         if args.no_guided:
             cmd.append("--no_guided")
+        if getattr(args, "redo_empty", False):
+            cmd.append("--redo_empty")
         print(f"[dp] launch shard {i}/{len(shards)} on GPU {env['CUDA_VISIBLE_DEVICES']} "
               f"({len(sh)} unique texts)", flush=True)
         procs.append(subprocess.Popen(cmd, env=env))
@@ -319,6 +324,9 @@ def main(argv=None):
     ap.add_argument("--no_guided", action="store_true",
                     help="Disable JSON-schema guided decoding (use if outlines deps are broken, "
                          "e.g. missing pyairports). parse_extraction tolerates free-text JSON.")
+    ap.add_argument("--redo_empty", action="store_true",
+                    help="Re-infer only the texts whose saved extraction has NO verb (the bug "
+                         "subset), keeping the good ones -- cheap fix after a prompt change.")
     ap.add_argument("--data_parallel", type=int, default=1, help="Independent tp=1 replicas across N GPUs.")
     ap.add_argument("--gpu_ids", default=None, help="Comma list of GPU ids for --data_parallel (default 0..N-1).")
     ap.add_argument("--checkpoint_every", type=int, default=4000,
