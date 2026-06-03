@@ -147,8 +147,11 @@ def _clean_objects(objs, normalize=True):
     out = []
     for o in (objs or []):
         o2 = _norm_object(o) if normalize else o
-        if o2 and o2 not in _OBJECT_STOP:
-            out.append(o2)
+        if not o2 or o2 in _OBJECT_STOP:
+            continue
+        if normalize and o2 in _OBJ_ADJ_STOP:   # a bare adjective ('metal','electronic') is not an object
+            continue
+        out.append(o2)
     return out
 
 # Hardened, MEANING-based prompt: base-form verbs even from gerunds/nominalizations, and
