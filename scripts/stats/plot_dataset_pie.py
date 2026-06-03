@@ -62,10 +62,22 @@ def _load_csv(path: str):
     return rows
 
 
-def _contrast(hex_color: str) -> str:
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+def _contrast(c) -> str:
+    """Black/white text for a wedge colour (accepts hex string or rgba tuple)."""
+    if isinstance(c, str):
+        h = c.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    else:
+        r, g, b = (int(255 * x) for x in c[:3])
     return "white" if (0.299 * r + 0.587 * g + 0.114 * b) < 145 else "#222222"
+
+
+def _colors_for(n, plt):
+    """n distinct colours: the curated palette for <=12, else matplotlib tab20."""
+    if n <= len(PALETTE):
+        return list(PALETTE[:n])
+    cmap = plt.get_cmap("tab20")
+    return [cmap(i % 20) for i in range(n)]
 
 
 def _fmt_eps(n: float) -> str:
@@ -123,6 +135,36 @@ def plot_single(data, args, plt):
     return fig
 
 
+def plot_flat_pie(data, args, plt):
+    """Single full pie of one metric (hours by default): sorted desc, % on wedges, bordered
+    left legend `Name (value)`. Optional `--gt` drops categories at or below a threshold."""
+    mi = 1 if args.metric == "hours" else 2
+    unit = "h" if args.metric == "hours" else " ep"
+    rows = [(d[0], float(d[1]), float(d[2]) if len(d) > 2 else 0.0) for d in data]
+    if args.gt and args.gt > 0:
+        rows = [r for r in rows if r[mi] > args.gt]
+    rows.sort(key=lambda r: r[mi], reverse=True)
+    if not rows:
+        raise SystemExit("no categories left after --gt filter")
+    vals = [r[mi] for r in rows]
+    colors = _colors_for(len(rows), plt)
+
+    fig, ax = plt.subplots(figsize=(13, 8))
+    _, _, autotexts = ax.pie(
+        vals, colors=colors, startangle=90, counterclock=False,
+        autopct=lambda p: f"{p:.1f}%" if p >= args.min_pct else "",
+        pctdistance=0.78, textprops=dict(fontsize=10, weight="bold"),
+        wedgeprops=dict(edgecolor="white", linewidth=0.8))
+    for t, c in zip(autotexts, colors):
+        t.set_color(_contrast(c))
+    ax.set(aspect="equal")
+    ax.set_title(args.title, fontsize=15, weight="bold", pad=16)
+    leg_labels = [f"{r[0]} ({r[mi]:g}{unit})" for r in rows]
+    ax.legend(leg_labels, title=args.legend_title, loc="center left", bbox_to_anchor=(-0.62, 0.5),
+              frameon=True, fontsize=11, title_fontsize=13, labelspacing=0.55)
+    return fig
+
+
 def plot_pie_of_pie(data, args, plt):
     big = [d for d in data if float(d[1]) >= args.rest_below_hours]
     small = [d for d in data if float(d[1]) < args.rest_below_hours]
@@ -161,14 +203,20 @@ def plot_pie_of_pie(data, args, plt):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--csv", default=None, help="CSV `label,hours,episodes` (overrides inline DATA).")
+    ap.add_argument("--csv", default=None, help="CSV `label,hours[,episodes]` (overrides inline DATA).")
     ap.add_argument("--out", default="dataset_pie.png")
-    ap.add_argument("--title", default="Dataset composition")
-    ap.add_argument("--min_pct", type=float, default=3.0, help="Hide percentage labels below this %.")
-    ap.add_argument("--width", type=float, default=0.34, help="Ring thickness.")
+    ap.add_argument("--title", default="Hours by category")
+    ap.add_argument("--legend_title", default="Categories", help="Title of the side legend.")
+    ap.add_argument("--metric", choices=["hours", "episodes"], default="hours",
+                    help="Which column to pie in the default flat-pie style.")
+    ap.add_argument("--gt", type=float, default=0.0,
+                    help="Only include categories whose --metric is GREATER than this (e.g. 50). "
+                         "0 = keep all.")
+    ap.add_argument("--min_pct", type=float, default=2.0, help="Hide percentage labels below this %.")
+    ap.add_argument("--width", type=float, default=0.34, help="Ring thickness (nested/pie-of-pie modes).")
     ap.add_argument("--rest_below_hours", type=float, default=0.0,
-                    help="Collapse datasets below this many hours into a grey 'Rest' wedge + a zoomed "
-                         "second donut (pie of pie). 0 = single donut.")
+                    help="Pie-of-pie mode: collapse datasets below this many hours into a grey 'Rest' "
+                         "wedge + a zoomed second donut. 0 = default single flat pie.")
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args(argv)
 
@@ -183,7 +231,7 @@ def main(argv=None):
     if args.rest_below_hours and args.rest_below_hours > 0:
         fig = plot_pie_of_pie(data, args, plt)
     else:
-        fig = plot_single(data, args, plt)
+        fig = plot_flat_pie(data, args, plt)
 
     out = Path(args.out).expanduser()
     fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
