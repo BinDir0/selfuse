@@ -213,6 +213,14 @@ def build_batch_infer_parser() -> argparse.ArgumentParser:
         "untouched). Sets HAWOR_HAND_ANCHOR_ALPHA.",
     )
     parser.add_argument(
+        "--hand_shape_stabilize",
+        action="store_true",
+        default=False,
+        help="Per-clip hand-shape stabilization in the motion stage: replace per-frame MANO betas "
+        "with one median shape and depth-compensate (trans×f), preserving the 2D overlay. Sets "
+        "HAWOR_HAND_SHAPE_STABILIZE.",
+    )
+    parser.add_argument(
         "--metric3d_batch_size",
         type=int,
         default=None,

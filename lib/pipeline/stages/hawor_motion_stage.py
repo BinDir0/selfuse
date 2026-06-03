@@ -473,6 +473,23 @@ def _finalize_motion_outputs(context, frame_chunks_all, profiler=None):
         context.output_dir,
     )
 
+    # Per-clip hand-shape stabilization (gated; default off): now that every cam_space chunk JSON
+    # is written, replace per-frame betas with one per-clip median shape and depth-compensate
+    # (trans×f), preserving the 2D overlay for the size dimension. Rewrites cam_space in place, so
+    # it must run AFTER the save futures join above and BEFORE the slam/world stages read it.
+    from lib.pipeline.hand_shape_stabilize import (
+        hand_shape_stabilize_enabled,
+        stabilize_cam_space_clip,
+    )
+
+    if hand_shape_stabilize_enabled():
+        try:
+            ss_info = stabilize_cam_space_clip(context.seq_folder, frame_chunks_all)
+            _invalidate_cam_space_cache(context.seq_folder)
+            vprint(f"[hand-shape-stabilize] {ss_info}")
+        except Exception as error:  # fail-open: never break motion on a stabilization issue
+            vprint(f"[hand-shape-stabilize] skipped ({type(error).__name__}: {error})")
+
 
 def run_motion_for_video(
     args,

@@ -32,6 +32,7 @@ class BatchRunConfig:
     any4d_overlap: int = 0
     hand_anchor: bool = False
     hand_anchor_alpha: bool = False
+    hand_shape_stabilize: bool = False
     render_batch_size: int = 8
     infiller_window_batch_size: int = 64
     detect_batch_size: int = 128
@@ -128,6 +129,7 @@ class BatchRunConfig:
             any4d_overlap=any4d_overlap,
             hand_anchor=bool(getattr(ns, "hand_anchor", False)),
             hand_anchor_alpha=bool(getattr(ns, "hand_anchor_alpha", False)),
+            hand_shape_stabilize=bool(getattr(ns, "hand_shape_stabilize", False)),
             render_batch_size=getattr(ns, "render_batch_size", 8),
             infiller_window_batch_size=getattr(ns, "infiller_window_batch_size", 64),
             detect_batch_size=getattr(ns, "detect_batch_size", 128),
@@ -187,4 +189,6 @@ class BatchRunConfig:
             overrides["HAWOR_HAND_ANCHOR"] = "1"
         if self.hand_anchor_alpha:
             overrides["HAWOR_HAND_ANCHOR_ALPHA"] = "1"
+        if self.hand_shape_stabilize:
+            overrides["HAWOR_HAND_SHAPE_STABILIZE"] = "1"
         return overrides
