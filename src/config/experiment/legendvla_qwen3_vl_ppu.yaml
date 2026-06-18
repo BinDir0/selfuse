@@ -1,0 +1,27 @@
+# @package _global_
+#
+# PPU bring-up overlay. Inherits the standard legendvla_qwen3_vl experiment and
+# forces the *safe baseline* so EgoVLA runs correctly on the Alibaba PPU before
+# any accelerated path is re-enabled:
+#   - torch.compile OFF   (Inductor/Triton support on the PPU is the highest risk)
+#   - text attention SDPA (flex_attention needs the transformers-5.x API + Triton)
+# Vision attention is left on flash_attention_2 because the PPU ships a
+# FlashAttention build; if its varlen kernel errors, uncomment the sdpa line.
+#
+# Launch:  experiment=legendvla_qwen3_vl_ppu
+# Once the baseline trains correctly, re-enable features one at a time (start
+# with vision FA2, then per-component compile) to attribute any regression.
+defaults:
+  - legendvla_qwen3_vl
+  - _self_
+
+name: legendvla_qwen3_vl_ppu
+exp_name: legendvla_qwen3_vl_ppu
+
+pretrained:
+  text_attn_implementation: sdpa
+  # vision_attn_implementation: sdpa   # fallback if PPU FlashAttention varlen fails
+
+training:
+  compile:
+    enabled: false

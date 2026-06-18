@@ -33,16 +33,21 @@ export WANDB_MODE=disabled
 # ============ 2. 还原正式训练的 NCCL 参数 ============
 # 保留这些参数可以确保通信协议与正式训练一致
 export NCCL_DEBUG=INFO
-export NCCL_IB_DISABLE=0
 export NCCL_P2P_DISABLE=0
 export NCCL_BLOCKING_WAIT=1
 export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=3600
-export NCCL_SOCKET_IFNAME=eth0
-export NCCL_IB_GID_INDEX=3
-# 注意：如果调试机器的网卡名字不同，可以注释掉下面几行
-export NCCL_IB_HCA=mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3
-export NCCL_NET_GDR_LEVEL=2
+# NVIDIA InfiniBand / RDMA 专用参数。Alibaba PPU 用厂商自带 CCL、网卡命名不同，
+# 这些 mlx5 / eth0 / GDR 设置会让通信库初始化挂起。默认在 NVIDIA 主机上启用；
+# 在 PPU 上设 EGOVLA_DISABLE_NV_NCCL=1 跳过，让厂商 CCL 自己选传输层。
+if [ "${EGOVLA_DISABLE_NV_NCCL:-0}" != "1" ]; then
+    export NCCL_IB_DISABLE=0
+    export NCCL_SOCKET_IFNAME=eth0
+    export NCCL_IB_GID_INDEX=3
+    # 注意：如果调试机器的网卡名字不同，可以注释掉下面几行
+    export NCCL_IB_HCA=mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3
+    export NCCL_NET_GDR_LEVEL=2
+fi
 
 # 内存管理优化（正式脚本有的，调试也要带上）
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"

@@ -10,7 +10,7 @@ import torch.profiler as torch_profiler
 
 def make_profiler_trace_handler(
     output_dir: str,
-    device_peak_tflops: float = 312.0,
+    device_peak_tflops: float | None = None,
     table_row_limit: int = 20,
 ) -> Callable:
     """Build an ``on_trace_ready`` handler for ``torch.profiler.profile``.
@@ -23,9 +23,14 @@ def make_profiler_trace_handler(
         output_dir: Workspace output directory; the ``trace/`` subdir is
             created on first call if missing.
         device_peak_tflops: Peak TFLOPS of the target device for MFU%.
-            Default is 312 (A800 bf16 peak).
+            If None, read env ``EGOVLA_DEVICE_PEAK_TFLOPS`` else fall back to
+            312.0 (A800 bf16 peak). On the Alibaba PPU export that env to the
+            PPU's dense bf16 peak, otherwise the MFU% is computed against the
+            wrong device and is meaningless.
         table_row_limit: Number of rows printed in each bottleneck table.
     """
+    if device_peak_tflops is None:
+        device_peak_tflops = float(os.environ.get("EGOVLA_DEVICE_PEAK_TFLOPS", "312.0"))
     trace_dir = os.path.join(output_dir, "trace")
 
     def trace_handler(p: torch_profiler.profile) -> None:

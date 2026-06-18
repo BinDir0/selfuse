@@ -1,0 +1,94 @@
+diff --git a/scripts/debug_start.sh b/scripts/debug_start.sh
+index 75f395b..852b41f 100755
+--- a/scripts/debug_start.sh
++++ b/scripts/debug_start.sh
+@@ -33,16 +33,21 @@ export WANDB_MODE=disabled
+ # ============ 2. 还原正式训练的 NCCL 参数 ============
+ # 保留这些参数可以确保通信协议与正式训练一致
+ export NCCL_DEBUG=INFO
+-export NCCL_IB_DISABLE=0
+ export NCCL_P2P_DISABLE=0
+ export NCCL_BLOCKING_WAIT=1
+ export NCCL_ASYNC_ERROR_HANDLING=1
+ export NCCL_TIMEOUT=3600
+-export NCCL_SOCKET_IFNAME=eth0
+-export NCCL_IB_GID_INDEX=3
+-# 注意：如果调试机器的网卡名字不同，可以注释掉下面几行
+-export NCCL_IB_HCA=mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3
+-export NCCL_NET_GDR_LEVEL=2
++# NVIDIA InfiniBand / RDMA 专用参数。Alibaba PPU 用厂商自带 CCL、网卡命名不同，
++# 这些 mlx5 / eth0 / GDR 设置会让通信库初始化挂起。默认在 NVIDIA 主机上启用；
++# 在 PPU 上设 EGOVLA_DISABLE_NV_NCCL=1 跳过，让厂商 CCL 自己选传输层。
++if [ "${EGOVLA_DISABLE_NV_NCCL:-0}" != "1" ]; then
++    export NCCL_IB_DISABLE=0
++    export NCCL_SOCKET_IFNAME=eth0
++    export NCCL_IB_GID_INDEX=3
++    # 注意：如果调试机器的网卡名字不同，可以注释掉下面几行
++    export NCCL_IB_HCA=mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3
++    export NCCL_NET_GDR_LEVEL=2
++fi
+ 
+ # 内存管理优化（正式脚本有的，调试也要带上）
+ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+diff --git a/src/config/experiment/legendvla_qwen3_vl_ppu.yaml b/src/config/experiment/legendvla_qwen3_vl_ppu.yaml
+new file mode 100644
+index 0000000..bf5801c
+--- /dev/null
++++ b/src/config/experiment/legendvla_qwen3_vl_ppu.yaml
+@@ -0,0 +1,27 @@
++# @package _global_
++#
++# PPU bring-up overlay. Inherits the standard legendvla_qwen3_vl experiment and
++# forces the *safe baseline* so EgoVLA runs correctly on the Alibaba PPU before
++# any accelerated path is re-enabled:
++#   - torch.compile OFF   (Inductor/Triton support on the PPU is the highest risk)
++#   - text attention SDPA (flex_attention needs the transformers-5.x API + Triton)
++# Vision attention is left on flash_attention_2 because the PPU ships a
++# FlashAttention build; if its varlen kernel errors, uncomment the sdpa line.
++#
++# Launch:  experiment=legendvla_qwen3_vl_ppu
++# Once the baseline trains correctly, re-enable features one at a time (start
++# with vision FA2, then per-component compile) to attribute any regression.
++defaults:
++  - legendvla_qwen3_vl
++  - _self_
++
++name: legendvla_qwen3_vl_ppu
++exp_name: legendvla_qwen3_vl_ppu
++
++pretrained:
++  text_attn_implementation: sdpa
++  # vision_attn_implementation: sdpa   # fallback if PPU FlashAttention varlen fails
++
++training:
++  compile:
++    enabled: false
+diff --git a/src/utils/profiler_utils.py b/src/utils/profiler_utils.py
+index 27b82b3..4281c1a 100644
+--- a/src/utils/profiler_utils.py
++++ b/src/utils/profiler_utils.py
+@@ -10,7 +10,7 @@ import torch.profiler as torch_profiler
+ 
+ def make_profiler_trace_handler(
+     output_dir: str,
+-    device_peak_tflops: float = 312.0,
++    device_peak_tflops: float | None = None,
+     table_row_limit: int = 20,
+ ) -> Callable:
+     """Build an ``on_trace_ready`` handler for ``torch.profiler.profile``.
+@@ -23,9 +23,14 @@ def make_profiler_trace_handler(
+         output_dir: Workspace output directory; the ``trace/`` subdir is
+             created on first call if missing.
+         device_peak_tflops: Peak TFLOPS of the target device for MFU%.
+-            Default is 312 (A800 bf16 peak).
++            If None, read env ``EGOVLA_DEVICE_PEAK_TFLOPS`` else fall back to
++            312.0 (A800 bf16 peak). On the Alibaba PPU export that env to the
++            PPU's dense bf16 peak, otherwise the MFU% is computed against the
++            wrong device and is meaningless.
+         table_row_limit: Number of rows printed in each bottleneck table.
+     """
++    if device_peak_tflops is None:
++        device_peak_tflops = float(os.environ.get("EGOVLA_DEVICE_PEAK_TFLOPS", "312.0"))
+     trace_dir = os.path.join(output_dir, "trace")
+ 
+     def trace_handler(p: torch_profiler.profile) -> None:
